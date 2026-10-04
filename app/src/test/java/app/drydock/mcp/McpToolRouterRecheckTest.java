@@ -377,8 +377,9 @@ class McpToolRouterRecheckTest extends McpRouterFixture {
     /**
      * {@code why} is free text from an agent, stored, and shown to a human as
      * the reason a hunk was marked affected -- the same treatment {@code
-     * finding.body} and {@code evidence.code} already get. A control character can reach a terminal through "Ask the agent to
-     * fix it", so it is refused at the boundary.
+     * finding.body} and {@code evidence.code} already get. A control
+     * character can reach a terminal through "Ask the agent to fix it", so it
+     * is refused at the boundary.
      */
     @Test
     void aWhyCarryingAControlCharacterRejectsTheBatch() {

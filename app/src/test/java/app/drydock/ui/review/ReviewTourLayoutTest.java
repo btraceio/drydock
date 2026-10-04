@@ -55,6 +55,22 @@ class ReviewTourLayoutTest extends ReviewTourFixture {
         WaitForAsyncUtils.waitForFxEvents();
     }
 
+    private void key(KeyCode code) {
+        press(code).release(code);
+        WaitForAsyncUtils.waitForFxEvents();
+    }
+
+    private boolean railsCollapsed(boolean outlineCollapsed, boolean stepPanelCollapsed) {
+        return ReviewDiagFxThread.call(() -> view.diagOutline().collapsed() == outlineCollapsed
+                && view.diagStepPanel().collapsed() == stepPanelCollapsed);
+    }
+
+    private boolean marginCollapsed() {
+        ReviewFindingsMargin margin = (ReviewFindingsMargin) lookup(node -> node instanceof ReviewFindingsMargin)
+                .query();
+        return ReviewDiagFxThread.call(margin::collapsed);
+    }
+
     @Test
     void theStepPanelAndTheOutlineAreStyledWithTheTheme() {
         StepPanel panel = ReviewDiagFxThread.call(view::diagStepPanel);
@@ -122,6 +138,7 @@ class ReviewTourLayoutTest extends ReviewTourFixture {
             resizeWindow(1400);
         }
     }
+
     @Test
     void aCollapsedOutlineShowsTheCurrentStepAndARealExpandButton() {
         try {
@@ -134,6 +151,9 @@ class ReviewTourLayoutTest extends ReviewTourFixture {
             Label step = from(outline).lookup(".tour-outline-collapsed-step").queryAs(Label.class);
             assertTrue(ReviewDiagFxThread.call(() -> treeVisible(step)));
             assertEquals("1", ReviewDiagFxThread.call(step::getText));
+            assertEquals(TEXT, ReviewDiagFxThread.call(expand::getTextFill), "the glyph reads like the theme's text");
+            assertNotEquals(ReviewDiagFxThread.call(() -> background(outline)),
+                    ReviewDiagFxThread.call(step::getTextFill), "the number stands off the strip");
 
             clickOn(expand);
             WaitForAsyncUtils.waitForFxEvents();
@@ -148,29 +168,13 @@ class ReviewTourLayoutTest extends ReviewTourFixture {
     @Test
     void theCollapsedOutlinesExpandButtonUndoesAFocusModeCollapse() {
         TourOutline outline = ReviewDiagFxThread.call(view::diagOutline);
-        press(KeyCode.F).release(KeyCode.F);
-        WaitForAsyncUtils.waitForFxEvents();
+        key(KeyCode.F);
         assertTrue(ReviewDiagFxThread.call(outline::collapsed));
 
         clickOn(from(outline).lookup(".tour-outline-expand").queryButton());
         WaitForAsyncUtils.waitForFxEvents();
 
         assertFalse(ReviewDiagFxThread.call(outline::collapsed));
-    }
-    private void key(KeyCode code) {
-        press(code).release(code);
-        WaitForAsyncUtils.waitForFxEvents();
-    }
-
-    private boolean railsCollapsed(boolean outlineCollapsed, boolean stepPanelCollapsed) {
-        return ReviewDiagFxThread.call(() -> view.diagOutline().collapsed() == outlineCollapsed
-                && view.diagStepPanel().collapsed() == stepPanelCollapsed);
-    }
-
-    private boolean marginCollapsed() {
-        ReviewFindingsMargin margin = (ReviewFindingsMargin) lookup(node -> node instanceof ReviewFindingsMargin)
-                .query();
-        return ReviewDiagFxThread.call(margin::collapsed);
     }
 
     @Test

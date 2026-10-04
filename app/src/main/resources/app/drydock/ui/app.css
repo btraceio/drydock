@@ -3605,12 +3605,13 @@
 }
 .tour-outline .tour-outline-expand {
     -fx-border-color: transparent;
-    -fx-text-fill: -drydock-text-faint;
+    -fx-text-fill: -drydock-text;
     -fx-padding: 2 5 2 5;
 }
 .tour-outline .tour-outline-collapsed-step {
-    -fx-text-fill: -drydock-text-faint;
-    -fx-font-size: 11px;
+    -fx-text-fill: -drydock-accent;
+    -fx-font-size: 12px;
+    -fx-font-weight: bold;
 }
 
 /* The outline: tabs as filter chips, steps as cards. */

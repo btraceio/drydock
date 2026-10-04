@@ -165,7 +165,6 @@ public final class ReadingPath {
      * order that path reaches them. Blocking only in the sense its inputs
      * are; never call the {@link ChangeGraph#of} that feeds it on the FX
      * thread.
-
      */
     public static Path of(UnifiedDiff diff, ChangeGraph graph,
                           List<Sections.Section> sections, OutOfDiffFanIn.Result fanIn) {

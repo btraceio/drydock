@@ -505,10 +505,10 @@ public final class SessionReviewView extends BorderPane {
 
     /**
      * What a scope's fan-in is until its scan has actually run: {@code
-     * unavailable=true}, the honest input for a signal nothing has measured
-     * yet. {@link ReadingPath#of} gives it no rank rather than reading a
-     * scan that did not run as one that found nothing -- which is the whole
-     * distinction the fan-in affordance rests on (spec §4.3).
+     * unavailable=true} with nothing measured, the honest input for a signal
+     * nothing has measured yet. It adds nothing to {@link ReadingPath#of}'s
+     * rank, and a step's measured impact shows it as callers unavailable,
+     * not as callers that do not exist (spec §4.3).
      */
     private static final OutOfDiffFanIn.Result FAN_IN_NOT_SCANNED =
             new OutOfDiffFanIn.Result(Map.of(), true);
@@ -1675,9 +1675,9 @@ public final class SessionReviewView extends BorderPane {
 
         /**
          * The bar's Approve / Request changes: the next unread hunk of
-         * {@code file}. Remembered for {@code u} exactly as {@link
-         * #verdictAction} remembers a key's settle, so {@code u} after a
-         * click undoes the click, not the keyboard settle before it.
+         * {@code file}. Remembered for {@code u} through {@link
+         * #rememberSettle}, as a key's settle is, so {@code u} after a click
+         * undoes the click, not the keyboard settle before it.
          */
         private void settle(String file, ReviewVerdict.Decision decision) {
             selectedScope().ifPresent(scope -> {
@@ -1689,13 +1689,7 @@ public final class SessionReviewView extends BorderPane {
                 Map<String, Optional<ReviewVerdict.Decision>> before = verdictsOf(scope, digests);
                 host.setVerdict(scope, digests, Optional.of(decision), blockedFor(scope, digests));
                 recordHunkOverrides(scope, digests, decision, before);
-                boolean applied = !digests.isEmpty() && digests.stream().allMatch(digest -> host.verdict(scope, digest)
-                        .filter(v -> v.decision() == decision).isPresent());
-                if (applied) {
-                    lastSettledFile = Optional.of(board().flatMap(b -> sections.fileOfDigest(b, digests.getFirst()))
-                            .orElse(file));
-                    lastSettledDigests = digests;
-                }
+                rememberSettle(scope, digests, decision, file);
             });
         }
 
@@ -2267,15 +2261,12 @@ public final class SessionReviewView extends BorderPane {
         }
         Map<String, Optional<ReviewVerdict.Decision>> before = verdictsOf(scope.get(), digests);
         host.setVerdict(scope.get(), digests, Optional.of(decision), blockedFor(scope.get(), digests));
-        boolean applied = digests.stream().allMatch(digest -> host.verdict(scope.get(), digest)
-                .filter(v -> v.decision() == decision).isPresent());
-        if (!applied) {
+        Optional<String> settled = rememberSettle(scope.get(), digests, decision, file.get());
+        if (settled.isEmpty()) {
             return;
         }
         recordHunkOverrides(scope.get(), digests, decision, before);
-        String settledFile = sections.fileOfDigest(board.get(), digests.getFirst()).orElse(file.get());
-        lastSettledFile = Optional.of(settledFile);
-        lastSettledDigests = digests;
+        String settledFile = settled.get();
         if (sections.decisionOf(board.get(), settledFile).filter(decision::equals).isPresent()) {
             nextUnsettledHunk();
             return;
@@ -2289,6 +2280,27 @@ public final class SessionReviewView extends BorderPane {
         } else {
             refreshReviewState();
         }
+    }
+
+    /**
+     * Records {@code digests} as what {@code u} undoes -- once the verdict
+     * actually took on every one of them (the host still refuses APPROVED
+     * over a blocking finding). The one place both settle paths, {@code a}/
+     * {@code r} and the bar's buttons, remember a settle, so they cannot
+     * drift apart. Returns the file the digests belong to, or empty when
+     * nothing was recorded.
+     */
+    private Optional<String> rememberSettle(ReviewScope scope, List<String> digests, ReviewVerdict.Decision decision,
+                                            String fallbackFile) {
+        boolean applied = !digests.isEmpty() && digests.stream().allMatch(digest -> host.verdict(scope, digest)
+                .filter(v -> v.decision() == decision).isPresent());
+        if (!applied) {
+            return Optional.empty();
+        }
+        String settledFile = board().flatMap(b -> sections.fileOfDigest(b, digests.getFirst())).orElse(fallbackFile);
+        lastSettledFile = Optional.of(settledFile);
+        lastSettledDigests = digests;
+        return lastSettledFile;
     }
 
     /**
