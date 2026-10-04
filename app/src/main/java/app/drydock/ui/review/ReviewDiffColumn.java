@@ -41,6 +41,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Predicate;
@@ -238,6 +239,21 @@ final class ReviewDiffColumn extends BorderPane {
     private boolean wholeFileUnavailable;
     /** Tour mode's header, naming the current step; see {@link #setStepHeader}. */
     private Optional<String> stepHeader = Optional.empty();
+
+    /**
+     * The file the hunk diff's cursor is on, or null outside the hunk diff.
+     * Only read when the whole scope would not fit under {@link
+     * #MAX_RENDERED_ROWS}: then the column renders this file alone rather
+     * than truncating, so {@code [}/{@code ]} reach every file and no file
+     * the reader is settling is cut off the end (see {@link #buildRows}).
+     */
+    private String cursorFile;
+
+    /** Whether the last build fell back to one file at a time; see {@link #buildRows}. */
+    private boolean oneFileAtATime;
+
+    /** The header's note while {@link #oneFileAtATime} is on. */
+    static final String ONE_FILE_AT_A_TIME = "Large change — one file at a time; [ / ] moves between files";
     private long wholeRequestToken;
     /** {@code c} in whole-file mode: fold every long unchanged run again. */
     private boolean foldAll;
@@ -1156,7 +1172,7 @@ final class ReviewDiffColumn extends BorderPane {
     }
 
     private void rebuild() {
-        rows.setAll(ReviewDiffRows.build(renderedDiff(), buildOptions()));
+        rows.setAll(buildRows());
         // Re-anchored rather than dropped: a rebuild happens for reasons that
         // have nothing to do with the draft (a pin refresh, the context
         // toggle), and losing typed text to one of those is the kind of thing
@@ -1164,6 +1180,55 @@ final class ReviewDiffColumn extends BorderPane {
         insertComposerRow();
         updateSummary();
         list.scrollTo(0);
+    }
+
+    /**
+     * The rows to show. The whole scope while it fits under {@link
+     * #MAX_RENDERED_ROWS}; past that, in the hunk diff, just {@link
+     * #cursorFile} -- a truncated whole scope would put every file past the
+     * cut out of reach while its hunks could still be settled unseen. Whole
+     * files (the tour) keep their own folding and are never narrowed.
+     */
+    private List<ReviewDiffRow> buildRows() {
+        List<ReviewDiffRow> built = ReviewDiffRows.build(renderedDiff(), buildOptions());
+        boolean truncated = built.stream().anyMatch(ReviewDiffRow.Truncation.class::isInstance);
+        oneFileAtATime = truncated && !wholeFiles && cursorFile != null;
+        if (!oneFileAtATime) {
+            return built;
+        }
+        UnifiedDiff oneFile = new UnifiedDiff(renderedDiff().files().stream()
+                .filter(file -> file.path().equals(cursorFile))
+                .toList());
+        return ReviewDiffRows.build(oneFile, buildOptions());
+    }
+
+    /**
+     * Tells the column which file the hunk diff's cursor is on (null outside
+     * the hunk diff). Rebuilds only when that changes what is rendered: in
+     * one-file-at-a-time mode, or when the scope may not have fit before a
+     * cursor existed.
+     */
+    void setCursorFile(String file) {
+        if (Objects.equals(file, cursorFile)) {
+            return;
+        }
+        String previous = cursorFile;
+        cursorFile = file;
+        if (oneFileAtATime || (previous == null && rows.stream().anyMatch(ReviewDiffRow.Truncation.class::isInstance))) {
+            rebuild();
+        }
+    }
+
+    /**
+     * Whether {@code file}'s hunk {@code hunkIndex} has a card on screen --
+     * what a verdict on it requires: a hunk past the row cap, or in a file
+     * not rendered, is code the reader has not been shown.
+     */
+    boolean rendersHunk(String file, int hunkIndex) {
+        return rows.stream()
+                .filter(ReviewDiffRow.HunkHeader.class::isInstance)
+                .map(ReviewDiffRow.HunkHeader.class::cast)
+                .anyMatch(header -> header.file().equals(file) && header.hunkIndex() == hunkIndex);
     }
 
     private ReviewDiffRows.Options buildOptions() {
@@ -1195,7 +1260,7 @@ final class ReviewDiffColumn extends BorderPane {
             return;
         }
         linksByHunk = copy;
-        rows.setAll(ReviewDiffRows.build(renderedDiff(), buildOptions()));
+        rows.setAll(buildRows());
         // The graph this map is computed from lands asynchronously, well
         // after a reader may have already opened the gutter composer -- a
         // rebuild that dropped it here would lose an in-progress comment to
@@ -1220,7 +1285,8 @@ final class ReviewDiffColumn extends BorderPane {
         summaryLabel.setText(files == 0
                 ? ""
                 : files + (files == 1 ? " file" : " files") + "  ·  +" + insertions + " −" + deletions
-                        + (wholeFileUnavailable ? "  ·  whole file unavailable" : wholeFiles ? "  ·  whole files" : ""));
+                        + (wholeFileUnavailable ? "  ·  whole file unavailable" : wholeFiles ? "  ·  whole files" : "")
+                        + (oneFileAtATime ? "  ·  " + ONE_FILE_AT_A_TIME : ""));
     }
 
     /**
@@ -1242,7 +1308,7 @@ final class ReviewDiffColumn extends BorderPane {
         // Deliberately not rebuild(): that scrolls back to the top, and
         // expanding a run is the one action whose whole point is to stay
         // where the reader already is.
-        rows.setAll(ReviewDiffRows.build(renderedDiff(), buildOptions()));
+        rows.setAll(buildRows());
     }
 
     /**

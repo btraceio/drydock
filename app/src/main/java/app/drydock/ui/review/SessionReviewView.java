@@ -1238,6 +1238,9 @@ public final class SessionReviewView extends BorderPane {
 
         margin.invalidate(null);
         margin.setFindings(findingsForMargin(scope.get()));
+        // Before anything reveals: an oversized diff renders the cursor
+        // file alone, and moving the cursor changes which file that is.
+        diffColumn.setCursorFile(mode == ReviewMode.DIFF ? currentFile().orElse(null) : null);
         diffColumn.refreshPins();
         diffColumn.setLinks(linksByHunk());
         mcpPanel.filter(Node::isVisible)
@@ -1802,6 +1805,10 @@ public final class SessionReviewView extends BorderPane {
         private void settle(String file, ReviewVerdict.Decision decision) {
             selectedScope().ifPresent(scope -> {
                 List<String> digests = digestsForAction(file, false);
+                if (!allRendered(digests)) {
+                    notice(HUNK_NOT_RENDERED);
+                    return;
+                }
                 Map<String, Optional<ReviewVerdict.Decision>> before = verdictsOf(scope, digests);
                 host.setVerdict(scope, digests, Optional.of(decision), blockedFor(scope, digests));
                 recordHunkOverrides(scope, digests, decision, before);
@@ -1905,6 +1912,29 @@ public final class SessionReviewView extends BorderPane {
         return board().map(b -> sections.digestsForAction(b, file, wholeFile,
                         diffColumn.currentLineSelection()))
                 .orElse(List.of());
+    }
+
+    /**
+     * Why {@code a}/{@code r} did nothing: a hunk they would settle has no
+     * card on screen (past the row cap), and a verdict is a claim the reader
+     * looked at the code.
+     */
+    static final String HUNK_NOT_RENDERED = "Not settled: a hunk it covers is past what the diff can show";
+
+    /** Whether every one of {@code digests} has its hunk's card rendered in the diff column. */
+    private boolean allRendered(List<String> digests) {
+        Optional<SectionStates.Board> board = board();
+        if (board.isEmpty()) {
+            return false;
+        }
+        for (String digest : digests) {
+            Optional<String> file = sections.fileOfDigest(board.get(), digest);
+            if (file.isEmpty() || !diffColumn.rendersHunk(file.get(),
+                    sections.digestsOfFile(board.get(), file.get()).indexOf(digest))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -2325,7 +2355,9 @@ public final class SessionReviewView extends BorderPane {
      * APPROVED over a blocking finding, so recording is not guaranteed),
      * remembers those exact digests as what {@code u} should undo (see
      * {@link #undoVerdict}). Once the file as a whole is decided this way,
-     * the cursor moves on to the next unread hunk, as {@code n} does.
+     * the cursor moves on to the next unread hunk, as {@code n} does;
+     * otherwise to the file's own next unread hunk. Refused, with a notice,
+     * when a hunk it would settle has no card on screen.
      */
     private void verdictAction(ReviewVerdict.Decision decision, boolean wholeFile) {
         Optional<ReviewScope> scope = selectedScope();
@@ -2336,6 +2368,10 @@ public final class SessionReviewView extends BorderPane {
         }
         List<String> digests = digestsForAction(file.get(), wholeFile);
         if (digests.isEmpty()) {
+            return;
+        }
+        if (!allRendered(digests)) {
+            notice(HUNK_NOT_RENDERED);
             return;
         }
         Map<String, Optional<ReviewVerdict.Decision>> before = verdictsOf(scope.get(), digests);
@@ -2351,6 +2387,14 @@ public final class SessionReviewView extends BorderPane {
         lastSettledDigests = digests;
         if (sections.decisionOf(board.get(), settledFile).filter(decision::equals).isPresent()) {
             nextUnsettledHunk();
+            return;
+        }
+        // The file is still undecided: put the cursor (and the scroll) on
+        // its next unread hunk, so the next a acts on what is on screen.
+        List<String> fileDigests = sections.digestsOfFile(board.get(), settledFile);
+        Optional<String> unread = sections.digestOfFirstUnsettledHunk(board.get(), settledFile);
+        if (unread.isPresent()) {
+            moveCursorTo(settledFile, fileDigests.indexOf(unread.get()));
         } else {
             refreshReviewState();
         }
@@ -4113,6 +4157,11 @@ public final class SessionReviewView extends BorderPane {
     /** Diagnostic-only: the file the hunk diff's cursor is on, if any. */
     Optional<String> diagCurrentFile() {
         return ReviewDiagFxThread.call(this::currentFile);
+    }
+
+    /** Diagnostic-only: the cursor as {@code "<file>#<hunk>"}, or empty. */
+    Optional<String> diagCursor() {
+        return ReviewDiagFxThread.call(() -> currentFile().map(file -> file + "#" + hunkCursor));
     }
 
     /** Diagnostic-only: whether the current file's verdicts are stale (spec §9.2). */

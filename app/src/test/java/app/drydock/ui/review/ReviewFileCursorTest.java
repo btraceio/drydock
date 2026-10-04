@@ -116,6 +116,64 @@ class ReviewFileCursorTest extends ApplicationTest {
         assertEquals("1/2 · " + FILE_A, targetLabel(), "the file is not settled yet, so the cursor stays");
     }
 
+    /** The next a acts on what is on screen: the cursor follows to the file's next unread hunk. */
+    @Test
+    void aSingleApproveMovesTheCursorToTheFilesNextUnreadHunk() {
+        seed();
+
+        type(KeyCode.A);
+
+        assertEquals(Optional.of(FILE_A + "#1"), view.diagCursor());
+    }
+
+    /**
+     * Over the row cap the whole scope cannot render; truncating it would put
+     * every file past the cut out of reach while a/⇧A could still settle it.
+     * The column shows the cursor file alone and says so.
+     */
+    @Test
+    void aDiffOverTheRowCapRendersOnlyTheCursorFile() {
+        seed(new UnifiedDiff(List.of(bigFile(FILE_A, 3000), bigFile(FILE_B, 3000))));
+
+        assertEquals(List.of(FILE_A), renderedFiles());
+        assertTrue(summary().contains(ReviewDiffColumn.ONE_FILE_AT_A_TIME), "got: " + summary());
+
+        type(KeyCode.CLOSE_BRACKET);
+
+        assertEquals(List.of(FILE_B), renderedFiles());
+    }
+
+    /** Under the cap the whole scope renders, as before. */
+    @Test
+    void aDiffUnderTheRowCapRendersTheWholeScope() {
+        seed();
+
+        assertEquals(List.of(FILE_A, FILE_B), renderedFiles());
+        assertFalse(summary().contains(ReviewDiffColumn.ONE_FILE_AT_A_TIME));
+    }
+
+    /**
+     * A single file can itself exceed the cap. A hunk past the truncation has
+     * no card on screen, so a/⇧A refuse it, visibly, and record nothing.
+     */
+    @Test
+    void approvingAHunkPastTheTruncationIsRefusedAndNothingIsRecorded() {
+        UnifiedDiff.FileDiff huge = new UnifiedDiff.FileDiff(FILE_A, "M", 4101, 0, false, false, List.of(
+                file(FILE_A, "int a = 1;").hunks().get(0),
+                bigFile(FILE_A, 4100).hunks().get(0)));
+        seed(new UnifiedDiff(List.of(huge)));
+
+        type(KeyCode.A);
+        assertTrue(verdict(FILE_A, 0).isPresent(), "the rendered first hunk settles");
+
+        type(KeyCode.A);
+        assertTrue(verdict(FILE_A, 1).isEmpty(), "a hunk with no card on screen must not be approved");
+        assertEquals(Optional.of(SessionReviewView.HUNK_NOT_RENDERED), notice());
+
+        shiftType(KeyCode.A);
+        assertTrue(verdict(FILE_A, 1).isEmpty(), "nor through ⇧A");
+    }
+
     @Test
     void settlingTheLastUnreadHunkOfAFileMovesToTheNextUnreadHunk() {
         seed();
@@ -240,6 +298,13 @@ class ReviewFileCursorTest extends ApplicationTest {
     // ---- fixtures -----------------------------------------------------------
 
     private void seed(ReviewAnnotation... findings) {
+        seed(new UnifiedDiff(List.of(
+                file(FILE_A, "int a = 1;", "int b = 2;"),
+                file(FILE_B, "int c = 3;"))), findings);
+    }
+
+    private void seed(UnifiedDiff diff, ReviewAnnotation... findings) {
+        host.diff = diff;
         scope = registry.mint(ReviewScopeRegistry.spec(ReviewScope.Kind.WORKTREE,
                 Path.of("/repo"), Optional.of(Path.of("/wt/cursor-" + System.nanoTime())), "master", "feat",
                 Optional.empty(), Optional.empty()));
@@ -314,6 +379,39 @@ class ReviewFileCursorTest extends ApplicationTest {
         interact(view::requestFocus);
         press(KeyCode.SHIFT).press(key).release(key).release(KeyCode.SHIFT);
         WaitForAsyncUtils.waitForFxEvents();
+    }
+
+    private List<String> renderedFiles() {
+        List<String> files = new ArrayList<>();
+        interact(() -> ((ReviewDiffColumn) lookup(".review-diff-column").query()).diagRows().stream()
+                .filter(ReviewDiffRow.HunkHeader.class::isInstance)
+                .map(row -> ((ReviewDiffRow.HunkHeader) row).file())
+                .distinct()
+                .forEach(files::add));
+        return files;
+    }
+
+    private String summary() {
+        String[] text = new String[1];
+        interact(() -> text[0] = ((Label) lookup(".review-diff-summary").query()).getText());
+        return text[0];
+    }
+
+    private Optional<String> notice() {
+        List<Optional<String>> holder = new ArrayList<>();
+        interact(() -> holder.add(view.diagNotice()));
+        return holder.get(0);
+    }
+
+    /** One hunk of {@code lines} added lines -- enough of them to pass the column's row cap. */
+    private static UnifiedDiff.FileDiff bigFile(String path, int lines) {
+        List<UnifiedDiff.Line> body = new ArrayList<>();
+        for (int i = 0; i < lines; i++) {
+            body.add(new UnifiedDiff.Line(UnifiedDiff.Line.Kind.ADD, OptionalInt.empty(),
+                    OptionalInt.of(100 + i), "int f" + i + " = " + i + ";"));
+        }
+        return new UnifiedDiff.FileDiff(path, "M", lines, 0, false, false,
+                List.of(new UnifiedDiff.Hunk("@@ -100 +100," + lines + " @@", body)));
     }
 
     /**
