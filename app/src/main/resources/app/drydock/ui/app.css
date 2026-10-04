@@ -3419,6 +3419,9 @@
     -fx-font-size: 12px;
     -fx-line-spacing: 2px;
 }
+.step-panel .step-panel-withheld {
+    -fx-font-style: italic;
+}
 .step-panel .step-anchor-chip {
     -fx-background-radius: 12px;
     -fx-border-radius: 12px;
