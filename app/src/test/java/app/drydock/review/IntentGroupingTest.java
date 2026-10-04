@@ -203,7 +203,7 @@ class IntentGroupingTest {
                 grouping.intentsFor("scope", diff, Optional.of(ChangeGraph.of(diff)));
 
         ReviewIntent first = computed.get(0);
-        assertTrue(first.hunkIds().contains(ReviewIntent.hunkId("src/zbase.cpp", 0)),
+        assertTrue(first.hunkIds().contains(HunkIds.hunkId("src/zbase.cpp", 0)),
                 "card 1 must be zbase.cpp's section (the reading path's entry point -- in-degree "
                         + "2 outranks mid.cpp's alphabetical lead), not Sections.of's own "
                         + "alphabetically-first card: " + computed);

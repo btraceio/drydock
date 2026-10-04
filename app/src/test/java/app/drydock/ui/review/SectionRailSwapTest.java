@@ -1,5 +1,6 @@
 package app.drydock.ui.review;
 
+import app.drydock.review.HunkIds;
 import app.drydock.ui.TestStages;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
@@ -148,7 +149,7 @@ class SectionRailSwapTest extends ApplicationTest {
 
         host.intents.set(scope.id(), List.of(new ReviewIntent("agent-1", 1, "Regrouped",
                 ReviewIntent.Kind.CHANGE, ReviewIntent.Risk.HIGH, "",
-                List.of(ReviewIntent.hunkId("src/z.cpp", 0)), Optional.empty(), false)));
+                List.of(HunkIds.hunkId("src/z.cpp", 0)), Optional.empty(), false)));
         interact(view::refreshReviewState);
         List<ReviewIntent> third = view.diagIntents();
         assertNotSame(second, third, "a reviewer's own regroup must invalidate the cache");
@@ -172,7 +173,7 @@ class SectionRailSwapTest extends ApplicationTest {
                 Optional.empty(), Optional.empty()));
         host.intents.set(scope.id(), List.of(new ReviewIntent("agent-1", 1, "Reviewed",
                 ReviewIntent.Kind.CHANGE, ReviewIntent.Risk.HIGH, "",
-                List.of(ReviewIntent.hunkId("src/z.cpp", 0)), Optional.empty(), false)));
+                List.of(HunkIds.hunkId("src/z.cpp", 0)), Optional.empty(), false)));
 
         interact(() -> view.showScopes(new SessionReviewScopes.Scopes(scope, Optional.empty()),
                 SessionReviewScopes.Choice.LOCAL));

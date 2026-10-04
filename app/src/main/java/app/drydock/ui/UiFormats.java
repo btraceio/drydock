@@ -4,6 +4,7 @@ import app.drydock.git.GitBranchState;
 import app.drydock.git.GitStatus;
 import javafx.scene.Node;
 import javafx.scene.control.Label;
+import javafx.scene.control.Labeled;
 
 import java.nio.file.Path;
 import java.time.Instant;
@@ -13,7 +14,8 @@ import java.util.List;
 /**
  * Small shared presentation helpers used across the UI packages (sidebar,
  * review, explorer): relative "time ago" text, branch-name text, the
- * A/D/M change-marker style class, and breadcrumb segment nodes. Public
+ * A/D/M change-marker style class, breadcrumb segment nodes, and the
+ * mnemonic-free wrapper for controls showing external text. Public
  * only because {@code app.drydock.ui.review} and {@code app.drydock.ui.explorer}
  * share them; nothing outside the UI layer should call these.
  */
@@ -130,5 +132,16 @@ public final class UiFormats {
         Label part = new Label(text);
         part.getStyleClass().add("breadcrumb-segment");
         return part;
+    }
+
+    /**
+     * Shows the control's text exactly as given. A JavaFX Button (like any
+     * Labeled except Label) parses a mnemonic from its text, which swallows an
+     * underscore ("Integer.MAX_VALUE" renders as "Integer.MAXVALUE"); text from
+     * the agent, from code or from file paths must never be read that way.
+     */
+    public static <T extends Labeled> T literal(T control) {
+        control.setMnemonicParsing(false);
+        return control;
     }
 }

@@ -2,8 +2,8 @@ package app.drydock.mcp;
 
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.HunkDigest;
+import app.drydock.review.HunkIds;
 import app.drydock.review.RecheckAssessment;
-import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.state.json.JsonParser;
 import app.drydock.state.json.JsonValue;
@@ -40,8 +40,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class McpToolRouterRecheckTest extends McpRouterFixture {
 
-    private static final String WIDGET_HUNK = ReviewIntent.hunkId("src/Widget.java", 0);
-    private static final String USER_HUNK = ReviewIntent.hunkId("src/WidgetUser.java", 0);
+    private static final String WIDGET_HUNK = HunkIds.hunkId("src/Widget.java", 0);
+    private static final String USER_HUNK = HunkIds.hunkId("src/WidgetUser.java", 0);
 
     /** The content digest of the fixture diff's first hunk -- what a verdict is keyed by. */
     private String widgetDigest() {

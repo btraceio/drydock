@@ -1,5 +1,6 @@
 package app.drydock.ui.review;
 
+import app.drydock.review.HunkIds;
 import app.drydock.ui.TestStages;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
@@ -128,7 +129,7 @@ class ReviewLinkFooterWiringTest extends ApplicationTest {
         // job is the DATA, not re-proving the scroll. What is worth checking
         // here is the round trip through REAL production code: the target id
         // this button carries was minted by ReadingPath.linksFrom via the
-        // real ReviewIntent.hunkId, not by a test fixture, so firing it must
+        // real HunkIds.hunkId, not by a test fixture, so firing it must
         // still resolve and must not throw.
         Button link = footerButtonContaining("called by");
         interact(link::fire);
@@ -154,7 +155,7 @@ class ReviewLinkFooterWiringTest extends ApplicationTest {
                 Optional.empty(), Optional.empty()));
         host.intents.set(scope.id(), List.of(new ReviewIntent("agent-1", 1, "Reviewed",
                 ReviewIntent.Kind.CHANGE, ReviewIntent.Risk.HIGH, "",
-                List.of(ReviewIntent.hunkId(DECLARING_FILE, 0), ReviewIntent.hunkId(REFERENCING_FILE, 0)),
+                List.of(HunkIds.hunkId(DECLARING_FILE, 0), HunkIds.hunkId(REFERENCING_FILE, 0)),
                 Optional.empty(), false)));
 
         interact(() -> view.showScopes(new SessionReviewScopes.Scopes(scope, Optional.empty()),

@@ -8,6 +8,7 @@ import app.drydock.mcp.McpActivityLog;
 import app.drydock.review.BaseMove;
 import app.drydock.review.ChangeGraph;
 import app.drydock.review.HunkDigest;
+import app.drydock.review.HunkIds;
 import app.drydock.review.IntentGrouping;
 import app.drydock.review.IntentHunks;
 import app.drydock.review.OutOfDiffFanIn;
@@ -1802,7 +1803,7 @@ public final class SessionReviewView extends BorderPane {
     }
 
     /**
-     * {@link #currentPath()}'s links, keyed by {@link ReviewIntent#hunkId} --
+     * {@link #currentPath()}'s links, keyed by {@link HunkIds#hunkId} --
      * what the diff column renders as a footer beneath each hunk (spec
      * §7.2), independent of whether the rail itself is in PATH mode. A step
      * with no links is left out of the map entirely rather than mapped to an
@@ -2597,7 +2598,7 @@ public final class SessionReviewView extends BorderPane {
      * #pathStepAsIntent}) a finding could never actually name.
      */
     private List<ReviewIntent> intentsCoveringPathStep(ReadingPath.Step step) {
-        Optional<ReviewIntent.Anchor> anchor = pathStepAsIntent(step).anchor();
+        Optional<HunkIds.Anchor> anchor = pathStepAsIntent(step).anchor();
         if (anchor.isEmpty()) {
             return List.of();
         }
@@ -3456,7 +3457,7 @@ public final class SessionReviewView extends BorderPane {
      */
     private boolean blockingFindingOpenForPathStep(ReviewScope scope, ReadingPath.Step step,
                                                    boolean wholeFile) {
-        Optional<ReviewIntent.Anchor> anchor = pathStepAsIntent(step).anchor();
+        Optional<HunkIds.Anchor> anchor = pathStepAsIntent(step).anchor();
         if (anchor.isEmpty()) {
             return false;
         }

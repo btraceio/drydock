@@ -3,6 +3,7 @@ package app.drydock.ui.review;
 import app.drydock.git.DiffScope;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
+import app.drydock.review.HunkIds;
 import app.drydock.review.OutOfDiffFanIn;
 import app.drydock.review.ReadingPath;
 import app.drydock.review.ReviewAnnotation;
@@ -10,6 +11,7 @@ import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.Severity;
 import app.drydock.ui.UiErrors;
+import app.drydock.ui.UiFormats;
 import app.drydock.ui.code.SyntaxHighlighter;
 
 import javafx.application.Platform;
@@ -19,7 +21,6 @@ import javafx.geometry.Pos;
 import javafx.scene.Node;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
-import javafx.scene.control.Labeled;
 import javafx.scene.control.ListCell;
 import javafx.scene.control.ListView;
 import javafx.scene.control.Tooltip;
@@ -252,7 +253,7 @@ final class ReviewDiffColumn extends BorderPane {
     private final Set<ReviewDiffRow.RunKey> expandedRuns = new HashSet<>();
 
     /**
-     * Each hunk's {@link ReadingPath.Link}s, keyed by {@link ReviewIntent#hunkId}
+     * Each hunk's {@link ReadingPath.Link}s, keyed by {@link HunkIds#hunkId}
      * -- see {@link #setLinks}. Empty until the host has a {@link
      * app.drydock.review.ChangeGraph} to compute them from, which is fine: a
      * hunk absent from this map simply gets no footer row (spec §7.2), not a
@@ -1264,7 +1265,7 @@ final class ReviewDiffColumn extends BorderPane {
 
     /**
      * What each hunk has to do with the rest of the diff (spec §7.2), keyed
-     * by {@link ReviewIntent#hunkId}. The host calls this whenever its
+     * by {@link HunkIds#hunkId}. The host calls this whenever its
      * {@link ReadingPath.Path} changes -- most often once its {@link
      * app.drydock.review.ChangeGraph} finishes building, well after the diff
      * itself rendered.
@@ -1747,7 +1748,7 @@ final class ReviewDiffColumn extends BorderPane {
                         occurrence.inDiff() ? "in-diff" : "not-touched");
                 Label where = new Label(occurrence.file() + ":" + occurrence.line());
                 where.getStyleClass().add("review-lens-where");
-                Button jump = literal(new Button(occurrence.text().length() > 60
+                Button jump = UiFormats.literal(new Button(occurrence.text().length() > 60
                         ? occurrence.text().substring(0, 59) + "…" : occurrence.text()));
                 jump.getStyleClass().add("review-lens-line");
                 jump.setOnAction(e -> {
@@ -1869,7 +1870,7 @@ final class ReviewDiffColumn extends BorderPane {
                 chip.getStyleClass().addAll("review-lens-chip", "not-touched");
                 Label where = new Label(occurrence.file() + ":" + occurrence.line());
                 where.getStyleClass().add("review-lens-where");
-                Button jump = literal(new Button(occurrence.text().strip().length() > 60
+                Button jump = UiFormats.literal(new Button(occurrence.text().strip().length() > 60
                         ? occurrence.text().strip().substring(0, 59) + "…"
                         : occurrence.text().strip()));
                 jump.getStyleClass().add("review-lens-line");
@@ -1968,7 +1969,7 @@ final class ReviewDiffColumn extends BorderPane {
      */
     private Region buildLinkRow(ReviewDiffRow.LinkRow row) {
         ReadingPath.Link link = row.link();
-        Button button = literal(new Button(glyphFor(link.kind()) + "  " + link.label()));
+        Button button = UiFormats.literal(new Button(glyphFor(link.kind()) + "  " + link.label()));
         button.getStyleClass().add("review-link-row");
         button.setMaxWidth(Double.MAX_VALUE);
         button.setAlignment(Pos.CENTER_LEFT);
@@ -1996,7 +1997,7 @@ final class ReviewDiffColumn extends BorderPane {
      * place through the same code.
      */
     private void selectLinkTarget(String hunkId) {
-        ReviewIntent.parseHunkId(hunkId).ifPresent(anchor -> {
+        HunkIds.parseHunkId(hunkId).ifPresent(anchor -> {
             // A link crosses files by construction (spec §7.2: cross-file
             // only), so its target is routinely a hunk the CURRENT filter
             // does not show at all -- PATH mode narrows the column to a
@@ -2182,16 +2183,5 @@ final class ReviewDiffColumn extends BorderPane {
         return "column=" + (int) getWidth() + " list=" + (int) list.getWidth()
                 + " viewport=" + (int) viewportWidth + " maxCell=" + (int) maxCell
                 + " maxGraphicPref=" + (int) maxGraphic + " hbar[" + hbar + "]";
-    }
-
-    /**
-     * Shows the control's text exactly as given. A JavaFX Button (like any
-     * Labeled except Label) parses a mnemonic from its text, which swallows an underscore
-     * ("Integer.MAX_VALUE" renders as "Integer.MAXVALUE"); text from the agent,
-     * from code or from file paths must never be read that way.
-     */
-    private static <T extends Labeled> T literal(T control) {
-        control.setMnemonicParsing(false);
-        return control;
     }
 }

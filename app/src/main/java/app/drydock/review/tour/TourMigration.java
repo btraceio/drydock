@@ -1,7 +1,7 @@
 package app.drydock.review.tour;
 
 import app.drydock.git.UnifiedDiff;
-import app.drydock.review.ReviewIntent;
+import app.drydock.review.HunkIds;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -98,7 +98,7 @@ public final class TourMigration {
                     .flatMap(step -> step.anchors().stream())
                     .anyMatch(anchor -> index.contains(anchor, row.file(), row.lineKey()));
             if (!covered) {
-                uncovered.add(ReviewIntent.hunkId(row.file(), row.hunkIndex()));
+                uncovered.add(HunkIds.hunkId(row.file(), row.hunkIndex()));
             }
         }
         return List.copyOf(uncovered);

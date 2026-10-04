@@ -4,6 +4,7 @@ import app.drydock.review.AnnotationStatus;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.Severity;
 import app.drydock.review.Triage;
+import app.drydock.ui.UiFormats;
 
 import javafx.animation.KeyFrame;
 import javafx.animation.KeyValue;
@@ -14,7 +15,6 @@ import javafx.geometry.Pos;
 import javafx.scene.Node;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
-import javafx.scene.control.Labeled;
 import javafx.scene.control.ScrollPane;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
@@ -518,7 +518,7 @@ final class ReviewFindingsMargin extends VBox {
         caption.getStyleClass().add("review-ask-caption");
         chips.getChildren().add(caption);
         for (ReviewAnnotation.Ask ask : finding.asks()) {
-            Button chip = literal(new Button(ask.label()));
+            Button chip = UiFormats.literal(new Button(ask.label()));
             chip.getStyleClass().add("review-ask-chip");
             chip.setTooltip(new Tooltip(ask.question()));
             chip.setOnAction(e -> host.postMessage(finding, ask.question()));
@@ -700,16 +700,5 @@ final class ReviewFindingsMargin extends VBox {
         }
         double top = card.getBoundsInParent().getMinY();
         scroll.setVvalue(Math.clamp(top / (contentHeight - viewportHeight), 0, 1));
-    }
-
-    /**
-     * Shows the control's text exactly as given. A JavaFX Button (like any
-     * Labeled except Label) parses a mnemonic from its text, which swallows an underscore
-     * ("Integer.MAX_VALUE" renders as "Integer.MAXVALUE"); text from the agent,
-     * from code or from file paths must never be read that way.
-     */
-    private static <T extends Labeled> T literal(T control) {
-        control.setMnemonicParsing(false);
-        return control;
     }
 }

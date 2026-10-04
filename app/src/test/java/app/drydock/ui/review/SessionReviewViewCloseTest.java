@@ -1,5 +1,6 @@
 package app.drydock.ui.review;
 
+import app.drydock.review.HunkIds;
 import app.drydock.ui.TestStages;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
@@ -62,7 +63,7 @@ class SessionReviewViewCloseTest extends ApplicationTest {
                 Optional.empty(), Optional.empty()));
         host.intents.set(scope.id(), List.of(
                 new ReviewIntent("section-1", 0, "A", ReviewIntent.Kind.CHANGE,
-                        ReviewIntent.Risk.MED, "", List.of(ReviewIntent.hunkId("src/a.java", 0)),
+                        ReviewIntent.Risk.MED, "", List.of(HunkIds.hunkId("src/a.java", 0)),
                         Optional.empty(), false)));
         view = new SessionReviewView(host, diffService, null);
         Scene scene = new Scene(view, 1400, 900);

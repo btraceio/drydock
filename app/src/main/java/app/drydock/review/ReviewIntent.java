@@ -138,9 +138,9 @@ public record ReviewIntent(
      */
     public List<String> files() {
         return hunkIds.stream()
-                .map(ReviewIntent::parseHunkId)
+                .map(HunkIds::parseHunkId)
                 .flatMap(Optional::stream)
-                .map(Anchor::file)
+                .map(HunkIds.Anchor::file)
                 .distinct()
                 .toList();
     }
@@ -161,34 +161,15 @@ public record ReviewIntent(
      * answer to "this intent does not say where it is".</p>
      */
     public boolean containsHunk(String file, int hunkIndex) {
-        return hunkIds.isEmpty() || hunkIds.contains(hunkId(file, hunkIndex));
+        return hunkIds.isEmpty() || hunkIds.contains(HunkIds.hunkId(file, hunkIndex));
     }
 
     /** Whether any of this intent's hunks is in {@code file}. */
     public boolean touches(String file) {
         return hunkIds.stream()
-                .map(ReviewIntent::parseHunkId)
+                .map(HunkIds::parseHunkId)
                 .flatMap(Optional::stream)
                 .anyMatch(anchor -> anchor.file().equals(file));
-    }
-
-    private static final String HUNK_ID_PREFIX = "h_";
-
-    /**
-     * The id a reviewer addresses one hunk by: {@code h_<file>_<index>},
-     * where {@code index} counts hunks within that file. Defined here rather
-     * than at the MCP boundary because the UI has to read the same ids back
-     * to know where in the diff an intent begins.
-     */
-    public static String hunkId(String file, int index) {
-        return HUNK_ID_PREFIX + file + "_" + index;
-    }
-
-    /** Where in the diff an intent begins: a file, and which of its hunks. */
-    public record Anchor(String file, int hunkIndex) {
-        public Anchor {
-            Objects.requireNonNull(file, "file");
-        }
     }
 
     /**
@@ -197,41 +178,14 @@ public record ReviewIntent(
      * reviewer, or by {@link FallbackIntents} when none has run. Empty when
      * no hunk id is recognisable: an intent may legitimately name none at all.
      */
-    public Optional<Anchor> anchor() {
+    public Optional<HunkIds.Anchor> anchor() {
         for (String hunkId : hunkIds) {
-            Optional<Anchor> parsed = parseHunkId(hunkId);
+            Optional<HunkIds.Anchor> parsed = HunkIds.parseHunkId(hunkId);
             if (parsed.isPresent()) {
                 return parsed;
             }
         }
         return Optional.empty();
-    }
-
-    /**
-     * The inverse of {@link #hunkId}: {@code file} and {@code index} back out
-     * of a raw hunk id, or empty for anything not shaped like one. Public so
-     * a caller that only HAS a hunk id -- {@link
-     * app.drydock.review.ReadingPath.Link#targetHunkId()}, most notably --
-     * can resolve it without building a throwaway one-hunk {@link
-     * ReviewIntent} purely to call {@link #anchor()} on it.
-     */
-    public static Optional<Anchor> parseHunkId(String hunkId) {
-        if (hunkId == null || !hunkId.startsWith(HUNK_ID_PREFIX)) {
-            return Optional.empty();
-        }
-        // The file path may itself contain '_', so the index is what follows
-        // the LAST one; anything else is part of the path.
-        int separator = hunkId.lastIndexOf('_');
-        if (separator <= HUNK_ID_PREFIX.length() - 1) {
-            return Optional.empty();
-        }
-        String file = hunkId.substring(HUNK_ID_PREFIX.length(), separator);
-        try {
-            int index = Integer.parseInt(hunkId.substring(separator + 1));
-            return file.isBlank() || index < 0 ? Optional.empty() : Optional.of(new Anchor(file, index));
-        } catch (NumberFormatException e) {
-            return Optional.empty();
-        }
     }
 
     private static <E extends Enum<E>> Optional<E> lookup(E[] values,

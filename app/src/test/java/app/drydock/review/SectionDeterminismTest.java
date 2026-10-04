@@ -54,7 +54,7 @@ class SectionDeterminismTest {
         IntentGrouping grouping = new IntentGrouping();
         ReviewIntent supplied = new ReviewIntent("agent-1", 1, "Crash-protected resolve()",
                 ReviewIntent.Kind.CHANGE, ReviewIntent.Risk.HIGH, "",
-                List.of(ReviewIntent.hunkId("src/a.cpp", 0)), java.util.Optional.empty(), false);
+                List.of(HunkIds.hunkId("src/a.cpp", 0)), java.util.Optional.empty(), false);
         grouping.set("scope-1", List.of(supplied));
 
         UnifiedDiff diff = diff();

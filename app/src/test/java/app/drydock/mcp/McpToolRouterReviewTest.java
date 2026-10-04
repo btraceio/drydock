@@ -6,6 +6,7 @@ import app.drydock.mcp.McpSessionRegistry.Spawn;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.Confidence;
 import app.drydock.review.HunkDigest;
+import app.drydock.review.HunkIds;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
@@ -483,7 +484,7 @@ class McpToolRouterReviewTest {
         JsonObject obj = intentJson(id, title, risk);
         List<JsonValue> ids = new ArrayList<>();
         for (int hunk : hunks) {
-            ids.add(new JsonString(ReviewIntent.hunkId("src/Main.java", hunk)));
+            ids.add(new JsonString(HunkIds.hunkId("src/Main.java", hunk)));
         }
         obj.put("hunkIds", new JsonArray(ids));
         return obj;

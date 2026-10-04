@@ -2,10 +2,10 @@ package app.drydock.ui.review;
 
 import app.drydock.review.tour.CheckProgress;
 import app.drydock.review.tour.StepProgress;
+import app.drydock.ui.UiFormats;
 import javafx.scene.Node;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
-import javafx.scene.control.Labeled;
 import javafx.scene.control.ScrollPane;
 import javafx.scene.control.Toggle;
 import javafx.scene.control.ToggleButton;
@@ -107,7 +107,7 @@ final class TourOutline extends VBox {
         message.getChildren().clear();
         rows.getChildren().clear();
         for (Row row : newRows) {
-            Button button = literal(new Button(glyph(row.state()) + row.number() + ". " + row.title()));
+            Button button = UiFormats.literal(new Button(glyph(row.state()) + row.number() + ". " + row.title()));
             button.getStyleClass().add("tour-outline-row");
             if (row.stepId().equals(currentStepId)) {
                 button.getStyleClass().add("tour-outline-row-current");
@@ -156,7 +156,7 @@ final class TourOutline extends VBox {
         label.setWrapText(true);
         message.getChildren().add(label);
         actionLabel.ifPresent(name -> {
-            Button button = literal(new Button(name));
+            Button button = UiFormats.literal(new Button(name));
             button.setOnAction(event -> action.run());
             message.getChildren().add(button);
         });
@@ -236,16 +236,5 @@ final class TourOutline extends VBox {
             case STALE -> "⟳ ";
             case NOT_STARTED -> "";
         };
-    }
-
-    /**
-     * Shows the control's text exactly as given. A JavaFX Button (like any
-     * Labeled except Label) parses a mnemonic from its text, which swallows an underscore
-     * ("Integer.MAX_VALUE" renders as "Integer.MAXVALUE"); text from the agent,
-     * from code or from file paths must never be read that way.
-     */
-    private static <T extends Labeled> T literal(T control) {
-        control.setMnemonicParsing(false);
-        return control;
     }
 }

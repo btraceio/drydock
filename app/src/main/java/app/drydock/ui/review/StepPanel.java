@@ -11,6 +11,7 @@ import app.drydock.review.tour.StepImpact;
 import app.drydock.review.tour.StepProgress;
 import app.drydock.review.tour.TourAnchor;
 import app.drydock.review.tour.TourCheck;
+import app.drydock.ui.UiFormats;
 import javafx.beans.binding.Bindings;
 import javafx.beans.binding.BooleanBinding;
 import javafx.beans.value.ObservableStringValue;
@@ -18,7 +19,6 @@ import javafx.geometry.Pos;
 import javafx.scene.Node;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
-import javafx.scene.control.Labeled;
 import javafx.scene.control.ScrollPane;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
@@ -409,7 +409,7 @@ final class StepPanel extends VBox {
     }
 
     private static Button entry(String text, String styleClass) {
-        Button button = literal(new Button(text));
+        Button button = UiFormats.literal(new Button(text));
         button.getStyleClass().addAll("step-impact-entry", styleClass);
         button.setWrapText(true);
         button.setMaxWidth(Double.MAX_VALUE);
@@ -643,7 +643,7 @@ final class StepPanel extends VBox {
         for (int i = 0; i < anchors.size(); i++) {
             int index = i;
             TourAnchor anchor = anchors.get(i);
-            Button chip = literal(new Button(anchor.file() + ":" + startLineOf(anchor)));
+            Button chip = UiFormats.literal(new Button(anchor.file() + ":" + startLineOf(anchor)));
             chip.getStyleClass().add("step-anchor-chip");
             chip.setOnAction(event -> host.goToAnchor(index));
             chips.getChildren().add(chip);
@@ -782,7 +782,7 @@ final class StepPanel extends VBox {
         }
         for (int i = 0; i < offered.choices().size(); i++) {
             int index = i;
-            Button choice = literal(new Button((i + 1) + "  " + offered.choices().get(i).text()));
+            Button choice = UiFormats.literal(new Button((i + 1) + "  " + offered.choices().get(i).text()));
             choice.getStyleClass().add("step-choice");
             choice.setWrapText(true);
             choice.setMaxWidth(Double.MAX_VALUE);
@@ -801,16 +801,5 @@ final class StepPanel extends VBox {
                 box.getChildren().add(choice);
             }
         }
-    }
-
-    /**
-     * Shows the control's text exactly as given. A JavaFX Button (like any
-     * Labeled except Label) parses a mnemonic from its text, which swallows an underscore
-     * ("Integer.MAX_VALUE" renders as "Integer.MAXVALUE"); text from the agent,
-     * from code or from file paths must never be read that way.
-     */
-    private static <T extends Labeled> T literal(T control) {
-        control.setMnemonicParsing(false);
-        return control;
     }
 }

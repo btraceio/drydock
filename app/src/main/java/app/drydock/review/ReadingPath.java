@@ -27,7 +27,7 @@ import java.util.TreeSet;
  * construction.</p>
  *
  * <p><strong>The rank, in full.</strong> Out-of-diff fan-in, then in-degree
- * within the changed set, then not-a-test, then {@link FallbackIntents}'
+ * within the changed set, then not-a-test, then {@link ChangedPaths}'
  * kind order, then the path. That is the whole chain: §6.2's not-a-leaf is
  * absent from it, for the reason two paragraphs down. The path is what
  * makes it TOTAL, and total is not a nicety here: {@code Graphs} keeps its ready set
@@ -201,7 +201,7 @@ public final class ReadingPath {
                 }
                 files.add(file);
                 for (int index = 0; index < fileDiff.hunks().size(); index++) {
-                    hunkIds.add(ReviewIntent.hunkId(file, index));
+                    hunkIds.add(HunkIds.hunkId(file, index));
                 }
             }
         }
@@ -214,7 +214,7 @@ public final class ReadingPath {
             String reason = reasonFor(file, graph, byPath, sectionByHunk,
                     fanInByFile.getOrDefault(file, 0), fanIn.unavailable());
             for (int index = 0; index < fileDiff.hunks().size(); index++) {
-                String hunkId = ReviewIntent.hunkId(file, index);
+                String hunkId = HunkIds.hunkId(file, index);
                 List<Link> links = linksFrom(new ChangeGraph.Hunk(file, index), graph,
                         byPath, sectionByHunk);
                 steps.add(new Step(hunkId, file, sectionByHunk.getOrDefault(hunkId, 0),
@@ -239,9 +239,9 @@ public final class ReadingPath {
         return Comparator
                 .comparingInt((String file) -> -fanInByFile.getOrDefault(file, 0))
                 .thenComparingInt(file -> -graph.filesReferencing(file).size())
-                .thenComparingInt(file -> FallbackIntents.isTestPath(file) ? 1 : 0)
+                .thenComparingInt(file -> ChangedPaths.isTestPath(file) ? 1 : 0)
                 .thenComparingInt(
-                        file -> FallbackIntents.readingOrder(FallbackIntents.kindOf(file)))
+                        file -> ChangedPaths.readingOrder(ChangedPaths.kindOf(file)))
                 .thenComparing(Comparator.naturalOrder());
     }
 
@@ -308,7 +308,7 @@ public final class ReadingPath {
         if (!dependencies.isEmpty()) {
             return "builds on " + markers(dependencies, own, byPath, sectionByHunk);
         }
-        String silence = FallbackIntents.isTestPath(file)
+        String silence = ChangedPaths.isTestPath(file)
                 ? "test, referenced by nothing in the change"
                 : "nothing in the change references it";
         // An unavailable scan is not a scan that found nothing (§4.3): this
@@ -336,7 +336,7 @@ public final class ReadingPath {
             int number = sectionOfFile(file, byPath, sectionByHunk);
             rendered.add(number > 0 && number != own
                     ? marker(number)
-                    : FallbackIntents.fileName(file));
+                    : ChangedPaths.fileName(file));
         }
         return String.join(", ", rendered);
     }
@@ -420,13 +420,13 @@ public final class ReadingPath {
                 // Nothing to click through to; a link to no hunk is a dead row.
                 continue;
             }
-            String hunkId = ReviewIntent.hunkId(to.file(), to.index());
+            String hunkId = HunkIds.hunkId(to.file(), to.index());
             if (!claimed.add(hunkId)) {
                 continue;
             }
             String marker = marker(sectionByHunk.getOrDefault(hunkId, 0));
             String label = (marker.isEmpty() ? "" : marker + " ")
-                    + FallbackIntents.fileName(to.file())
+                    + ChangedPaths.fileName(to.file())
                     + relation + best(target.getValue(), graph);
             links.add(new Link(kind, hunkId, label, Provenance.MEASURED));
         }
@@ -511,7 +511,7 @@ public final class ReadingPath {
         if (fileDiff == null || fileDiff.hunks().isEmpty()) {
             return 0;
         }
-        return sectionByHunk.getOrDefault(ReviewIntent.hunkId(file, 0), 0);
+        return sectionByHunk.getOrDefault(HunkIds.hunkId(file, 0), 0);
     }
 
     /**

@@ -21,9 +21,9 @@ class ReviewIntentAnchorTest {
      */
     @Test
     void theFallbackGroupingAnchorsThroughItsHunkIds() {
-        ReviewIntent intent = intentWith(List.of(ReviewIntent.hunkId("app/src/Main.java", 0)));
+        ReviewIntent intent = intentWith(List.of(HunkIds.hunkId("app/src/Main.java", 0)));
 
-        assertEquals(Optional.of(new ReviewIntent.Anchor("app/src/Main.java", 0)), intent.anchor());
+        assertEquals(Optional.of(new HunkIds.Anchor("app/src/Main.java", 0)), intent.anchor());
     }
 
     @Test
@@ -34,18 +34,18 @@ class ReviewIntentAnchorTest {
     @Test
     void aReviewerGroupingAnchorsToItsFirstHunk() {
         ReviewIntent intent = intentWith(List.of(
-                ReviewIntent.hunkId("app/Sidebar.java", 2),
-                ReviewIntent.hunkId("app/Other.java", 0)));
+                HunkIds.hunkId("app/Sidebar.java", 2),
+                HunkIds.hunkId("app/Other.java", 0)));
 
-        assertEquals(Optional.of(new ReviewIntent.Anchor("app/Sidebar.java", 2)), intent.anchor());
+        assertEquals(Optional.of(new HunkIds.Anchor("app/Sidebar.java", 2)), intent.anchor());
     }
 
     /** Underscores in the path are the common case in this repository's own tree. */
     @Test
     void aPathContainingUnderscoresParsesBackToItself() {
-        ReviewIntent intent = intentWith(List.of(ReviewIntent.hunkId("src/my_module/deep_file.java", 11)));
+        ReviewIntent intent = intentWith(List.of(HunkIds.hunkId("src/my_module/deep_file.java", 11)));
 
-        assertEquals(Optional.of(new ReviewIntent.Anchor("src/my_module/deep_file.java", 11)),
+        assertEquals(Optional.of(new HunkIds.Anchor("src/my_module/deep_file.java", 11)),
                 intent.anchor());
     }
 

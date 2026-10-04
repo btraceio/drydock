@@ -4,6 +4,7 @@ import app.drydock.git.UnifiedDiff;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.Confidence;
 import app.drydock.review.HunkDigest;
+import app.drydock.review.HunkIds;
 import app.drydock.review.RecheckAssessment;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
@@ -122,7 +123,7 @@ final class ReviewToolCodec {
     /** A hunk plus the file it came from and the stable id the cursor uses. */
     private record HunkRef(String file, int index, UnifiedDiff.Hunk hunk) {
         String id() {
-            return app.drydock.review.ReviewIntent.hunkId(file, index);
+            return HunkIds.hunkId(file, index);
         }
     }
 
@@ -384,7 +385,7 @@ final class ReviewToolCodec {
      * keyed by (spec §9.7).
      *
      * <p><strong>The two ids are different things.</strong> {@link
-     * ReviewIntent#hunkId} is POSITIONAL -- a file and an index into that
+     * HunkIds#hunkId} is POSITIONAL -- a file and an index into that
      * file's hunks -- and is what an agent reads off {@code review_scope}.
      * {@link HunkDigest#of} is CONTENT-ADDRESSED and deliberately excludes
      * line numbers, so a hunk that merely moved keeps its digest. Storing the
@@ -498,7 +499,7 @@ final class ReviewToolCodec {
      * that file's hunk count.
      */
     private static Optional<String> digestOfHunkId(UnifiedDiff diff, String hunkId) {
-        return ReviewIntent.parseHunkId(hunkId).flatMap(anchor -> {
+        return HunkIds.parseHunkId(hunkId).flatMap(anchor -> {
             for (UnifiedDiff.FileDiff file : diff.files()) {
                 if (!file.path().equals(anchor.file())) {
                     continue;

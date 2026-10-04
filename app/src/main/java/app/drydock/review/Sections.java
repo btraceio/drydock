@@ -57,7 +57,7 @@ import java.util.regex.Pattern;
  * nameable is named after its own most substantial file, never after a
  * directory: the grouping is not directory-derived, so a directory title
  * misdescribes it. No two cards may read the same, which {@link
- * FallbackIntents} guarantees and this has to guarantee too.</p>
+ * ChangedPaths} clusters guarantee and this has to guarantee too.</p>
  *
  * <p>Tests are NOT split out. A test references the symbol under test, so
  * the graph already places it; splitting on {@code /test/} would be a path
@@ -127,7 +127,7 @@ public final class Sections {
             // Nothing structural to consult: today's (kind, directory)
             // clustering is still the best available guess, and saying so is
             // better than inventing structure that is not there.
-            return fromFallback(diff);
+            return ChangedPaths.fallbackSections(diff);
         }
 
         Function<String, SortedSet<String>> dependsOn = file -> {
@@ -317,9 +317,9 @@ public final class Sections {
 
     private static boolean sameComponentByName(String left, String right,
                                                Map<String, SortedSet<String>> includes) {
-        return stem(FallbackIntents.fileName(left)).equals(stem(FallbackIntents.fileName(right)))
+        return stem(ChangedPaths.fileName(left)).equals(stem(ChangedPaths.fileName(right)))
                 && !extension(left).equals(extension(right))
-                && (FallbackIntents.directoryOf(left).equals(FallbackIntents.directoryOf(right))
+                && (ChangedPaths.directoryOf(left).equals(ChangedPaths.directoryOf(right))
                         || includes.get(left).contains(right)
                         || includes.get(right).contains(left));
     }
@@ -419,7 +419,7 @@ public final class Sections {
 
     private static boolean matchesFileName(String symbol, List<String> unit) {
         for (String file : unit) {
-            if (stem(FallbackIntents.fileName(file)).equalsIgnoreCase(symbol)) {
+            if (stem(ChangedPaths.fileName(file)).equalsIgnoreCase(symbol)) {
                 return true;
             }
         }
@@ -467,7 +467,7 @@ public final class Sections {
     }
 
     /**
-     * The rail, named. {@link FallbackIntents} guarantees that two cards can
+     * The rail, named. {@link ChangedPaths} clusters guarantee that two cards can
      * never read the same, and a grouping is only useful if its entries can
      * be told apart -- so this makes the same guarantee rather than hoping
      * for it. A hub symbol is declared in exactly one file and units are
@@ -500,7 +500,7 @@ public final class Sections {
                 .map(hub -> qualified ? hub + " (" + draft.primary() + ")" : hub)
                 .orElseGet(() -> qualified
                         ? draft.primary()
-                        : FallbackIntents.fileName(draft.primary()));
+                        : ChangedPaths.fileName(draft.primary()));
         return subject + " · " + count;
     }
 
@@ -545,19 +545,10 @@ public final class Sections {
                 continue;
             }
             for (int hunk = 0; hunk < file.hunks().size(); hunk++) {
-                ids.add(ReviewIntent.hunkId(path, hunk));
+                ids.add(HunkIds.hunkId(path, hunk));
             }
         }
         return ids;
-    }
-
-    private static List<Section> fromFallback(UnifiedDiff diff) {
-        List<Section> sections = new ArrayList<>();
-        for (ReviewIntent intent : FallbackIntents.group(diff)) {
-            sections.add(new Section(intent.title(), intent.files(), intent.hunkIds(),
-                    Optional.empty(), List.of()));
-        }
-        return List.copyOf(sections);
     }
 
     private static Map<String, SortedSet<String>> emptyEdges(SortedSet<String> nodes) {
@@ -579,7 +570,7 @@ public final class Sections {
     }
 
     private static String extension(String path) {
-        String name = FallbackIntents.fileName(path);
+        String name = ChangedPaths.fileName(path);
         int dot = name.lastIndexOf('.');
         return dot <= 0 ? "" : name.substring(dot + 1);
     }
@@ -597,12 +588,12 @@ public final class Sections {
     private record Reference(String token, boolean pathLike) {
 
         boolean names(String other) {
-            String otherName = FallbackIntents.fileName(other);
+            String otherName = ChangedPaths.fileName(other);
             if (pathLike) {
                 if (other.equals(token) || other.endsWith("/" + token)) {
                     return true;
                 }
-                String named = FallbackIntents.fileName(token);
+                String named = ChangedPaths.fileName(token);
                 return named.equals(otherName)
                         || (!stem(named).isEmpty() && stem(named).equals(stem(otherName)));
             }

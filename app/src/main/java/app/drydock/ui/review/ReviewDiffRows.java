@@ -1,8 +1,8 @@
 package app.drydock.ui.review;
 
 import app.drydock.git.UnifiedDiff;
+import app.drydock.review.HunkIds;
 import app.drydock.review.ReadingPath;
-import app.drydock.review.ReviewIntent;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -39,7 +39,7 @@ final class ReviewDiffRows {
 
     /**
      * What the column is currently showing. {@code linksByHunk} carries each
-     * hunk's {@link ReadingPath.Link}s, keyed by {@link ReviewIntent#hunkId};
+     * hunk's {@link ReadingPath.Link}s, keyed by {@link HunkIds#hunkId};
      * a hunk absent from the map gets no footer row at all, rather than an
      * empty one -- the same "no card for nothing to say" rule {@link #build}
      * already applies to a hunk with no rows to show.
@@ -185,7 +185,7 @@ final class ReviewDiffRows {
         card.add(new ReviewDiffRow.HunkHeader(file.path(), rangeLabel(hunk), startLine(hunk),
                 file.untracked(), file.staged(), hunkIndex));
         card.addAll(body);
-        String hunkId = ReviewIntent.hunkId(file.path(), hunkIndex);
+        String hunkId = HunkIds.hunkId(file.path(), hunkIndex);
         for (ReadingPath.Link link : options.linksByHunk().getOrDefault(hunkId, List.of())) {
             card.add(new ReviewDiffRow.LinkRow(link, ReviewDiffRow.Edge.BODY));
         }

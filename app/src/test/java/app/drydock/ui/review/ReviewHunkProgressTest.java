@@ -1,5 +1,6 @@
 package app.drydock.ui.review;
 
+import app.drydock.review.HunkIds;
 import app.drydock.ui.TestStages;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
@@ -409,7 +410,7 @@ class ReviewHunkProgressTest extends ApplicationTest {
         mintScope();
         ReviewIntent adrift = new ReviewIntent("section-2", 0, "Profiler",
                 ReviewIntent.Kind.CHANGE, ReviewIntent.Risk.MED, "",
-                List.of(ReviewIntent.hunkId(PROFILER, 7)), Optional.empty(), false);
+                List.of(HunkIds.hunkId(PROFILER, 7)), Optional.empty(), false);
         host.intents.set(scope.id(), List.of(
                 section("section-1", "Guards", GUARDS_H, GUARDS_CPP), adrift));
         show();
@@ -431,7 +432,7 @@ class ReviewHunkProgressTest extends ApplicationTest {
     private static ReviewIntent section(String id, String title, String... files) {
         List<String> hunkIds = new ArrayList<>();
         for (String file : files) {
-            hunkIds.add(ReviewIntent.hunkId(file, 0));
+            hunkIds.add(HunkIds.hunkId(file, 0));
         }
         return new ReviewIntent(id, 0, title, ReviewIntent.Kind.CHANGE, ReviewIntent.Risk.MED,
                 "", hunkIds, Optional.empty(), false);

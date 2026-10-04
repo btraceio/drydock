@@ -126,9 +126,9 @@ class FallbackIntentsTest {
         ReviewIntent intent = FallbackIntents.group(diff).get(0);
 
         assertEquals(3, intent.hunkIds().size());
-        assertTrue(intent.hunkIds().contains(ReviewIntent.hunkId("src/app/A.java", 0)));
-        assertTrue(intent.hunkIds().contains(ReviewIntent.hunkId("src/app/A.java", 1)));
-        assertTrue(intent.hunkIds().contains(ReviewIntent.hunkId("src/app/B.java", 0)));
+        assertTrue(intent.hunkIds().contains(HunkIds.hunkId("src/app/A.java", 0)));
+        assertTrue(intent.hunkIds().contains(HunkIds.hunkId("src/app/A.java", 1)));
+        assertTrue(intent.hunkIds().contains(HunkIds.hunkId("src/app/B.java", 0)));
         assertTrue(intent.anchor().isPresent());
     }
 

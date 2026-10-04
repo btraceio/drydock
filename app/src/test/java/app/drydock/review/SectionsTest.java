@@ -334,7 +334,7 @@ class SectionsTest {
         List<Sections.Section> sections = sectionsOf(diff);
 
         for (UnifiedDiff.FileDiff file : diff.files()) {
-            String hunkId = ReviewIntent.hunkId(file.path(), 0);
+            String hunkId = HunkIds.hunkId(file.path(), 0);
             assertTrue(sections.stream().anyMatch(s -> s.hunkIds().contains(hunkId)),
                     "no section carries " + hunkId);
         }

@@ -4,6 +4,7 @@ import app.drydock.git.UnifiedDiff;
 import app.drydock.review.BaseMove;
 import app.drydock.review.ChangeGraph;
 import app.drydock.review.HunkDigest;
+import app.drydock.review.HunkIds;
 import app.drydock.review.IntentHunks;
 import app.drydock.review.Provenance;
 import app.drydock.review.RecheckDispatch;
@@ -671,7 +672,7 @@ final class SectionStates {
      * first file it covers at all (see {@link #filesOf}).
      */
     private Optional<String> fileOf(Board board, ReviewIntent intent) {
-        return intent.anchor().map(ReviewIntent.Anchor::file)
+        return intent.anchor().map(HunkIds.Anchor::file)
                 .or(() -> filesOf(board, intent).stream().findFirst());
     }
 

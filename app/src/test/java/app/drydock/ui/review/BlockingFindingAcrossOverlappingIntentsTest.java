@@ -1,5 +1,6 @@
 package app.drydock.ui.review;
 
+import app.drydock.review.HunkIds;
 import app.drydock.ui.TestStages;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
@@ -96,9 +97,9 @@ class BlockingFindingAcrossOverlappingIntentsTest extends ApplicationTest {
                 Optional.empty(), Optional.empty()));
         host.intents.set(scope.id(), List.of(
                 new ReviewIntent("alpha-id", 0, "Alpha", ReviewIntent.Kind.CHANGE, ReviewIntent.Risk.MED,
-                        "", List.of(ReviewIntent.hunkId(FILE_A, 0)), Optional.empty(), false),
+                        "", List.of(HunkIds.hunkId(FILE_A, 0)), Optional.empty(), false),
                 new ReviewIntent("beta-id", 0, "Beta", ReviewIntent.Kind.CHANGE, ReviewIntent.Risk.MED,
-                        "", List.of(ReviewIntent.hunkId(FILE_A, 0), ReviewIntent.hunkId(FILE_B, 0)),
+                        "", List.of(HunkIds.hunkId(FILE_A, 0), HunkIds.hunkId(FILE_B, 0)),
                         Optional.empty(), false)));
         interact(() -> view.showScopes(new SessionReviewScopes.Scopes(scope, Optional.empty()),
                 SessionReviewScopes.Choice.LOCAL));

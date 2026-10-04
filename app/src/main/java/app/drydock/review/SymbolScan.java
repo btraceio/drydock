@@ -67,7 +67,7 @@ public final class SymbolScan {
 
     /**
      * One symbol occurrence. {@code hunk} is its index within {@code path}'s
-     * hunks, the same index {@link ReviewIntent#hunkId} counts, so a caller
+     * hunks, the same index {@link HunkIds#hunkId} counts, so a caller
      * can say which hunk a name is in and not merely which file. It is free
      * here -- {@link #of} is already looping hunks -- and it is the whole
      * difference between "these two files are related" and a claim about a

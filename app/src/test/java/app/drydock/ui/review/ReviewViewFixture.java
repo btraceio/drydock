@@ -1,5 +1,6 @@
 package app.drydock.ui.review;
 
+import app.drydock.review.HunkIds;
 import app.drydock.ui.TestStages;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
@@ -90,14 +91,14 @@ abstract class ReviewViewFixture extends ApplicationTest {
         host.intents.set(scope.id(), List.of(
                 new ReviewIntent("section-1", 0, "Guards", ReviewIntent.Kind.CHANGE,
                         ReviewIntent.Risk.MED, "", List.of(
-                                ReviewIntent.hunkId(FILE_A, 0),
-                                ReviewIntent.hunkId(FILE_A, 1),
-                                ReviewIntent.hunkId(FILE_B, 0)),
+                                HunkIds.hunkId(FILE_A, 0),
+                                HunkIds.hunkId(FILE_A, 1),
+                                HunkIds.hunkId(FILE_B, 0)),
                         Optional.empty(), false),
                 new ReviewIntent("section-2", 0, "Profiler", ReviewIntent.Kind.CHANGE,
                         ReviewIntent.Risk.MED, "", List.of(
-                                ReviewIntent.hunkId(FILE_A, 0),
-                                ReviewIntent.hunkId(FILE_C, 0)),
+                                HunkIds.hunkId(FILE_A, 0),
+                                HunkIds.hunkId(FILE_C, 0)),
                         Optional.empty(), false)));
         interact(() -> view.showScopes(new SessionReviewScopes.Scopes(scope, Optional.empty()),
                 SessionReviewScopes.Choice.LOCAL));

@@ -4,6 +4,7 @@ import app.drydock.git.UnifiedDiff;
 import app.drydock.review.BaseMove;
 import app.drydock.review.ChangeGraph;
 import app.drydock.review.HunkDigest;
+import app.drydock.review.HunkIds;
 import app.drydock.review.Provenance;
 import app.drydock.review.RecheckDispatch;
 import app.drydock.review.ReviewIntent;
@@ -428,7 +429,7 @@ class SectionStatesTest {
         SectionStates.Board board = board(List.of(
                 section("section-1", GUARDS_H),
                 new ReviewIntent("section-2", 2, "Profiler", ReviewIntent.Kind.CHANGE,
-                        ReviewIntent.Risk.MED, "", List.of(ReviewIntent.hunkId(PROFILER, 7)),
+                        ReviewIntent.Risk.MED, "", List.of(HunkIds.hunkId(PROFILER, 7)),
                         Optional.empty(), false)));
 
         SectionStates.SectionState adrift = sections.stateOf(board, board.sections().get(1));
@@ -455,7 +456,7 @@ class SectionStatesTest {
     void aCollapsedSectionIsNotCounted() {
         ReviewIntent collapsed = new ReviewIntent("collapsed", 2, "Rename",
                 ReviewIntent.Kind.MOVE, ReviewIntent.Risk.NONE, "",
-                List.of(ReviewIntent.hunkId(PROFILER, 0)),
+                List.of(HunkIds.hunkId(PROFILER, 0)),
                 Optional.of(new ReviewIntent.Collapse("pure rename", "git -M", 1, 1)), false);
         SectionStates.Board board = board(List.of(section("section-1", GUARDS_H), collapsed));
 
@@ -1028,7 +1029,7 @@ class SectionStatesTest {
     private static ReviewIntent section(String id, String... files) {
         List<String> hunkIds = new ArrayList<>();
         for (String file : files) {
-            hunkIds.add(ReviewIntent.hunkId(file, 0));
+            hunkIds.add(HunkIds.hunkId(file, 0));
         }
         return new ReviewIntent(id, 0, id, ReviewIntent.Kind.CHANGE, ReviewIntent.Risk.MED,
                 "", hunkIds, Optional.empty(), false);

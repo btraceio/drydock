@@ -2,7 +2,7 @@ package app.drydock.review.tour;
 
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.HunkDigest;
-import app.drydock.review.ReviewIntent;
+import app.drydock.review.HunkIds;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -28,7 +28,7 @@ public final class AnchorIndex {
 
     public record HunkRef(String file, int index, String digest) {
         public String hunkId() {
-            return ReviewIntent.hunkId(file, index);
+            return HunkIds.hunkId(file, index);
         }
     }
 

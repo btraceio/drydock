@@ -1,5 +1,6 @@
 package app.drydock.ui.review;
 
+import app.drydock.review.HunkIds;
 import app.drydock.ui.TestStages;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
@@ -75,8 +76,8 @@ class ReviewLinkRowTest extends ApplicationTest {
     @Test
     void aHunkWithALinkGetsAFooterRowBeneathIt() {
         showTwoFileDiff();
-        String targetHunkId = ReviewIntent.hunkId(FILE_B, 0);
-        setLinks(Map.of(ReviewIntent.hunkId(FILE_A, 0),
+        String targetHunkId = HunkIds.hunkId(FILE_B, 0);
+        setLinks(Map.of(HunkIds.hunkId(FILE_A, 0),
                 List.of(new ReadingPath.Link(ReadingPath.CALLED_BY, targetHunkId, "guards.cpp:forCheckout"))));
 
         assertTrue(linkRowTexts().stream().anyMatch(text -> text.contains("called by")),
@@ -86,8 +87,8 @@ class ReviewLinkRowTest extends ApplicationTest {
     @Test
     void aLinkNamesItsTargetFileAndSymbolNotARawHunkId() {
         showTwoFileDiff();
-        String targetHunkId = ReviewIntent.hunkId(FILE_B, 0);
-        setLinks(Map.of(ReviewIntent.hunkId(FILE_A, 0),
+        String targetHunkId = HunkIds.hunkId(FILE_B, 0);
+        setLinks(Map.of(HunkIds.hunkId(FILE_A, 0),
                 List.of(new ReadingPath.Link(ReadingPath.CALLED_BY, targetHunkId, "guards.cpp:forCheckout"))));
 
         List<String> texts = linkRowTexts();
@@ -109,10 +110,10 @@ class ReviewLinkRowTest extends ApplicationTest {
     @Test
     void everyFooterRowSharesOneLeftInsetIncludingTheOneClosingTheCard() {
         showTwoFileDiff();
-        setLinks(Map.of(ReviewIntent.hunkId(FILE_A, 0), List.of(
-                new ReadingPath.Link(ReadingPath.CALLS, ReviewIntent.hunkId(FILE_B, 0), "guards.cpp:x"),
-                new ReadingPath.Link(ReadingPath.CALLED_BY, ReviewIntent.hunkId(FILE_C, 0), "unrelated.cpp:y"),
-                new ReadingPath.Link(ReadingPath.SAME_CONCEPT, ReviewIntent.hunkId(FILE_C, 0),
+        setLinks(Map.of(HunkIds.hunkId(FILE_A, 0), List.of(
+                new ReadingPath.Link(ReadingPath.CALLS, HunkIds.hunkId(FILE_B, 0), "guards.cpp:x"),
+                new ReadingPath.Link(ReadingPath.CALLED_BY, HunkIds.hunkId(FILE_C, 0), "unrelated.cpp:y"),
+                new ReadingPath.Link(ReadingPath.SAME_CONCEPT, HunkIds.hunkId(FILE_C, 0),
                         "unrelated.cpp · both touch z"))));
 
         for (ReviewDensity density : ReviewDensity.values()) {
@@ -134,8 +135,8 @@ class ReviewLinkRowTest extends ApplicationTest {
     @Test
     void aHunkWithNoLinksGetsNoFooterRow() {
         showTwoFileDiff();
-        setLinks(Map.of(ReviewIntent.hunkId(FILE_A, 0),
-                List.of(new ReadingPath.Link(ReadingPath.CALLS, ReviewIntent.hunkId(FILE_B, 0), "guards.cpp:x"))));
+        setLinks(Map.of(HunkIds.hunkId(FILE_A, 0),
+                List.of(new ReadingPath.Link(ReadingPath.CALLS, HunkIds.hunkId(FILE_B, 0), "guards.cpp:x"))));
 
         assertEquals(1, linkRowTexts().size(),
                 "only FILE_A's hunk carries a link; FILE_B and FILE_C carry none");
@@ -147,8 +148,8 @@ class ReviewLinkRowTest extends ApplicationTest {
         showTwoFilesFarApart();
         assertFalse(renderedHunkFiles().contains(FILE_B),
                 "the fixture must start with the target file below the fold");
-        String targetHunkId = ReviewIntent.hunkId(FILE_B, 0);
-        setLinks(Map.of(ReviewIntent.hunkId(FILE_A, 0),
+        String targetHunkId = HunkIds.hunkId(FILE_B, 0);
+        setLinks(Map.of(HunkIds.hunkId(FILE_A, 0),
                 List.of(new ReadingPath.Link(ReadingPath.CALLS, targetHunkId, "guards.cpp:x"))));
 
         Button link = (Button) lookup(".review-link-row").query();
@@ -174,8 +175,8 @@ class ReviewLinkRowTest extends ApplicationTest {
         clickGutterForLine("1");
         assertEquals(1, composerCount(), "the gutter click must open a composer to begin with");
 
-        setLinks(Map.of(ReviewIntent.hunkId(FILE_A, 0),
-                List.of(new ReadingPath.Link(ReadingPath.CALLS, ReviewIntent.hunkId(FILE_B, 0), "guards.cpp:x"))));
+        setLinks(Map.of(HunkIds.hunkId(FILE_A, 0),
+                List.of(new ReadingPath.Link(ReadingPath.CALLS, HunkIds.hunkId(FILE_B, 0), "guards.cpp:x"))));
 
         assertEquals(1, composerCount(),
                 "an async graph landing (setLinks) must not silently drop an open comment composer");
@@ -185,8 +186,8 @@ class ReviewLinkRowTest extends ApplicationTest {
     @Test
     void aLinkRowIsFocusTraversable() {
         showTwoFileDiff();
-        setLinks(Map.of(ReviewIntent.hunkId(FILE_A, 0),
-                List.of(new ReadingPath.Link(ReadingPath.CALLS, ReviewIntent.hunkId(FILE_B, 0), "guards.cpp:x"))));
+        setLinks(Map.of(HunkIds.hunkId(FILE_A, 0),
+                List.of(new ReadingPath.Link(ReadingPath.CALLS, HunkIds.hunkId(FILE_B, 0), "guards.cpp:x"))));
 
         Button link = (Button) lookup(".review-link-row").query();
         assertTrue(link.isFocusTraversable());
@@ -206,13 +207,13 @@ class ReviewLinkRowTest extends ApplicationTest {
     void clickingALinkFilteredOutOfTheCurrentViewWidensAndReachesItsTarget() {
         showTwoFilesFarApart();
         ReviewIntent onlyFileA = new ReviewIntent("path:only-a", 1, FILE_A, ReviewIntent.Kind.CHANGE,
-                ReviewIntent.Risk.NONE, "", List.of(ReviewIntent.hunkId(FILE_A, 0)), Optional.empty(), false);
+                ReviewIntent.Risk.NONE, "", List.of(HunkIds.hunkId(FILE_A, 0)), Optional.empty(), false);
         interact(() -> column.setIntent(onlyFileA));
         assertFalse(renderedHunkFiles().contains(FILE_B),
                 "the narrowed filter must exclude the link's target file up front");
 
-        String targetHunkId = ReviewIntent.hunkId(FILE_B, 0);
-        setLinks(Map.of(ReviewIntent.hunkId(FILE_A, 0),
+        String targetHunkId = HunkIds.hunkId(FILE_B, 0);
+        setLinks(Map.of(HunkIds.hunkId(FILE_A, 0),
                 List.of(new ReadingPath.Link(ReadingPath.CALLS, targetHunkId, "guards.cpp:x"))));
 
         Button link = (Button) lookup(".review-link-row").query();
@@ -244,7 +245,7 @@ class ReviewLinkRowTest extends ApplicationTest {
 
         ReviewIntent excludeFirstHunk = new ReviewIntent("only-1-and-2", 1, FILE_A, ReviewIntent.Kind.CHANGE,
                 ReviewIntent.Risk.NONE, "",
-                List.of(ReviewIntent.hunkId(FILE_A, 1), ReviewIntent.hunkId(FILE_A, 2)), Optional.empty(), false);
+                List.of(HunkIds.hunkId(FILE_A, 1), HunkIds.hunkId(FILE_A, 2)), Optional.empty(), false);
         interact(() -> column.setIntent(excludeFirstHunk));
 
         assertFalse(renderedRangeLabels().contains("L300"),

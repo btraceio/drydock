@@ -56,7 +56,7 @@ public final class ChangeGraph {
 
     /**
      * One hunk of one changed file, by the same index {@link
-     * ReviewIntent#hunkId} counts.
+     * HunkIds#hunkId} counts.
      *
      * <p>The file-level view answers "are these two files related". A
      * reviewer is shown a marker under ONE hunk, and a marker under a hunk

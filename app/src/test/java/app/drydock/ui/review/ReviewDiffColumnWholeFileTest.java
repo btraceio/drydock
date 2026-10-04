@@ -3,6 +3,7 @@ package app.drydock.ui.review;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.git.UnifiedDiff.Line;
+import app.drydock.review.HunkIds;
 import app.drydock.review.ReadingPath;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
@@ -106,12 +107,12 @@ class ReviewDiffColumnWholeFileTest extends ApplicationTest {
         // An intent that covers only hunk 1 of the review diff, which has no
         // counterpart in the one-hunk whole-file diff.
         ReviewIntent intent = new ReviewIntent("i_1", 1, "second hunk", ReviewIntent.Kind.CHANGE,
-                ReviewIntent.Risk.MED, "", List.of(ReviewIntent.hunkId("src/A.java", 1)),
+                ReviewIntent.Risk.MED, "", List.of(HunkIds.hunkId("src/A.java", 1)),
                 Optional.empty(), false);
         interact(() -> {
             column.showDiff(scope(), twoHunks());
-            column.setLinks(Map.of(ReviewIntent.hunkId("src/A.java", 0),
-                    List.of(new ReadingPath.Link("calls", ReviewIntent.hunkId("src/A.java", 1), "calls b"))));
+            column.setLinks(Map.of(HunkIds.hunkId("src/A.java", 0),
+                    List.of(new ReadingPath.Link("calls", HunkIds.hunkId("src/A.java", 1), "calls b"))));
             column.setIntent(intent);
             column.setWholeFiles(true);
             column.diagShowWholeFileDiff(whole);

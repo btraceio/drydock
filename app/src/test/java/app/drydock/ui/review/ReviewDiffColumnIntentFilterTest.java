@@ -1,5 +1,6 @@
 package app.drydock.ui.review;
 
+import app.drydock.review.HunkIds;
 import app.drydock.ui.TestStages;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
@@ -177,7 +178,7 @@ class ReviewDiffColumnIntentFilterTest extends ApplicationTest {
     private ReviewIntent intent(int number, String title, String... files) {
         List<String> hunkIds = new ArrayList<>();
         for (String file : files) {
-            hunkIds.add(ReviewIntent.hunkId(file, 0));
+            hunkIds.add(HunkIds.hunkId(file, 0));
         }
         return new ReviewIntent("i_" + number, number, title, ReviewIntent.Kind.CHANGE,
                 ReviewIntent.Risk.MED, "", hunkIds, Optional.empty(), false);

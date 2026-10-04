@@ -227,7 +227,7 @@ class ReadingPathTest {
         ReadingPath.Link link = guards.links().stream()
                 .filter(candidate -> candidate.kind().equals("called by"))
                 .findFirst().orElseThrow();
-        assertEquals(ReviewIntent.hunkId("src/profiler.cpp", 0), link.targetHunkId());
+        assertEquals(HunkIds.hunkId("src/profiler.cpp", 0), link.targetHunkId());
         assertTrue(link.label().contains("profiler.cpp"), link.label());
         assertTrue(link.label().contains("JmpCtxScope"), link.label());
     }
@@ -242,7 +242,7 @@ class ReadingPathTest {
         ReadingPath.Link link = profiler.links().stream()
                 .filter(candidate -> candidate.kind().equals("calls"))
                 .findFirst().orElseThrow();
-        assertEquals(ReviewIntent.hunkId("src/guards.cpp", 0), link.targetHunkId());
+        assertEquals(HunkIds.hunkId("src/guards.cpp", 0), link.targetHunkId());
         assertTrue(link.label().contains("guards.cpp:JmpCtxScope"), link.label());
     }
 
@@ -257,7 +257,7 @@ class ReadingPathTest {
         ReadingPath.Link shared = stepFor(path, "src/a.cpp").links().stream()
                 .filter(link -> link.kind().equals("same concept"))
                 .findFirst().orElseThrow();
-        assertEquals(ReviewIntent.hunkId("src/b.cpp", 0), shared.targetHunkId());
+        assertEquals(HunkIds.hunkId("src/b.cpp", 0), shared.targetHunkId());
         assertTrue(shared.label().contains("JmpCtxScope"), shared.label());
         assertTrue(shared.label().contains("b.cpp"), shared.label());
     }
@@ -296,9 +296,9 @@ class ReadingPathTest {
                         "void two() { }",
                         "void three() { }"))), NO_FAN_IN);
 
-        assertEquals(List.of("calls"), kindsOn(path, ReviewIntent.hunkId("src/big.cpp", 0)));
-        assertEquals(List.of(), kindsOn(path, ReviewIntent.hunkId("src/big.cpp", 1)));
-        assertEquals(List.of(), kindsOn(path, ReviewIntent.hunkId("src/big.cpp", 2)));
+        assertEquals(List.of("calls"), kindsOn(path, HunkIds.hunkId("src/big.cpp", 0)));
+        assertEquals(List.of(), kindsOn(path, HunkIds.hunkId("src/big.cpp", 1)));
+        assertEquals(List.of(), kindsOn(path, HunkIds.hunkId("src/big.cpp", 2)));
     }
 
     /**
@@ -316,7 +316,7 @@ class ReadingPathTest {
         ReadingPath.Link link = stepFor(path, "src/guards.cpp").links().stream()
                 .filter(candidate -> candidate.kind().equals("called by"))
                 .findFirst().orElseThrow();
-        assertEquals(ReviewIntent.hunkId("src/big.cpp", 1), link.targetHunkId());
+        assertEquals(HunkIds.hunkId("src/big.cpp", 1), link.targetHunkId());
     }
 
     /**
@@ -334,13 +334,13 @@ class ReadingPathTest {
                 NO_FAN_IN);
 
         assertEquals(List.of("called by"),
-                kindsOn(path, ReviewIntent.hunkId("src/alpha.cpp", 0)));
+                kindsOn(path, HunkIds.hunkId("src/alpha.cpp", 0)));
         assertEquals(List.of("calls"),
-                kindsOn(path, ReviewIntent.hunkId("src/alpha.cpp", 1)));
-        assertEquals(ReviewIntent.hunkId("src/beta.cpp", 1),
-                linkOn(path, ReviewIntent.hunkId("src/alpha.cpp", 0)).targetHunkId());
-        assertEquals(ReviewIntent.hunkId("src/beta.cpp", 0),
-                linkOn(path, ReviewIntent.hunkId("src/alpha.cpp", 1)).targetHunkId());
+                kindsOn(path, HunkIds.hunkId("src/alpha.cpp", 1)));
+        assertEquals(HunkIds.hunkId("src/beta.cpp", 1),
+                linkOn(path, HunkIds.hunkId("src/alpha.cpp", 0)).targetHunkId());
+        assertEquals(HunkIds.hunkId("src/beta.cpp", 0),
+                linkOn(path, HunkIds.hunkId("src/alpha.cpp", 1)).targetHunkId());
     }
 
     /** Same concept points at the hunk that touches the symbol, not at hunk 0. */
@@ -352,11 +352,11 @@ class ReadingPathTest {
                 multiHunk("src/b.cpp", "void b0() { }", "void b1() { new JmpCtxScope(); }"))),
                 NO_FAN_IN);
 
-        ReadingPath.Link shared = linksOn(path, ReviewIntent.hunkId("src/a.cpp", 1)).stream()
+        ReadingPath.Link shared = linksOn(path, HunkIds.hunkId("src/a.cpp", 1)).stream()
                 .filter(link -> link.kind().equals("same concept"))
                 .findFirst().orElseThrow();
-        assertEquals(ReviewIntent.hunkId("src/b.cpp", 1), shared.targetHunkId());
-        assertEquals(List.of(), kindsOn(path, ReviewIntent.hunkId("src/a.cpp", 0)));
+        assertEquals(HunkIds.hunkId("src/b.cpp", 1), shared.targetHunkId());
+        assertEquals(List.of(), kindsOn(path, HunkIds.hunkId("src/a.cpp", 0)));
     }
 
     /** Cross-file only: two hunks of one file are not a relationship. */
@@ -400,9 +400,9 @@ class ReadingPathTest {
                 file("src/guards.cpp", "class JmpCtxScope { };"), two)), NO_FAN_IN);
 
         assertEquals(List.of(
-                ReviewIntent.hunkId("src/guards.cpp", 0),
-                ReviewIntent.hunkId("src/profiler.cpp", 0),
-                ReviewIntent.hunkId("src/profiler.cpp", 1)),
+                HunkIds.hunkId("src/guards.cpp", 0),
+                HunkIds.hunkId("src/profiler.cpp", 0),
+                HunkIds.hunkId("src/profiler.cpp", 1)),
                 path.stream().map(ReadingPath.Step::hunkId).toList());
     }
 
@@ -441,7 +441,7 @@ class ReadingPathTest {
                 file("src/zeta.cpp", "class PublicThing { };")));
         ChangeGraph graph = ChangeGraph.of(diff);
         List<Sections.Section> asGrouped = Sections.of(diff, graph);
-        String entry = ReviewIntent.hunkId("src/zeta.cpp", 0);
+        String entry = HunkIds.hunkId("src/zeta.cpp", 0);
 
         ReadingPath.Path path =
                 ReadingPath.of(diff, graph, asGrouped, fanIn("PublicThing", 1));
@@ -466,7 +466,7 @@ class ReadingPathTest {
                 file("src/profiler.cpp", "void go() { new JmpCtxScope(); }")));
         ChangeGraph graph = ChangeGraph.of(diff);
         Sections.Section orphan = new Sections.Section("Orphan", List.of(),
-                List.of(ReviewIntent.hunkId("src/gone.cpp", 0)), Optional.empty(), List.of());
+                List.of(HunkIds.hunkId("src/gone.cpp", 0)), Optional.empty(), List.of());
         List<Sections.Section> withOrphan = new ArrayList<>(Sections.of(diff, graph));
         withOrphan.add(0, orphan);
 

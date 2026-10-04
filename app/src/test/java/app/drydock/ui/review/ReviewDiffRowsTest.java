@@ -1,8 +1,8 @@
 package app.drydock.ui.review;
 
 import app.drydock.git.UnifiedDiff;
+import app.drydock.review.HunkIds;
 import app.drydock.review.ReadingPath;
-import app.drydock.review.ReviewIntent;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -237,7 +237,7 @@ class ReviewDiffRowsTest {
     void aHunkWithALinkGetsAFooterRowThatClosesTheCard() {
         UnifiedDiff diff = diff(file("A.java", hunk(add(1))));
         ReadingPath.Link link = link("calls", "B.java", 0, "B.java:helper");
-        ReviewDiffRows.Options options = withLinks(Map.of(ReviewIntent.hunkId("A.java", 0), List.of(link)));
+        ReviewDiffRows.Options options = withLinks(Map.of(HunkIds.hunkId("A.java", 0), List.of(link)));
 
         List<ReviewDiffRow> rows = ReviewDiffRows.build(diff, options);
 
@@ -255,7 +255,7 @@ class ReviewDiffRowsTest {
     void aHunkWithNoEntryInLinksByHunkGetsNoFooterRow() {
         UnifiedDiff diff = diff(file("A.java", hunk(add(1))));
         ReviewDiffRows.Options options = withLinks(Map.of(
-                ReviewIntent.hunkId("SOMETHING_ELSE.java", 0), List.of(link("calls", "B.java", 0, "x"))));
+                HunkIds.hunkId("SOMETHING_ELSE.java", 0), List.of(link("calls", "B.java", 0, "x"))));
 
         List<ReviewDiffRow> rows = ReviewDiffRows.build(diff, options);
 
@@ -268,7 +268,7 @@ class ReviewDiffRowsTest {
     void eachHunkGetsOnlyItsOwnLinks() {
         UnifiedDiff diff = diff(file("A.java", hunk(add(1)), hunk(add(2))));
         ReadingPath.Link linkOnSecond = link("called by", "B.java", 0, "B.java:x");
-        ReviewDiffRows.Options options = withLinks(Map.of(ReviewIntent.hunkId("A.java", 1), List.of(linkOnSecond)));
+        ReviewDiffRows.Options options = withLinks(Map.of(HunkIds.hunkId("A.java", 1), List.of(linkOnSecond)));
 
         List<ReviewDiffRow> rows = ReviewDiffRows.build(diff, options);
 
@@ -287,7 +287,7 @@ class ReviewDiffRowsTest {
         ReadingPath.Link first = link("calls", "B.java", 0, "B.java:x");
         ReadingPath.Link second = link("same concept", "C.java", 0, "C.java: shared y");
         ReviewDiffRows.Options options =
-                withLinks(Map.of(ReviewIntent.hunkId("A.java", 0), List.of(first, second)));
+                withLinks(Map.of(HunkIds.hunkId("A.java", 0), List.of(first, second)));
 
         List<ReviewDiffRow> rows = ReviewDiffRows.build(diff, options);
 
@@ -319,7 +319,7 @@ class ReviewDiffRowsTest {
     }
 
     private static ReadingPath.Link link(String kind, String targetFile, int targetHunkIndex, String label) {
-        return new ReadingPath.Link(kind, ReviewIntent.hunkId(targetFile, targetHunkIndex), label);
+        return new ReadingPath.Link(kind, HunkIds.hunkId(targetFile, targetHunkIndex), label);
     }
 
     // ---- fixtures -----------------------------------------------------------
