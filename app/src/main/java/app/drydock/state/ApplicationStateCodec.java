@@ -103,7 +103,8 @@ import java.util.Set;
  *     "terminalFontSize": 13.0,
  *     "openSessionIds": ["<uuid>", ...],
  *     "selectedSessionId": "<uuid>" | null,
- *     "reviewScopeChoices": {"<uuid>": "LOCAL" | "PULL_REQUEST", ...}
+ *     "reviewScopeChoices": {"<uuid>": "LOCAL" | "PULL_REQUEST", ...},
+ *     "reviewKeyHintsHidden": false
  *   }
  * }
  * }</pre>
@@ -172,6 +173,9 @@ import java.util.Set;
  * {@code Choice.fromPersisted} (which maps it to {@code LOCAL}) rather than
  * being dropped. An absent member decodes to an empty map, so no version
  * bump was needed and older builds simply ignore it.
+ * The {@code reviewKeyHintsHidden} member (whether the tour's key-hints strip
+ * was hidden) is likewise lenient: absent or not a boolean decodes to
+ * {@code false}, hints shown.
  * No version bump was needed and downgrades stay non-destructive.</p>
  */
 public final class ApplicationStateCodec {
@@ -348,6 +352,7 @@ public final class ApplicationStateCodec {
             reviewScopeChoices.put(entry.getKey().value().toString(), new JsonString(entry.getValue().name()));
         }
         obj.put("reviewScopeChoices", reviewScopeChoices);
+        obj.put("reviewKeyHintsHidden", new JsonBoolean(ui.reviewKeyHintsHidden()));
         return obj;
     }
 
@@ -724,8 +729,13 @@ public final class ApplicationStateCodec {
             }
         }
 
+        // Cosmetic and lenient: absent in documents written before the strip
+        // existed, and anything but a boolean means "shown".
+        boolean reviewKeyHintsHidden = obj.get("reviewKeyHintsHidden") instanceof JsonBoolean hidden
+                && hidden.value();
+
         return new WorkspaceUiState(selected, sidebarWidth, expanded, theme, uiFontSize, terminalFontSize,
-                openSessionIds, selectedSessionId, reviewScopeChoices);
+                openSessionIds, selectedSessionId, reviewScopeChoices, reviewKeyHintsHidden);
     }
 
     private static int readSchemaVersion(JsonObject root) {

@@ -197,6 +197,17 @@ public final class RepositoryManager {
         });
     }
 
+    /**
+     * Persists whether the tour's key-hints strip is hidden. One global
+     * preference, written through the state store's own update function for
+     * the same reason as {@link #updateReviewScopeChoice}: no second writer.
+     */
+    public void updateReviewKeyHintsHidden(boolean hidden) {
+        stateStore.update(state -> state.ui().reviewKeyHintsHidden() == hidden
+                ? state
+                : state.withUi(state.ui().withReviewKeyHintsHidden(hidden)));
+    }
+
     /** Persists which session tab was active when the app shut down. */
     public void updateSelectedSession(Optional<ManagedSessionId> selectedSessionId) {
         stateStore.update(state -> state.withUi(state.ui().withSelectedSessionId(selectedSessionId)));
