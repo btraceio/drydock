@@ -6,6 +6,7 @@ import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
 import javafx.scene.control.ToggleButton;
+import javafx.scene.text.Text;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.Test;
 import org.testfx.framework.junit5.ApplicationTest;
@@ -18,6 +19,7 @@ import java.util.Optional;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class TourOutlineTest extends ApplicationTest {
@@ -53,6 +55,19 @@ class TourOutlineTest extends ApplicationTest {
         assertTrue(found.stream().allMatch(node -> node instanceof Button));
         assertEquals(1, lookup(".tour-outline-row-current").queryAll().size());
         assertTrue(((Button) lookup(".tour-outline-row-current").query()).getText().contains("2. Cache"));
+    }
+
+    @Test
+    void aSnakeCaseTitleIsShownVerbatim() {
+        interact(() -> outline.setRows(List.of(
+                new TourOutline.Row("s1", 1, "Clamp MAX_VALUE", TourOutline.RowState.NOT_STARTED)), "s1"));
+        Button row = lookup(".tour-outline-row").queryAs(Button.class);
+        assertFalse(row.isMnemonicParsing());
+        interact(() -> {
+            row.applyCss();
+            row.layout();
+        });
+        assertTrue(((Text) row.lookup(".text")).getText().endsWith("1. Clamp MAX_VALUE"));
     }
 
     @Test

@@ -19,6 +19,7 @@ import javafx.geometry.Pos;
 import javafx.scene.Node;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
+import javafx.scene.control.Labeled;
 import javafx.scene.control.ListCell;
 import javafx.scene.control.ListView;
 import javafx.scene.control.Tooltip;
@@ -1746,8 +1747,8 @@ final class ReviewDiffColumn extends BorderPane {
                         occurrence.inDiff() ? "in-diff" : "not-touched");
                 Label where = new Label(occurrence.file() + ":" + occurrence.line());
                 where.getStyleClass().add("review-lens-where");
-                Button jump = new Button(occurrence.text().length() > 60
-                        ? occurrence.text().substring(0, 59) + "…" : occurrence.text());
+                Button jump = literal(new Button(occurrence.text().length() > 60
+                        ? occurrence.text().substring(0, 59) + "…" : occurrence.text()));
                 jump.getStyleClass().add("review-lens-line");
                 jump.setOnAction(e -> {
                     hideLens();
@@ -1868,9 +1869,9 @@ final class ReviewDiffColumn extends BorderPane {
                 chip.getStyleClass().addAll("review-lens-chip", "not-touched");
                 Label where = new Label(occurrence.file() + ":" + occurrence.line());
                 where.getStyleClass().add("review-lens-where");
-                Button jump = new Button(occurrence.text().strip().length() > 60
+                Button jump = literal(new Button(occurrence.text().strip().length() > 60
                         ? occurrence.text().strip().substring(0, 59) + "…"
-                        : occurrence.text().strip());
+                        : occurrence.text().strip()));
                 jump.getStyleClass().add("review-lens-line");
                 jump.setOnAction(e -> openOutsideFile(occurrence, notice));
                 HBox row = new HBox(6, chip, where);
@@ -1967,7 +1968,7 @@ final class ReviewDiffColumn extends BorderPane {
      */
     private Region buildLinkRow(ReviewDiffRow.LinkRow row) {
         ReadingPath.Link link = row.link();
-        Button button = new Button(glyphFor(link.kind()) + "  " + link.label());
+        Button button = literal(new Button(glyphFor(link.kind()) + "  " + link.label()));
         button.getStyleClass().add("review-link-row");
         button.setMaxWidth(Double.MAX_VALUE);
         button.setAlignment(Pos.CENTER_LEFT);
@@ -2181,5 +2182,16 @@ final class ReviewDiffColumn extends BorderPane {
         return "column=" + (int) getWidth() + " list=" + (int) list.getWidth()
                 + " viewport=" + (int) viewportWidth + " maxCell=" + (int) maxCell
                 + " maxGraphicPref=" + (int) maxGraphic + " hbar[" + hbar + "]";
+    }
+
+    /**
+     * Shows the control's text exactly as given. A JavaFX Button (like any
+     * Labeled except Label) parses a mnemonic from its text, which swallows an underscore
+     * ("Integer.MAX_VALUE" renders as "Integer.MAXVALUE"); text from the agent,
+     * from code or from file paths must never be read that way.
+     */
+    private static <T extends Labeled> T literal(T control) {
+        control.setMnemonicParsing(false);
+        return control;
     }
 }

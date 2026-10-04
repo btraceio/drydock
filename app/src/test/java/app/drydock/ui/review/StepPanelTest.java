@@ -14,6 +14,9 @@ import app.drydock.review.tour.TourStep;
 import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
+import javafx.scene.text.Text;
+import app.drydock.review.tour.ImpactNote;
+import app.drydock.review.tour.StepImpact;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.Test;
 import org.testfx.framework.junit5.ApplicationTest;
@@ -84,6 +87,38 @@ class StepPanelTest extends ApplicationTest {
         clickOn("2  returns");
         WaitForAsyncUtils.waitForFxEvents();
         assertEquals(List.of("answer c1 1"), calls);
+    }
+
+    private static String displayed(Button button) {
+        button.applyCss();
+        button.layout();
+        return ((Text) button.lookup(".text")).getText();
+    }
+
+    @Test
+    void aChoiceWithAnUnderscoreIsShownVerbatim() {
+        TourCheck check = new TourCheck("c1", TourCheck.Kind.PREDICT, "What does it return?",
+                List.of(new TourCheck.Choice("Return Integer.MAX_VALUE", Optional.empty()),
+                        new TourCheck.Choice("Return zero", Optional.empty())),
+                OptionalInt.of(0), "Because.", List.of());
+        TourStep step = new TourStep("s1", "Guard", "Why.", List.of(new TourAnchor("src/A.java", "n3", "n9")),
+                List.of(), List.of(check));
+        interact(() -> panel.show(new StepView(step, 1, 3, new StepProgress("s1", List.of(),
+                Map.of("c1", CheckProgress.fresh("c1")), StepProgress.Decision.NONE, Optional.empty(), false))));
+        Button choice = lookup("1  Return Integer.MAX_VALUE").queryAs(Button.class);
+        assertFalse(choice.isMnemonicParsing());
+        assertEquals("1  Return Integer.MAX_VALUE", displayed(choice));
+    }
+
+    @Test
+    void anImpactEntryWithAnUnderscoreIsShownVerbatim() {
+        interact(() -> panel.showImpact(new StepPanel.ImpactView(
+                List.of(new ImpactNote("src/snake_case.h", 1, "keep max_value in range")),
+                new StepImpact(List.of(), List.of(), List.of(), List.of(), Optional.empty()),
+                Map.of(), false, Optional.empty(), true)));
+        Button entry = lookup("src/snake_case.h:1 — keep max_value in range").queryAs(Button.class);
+        assertFalse(entry.isMnemonicParsing());
+        assertEquals("src/snake_case.h:1 — keep max_value in range", displayed(entry));
     }
 
     @Test
