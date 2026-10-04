@@ -2539,6 +2539,20 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             return handedOff;
         }
 
+        /** The tour refresh, sent like {@link #dispatchRiskCheck}: an automatic hand-off, so it is logged. */
+        @Override
+        public boolean dispatchTourRefresh(ReviewScope scope, List<String> staleStepIds, int uncoveredHunks) {
+            OpenSessionTab open = scope.sessionId().map(openTabs::get).orElse(null);
+            if (open == null || open.isProcessExited()) {
+                return false;
+            }
+            boolean handedOff = sendToBoundSession(scope,
+                    ReviewInstructions.forTourRefresh(scope.id(), staleStepIds, uncoveredHunks));
+            LOG.log(Level.INFO, () -> (handedOff ? "Asked" : "Could not ask") + " the agent to refresh the tour of "
+                    + "scope " + scope.id() + " (stale " + staleStepIds + ", " + uncoveredHunks + " uncovered hunks)");
+            return handedOff;
+        }
+
         @Override
         public SessionActivity agentActivity(ReviewScope scope) {
             return scope.sessionId().map(viewModel::activityOf).orElse(SessionActivity.UNKNOWN);

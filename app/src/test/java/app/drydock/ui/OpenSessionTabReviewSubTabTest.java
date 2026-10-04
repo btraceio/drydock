@@ -626,6 +626,11 @@ class OpenSessionTabReviewSubTabTest extends ApplicationTest {
         }
 
         @Override
+        public boolean dispatchTourRefresh(ReviewScope scope, List<String> staleStepIds, int uncoveredHunks) {
+            return false;
+        }
+
+        @Override
         public SessionActivity agentActivity(ReviewScope scope) {
             return SessionActivity.UNKNOWN;
         }

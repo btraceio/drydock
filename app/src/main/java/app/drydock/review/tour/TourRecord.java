@@ -14,10 +14,16 @@ import java.util.Optional;
  * hunk overrides from the hunk diff, and -- for migrating anchors when the
  * diff moves under it -- the row keys of every hunk the tour was written
  * against.
+ *
+ * <p>{@code seeded} records that the verdicts set in the hunk diff before
+ * this tour existed have been carried over as hunk overrides, so that
+ * happens once per tour and never again -- not after a restart, and not
+ * for a re-posted tour, whose stored verdicts are the previous tour's
+ * derivations rather than a human's.</p>
  */
 public record TourRecord(ReviewTour tour, Map<String, StepProgress> progress,
                          Map<String, HunkOverride> hunkOverrides, Map<String, List<String>> hunkRows,
-                         boolean reviewAnyway, boolean shelved) {
+                         boolean reviewAnyway, boolean shelved, boolean seeded) {
 
     public TourRecord {
         Objects.requireNonNull(tour, "tour");
@@ -32,7 +38,7 @@ public record TourRecord(ReviewTour tour, Map<String, StepProgress> progress,
         for (TourStep step : tour.steps()) {
             progress.put(step.id(), StepProgress.fresh(step, index));
         }
-        return new TourRecord(tour, progress, Map.of(), rowsOf(reviewDiff), false, false);
+        return new TourRecord(tour, progress, Map.of(), rowsOf(reviewDiff), false, false, false);
     }
 
     /** Row keys per hunk digest, in diff order. */
@@ -59,28 +65,32 @@ public record TourRecord(ReviewTour tour, Map<String, StepProgress> progress,
     public TourRecord withProgress(StepProgress stepProgress) {
         Map<String, StepProgress> next = new LinkedHashMap<>(progress);
         next.put(stepProgress.stepId(), stepProgress);
-        return new TourRecord(tour, next, hunkOverrides, hunkRows, reviewAnyway, shelved);
+        return new TourRecord(tour, next, hunkOverrides, hunkRows, reviewAnyway, shelved, seeded);
     }
 
     public TourRecord withHunkOverride(String digest, Optional<HunkOverride> override) {
         Map<String, HunkOverride> next = new LinkedHashMap<>(hunkOverrides);
         override.ifPresentOrElse(value -> next.put(digest, value), () -> next.remove(digest));
-        return new TourRecord(tour, progress, next, hunkRows, reviewAnyway, shelved);
+        return new TourRecord(tour, progress, next, hunkRows, reviewAnyway, shelved, seeded);
     }
 
     public TourRecord withReviewAnyway(boolean value) {
-        return new TourRecord(tour, progress, hunkOverrides, hunkRows, value, shelved);
+        return new TourRecord(tour, progress, hunkOverrides, hunkRows, value, shelved, seeded);
     }
 
     public TourRecord withShelved(boolean value) {
-        return new TourRecord(tour, progress, hunkOverrides, hunkRows, reviewAnyway, value);
+        return new TourRecord(tour, progress, hunkOverrides, hunkRows, reviewAnyway, value, seeded);
     }
 
     public TourRecord withTour(ReviewTour newTour) {
-        return new TourRecord(newTour, progress, hunkOverrides, hunkRows, reviewAnyway, shelved);
+        return new TourRecord(newTour, progress, hunkOverrides, hunkRows, reviewAnyway, shelved, seeded);
     }
 
     public TourRecord withHunkRows(Map<String, List<String>> rows) {
-        return new TourRecord(tour, progress, hunkOverrides, rows, reviewAnyway, shelved);
+        return new TourRecord(tour, progress, hunkOverrides, rows, reviewAnyway, shelved, seeded);
+    }
+
+    public TourRecord withSeeded(boolean value) {
+        return new TourRecord(tour, progress, hunkOverrides, hunkRows, reviewAnyway, shelved, value);
     }
 }

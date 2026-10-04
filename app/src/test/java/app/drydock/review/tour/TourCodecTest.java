@@ -104,4 +104,21 @@ class TourCodecTest {
     void aRecordWithoutATourDecodesToNothing() {
         assertTrue(TourCodec.recordFromJson(JsonParser.parse("{\"progress\":{}}")).isEmpty());
     }
+
+    @Test
+    void theSeededFlagRoundTripsAndDefaultsToFalseWhenAbsent() {
+        UnifiedDiff diff = twoFileDiff();
+        TourRecord seeded = TourRecord.fresh(coveringTour(diff), diff).withSeeded(true);
+
+        TourRecord back = TourCodec.recordFromJson(JsonParser.parse(JsonWriter.write(TourCodec.recordToJson(seeded))))
+                .orElseThrow();
+        assertTrue(back.seeded());
+        assertEquals(seeded, back);
+
+        String withoutFlag = JsonWriter.write(TourCodec.recordToJson(seeded))
+                .replaceFirst(",\\s*\"seeded\"\\s*:\\s*true", "");
+        TourRecord legacy = TourCodec.recordFromJson(JsonParser.parse(withoutFlag)).orElseThrow();
+        assertTrue(!legacy.seeded(), "a record written before the flag existed is not seeded");
+        assertTrue(!TourRecord.fresh(coveringTour(diff), diff).seeded());
+    }
 }

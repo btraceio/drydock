@@ -1,0 +1,122 @@
+package app.drydock.review.tour;
+
+import app.drydock.git.UnifiedDiff;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+import java.util.Optional;
+
+import static app.drydock.review.tour.TourFixtures.add;
+import static app.drydock.review.tour.TourFixtures.coveringTour;
+import static app.drydock.review.tour.TourFixtures.ctx;
+import static app.drydock.review.tour.TourFixtures.del;
+import static app.drydock.review.tour.TourFixtures.file;
+import static app.drydock.review.tour.TourFixtures.hunk;
+import static app.drydock.review.tour.TourFixtures.predict;
+import static app.drydock.review.tour.TourFixtures.risk;
+import static app.drydock.review.tour.TourFixtures.step;
+import static app.drydock.review.tour.TourFixtures.twoFileDiff;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class TourMigrationTest {
+
+    private static final UnifiedDiff.FileDiff UNCHANGED_A = twoFileDiff().files().get(0);
+
+    /** Both steps passed against {@link TourFixtures#twoFileDiff()}. */
+    private static TourRecord passed(ReviewTour tour) {
+        UnifiedDiff diff = twoFileDiff();
+        TourRecord record = TourRecord.fresh(tour, diff);
+        for (TourStep step : tour.steps()) {
+            record = record.withProgress(record.progress(step.id())
+                    .withDecision(StepProgress.Decision.PASSED, Optional.empty()));
+        }
+        return record;
+    }
+
+    /** src/B.java's hunk now removes a different line; src/A.java is untouched. */
+    private static UnifiedDiff bChanged() {
+        return new UnifiedDiff(List.of(UNCHANGED_A,
+                file("src/B.java", hunk(ctx(4, 4, "a"), del(5, "b"), del(6, "CHANGED"), ctx(7, 5, "d")))));
+    }
+
+    @Test
+    void aStepWhoseHunksAreUnchangedKeepsItsProgressAndAChangedOneGoesStale() {
+        TourRecord record = passed(coveringTour(twoFileDiff()));
+
+        TourMigration.Result result = TourMigration.migrate(record, bChanged());
+
+        StepProgress s1 = result.record().progress("s1");
+        StepProgress s2 = result.record().progress("s2");
+        assertEquals(StepProgress.Decision.PASSED, s1.decision());
+        assertFalse(s1.stale());
+        assertTrue(s2.stale());
+        assertEquals(StepProgress.Decision.PASSED, s2.decision(), "a stale step keeps its progress");
+        assertEquals(List.of("s2"), result.staleStepIds());
+        assertEquals(List.of("h_src/B.java_0"), result.uncoveredHunkIds(),
+                "a stale step's hunk is uncovered until the step is re-issued");
+        assertEquals(TourFingerprint.of(bChanged()), result.record().tour().diffFingerprint());
+        assertEquals(TourRecord.rowsOf(bChanged()), result.record().hunkRows());
+    }
+
+    @Test
+    void aShiftedHunkKeepsItsStepAndRemapsTheAnchorThroughTheStoredRowKeys() {
+        ReviewTour tour = new ReviewTour(TourFixtures.SCOPE, TourFingerprint.of(twoFileDiff()), List.of(
+                step("s1", List.of(new TourAnchor("src/A.java", "n1", "o20"),
+                        new TourAnchor("src/A.java", "n21", "n22")), predict("c1")),
+                step("s2", List.of(new TourAnchor("src/B.java", "o5", "o6")), risk("c2"))));
+        UnifiedDiff.FileDiff shiftedA = file("src/A.java",
+                UNCHANGED_A.hunks().get(0),
+                hunk(ctx(19, 25, "void f() {"), del(20, "  old();"), add(26, "  next();"), ctx(21, 27, "}")));
+        UnifiedDiff shifted = new UnifiedDiff(List.of(shiftedA, twoFileDiff().files().get(1)));
+
+        TourMigration.Result result = TourMigration.migrate(passed(tour), shifted);
+
+        TourStep s1 = result.record().tour().step("s1").orElseThrow();
+        assertEquals(new TourAnchor("src/A.java", "n1", "o20"), s1.anchors().get(0));
+        assertEquals(new TourAnchor("src/A.java", "n26", "n27"), s1.anchors().get(1));
+        assertEquals(StepProgress.Decision.PASSED, result.record().progress("s1").decision());
+        assertFalse(result.record().progress("s1").stale());
+        assertEquals(List.of(), result.staleStepIds());
+        assertEquals(List.of(), result.uncoveredHunkIds());
+        assertTrue(AnchorIndex.of(shifted).resolves(s1.anchors().get(1)));
+    }
+
+    @Test
+    void aNewHunkIsReportedUncovered() {
+        UnifiedDiff withC = new UnifiedDiff(List.of(UNCHANGED_A, twoFileDiff().files().get(1),
+                file("src/C.java", hunk(add(1, "class C {}")))));
+
+        TourMigration.Result result = TourMigration.migrate(passed(coveringTour(twoFileDiff())), withC);
+
+        assertEquals(List.of(), result.staleStepIds());
+        assertEquals(List.of("h_src/C.java_0"), result.uncoveredHunkIds());
+    }
+
+    @Test
+    void aNewHunkInsideAKeptStepsRangeMakesThatStepStale() {
+        // s1 spans n1..n22 of src/A.java; a hunk appearing between its two
+        // hunks would otherwise ride along on s1's PASSED unseen.
+        UnifiedDiff.FileDiff aWithMiddle = file("src/A.java",
+                UNCHANGED_A.hunks().get(0),
+                hunk(ctx(10, 11, "int z;"), add(12, "int w;")),
+                UNCHANGED_A.hunks().get(1));
+        UnifiedDiff diff = new UnifiedDiff(List.of(aWithMiddle, twoFileDiff().files().get(1)));
+
+        TourMigration.Result result = TourMigration.migrate(passed(coveringTour(twoFileDiff())), diff);
+
+        assertEquals(List.of("s1"), result.staleStepIds());
+        assertTrue(result.record().progress("s1").stale());
+        assertEquals(List.of("h_src/A.java_0", "h_src/A.java_1", "h_src/A.java_2"), result.uncoveredHunkIds());
+    }
+
+    @Test
+    void migratingClearsShelved() {
+        TourRecord record = passed(coveringTour(twoFileDiff())).withShelved(true);
+
+        TourMigration.Result result = TourMigration.migrate(record, bChanged());
+
+        assertFalse(result.record().shelved());
+    }
+}

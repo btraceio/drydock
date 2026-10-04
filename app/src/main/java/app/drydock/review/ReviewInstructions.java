@@ -1,5 +1,7 @@
 package app.drydock.review;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 
 /**
@@ -73,5 +75,28 @@ public final class ReviewInstructions {
         return "For review handle " + scopeId + ", call review_state and read the reviewer's answer to check "
                 + checkId + " under tour.awaitingAgent; judge it against the code and call review_check with "
                 + "verdict holds, partly or doesNotHold and a one-line reason.";
+    }
+
+    /**
+     * Asks the agent to bring its tour onto a diff that moved (spec §3,
+     * "Staleness"): re-issue {@code staleStepIds} and add steps for the
+     * {@code uncoveredHunks} hunks no live step covers, through {@code
+     * review_tour} with {@code onlySteps}, so the steps already walked keep
+     * their progress. One line, for the same reason as {@link #forRecheck}.
+     */
+    public static String forTourRefresh(String scopeId, List<String> staleStepIds, int uncoveredHunks) {
+        Objects.requireNonNull(scopeId, "scopeId");
+        Objects.requireNonNull(staleStepIds, "staleStepIds");
+        List<String> asks = new ArrayList<>();
+        if (!staleStepIds.isEmpty()) {
+            asks.add("replace steps " + String.join(", ", staleStepIds) + " (their code changed)");
+        }
+        if (uncoveredHunks > 0) {
+            asks.add("add steps covering the " + uncoveredHunks + " uncovered hunk"
+                    + (uncoveredHunks == 1 ? "" : "s"));
+        }
+        return "For review handle " + scopeId + ", the diff changed under your tour: call review_scope and "
+                + "review_state, then call review_tour with onlySteps true to " + String.join(" and ", asks)
+                + "; the steps you do not send keep the reviewer's progress.";
     }
 }

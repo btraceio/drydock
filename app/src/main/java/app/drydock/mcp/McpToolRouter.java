@@ -24,12 +24,14 @@ import app.drydock.review.SymbolScan;
 import app.drydock.review.VerdictMerge;
 import app.drydock.review.tour.AnchorIndex;
 import app.drydock.review.tour.CheckProgress;
+import app.drydock.review.tour.HunkOverride;
 import app.drydock.review.tour.ImpactNote;
 import app.drydock.review.tour.ReviewTour;
 import app.drydock.review.tour.StepGrading;
 import app.drydock.review.tour.TourCheck;
 import app.drydock.review.tour.TourCodec;
 import app.drydock.review.tour.TourFingerprint;
+import app.drydock.review.tour.TourMerge;
 import app.drydock.review.tour.TourRecord;
 import app.drydock.review.tour.TourStep;
 import app.drydock.review.tour.TourValidator;
@@ -195,14 +197,20 @@ public final class McpToolRouter {
                                 + "and every problem is listed. Every changed row must lie in some step's anchor; "
                                 + "each step needs a narrative and at least one check, each check at least one "
                                 + "alternate. Anchor keys are line keys from review_scope (n<newLine> or "
-                                + "o<oldLine>); answer is a 0-based index into choices.",
+                                + "o<oldLine>); answer is a 0-based index into choices. With onlySteps true, "
+                                + "the steps sent replace the stored steps with the same id and the rest are "
+                                + "appended; unsent steps keep their progress, and the merged tour is validated "
+                                + "as a whole.",
                         JsonObject.empty()
                                 .put("scopeId", schemaString("Review scope handle."))
                                 .put("steps", schemaString("Array of {id, title, narrative (<=1000 chars), "
                                         + "anchors[{file, startKey, endKey?}], impactNotes?[{file, line, text}], "
                                         + "checks[{id, kind: predict|trace|risk, prompt, choices?[{text, at?{file, "
                                         + "line}}] (2-4, not for risk), answer? (0-based, not for risk), explanation, "
-                                        + "alternates[{...same, no alternates}]}]}; at most 40 steps, 6 checks each.")),
+                                        + "alternates[{...same, no alternates}]}]}; at most 40 steps, 6 checks each."))
+                                .put("onlySteps", schemaBoolean("Merge these steps into the stored tour instead "
+                                        + "of replacing it: re-issue stale steps, add steps for uncovered hunks. "
+                                        + "Needs a stored tour.")),
                         "scopeId", "steps"),
                 descriptor("review_check",
                         "Judges the reviewer's free-text answer to a risk check, read from review_state "
@@ -745,17 +753,37 @@ public final class McpToolRouter {
             throw new McpToolException("review_tour rejected, nothing stored: " + e.getMessage());
         }
         checkTourText(steps);
-        ReviewTour tour = new ReviewTour(scope.id(), TourFingerprint.of(diff), steps);
-        List<String> errors = new ArrayList<>(TourValidator.validate(tour, diff, context.findingsOf(scope.id())));
+        boolean onlySteps = optionalBooleanArg(args, "onlySteps", false);
+        Optional<TourRecord> existing = context.tourOf(scope.id());
+        TourRecord record;
+        if (onlySteps) {
+            record = TourMerge.replaceSteps(existing.orElseThrow(() -> new McpToolException(
+                    "review_tour rejected, nothing stored: onlySteps needs a stored tour, and scope " + scope.id()
+                            + " has no tour; post the whole tour without onlySteps")), steps, diff);
+        } else {
+            record = TourRecord.fresh(new ReviewTour(scope.id(), TourFingerprint.of(diff), steps), diff);
+            if (existing.isPresent()) {
+                // The hunk diff's own decisions survive a re-post, and the
+                // verdicts stored now are the previous tour's derivations,
+                // which must not be seeded as if a human had set them.
+                for (Map.Entry<String, HunkOverride> override : existing.get().hunkOverrides().entrySet()) {
+                    record = record.withHunkOverride(override.getKey(), Optional.of(override.getValue()));
+                }
+                record = record.withSeeded(true);
+            }
+        }
+        List<String> errors = new ArrayList<>(
+                TourValidator.validate(record.tour(), diff, context.findingsOf(scope.id())));
         errors.addAll(impactNoteErrors(caller, steps));
         if (!errors.isEmpty()) {
             throw new McpToolException("review_tour rejected, nothing stored:\n- " + String.join("\n- ", errors));
         }
-        context.putTour(TourRecord.fresh(tour, diff));
-        int checks = steps.stream().mapToInt(step -> step.checks().size()).sum();
+        context.putTour(record);
+        List<TourStep> stored = record.tour().steps();
+        int checks = stored.stream().mapToInt(step -> step.checks().size()).sum();
         return JsonObject.empty()
                 .put("scopeId", new JsonString(scope.id()))
-                .put("steps", JsonNumber.of(steps.size()))
+                .put("steps", JsonNumber.of(stored.size()))
                 .put("checks", JsonNumber.of(checks));
     }
 

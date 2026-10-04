@@ -150,4 +150,14 @@ class StepPanelTest extends ApplicationTest {
         WaitForAsyncUtils.waitForFxEvents();
         assertTrue(lookup("Send answer").queryAs(Button.class).isDisabled());
     }
+
+    @Test
+    void aStaleStepSaysItsCodeChangedAndIsBeingRewritten() {
+        StepView stale = new StepView(STEP, 1, 3, new StepProgress("s1", List.of(), Map.of(),
+                StepProgress.Decision.PASSED, Optional.empty(), true));
+        interact(() -> panel.show(stale));
+        assertTrue(lookup("This step's code changed; the agent is re-writing it.").tryQuery().isPresent());
+        interact(() -> panel.show(view(CheckProgress.fresh("c1"))));
+        assertTrue(lookup("This step's code changed; the agent is re-writing it.").tryQuery().isEmpty());
+    }
 }

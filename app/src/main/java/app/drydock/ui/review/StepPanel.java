@@ -45,6 +45,8 @@ final class StepPanel extends VBox {
     static final double EXPANDED_WIDTH = ReviewFindingsMargin.EXPANDED_WIDTH;
     static final double NARROW_WIDTH = ReviewFindingsMargin.NARROW_WIDTH;
     static final double COLLAPSED_WIDTH = ReviewFindingsMargin.COLLAPSED_WIDTH;
+    /** Shown on a step whose code moved under it, until the agent re-issues it. */
+    static final String STALE_NOTICE = "This step's code changed; the agent is re-writing it.";
 
     interface Host {
         void answerChoice(String checkId, int choiceIndex);
@@ -151,6 +153,12 @@ final class StepPanel extends VBox {
         narrative.setWrapText(true);
         narrative.getStyleClass().add("step-panel-narrative");
         content.getChildren().addAll(header, narrative, anchorChips(view));
+        if (view.progress().stale()) {
+            Label stale = new Label(STALE_NOTICE);
+            stale.setWrapText(true);
+            stale.getStyleClass().add("step-panel-stale");
+            content.getChildren().add(stale);
+        }
         content.getChildren().add(checkSection(view));
     }
 

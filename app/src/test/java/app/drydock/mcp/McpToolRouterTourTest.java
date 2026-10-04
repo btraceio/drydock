@@ -4,11 +4,15 @@ import app.drydock.git.UnifiedDiff;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.Confidence;
 import app.drydock.review.ReviewAnnotation;
+import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Severity;
 import app.drydock.review.Triage;
 import app.drydock.review.tour.CheckProgress;
+import app.drydock.review.tour.HunkOverride;
 import app.drydock.review.tour.StepGrading;
+import app.drydock.review.tour.StepProgress;
 import app.drydock.review.tour.TourRecord;
+import app.drydock.review.tour.TourStep;
 import app.drydock.state.json.JsonParser;
 import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonValue.JsonObject;
@@ -21,6 +25,7 @@ import java.util.Optional;
 import static app.drydock.mcp.JsonPeek.field;
 import static app.drydock.mcp.JsonPeek.num;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -232,5 +237,70 @@ class McpToolRouterTourTest extends McpRouterFixture {
         JsonObject args = JsonObject.empty().put("scopeId", new JsonValue.JsonString(scopeId()));
         args.put("findings", new JsonValue.JsonArray(List.of(finding)));
         return args;
+    }
+
+    private JsonObject onlyStepsArgs(String... steps) {
+        return tourArgs(steps).put("onlySteps", new JsonValue.JsonBoolean(true));
+    }
+
+    /** Posts the covering tour and passes s1. */
+    private TourRecord postedWithS1Passed() throws Exception {
+        router.call(callerId(), "review_tour", coveringArgs());
+        TourRecord record = context.tourOf(scopeId()).orElseThrow();
+        context.putTour(record.withProgress(record.progress("s1")
+                .withDecision(StepProgress.Decision.PASSED, Optional.empty())));
+        return context.tourOf(scopeId()).orElseThrow();
+    }
+
+    @Test
+    void onlyStepsReplacesTheNamedStepAndKeepsTheOthersProgress() throws Exception {
+        postedWithS1Passed();
+
+        router.call(callerId(), "review_tour", onlyStepsArgs(step("s2", "src/WidgetUser.java", "n1", "n6", "c9")));
+
+        TourRecord stored = context.tourOf(scopeId()).orElseThrow();
+        assertEquals(List.of("s1", "s2"), stored.tour().steps().stream().map(TourStep::id).toList());
+        assertTrue(stored.tour().step("s2").orElseThrow().check("c9").isPresent());
+        assertEquals(StepProgress.Decision.PASSED, stored.progress("s1").decision());
+        assertEquals(StepProgress.Decision.NONE, stored.progress("s2").decision());
+    }
+
+    @Test
+    void anOnlyStepsMergeThatLeavesAHunkUncoveredIsRejectedAndStoresNothing() throws Exception {
+        TourRecord before = postedWithS1Passed();
+
+        McpToolException error = assertThrows(McpToolException.class, () -> router.call(callerId(), "review_tour",
+                onlyStepsArgs(step("s2", "src/WidgetUser.java", "n1", "n3", "c9"))));
+
+        assertTrue(error.getMessage().contains("hunk h_src/WidgetUser.java_0"), error.getMessage());
+        assertTrue(error.getMessage().contains("nothing stored"), error.getMessage());
+        assertEquals(before, context.tourOf(scopeId()).orElseThrow());
+    }
+
+    @Test
+    void onlyStepsWithNoStoredTourIsAnError() {
+        McpToolException error = assertThrows(McpToolException.class, () -> router.call(callerId(), "review_tour",
+                onlyStepsArgs(step("s2", "src/WidgetUser.java", "n1", "n6", "c9"))));
+
+        assertTrue(error.getMessage().contains("no tour"), error.getMessage());
+        assertTrue(context.tourOf(scopeId()).isEmpty());
+    }
+
+    @Test
+    void aFullRepostKeepsTheHunkOverridesAndIsMarkedSeeded() throws Exception {
+        router.call(callerId(), "review_tour", coveringArgs());
+        TourRecord first = context.tourOf(scopeId()).orElseThrow();
+        assertFalse(first.seeded(), "a first tour still has the hunk diff's verdicts to seed");
+        String digest = first.progress("s1").hunkDigests().getFirst();
+        context.putTour(first.withHunkOverride(digest,
+                Optional.of(new HunkOverride(ReviewVerdict.Decision.CHANGES, "set in the hunk diff"))));
+
+        router.call(callerId(), "review_tour", coveringArgs());
+
+        TourRecord second = context.tourOf(scopeId()).orElseThrow();
+        assertEquals(Optional.of(new HunkOverride(ReviewVerdict.Decision.CHANGES, "set in the hunk diff")),
+                Optional.ofNullable(second.hunkOverrides().get(digest)));
+        assertTrue(second.seeded(), "the previous tour's derived verdicts are not the hunk diff's");
+        assertEquals(StepProgress.Decision.NONE, second.progress("s1").decision());
     }
 }

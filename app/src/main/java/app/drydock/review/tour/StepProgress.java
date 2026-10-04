@@ -56,10 +56,6 @@ public record StepProgress(String stepId, List<String> hunkDigests, Map<String, 
         return new StepProgress(stepId, hunkDigests, checks, decision, overrideReason, newStale);
     }
 
-    public StepProgress withHunkDigests(List<String> digests) {
-        return new StepProgress(stepId, digests, checks, decision, overrideReason, stale);
-    }
-
     /** Passed or overridden, and not stale. */
     public boolean settledForApproval() {
         return !stale && (decision == Decision.PASSED || decision == Decision.OVERRIDDEN);

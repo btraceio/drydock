@@ -1181,6 +1181,16 @@ final class ReviewDiffColumn extends BorderPane {
         publishDisplayed(displayedScopeId);
     }
 
+    /**
+     * Whether the diff last published for {@code scopeId} left untracked
+     * files out -- so it is not the review diff an agent reads, and a tour
+     * must not be migrated onto it. False when there were none to hide.
+     */
+    boolean hidesUntracked(String scopeId) {
+        return scopeId.equals(displayedScopeId) && !includeUntracked(scopeId)
+                && fullDiff.files().stream().anyMatch(UnifiedDiff.FileDiff::untracked);
+    }
+
     /** A scope with no recorded preference includes untracked files: see the field javadoc on why. */
     private boolean includeUntracked(String scopeId) {
         return includeUntrackedByScope.getOrDefault(scopeId, true);

@@ -211,7 +211,8 @@ public final class TourCodec {
                 .put("hunkOverrides", overrides)
                 .put("hunkRows", rows)
                 .put("reviewAnyway", new JsonBoolean(record.reviewAnyway()))
-                .put("shelved", new JsonBoolean(record.shelved()));
+                .put("shelved", new JsonBoolean(record.shelved()))
+                .put("seeded", new JsonBoolean(record.seeded()));
     }
 
     // ---- JSON → record (lenient) ----
@@ -257,7 +258,8 @@ public final class TourCodec {
         }
         boolean reviewAnyway = root.get("reviewAnyway") instanceof JsonBoolean flag && flag.value();
         boolean shelved = root.get("shelved") instanceof JsonBoolean flag && flag.value();
-        return Optional.of(new TourRecord(tour, progress, overrides, rows, reviewAnyway, shelved));
+        boolean seeded = root.get("seeded") instanceof JsonBoolean flag && flag.value();
+        return Optional.of(new TourRecord(tour, progress, overrides, rows, reviewAnyway, shelved, seeded));
     }
 
     private static Optional<StepProgress> decodeProgress(String stepId, JsonObject obj) {

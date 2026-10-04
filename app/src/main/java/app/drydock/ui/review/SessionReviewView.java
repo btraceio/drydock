@@ -35,6 +35,8 @@ import app.drydock.review.tour.StepProgress;
 import app.drydock.review.tour.StepVerdicts;
 import app.drydock.review.tour.TourAnchor;
 import app.drydock.review.tour.TourFindings;
+import app.drydock.review.tour.TourFingerprint;
+import app.drydock.review.tour.TourMigration;
 import app.drydock.review.tour.TourRecord;
 import app.drydock.review.tour.TourCheck;
 import app.drydock.review.tour.TourStep;
@@ -289,6 +291,16 @@ public final class SessionReviewView extends BorderPane {
          */
         boolean dispatchRiskCheck(ReviewScope scope, String checkId);
 
+        /**
+         * Asks the scope's agent to bring its tour onto a diff that moved:
+         * re-issue {@code staleStepIds} and add steps for {@code
+         * uncoveredHunks} uncovered hunks ({@code
+         * ReviewInstructions.forTourRefresh}). False when the hand-off did
+         * not happen (no bound session, or its tab is not open or its agent
+         * has exited), so the caller can release its claim.
+         */
+        boolean dispatchTourRefresh(ReviewScope scope, List<String> staleStepIds, int uncoveredHunks);
+
         /** What the scope's agent is doing; UNKNOWN when it reports nothing (Codex, Pi). */
         SessionActivity agentActivity(ReviewScope scope);
 
@@ -499,6 +511,9 @@ public final class SessionReviewView extends BorderPane {
      * times per move.
      */
     private final RecheckDispatch recheckDispatch = new RecheckDispatch();
+    private final TourRefreshDispatch tourRefreshDispatch = new TourRefreshDispatch();
+    /** The review diff each scope's tour was last checked against; see {@link #migrateTour}. */
+    private final Map<String, UnifiedDiff> tourCheckedDiffByScope = new HashMap<>();
     private final ReviewFindingsMargin margin;
     private final ReviewVerdictBar verdictBar;
 
@@ -907,9 +922,6 @@ public final class SessionReviewView extends BorderPane {
 
     private Optional<TourFailure> tourFailure = Optional.empty();
 
-    /** The tour instance each scope's pre-tour verdicts were last considered for; see {@link #seedPreTourVerdicts}. */
-    private final Map<String, ReviewTour> seededTours = new HashMap<>();
-
     /** How long "Building tour…" waits before offering Retry / Open diff review. */
     private final PauseTransition tourWait = new PauseTransition(Duration.minutes(15));
 
@@ -1087,6 +1099,7 @@ public final class SessionReviewView extends BorderPane {
                 // final INTENTS grouping must not flash it while this build
                 // runs purely for links.
                 requestGraph(scopeId, loaded.diff());
+                migrateTour(scopeId, loaded.diff());
             } else {
                 graphByScope.remove(scopeId);
             }
@@ -4133,51 +4146,101 @@ public final class SessionReviewView extends BorderPane {
     /**
      * Verdicts set in the hunk diff before the scope had a tour would be
      * cleared by the first derivation, which covers every hunk. So the first
-     * time this view syncs a tour, each stored verdict is carried over as a
-     * hunk override -- the same thing a hunk-diff verdict set while the tour
+     * time a tour is synced, each stored verdict is carried over as a hunk
+     * override -- the same thing a hunk-diff verdict set while the tour
      * exists becomes.
      *
-     * <p>"First time" is per tour INSTANCE ({@link #seededTours}, compared
-     * by identity): the store hands back the same {@link ReviewTour} object
-     * across every progress change, and a new one only when a tour is posted
-     * or loaded from disk. On top of that, a record that already has hunk
-     * overrides or a decided step is never seeded. That combination keeps
-     * out the case a state check alone would get wrong: a step passed, its
-     * hunks derived APPROVED, then undone with {@code u} -- the record is
-     * back to "no decisions, no overrides" while the derived verdicts are
-     * still stored, and seeding them would turn the tour's own approvals
-     * into overrides.</p>
+     * <p>"First time" is the record's persisted {@link TourRecord#seeded}
+     * flag, set in the same store write as the seeds, so it holds across a
+     * restart and a fresh view. A record seeded already -- including a
+     * re-posted tour, which {@code review_tour} marks seeded because the
+     * verdicts stored then are the previous tour's derivations -- is never
+     * seeded again: a step passed, its hunks derived APPROVED, then undone
+     * with {@code u} would otherwise look exactly like a fresh tour over
+     * human verdicts. A record from before the flag existed that already
+     * has overrides or a decided step is marked seeded without seeds, for
+     * the same reason.</p>
      */
     private TourRecord seedPreTourVerdicts(ReviewScope scope, TourRecord record, AnchorIndex index) {
-        if (seededTours.get(scope.id()) == record.tour()) {
+        if (record.seeded()) {
             return record;
         }
-        seededTours.put(scope.id(), record.tour());
         boolean untouched = record.hunkOverrides().isEmpty() && record.progress().values().stream()
                 .allMatch(progress -> progress.decision() == StepProgress.Decision.NONE);
-        if (!untouched) {
-            return record;
-        }
         Map<String, HunkOverride> seeds = new LinkedHashMap<>();
-        for (AnchorIndex.HunkRef hunk : index.hunks()) {
-            // A human's decisions only; an automatic approval is not one.
-            host.verdict(scope, hunk.digest())
-                    .filter(verdict -> verdict.decision() == ReviewVerdict.Decision.APPROVED
-                            || verdict.decision() == ReviewVerdict.Decision.CHANGES)
-                    .ifPresent(verdict -> seeds.put(hunk.digest(),
-                            new HunkOverride(verdict.decision(), "set in the hunk diff before the tour")));
-        }
-        if (seeds.isEmpty()) {
-            return record;
+        if (untouched) {
+            for (AnchorIndex.HunkRef hunk : index.hunks()) {
+                // A human's decisions only; an automatic approval is not one.
+                host.verdict(scope, hunk.digest())
+                        .filter(verdict -> verdict.decision() == ReviewVerdict.Decision.APPROVED
+                                || verdict.decision() == ReviewVerdict.Decision.CHANGES)
+                        .ifPresent(verdict -> seeds.put(hunk.digest(),
+                                new HunkOverride(verdict.decision(), "set in the hunk diff before the tour")));
+            }
         }
         host.updateTour(scope, current -> {
-            TourRecord next = current;
+            if (current.seeded()) {
+                return current;
+            }
+            TourRecord next = current.withSeeded(true);
             for (Map.Entry<String, HunkOverride> seed : seeds.entrySet()) {
                 next = next.withHunkOverride(seed.getKey(), Optional.of(seed.getValue()));
             }
             return next;
         });
         return host.tour(scope).orElse(record);
+    }
+
+    /**
+     * Carries {@code scopeId}'s stored tour onto a review diff that moved
+     * under it ({@link TourMigration}), through the tour store's one writer,
+     * and asks the agent -- once per diff -- to re-issue the stale steps and
+     * cover the new hunks.
+     *
+     * <p>Only a NEW diff instance for the scope is considered: a scope flip
+     * or a re-selection republishes the diff it already had, and a tour the
+     * agent posted since then was validated against a fresher diff than
+     * that one -- migrating it back would undo it. A diff with untracked
+     * files filtered out is not the review diff the agent sees, so it is
+     * skipped too; turning them back on publishes the real one.</p>
+     */
+    private void migrateTour(String scopeId, UnifiedDiff diff) {
+        if (tourCheckedDiffByScope.get(scopeId) == diff) {
+            return;
+        }
+        tourCheckedDiffByScope.put(scopeId, diff);
+        Optional<ReviewScope> scope = scopeById(scopeId);
+        if (scope.isEmpty() || diffColumn.hidesUntracked(scopeId)) {
+            return;
+        }
+        String fingerprint = TourFingerprint.of(diff);
+        boolean moved = host.tour(scope.get())
+                .map(record -> !record.tour().diffFingerprint().equals(fingerprint))
+                .orElse(false);
+        if (!moved) {
+            return;
+        }
+        List<TourMigration.Result> migrated = new ArrayList<>(1);
+        host.updateTour(scope.get(), record -> {
+            migrated.clear();
+            if (record.tour().diffFingerprint().equals(fingerprint)) {
+                return record;
+            }
+            TourMigration.Result result = TourMigration.migrate(record, diff);
+            migrated.add(result);
+            return result.record();
+        });
+        if (migrated.isEmpty()) {
+            return;
+        }
+        TourMigration.Result result = migrated.getFirst();
+        if (result.staleStepIds().isEmpty() && result.uncoveredHunkIds().isEmpty()) {
+            return;
+        }
+        if (tourRefreshDispatch.claim(scopeId, fingerprint)
+                && !host.dispatchTourRefresh(scope.get(), result.staleStepIds(), result.uncoveredHunkIds().size())) {
+            tourRefreshDispatch.release(scopeId, fingerprint);
+        }
     }
 
     /**

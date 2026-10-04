@@ -1,18 +1,22 @@
 package app.drydock.ui.review;
 
+import app.drydock.git.UnifiedDiff;
 import app.drydock.review.ReviewVerdict;
-import app.drydock.review.tour.TourRecord;
 import app.drydock.review.tour.StepProgress;
+import app.drydock.review.tour.TourFingerprint;
+import app.drydock.review.tour.TourRecord;
 import javafx.scene.Node;
 import javafx.scene.input.KeyCode;
 import org.junit.jupiter.api.Test;
 import org.testfx.util.WaitForAsyncUtils;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -128,6 +132,88 @@ class ReviewTourModeTest extends ReviewTourFixture {
         assertEquals(Optional.of(ReviewVerdict.Decision.APPROVED), verdictOfHunk(FILE_A, 0));
         assertTrue(ReviewDiagFxThread.call(() -> host.tours.forScope(scope.id()).orElseThrow()
                 .hunkOverrides().containsKey(digest)), "seeded as a hunk override");
+        assertTrue(ReviewDiagFxThread.call(() -> host.tours.forScope(scope.id()).orElseThrow().seeded()),
+                "seeding is recorded on the tour, so it happens once");
+    }
+
+    /**
+     * A record that was already seeded -- as one loaded from disk after a
+     * restart is: a new tour instance, no decisions, no overrides -- keeps
+     * the stored verdicts as derived ones rather than turning them into
+     * permanent overrides. Nothing in a fresh view distinguishes this from
+     * a fresh record instance, which is what this test hands in.
+     */
+    @Test
+    void aSeededRecordIsNotSeededAgain() {
+        String digest = digestOfHunk(FILE_A, 0);
+        interact(() -> {
+            host.tours.remove(scope.id());
+            view.refreshReviewState();
+            host.store.putVerdict(new ReviewVerdict(scope.id(), digest, ReviewVerdict.Decision.APPROVED,
+                    Optional.empty(), Instant.now(), host.baseCommit, host.headCommit));
+            host.tours.put(TourRecord.fresh(tour(scope.id(), host.diff), host.diff).withSeeded(true));
+            view.refreshReviewState();
+        });
+        WaitForAsyncUtils.waitForFxEvents();
+        assertEquals(SessionReviewView.ReviewMode.TOUR, ReviewDiagFxThread.call(view::diagMode));
+        assertTrue(ReviewDiagFxThread.call(() -> host.tours.forScope(scope.id()).orElseThrow()
+                .hunkOverrides().isEmpty()), "no override was made from a derived verdict");
+    }
+
+    /** FILE_B's one hunk now adds a different line; FILE_A is as the tour was written against. */
+    private static UnifiedDiff movedDiff() {
+        return new UnifiedDiff(List.of(
+                file(FILE_A, "void foo();", "void bar();"),
+                file(FILE_B, "void qux();")));
+    }
+
+    private void showDiff(UnifiedDiff diff) {
+        interact(() -> view.diagShowDiff(scope, diff));
+        WaitForAsyncUtils.waitForFxEvents();
+    }
+
+    @Test
+    void aMovedDiffKeepsTheUntouchedStepAndAsksTheAgentOnceForTheChangedOne() {
+        host.tourRefreshDispatches.clear();
+        press(KeyCode.DIGIT2).release(KeyCode.DIGIT2);
+        press(KeyCode.A).release(KeyCode.A);
+        WaitForAsyncUtils.waitForFxEvents();
+        assertEquals(StepProgress.Decision.PASSED, progress("s1").decision());
+
+        showDiff(movedDiff());
+
+        assertEquals(StepProgress.Decision.PASSED, progress("s1").decision());
+        assertFalse(progress("s1").stale());
+        assertTrue(progress("s2").stale());
+        assertEquals(TourFingerprint.of(movedDiff()), ReviewDiagFxThread.call(() ->
+                host.tours.forScope(scope.id()).orElseThrow().tour().diffFingerprint()));
+        assertEquals(List.of("s2/1"), host.tourRefreshDispatches);
+        assertEquals("s2", ReviewDiagFxThread.call(view::diagCurrentStepId));
+        assertTrue(lookup("This step's code changed; the agent is re-writing it.").tryQuery().isPresent());
+
+        showDiff(movedDiff());
+        assertEquals(List.of("s2/1"), host.tourRefreshDispatches, "the same diff again asks nothing");
+
+        showDiff(host.diff);
+        showDiff(movedDiff());
+        assertEquals(List.of("s2/1", "s2/1"), host.tourRefreshDispatches,
+                "back to the original diff asks once for it; the moved diff was already asked about");
+    }
+
+    @Test
+    void aRefreshThatCouldNotBeHandedOverIsAskedAgainNextTime() {
+        host.tourRefreshDispatches.clear();
+        host.tourRefreshHandOffSucceeds = false;
+        try {
+            showDiff(movedDiff());
+            assertEquals(List.of("s2/1"), host.tourRefreshDispatches);
+        } finally {
+            host.tourRefreshHandOffSucceeds = true;
+        }
+        showDiff(host.diff);
+        showDiff(movedDiff());
+        assertEquals(List.of("s2/1", "s2/1", "s2/1"), host.tourRefreshDispatches,
+                "the failed hand-off released its claim");
     }
 
     private void assertFailureShown(String message) {

@@ -239,6 +239,16 @@ final class FakeReviewHost implements SessionReviewView.Host {
         return riskCheckHandOffSucceeds;
     }
 
+    /** Every tour refresh asked for, as "stale steps / uncovered hunk count", in order. */
+    final List<String> tourRefreshDispatches = new ArrayList<>();
+    boolean tourRefreshHandOffSucceeds = true;
+
+    @Override
+    public boolean dispatchTourRefresh(ReviewScope scope, List<String> staleStepIds, int uncoveredHunks) {
+        tourRefreshDispatches.add(String.join(",", staleStepIds) + "/" + uncoveredHunks);
+        return tourRefreshHandOffSucceeds;
+    }
+
     @Override
     public SessionActivity agentActivity(ReviewScope scope) {
         return agentActivity;

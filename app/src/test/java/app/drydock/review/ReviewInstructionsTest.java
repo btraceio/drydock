@@ -2,6 +2,8 @@ package app.drydock.review;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -54,5 +56,27 @@ class ReviewInstructionsTest {
         assertTrue(line.contains("review_check"));
         assertTrue(line.contains("review_state"));
         assertFalse(line.contains("\n"));
+    }
+
+    @Test
+    void aTourRefreshNamesTheStaleStepsTheUncoveredCountAndOnlyStepsInOneLine() {
+        String line = ReviewInstructions.forTourRefresh("rs_abc123", List.of("s2", "s5"), 3);
+
+        assertTrue(line.contains("rs_abc123"));
+        assertTrue(line.contains("s2, s5"));
+        assertTrue(line.contains("3 uncovered hunks"));
+        assertTrue(line.contains("review_scope"));
+        assertTrue(line.contains("review_state"));
+        assertTrue(line.contains("review_tour"));
+        assertTrue(line.contains("onlySteps true"));
+        assertFalse(line.contains("\n"));
+    }
+
+    @Test
+    void aTourRefreshWithOnlyUncoveredHunksAsksForNoReplacement() {
+        String line = ReviewInstructions.forTourRefresh("rs_abc123", List.of(), 1);
+
+        assertTrue(line.contains("1 uncovered hunk"));
+        assertFalse(line.contains("replace"));
     }
 }
