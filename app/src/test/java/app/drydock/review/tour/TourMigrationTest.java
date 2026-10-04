@@ -121,7 +121,7 @@ class TourMigrationTest {
     }
 
     @Test
-    void aStepGoingStaleRemapsTheEndpointsThatStillMapAndKeepsTheRest() {
+    void aStepGoingStaleRemapsTheAnchorsThatStillMapAndKeepsTheRest() {
         ReviewTour tour = new ReviewTour(TourFixtures.SCOPE, TourFingerprint.of(twoFileDiff()), List.of(
                 step("s1", List.of(new TourAnchor("src/A.java", "n1", "n4")), predict("c1")),
                 step("s2", List.of(new TourAnchor("src/A.java", "n21", "n22"),
@@ -134,7 +134,27 @@ class TourMigrationTest {
         assertEquals(List.of("s2"), result.staleStepIds());
         assertEquals(List.of(new TourAnchor("src/A.java", "n26", "n27"), new TourAnchor("src/B.java", "o5", "o6")),
                 result.record().tour().step("s2").orElseThrow().anchors(),
-                "B's hunk changed, so its endpoints have nowhere to map and stay as they were");
+                "B's hunk changed, so that anchor has nowhere to map and stays as it was");
+    }
+
+    @Test
+    void aStaleAnchorWithOnlyOneEndpointMappingIsKeptWhole() {
+        // s1 spans n1 (hunk 0, which changed) to n22 (hunk 1, which only
+        // shifted). Remapping just the end would mix old and new coordinates
+        // and could widen what an override of the stale step takes in.
+        ReviewTour tour = new ReviewTour(TourFixtures.SCOPE, TourFingerprint.of(twoFileDiff()), List.of(
+                step("s1", List.of(new TourAnchor("src/A.java", "n1", "n22")), predict("c1")),
+                step("s2", List.of(new TourAnchor("src/B.java", "o5", "o6")), risk("c2"))));
+        UnifiedDiff.FileDiff a = file("src/A.java",
+                hunk(ctx(1, 1, "class A {"), ctx(2, 2, "  int x;"), add(3, "  int CHANGED;"), ctx(3, 4, "}")),
+                hunk(ctx(19, 25, "void f() {"), del(20, "  old();"), add(26, "  next();"), ctx(21, 27, "}")));
+        UnifiedDiff diff = new UnifiedDiff(List.of(a, twoFileDiff().files().get(1)));
+
+        TourMigration.Result result = TourMigration.migrate(passed(tour), diff);
+
+        assertEquals(List.of("s1"), result.staleStepIds());
+        assertEquals(List.of(new TourAnchor("src/A.java", "n1", "n22")),
+                result.record().tour().step("s1").orElseThrow().anchors());
     }
 
     @Test
