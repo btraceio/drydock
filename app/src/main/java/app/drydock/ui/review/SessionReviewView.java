@@ -2790,9 +2790,10 @@ public final class SessionReviewView extends BorderPane {
             }
             selectedScope().ifPresent(scope -> {
                 List<String> digests = digestsForAction(intent, unit, false);
+                Map<String, Optional<ReviewVerdict.Decision>> before = verdictsOf(scope, digests);
                 host.setVerdict(scope, intent, digests, Optional.of(ReviewVerdict.Decision.APPROVED),
                         blockingFindingOpen(scope, intent));
-                recordHunkOverrides(scope, digests, ReviewVerdict.Decision.APPROVED);
+                recordHunkOverrides(scope, digests, ReviewVerdict.Decision.APPROVED, before);
             });
         }
 
@@ -2810,9 +2811,10 @@ public final class SessionReviewView extends BorderPane {
             }
             selectedScope().ifPresent(scope -> {
                 List<String> digests = digestsForAction(intent, unit, false);
+                Map<String, Optional<ReviewVerdict.Decision>> before = verdictsOf(scope, digests);
                 host.setVerdict(scope, intent, digests, Optional.of(ReviewVerdict.Decision.CHANGES),
                         blockingFindingOpen(scope, intent));
-                recordHunkOverrides(scope, digests, ReviewVerdict.Decision.CHANGES);
+                recordHunkOverrides(scope, digests, ReviewVerdict.Decision.CHANGES, before);
             });
         }
 
@@ -3273,13 +3275,21 @@ public final class SessionReviewView extends BorderPane {
      * hunk override (spec §5), so the derivation the tour runs keeps it
      * rather than clearing it the next time tour mode shows. Only once the
      * host actually recorded {@code decision} -- an approval it refused over
-     * a blocking finding is no override.
+     * a blocking finding is no override -- and only for the hunks this action
+     * changed: a hunk the tour's steps had already derived to {@code
+     * decision} was decided by those steps, and recording it as a hunk-diff
+     * override would count it on the submit sheet and pin it there after
+     * the step is undone.
+     *
+     * @param before each digest's stored decision just before this action
      */
-    private void recordHunkOverrides(ReviewScope scope, List<String> digests, ReviewVerdict.Decision decision) {
+    private void recordHunkOverrides(ReviewScope scope, List<String> digests, ReviewVerdict.Decision decision,
+                                     Map<String, Optional<ReviewVerdict.Decision>> before) {
         if (host.tour(scope).isEmpty()) {
             return;
         }
         List<String> recorded = digests.stream()
+                .filter(digest -> !before.getOrDefault(digest, Optional.empty()).equals(Optional.of(decision)))
                 .filter(digest -> host.verdict(scope, digest).filter(v -> v.decision() == decision).isPresent())
                 .toList();
         if (recorded.isEmpty()) {
@@ -3293,6 +3303,15 @@ public final class SessionReviewView extends BorderPane {
             }
             return next;
         });
+    }
+
+    /** Each digest's stored decision, for {@link #recordHunkOverrides} to tell what an action changed. */
+    private Map<String, Optional<ReviewVerdict.Decision>> verdictsOf(ReviewScope scope, List<String> digests) {
+        Map<String, Optional<ReviewVerdict.Decision>> decisions = new HashMap<>();
+        for (String digest : digests) {
+            decisions.put(digest, host.verdict(scope, digest).map(ReviewVerdict::decision));
+        }
+        return decisions;
     }
 
     /** Undo in the hunk diff removes the overrides it had recorded. */
@@ -3344,6 +3363,7 @@ public final class SessionReviewView extends BorderPane {
         if (digests.isEmpty()) {
             return;
         }
+        Map<String, Optional<ReviewVerdict.Decision>> before = verdictsOf(scope.get(), digests);
         host.setVerdict(scope.get(), intent.get(), digests, Optional.of(decision),
                 blockingFindingOpen(scope.get(), intent.get()));
         boolean applied = digests.stream().allMatch(digest -> host.verdict(scope.get(), digest)
@@ -3351,7 +3371,7 @@ public final class SessionReviewView extends BorderPane {
         if (!applied) {
             return;
         }
-        recordHunkOverrides(scope.get(), digests, decision);
+        recordHunkOverrides(scope.get(), digests, decision, before);
         lastSettledWasPath = false;
         lastSettledIntentId = Optional.of(intent.get().id());
         lastSettledDigests = digests;
@@ -3385,6 +3405,7 @@ public final class SessionReviewView extends BorderPane {
         if (digests.isEmpty()) {
             return;
         }
+        Map<String, Optional<ReviewVerdict.Decision>> before = verdictsOf(scope.get(), digests);
         host.setVerdict(scope.get(), synthetic, digests, Optional.of(decision),
                 blockingFindingOpenForPathStep(scope.get(), step, wholeFile));
         boolean applied = digests.stream().allMatch(digest -> host.verdict(scope.get(), digest)
@@ -3392,7 +3413,7 @@ public final class SessionReviewView extends BorderPane {
         if (!applied) {
             return;
         }
-        recordHunkOverrides(scope.get(), digests, decision);
+        recordHunkOverrides(scope.get(), digests, decision, before);
         lastSettledWasPath = true;
         lastSettledPathHunkId = Optional.of(step.hunkId());
         lastSettledDigests = digests;
@@ -4412,7 +4433,11 @@ public final class SessionReviewView extends BorderPane {
         }
         TourRecord record = tour.get();
         if (digit > 0) {
-            stepPanel.answerByKey(digit);
+            // A peek card covers the panel: a digit must not answer a check
+            // the reader cannot see.
+            if (!peekLayer.isOpen()) {
+                stepPanel.answerByKey(digit);
+            }
             return true;
         }
         switch (event.getCode()) {
@@ -4451,13 +4476,22 @@ public final class SessionReviewView extends BorderPane {
             stepPanel.focusBanner();
             return;
         }
-        Optional<StepGate.Unmet> unmet = StepGate.unmet(step.get(), record.progress(step.get().id()),
-                stepFindings(step.get()), record);
+        List<ReviewAnnotation> findings = stepFindings(step.get());
+        Optional<StepGate.Unmet> unmet = StepGate.unmet(step.get(), record.progress(step.get().id()), findings,
+                record);
         if (unmet.isPresent()) {
             stepPanel.focusUnmet(unmet.get());
             return;
         }
-        decideCurrentStep(StepProgress.Decision.PASSED, Optional.empty());
+        // The gate again, on the record as it is when written: `record` is a
+        // snapshot, and a check reset by a re-issue or a verdict that landed
+        // since must not be passed over.
+        String stepId = step.get().id();
+        updateCurrentTour(current -> current.tour().step(stepId)
+                .filter(now -> StepGate.unmet(now, current.progress(stepId), findings, current).isEmpty())
+                .map(now -> current.withProgress(current.progress(stepId)
+                        .withDecision(StepProgress.Decision.PASSED, Optional.empty())))
+                .orElse(current));
         currentTour().flatMap(this::firstUnsettled).ifPresent(this::selectStep);
     }
 
