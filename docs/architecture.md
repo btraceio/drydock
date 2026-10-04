@@ -243,3 +243,30 @@ Full detail in `docs/runtime-image.md`. Summary:
   outputs (one per JavaFX platform classifier) or a picking launcher;
   left as explicit future work since Task 8's acceptance criteria only
   require the image to work on the machine that built it.
+
+## Guided review tour
+
+- Model: `app.drydock.review.tour` — `ReviewTour` / `TourStep` / `TourCheck` /
+  `TourAnchor` / `ImpactNote`, checked by `TourValidator`, serialized by
+  `TourCodec`, pinned to content by `AnchorIndex` and `TourFingerprint`.
+- Progress lives apart from the tour: `TourRecord` holds `StepProgress`,
+  `CheckProgress` and `HunkOverride`; `StepGrading` / `StepGate` decide when a
+  step may be approved. `TourMigration` and `TourMerge` carry a record across
+  a changed diff.
+- `TourStore` is the single writer of `review-tours.json`, a sibling of the
+  state file. It is separate from `annotations.json` so that regenerating or
+  discarding a tour cannot touch findings and verdicts, and each file keeps
+  one writer.
+- MCP: `review_tour` (whole tour, or `onlySteps`) and `review_check`;
+  `review_scope` includes impact notes, `review_state` a tour block, and
+  `review_finding` takes triage / `withheldBy` (`TourFindings`, `StepImpact`).
+- Hunk verdicts are derived from step progress (`StepVerdicts.derive`), not
+  stored twice. The review diff (`DiffService.REVIEW_CONTEXT_LINES`, 12) stays
+  the source of digests; the whole-file display diff
+  (`WHOLE_FILE_CONTEXT_LINES`) is for rendering only.
+- UI: tour mode in `SessionReviewView` (`v` toggles tour / hunk diff) built
+  from `TourOutline`, `StepPanel`, `StepView`, `TourMarks`, `RiskCheckQueue`.
+- `app.drydock.ui.nav` is shared by the Explorer and Review: `PeekLayer`,
+  `NavigationTrail` / `TrailBar`, `SearchRail`, `FileRailModel`,
+  `SymbolPeekService` (via `app.drydock.review.UsageProvider`,
+  `LexicalUsageProvider`) and `ExplorerTrailStore`.
