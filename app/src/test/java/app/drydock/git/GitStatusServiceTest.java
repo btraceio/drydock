@@ -17,6 +17,9 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -145,6 +148,43 @@ class GitStatusServiceTest {
 
         assertEquals(Optional.empty(), service.currentBranch(repo).get(),
                 "a detached HEAD is an answer (no branch), not a failure");
+    }
+
+    /**
+     * {@code symbolic-ref --short} disambiguates against tags: on a branch
+     * that shares its name with a tag it answers {@code heads/<name>}, which
+     * is not the branch name and never matches a pr-<n> alias or a PR's head.
+     */
+    @Test
+    void currentBranchIsTheBranchNameEvenWhenATagSharesIt(@TempDir Path repo) throws Exception {
+        initRepo(repo, "main");
+        writeFile(repo, "README.md", "hello\n");
+        runGit(repo, "add", "README.md");
+        commit(repo, "initial commit");
+        runGit(repo, "checkout", "-b", "pr-42");
+        runGit(repo, "tag", "pr-42");
+
+        assertEquals(Optional.of("pr-42"), service.currentBranch(repo).get());
+    }
+
+    /**
+     * Called on the FX thread by the Review board's resolve. After the
+     * service's executor is shut down (app shutdown racing a reveal), the
+     * submit is rejected; that must arrive as a failed future the caller's
+     * handler sees, not an exception thrown into the FX event handler that
+     * leaves the board on "Resolving…".
+     */
+    @Test
+    void currentBranchOnAShutDownExecutorIsAFailedFutureNotAThrow(@TempDir Path repo) {
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        executor.shutdown();
+        GitStatusService closed = new GitStatusService(new GitExecutableLocator(), executor);
+
+        CompletableFuture<Optional<String>> branch = closed.currentBranch(repo);
+
+        assertTrue(branch.isCompletedExceptionally());
+        CompletionException completion = assertThrows(CompletionException.class, branch::join);
+        assertInstanceOf(RejectedExecutionException.class, completion.getCause());
     }
 
     @Test

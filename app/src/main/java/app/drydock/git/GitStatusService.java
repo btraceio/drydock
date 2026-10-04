@@ -21,6 +21,7 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 
 /**
  * Determines the branch/dirty/ahead-behind {@link GitStatus} summary for a
@@ -790,16 +791,33 @@ public final class GitStatusService implements AutoCloseable {
      * "HEAD is not a branch" -- an ordinary state, so empty. Anything else
      * (not a repository, git missing, a timeout) completes exceptionally with
      * a {@link GitException}: a failure must not read as "detached".</p>
+     *
+     * <p>Never throws: the Review board calls this on the FX thread, and a
+     * submit the executor rejects (it is shut down -- app shutdown racing a
+     * reveal) arrives as a failed future the caller's handler sees, rather
+     * than an exception out of the event handler that strands the board on
+     * "Resolving…".</p>
      */
     public CompletableFuture<Optional<String>> currentBranch(Path workingDirectory) {
-        return CompletableFuture.supplyAsync(() -> currentBranchBlocking(workingDirectory), executor);
+        try {
+            return CompletableFuture.supplyAsync(() -> currentBranchBlocking(workingDirectory), executor);
+        } catch (RejectedExecutionException e) {
+            return CompletableFuture.failedFuture(e);
+        }
     }
 
+    /**
+     * The full ref is read and {@code refs/heads/} stripped here, rather than
+     * asking for {@code --short}: that disambiguates against tags, and on a
+     * branch that shares its name with a tag answers {@code heads/<name>} --
+     * not the branch name, and never a match for a {@code pr-<n>} alias or a
+     * PR's head.
+     */
     Optional<String> currentBranchBlocking(Path workingDirectory) {
         Path git = locator.locate()
                 .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
         List<String> command = List.of(git.toString(), "-C", workingDirectory.toString(),
-                "symbolic-ref", "-q", "--short", "HEAD");
+                "symbolic-ref", "-q", "HEAD");
         ProcessResult result = run(command);
         if (result.exitCode() == 1 && result.stderr().isBlank()) {
             return Optional.empty();
@@ -808,9 +826,15 @@ public final class GitStatusService implements AutoCloseable {
             throw new GitCommandFailedException(command, result.exitCode(),
                     ProcessRunner.excerpt(result.stderr()));
         }
-        String branch = result.stdout().strip();
-        return branch.isEmpty() ? Optional.empty() : Optional.of(branch);
+        String ref = result.stdout().strip();
+        if (!ref.startsWith(BRANCH_REF_PREFIX) || ref.length() == BRANCH_REF_PREFIX.length()) {
+            // HEAD points somewhere other than a local branch: no branch name to give.
+            return Optional.empty();
+        }
+        return Optional.of(ref.substring(BRANCH_REF_PREFIX.length()));
     }
+
+    private static final String BRANCH_REF_PREFIX = "refs/heads/";
 
     /** Async form of {@link #headCommitBlocking}, on this service's background executor. */
     public CompletableFuture<Optional<String>> headCommit(Path workingDirectory) {

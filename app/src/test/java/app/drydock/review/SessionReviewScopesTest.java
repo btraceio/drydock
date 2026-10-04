@@ -20,6 +20,13 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -431,6 +438,104 @@ class SessionReviewScopesTest {
             assertEquals(ReviewScope.Kind.WORKING_TREE, resolved.local().kind());
             assertEquals(ReviewBase.Origin.DEFAULT_UNMEASURED, resolved.local().baseOrigin().orElseThrow());
         }
+    }
+
+    /** The WARNING records {@link SessionReviewScopes} logs while {@code body} runs. */
+    private static List<LogRecord> warningsDuring(ThrowingRunnable body) throws Exception {
+        Logger logger = Logger.getLogger(SessionReviewScopes.class.getName());
+        List<LogRecord> records = new ArrayList<>();
+        Handler handler = new Handler() {
+            @Override
+            public void publish(LogRecord record) {
+                if (record.getLevel().intValue() >= Level.WARNING.intValue()) {
+                    synchronized (records) {
+                        records.add(record);
+                    }
+                }
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        logger.addHandler(handler);
+        try {
+            body.run();
+        } finally {
+            logger.removeHandler(handler);
+        }
+        synchronized (records) {
+            return List.copyOf(records);
+        }
+    }
+
+    private interface ThrowingRunnable {
+        void run() throws Exception;
+    }
+
+    /**
+     * A branch read that fails -- the session's checkout is not (or no
+     * longer) a repository -- is logged and resolves as no branch: the board
+     * still gets a local scope rather than nothing.
+     */
+    @Test
+    void aBranchReadThatFailsOnANonRepositoryIsLoggedAndStillYieldsALocalScope(
+            @TempDir Path dir, @TempDir Path notARepo) throws Exception {
+        Path repo = initCommittedRepo(dir);
+        List<SessionReviewScopes.Scopes> resolved = new ArrayList<>();
+
+        List<LogRecord> warnings = warningsDuring(() -> resolved.add(scopes.forSessionCheckout(repo, notARepo,
+                Optional.empty(), Optional.empty(),
+                branch -> CompletableFuture.completedFuture(Optional.empty())).get(30, TimeUnit.SECONDS)));
+
+        assertEquals(ReviewScope.Kind.WORKTREE, resolved.get(0).local().kind());
+        assertEquals("(no branch)", resolved.get(0).local().head());
+        assertTrue(warnings.stream().anyMatch(record -> record.getMessage().contains("Could not read the branch")
+                && record.getMessage().contains(notARepo.toString())), "the failure is logged: " + warnings);
+    }
+
+    /** As above, when there is no git executable at all. */
+    @Test
+    void aBranchReadWithNoGitIsLoggedAndStillYieldsALocalScope(@TempDir Path dir) throws Exception {
+        Path repo = initCommittedRepo(dir);
+        GitExecutableLocator missingLocator = new GitExecutableLocator(Path.of("/nonexistent/git-does-not-exist"));
+        try (GitStatusService brokenGitStatusService = new GitStatusService(missingLocator)) {
+            SessionReviewScopes brokenScopes = new SessionReviewScopes(brokenGitStatusService, registry);
+            List<SessionReviewScopes.Scopes> resolved = new ArrayList<>();
+
+            List<LogRecord> warnings = warningsDuring(() -> resolved.add(brokenScopes.forSessionCheckout(repo,
+                    repo, Optional.empty(), Optional.empty(),
+                    branch -> CompletableFuture.completedFuture(Optional.empty())).get(30, TimeUnit.SECONDS)));
+
+            assertEquals(ReviewScope.Kind.WORKING_TREE, resolved.get(0).local().kind());
+            assertEquals("(no branch)", resolved.get(0).local().head());
+            assertTrue(warnings.stream().anyMatch(record -> record.getMessage().contains("Could not read the branch")),
+                    "the failure is logged: " + warnings);
+        }
+    }
+
+    /**
+     * A resolve racing shutdown: the git service's executor is gone. The
+     * call runs on the FX thread, so it must not throw -- the future must
+     * complete, one way or the other, so the board's completion handler
+     * replaces "Resolving…".
+     */
+    @Test
+    void aResolveOnAShutDownGitServiceCompletesRatherThanThrows(@TempDir Path dir) throws Exception {
+        Path repo = initCommittedRepo(dir);
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        executor.shutdown();
+        GitStatusService closed = new GitStatusService(new GitExecutableLocator(), executor);
+        SessionReviewScopes closedScopes = new SessionReviewScopes(closed, registry);
+
+        CompletableFuture<SessionReviewScopes.Scopes> resolve = closedScopes.forSessionCheckout(repo, repo,
+                Optional.empty(), Optional.empty(), branch -> CompletableFuture.completedFuture(Optional.empty()));
+
+        assertTrue(resolve.isDone(), "the future completes instead of hanging the board");
     }
 
     @Test
