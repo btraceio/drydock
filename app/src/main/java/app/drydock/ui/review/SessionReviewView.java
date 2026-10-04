@@ -1736,7 +1736,14 @@ public final class SessionReviewView extends BorderPane {
         public void confirmStillGood(ReviewVerdictBar.Target target) {
             Optional<String> onBar = fileOnBar(target);
             selectedScope().filter(scope -> onBar.isPresent()).ifPresent(scope -> {
-                host.confirmStillGood(scope, digestsOfFile(onBar.get()));
+                List<String> digests = digestsOfFile(onBar.get());
+                // A re-dated hunk is approved against the new base, so this
+                // follows settle's rule: never approve what is not displayed.
+                if (!allRendered(digests)) {
+                    notice(CONFIRM_NOT_RENDERED);
+                    return;
+                }
+                host.confirmStillGood(scope, digests);
                 refreshReviewState();
             });
         }
@@ -1798,25 +1805,48 @@ public final class SessionReviewView extends BorderPane {
     static final String HUNK_NOT_RENDERED = "Not settled: a hunk it covers is past what the diff can show";
 
     /**
+     * Why "Confirm still good" did nothing: it re-dates every hunk of the
+     * file, and one of them has no rows on screen.
+     */
+    static final String CONFIRM_NOT_RENDERED = "Not confirmed: a hunk of this file is past what the diff can show";
+
+    /**
      * Why {@code a} or "Approve without passing" did nothing in the tour: some
      * of the step's changed rows are past the whole-file view's row cap.
      */
     static final String STEP_NOT_RENDERED = "Not approved: some of this step's lines are past what the diff can show";
 
-    /** Whether every one of {@code digests} has its hunk's card rendered in the diff column. */
+    /**
+     * Whether every changed row of every one of {@code digests}' hunks is
+     * rendered in the diff column. By line key, so it answers in the tour's
+     * whole-file view too (where the stale banner's confirm is reachable),
+     * and a hunk the row cap cuts off partway counts as not shown.
+     */
     private boolean allRendered(List<String> digests) {
         Optional<SectionStates.Board> board = board();
         if (board.isEmpty()) {
             return false;
         }
+        List<String> keys = new ArrayList<>();
         for (String digest : digests) {
             Optional<String> file = sections.fileOfDigest(board.get(), digest);
-            if (file.isEmpty() || !diffColumn.rendersHunk(file.get(),
-                    sections.digestsOfFile(board.get(), file.get()).indexOf(digest))) {
+            if (file.isEmpty()) {
                 return false;
             }
+            int index = sections.digestsOfFile(board.get(), file.get()).indexOf(digest);
+            Optional<UnifiedDiff.FileDiff> fileDiff = board.get().diff().files().stream()
+                    .filter(candidate -> candidate.path().equals(file.get()))
+                    .findFirst();
+            if (fileDiff.isEmpty() || index < 0 || index >= fileDiff.get().hunks().size()) {
+                return false;
+            }
+            for (UnifiedDiff.Line line : fileDiff.get().hunks().get(index).lines()) {
+                if (line.kind() != UnifiedDiff.Line.Kind.CONTEXT) {
+                    keys.add(file.get() + " " + line.lineKey());
+                }
+            }
         }
-        return true;
+        return diffColumn.rendersLines(keys);
     }
 
     /**

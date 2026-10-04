@@ -3,6 +3,7 @@ package app.drydock.ui.review;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.AnnotationStatus;
+import app.drydock.review.BaseMove;
 import app.drydock.review.Confidence;
 import app.drydock.review.HunkDigest;
 import app.drydock.review.ReviewAnnotation;
@@ -14,6 +15,7 @@ import app.drydock.review.Severity;
 import app.drydock.ui.TestStages;
 import javafx.scene.Node;
 import javafx.scene.Scene;
+import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.scene.input.KeyCode;
 import javafx.stage.Stage;
@@ -31,6 +33,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.TreeSet;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -172,6 +175,34 @@ class ReviewFileCursorTest extends ApplicationTest {
 
         shiftType(KeyCode.A);
         assertTrue(verdict(FILE_A, 1).isEmpty(), "nor through ⇧A");
+    }
+
+    /**
+     * "Confirm still good" re-dates every hunk of the file, so it is an
+     * approval of each: one past the truncation is refused like a settle,
+     * and nothing is re-dated.
+     */
+    @Test
+    void confirmingAStaleFileWithAHunkPastTheTruncationIsRefused() {
+        UnifiedDiff.FileDiff huge = new UnifiedDiff.FileDiff(FILE_A, "M", 4101, 0, false, false, List.of(
+                file(FILE_A, "int a = 1;").hunks().get(0),
+                bigFile(FILE_A, 4100).hunks().get(0)));
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(FILE_A)));
+        seed(new UnifiedDiff(List.of(huge)));
+        String oldBase = "0".repeat(40);
+        for (int hunk = 0; hunk < 2; hunk++) {
+            host.store.putVerdict(new ReviewVerdict(scope.id(), digestOf(FILE_A, hunk),
+                    ReviewVerdict.Decision.APPROVED, Optional.empty(), Instant.EPOCH, oldBase, host.headCommit));
+        }
+        interact(view::refreshReviewState);
+        WaitForAsyncUtils.waitForFxEvents();
+
+        interact(() -> ((Button) lookup(".review-verdict-confirm-stale").query()).fire());
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertEquals(Optional.of(SessionReviewView.CONFIRM_NOT_RENDERED), notice());
+        assertEquals(oldBase, verdict(FILE_A, 0).orElseThrow().baseCommit(), "nothing is re-dated");
+        assertEquals(oldBase, verdict(FILE_A, 1).orElseThrow().baseCommit());
     }
 
     @Test

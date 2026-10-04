@@ -1221,18 +1221,6 @@ final class ReviewDiffColumn extends BorderPane {
     }
 
     /**
-     * Whether {@code file}'s hunk {@code hunkIndex} has a card on screen --
-     * what a verdict on it requires: a hunk past the row cap, or in a file
-     * not rendered, is code the reader has not been shown.
-     */
-    boolean rendersHunk(String file, int hunkIndex) {
-        return rows.stream()
-                .filter(ReviewDiffRow.HunkHeader.class::isInstance)
-                .map(ReviewDiffRow.HunkHeader.class::cast)
-                .anyMatch(header -> header.file().equals(file) && header.hunkIndex() == hunkIndex);
-    }
-
-    /**
      * Whether every one of {@code lineKeys} -- each {@code "<file>
      * <lineKey>"} -- has a row on screen: what an approval requires, since a
      * row past the row cap, or in a file not rendered, is code the reader
