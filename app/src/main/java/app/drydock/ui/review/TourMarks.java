@@ -9,8 +9,10 @@ import app.drydock.review.tour.TourCheck;
 import app.drydock.review.tour.TourRecord;
 import app.drydock.review.tour.TourStep;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -39,6 +41,21 @@ final class TourMarks implements ReviewDiffColumn.StepMarkSource {
     }
 
     static TourMarks of(TourRecord record, UnifiedDiff renderedDiff, String currentStepId) {
+        return of(record, renderedDiff, currentStepId, 0);
+    }
+
+    /**
+     * As {@link #of(TourRecord, UnifiedDiff, String)}, with the claims of the
+     * current step's anchored ranges when it makes any. {@code activeAnchor}
+     * is the anchor the reader is on: its claim is {@link StepMark.Claim#active}
+     * and the others' are not.
+     *
+     * <p>A step makes claims when at least one of its anchors carries a note,
+     * and shows them only once its PREDICT is answered: the claims are the
+     * explanation, and showing them first would answer the check. A tour
+     * with no notes marks rows exactly as it always did.</p>
+     */
+    static TourMarks of(TourRecord record, UnifiedDiff renderedDiff, String currentStepId, int activeAnchor) {
         AnchorIndex index = AnchorIndex.of(renderedDiff);
         Map<String, StepMark> marks = new HashMap<>();
         Optional<TourStep> current = record.tour().step(currentStepId);
@@ -46,6 +63,24 @@ final class TourMarks implements ReviewDiffColumn.StepMarkSource {
         for (TourStep step : record.tour().steps()) {
             if (predictPending(step, record.progress(step.id()))) {
                 pending.add(step.id());
+            }
+        }
+        List<TourAnchor> claimAnchors = current.isPresent() && !pending.contains(current.get().id())
+                && current.get().anchors().stream().anyMatch(TourAnchor::hasNote)
+                ? current.get().anchors()
+                : List.of();
+        Map<Integer, String> firstRow = new HashMap<>();
+        Map<Integer, String> lastRow = new HashMap<>();
+        for (UnifiedDiff.FileDiff file : renderedDiff.files()) {
+            for (UnifiedDiff.Hunk hunk : file.hunks()) {
+                for (UnifiedDiff.Line line : hunk.lines()) {
+                    for (int i = 0; i < claimAnchors.size(); i++) {
+                        if (index.contains(claimAnchors.get(i), file.path(), line.lineKey())) {
+                            firstRow.putIfAbsent(i, line.lineKey());
+                            lastRow.put(i, line.lineKey());
+                        }
+                    }
+                }
             }
         }
         for (UnifiedDiff.FileDiff file : renderedDiff.files()) {
@@ -75,13 +110,25 @@ final class TourMarks implements ReviewDiffColumn.StepMarkSource {
                     if (owner != null) {
                         boolean hidden = hider != null;
                         int hiderNumber = hidden ? record.tour().number(hider) : 0;
+                        Optional<StepMark.Claim> claim = Optional.empty();
+                        List<StepMark.Callout> callouts = new ArrayList<>();
+                        if (strength == StepMark.Strength.CURRENT && !hidden) {
+                            claim = claimOf(claimAnchors, index, file.path(), key, activeAnchor, firstRow);
+                            for (int i = 0; i < claimAnchors.size(); i++) {
+                                TourAnchor anchor = claimAnchors.get(i);
+                                if (anchor.hasNote() && anchor.file().equals(file.path())
+                                        && key.equals(lastRow.get(i))) {
+                                    callouts.add(new StepMark.Callout(i, i + 1, i == activeAnchor, anchor.note()));
+                                }
+                            }
+                        }
                         // A band starts afresh where another step's hidden
                         // rows begin, so each says whose answer it waits for.
                         marks.put(file.path() + " " + key, new StepMark(strength, record.tour().number(owner),
                                 !owner.equals(previousOwner), hidden,
                                 hidden && (previousHider == null || !hider.equals(previousHider)
                                         || !owner.equals(previousOwner)),
-                                hiderNumber));
+                                hiderNumber, claim, callouts));
                     }
                     previousOwner = owner;
                     previousHider = hider;
@@ -89,6 +136,29 @@ final class TourMarks implements ReviewDiffColumn.StepMarkSource {
             }
         }
         return new TourMarks(marks);
+    }
+
+    /**
+     * The claim a row belongs to: the active anchor's when its range takes the
+     * row in, otherwise the first anchor that does. Anchors may overlap.
+     */
+    private static Optional<StepMark.Claim> claimOf(List<TourAnchor> anchors, AnchorIndex index, String file,
+                                                    String key, int active, Map<Integer, String> firstRow) {
+        int pick = -1;
+        for (int i = 0; i < anchors.size(); i++) {
+            if (index.contains(anchors.get(i), file, key)) {
+                if (i == active) {
+                    pick = i;
+                    break;
+                }
+                if (pick < 0) {
+                    pick = i;
+                }
+            }
+        }
+        return pick < 0
+                ? Optional.empty()
+                : Optional.of(new StepMark.Claim(pick, pick + 1, pick == active, key.equals(firstRow.get(pick))));
     }
 
     /**
