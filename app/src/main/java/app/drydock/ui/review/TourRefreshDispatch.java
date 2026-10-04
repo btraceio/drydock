@@ -28,6 +28,11 @@ final class TourRefreshDispatch {
         return dispatched.add(new Refresh(scopeId, fingerprint));
     }
 
+    /** Whether a refresh for {@code (scopeId, fingerprint)} was claimed and not released: it was sent. */
+    boolean claimed(String scopeId, String fingerprint) {
+        return dispatched.contains(new Refresh(scopeId, fingerprint));
+    }
+
     /** Forgets a claim whose hand-off did not happen, so the next publish of that diff asks again. */
     void release(String scopeId, String fingerprint) {
         dispatched.remove(new Refresh(scopeId, fingerprint));

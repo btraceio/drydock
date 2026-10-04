@@ -240,7 +240,6 @@ class ReviewTourImpactTest extends ReviewTourFixture {
         @Override public void answerChoice(String checkId, int choiceIndex) { }
         @Override public void submitRisk(String checkId, String answer) { }
         @Override public void override(String reason) { }
-        @Override public void askAgent(String checkId) { }
         @Override public void goToAnchor(int anchorIndex) { }
         @Override public void retryRisk(String checkId) { }
         @Override public void triage(ReviewAnnotation finding, Triage triage, Optional<String> reason) { }
@@ -248,6 +247,8 @@ class ReviewTourImpactTest extends ReviewTourFixture {
         @Override public void sendBack(List<ReviewAnnotation> confirmedBlockers) { }
         @Override public void reviewAnyway() { }
         @Override public void backToStep() { }
+        @Override public void requestRefresh() { }
+        @Override public void postMessage(ReviewAnnotation finding, String body) { }
 
         @Override
         public void openLocation(String file, int line) {

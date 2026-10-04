@@ -3875,8 +3875,12 @@ public final class SessionReviewView extends BorderPane {
         outline.setFooter(filesWithoutLineChanges(), filesWithoutChangesAcknowledged);
         TourStep step = record.tour().step(currentStepId).orElseThrow();
         StepProgress progress = record.progress(step.id());
+        List<ReviewAnnotation> onStep = stepFindings(step);
+        boolean refreshSent = progress.stale() && selectedScope()
+                .map(selected -> tourRefreshDispatch.claimed(selected.id(), record.tour().diffFingerprint()))
+                .orElse(false);
         StepView stepView = new StepView(step, record.tour().number(step.id()), record.tour().steps().size(),
-                progress);
+                progress, StepGate.unmet(step, progress, onStep, record), refreshSent);
         List<ReviewAnnotation> findings = selectedScope().map(this::visibleFindings).orElse(List.of());
         if (TourFindings.needsBanner(record, findings)) {
             List<ReviewAnnotation> blockers = TourFindings.blockers(findings);
@@ -3894,7 +3898,7 @@ public final class SessionReviewView extends BorderPane {
                 shownStepView = stepView;
                 shownBanner = null;
             }
-            List<ReviewAnnotation> proposals = stepFindings(step).stream()
+            List<ReviewAnnotation> proposals = onStep.stream()
                     .filter(finding -> finding.triage() == Triage.PROPOSED)
                     .toList();
             if (!proposals.equals(shownTriage)) {
@@ -4378,6 +4382,81 @@ public final class SessionReviewView extends BorderPane {
         updateCurrentTour(record -> record.tour().step(stepId).isEmpty()
                 ? record
                 : record.withProgress(record.progress(stepId).withDecision(decision, reason)));
+    }
+
+    /** Why a stale step cannot be approved without passing: its rows are gone from the diff. */
+    static final String STALE_STEP_GONE = "This step's lines are no longer in the diff. Ask the agent to "
+            + "refresh it, or settle those hunks in the hunk diff (v).";
+
+    /**
+     * "Approve without passing" on the current step, with the reviewer's
+     * reason.
+     *
+     * <p>A stale step's progress is keyed to the digests of hunks that have
+     * since changed, so an override recorded as it stands would decide
+     * nothing: the step would count as unsettled and its verdicts would
+     * name hunks the diff no longer has. The reviewer is approving the code
+     * as it is now -- the whole file is on screen -- so the override re-keys
+     * the step to the hunks its anchors cover in the current review diff and
+     * clears the stale mark, and the agent is no longer asked to re-issue
+     * it. When an anchor no longer resolves there is no "code as it is now"
+     * to approve, and the panel says so instead.</p>
+     */
+    private void overrideCurrentStep(String reason) {
+        String stepId = currentStepId;
+        Optional<TourRecord> tour = currentTour();
+        if (stepId == null || tour.isEmpty() || tour.get().tour().step(stepId).isEmpty()) {
+            return;
+        }
+        Optional<UnifiedDiff> diff = loadedDiff();
+        if (tour.get().progress(stepId).stale()) {
+            TourStep step = tour.get().tour().step(stepId).orElseThrow();
+            if (diff.isEmpty() || !step.anchors().stream().allMatch(AnchorIndex.of(diff.get())::resolves)) {
+                stepPanel.showTransient(STALE_STEP_GONE);
+                return;
+            }
+        }
+        updateCurrentTour(record -> record.tour().step(stepId).map(step -> {
+            StepProgress now = record.progress(stepId);
+            if (!now.stale()) {
+                return record.withProgress(now.withDecision(StepProgress.Decision.OVERRIDDEN, Optional.of(reason)));
+            }
+            AnchorIndex index = AnchorIndex.of(diff.orElseThrow());
+            if (!step.anchors().stream().allMatch(index::resolves)) {
+                return record;
+            }
+            return record.withProgress(new StepProgress(stepId, StepProgress.fresh(step, index).hunkDigests(),
+                    now.checks(), StepProgress.Decision.OVERRIDDEN, Optional.of(reason), false));
+        }).orElse(record));
+    }
+
+    /**
+     * A human's request to bring the tour onto the current diff: re-issue
+     * the stale steps and cover the uncovered hunks. Sent whatever the
+     * automatic gating ({@link #requestTourRefresh}) would say -- the click
+     * is the authorisation -- and it takes the per-diff claim, so the
+     * automatic path does not ask a second time. A hand-off that fails
+     * releases the claim. True when the request was handed over.
+     */
+    private boolean askForTourRefresh(ReviewScope scope) {
+        Optional<UnifiedDiff> diff = loadedDiff();
+        Optional<TourRecord> tour = host.tour(scope);
+        if (diff.isEmpty() || tour.isEmpty()) {
+            return false;
+        }
+        TourRecord record = tour.get();
+        String fingerprint = TourFingerprint.of(diff.get());
+        List<String> stale = record.tour().steps().stream()
+                .map(TourStep::id)
+                .filter(id -> record.progress(id).stale())
+                .toList();
+        int uncovered = TourMigration.uncoveredHunkIds(record, AnchorIndex.of(diff.get())).size();
+        tourRefreshDispatch.claim(scope.id(), fingerprint);
+        if (host.dispatchTourRefresh(scope, stale, uncovered)) {
+            return true;
+        }
+        tourRefreshDispatch.release(scope.id(), fingerprint);
+        return false;
     }
 
     /** Applies {@code transform} to the selected scope's tour, then re-renders it (and so re-syncs verdicts). */
@@ -4882,12 +4961,31 @@ public final class SessionReviewView extends BorderPane {
 
         @Override
         public void override(String reason) {
-            decideCurrentStep(StepProgress.Decision.OVERRIDDEN, Optional.of(reason));
+            overrideCurrentStep(reason);
         }
 
         @Override
-        public void askAgent(String checkId) {
-            LOG.log(Level.DEBUG, "Ask the agent about check " + checkId + ": not wired yet");
+        public void requestRefresh() {
+            Optional<ReviewScope> scope = selectedScope();
+            if (scope.isEmpty()) {
+                return;
+            }
+            stepPanel.showTransient("Asking the agent to refresh the tour…");
+            if (askForTourRefresh(scope.get())) {
+                renderTour(currentTour());
+                stepPanel.showTransient("Asked the agent to re-write the stale steps.");
+            } else {
+                stepPanel.showTransient("Could not reach this session's agent. Approve without passing, "
+                        + "or settle these hunks in the hunk diff (v).");
+            }
+        }
+
+        @Override
+        public void postMessage(ReviewAnnotation finding, String body) {
+            selectedScope().ifPresent(scope -> {
+                host.postMessage(scope, finding, body);
+                refreshReviewState();
+            });
         }
 
         @Override

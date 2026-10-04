@@ -45,14 +45,15 @@ final class StepPanel extends VBox {
     static final double EXPANDED_WIDTH = ReviewFindingsMargin.EXPANDED_WIDTH;
     static final double NARROW_WIDTH = ReviewFindingsMargin.NARROW_WIDTH;
     static final double COLLAPSED_WIDTH = ReviewFindingsMargin.COLLAPSED_WIDTH;
-    /** Shown on a step whose code moved under it, until the agent re-issues it. */
+    /** Shown on a step whose code moved under it once a refresh was actually sent to the agent. */
     static final String STALE_NOTICE = "This step's code changed; the agent is re-writing it.";
+    /** Shown on a step whose code moved under it while no refresh has been sent for this diff. */
+    static final String STALE_WAITING = "This step's code changed; waiting for the agent.";
 
     interface Host {
         void answerChoice(String checkId, int choiceIndex);
         void submitRisk(String checkId, String answer);
         void override(String reason);
-        void askAgent(String checkId);
         void goToAnchor(int anchorIndex);
         void retryRisk(String checkId);
         void triage(ReviewAnnotation finding, Triage triage, Optional<String> reason);
@@ -63,6 +64,10 @@ final class StepPanel extends VBox {
         /** Peeks at {@code file}:{@code line} in place, over the diff column. */
         void openLocation(String file, int line);
         void selectStep(String stepId);
+        /** "Ask the agent to refresh": a human's request, sent whatever the automatic gating says. */
+        void requestRefresh();
+        /** Not sure's reply: appended to {@code finding}'s thread, the way the margin's Reply is. */
+        void postMessage(ReviewAnnotation finding, String body);
     }
 
     /**
@@ -104,6 +109,7 @@ final class StepPanel extends VBox {
     private final List<Button> choiceButtons = new ArrayList<>();
     private Optional<TextArea> riskBox = Optional.empty();
     private Optional<TextField> overrideReason = Optional.empty();
+    private Optional<Button> refreshButton = Optional.empty();
     private boolean collapsed;
     private boolean narrow;
 
@@ -146,6 +152,7 @@ final class StepPanel extends VBox {
         choiceButtons.clear();
         riskBox = Optional.empty();
         overrideReason = Optional.empty();
+        refreshButton = Optional.empty();
         content.getChildren().clear();
         Label header = new Label("Step " + view.number() + " of " + view.total() + " · " + view.step().title());
         header.getStyleClass().add("step-panel-header");
@@ -154,18 +161,38 @@ final class StepPanel extends VBox {
         narrative.getStyleClass().add("step-panel-narrative");
         content.getChildren().addAll(header, narrative, anchorChips(view));
         if (view.progress().stale()) {
-            Label stale = new Label(STALE_NOTICE);
-            stale.setWrapText(true);
-            stale.getStyleClass().add("step-panel-stale");
-            content.getChildren().add(stale);
+            content.getChildren().add(staleNotice(view.refreshDispatched()));
         }
         content.getChildren().add(checkSection(view));
+    }
+
+    /**
+     * Says the step's code changed, and only claims the agent is re-writing
+     * it when a refresh was actually sent for this diff -- an inline harness
+     * or a busy agent is never asked automatically, and "re-writing" would
+     * then be a promise nobody is keeping. Until then a real Button asks.
+     */
+    private VBox staleNotice(boolean refreshDispatched) {
+        Label stale = new Label(refreshDispatched ? STALE_NOTICE : STALE_WAITING);
+        stale.setWrapText(true);
+        stale.getStyleClass().add("step-panel-stale");
+        VBox notice = new VBox(6, stale);
+        notice.getStyleClass().add("step-stale-notice");
+        if (!refreshDispatched) {
+            Button ask = new Button("Ask the agent to refresh");
+            ask.getStyleClass().add("step-refresh");
+            ask.setOnAction(event -> host.requestRefresh());
+            refreshButton = Optional.of(ask);
+            notice.getChildren().add(ask);
+        }
+        return notice;
     }
 
     void showMessage(String message) {
         choiceButtons.clear();
         riskBox = Optional.empty();
         overrideReason = Optional.empty();
+        refreshButton = Optional.empty();
         content.getChildren().setAll(new Label(message));
         extraSections.getChildren().clear();
     }
@@ -370,6 +397,7 @@ final class StepPanel extends VBox {
         choiceButtons.clear();
         riskBox = Optional.empty();
         overrideReason = Optional.empty();
+        refreshButton = Optional.empty();
         triageSection.getChildren().clear();
         extraSections.getChildren().remove(impactSection);
         VBox banner = new VBox(8);
@@ -421,8 +449,18 @@ final class StepPanel extends VBox {
     }
 
     void focusUnmet(StepGate.Unmet unmet) {
+        if (unmet.kind() == StepGate.Kind.STALE) {
+            // Says why, then lands on the way out: ask for the refresh, or
+            // approve without passing.
+            showTransient(unmet.message());
+            refreshButton.<Node>map(button -> button)
+                    .or(() -> overrideReason.map(field -> field))
+                    .ifPresent(Node::requestFocus);
+            return;
+        }
         if (unmet.kind() == StepGate.Kind.BLOCKER) {
             showTransient(unmet.message());
+            overrideReason.ifPresent(TextField::requestFocus);
             return;
         }
         if (unmet.kind() == StepGate.Kind.TRIAGE && !triageSection.getChildren().isEmpty()) {
@@ -506,11 +544,35 @@ final class StepPanel extends VBox {
         Button dismissStart = new Button("Dismiss…");
         HBox buttons = new HBox(6, confirm, dismissStart);
         buttons.setAlignment(Pos.CENTER_LEFT);
+        VBox replyRow = new VBox(6);
         if (offerNotSure) {
+            // Leaves it proposed (spec §4): the question goes to the finding's
+            // thread, where the agent answers it.
             Button notSure = new Button("Not sure");
-            // Leaves it proposed; its line is where the question lives.
-            notSure.setOnAction(event -> host.revealFinding(finding));
             buttons.getChildren().add(notSure);
+            TextField reply = new TextField();
+            reply.setPromptText("Ask the agent about this finding");
+            reply.getStyleClass().add("step-finding-reply");
+            Button send = new Button("Send");
+            send.getStyleClass().add("step-finding-send");
+            send.disableProperty().bind(blank(reply.textProperty()));
+            send.setOnAction(event -> {
+                String body = reply.getText().strip();
+                reply.clear();
+                host.postMessage(finding, body);
+                showTransient("Asked in the finding's thread; it stays proposed until you decide.");
+            });
+            HBox field = new HBox(6, reply, send);
+            field.setAlignment(Pos.CENTER_LEFT);
+            HBox.setHgrow(reply, Priority.ALWAYS);
+            replyRow.getChildren().add(field);
+            replyRow.setVisible(false);
+            replyRow.setManaged(false);
+            notSure.setOnAction(event -> {
+                replyRow.setVisible(true);
+                replyRow.setManaged(true);
+                reply.requestFocus();
+            });
         }
         TextField reason = new TextField();
         reason.setPromptText("Why is it wrong?");
@@ -528,7 +590,7 @@ final class StepPanel extends VBox {
             dismissRow.setManaged(true);
             reason.requestFocus();
         });
-        return new VBox(6, buttons, dismissRow);
+        return new VBox(6, buttons, dismissRow, replyRow);
     }
 
     private static BooleanBinding blank(ObservableStringValue text) {
@@ -557,17 +619,33 @@ final class StepPanel extends VBox {
         return key.substring(1);
     }
 
+    /**
+     * The step's check, or its decision. "Approve without passing" is
+     * offered wherever the gate cannot be met by answering (spec §4, §8): a
+     * stale step, a confirmed blocker on the step's lines, an agent that did
+     * not grade a RISK answer, and a check out of alternates.
+     */
     private VBox checkSection(StepView view) {
         VBox box = new VBox(8);
         box.getStyleClass().add("step-check");
         StepProgress progress = view.progress();
+        Optional<StepGate.Kind> gate = view.unmet().map(StepGate.Unmet::kind);
+        boolean overridable = gate.filter(kind -> kind == StepGate.Kind.STALE || kind == StepGate.Kind.BLOCKER)
+                .isPresent();
         if (progress.decision() != StepProgress.Decision.NONE) {
-            box.getChildren().add(new Label(switch (progress.decision()) {
+            Label decision = new Label(switch (progress.decision()) {
                 case PASSED -> "Approved.";
                 case CHANGES -> "Changes requested.";
                 case OVERRIDDEN -> "Approved without passing: " + progress.overrideReason().orElse("");
                 case NONE -> "";
-            }));
+            });
+            decision.setWrapText(true);
+            decision.getStyleClass().add("step-check-decision");
+            box.getChildren().add(decision);
+            if (overridable) {
+                // A decision on code that has since changed no longer counts.
+                addOverride(box);
+            }
             return box;
         }
         for (TourCheck check : view.step().checks()) {
@@ -576,9 +654,26 @@ final class StepPanel extends VBox {
                 continue;
             }
             renderActiveCheck(box, check, p);
+            if (overridable || p.status() == CheckProgress.Status.AGENT_UNAVAILABLE
+                    || p.status() == CheckProgress.Status.EXHAUSTED) {
+                addOverride(box);
+            }
             return box;
         }
-        box.getChildren().add(new Label("All checks passed — press a to approve this step."));
+        String settled = switch (gate.orElse(null)) {
+            case null -> "All checks passed — press a to approve this step.";
+            case BLOCKER -> view.unmet().get().message();
+            case TRIAGE -> "All checks passed — triage the agent's findings below, then press a.";
+            case STALE, CHECK -> "All checks passed.";
+        };
+        Label done = new Label(settled);
+        done.setWrapText(true);
+        done.getStyleClass().add(gate.filter(kind -> kind == StepGate.Kind.BLOCKER).isPresent()
+                ? "step-check-blocker" : "step-check-done");
+        box.getChildren().add(done);
+        if (overridable) {
+            addOverride(box);
+        }
         return box;
     }
 
@@ -591,26 +686,36 @@ final class StepPanel extends VBox {
             box.getChildren().add(explanation);
         });
         switch (p.status()) {
-            case AWAITING_AGENT -> box.getChildren().add(new Label("Checking with the agent…"));
+            case AWAITING_AGENT -> box.getChildren().add(statusLabel("Checking with the agent…"));
             case AGENT_UNAVAILABLE -> {
                 Button retry = new Button("Retry");
+                retry.getStyleClass().add("step-retry");
                 retry.setOnAction(event -> host.retryRisk(check.id()));
-                box.getChildren().addAll(new Label("The agent did not answer."), retry);
+                box.getChildren().addAll(statusLabel("The agent did not answer."), retry);
             }
-            case EXHAUSTED -> {
-                TextField reason = new TextField();
-                reason.setPromptText("Why approve without passing?");
-                reason.getStyleClass().add("step-override-reason");
-                Button override = new Button("Approve without passing");
-                override.disableProperty().bind(blank(reason.textProperty()));
-                override.setOnAction(event -> host.override(reason.getText().strip()));
-                Button ask = new Button("Ask the agent");
-                ask.setOnAction(event -> host.askAgent(check.id()));
-                overrideReason = Optional.of(reason);
-                box.getChildren().addAll(new Label("Out of alternates."), reason, override, ask);
-            }
+            case EXHAUSTED -> box.getChildren().add(statusLabel("Out of alternates."));
             default -> renderPrompt(box, check, offered);
         }
+    }
+
+    private static Label statusLabel(String text) {
+        Label label = new Label(text);
+        label.setWrapText(true);
+        label.getStyleClass().add("step-check-status");
+        return label;
+    }
+
+    /** The reason field and "Approve without passing", which stays disabled until a reason is given. */
+    private void addOverride(VBox box) {
+        TextField reason = new TextField();
+        reason.setPromptText("Why approve without passing?");
+        reason.getStyleClass().add("step-override-reason");
+        Button override = new Button("Approve without passing");
+        override.getStyleClass().add("step-override");
+        override.disableProperty().bind(blank(reason.textProperty()));
+        override.setOnAction(event -> host.override(reason.getText().strip()));
+        overrideReason = Optional.of(reason);
+        box.getChildren().addAll(reason, override);
     }
 
     private void renderPrompt(VBox box, TourCheck check, TourCheck offered) {
