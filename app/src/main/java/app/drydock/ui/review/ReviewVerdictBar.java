@@ -3,6 +3,7 @@ package app.drydock.ui.review;
 import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewVerdict;
 
+import javafx.css.PseudoClass;
 import javafx.geometry.Pos;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
@@ -643,7 +644,7 @@ final class ReviewVerdictBar extends VBox {
                 requestChangesButton.setTooltip(new Tooltip("Request changes on this step (r)"));
                 refusalLabel.setVisible(false);
                 refusalLabel.setManaged(false);
-                approveButton.pseudoClassStateChanged(javafx.css.PseudoClass.getPseudoClass("refused"), false);
+                approveButton.pseudoClassStateChanged(PseudoClass.getPseudoClass("refused"), false);
                 actionRow.getChildren().setAll(previousButton, nextButton, intentLabel,
                         approveButton, requestChangesButton, actionSpacer, navHint);
                 fitActionRow(actionRow.getWidth());
