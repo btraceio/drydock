@@ -2899,8 +2899,8 @@
    A diff row's height is font-size x line-height (1.6 / 1.42 / 1.25), which
    is what the prototype gives its code rows; JavaFX has no line-height on a
    single-line row, so it becomes -fx-min-height. The 8/6/4px "row padding"
-   of section 4.8 is the prototype's `ipad`, which it applies to the QUEUE
-   and INTENT cards, not to code lines -- putting it here too made every diff
+   of section 4.8 is the prototype's `ipad`, which it applies to its queue
+   and rail cards, not to code lines -- putting it here too made every diff
    row almost twice its intended height. Code rows take horizontal padding
    only. */
 .density-cozy .review-code-span,

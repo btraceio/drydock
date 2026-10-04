@@ -58,12 +58,15 @@ import java.util.function.UnaryOperator;
  * keys.
  *
  * <p>The view keeps the layout and the mode switch, and reaches the tour
- * only through this class; the tour reaches back only through {@link View}.
- * The tour record itself lives in the host's store ({@link
- * SessionReviewView.Host#tour}, {@link SessionReviewView.Host#updateTour}),
- * which stays its one writer. Everything here runs on the FX thread except
- * the impact computation and callee resolution, which run off it and hop
- * back.</p>
+ * only through this class. The tour has three collaborators: the board
+ * around it, only through {@link View}; the host ({@link
+ * SessionReviewView.Host}), for the agent hand-offs, the hunk verdicts the
+ * tour derives, and the tour record, which lives in the host's store
+ * ({@link SessionReviewView.Host#tour}, {@link
+ * SessionReviewView.Host#updateTour}) and stays its one writer; and
+ * the {@link ReviewDiffColumn} it reveals rows in and marks steps over.
+ * Everything here runs on the FX thread except the impact computation and
+ * callee resolution, which run off it and hop back.</p>
  */
 final class TourController {
 
@@ -616,21 +619,19 @@ final class TourController {
                             render();
                             return;
                         }
-                        {
-                            LOG.log(Level.WARNING, "Could not measure the tour's impact for scope "
-                                    + key.scopeId(), failure);
-                            StepImpact unmeasured = new StepImpact(List.of(), List.of(), List.of(), List.of(),
-                                    Optional.of("the impact could not be measured: " + UiErrors.message(failure)));
-                            Map<String, StepImpact> computed = new HashMap<>();
-                            Set<String> everyStep = new HashSet<>();
-                            for (TourStep each : key.tour().steps()) {
-                                computed.put(each.id(), unmeasured);
-                                everyStep.add(each.id());
-                            }
-                            // Unknown what each step declares: every one says why it is unmeasured.
-                            impacts = new ImpactEntry(key.scopeId(), key.diff(), key.graph(), key.fanIn(),
-                                    key.tour(), Map.copyOf(computed), Set.copyOf(everyStep));
+                        LOG.log(Level.WARNING, "Could not measure the tour's impact for scope "
+                                + key.scopeId(), failure);
+                        StepImpact unmeasured = new StepImpact(List.of(), List.of(), List.of(), List.of(),
+                                Optional.of("the impact could not be measured: " + UiErrors.message(failure)));
+                        Map<String, StepImpact> computed = new HashMap<>();
+                        Set<String> everyStep = new HashSet<>();
+                        for (TourStep each : key.tour().steps()) {
+                            computed.put(each.id(), unmeasured);
+                            everyStep.add(each.id());
                         }
+                        // Unknown what each step declares: every one says why it is unmeasured.
+                        impacts = new ImpactEntry(key.scopeId(), key.diff(), key.graph(), key.fanIn(),
+                                key.tour(), Map.copyOf(computed), Set.copyOf(everyStep));
                         render();
                     });
                 });
@@ -1005,13 +1006,7 @@ final class TourController {
         currentTour().ifPresent(record -> moveStep(record, delta));
     }
 
-    /**
-     * Submit's refusal while the tour is showing. The hunk diff's answer --
-     * move the file cursor -- points at nothing the tour shows, so here the
-     * refusal jumps to a step: for a stale approval the step covering any of
-     * {@code digests}, otherwise the first unsettled step. False when there
-     * is no step to jump to -- a hunk no step covers.
-     */
+    /** The step jump of {@link SessionReviewView#refuseSubmitFromTour}; false when there is no step to jump to. */
     boolean jumpForSubmitRefusal(List<String> digests, boolean staleBase) {
         Optional<TourRecord> tour = currentTour();
         Optional<String> target = tour.flatMap(record -> {
@@ -1181,8 +1176,6 @@ final class TourController {
         } catch (NumberFormatException e) {
             return Optional.empty();
         }
-        // A number alone could name a different step of a re-posted tour;
-        // the step only counts when its first anchor is still this file.
         return currentTour().map(record -> record.tour().steps())
                 .filter(steps -> number >= 1 && number <= steps.size())
                 .map(steps -> steps.get(number - 1))

@@ -28,9 +28,9 @@ class SubmitPlanTest {
     }
 
     @Test
-    void anAutoApprovedIntentStillCountsAsApproval() {
+    void anAutoApprovedHunkStillCountsAsApproval() {
         // Decision has three constants (ReviewVerdict.java:17-20). AUTO_APPROVED
-        // is drydock deciding an intent needed no human verdict -- it approves.
+        // is the agent's own assertion that a hunk needed no human verdict -- it approves.
         assertEquals(Event.APPROVE, SubmitPlan.preselect(List.of(
                 ReviewVerdict.Decision.AUTO_APPROVED, ReviewVerdict.Decision.APPROVED)));
         assertEquals(Event.REQUEST_CHANGES, SubmitPlan.preselect(List.of(
@@ -39,8 +39,8 @@ class SubmitPlanTest {
 
     @Test
     void nothingToDecideIsAPlainComment() {
-        // Reachable only when the scope has no counted intents: submitReview()
-        // refuses to submit while any counted intent is unsettled.
+        // Reachable only when the scope has no hunks to decide: submitReview()
+        // refuses to submit while any hunk is unsettled.
         assertEquals(Event.COMMENT, SubmitPlan.preselect(List.of()));
     }
 

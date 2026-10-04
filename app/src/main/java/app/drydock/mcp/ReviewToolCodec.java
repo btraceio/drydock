@@ -21,11 +21,9 @@ import app.drydock.state.json.JsonValue.JsonString;
 
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 
 /**
  * Encodes and decodes the Review MCP payloads (schema §§1-4), keeping the

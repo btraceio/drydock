@@ -46,7 +46,7 @@ public final class ShortcutsOverlay {
                     {"Cancel / close", "Esc"},
             }),
             new Section("IN REVIEW", new String[][] {
-                    {"Focus mode — collapse every rail", "f"},
+                    {"Focus mode — collapse the findings margin, outline and step panel", "f"},
                     {"Cycle density: cozy · compact · dense", "d"},
                     {"Show or hide unchanged lines (whole files: fold long runs)", "c"},
                     {"Tour / hunk diff", "v"},

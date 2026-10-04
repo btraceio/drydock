@@ -10,7 +10,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * The one mapping from a review scope to the diff it covers. Every reader
- * (the diff column, intent grouping, the agent's review tools) goes through
+ * (the diff column, the tour, the agent's review tools) goes through
  * it, so pinning it here pins what the human and the agent both see.
  */
 class ReviewScopeDiffScopeTest {

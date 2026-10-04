@@ -59,7 +59,7 @@ class AnchorIndexTest {
     }
 
     @Test
-    void hunkIdsMatchTheReviewIntentFormat() {
+    void hunkIdsUseTheSharedHunkIdFormat() {
         UnifiedDiff diff = twoFileDiff();
         assertEquals("h_src/A.java_1", AnchorIndex.of(diff).hunks().get(1).hunkId());
     }

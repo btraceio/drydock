@@ -1,7 +1,6 @@
 package app.drydock.mcp;
 
 import app.drydock.domain.ManagedSessionId;
-import app.drydock.git.DiffScope;
 import app.drydock.mcp.McpSessionRegistry.Spawn;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.ReviewAnnotation;

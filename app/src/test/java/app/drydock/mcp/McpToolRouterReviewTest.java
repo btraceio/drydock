@@ -7,7 +7,6 @@ import app.drydock.review.AnnotationStatus;
 import app.drydock.review.Confidence;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewScope;
-import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Severity;
 import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonValue.JsonArray;

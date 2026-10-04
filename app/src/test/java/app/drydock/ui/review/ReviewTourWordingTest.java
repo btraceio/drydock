@@ -14,7 +14,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** In tour mode the verdict bar and the diff header talk about steps, not hunks and intents. */
+/** In tour mode the verdict bar and the diff header talk about steps, not hunks and files. */
 class ReviewTourWordingTest extends ReviewTourFixture {
 
     private boolean shown(String text) {

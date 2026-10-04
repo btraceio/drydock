@@ -1,7 +1,6 @@
 package app.drydock.ui.review;
 
 import app.drydock.ui.TestStages;
-import app.drydock.review.ReviewVerdict;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;

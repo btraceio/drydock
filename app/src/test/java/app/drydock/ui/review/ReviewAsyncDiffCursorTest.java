@@ -113,8 +113,7 @@ class ReviewAsyncDiffCursorTest extends ApplicationTest {
      * cached, so {@code bodyFor} restores it through {@code showDiff} rather
      * than re-running git. That must still land on the first file -- the
      * cursor AND the code -- not leave the column where the last read
-     * stopped. (Ported from the intent rail's {@code
-     * ReviewLandsOnFirstIntentTest}.)
+     * stopped.
      */
     @Test
     void showingTheSameScopesAgainLandsBackOnTheFirstFile() throws Exception {

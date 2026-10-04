@@ -35,7 +35,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * reproduce the "rail promises uncommitted changes, column shows nothing"
  * defect this branch exists to fix), filters the already-loaded diff rather
  * than re-diffing, and -- the important one -- publishes exactly what it
- * renders so the intent rail cannot disagree with the column.
+ * renders so the rest of the board cannot disagree with the column.
  */
 class ReviewDiffColumnUntrackedToggleTest extends ApplicationTest {
 
@@ -138,7 +138,7 @@ class ReviewDiffColumnUntrackedToggleTest extends ApplicationTest {
 
         assertEquals(hunkFiles(), publishedFiles,
                 "the published diff must contain exactly what is rendered -- "
-                        + "otherwise the intent rail disagrees with the column");
+                        + "otherwise the board disagrees with the column");
         assertFalse(publishedFiles.contains("NewA.java"));
         assertFalse(publishedFiles.contains("NewB.java"));
     }

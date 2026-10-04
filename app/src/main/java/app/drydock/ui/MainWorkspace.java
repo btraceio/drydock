@@ -30,7 +30,6 @@ import app.drydock.git.DiffService;
 import app.drydock.git.GhCliService;
 import app.drydock.git.GitException;
 import app.drydock.git.PrCheckoutService;
-import app.drydock.git.UnifiedDiff;
 import app.drydock.git.WorktreeNaming;
 import app.drydock.git.GitBranchState;
 import app.drydock.git.GitStatus;

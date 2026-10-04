@@ -240,10 +240,9 @@ class ReviewDiffColumnTest extends ApplicationTest {
     }
 
     /**
-     * Selecting an intent has to move the code, not just the rail. The bug
-     * this covers: the intent rail was a list of labels -- clicking one
-     * changed which intent the verdict bar settled and left the diff exactly
-     * where it was, so the rail read as decoration.
+     * Revealing a hunk has to move the code: a navigation that changes what
+     * the verdict bar settles and leaves the diff where it was reads as
+     * decoration.
      */
     @Test
     void revealingAHunkScrollsItIntoTheScene() throws Exception {
@@ -258,7 +257,7 @@ class ReviewDiffColumnTest extends ApplicationTest {
         WaitForAsyncUtils.waitForFxEvents();
 
         assertTrue(renderedHunkFiles().contains("Zulu.java"),
-                "reveal must bring the intent's file into view; rendered " + renderedHunkFiles());
+                "reveal must bring the hunk's file into view; rendered " + renderedHunkFiles());
     }
 
     /** A file that is not in this diff must leave the column where it is, not throw. */
@@ -278,9 +277,9 @@ class ReviewDiffColumnTest extends ApplicationTest {
     }
 
     /**
-     * The intent rail is built from the whole diff while these rows stop at
-     * the row cap, so in a large diff an intent can name a file that has no
-     * card to scroll to. Reported as "clicking an intent does nothing": it
+     * Navigation targets come from the whole diff while these rows stop at
+     * the row cap, so in a large diff a target can name a file that has no
+     * card to scroll to. Reported as "clicking it does nothing": it
      * returned silently, which is indistinguishable from a dead click. The
      * truncation notice is the one row that explains the absence, so that is
      * where the column goes.

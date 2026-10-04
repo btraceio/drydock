@@ -25,7 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 /**
  * The publish channel carries the scope a diff belongs to, and carries a
  * failure as well as a success. Both halves are load-bearing: without the
- * scope id an intent rail cannot tell whose diff it received, and without
+ * scope id the board cannot tell whose diff it received, and without
  * the failure a failed scope is indistinguishable from one still loading.
  */
 class ReviewDiffColumnPublishTest extends ApplicationTest {

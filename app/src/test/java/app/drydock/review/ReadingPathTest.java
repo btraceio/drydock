@@ -167,8 +167,8 @@ class ReadingPathTest {
     }
 
     /**
-     * The four §6.2 signals rank ahead of {@code FallbackIntents}' kind
-     * order, which is only what the rank falls back to. Isolates the
+     * The four §6.2 signals rank ahead of {@link ChangedPaths}' kind order,
+     * which is only what the rank falls back to. Isolates the
      * not-a-test signal from the kind order, which would otherwise demote
      * every test on its own and leave the signal untestable: a vendored file
      * is GENERATED, which the kind order ranks BELOW tests, and it sorts

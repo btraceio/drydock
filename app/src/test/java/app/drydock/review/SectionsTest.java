@@ -251,10 +251,9 @@ class SectionsTest {
     }
 
     /**
-     * FallbackIntents guarantees two cards can never read the same, because
-     * a grouping is only useful if its entries can be told apart. This makes
-     * the same guarantee: on the first real diff it was run against, three
-     * cards read identically.
+     * Two cards can never read the same, because a grouping is only useful
+     * if its entries can be told apart: on the first real diff this was run
+     * against, three cards read identically.
      */
     @Test
     void noTwoCardsReadTheSame() {
