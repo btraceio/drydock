@@ -539,7 +539,7 @@ public final class McpToolRouter {
             throw new McpToolException("findings must be an array");
         }
         String author = context.reviewerName(caller);
-        List<ReviewAnnotation> decoded = new java.util.ArrayList<>();
+        List<ReviewAnnotation> decoded = new ArrayList<>();
         for (JsonValue element : array.elements()) {
             if (!(element instanceof JsonObject obj)) {
                 throw new McpToolException("each finding must be an object");
@@ -1519,22 +1519,28 @@ public final class McpToolRouter {
      * (the descriptors used to declare these as strings, and models
      * stringify nested JSON); a string holding an array is accepted as that
      * array. Any other value is returned unchanged for the caller's own
-     * "must be an array" refusal, and a string that does not parse to an
-     * array is refused here, naming the argument.
+     * "must be an array" refusal. A string that does not hold an array is
+     * refused here, naming the argument and saying which way it missed --
+     * not JSON at all (with the parser's reason, which includes its nesting
+     * limit), or JSON of another shape -- so the client knows what to fix.
      */
     private static JsonValue arrayArgument(JsonObject args, String name) throws McpToolException {
         JsonValue value = args.get(name);
         if (!(value instanceof JsonString text)) {
             return value;
         }
+        JsonValue parsed;
         try {
-            if (JsonParser.parse(text.value()) instanceof JsonArray parsed) {
-                return parsed;
-            }
+            parsed = JsonParser.parse(text.value());
         } catch (JsonParseException e) {
-            // Falls through to the refusal below: the cause is not the model's to act on.
+            throw new McpToolException(name + " must be an array (or a JSON string holding one); the string is"
+                    + " not valid JSON: " + e.getMessage());
         }
-        throw new McpToolException(name + " must be an array (or a JSON string holding one)");
+        if (parsed instanceof JsonArray array) {
+            return array;
+        }
+        throw new McpToolException(name + " must be an array (or a JSON string holding one); the string is"
+                + " JSON but not an array");
     }
 
     private static JsonValue schemaBoolean(String description) {

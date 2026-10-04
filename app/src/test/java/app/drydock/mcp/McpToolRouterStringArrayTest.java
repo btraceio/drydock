@@ -3,8 +3,12 @@ package app.drydock.mcp;
 import app.drydock.review.HunkDigest;
 import app.drydock.review.HunkIds;
 import app.drydock.review.ReviewVerdict;
+import app.drydock.review.tour.TourRecord;
+import app.drydock.review.tour.TourStep;
 import app.drydock.state.json.JsonParser;
 import app.drydock.state.json.JsonValue;
+import app.drydock.state.json.JsonValue.JsonBoolean;
+import app.drydock.state.json.JsonValue.JsonNumber;
 import app.drydock.state.json.JsonValue.JsonObject;
 import app.drydock.state.json.JsonValue.JsonString;
 import app.drydock.state.json.JsonWriter;
@@ -13,11 +17,13 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 
 import static app.drydock.mcp.JsonPeek.field;
 import static app.drydock.mcp.JsonPeek.str;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -110,5 +116,62 @@ class McpToolRouterStringArrayTest extends McpRouterFixture {
                     () -> router.call(callerId(), tool, args(argument, new JsonString(bad))), bad);
             assertTrue(error.getMessage().contains(argument), error.getMessage());
         }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"review_finding,findings", "review_tour,steps", "review_recheck,assessments"})
+    void theRefusalSaysWhetherTheStringWasNotJsonOrJsonButNotAnArray(String tool, String argument) {
+        McpToolException notJson = assertThrows(McpToolException.class,
+                () -> router.call(callerId(), tool, args(argument, new JsonString("[1,"))));
+        assertTrue(notJson.getMessage().contains("not valid JSON"), notJson.getMessage());
+
+        McpToolException notArray = assertThrows(McpToolException.class,
+                () -> router.call(callerId(), tool, args(argument, new JsonString("{\"id\":\"x\"}"))));
+        assertTrue(notArray.getMessage().contains("JSON but not an array"), notArray.getMessage());
+        assertFalse(notArray.getMessage().contains("not valid JSON"), notArray.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"review_finding,findings", "review_tour,steps", "review_recheck,assessments"})
+    void aDeeplyNestedStringIsRefusedNotAStackOverflow(String tool, String argument) {
+        JsonValue bomb = new JsonString("[".repeat(10_000));
+
+        McpToolException error = assertThrows(McpToolException.class,
+                () -> router.call(callerId(), tool, args(argument, bomb)));
+
+        assertTrue(error.getMessage().contains(argument), error.getMessage());
+        assertTrue(error.getMessage().contains("not valid JSON"), error.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "review_finding,findings,findings must be an array",
+            "review_tour,steps,steps must be an array of step objects",
+            "review_recheck,assessments,assessments must be an array"})
+    void aNumberIsLeftToTheToolsOwnArrayRefusal(String tool, String argument, String refusal) {
+        McpToolException error = assertThrows(McpToolException.class,
+                () -> router.call(callerId(), tool, args(argument, JsonNumber.of(7))));
+
+        assertTrue(error.getMessage().contains(refusal), error.getMessage());
+        assertFalse(error.getMessage().contains("JSON string"), error.getMessage());
+    }
+
+    @Test
+    void anOnlyStepsRepostTakesItsStepsAsAJsonString() throws Exception {
+        router.call(callerId(), "review_tour", args("steps", JsonParser.parse(STEPS)));
+        TourRecord record = context.tourOf(scopeId()).orElseThrow();
+        context.putTour(record.withProgress(record.progress("s2").withStale(true)));
+        String replacement = """
+                [{"id":"s2","title":"T2","narrative":"Why now.",
+                  "anchors":[{"file":"src/WidgetUser.java","startKey":"n1","endKey":"n6"}],
+                  "checks":[{"id":"c9","kind":"predict","prompt":"P?","choices":[{"text":"a"},{"text":"b"}],"answer":0,"explanation":"E.",
+                   "alternates":[{"id":"c9_alt","kind":"risk","prompt":"R?","explanation":"E."}]}]}]""";
+
+        router.call(callerId(), "review_tour",
+                args("steps", asString(replacement)).put("onlySteps", new JsonBoolean(true)));
+
+        TourRecord stored = context.tourOf(scopeId()).orElseThrow();
+        assertEquals(List.of("s1", "s2"), stored.tour().steps().stream().map(TourStep::id).toList());
+        assertTrue(stored.tour().step("s2").orElseThrow().check("c9").isPresent());
     }
 }
