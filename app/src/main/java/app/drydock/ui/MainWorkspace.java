@@ -1870,7 +1870,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             KeyCode.D, KeyCode.C, KeyCode.M, KeyCode.BACK_SLASH,
             KeyCode.OPEN_BRACKET, KeyCode.CLOSE_BRACKET, KeyCode.N, KeyCode.A, KeyCode.R,
             KeyCode.U, KeyCode.F, KeyCode.V, KeyCode.DIGIT1, KeyCode.DIGIT2, KeyCode.DIGIT3,
-            KeyCode.DIGIT4, KeyCode.B, KeyCode.PERIOD, KeyCode.COMMA);
+            KeyCode.DIGIT4, KeyCode.B, KeyCode.PERIOD, KeyCode.COMMA, KeyCode.H);
 
     /**
      * The pure logic behind {@link #reviewKeyboardBackstop(KeyEvent)},
@@ -4835,6 +4835,11 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             // the state store's single writer, never a load-then-save here.
             // Read back by resolveReviewScopes when a later gesture names no
             // choice of its own (⌘4, the sub-tab button).
+            // The key-hints strip's hide/show is one global preference, read
+            // from and written to the state store's single owner.
+            view.setKeyHintsPreference(
+                    () -> repositoryManager.state().ui().reviewKeyHintsHidden(),
+                    repositoryManager::updateReviewKeyHintsHidden);
             view.setOnChoiceChanged(choice -> {
                 repositoryManager.updateReviewScopeChoice(openTab.sessionId(), choice);
                 view.selectedScope().ifPresent(scope -> openTab.setReviewBadge(openFindingsFor(scope)));

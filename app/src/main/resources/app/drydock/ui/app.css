@@ -2800,6 +2800,34 @@
 .tour-claim-callout.collapsed .tour-claim-text {
     -fx-text-fill: -drydock-text-dim;
 }
+/* The key-hints strip: the keys that work now, under the code. */
+.tour-key-strip {
+    -fx-padding: 6 14 6 14;
+    -fx-background-color: -drydock-main;
+    -fx-border-color: -drydock-border transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+}
+.tour-key-strip.hidden-hints {
+    -fx-padding: 2 14 2 14;
+}
+.tour-key-strip-label {
+    -fx-font-size: 11.5px;
+    -fx-text-fill: -drydock-text-dim;
+}
+.tour-key-strip-toggle {
+    -fx-background-color: transparent;
+    -fx-border-color: -drydock-border;
+    -fx-border-radius: 6px;
+    -fx-background-radius: 6px;
+    -fx-font-size: 11px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-padding: 2 8 2 8;
+    -fx-content-display: right;
+    -fx-graphic-text-gap: 6;
+}
+.tour-key-strip-toggle:hover {
+    -fx-background-color: -drydock-hover;
+}
 .tour-step-tag {
     -fx-font-size: 10px;
     -fx-text-fill: -drydock-text-dim;

@@ -109,6 +109,12 @@ final class TourController {
         /** Puts nothing on the verdict bar, with no progress. */
         void clearVerdictBar();
 
+        /** The keys that work now, for the hint strip; empty when there is no tour to act on. */
+        void showKeyHints(List<TourKeyHints.Hint> hints);
+
+        /** {@code h}: hides the key hints, or shows them again. */
+        void toggleKeyHints();
+
         /** Puts the current step on the verdict bar, with progress in steps. */
         void showStepOnVerdictBar(ReviewVerdictBar.Target target, Optional<ReviewVerdict.Decision> decision,
                                   int settled, int total);
@@ -453,6 +459,7 @@ final class TourController {
             outline.setFooter(0, true);
             diffColumn.setStepHeader(Optional.empty());
             view.clearVerdictBar();
+            view.showKeyHints(List.of());
             if (tourMarksShown) {
                 diffColumn.setStepMarkSource(null);
                 tourMarksShown = false;
@@ -530,6 +537,8 @@ final class TourController {
             shownMarksStepId = currentStepId;
             shownMarksAnchor = anchorIndex;
         }
+        view.showKeyHints(TourKeyHints.hintsFor(TourKeyHints.contextOf(step, progress),
+                (int) step.anchors().stream().filter(TourAnchor::hasNote).count()));
         renderTourVerdictBar(record, step, progress);
         syncTourVerdicts(record);
     }
@@ -929,6 +938,10 @@ final class TourController {
             }
             case B -> {
                 backToStep();
+                return true;
+            }
+            case H -> {
+                view.toggleKeyHints();
                 return true;
             }
             case PERIOD -> {
