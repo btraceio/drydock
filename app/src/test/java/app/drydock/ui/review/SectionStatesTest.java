@@ -140,6 +140,22 @@ class SectionStatesTest {
         assertEquals(SectionStates.Staleness.MOVED, sections.stalenessOf(board(), GUARDS_H));
     }
 
+    /**
+     * A stale verdict does not count as settled -- Submit refuses it -- but
+     * the file's decision still merges it: only its freshness is in
+     * question, not what was decided.
+     */
+    @Test
+    void settledHunksExcludesAStaleOneButTheDecisionStillMergesIt() {
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
+        record(GUARDS_H, 0, ReviewVerdict.Decision.APPROVED, OLD_BASE);
+        approve(GUARDS_H, 1);
+
+        assertEquals(1, sections.settledHunkCount(board()), "the stale hunk 0 must not be counted");
+        assertEquals(Optional.of(ReviewVerdict.Decision.APPROVED), sections.decisionOf(board(), GUARDS_H),
+                "the decision persists across staleness");
+    }
+
     /** Per file: a move touching guards.h does not stale guards.cpp's approval. */
     @Test
     void aBaseMoveTouchingAnotherFileLeavesThisOneFresh() {

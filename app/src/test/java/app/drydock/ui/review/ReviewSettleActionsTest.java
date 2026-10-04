@@ -122,6 +122,31 @@ class ReviewSettleActionsTest extends ReviewViewFixture {
         assertEquals(1, settledHunksOf(FILE_A));
     }
 
+    /**
+     * The bar's Approve is a settle like {@code a}: {@code u} afterwards
+     * undoes what the click recorded, not the keyboard settle before it.
+     */
+    @Test
+    void undoAfterAMouseSettleUndoesTheMouseSettle() {
+        interact(view::requestFocus);
+        press(KeyCode.A).release(KeyCode.A);
+        WaitForAsyncUtils.waitForFxEvents();
+        assertTrue(host.store.verdict(scope.id(), digestOfFirstHunkOfFileA()).isPresent());
+
+        clickOn(".review-verdict-action");
+        WaitForAsyncUtils.waitForFxEvents();
+        assertTrue(host.store.verdict(scope.id(), digestOfSecondHunkOfFileA()).isPresent());
+
+        interact(view::requestFocus);
+        press(KeyCode.U).release(KeyCode.U);
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertTrue(host.store.verdict(scope.id(), digestOfSecondHunkOfFileA()).isEmpty(),
+                "u undoes the click's settle");
+        assertTrue(host.store.verdict(scope.id(), digestOfFirstHunkOfFileA()).isPresent(),
+                "and leaves the keyboard settle before it alone");
+    }
+
     private long settledHunksOf(String file) {
         return host.diff.files().stream()
                 .filter(candidate -> candidate.path().equals(file))

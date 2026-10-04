@@ -1671,7 +1671,12 @@ public final class SessionReviewView extends BorderPane {
             fileOnBar(target).ifPresent(file -> settle(file, ReviewVerdict.Decision.CHANGES));
         }
 
-        /** The bar's Approve / Request changes: the next unread hunk of {@code file}. */
+        /**
+         * The bar's Approve / Request changes: the next unread hunk of
+         * {@code file}. Remembered for {@code u} exactly as {@link
+         * #verdictAction} remembers a key's settle, so {@code u} after a
+         * click undoes the click, not the keyboard settle before it.
+         */
         private void settle(String file, ReviewVerdict.Decision decision) {
             selectedScope().ifPresent(scope -> {
                 List<String> digests = digestsForAction(file, false);
@@ -1682,6 +1687,13 @@ public final class SessionReviewView extends BorderPane {
                 Map<String, Optional<ReviewVerdict.Decision>> before = verdictsOf(scope, digests);
                 host.setVerdict(scope, digests, Optional.of(decision), blockedFor(scope, digests));
                 recordHunkOverrides(scope, digests, decision, before);
+                boolean applied = !digests.isEmpty() && digests.stream().allMatch(digest -> host.verdict(scope, digest)
+                        .filter(v -> v.decision() == decision).isPresent());
+                if (applied) {
+                    lastSettledFile = Optional.of(board().flatMap(b -> sections.fileOfDigest(b, digests.getFirst()))
+                            .orElse(file));
+                    lastSettledDigests = digests;
+                }
             });
         }
 
