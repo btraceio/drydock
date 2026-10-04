@@ -26,13 +26,15 @@ public final class TourFindings {
     }
 
     /**
-     * Whether {@code finding} is still withheld: it names a check, has not
-     * been dismissed, its step was not overridden, and its check has not
-     * been answered yet. Once answered -- right or wrong -- it is revealed,
-     * and that reveal is its triage moment.
+     * Whether {@code finding} is still withheld: it names a check, is still
+     * proposed, its step was not overridden, and its check has not been
+     * answered yet. Once answered -- right or wrong -- it is revealed, and
+     * that reveal is its triage moment. A finding the reviewer has triaged
+     * stays revealed for good, even when its step is re-issued and the
+     * check starts over: hiding it again would hide their decision.
      */
     public static boolean hidden(ReviewAnnotation finding, TourRecord record) {
-        if (finding.withheldBy().isEmpty() || finding.triage() == Triage.DISMISSED) {
+        if (finding.withheldBy().isEmpty() || finding.triage() != Triage.PROPOSED) {
             return false;
         }
         String checkId = finding.withheldBy().get();

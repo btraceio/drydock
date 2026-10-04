@@ -198,9 +198,9 @@ public final class McpToolRouter {
                                 + "each step needs a narrative and at least one check, each check at least one "
                                 + "alternate. Anchor keys are line keys from review_scope (n<newLine> or "
                                 + "o<oldLine>); answer is a 0-based index into choices. With onlySteps true, "
-                                + "the steps sent replace the stored steps with the same id and the rest are "
-                                + "appended; unsent steps keep their progress, and the merged tour is validated "
-                                + "as a whole.",
+                                + "the steps sent replace the stored stale steps with the same id and the rest "
+                                + "are appended; naming a step that is not stale is rejected. Unsent steps keep "
+                                + "their progress, and the merged tour is validated as a whole.",
                         JsonObject.empty()
                                 .put("scopeId", schemaString("Review scope handle."))
                                 .put("steps", schemaString("Array of {id, title, narrative (<=1000 chars), "
@@ -766,8 +766,15 @@ public final class McpToolRouter {
                 if (context.tourOf(scope.id()).isEmpty()) {
                     throw new McpToolException(missing);
                 }
-                stored = context.updateTour(scope.id(), current -> validated(
-                        TourMerge.replaceSteps(current, steps, diff), diff, findings, noteErrors))
+                stored = context.updateTour(scope.id(), current -> {
+                    // Judged on the record as it is when written: the
+                    // reviewer may have overridden a stale step meanwhile.
+                    List<String> live = TourMerge.notStaleReplacements(current, steps, diff);
+                    if (!live.isEmpty()) {
+                        throw new TourRejected(live);
+                    }
+                    return validated(TourMerge.replaceSteps(current, steps, diff), diff, findings, noteErrors);
+                })
                         .orElseThrow(() -> new McpToolException(missing));
             } else {
                 TourRecord fresh = TourRecord.fresh(new ReviewTour(scope.id(), TourFingerprint.of(diff), steps), diff);

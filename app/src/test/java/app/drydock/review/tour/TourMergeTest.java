@@ -8,6 +8,8 @@ import java.util.Optional;
 
 import static app.drydock.review.tour.TourFixtures.add;
 import static app.drydock.review.tour.TourFixtures.coveringTour;
+import static app.drydock.review.tour.TourFixtures.ctx;
+import static app.drydock.review.tour.TourFixtures.del;
 import static app.drydock.review.tour.TourFixtures.file;
 import static app.drydock.review.tour.TourFixtures.hunk;
 import static app.drydock.review.tour.TourFixtures.predict;
@@ -16,6 +18,7 @@ import static app.drydock.review.tour.TourFixtures.step;
 import static app.drydock.review.tour.TourFixtures.twoFileDiff;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class TourMergeTest {
 
@@ -60,5 +63,37 @@ class TourMergeTest {
         assertEquals(StepProgress.Decision.PASSED, merged.progress("s1").decision());
         assertEquals(TourFingerprint.of(current), merged.tour().diffFingerprint());
         assertEquals(TourRecord.rowsOf(current), merged.hunkRows());
+    }
+
+    @Test
+    void replacingAStepThatIsNotStaleIsAnError() {
+        UnifiedDiff diff = twoFileDiff();
+        TourStep replacement = step("s1", List.of(new TourAnchor("src/A.java", "n1", "n22")), predict("c9"));
+
+        assertEquals(List.of("step s1 is not stale; onlySteps only replaces stale steps or adds new ones"),
+                TourMerge.notStaleReplacements(record(diff), List.of(replacement), diff));
+    }
+
+    @Test
+    void replacingAStaleStepOrAddingANewOneIsAllowed() {
+        UnifiedDiff diff = twoFileDiff();
+        TourStep s2 = step("s2", List.of(new TourAnchor("src/B.java", "o5", "o6")), risk("c9"));
+        TourStep s3 = step("s3", List.of(new TourAnchor("src/B.java", "o5", "o6")), risk("c8"));
+
+        assertTrue(TourMerge.notStaleReplacements(record(diff), List.of(s2, s3), diff).isEmpty());
+    }
+
+    @Test
+    void aStepTheMovedDiffMakesStaleCountsAsStale() {
+        // s2 is passed and live on the stored diff; the current diff changed
+        // its hunk, so the merge's own migration makes it stale.
+        UnifiedDiff old = twoFileDiff();
+        TourRecord live = TourRecord.fresh(coveringTour(old), old);
+        UnifiedDiff moved = new UnifiedDiff(List.of(old.files().get(0),
+                file("src/B.java", hunk(ctx(4, 4, "a"), del(5, "b"),
+                        del(6, "CHANGED"), ctx(7, 5, "d")))));
+        TourStep s2 = step("s2", List.of(new TourAnchor("src/B.java", "o5", "o6")), risk("c9"));
+
+        assertTrue(TourMerge.notStaleReplacements(live, List.of(s2), moved).isEmpty());
     }
 }

@@ -27,7 +27,8 @@ import java.util.Set;
  * takes in a hunk it was not written against goes stale, its progress kept
  * but no longer counting. Changed rows in no anchor of a live step are
  * uncovered. A step that was already stale stays stale until the agent
- * re-issues it.</p>
+ * re-issues it. Hunk overrides are kept only for hunks the new diff still
+ * has.</p>
  *
  * <p>Pure: the caller applies the result through the tour store's one
  * writer.</p>
@@ -74,7 +75,11 @@ public final class TourMigration {
         }
         List<String> uncovered = uncoveredHunkIds(live, index);
         ReviewTour tour = record.tour().withSteps(steps).withFingerprint(TourFingerprint.of(newReviewDiff));
-        TourRecord migrated = new TourRecord(tour, progress, record.hunkOverrides(), newRows,
+        // An override on a hunk the new diff no longer has decides nothing,
+        // but the submit sheet would still count it.
+        Map<String, HunkOverride> overrides = new LinkedHashMap<>(record.hunkOverrides());
+        overrides.keySet().retainAll(newRows.keySet());
+        TourRecord migrated = new TourRecord(tour, progress, overrides, newRows,
                 record.reviewAnyway(), false, record.seeded());
         return new Result(migrated, stale, uncovered);
     }

@@ -66,6 +66,16 @@ class TourFindingsTest {
     }
 
     @Test
+    void aTriagedWithheldFindingIsNeverHiddenAgain() {
+        // Answered, revealed, confirmed -- then the step is re-issued and its
+        // check starts fresh. The reviewer's triage must not vanish with it.
+        ReviewAnnotation confirmed = finding("f1", "src/A.java", "n3", Severity.QUESTION, Triage.CONFIRMED,
+                Optional.of("c1"));
+
+        assertFalse(TourFindings.hidden(confirmed, fresh));
+    }
+
+    @Test
     void aWithheldFindingIsHiddenBeforeItsCheckIsAnswered() {
         assertTrue(TourFindings.hidden(withheld("f1", "src/A.java", "n3", "c1"), fresh));
     }

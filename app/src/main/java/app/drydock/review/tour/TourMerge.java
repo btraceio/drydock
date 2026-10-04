@@ -4,6 +4,7 @@ import app.drydock.git.UnifiedDiff;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -16,7 +17,9 @@ import java.util.stream.Collectors;
  * has already walked.
  *
  * <p>A step whose id is already in the tour replaces it in place, with
- * fresh progress; any other step is appended. The result is not
+ * fresh progress; any other step is appended. Only a stale step may be
+ * replaced: the caller refuses the merge when {@link #notStaleReplacements}
+ * names any. The result is not
  * validated here: the caller validates the merged tour as a whole, since a
  * merge can leave a hunk uncovered that neither half did alone.</p>
  *
@@ -27,13 +30,42 @@ public final class TourMerge {
     private TourMerge() {
     }
 
+    /**
+     * The reasons {@code steps} may not be merged with {@link #replaceSteps}:
+     * one per step that names a stored step which is not stale. {@code
+     * onlySteps} exists to re-issue what a moved diff invalidated; replacing
+     * a live step would wipe progress the reviewer made on code that did not
+     * change. Staleness is judged on the record as the merge would see it --
+     * migrated onto {@code reviewDiff} first -- so a step the moved diff just
+     * invalidated counts as stale. Empty when the merge may go ahead.
+     */
+    public static List<String> notStaleReplacements(TourRecord record, List<TourStep> steps,
+                                                    UnifiedDiff reviewDiff) {
+        TourRecord base = onto(record, reviewDiff);
+        Set<String> existing = base.tour().steps().stream().map(TourStep::id).collect(Collectors.toSet());
+        Set<String> named = new LinkedHashSet<>();
+        for (TourStep step : steps) {
+            if (existing.contains(step.id()) && !base.progress(step.id()).stale()) {
+                named.add(step.id());
+            }
+        }
+        return named.stream()
+                .map(id -> "step " + id + " is not stale; onlySteps only replaces stale steps or adds new ones")
+                .toList();
+    }
+
+    /** {@code record} on {@code reviewDiff}: as it is when already current, else migrated onto it. */
+    private static TourRecord onto(TourRecord record, UnifiedDiff reviewDiff) {
+        return record.tour().diffFingerprint().equals(TourFingerprint.of(reviewDiff))
+                ? record
+                : TourMigration.migrate(record, reviewDiff).record();
+    }
+
     public static TourRecord replaceSteps(TourRecord record, List<TourStep> steps, UnifiedDiff reviewDiff) {
         String fingerprint = TourFingerprint.of(reviewDiff);
         // A merge that arrives before the board saw the diff move carries
         // the kept steps over first, exactly as the board would have.
-        TourRecord base = record.tour().diffFingerprint().equals(fingerprint)
-                ? record
-                : TourMigration.migrate(record, reviewDiff).record();
+        TourRecord base = onto(record, reviewDiff);
         AnchorIndex index = AnchorIndex.of(reviewDiff);
         Set<String> existing = base.tour().steps().stream().map(TourStep::id).collect(Collectors.toSet());
         Map<String, TourStep> replacing = new LinkedHashMap<>();

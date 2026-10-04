@@ -1,10 +1,13 @@
 package app.drydock.review.tour;
 
 import app.drydock.git.UnifiedDiff;
+import app.drydock.review.HunkDigest;
+import app.drydock.review.ReviewVerdict;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 import static app.drydock.review.tour.TourFixtures.add;
 import static app.drydock.review.tour.TourFixtures.coveringTour;
@@ -118,5 +121,21 @@ class TourMigrationTest {
         TourMigration.Result result = TourMigration.migrate(record, bChanged());
 
         assertFalse(result.record().shelved());
+    }
+
+    @Test
+    void hunkOverridesOfHunksTheNewDiffNoLongerHasArePruned() {
+        UnifiedDiff old = twoFileDiff();
+        String aDigest = HunkDigest.of("src/A.java", old.files().get(0).hunks().get(0));
+        String bDigest = HunkDigest.of("src/B.java", old.files().get(1).hunks().get(0));
+        HunkOverride approved = new HunkOverride(ReviewVerdict.Decision.APPROVED, "set in the hunk diff");
+        TourRecord record = passed(coveringTour(old))
+                .withHunkOverride(aDigest, Optional.of(approved))
+                .withHunkOverride(bDigest, Optional.of(approved));
+
+        TourMigration.Result result = TourMigration.migrate(record, bChanged());
+
+        assertEquals(Set.of(aDigest), result.record().hunkOverrides().keySet(),
+                "an override on a hunk that is gone would still be counted at submit");
     }
 }

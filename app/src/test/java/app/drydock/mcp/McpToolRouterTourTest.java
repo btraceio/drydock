@@ -252,9 +252,29 @@ class McpToolRouterTourTest extends McpRouterFixture {
         return context.tourOf(scopeId()).orElseThrow();
     }
 
+    /** As {@link #postedWithS1Passed}, with s2 gone stale -- the only kind of step onlySteps may replace. */
+    private TourRecord postedWithS1PassedAndS2Stale() throws Exception {
+        TourRecord record = postedWithS1Passed();
+        context.putTour(record.withProgress(record.progress("s2").withStale(true)));
+        return context.tourOf(scopeId()).orElseThrow();
+    }
+
+    @Test
+    void onlyStepsReplacingAStepThatIsNotStaleIsRejectedAndStoresNothing() throws Exception {
+        TourRecord before = postedWithS1Passed();
+
+        McpToolException error = assertThrows(McpToolException.class, () -> router.call(callerId(), "review_tour",
+                onlyStepsArgs(step("s1", "src/Widget.java", "n1", "n5", "c9"))));
+
+        assertTrue(error.getMessage().contains(
+                "step s1 is not stale; onlySteps only replaces stale steps or adds new ones"), error.getMessage());
+        assertTrue(error.getMessage().contains("nothing stored"), error.getMessage());
+        assertEquals(before, context.tourOf(scopeId()).orElseThrow());
+    }
+
     @Test
     void onlyStepsReplacesTheNamedStepAndKeepsTheOthersProgress() throws Exception {
-        postedWithS1Passed();
+        postedWithS1PassedAndS2Stale();
 
         router.call(callerId(), "review_tour", onlyStepsArgs(step("s2", "src/WidgetUser.java", "n1", "n6", "c9")));
 
@@ -267,7 +287,7 @@ class McpToolRouterTourTest extends McpRouterFixture {
 
     @Test
     void anOnlyStepsMergeThatLeavesAHunkUncoveredIsRejectedAndStoresNothing() throws Exception {
-        TourRecord before = postedWithS1Passed();
+        TourRecord before = postedWithS1PassedAndS2Stale();
 
         McpToolException error = assertThrows(McpToolException.class, () -> router.call(callerId(), "review_tour",
                 onlyStepsArgs(step("s2", "src/WidgetUser.java", "n1", "n3", "c9"))));
@@ -325,7 +345,7 @@ class McpToolRouterTourTest extends McpRouterFixture {
 
     @Test
     void anOnlyStepsMergeAppliesToTheRecordAsItIsWhenWritten() throws Exception {
-        postedWithS1Passed();
+        postedWithS1PassedAndS2Stale();
         // The reviewer undoes s1 while the agent's merge is in flight.
         context.beforeTourMutate = () -> {
             TourRecord now = context.tours.get(scopeId());
