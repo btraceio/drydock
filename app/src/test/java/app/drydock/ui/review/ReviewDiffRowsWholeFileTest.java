@@ -37,7 +37,7 @@ class ReviewDiffRowsWholeFileTest {
     @Test
     void wholeFileModeExpandsEveryRunByDefault() {
         ReviewDiffRows.Options options = new ReviewDiffRows.Options(true, Set.of(), 4000,
-                ReviewDiffRows.HunkFilter.ALL, Map.of(), true);
+                Map.of(), true);
         assertEquals(0, collapsedRuns(ReviewDiffRows.build(wholeFile(), options)));
     }
 
@@ -49,7 +49,7 @@ class ReviewDiffRowsWholeFileTest {
     @Test
     void overTheRowBudgetTheLongestRunFoldsFirst() {
         ReviewDiffRows.Options tight = new ReviewDiffRows.Options(true, Set.of(), 25,
-                ReviewDiffRows.HunkFilter.ALL, Map.of(), true);
+                Map.of(), true);
         Set<ReviewDiffRow.RunKey> folds = ReviewDiffRows.budgetFolds(wholeFile(), tight);
         assertEquals(Set.of(new ReviewDiffRow.RunKey("src/A.java", 0, 0)), folds, "the 30-row run, not the 10-row one");
         List<ReviewDiffRow> rows = ReviewDiffRows.build(wholeFile(), tight);
@@ -60,7 +60,7 @@ class ReviewDiffRowsWholeFileTest {
     void aRunTheUserExpandedIsNeverBudgetFolded() {
         ReviewDiffRow.RunKey big = new ReviewDiffRow.RunKey("src/A.java", 0, 0);
         ReviewDiffRows.Options tight = new ReviewDiffRows.Options(true, Set.of(big), 25,
-                ReviewDiffRows.HunkFilter.ALL, Map.of(), true);
+                Map.of(), true);
         assertTrue(!ReviewDiffRows.budgetFolds(wholeFile(), tight).contains(big));
     }
 }

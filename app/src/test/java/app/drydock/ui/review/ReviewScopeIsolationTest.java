@@ -24,16 +24,15 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 
 /**
- * The reported defect: the intent rail described whichever scope last
+ * The reported defect: the board described whichever scope last
  * produced a diff, not the scope the header named. A not-checked-out PR
  * never runs a diff at all, so it inherited the previous item's files and
  * kept them -- which is how a repository with no diffable item at all came
  * to show another repository's files.
  */
-class ReviewIntentScopeIsolationTest extends ApplicationTest {
+class ReviewScopeIsolationTest extends ApplicationTest {
 
     private final DiffService diffService = new DiffService();
     private final ReviewScopeRegistry registry = new ReviewScopeRegistry();
@@ -76,18 +75,17 @@ class ReviewIntentScopeIsolationTest extends ApplicationTest {
         interact(() -> view.showScopes(new SessionReviewScopes.Scopes(worktree, Optional.of(gate)),
                 SessionReviewScopes.Choice.LOCAL));
 
-        awaitCardCount(2);
+        awaitTarget("1/2 · lib/B.java");
 
         view.diagSelectChoice(SessionReviewScopes.Choice.PULL_REQUEST);
         WaitForAsyncUtils.waitForFxEvents();
 
-        assertEquals(0, cardCount(),
-                "a scope with no diff of its own must show no intents, not the previous scope's");
-        assertEquals("Not checked out — check out to group changes", railMessage());
+        assertEquals("no file", targetLabel(),
+                "a scope with no diff of its own must show no file, not the previous scope's");
     }
 
     @Test
-    void comingBackToTheWorktreeRestoresItsOwnIntents() throws Exception {
+    void comingBackToTheWorktreeRestoresItsOwnFiles() throws Exception {
         Path repo = repoWithTwoChangedFiles();
         ReviewScope worktree = registry.mint(ReviewScopeRegistry.spec(
                 ReviewScope.Kind.WORKING_TREE, repo, Optional.of(repo), "main", "main",
@@ -99,20 +97,21 @@ class ReviewIntentScopeIsolationTest extends ApplicationTest {
 
         interact(() -> view.showScopes(new SessionReviewScopes.Scopes(worktree, Optional.of(gate)),
                 SessionReviewScopes.Choice.LOCAL));
-        awaitCardCount(2);
+        awaitTarget("1/2 · lib/B.java");
 
         view.diagSelectChoice(SessionReviewScopes.Choice.PULL_REQUEST);
         WaitForAsyncUtils.waitForFxEvents();
         view.diagSelectChoice(SessionReviewScopes.Choice.LOCAL);
 
-        awaitCardCount(2);
+        awaitTarget("1/2 · lib/B.java");
     }
 
     /**
      * The reported defect: {@code refreshReviewState}'s early return for "no
-     * scope selected" cleared the margin and the verdict bar but never the
-     * rail, so a rescan that emptied the queue left the previous scope's
-     * cards on screen -- a dead click describing an item no longer queued.
+     * scope selected" cleared the margin but not everything that described
+     * the scope, so a rescan that emptied the queue left the previous
+     * scope's files on screen -- a dead click describing an item no longer
+     * queued.
      *
      * <p>The queue that used to empty is gone with the Review destination;
      * the board now loses its scope the same way the two placeholder states
@@ -120,7 +119,7 @@ class ReviewIntentScopeIsolationTest extends ApplicationTest {
      * the exact same {@code refreshReviewState} early return this guards.</p>
      */
     @Test
-    void theRailClearsWhenTheScopeIsLost() throws Exception {
+    void theVerdictBarClearsWhenTheScopeIsLost() throws Exception {
         Path repo = repoWithTwoChangedFiles();
         ReviewScope worktree = registry.mint(ReviewScopeRegistry.spec(
                 ReviewScope.Kind.WORKING_TREE, repo, Optional.of(repo), "main", "main",
@@ -128,13 +127,13 @@ class ReviewIntentScopeIsolationTest extends ApplicationTest {
 
         interact(() -> view.showScopes(new SessionReviewScopes.Scopes(worktree, Optional.empty()),
                 SessionReviewScopes.Choice.LOCAL));
-        awaitCardCount(2);
+        awaitTarget("1/2 · lib/B.java");
 
         interact(view::showResolving);
         WaitForAsyncUtils.waitForFxEvents();
 
-        assertEquals(0, cardCount(),
-                "losing the scope must clear the rail, not keep the departed scope's cards");
+        assertEquals("no file", targetLabel(),
+                "losing the scope must clear the bar, not keep the departed scope's file");
     }
 
     /**
@@ -150,7 +149,7 @@ class ReviewIntentScopeIsolationTest extends ApplicationTest {
      * scopes below are minted from different repos only because the switcher
      * takes any two {@link ReviewScope}s and this is the cheapest way to get
      * two that are diffably distinct. What still holds, and is what this
-     * pins, is per-scope isolation of the rail across a chip switch -- the
+     * pins, is per-scope isolation of the file cursor across a chip switch -- the
      * same guarantee, exercised through the switcher's two slots rather than
      * a queue's rows.</p>
      */
@@ -167,14 +166,10 @@ class ReviewIntentScopeIsolationTest extends ApplicationTest {
 
         interact(() -> view.showScopes(new SessionReviewScopes.Scopes(scopeOne, Optional.of(scopeTwo)),
                 SessionReviewScopes.Choice.LOCAL));
-        awaitCardCount(1);
-        assertEquals(List.of("Alpha.java"), cardTitles());
+        awaitTarget("1/1 · Alpha.java");
 
         view.diagSelectChoice(SessionReviewScopes.Choice.PULL_REQUEST);
-        awaitCardCount(1);
-        List<String> titles = cardTitles();
-        assertEquals(List.of("Zulu.java"), titles);
-        assertFalse(titles.contains("Alpha.java"), "the second repository must not carry the first's files");
+        awaitTarget("1/1 · Zulu.java");
     }
 
     /**
@@ -212,34 +207,21 @@ class ReviewIntentScopeIsolationTest extends ApplicationTest {
                 new ReviewAnnotation.Message("Claude", Instant.EPOCH, text));
     }
 
-    private List<String> cardTitles() {
-        List<String> titles = new ArrayList<>();
-        interact(() -> lookup(".review-intent-title").queryAll()
-                .forEach(node -> titles.add(((Label) node).getText())));
-        return titles;
-    }
-
-    private int cardCount() {
-        int[] count = new int[1];
-        interact(() -> count[0] = lookup(".review-intent-card").queryAll().size());
-        return count[0];
-    }
-
-    private String railMessage() {
+    private String targetLabel() {
         String[] text = new String[1];
-        interact(() -> text[0] = lookup(".review-intent-empty").tryQuery()
-                .map(node -> ((Label) node).getText()).orElse(""));
+        interact(() -> text[0] = ((Label) lookup(".review-verdict-target").query()).getText());
         return text[0];
     }
 
-    private void awaitCardCount(int expected) {
+    /** Polls the bar's label; the diff is a real git process, so it does not land at once. */
+    private void awaitTarget(String expected) {
         for (int i = 0; i < 200; i++) {
-            if (cardCount() == expected) {
+            if (expected.equals(targetLabel())) {
                 return;
             }
             sleep(25);
         }
-        throw new AssertionError("expected " + expected + " intent cards, saw " + cardCount());
+        assertEquals(expected, targetLabel());
     }
 
     private static Path repoWithTwoChangedFiles() throws Exception {
@@ -248,9 +230,6 @@ class ReviewIntentScopeIsolationTest extends ApplicationTest {
         runGit(repo, "init", "-b", "main");
         runGit(repo, "config", "user.name", "Test");
         runGit(repo, "config", "user.email", "test@example.com");
-        // Two directories, not two root-level files: the fallback grouping
-        // clusters by directory, so a pair of siblings is one card and this
-        // test needs two.
         Files.createDirectories(repo.resolve("src"));
         Files.createDirectories(repo.resolve("lib"));
         Files.writeString(repo.resolve("src/A.java"), "class A { int x = 1; }\n");

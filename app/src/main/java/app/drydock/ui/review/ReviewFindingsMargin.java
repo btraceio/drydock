@@ -225,7 +225,7 @@ final class ReviewFindingsMargin extends VBox {
         return wholeReview;
     }
 
-    /** {@code F}: findings from the whole review rather than the current intent. */
+    /** {@code ⇧F}: findings from the whole review rather than the current file. */
     void setWholeReview(boolean newWholeReview) {
         wholeReview = newWholeReview;
         renderFilters();
@@ -357,7 +357,7 @@ final class ReviewFindingsMargin extends VBox {
         if (findings.isEmpty() && wholeReview) {
             text = "Nothing flagged anywhere in this review.";
         } else if (findings.isEmpty()) {
-            text = "Nothing flagged in this intent. Press F for the whole review.";
+            text = "Nothing flagged in this file. Press ⇧F for the whole review.";
         } else {
             text = "No open findings left here.";
         }

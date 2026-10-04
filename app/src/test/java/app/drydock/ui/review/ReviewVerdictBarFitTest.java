@@ -53,8 +53,8 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
     @Override
     public void start(Stage stage) {
         bar = new ReviewVerdictBar(new ReviewVerdictBar.Host() {
-            @Override public void approve(ReviewVerdictBar.Target target, SessionReviewView.SettleUnit unit) { }
-            @Override public void requestChanges(ReviewVerdictBar.Target target, SessionReviewView.SettleUnit unit) { }
+            @Override public void approve(ReviewVerdictBar.Target target) { }
+            @Override public void requestChanges(ReviewVerdictBar.Target target) { }
             @Override public boolean askAgentToFix(ReviewVerdictBar.Target target) { return askSucceeds; }
             @Override public void undo(ReviewVerdictBar.Target target) { }
             @Override public void confirmStillGood(ReviewVerdictBar.Target target) { }
@@ -108,28 +108,28 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
 
     @Test
     void everyActionIsFullyLegibleAtTheCodeColumnFloor() {
-        show(intent(2, "drydock/review · 4 files"), Optional.empty());
+        show(target(2, "drydock/review · 4 files"), Optional.empty());
 
         assertNothingTruncated();
     }
 
-    /** A settled intent swaps the actions for a verdict and an undo; it must fit too. */
+    /** A settled target swaps the actions for a verdict and an undo; it must fit too. */
     @Test
-    void aSettledIntentFitsAsWell() {
-        show(intent(2, "drydock/review · 4 files"),
+    void aSettledTargetFitsAsWell() {
+        show(target(2, "drydock/review · 4 files"),
                 Optional.of(ReviewVerdict.Decision.APPROVED));
 
         assertNothingTruncated();
     }
 
     /**
-     * The intent title is the one thing allowed to give way -- it is context,
+     * The target title is the one thing allowed to give way -- it is context,
      * and the actions are the point. A long one must not push the buttons
      * back into truncation.
      */
     @Test
-    void aLongIntentTitleYieldsInsteadOfTheButtons() {
-        show(intent(11, "app/src/main/java/app/drydock/ui/review · 23 files, +1782 −455"),
+    void aLongTargetTitleYieldsInsteadOfTheButtons() {
+        show(target(11, "app/src/main/java/app/drydock/ui/review · 23 files, +1782 −455"),
                 Optional.empty());
 
         assertNothingTruncated();
@@ -142,7 +142,7 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
      */
     @Test
     void theHintIsBackAsSoonAsThereIsRoomForIt() {
-        show(intent(2, "drydock/review · 4 files"), Optional.empty());
+        show(target(2, "drydock/review · 4 files"), Optional.empty());
         assertFalse(navHintShowing(), "at the floor the nav hint has to go");
 
         interact(() -> bar.getScene().getWindow().setWidth(1400));
@@ -161,7 +161,7 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
      */
     @Test
     void theHintIsEitherDroppedOrShownWholeAtEveryWidth() {
-        show(intent(2, "append · 3 files · a title long enough to want more room"), Optional.empty());
+        show(target(2, "append · 3 files · a title long enough to want more room"), Optional.empty());
         for (double width = BAR_WIDTH_AT_FLOOR; width <= 1400; width += 20) {
             double w = width;
             interact(() -> bar.getScene().getWindow().setWidth(w));
@@ -205,7 +205,7 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
      */
     @Test
     void theStaleBannerFitsAtTheCodeColumnFloor() {
-        show(intent(2, "drydock/review · 4 files"), Optional.of(ReviewVerdict.Decision.APPROVED));
+        show(target(2, "drydock/review · 4 files"), Optional.of(ReviewVerdict.Decision.APPROVED));
         interact(() -> bar.showStale(Optional.of(
                 new ReviewVerdictBar.StaleInfo("a1b2c3d4e5f6789", "d4e5f6a1b2c3789"))));
         WaitForAsyncUtils.waitForFxEvents();
@@ -216,27 +216,18 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
     }
 
     /**
-     * The unit (spec §9.6) is named on the button itself now, not a separate
-     * droppable label: "Approve intent" (the pre-Task-7 text) contradicted
-     * whatever {@link SessionReviewView#settleUnit()} actually hit, and at
-     * the floor the acting-unit label the first attempt added was hidden by
-     * design -- so the ONLY unit statement visible there was the wrong one.
-     * Naming it on the button is always-visible, which is what makes this
-     * the fit-relevant surface rather than the (now deleted) label.
+     * The unit (spec §9.6) is named on the button itself, not a separate
+     * droppable label: at the floor a label would be hidden by design, so
+     * the button is the only always-visible statement of what it will hit.
      */
     @Test
-    void theApproveButtonNamesTheUnitAndFitsForEveryUnitAtTheFloor() {
-        for (SessionReviewView.SettleUnit unit : SessionReviewView.SettleUnit.values()) {
-            show(intent(2, "drydock/review · 4 files"), Optional.empty());
-            interact(() -> bar.showActingUnit(unit));
-            WaitForAsyncUtils.waitForFxEvents();
-            interact(() -> bar.getScene().getRoot().layout());
-            WaitForAsyncUtils.waitForFxEvents();
+    void theApproveButtonNamesTheUnitAndFitsAtTheFloor() {
+        show(target(2, "drydock/review · 4 files"), Optional.empty());
+        interact(() -> bar.getScene().getRoot().layout());
+        WaitForAsyncUtils.waitForFxEvents();
 
-            assertTrue(approveButtonText().contains(unitWord(unit)),
-                    "the button must name " + unit + ", got: " + approveButtonText());
-            assertNothingTruncated();
-        }
+        assertEquals("Approve (next unread hunk)", approveButtonText());
+        assertNothingTruncated();
     }
 
     /**
@@ -248,7 +239,7 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
     @Test
     void theAskRefusalFitsAtTheCodeColumnFloor() {
         askSucceeds = false;
-        show(intent(2, "drydock/review · 4 files"), Optional.empty());
+        show(target(2, "drydock/review · 4 files"), Optional.empty());
 
         interact(() -> askButton().fire());
         WaitForAsyncUtils.waitForFxEvents();
@@ -270,7 +261,7 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
     @Test
     void theBlockingRefusalFitsAtTheCodeColumnFloor() {
         interact(() -> {
-            bar.update(intent(2, "drydock/review · 4 files"), Optional.empty(), true);
+            bar.update(target(2, "drydock/review · 4 files"), Optional.empty(), true);
             bar.showProgress(1, 7);
         });
         WaitForAsyncUtils.waitForFxEvents();
@@ -286,7 +277,7 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
         // What the shortening buys, stated as the reader sees it: the row
         // cannot hold the sentence at this width, so the refusal is its
         // glyph. Asserted rather than inferred from a width measurement --
-        // at the bar's REAL floor the intent title is squeezed to nothing
+        // at the bar's REAL floor the target title is squeezed to nothing
         // either way, so the geometry no longer discriminates and a test
         // resting on it (as this one did at a 560px bar) silently stops
         // pinning anything.
@@ -305,7 +296,7 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
     @Test
     void theBlockingRefusalKeepsItsSentenceWhenTheRowCanHoldIt() {
         interact(() -> {
-            bar.update(intent(2, "drydock/review · 4 files"), Optional.empty(), true);
+            bar.update(target(2, "drydock/review · 4 files"), Optional.empty(), true);
             bar.showProgress(1, 7);
             bar.getScene().getWindow().setWidth(1400);
         });
@@ -334,12 +325,12 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
      * Round 3, item 2. {@code update()} clears both footer refusals, but
      * nothing cleared one when the OTHER was raised -- and neither failure
      * path calls {@code update()}. Submit refuses, the reader then asks the
-     * agent on that same intent, and both labels plus {@code Submit} shared
+     * agent on that same file, and both labels plus {@code Submit} shared
      * one row three ways: the primary action read "Sub…".
      */
     @Test
     void raisingOneFooterRefusalRetiresTheOther() {
-        show(intent(2, "drydock/review · 4 files"), Optional.empty());
+        show(target(2, "drydock/review · 4 files"), Optional.empty());
         interact(() -> bar.showSubmitRefused(SessionReviewView.NEEDS_VERDICT.reason(),
                 SessionReviewView.NEEDS_VERDICT.detail()));
         WaitForAsyncUtils.waitForFxEvents();
@@ -368,7 +359,7 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
     @Test
     void everySubmitRefusalFitsAtTheCodeColumnFloor() {
         for (SessionReviewView.SubmitRefusal refusal : SessionReviewView.SUBMIT_REFUSALS) {
-            show(intent(2, "drydock/review · 4 files"), Optional.empty());
+            show(target(2, "drydock/review · 4 files"), Optional.empty());
             interact(() -> bar.showSubmitRefused(refusal.reason(), refusal.detail()));
             WaitForAsyncUtils.waitForFxEvents();
             interact(() -> bar.getScene().getRoot().layout());
@@ -390,7 +381,7 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
      */
     @Test
     void raisingTheSubmitRefusalRetiresTheAskRefusalToo() {
-        show(intent(2, "drydock/review · 4 files"), Optional.empty());
+        show(target(2, "drydock/review · 4 files"), Optional.empty());
         askSucceeds = false;
         interact(() -> askButton().fire());
         WaitForAsyncUtils.waitForFxEvents();
@@ -418,7 +409,7 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
      */
     @Test
     void aWideBarKeepsTheShortcutHintWhileRefusing() {
-        show(intent(2, "drydock/review · 4 files"), Optional.empty());
+        show(target(2, "drydock/review · 4 files"), Optional.empty());
         interact(() -> bar.getScene().getWindow().setWidth(1400));
         WaitForAsyncUtils.waitForFxEvents();
 
@@ -434,7 +425,7 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
     /** And at the floor it still yields, which is what made the trade worth making. */
     @Test
     void atTheFloorTheShortcutHintStillYieldsToARefusal() {
-        show(intent(2, "drydock/review · 4 files"), Optional.empty());
+        show(target(2, "drydock/review · 4 files"), Optional.empty());
         interact(() -> bar.showSubmitRefused(SessionReviewView.NEEDS_VERDICT.reason(),
                 SessionReviewView.NEEDS_VERDICT.detail()));
         WaitForAsyncUtils.waitForFxEvents();
@@ -458,14 +449,6 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
                 .filter(button -> "Ask the agent to fix it".equals(button.getText()))
                 .findFirst()
                 .orElseThrow(() -> new AssertionError("no Ask-the-agent button"));
-    }
-
-    private static String unitWord(SessionReviewView.SettleUnit unit) {
-        return switch (unit) {
-            case HUNK -> "next unread hunk";
-            case SECTION -> "section";
-            case FILE -> "file";
-        };
     }
 
     private String approveButtonText() {
@@ -505,9 +488,9 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
     }
 
 
-    private void show(ReviewVerdictBar.Target intent, Optional<ReviewVerdict.Decision> decision) {
+    private void show(ReviewVerdictBar.Target target, Optional<ReviewVerdict.Decision> decision) {
         interact(() -> {
-            bar.update(intent, decision, false);
+            bar.update(target, decision, false);
             bar.showProgress(1, 7);
         });
         WaitForAsyncUtils.waitForFxEvents();
@@ -526,7 +509,7 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
      * stale banner's own two-line wrap (see the class's history) adds one
      * more line. What this actually guards against is the OTHER failure
      * mode this codebase has shipped -- a wrapped label collapsing to a
-     * column of single characters (see {@code ReviewIntentRailCardHeightTest}) --
+     * column of single characters (the retired intent rail's cards did) --
      * not the two-line wrap itself, which is real and reported, not hidden.
      */
     private static final double SANE_BAR_HEIGHT = 160;
@@ -625,7 +608,7 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
         return node.getStyleClass().isEmpty() ? node.toString() : "." + node.getStyleClass().get(0);
     }
 
-    private static ReviewVerdictBar.Target intent(int number, String title) {
-        return new ReviewVerdictBar.Target("auto:" + number, number + " · " + title);
+    private static ReviewVerdictBar.Target target(int number, String title) {
+        return new ReviewVerdictBar.Target("file:" + number, number + " · " + title);
     }
 }

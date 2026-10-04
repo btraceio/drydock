@@ -171,9 +171,12 @@ class ReviewCommentComposerTest extends ApplicationTest {
         assertTrue(host.findings(scope).isEmpty());
     }
 
-    /** The comment has to land under the intent that owns the code it is on. */
+    /**
+     * A comment is filed against its file and lines only: the board no
+     * longer has a grouping to stamp it with.
+     */
     @Test
-    void theCommentIsFiledUnderTheIntentThatOwnsTheFile() {
+    void theCommentIsFiledAgainstItsFileWithNoGrouping() {
         showDiff();
         clickGutter();
         type("a note");
@@ -181,11 +184,9 @@ class ReviewCommentComposerTest extends ApplicationTest {
         interact(() -> button("Comment").fire());
         WaitForAsyncUtils.waitForFxEvents();
 
-        Optional<String> intentId = host.findings(scope).get(0).intentId();
-        assertTrue(intentId.isPresent(), "the comment must name an intent");
-        assertTrue(host.intents(scope, host.diff, Optional.empty()).stream()
-                        .anyMatch(intent -> intent.id().equals(intentId.get())),
-                "and it must be an intent that exists: " + intentId.get());
+        ReviewAnnotation comment = host.findings(scope).get(0);
+        assertTrue(comment.intentId().isEmpty(), "no grouping id: " + comment.intentId());
+        assertFalse(comment.file().isBlank());
     }
 
     // ---- helpers --------------------------------------------------------

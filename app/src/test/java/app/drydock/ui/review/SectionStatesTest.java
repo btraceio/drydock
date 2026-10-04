@@ -4,10 +4,8 @@ import app.drydock.git.UnifiedDiff;
 import app.drydock.review.BaseMove;
 import app.drydock.review.ChangeGraph;
 import app.drydock.review.HunkDigest;
-import app.drydock.review.HunkIds;
-import app.drydock.review.Provenance;
+import app.drydock.review.RecheckAssessment;
 import app.drydock.review.RecheckDispatch;
-import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.review.ReviewVerdict;
@@ -26,23 +24,23 @@ import java.util.TreeSet;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * What a section says about itself, derived from its hunks (spec §9.1) --
- * exercised directly, with no {@code Stage}.
+ * What a file and the whole review say about themselves, derived from the
+ * hunks' verdicts (spec §9.1) -- exercised directly, with no {@code Stage}.
  *
- * <p>Every question here is answered from a {@link SessionReviewView.Host},
- * a diff and a grouping; none of it is scene graph. {@link
- * ReviewHunkProgressTest} keeps the assertions that are genuinely about what
- * the rail and the verdict bar RENDER.</p>
+ * <p>Every question here is answered from a {@link SessionReviewView.Host}
+ * and a diff; none of it is scene graph. {@link ReviewHunkProgressTest}
+ * keeps the assertions that are genuinely about what the verdict bar
+ * RENDERS.</p>
  */
 class SectionStatesTest {
 
     private static final String GUARDS_H = "src/guards.h";
     private static final String GUARDS_CPP = "src/guards.cpp";
     private static final String PROFILER = "src/profiler.cpp";
+    private static final String OLD_BASE = "0".repeat(40);
 
     private final ReviewScopeRegistry registry = new ReviewScopeRegistry();
     private FakeReviewHost host;
@@ -54,10 +52,13 @@ class SectionStatesTest {
     void setUp(@TempDir Path store) {
         host = new FakeReviewHost(store.resolve("annotations.json"));
         sections = new SectionStates(host);
+        // guards.h has TWO hunks, so a file-level answer is distinguishable
+        // from a hunk-level one.
         diff = new UnifiedDiff(List.of(
-                file(GUARDS_H, "class JmpCtxScope;"),
+                file(GUARDS_H, "class JmpCtxScope;", "void enter();"),
                 file(GUARDS_CPP, "void install();"),
-                file(PROFILER, "resolve();")));
+                file(PROFILER, "resolve();"),
+                new UnifiedDiff.FileDiff("bin/tool", "M", 0, 0, true, false, List.of())));
         scope = registry.mint(ReviewScopeRegistry.spec(ReviewScope.Kind.WORKING_TREE,
                 Path.of("/tmp/nowhere"), Optional.of(Path.of("/tmp/nowhere")), "main", "main",
                 Optional.empty(), Optional.empty()));
@@ -68,215 +69,118 @@ class SectionStatesTest {
         host.store.close();
     }
 
-    // ---- distinct hunks, not section slots ----------------------------------
+    // ---- what the hunk diff walks --------------------------------------------
 
-    /** Four section slots over three hunks: anything summing sizes reads 4. */
+    /** A file with no hunk (binary, mode-only) has nothing to settle and is no stop. */
     @Test
-    void progressCountsDistinctHunksNotSectionSlots() {
-        SectionStates.Board board = overlapping();
+    void theFilesWalkedAreThoseWithHunksInDiffOrder() {
+        assertEquals(List.of(GUARDS_H, GUARDS_CPP, PROFILER), sections.filesWithHunks(board()));
+    }
 
-        assertEquals(3, sections.distinctDigests(board).size());
+    @Test
+    void progressCountsEveryHunkOfTheDiff() {
+        SectionStates.Board board = board();
+
+        assertEquals(4, sections.distinctDigests(board).size());
         assertEquals(0, sections.settledHunkCount(board));
     }
 
     @Test
-    void aHunkInTwoSectionsIsOneFlagNotTwo() {
-        SectionStates.Board board = overlapping();
+    void settlingOneHunkCountsOne() {
+        SectionStates.Board board = board();
         approve(GUARDS_H);
 
         assertEquals(1, sections.settledHunkCount(board));
     }
 
-    // ---- a section's decision comes from its hunks ---------------------------
+    // ---- a file's decision comes from its hunks -------------------------------
 
     @Test
-    void anUnsettledHunkLeavesItsSectionUnsettled() {
-        SectionStates.Board board = overlapping();
+    void anUnsettledHunkLeavesItsFileUndecided() {
         approve(GUARDS_H);
 
-        SectionStates.SectionState state = sections.stateOf(board, board.sections().get(0));
-        assertEquals(Optional.empty(), state.decision());
-        assertEquals(1, state.settledHunks());
-        assertEquals(2, state.totalHunks());
+        assertEquals(Optional.empty(), sections.decisionOf(board(), GUARDS_H));
     }
 
     @Test
-    void aSectionWithEveryHunkSettledIsApproved() {
-        SectionStates.Board board = overlapping();
-        approve(GUARDS_H);
-        approve(GUARDS_CPP);
+    void aFileWithEveryHunkSettledIsApproved() {
+        approve(GUARDS_H, 0);
+        approve(GUARDS_H, 1);
 
-        assertEquals(Optional.of(ReviewVerdict.Decision.APPROVED),
-                sections.stateOf(board, board.sections().get(0)).decision());
+        assertEquals(Optional.of(ReviewVerdict.Decision.APPROVED), sections.decisionOf(board(), GUARDS_H));
     }
 
-    /** Any changes request wins over the rest of the section (VerdictMerge). */
+    /** Any changes request wins over the rest of the file (VerdictMerge), read or not. */
     @Test
-    void oneChangeRequestMakesTheWholeSectionChanges() {
-        SectionStates.Board board = overlapping();
-        record(GUARDS_CPP, ReviewVerdict.Decision.CHANGES, host.baseCommit);
+    void oneChangeRequestMakesTheWholeFileChanges() {
+        record(GUARDS_H, 1, ReviewVerdict.Decision.CHANGES, host.baseCommit);
 
-        assertEquals(Optional.of(ReviewVerdict.Decision.CHANGES),
-                sections.stateOf(board, board.sections().get(0)).decision());
+        assertEquals(Optional.of(ReviewVerdict.Decision.CHANGES), sections.decisionOf(board(), GUARDS_H));
     }
 
-    // ---- a hunk settled in a neighbouring section ----------------------------
-
     @Test
-    void aFullySettledSiblingIsNamed() {
-        SectionStates.Board board = overlapping();
-        approve(GUARDS_H);
-        approve(GUARDS_CPP);
-
-        assertEquals(List.of("①"),
-                sections.stateOf(board, board.sections().get(1)).settledElsewhere());
-    }
-
-    /**
-     * A sibling that settled ONE shared hunk moves this card's count by
-     * exactly as much as a fully settled one does. Marking only the
-     * fully-settled case solves the easy half of "state changing on its own"
-     * and leaves the other half exactly as mysterious.
-     */
-    @Test
-    void aPartlySettledSiblingIsNamedToo() {
-        SectionStates.Board board = overlapping();
-        approve(GUARDS_H);
-
-        assertEquals(List.of("②"),
-                sections.stateOf(board, board.sections().get(0)).settledElsewhere());
-        assertEquals(List.of("①"),
-                sections.stateOf(board, board.sections().get(1)).settledElsewhere());
-    }
-
-    /** A section that shares nothing has nothing to point at. */
-    @Test
-    void aSectionSharingNoHunkNamesNobody() {
-        SectionStates.Board board = board(List.of(
-                section("section-1", GUARDS_H),
-                section("section-2", PROFILER)));
-        approve(GUARDS_H);
-
-        assertTrue(sections.stateOf(board, board.sections().get(0)).settledElsewhere().isEmpty());
-    }
-
-    /**
-     * Task 18's correction 6b, unreachable until sections overlapped: with
-     * THREE sections sharing one hunk, a verdict is keyed {@code (scopeId,
-     * hunkDigest)} alone -- nothing records which of them the reader actually
-     * settled it through -- so naming every sharer would credit sections
-     * that, as far as this model can tell, reviewed nothing. At most one is
-     * named per card; the two-section tests above (still passing, unchanged)
-     * are the case where "at most one" and "the only one" coincide.
-     */
-    @Test
-    void threeSectionsSharingAHunkNameAtMostOneEach() {
-        SectionStates.Board board = board(List.of(
-                section("section-1", GUARDS_H, GUARDS_CPP),
-                section("section-2", GUARDS_H, PROFILER),
-                section("section-3", GUARDS_H)));
-        approve(GUARDS_H);
-
-        assertEquals(List.of("②"),
-                sections.stateOf(board, board.sections().get(0)).settledElsewhere(),
-                "section 1 must name at most one sharer, not both 2 and 3");
-        assertEquals(List.of("①"),
-                sections.stateOf(board, board.sections().get(1)).settledElsewhere(),
-                "section 2 must name at most one sharer, not both 1 and 3");
-        assertEquals(List.of("①"),
-                sections.stateOf(board, board.sections().get(2)).settledElsewhere(),
-                "section 3 must name at most one sharer, not both 1 and 2");
+    void aFileNotInTheDiffHasNoDecision() {
+        assertEquals(Optional.empty(), sections.decisionOf(board(), "src/nowhere.cpp"));
     }
 
     // ---- staleness has three states, not two --------------------------------
 
     @Test
     void aVerdictAgainstTheCurrentBaseIsFresh() {
-        SectionStates.Board board = overlapping();
         approve(GUARDS_H);
 
-        assertEquals(SectionStates.Staleness.FRESH,
-                sections.stateOf(board, board.sections().get(0)).staleness());
+        assertEquals(SectionStates.Staleness.FRESH, sections.stalenessOf(board(), GUARDS_H));
     }
 
     @Test
-    void aBaseMoveTouchingTheSectionIsMoved() {
+    void aBaseMoveTouchingTheFileIsMoved() {
         host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
-        SectionStates.Board board = overlapping();
-        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
+        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, OLD_BASE);
 
-        assertEquals(SectionStates.Staleness.MOVED,
-                sections.stateOf(board, board.sections().get(0)).staleness());
+        assertEquals(SectionStates.Staleness.MOVED, sections.stalenessOf(board(), GUARDS_H));
     }
 
-    /**
-     * Same exclusion {@link #settledHunkCount} applies globally, one layer
-     * down: a card's own "n/total" must not count a stale hunk either, or
-     * the card could read fully settled while the verdict bar's progress
-     * line, for the SAME hunks, read one short of it (coordinator's review).
-     * The DECISION still merges the stale verdict -- only the numeric count
-     * excludes it.
-     */
+    /** Per file: a move touching guards.h does not stale guards.cpp's approval. */
     @Test
-    void settledHunksExcludesAStaleOneButTheDecisionStillMergesIt() {
+    void aBaseMoveTouchingAnotherFileLeavesThisOneFresh() {
         host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
-        SectionStates.Board board = overlapping();
-        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
-        approve(GUARDS_CPP);
+        record(GUARDS_CPP, ReviewVerdict.Decision.APPROVED, OLD_BASE);
 
-        SectionStates.SectionState state = sections.stateOf(board, board.sections().get(0));
-        assertEquals(1, state.settledHunks(), "the stale GUARDS_H verdict must not be counted");
-        assertEquals(2, state.totalHunks());
-        assertEquals(Optional.of(ReviewVerdict.Decision.APPROVED), state.decision(),
-                "the decision persists across staleness -- only its freshness is in question");
-    }
-
-    /**
-     * Task 18's correction 6a: a section with one stale-approved hunk and one
-     * genuinely UNREAD hunk has {@code settledHunks()==0} -- correct, nothing
-     * here is safely settled -- but the card must not read as though NOTHING
-     * was ever recorded either. {@code recordedHunks()} is what the rail's
-     * progress LABEL reads instead, so "1/2 hunks" survives exactly this gap.
-     */
-    @Test
-    void recordedHunksCountsAStaleVerdictEvenWhenNothingElseIsSettled() {
-        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
-        SectionStates.Board board = overlapping();
-        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
-        // GUARDS_CPP is left entirely unread -- no verdict of any kind.
-
-        SectionStates.SectionState state = sections.stateOf(board, board.sections().get(0));
-        assertEquals(0, state.settledHunks(), "the stale hunk must not count as SETTLED");
-        assertEquals(1, state.recordedHunks(),
-                "but it WAS recorded -- the card must not understate to zero hunks touched");
-        assertEquals(2, state.totalHunks());
+        assertEquals(SectionStates.Staleness.FRESH, sections.stalenessOf(board(), GUARDS_CPP));
     }
 
     /** A move that provably could not matter must not spend the reader's attention. */
     @Test
     void aBaseMoveElsewhereIsFresh() {
         host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of("docs/README.md")));
-        SectionStates.Board board = overlapping();
-        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
+        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, OLD_BASE);
 
-        assertEquals(SectionStates.Staleness.FRESH,
-                sections.stateOf(board, board.sections().get(0)).staleness());
+        assertEquals(SectionStates.Staleness.FRESH, sections.stalenessOf(board(), GUARDS_H));
     }
 
     /**
      * The delta is unresolvable while it is still being computed off the FX
      * thread, and when the old base can no longer be diffed. Neither is
      * evidence that the base moved, and rendering them as one would put a
-     * confirm-me banner on every card of a review nobody has touched.
+     * confirm-me banner on a review nobody has touched.
      */
     @Test
     void anUnresolvableDeltaIsUnknownNotMoved() {
         host.baseDelta = new BaseMove.Delta(true, new TreeSet<>());
-        SectionStates.Board board = overlapping();
-        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
+        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, OLD_BASE);
 
-        assertEquals(SectionStates.Staleness.UNKNOWN,
-                sections.stateOf(board, board.sections().get(0)).staleness());
+        assertEquals(SectionStates.Staleness.UNKNOWN, sections.stalenessOf(board(), GUARDS_H));
+    }
+
+    /** One hunk known to have moved is the strongest thing true of the file. */
+    @Test
+    void aKnownMoveOutranksAnUnknownOne() {
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
+        host.baseDeltaByRecordedBase.put("9".repeat(40), new BaseMove.Delta(true, new TreeSet<>()));
+        record(GUARDS_H, 0, ReviewVerdict.Decision.APPROVED, "9".repeat(40));
+        record(GUARDS_H, 1, ReviewVerdict.Decision.APPROVED, OLD_BASE);
+
+        assertEquals(SectionStates.Staleness.MOVED, sections.stalenessOf(board(), GUARDS_H));
     }
 
     // ---- an agent may add staleness, never take it away (spec 9.7) ----------
@@ -284,19 +188,17 @@ class SectionStatesTest {
     /**
      * The blind spot {@link BaseMove} names in its own class comment: the
      * intersection is file-level and lexical, so a base commit that changes
-     * behaviour without touching a file this section names reads as FRESH.
-     * An agent's {@code affected} recheck is the only thing that can close
-     * it, and this is the case where it has to.
+     * behaviour without touching this file reads as FRESH. An agent's {@code
+     * affected} recheck is the only thing that can close it.
      */
     @Test
     void anAgentsAffectedRecheckMarksAMoveTheFileFilterDismissed() {
         host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of("docs/README.md")));
-        SectionStates.Board board = overlapping();
-        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
-        assess(GUARDS_H, true, "0".repeat(40));
+        SectionStates.Board board = board();
+        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, OLD_BASE);
+        assess(GUARDS_H, true, OLD_BASE);
 
-        assertEquals(SectionStates.Staleness.MOVED,
-                sections.stateOf(board, board.sections().get(0)).staleness());
+        assertEquals(SectionStates.Staleness.MOVED, sections.stalenessOf(board, GUARDS_H));
         assertEquals(0, sections.settledHunkCount(board),
                 "a hunk the agent marked must not count as settled either");
     }
@@ -304,19 +206,16 @@ class SectionStatesTest {
     /**
      * <strong>The asymmetry.</strong> The filter already found this move, and
      * an agent saying "unaffected" must not take that back: an agent wrong
-     * THAT way leaves a human's approval standing over code nobody re-read,
-     * which is the outcome the whole reviewed-state model refuses. False and
-     * "never asked" are one answer here, deliberately.
+     * THAT way leaves a human's approval standing over code nobody re-read.
      */
     @Test
     void anAgentsUnaffectedRecheckDoesNotClearAMoveTheFilterFound() {
         host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
-        SectionStates.Board board = overlapping();
-        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
-        assess(GUARDS_H, false, "0".repeat(40));
+        SectionStates.Board board = board();
+        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, OLD_BASE);
+        assess(GUARDS_H, false, OLD_BASE);
 
-        assertEquals(SectionStates.Staleness.MOVED,
-                sections.stateOf(board, board.sections().get(0)).staleness());
+        assertEquals(SectionStates.Staleness.MOVED, sections.stalenessOf(board, GUARDS_H));
         assertEquals(0, sections.settledHunkCount(board),
                 "an agent's advice must not re-settle a hunk the base moved under");
     }
@@ -325,82 +224,54 @@ class SectionStatesTest {
     @Test
     void anAgentsUnaffectedRecheckDoesNotClearAnUnresolvableDelta() {
         host.baseDelta = new BaseMove.Delta(true, new TreeSet<>());
-        SectionStates.Board board = overlapping();
-        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
-        assess(GUARDS_H, false, "0".repeat(40));
+        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, OLD_BASE);
+        assess(GUARDS_H, false, OLD_BASE);
 
-        assertEquals(SectionStates.Staleness.UNKNOWN,
-                sections.stateOf(board, board.sections().get(0)).staleness());
+        assertEquals(SectionStates.Staleness.UNKNOWN, sections.stalenessOf(board(), GUARDS_H));
     }
 
     /** An affected recheck DOES outrank "cannot tell": it only ever adds reading. */
     @Test
     void anAgentsAffectedRecheckOutranksAnUnresolvableDelta() {
         host.baseDelta = new BaseMove.Delta(true, new TreeSet<>());
-        SectionStates.Board board = overlapping();
-        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
-        assess(GUARDS_H, true, "0".repeat(40));
+        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, OLD_BASE);
+        assess(GUARDS_H, true, OLD_BASE);
 
-        assertEquals(SectionStates.Staleness.MOVED,
-                sections.stateOf(board, board.sections().get(0)).staleness());
+        assertEquals(SectionStates.Staleness.MOVED, sections.stalenessOf(board(), GUARDS_H));
     }
 
     /**
      * An assessment is about one base PAIR. A recheck of an older move is not
-     * an answer about this one, and carrying it forward would be the agent
-     * answering something it was never asked.
+     * an answer about this one.
      */
     @Test
     void anAgentsRecheckOfADifferentBasePairIsNotConsulted() {
         host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of("docs/README.md")));
-        SectionStates.Board board = overlapping();
-        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
-        // Marked affected -- but about a move FROM a base this verdict was
-        // never judged against.
-        host.store.putAssessment(new app.drydock.review.RecheckAssessment(scope.id(),
+        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, OLD_BASE);
+        host.store.putAssessment(new RecheckAssessment(scope.id(),
                 digestOf(GUARDS_H), "9".repeat(40), host.baseCommit, true, "why", Instant.EPOCH));
 
-        assertEquals(SectionStates.Staleness.FRESH,
-                sections.stateOf(board, board.sections().get(0)).staleness());
+        assertEquals(SectionStates.Staleness.FRESH, sections.stalenessOf(board(), GUARDS_H));
     }
 
     /**
-     * A recheck cannot invent staleness where the base never moved. The
-     * agent's answer is consulted only once the verdict is already stale
-     * against the current base -- it widens what counts as a move that
-     * matters, it does not decide that one happened.
+     * A recheck cannot invent staleness where the base never moved: it widens
+     * what counts as a move that matters, it does not decide that one happened.
      */
     @Test
     void anAgentsAffectedRecheckCannotStaleAVerdictAgainstTheCurrentBase() {
         host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
-        SectionStates.Board board = overlapping();
         approve(GUARDS_H);
         assess(GUARDS_H, true, host.baseCommit);
 
-        assertEquals(SectionStates.Staleness.FRESH,
-                sections.stateOf(board, board.sections().get(0)).staleness());
-    }
-
-    /** One hunk known to have moved is the strongest thing true of the section. */
-    @Test
-    void aKnownMoveOutranksAnUnknownOne() {
-        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_CPP)));
-        SectionStates.Board board = overlapping();
-        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
-        record(GUARDS_CPP, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
-
-        assertEquals(SectionStates.Staleness.MOVED,
-                sections.stateOf(board, board.sections().get(0)).staleness());
+        assertEquals(SectionStates.Staleness.FRESH, sections.stalenessOf(board(), GUARDS_H));
     }
 
     /**
-     * The half Task 5 deferred: a base commit touching a file this section
-     * does not change but DOES reference can have moved the ground under an
-     * approval, and only the change graph -- when already in hand -- makes
-     * that visible (spec §9.2). Section-1 here names only Profiler.java;
-     * the base move touches only Guards.java, which Profiler.java
-     * references. Without the graph's widening this reads FRESH -- the
-     * scope's own files never touch Guards.java at all.
+     * A base commit touching a file this one does not change but DOES
+     * reference can have moved the ground under an approval, and only the
+     * change graph -- when already in hand -- makes that visible (spec §9.2).
+     * The move touches only Guards.java, which Profiler.java references.
      */
     @Test
     void aBaseMoveTouchingAReferencedButUnchangedFileIsMoved() {
@@ -408,298 +279,128 @@ class SectionStatesTest {
                 file("src/Guards.java", "class JmpCtxScope { }"),
                 file("src/Profiler.java", "void go() { new JmpCtxScope(); }")));
         ChangeGraph graph = ChangeGraph.of(graphDiff);
-        SectionStates.Board board = new SectionStates.Board(scope, graphDiff,
-                List.of(section("section-1", "src/Profiler.java")), Optional.of(graph));
+        SectionStates.Board board = new SectionStates.Board(scope, graphDiff, Optional.of(graph));
         host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of("src/Guards.java")));
-        record(graphDiff, "src/Profiler.java", ReviewVerdict.Decision.APPROVED, "0".repeat(40));
+        record(graphDiff, "src/Profiler.java", 0, ReviewVerdict.Decision.APPROVED, OLD_BASE);
 
-        assertEquals(SectionStates.Staleness.MOVED,
-                sections.stateOf(board, board.sections().get(0)).staleness());
-    }
-
-    // ---- a grouping that drifted off the diff --------------------------------
-
-    /**
-     * Hunk ids are positional ({@code h_<file>_<index>}), so an agent's
-     * grouping can name hunks a later diff does not have. Such a section can
-     * never be settled: counting it toward progress refuses Submit forever.
-     */
-    @Test
-    void aSectionWhoseHunksLeftTheDiffIsAdriftNotUnread() {
-        SectionStates.Board board = board(List.of(
-                section("section-1", GUARDS_H),
-                new ReviewIntent("section-2", 2, "Profiler", ReviewIntent.Kind.CHANGE,
-                        ReviewIntent.Risk.MED, "", List.of(HunkIds.hunkId(PROFILER, 7)),
-                        Optional.empty(), false)));
-
-        SectionStates.SectionState adrift = sections.stateOf(board, board.sections().get(1));
-        assertTrue(adrift.hunksMissing());
-        assertEquals(0, adrift.totalHunks());
-        assertEquals(List.of("section-1"),
-                sections.counted(board).stream().map(ReviewIntent::id).toList());
-        assertFalse(sections.hasResolvableHunks(board, board.sections().get(1)));
-    }
-
-    /** An intent naming no hunks at all covers the whole diff -- it is not adrift. */
-    @Test
-    void anIntentNamingNoHunksCoversEverything() {
-        SectionStates.Board board = board(List.of(new ReviewIntent("everything", 1, "All",
-                ReviewIntent.Kind.CHANGE, ReviewIntent.Risk.MED, "", List.of(),
-                Optional.empty(), false)));
-
-        assertEquals(3, sections.digestsOf(board, board.sections().get(0)).size());
-        assertFalse(sections.stateOf(board, board.sections().get(0)).hunksMissing());
-    }
-
-    /** A collapsed section is not counted: the point of the collapse is nothing to read. */
-    @Test
-    void aCollapsedSectionIsNotCounted() {
-        ReviewIntent collapsed = new ReviewIntent("collapsed", 2, "Rename",
-                ReviewIntent.Kind.MOVE, ReviewIntent.Risk.NONE, "",
-                List.of(HunkIds.hunkId(PROFILER, 0)),
-                Optional.of(new ReviewIntent.Collapse("pure rename", "git -M", 1, 1)), false);
-        SectionStates.Board board = board(List.of(section("section-1", GUARDS_H), collapsed));
-
-        assertEquals(List.of("section-1"),
-                sections.counted(board).stream().map(ReviewIntent::id).toList());
-        assertEquals(1, sections.distinctDigests(board).size());
-    }
-
-    // ---- the digest memo -----------------------------------------------------
-
-    /**
-     * A reviewer may re-issue the same id over DIFFERENT hunks. A memo keyed
-     * by the id would answer with the hunks of a grouping that no longer
-     * exists.
-     */
-    @Test
-    void reIssuingAnIdOverDifferentHunksIsNotServedFromTheMemo() {
-        SectionStates.Board first = board(List.of(section("s", GUARDS_H)));
-        assertEquals(List.of(digestOf(GUARDS_H)), sections.digestsOf(first, first.sections().get(0)));
-
-        SectionStates.Board second = board(List.of(section("s", PROFILER)));
-        assertEquals(List.of(digestOf(PROFILER)),
-                sections.digestsOf(second, second.sections().get(0)));
+        assertEquals(SectionStates.Staleness.MOVED, sections.stalenessOf(board, "src/Profiler.java"));
+        assertEquals(SectionStates.Staleness.FRESH,
+                sections.stalenessOf(new SectionStates.Board(scope, graphDiff), "src/Profiler.java"),
+                "without the graph only the file itself counts");
     }
 
     @Test
-    void sectionMarksAreCircledUpToTwentyThenPlain() {
-        assertEquals("①", SectionStates.sectionMark(1));
-        assertEquals("⑳", SectionStates.sectionMark(20));
-        assertEquals("#21", SectionStates.sectionMark(21));
-    }
+    void settledHunkCountExcludesAStaleVerdict() {
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
+        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, OLD_BASE);
+        approve(GUARDS_CPP);
+        approve(PROFILER);
 
-    // ---- what a/r/u act on (spec §9.6) ----------------------------------------
-
-    /** The anchor hunk is the FIRST one named, matching where the diff column scrolls to. */
-    @Test
-    void digestOfAnchorHunkIsTheFirstHunkNamed() {
-        SectionStates.Board board = overlapping();
-        ReviewIntent section1 = board.sections().get(0);
-
-        assertEquals(Optional.of(digestOf(GUARDS_H)), sections.digestOfAnchorHunk(board, section1));
+        assertEquals(2, sections.settledHunkCount(board()),
+                "the stale GUARDS_H verdict must not count toward progress");
     }
 
     @Test
-    void digestOfAnchorHunkIsEmptyForAnUnresolvableSection() {
-        SectionStates.Board board = board(List.of(section("adrift", "src/gone.cpp")));
+    void oldBaseOfNamesTheStaleVerdictsBase() {
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
+        approve(GUARDS_H, 0);
+        record(GUARDS_H, 1, ReviewVerdict.Decision.APPROVED, OLD_BASE);
 
-        assertTrue(sections.digestOfAnchorHunk(board, board.sections().get(0)).isEmpty());
-    }
-
-    @Test
-    void currentFileOfIsTheAnchorHunksFileWhenNothingIsSelected() {
-        SectionStates.Board board = overlapping();
-        ReviewIntent section2 = board.sections().get(1);
-
-        assertEquals(Optional.of(GUARDS_H), sections.currentFileOf(board, section2, Optional.empty()));
+        assertEquals(OLD_BASE, sections.oldBaseOf(board(), GUARDS_H));
     }
 
     /**
-     * An intent naming no hunks at all covers the whole diff (see {@link
-     * ReviewIntent#containsHunk}); the anchor-file fallback inside {@link
-     * SectionStates#currentFileOf} falls back further, to the first file of
-     * the diff, rather than answering nothing.
+     * Digests are memoized per diff INSTANCE: a re-diff that changed a
+     * file's content must not be answered with the previous diff's hunks.
      */
     @Test
-    void currentFileOfFallsBackToTheDiffsFirstFileWhenTheSectionNamesNone() {
-        SectionStates.Board board = board(List.of(
-                new ReviewIntent("whole-diff", 1, "Everything", ReviewIntent.Kind.CHANGE,
-                        ReviewIntent.Risk.MED, "", List.of(), Optional.empty(), false)));
+    void aNewDiffIsNotServedFromTheDigestMemo() {
+        assertEquals(List.of(digestOf(GUARDS_CPP)), sections.digestsOfFile(board(), GUARDS_CPP));
 
-        assertEquals(Optional.of(GUARDS_H),
-                sections.currentFileOf(board, board.sections().get(0), Optional.empty()));
+        UnifiedDiff changed = new UnifiedDiff(List.of(file(GUARDS_CPP, "void uninstall();")));
+        assertEquals(List.of(digestOf(changed, GUARDS_CPP, 0)),
+                sections.digestsOfFile(new SectionStates.Board(scope, changed), GUARDS_CPP));
+        assertNotEquals(digestOf(GUARDS_CPP), digestOf(changed, GUARDS_CPP, 0));
     }
 
-    /** A gutter selection wins over the section's own anchor file. */
-    @Test
-    void currentFileOfPrefersTheGutterSelectionOverTheAnchor() {
-        SectionStates.Board board = overlapping();
-        ReviewIntent section1 = board.sections().get(0);
-        String selectionKey = GUARDS_CPP + " n1";
+    // ---- what a/r act on (spec §9.6) ------------------------------------------
 
-        assertEquals(Optional.of(GUARDS_CPP),
-                sections.currentFileOf(board, section1, Optional.of(selectionKey)));
-    }
-
-    /** A gutter selection resolves to the hunk containing that exact line. */
+    /** A gutter selection resolves to the hunk containing that exact line, in any file. */
     @Test
     void digestOfCurrentHunkPrefersTheGutterSelection() {
-        SectionStates.Board board = overlapping();
-        ReviewIntent section1 = board.sections().get(0);
-        String selectionKey = GUARDS_CPP + " n1";
-
         assertEquals(Optional.of(digestOf(GUARDS_CPP)),
-                sections.digestOfCurrentHunk(board, section1, Optional.of(selectionKey)));
+                sections.digestOfCurrentHunk(board(), GUARDS_H, Optional.of(GUARDS_CPP + " n1")));
     }
 
     /**
-     * With nothing selected, HUNK mode must not always answer hunk one:
-     * with the anchor hunk already settled, the next press has to reach
-     * the section's first UNSETTLED hunk, or a reader who never opens the
-     * gutter composer could never approve anything past the first hunk.
+     * With nothing selected, {@code a} must not always answer hunk one: with
+     * the first hunk settled, the next press has to reach the file's first
+     * UNSETTLED hunk.
      */
     @Test
     void digestOfCurrentHunkFallsBackToTheFirstUnsettledHunk() {
-        SectionStates.Board board = overlapping();
-        ReviewIntent section1 = board.sections().get(0);
-        approve(GUARDS_H);
+        approve(GUARDS_H, 0);
 
-        assertEquals(Optional.of(digestOf(GUARDS_CPP)),
-                sections.digestOfCurrentHunk(board, section1, Optional.empty()));
+        assertEquals(Optional.of(digestOf(GUARDS_H, 1)),
+                sections.digestOfCurrentHunk(board(), GUARDS_H, Optional.empty()));
     }
 
-    /** Once every hunk is settled, the anchor is the last fallback left. */
+    /** Once every hunk is settled, the file's first hunk is the last fallback left. */
     @Test
-    void digestOfCurrentHunkFallsBackToTheAnchorWhenEverythingIsSettled() {
-        SectionStates.Board board = overlapping();
-        ReviewIntent section1 = board.sections().get(0);
-        approve(GUARDS_H);
-        approve(GUARDS_CPP);
+    void digestOfCurrentHunkFallsBackToTheFirstHunkWhenEverythingIsSettled() {
+        approve(GUARDS_H, 0);
+        approve(GUARDS_H, 1);
 
-        assertEquals(Optional.of(digestOf(GUARDS_H)),
-                sections.digestOfCurrentHunk(board, section1, Optional.empty()));
+        assertEquals(Optional.of(digestOf(GUARDS_H, 0)),
+                sections.digestOfCurrentHunk(board(), GUARDS_H, Optional.empty()));
     }
 
     /** A stale key -- selected line no longer in the diff -- is not trusted; the walk continues. */
     @Test
     void digestOfCurrentHunkIgnoresASelectionTheDiffNoLongerHas() {
-        SectionStates.Board board = overlapping();
-        ReviewIntent section1 = board.sections().get(0);
-
         assertEquals(Optional.of(digestOf(GUARDS_H)),
-                sections.digestOfCurrentHunk(board, section1, Optional.of(GUARDS_H + " n999")));
+                sections.digestOfCurrentHunk(board(), GUARDS_H, Optional.of(GUARDS_H + " n999")));
     }
 
-    // ---- what a/r/u act on does not count as settled while stale (spec §9.2) --
-
     @Test
-    void settledHunkCountExcludesAStaleVerdict() {
-        SectionStates.Board board = overlapping();
-        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
-        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
-        approve(GUARDS_CPP);
-        approve(PROFILER);
-
-        assertEquals(2, sections.settledHunkCount(board),
-                "the stale GUARDS_H verdict must not count toward progress");
+    void currentFileOfIsTheCursorsFileWhenNothingIsSelected() {
+        assertEquals(PROFILER, sections.currentFileOf(PROFILER, Optional.empty()));
     }
 
-    /**
-     * {@code ⇧A}/{@code ⇧R} settle every hunk of the file across the WHOLE
-     * diff -- not just the hunks the current section happens to name.
-     */
+    /** A gutter selection wins over the cursor's file. */
     @Test
-    void digestsOfFileCoversEveryHunkOfTheFileRegardlessOfSection() {
-        SectionStates.Board board = overlapping();
+    void currentFileOfPrefersTheGutterSelection() {
+        assertEquals(GUARDS_CPP, sections.currentFileOf(GUARDS_H, Optional.of(GUARDS_CPP + " n1")));
+    }
 
-        assertEquals(List.of(digestOf(GUARDS_H)), sections.digestsOfFile(board, GUARDS_H));
+    @Test
+    void digestsOfFileCoversEveryHunkOfTheFile() {
+        assertEquals(List.of(digestOf(GUARDS_H, 0), digestOf(GUARDS_H, 1)),
+                sections.digestsOfFile(board(), GUARDS_H));
     }
 
     @Test
     void digestsOfFileIsEmptyForAFileNotInTheDiff() {
-        SectionStates.Board board = overlapping();
-
-        assertTrue(sections.digestsOfFile(board, "src/nowhere.cpp").isEmpty());
+        assertTrue(sections.digestsOfFile(board(), "src/nowhere.cpp").isEmpty());
     }
 
     @Test
-    void digestsForActionInHunkModeIsJustTheOneHunk() {
-        SectionStates.Board board = overlapping();
-        ReviewIntent section1 = board.sections().get(0);
-
-        assertEquals(List.of(digestOf(GUARDS_H)), sections.digestsForAction(
-                board, section1, SessionReviewView.SettleUnit.HUNK, false, Optional.empty()));
+    void fileOfDigestFindsTheHunksFile() {
+        assertEquals(Optional.of(GUARDS_H), sections.fileOfDigest(board(), digestOf(GUARDS_H, 1)));
+        assertEquals(Optional.empty(), sections.fileOfDigest(board(), "not-a-digest"));
     }
 
     @Test
-    void digestsForActionInSectionModeIsEveryHunkTheSectionNames() {
-        SectionStates.Board board = overlapping();
-        ReviewIntent section1 = board.sections().get(0);
-
-        assertEquals(List.of(digestOf(GUARDS_H), digestOf(GUARDS_CPP)), sections.digestsForAction(
-                board, section1, SessionReviewView.SettleUnit.SECTION, false, Optional.empty()));
+    void digestsForActionIsJustTheOneHunk() {
+        assertEquals(List.of(digestOf(GUARDS_H)),
+                sections.digestsForAction(board(), GUARDS_H, false, Optional.empty()));
     }
 
-    /** {@code wholeFile} wins over the unit even in HUNK mode -- ⇧A/⇧R always mean the file. */
+    /** {@code wholeFile} is ⇧A/⇧R: every hunk of the file. */
     @Test
-    void digestsForActionWithWholeFileIgnoresTheUnit() {
-        SectionStates.Board board = overlapping();
-        ReviewIntent section1 = board.sections().get(0);
-
-        assertEquals(List.of(digestOf(GUARDS_H)), sections.digestsForAction(
-                board, section1, SessionReviewView.SettleUnit.HUNK, true, Optional.empty()));
-    }
-
-    // ---- whose judgement the staleness is (spec §9.7 / §6.5) ----------------
-
-    /**
-     * Spec §9.7: "Assessments render as CLAIMED, not measured." A move the
-     * file-level filter found is drydock's own measurement.
-     */
-    @Test
-    void aMoveTheFilterFoundIsMeasured() {
-        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
-        SectionStates.Board board = overlapping();
-        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
-
-        SectionStates.SectionState state = sections.stateOf(board, board.sections().get(0));
-
-        assertEquals(SectionStates.Staleness.MOVED, state.staleness());
-        assertEquals(Provenance.MEASURED, state.stalenessProvenance());
-    }
-
-    /**
-     * The case §6.5 exists for: the filter dismissed this move, and only the
-     * AGENT's assertion makes it stale. Rendered identically to a measured
-     * move, a reviewer could not tell whose judgement they were trusting.
-     */
-    @Test
-    void aMoveOnlyTheAgentCallsAffectedIsClaimed() {
-        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of("docs/README.md")));
-        SectionStates.Board board = overlapping();
-        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
-        assess(GUARDS_H, true, "0".repeat(40));
-
-        SectionStates.SectionState state = sections.stateOf(board, board.sections().get(0));
-
-        assertEquals(SectionStates.Staleness.MOVED, state.staleness());
-        assertEquals(Provenance.CLAIMED, state.stalenessProvenance());
-    }
-
-    /** An "unaffected" assessment is advice and changes no warrant. */
-    @Test
-    void anUnaffectedAssessmentLeavesTheWarrantMeasured() {
-        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
-        SectionStates.Board board = overlapping();
-        record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
-        assess(GUARDS_H, false, "0".repeat(40));
-
-        SectionStates.SectionState state = sections.stateOf(board, board.sections().get(0));
-
-        assertEquals(SectionStates.Staleness.MOVED, state.staleness());
-        assertEquals(Provenance.MEASURED, state.stalenessProvenance(),
-                "the filter found this move; the agent's advice did not");
+    void digestsForActionWithWholeFileIsEveryHunkOfTheFile() {
+        assertEquals(List.of(digestOf(GUARDS_H, 0), digestOf(GUARDS_H, 1)),
+                sections.digestsForAction(board(), GUARDS_H, true, Optional.empty()));
     }
 
     // ---- the automatic recheck a base move earns (spec §9.7) ----------------
@@ -711,7 +412,7 @@ class SectionStatesTest {
     @Test
     void aBaseMoveThatStalesAnApprovalAsksTheAgentOnce() {
         host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
-        SectionStates.Board board = overlapping();
+        SectionStates.Board board = board();
         record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
 
         sections.requestRechecks(board, new RecheckDispatch());
@@ -729,7 +430,7 @@ class SectionStatesTest {
     @Test
     void aSecondRenderInsideTheSameMoveDoesNotAskAgain() {
         host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
-        SectionStates.Board board = overlapping();
+        SectionStates.Board board = board();
         record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
         RecheckDispatch dispatch = new RecheckDispatch();
 
@@ -748,7 +449,7 @@ class SectionStatesTest {
     void aRecheckWhoseHandOffFailedIsAskedAgainOnTheNextRender() {
         host.recheckHandOffSucceeds = false;
         host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
-        SectionStates.Board board = overlapping();
+        SectionStates.Board board = board();
         record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
         RecheckDispatch dispatch = new RecheckDispatch();
 
@@ -760,13 +461,13 @@ class SectionStatesTest {
 
     /**
      * Relevance-gated: a move touching nothing this scope reads leaves every
-     * section FRESH, and a fresh section has no disturbed approval to ask
+     * file FRESH, and a fresh file has no disturbed approval to ask
      * about. Without this every base move spends a subagent.
      */
     @Test
     void aMoveThatCouldNotMatterAsksNothing() {
         host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of("docs/README.md")));
-        SectionStates.Board board = overlapping();
+        SectionStates.Board board = board();
         record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
 
         sections.requestRechecks(board, new RecheckDispatch());
@@ -786,7 +487,7 @@ class SectionStatesTest {
     @Test
     void aMoveNobodyCanResolveYetAsksNothing() {
         host.baseDelta = new BaseMove.Delta(true, new TreeSet<>());
-        SectionStates.Board board = overlapping();
+        SectionStates.Board board = board();
         record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
 
         sections.requestRechecks(board, new RecheckDispatch());
@@ -804,7 +505,7 @@ class SectionStatesTest {
     @Test
     void aVerdictRecordedAgainstAnUnresolvedBaseAsksNothing() {
         host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
-        SectionStates.Board board = overlapping();
+        SectionStates.Board board = board();
         record(GUARDS_H, ReviewVerdict.Decision.APPROVED, SessionReviewView.UNRESOLVED_BASE);
 
         sections.requestRechecks(board, new RecheckDispatch());
@@ -817,7 +518,7 @@ class SectionStatesTest {
     @Test
     void anUnresolvedCurrentBaseAsksNothing() {
         host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
-        SectionStates.Board board = overlapping();
+        SectionStates.Board board = board();
         record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
         host.baseCommit = SessionReviewView.UNRESOLVED_BASE;
 
@@ -827,10 +528,10 @@ class SectionStatesTest {
     }
 
     /**
-     * <strong>Relevance is per approval, not per section.</strong> Two
-     * approvals in ONE section, recorded at different bases: one move is
-     * resolved and could matter, the other is still in flight. Gating on the
-     * section alone let the resolved one drag the unresolved one into the
+     * <strong>Relevance is per approval, not per file.</strong> Two
+     * approvals recorded at different bases: one move is resolved and could
+     * matter, the other is still in flight. Gating on anything coarser than
+     * the approval let the resolved one drag the unresolved one into the
      * dispatch -- asking the agent about a move before git had said whether
      * it mattered, with the claim permanent.
      */
@@ -838,7 +539,7 @@ class SectionStatesTest {
     void aNeighbourWhoseMoveIsStillInFlightIsNotDraggedIn() {
         host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H, GUARDS_CPP)));
         host.baseDeltaByRecordedBase.put("9".repeat(40), new BaseMove.Delta(true, new TreeSet<>()));
-        SectionStates.Board board = overlapping();
+        SectionStates.Board board = board();
         record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
         record(GUARDS_CPP, ReviewVerdict.Decision.APPROVED, "9".repeat(40));
 
@@ -854,7 +555,7 @@ class SectionStatesTest {
         host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H, GUARDS_CPP)));
         host.baseDeltaByRecordedBase.put("9".repeat(40),
                 new BaseMove.Delta(false, new TreeSet<>(List.of("docs/README.md"))));
-        SectionStates.Board board = overlapping();
+        SectionStates.Board board = board();
         record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
         record(GUARDS_CPP, ReviewVerdict.Decision.APPROVED, "9".repeat(40));
 
@@ -872,7 +573,7 @@ class SectionStatesTest {
     @Test
     void twoApprovalsAtDifferentOlderBasesEachEarnTheirOwnRecheck() {
         host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H, GUARDS_CPP)));
-        SectionStates.Board board = overlapping();
+        SectionStates.Board board = board();
         record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
         record(GUARDS_CPP, ReviewVerdict.Decision.APPROVED, "9".repeat(40));
 
@@ -893,7 +594,7 @@ class SectionStatesTest {
     void aHarnessWithoutSubagentsIsNeverAskedAutomatically() {
         host.supportsAutomaticRecheck = false;
         host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
-        SectionStates.Board board = overlapping();
+        SectionStates.Board board = board();
         record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
 
         sections.requestRechecks(board, new RecheckDispatch());
@@ -909,7 +610,7 @@ class SectionStatesTest {
     @Test
     void aMoveTheAgentHasAlreadyAnsweredIsNotAskedAgain() {
         host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
-        SectionStates.Board board = overlapping();
+        SectionStates.Board board = board();
         record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
         assess(GUARDS_H, false, "0".repeat(40));
 
@@ -923,7 +624,7 @@ class SectionStatesTest {
     @Test
     void aRequestedChangesVerdictEarnsNoRecheck() {
         host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
-        SectionStates.Board board = overlapping();
+        SectionStates.Board board = board();
         record(GUARDS_H, ReviewVerdict.Decision.CHANGES, "0".repeat(40));
 
         sections.requestRechecks(board, new RecheckDispatch());
@@ -942,7 +643,7 @@ class SectionStatesTest {
     void oneDispatchMemoryServesTwoScopesIndependently() {
         host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
         RecheckDispatch shared = new RecheckDispatch();
-        SectionStates.Board first = overlapping();
+        SectionStates.Board first = board();
         record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
         sections.requestRechecks(first, shared);
         assertEquals(1, host.recheckDispatches.size(), "precondition");
@@ -958,7 +659,7 @@ class SectionStatesTest {
         host.store.putVerdict(new ReviewVerdict(other.id(), digestOf(GUARDS_H),
                 ReviewVerdict.Decision.APPROVED, Optional.empty(), Instant.EPOCH,
                 "0".repeat(40), host.headCommit));
-        SectionStates.Board second = new SectionStates.Board(other, diff, first.sections());
+        SectionStates.Board second = new SectionStates.Board(other, diff);
 
         sections.requestRechecks(second, shared);
 
@@ -967,16 +668,16 @@ class SectionStatesTest {
     }
 
     /**
-     * Only the approvals the move actually staled are asked about. A section
+     * Only the approvals the move actually staled are asked about. A scope
      * can hold one stale hunk and one approved against the CURRENT base;
-     * taking every verdict in a non-FRESH section would ask the agent to read
+     * taking every verdict of a stale scope would ask the agent to read
      * what changed between a base and itself -- a subagent spent on an empty
      * diff.
      */
     @Test
-    void aFreshApprovalSharingAStaleSectionIsNotAskedAbout() {
+    void aFreshApprovalBesideAStaleOneIsNotAskedAbout() {
         host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H, GUARDS_CPP)));
-        SectionStates.Board board = overlapping();
+        SectionStates.Board board = board();
         record(GUARDS_H, ReviewVerdict.Decision.APPROVED, "0".repeat(40));
         record(GUARDS_CPP, ReviewVerdict.Decision.APPROVED, host.baseCommit);
 
@@ -995,7 +696,7 @@ class SectionStatesTest {
     @Test
     void aScopeWithNoRecordedApprovalAsksNothing() {
         host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
-        SectionStates.Board board = overlapping();
+        SectionStates.Board board = board();
 
         sections.requestRechecks(board, new RecheckDispatch());
         assertTrue(host.recheckDispatches.isEmpty());
@@ -1008,35 +709,16 @@ class SectionStatesTest {
 
     // ---- helpers -------------------------------------------------------------
 
-    /** Section ① covers both guards files; section ② covers guards.h again and profiler. */
-    private SectionStates.Board overlapping() {
-        return board(List.of(
-                section("section-1", GUARDS_H, GUARDS_CPP),
-                section("section-2", GUARDS_H, PROFILER)));
-    }
-
-    private SectionStates.Board board(List<ReviewIntent> grouping) {
-        List<ReviewIntent> numbered = new ArrayList<>();
-        int number = 1;
-        for (ReviewIntent intent : grouping) {
-            numbered.add(new ReviewIntent(intent.id(), number++, intent.title(), intent.kind(),
-                    intent.risk(), intent.rationale(), intent.hunkIds(), intent.collapse(),
-                    intent.autoApprove()));
-        }
-        return new SectionStates.Board(scope, diff, numbered);
-    }
-
-    private static ReviewIntent section(String id, String... files) {
-        List<String> hunkIds = new ArrayList<>();
-        for (String file : files) {
-            hunkIds.add(HunkIds.hunkId(file, 0));
-        }
-        return new ReviewIntent(id, 0, id, ReviewIntent.Kind.CHANGE, ReviewIntent.Risk.MED,
-                "", hunkIds, Optional.empty(), false);
+    private SectionStates.Board board() {
+        return new SectionStates.Board(scope, diff);
     }
 
     private void approve(String file) {
-        record(file, ReviewVerdict.Decision.APPROVED, host.baseCommit);
+        approve(file, 0);
+    }
+
+    private void approve(String file, int hunk) {
+        record(file, hunk, ReviewVerdict.Decision.APPROVED, host.baseCommit);
     }
 
     /**
@@ -1046,36 +728,48 @@ class SectionStatesTest {
      * recheck up by.
      */
     private void assess(String file, boolean affected, String fromBase) {
-        host.store.putAssessment(new app.drydock.review.RecheckAssessment(scope.id(),
+        host.store.putAssessment(new RecheckAssessment(scope.id(),
                 digestOf(file), fromBase, host.baseCommit, affected, "why", Instant.EPOCH));
     }
 
     private void record(String file, ReviewVerdict.Decision decision, String base) {
-        record(diff, file, decision, base);
+        record(file, 0, decision, base);
     }
 
-    /** As {@link #record(String, ReviewVerdict.Decision, String)}, over a diff other than the fixture's. */
-    private void record(UnifiedDiff source, String file, ReviewVerdict.Decision decision, String base) {
-        host.store.putVerdict(new ReviewVerdict(scope.id(), digestOf(source, file), decision,
+    private void record(String file, int hunk, ReviewVerdict.Decision decision, String base) {
+        record(diff, file, hunk, decision, base);
+    }
+
+    /** As {@link #record(String, int, ReviewVerdict.Decision, String)}, over a diff other than the fixture's. */
+    private void record(UnifiedDiff source, String file, int hunk, ReviewVerdict.Decision decision, String base) {
+        host.store.putVerdict(new ReviewVerdict(scope.id(), digestOf(source, file, hunk), decision,
                 Optional.empty(), Instant.EPOCH, base, host.headCommit));
     }
 
     private String digestOf(String file) {
-        return digestOf(diff, file);
+        return digestOf(file, 0);
     }
 
-    private static String digestOf(UnifiedDiff source, String file) {
+    private String digestOf(String file, int hunk) {
+        return digestOf(diff, file, hunk);
+    }
+
+    private static String digestOf(UnifiedDiff source, String file, int hunk) {
         return source.files().stream()
                 .filter(candidate -> candidate.path().equals(file))
                 .findFirst()
-                .map(candidate -> HunkDigest.of(file, candidate.hunks().get(0)))
+                .map(candidate -> HunkDigest.of(file, candidate.hunks().get(hunk)))
                 .orElseThrow();
     }
 
-    private static UnifiedDiff.FileDiff file(String path, String text) {
-        return new UnifiedDiff.FileDiff(path, "M", 1, 0, false, false, List.of(
-                new UnifiedDiff.Hunk("@@ -1 +1 @@", List.of(
-                        new UnifiedDiff.Line(UnifiedDiff.Line.Kind.ADD, OptionalInt.empty(),
-                                OptionalInt.of(1), text)))));
+    /** One hunk per text, each on its own new-line number (index*10 + 1). */
+    private static UnifiedDiff.FileDiff file(String path, String... texts) {
+        List<UnifiedDiff.Hunk> hunks = new ArrayList<>();
+        for (int i = 0; i < texts.length; i++) {
+            hunks.add(new UnifiedDiff.Hunk("@@ -1 +1 @@", List.of(
+                    new UnifiedDiff.Line(UnifiedDiff.Line.Kind.ADD, OptionalInt.empty(),
+                            OptionalInt.of(i * 10 + 1), texts[i]))));
+        }
+        return new UnifiedDiff.FileDiff(path, "M", texts.length, 0, false, false, hunks);
     }
 }

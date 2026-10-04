@@ -22,13 +22,16 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -42,7 +45,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class SessionReviewViewTest extends ApplicationTest {
 
-    /** Wide enough that the responsive layout leaves both rails expanded. */
+    /** Wide enough that the responsive layout leaves every rail expanded. */
     private static final double SCENE_WIDTH = 1400;
 
     private final DiffService diffService = new DiffService();
@@ -229,16 +232,10 @@ class SessionReviewViewTest extends ApplicationTest {
     }
 
     /**
-     * A restored diff must not still be filtered by the scope it replaced.
-     *
-     * <p>Fallback intent ids are keyed by (kind, directory) and nothing else,
-     * so the two scopes of one branch collide on them: both diffs here group
-     * into {@code auto:change:src}. {@code setIntent} early-returns on an
-     * equal id, so nothing downstream would repair a filter left pointing at
-     * the outgoing scope -- and because the hunk sets differ (which is the
-     * whole reason a local scope exists beside its PR), the column would
-     * render the incoming diff down to nothing, with no indication that it
-     * was hiding anything.</p>
+     * A restored diff renders whole: the incoming scope's own files, none of
+     * the outgoing scope's and nothing of it hidden. (The retired intent
+     * filter once survived this switch and rendered the PR's diff down to
+     * nothing.)
      */
     @Test
     void aRestoredScopeIsNotStillFilteredByTheScopeItReplaced() {
@@ -255,7 +252,7 @@ class SessionReviewViewTest extends ApplicationTest {
         view.diagSelectChoice(SessionReviewScopes.Choice.PULL_REQUEST);
 
         assertEquals(1, renderedHunkHeaders(),
-                "the PR's own file must be on screen, not filtered away by the local scope's intent");
+                "the PR's own file must be on screen, and only it");
     }
 
     /**
@@ -299,43 +296,36 @@ class SessionReviewViewTest extends ApplicationTest {
     }
 
     /**
-     * The one member the brief specified as rewritten rather than moved.
-     * With the queue gone there are three columns, and the trade order is the
-     * solver's: narrow both rails, then collapse the margin, then the intent
-     * rail -- the code column is the last thing to give up width, because it
-     * is the only thing anyone opened Review to read.
+     * The hunk diff has no left rail: the margin is the only rail to trade,
+     * and it narrows before it collapses -- the code column is the last
+     * thing to give up width, because it is the only thing anyone opened
+     * Review to read.
      */
     @Test
-    void railsGiveUpWidthMarginFirstThenTheIntentRail() {
+    void theMarginIsTheHunkDiffsOnlyRailAndNarrowsBeforeItCollapses() {
         SessionReviewView view = newView();
         interact(() -> view.diagPublishOutcome(localScope.id(),
                 new DiffOutcome.Loaded(diffOf("src/A.java"))));
         showScopes(view, new SessionReviewScopes.Scopes(localScope, Optional.empty()),
                 SessionReviewScopes.Choice.LOCAL);
 
-        // 1150px is the width that proves this is a THREE-column solve: the
-        // intent rail and the margin want 568px, leaving 582px of code, so
-        // both stay expanded -- while charging this view for the departed
-        // queue rail's 44px too would already have narrowed them here.
         resizeTo(1150);
-        assertEquals(ReviewIntentRail.EXPANDED_WIDTH, settledWidth(".review-intent-rail"), 1.0);
+        assertNull(interactGet(view::getLeft), "no left rail in the hunk diff");
         assertEquals(ReviewFindingsMargin.EXPANDED_WIDTH, settledWidth(".review-findings-margin"), 1.0);
 
-        resizeTo(1100);
-        assertEquals(ReviewIntentRail.NARROW_WIDTH, settledWidth(".review-intent-rail"), 1.0,
+        resizeTo(880);
+        assertEquals(ReviewFindingsMargin.NARROW_WIDTH, settledWidth(".review-findings-margin"), 1.0,
                 "narrowing comes before any collapse");
-        assertEquals(ReviewFindingsMargin.NARROW_WIDTH, settledWidth(".review-findings-margin"), 1.0);
 
-        resizeTo(900);
+        resizeTo(800);
         assertEquals(ReviewFindingsMargin.COLLAPSED_WIDTH, settledWidth(".review-findings-margin"), 1.0,
-                "the margin is the first rail to be collapsed");
-        assertEquals(ReviewIntentRail.NARROW_WIDTH, settledWidth(".review-intent-rail"), 1.0,
-                "the intent rail must still be readable while the margin can pay");
+                "with nothing else left to trade the margin collapses");
+    }
 
-        resizeTo(700);
-        assertEquals(ReviewIntentRail.COLLAPSED_WIDTH, settledWidth(".review-intent-rail"), 1.0,
-                "with nothing else left to trade the intent rail collapses too");
-        assertEquals(ReviewFindingsMargin.COLLAPSED_WIDTH, settledWidth(".review-findings-margin"), 1.0);
+    private <T> T interactGet(Supplier<T> read) {
+        List<T> holder = new ArrayList<>();
+        interact(() -> holder.add(read.get()));
+        return holder.get(0);
     }
 
     // ---- fixtures -----------------------------------------------------------

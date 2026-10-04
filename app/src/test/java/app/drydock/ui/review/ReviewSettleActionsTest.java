@@ -1,5 +1,6 @@
 package app.drydock.ui.review;
 
+import app.drydock.review.HunkDigest;
 import javafx.scene.control.Button;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.MouseButton;
@@ -12,21 +13,21 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Reading is per hunk; settling usually is not (spec §9.6). The unit follows
- * focus rather than adding a parallel key set -- the same rule {@code [} and
- * {@code ]} already follow -- and the bar names the unit, because a key whose
- * target depends on focus must say what it is about to do.
+ * Reading is per hunk, and so is settling (spec §9.6): {@code a}/{@code r}
+ * act on the current file's next unread hunk wherever focus is, {@code
+ * ⇧A}/{@code ⇧R} on the whole file, and the bar names the unit its buttons
+ * will hit.
  */
 class ReviewSettleActionsTest extends ReviewViewFixture {
 
     @Test
-    void withTheRailFocusedApproveSettlesTheWholeSection() {
-        focusRail();
+    void approveWithNothingFocusedSettlesOneHunk() {
+        interact(view::requestFocus);
         press(KeyCode.A).release(KeyCode.A);
         WaitForAsyncUtils.waitForFxEvents();
 
-        SectionStates.SectionState state = view.diagSectionState(0);
-        assertEquals(state.totalHunks(), state.settledHunks());
+        assertEquals(1, settledHunksOf(FILE_A));
+        assertTrue(host.store.verdict(scope.id(), digestOfFirstHunkOfFileA()).isPresent());
     }
 
     @Test
@@ -37,7 +38,7 @@ class ReviewSettleActionsTest extends ReviewViewFixture {
         WaitForAsyncUtils.waitForFxEvents();
         String afterPress = view.diagFocusSnapshot();
 
-        assertEquals(1, view.diagSectionState(0).settledHunks(),
+        assertEquals(1, settledHunksOf(FILE_A),
                 () -> "after focusDiffColumn(): " + afterFocus + " | after a-press: " + afterPress);
     }
 
@@ -47,29 +48,16 @@ class ReviewSettleActionsTest extends ReviewViewFixture {
         press(KeyCode.SHIFT).press(KeyCode.A).release(KeyCode.A).release(KeyCode.SHIFT);
         WaitForAsyncUtils.waitForFxEvents();
 
-        assertEquals(hunkCountOfCurrentFile(), view.diagSectionState(0).settledHunks());
-    }
-
-    /** Settling a shared hunk has to be visible where it lands. */
-    @Test
-    void settlingASectionShowsItsSharedHunksSettledInTheOtherSection() {
-        focusRail();
-        press(KeyCode.A).release(KeyCode.A);
-        WaitForAsyncUtils.waitForFxEvents();
-
-        assertTrue(view.diagSectionState(1).settledElsewhere().contains("①"),
-                "section ② must name ① as where its shared hunk was settled, got: "
-                        + view.diagSectionState(1).settledElsewhere());
+        assertEquals(hunkCountOfCurrentFile(), settledHunksOf(FILE_A));
+        assertEquals(0, settledHunksOf(FILE_B), "⇧A is the current file, not the review");
     }
 
     /**
-     * With the diff column acting AND a gutter selection open, {@code a}
-     * must settle the hunk under the cursor -- not always the section's
-     * first hunk. {@code FILE_A}'s second hunk is what gets selected, so
-     * settling "hunk one, not the anchor" a second time (in a section
-     * still holding an unsettled first hunk) is the one outcome that would
-     * pass if HUNK mode quietly fell back to the anchor regardless of the
-     * open selection.
+     * With a gutter selection open, {@code a} must settle the hunk under the
+     * cursor -- not the file's first unread hunk. {@code FILE_A}'s second
+     * hunk is what gets selected, while its first is still unread, so this
+     * is the one outcome that would pass if {@code a} quietly fell back to
+     * the first unread hunk regardless of the open selection.
      *
      * <p>A bare press, not a full click: {@link ReviewDiffColumn}'s gutter
      * finalizes a completed click by OPENING THE COMMENT COMPOSER and
@@ -95,27 +83,24 @@ class ReviewSettleActionsTest extends ReviewViewFixture {
             press(KeyCode.A).release(KeyCode.A);
             WaitForAsyncUtils.waitForFxEvents();
 
-            assertEquals(1, view.diagSectionState(0).settledHunks());
+            assertEquals(1, settledHunksOf(FILE_A));
             assertTrue(host.store.verdict(scope.id(), digestOfSecondHunkOfFileA()).isPresent(),
                     "the SELECTED hunk must be the one settled");
             assertTrue(host.store.verdict(scope.id(), digestOfFirstHunkOfFileA()).isEmpty(),
-                    "the anchor hunk must be untouched -- a selection was open");
+                    "the first unread hunk must be untouched -- a selection was open");
         } finally {
             release(MouseButton.PRIMARY);
         }
     }
 
     /**
-     * Asserts the RENDERED Approve button, not {@code view.settleUnit()}:
-     * an assertion on the model alone shipped once already while the bar
-     * itself still read "acts on: section" after a diff-column click,
-     * because nothing re-rendered it -- a test that cannot catch the bug it
-     * was written for is worse than no test.
+     * Asserts the RENDERED Approve button: the unit no longer depends on
+     * focus, so the button reads the same with the diff column focused as
+     * without.
      */
     @Test
-    void theBarNamesTheUnitAnActionWillHit() throws TimeoutException {
-        focusRail();
-        assertEquals("Approve (section)", approveButtonText());
+    void theBarNamesTheUnitAnActionWillHitWhereverFocusIs() throws TimeoutException {
+        assertEquals("Approve (next unread hunk)", approveButtonText());
 
         focusDiffColumn();
         WaitForAsyncUtils.waitForFxEvents();
@@ -123,29 +108,27 @@ class ReviewSettleActionsTest extends ReviewViewFixture {
     }
 
     /**
-     * A real mouse press on a focusable {@code Button} requests focus on
-     * press (see {@code app.css}'s {@code .review-verdict-action:focused}),
-     * which moves Scene focus off the diff column onto the button itself
-     * BEFORE the button's own action fires on release -- so if the acting
-     * unit were re-read at release time, "Approve (next unread hunk)" would
-     * settle the whole section instead, silently, because the reader's
-     * focus change (into the button they are pressing) looks identical to
-     * a genuine "I clicked the rail" to {@code settleUnit()}. Only a real
-     * press-then-release ({@code clickOn}, not {@code Button.fire()})
-     * reproduces this: {@code fire()} never presses at all, so it never
-     * moves focus and could not have caught the bug.
+     * A real press-then-release on the bar's Approve button (not {@code
+     * fire()}): pressing moves Scene focus onto the button, and the press
+     * must still settle exactly one hunk of the file the bar names.
      */
     @Test
-    void aRealMousePressCapturesTheUnitBeforeTheFocusChangeItCauses() throws TimeoutException {
+    void aRealMousePressOnApproveSettlesOneHunk() throws TimeoutException {
         focusDiffColumn();
-        assertEquals("Approve (next unread hunk)", approveButtonText());
 
         clickOn(".review-verdict-action");
         WaitForAsyncUtils.waitForFxEvents();
 
-        assertEquals(1, view.diagSectionState(0).settledHunks(),
-                "a real button press must settle what the button showed when pressed, not "
-                        + "whatever settleUnit() became after the press moved focus onto it");
+        assertEquals(1, settledHunksOf(FILE_A));
+    }
+
+    private long settledHunksOf(String file) {
+        return host.diff.files().stream()
+                .filter(candidate -> candidate.path().equals(file))
+                .flatMap(candidate -> candidate.hunks().stream()
+                        .map(hunk -> HunkDigest.of(file, hunk)))
+                .filter(digest -> host.store.verdict(scope.id(), digest).isPresent())
+                .count();
     }
 
     private String approveButtonText() {

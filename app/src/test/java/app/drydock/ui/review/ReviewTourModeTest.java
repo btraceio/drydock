@@ -60,7 +60,8 @@ class ReviewTourModeTest extends ReviewTourFixture {
         press(KeyCode.V).release(KeyCode.V);
         WaitForAsyncUtils.waitForFxEvents();
         assertEquals(SessionReviewView.ReviewMode.DIFF, ReviewDiagFxThread.call(view::diagMode));
-        assertTrue(lookup(".review-intent-card").tryQuery().isPresent(), "today's intent rail is back");
+        assertTrue(lookup(".review-findings-margin").tryQuery().isPresent(), "the findings margin is back");
+        assertTrue(ReviewDiagFxThread.call(view::getLeft) == null, "and the hunk diff has no left rail");
         press(KeyCode.V).release(KeyCode.V);
         WaitForAsyncUtils.waitForFxEvents();
         assertEquals(SessionReviewView.ReviewMode.TOUR, ReviewDiagFxThread.call(view::diagMode));

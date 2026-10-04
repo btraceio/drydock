@@ -2,148 +2,177 @@ package app.drydock.ui.review;
 
 import org.junit.jupiter.api.Test;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * One invariant in place of four thresholds: there is always readable code
  * on screen. The rails used to collapse on independent width triggers while
- * the code column had no claim on space at all, so at ~1200px the rails were
- * the only thing left and the intent card was the only thing to click.
+ * the code column had no claim on space at all.
  *
- * <p>Two rails now, not three: the cross-repo queue rail went with the Review
- * destination. Its collapsed width was a constant on both sides of the
- * arithmetic -- the board asked for a three-rail answer with the queue forced
- * collapsed and handed the collapsed queue's 44px back on top -- so dropping
- * it changes no breakpoint, only the terms.</p>
+ * <p>The hunk diff has one rail (the findings margin, 336 / 286 / 30); the
+ * tour has two (the outline, 232 / 196 / 40, and the step panel at the
+ * margin's widths).</p>
  */
 class RailLayoutTest {
 
-    @Test
-    void aWideWindowCollapsesNothingAndStaysFullWidth() {
-        // Expanded rails are 232 + 336 = 568; 1800 leaves 1232 for code.
-        RailLayout.Layout layout = RailLayout.solve(1800, false, false);
+    private static final SessionReviewView.ReviewMode DIFF = SessionReviewView.ReviewMode.DIFF;
+    private static final SessionReviewView.ReviewMode TOUR = SessionReviewView.ReviewMode.TOUR;
 
-        assertFalse(layout.intentsCollapsed());
+    @Test
+    void theOutlineKeepsTheWidthsTheHunkDiffsLeftRailHad() {
+        assertEquals(232, TourOutline.EXPANDED_WIDTH);
+        assertEquals(196, TourOutline.NARROW_WIDTH);
+        assertEquals(40, TourOutline.COLLAPSED_WIDTH);
+    }
+
+    // ---- the hunk diff: the margin is the only rail -----------------------
+
+    /** With no left rail, the code column takes the outline's width back. */
+    @Test
+    void theHunkDiffChargesOnlyTheMargin() {
+        RailLayout.Layout layout = RailLayout.solve(1800, false, false, DIFF);
+
+        assertEquals(ReviewFindingsMargin.EXPANDED_WIDTH, RailLayout.railsWidth(layout, DIFF));
+    }
+
+    @Test
+    void aWideHunkDiffCollapsesNothing() {
+        // 900 - 336 = 564, over the 560 floor.
+        RailLayout.Layout layout = RailLayout.solve(900, false, false, DIFF);
+
         assertFalse(layout.marginCollapsed());
         assertFalse(layout.narrow());
     }
 
     @Test
-    void narrowingTheRailsIsTriedBeforeCollapsingAnything() {
-        // Expanded would leave 1100 - 568 = 532, under the floor. Narrow rails
-        // are 196 + 286 = 482, leaving 618 -- so nothing has to go.
-        RailLayout.Layout layout = RailLayout.solve(1100, false, false);
+    void theMarginNarrowsBeforeItCollapses() {
+        // Expanded leaves 880 - 336 = 544; narrow leaves 880 - 286 = 594.
+        RailLayout.Layout layout = RailLayout.solve(880, false, false, DIFF);
 
         assertTrue(layout.narrow());
-        assertFalse(layout.marginCollapsed(), "narrowing bought enough width on its own");
-    }
-
-    @Test
-    void theMarginIsTheFirstToGo() {
-        // Narrow rails 482 leave 900 - 482 = 418, under the floor. Collapsing
-        // the margin gives 196 + 30 = 226, leaving 674.
-        RailLayout.Layout layout = RailLayout.solve(900, false, false);
-
-        assertTrue(layout.marginCollapsed(), "the margin collapses first");
-        assertFalse(layout.intentsCollapsed(), "the intent rail must still be readable");
-    }
-
-    @Test
-    void andOnlyThenTheIntents() {
-        // 700 - 226 = 474, under the floor; collapsing the intents gives 70,
-        // leaving 630. The intent rail is the last to give up its width.
-        RailLayout.Layout layout = RailLayout.solve(700, false, false);
-
-        assertTrue(layout.marginCollapsed());
-        assertTrue(layout.intentsCollapsed());
-    }
-
-    @Test
-    void theCodeColumnClearsItsFloorWheneverArithmeticAllows() {
-        for (double width = 700; width <= 2000; width += 10) {
-            RailLayout.Layout layout = RailLayout.solve(width, false, false);
-            double used = RailLayout.railsWidth(layout);
-            assertTrue(width - used >= RailLayout.CODE_MIN_WIDTH || allCollapsed(layout),
-                    "at " + width + "px the code column got " + (width - used));
-        }
-    }
-
-    @Test
-    void aManualCollapseIsHonouredEvenWhenThereIsRoom() {
-        RailLayout.Layout layout = RailLayout.solve(1800, true, false);
-
-        assertTrue(layout.intentsCollapsed(), "the user's own collapse survives a wide window");
         assertFalse(layout.marginCollapsed());
     }
 
     @Test
-    void collapseIsMonotonicInWidth() {
-        // A wider window may never be more collapsed than a narrower one.
-        // The rule this pins down: narrowing is tried before collapsing, so
-        // there is no width at which widening the window loses you a rail.
-        RailLayout.Layout previous = RailLayout.solve(600, false, false);
-        for (double width = 610; width <= 2000; width += 10) {
-            RailLayout.Layout layout = RailLayout.solve(width, false, false);
-            assertTrue(collapsedCount(layout) <= collapsedCount(previous),
-                    "widening to " + width + "px collapsed something that was open");
-            previous = layout;
-        }
+    void andCollapsesWhenNarrowingIsNotEnough() {
+        // Narrow leaves 800 - 286 = 514; collapsed leaves 770.
+        RailLayout.Layout layout = RailLayout.solve(800, false, false, DIFF);
+
+        assertTrue(layout.marginCollapsed());
     }
 
-    /**
-     * The measured defect, as a test. These are the view widths photographed
-     * through the diag harness on 2026-08-05, before this class existed; at
-     * four of them the code column was under its floor -- 526, 522, 493 and
-     * 524 -- because each rail decided its own collapse and none of them was
-     * accountable for what was left. (View widths, not window widths: the
-     * window is wider by the sidebar.)
-     *
-     * <p>The code column's own width is deliberately <em>not</em> asserted to
-     * grow with the window. Widening from 1110 to 1150 takes it from 628 to
-     * 582, because 1150 is where the rails can re-expand and they take their
-     * full width back. That is the design -- rails return in the reverse of
-     * the order they went -- and the floor is what must hold across it.</p>
-     */
     @Test
-    void theWidthsThatWereMeasuredWrongAreRight() {
-        for (double width : new double[] {1050, 1110, 1150, 1181, 1210, 1270, 1330}) {
-            RailLayout.Layout layout = RailLayout.solve(width, false, false);
-            double code = width - RailLayout.railsWidth(layout);
-            assertTrue(code >= RailLayout.CODE_MIN_WIDTH,
-                    "at " + width + "px the code column got " + code);
+    void aManualMarginCollapseIsHonouredEvenWhenThereIsRoom() {
+        RailLayout.Layout layout = RailLayout.solve(1800, false, true, DIFF);
+
+        assertTrue(layout.marginCollapsed());
+    }
+
+    // ---- both modes -----------------------------------------------------------
+
+    @Test
+    void theCodeColumnClearsItsFloorWheneverArithmeticAllows() {
+        for (SessionReviewView.ReviewMode mode : SessionReviewView.ReviewMode.values()) {
+            for (double width = 600; width <= 2000; width += 10) {
+                RailLayout.Layout layout = RailLayout.solve(width, false, false, mode);
+                double used = RailLayout.railsWidth(layout, mode);
+                assertTrue(width - used >= RailLayout.CODE_MIN_WIDTH || allCollapsed(layout, mode),
+                        mode + " at " + width + "px the code column got " + (width - used));
+            }
         }
     }
 
-    private static int collapsedCount(RailLayout.Layout layout) {
-        return (layout.intentsCollapsed() ? 1 : 0) + (layout.marginCollapsed() ? 1 : 0);
+    @Test
+    void collapseIsMonotonicInWidth() {
+        // A wider window may never be more collapsed than a narrower one:
+        // narrowing is tried before collapsing, so there is no width at
+        // which widening the window loses you a rail.
+        for (SessionReviewView.ReviewMode mode : SessionReviewView.ReviewMode.values()) {
+            RailLayout.Layout previous = RailLayout.solve(600, false, false, mode);
+            for (double width = 610; width <= 2000; width += 10) {
+                RailLayout.Layout layout = RailLayout.solve(width, false, false, mode);
+                assertTrue(collapsedCount(layout, mode) <= collapsedCount(previous, mode),
+                        mode + ": widening to " + width + "px collapsed something that was open");
+                previous = layout;
+            }
+        }
     }
 
-    private static boolean allCollapsed(RailLayout.Layout layout) {
-        return layout.intentsCollapsed() && layout.marginCollapsed();
+    // ---- the tour: outline first, step panel last ---------------------------
+
+    @Test
+    void aWideTourCollapsesNothing() {
+        // Expanded rails are 232 + 336 = 568; 1800 leaves 1232 for code.
+        RailLayout.Layout layout = RailLayout.solve(1800, false, false, TOUR);
+
+        assertFalse(layout.outlineCollapsed());
+        assertFalse(layout.marginCollapsed());
+        assertFalse(layout.narrow());
+    }
+
+    @Test
+    void inATourNarrowingTheRailsIsTriedBeforeCollapsingAnything() {
+        // Expanded would leave 1100 - 568 = 532, under the floor. Narrow rails
+        // are 196 + 286 = 482, leaving 618 -- so nothing has to go.
+        RailLayout.Layout layout = RailLayout.solve(1100, false, false, TOUR);
+
+        assertTrue(layout.narrow());
+        assertFalse(layout.marginCollapsed());
+        assertFalse(layout.outlineCollapsed());
     }
 
     @Test
     void inATourTheOutlineGoesFirstAndTheStepPanelLast() {
-        // Same arithmetic as theMarginIsTheFirstToGo, order inverted: the
-        // step panel is the tour's primary content. Collapsing the outline
+        // Narrow rails 482 leave 900 - 482 = 418. Collapsing the outline
         // gives 40 + 286 = 326, leaving 574.
-        RailLayout.Layout layout = RailLayout.solve(900, false, false, SessionReviewView.ReviewMode.TOUR);
+        RailLayout.Layout layout = RailLayout.solve(900, false, false, TOUR);
 
-        assertTrue(layout.intentsCollapsed(), "the outline collapses first");
+        assertTrue(layout.outlineCollapsed(), "the outline collapses first");
         assertFalse(layout.marginCollapsed(), "the step panel stays readable");
         assertTrue(layout.narrow());
     }
 
     @Test
-    void inATourTheThresholdsAreTheHunkDiffs() {
-        // Wide and narrow-but-fitting widths answer exactly as in the hunk
-        // diff; only which rail goes first differs, and at 700 both go.
-        for (double width : new double[] {1800, 1100, 700}) {
-            RailLayout.Layout diff = RailLayout.solve(width, false, false);
-            RailLayout.Layout tour = RailLayout.solve(width, false, false, SessionReviewView.ReviewMode.TOUR);
-            assertTrue(diff.equals(tour), width + ": " + diff + " vs " + tour);
+    void andOnlyThenTheStepPanel() {
+        // 700 - 326 = 374; collapsing the step panel too gives 70, leaving 630.
+        RailLayout.Layout layout = RailLayout.solve(700, false, false, TOUR);
+
+        assertTrue(layout.outlineCollapsed());
+        assertTrue(layout.marginCollapsed());
+    }
+
+    @Test
+    void aManualOutlineCollapseIsHonouredEvenWhenThereIsRoom() {
+        RailLayout.Layout layout = RailLayout.solve(1800, true, false, TOUR);
+
+        assertTrue(layout.outlineCollapsed(), "the user's own collapse survives a wide window");
+        assertFalse(layout.marginCollapsed());
+    }
+
+    /**
+     * The view widths photographed through the diag harness on 2026-08-05,
+     * when at four of them the code column was under its floor because each
+     * rail decided its own collapse. The tour still has two rails, so it is
+     * the mode these widths now pin.
+     */
+    @Test
+    void theWidthsThatWereMeasuredWrongAreRight() {
+        for (double width : new double[] {1050, 1110, 1150, 1181, 1210, 1270, 1330}) {
+            RailLayout.Layout layout = RailLayout.solve(width, false, false, TOUR);
+            double code = width - RailLayout.railsWidth(layout, TOUR);
+            assertTrue(code >= RailLayout.CODE_MIN_WIDTH,
+                    "at " + width + "px the code column got " + code);
         }
-        assertTrue(RailLayout.solve(700, false, false, SessionReviewView.ReviewMode.TOUR).marginCollapsed());
+    }
+
+    private static int collapsedCount(RailLayout.Layout layout, SessionReviewView.ReviewMode mode) {
+        int outline = mode == TOUR && layout.outlineCollapsed() ? 1 : 0;
+        return outline + (layout.marginCollapsed() ? 1 : 0);
+    }
+
+    private static boolean allCollapsed(RailLayout.Layout layout, SessionReviewView.ReviewMode mode) {
+        return layout.marginCollapsed() && (mode != TOUR || layout.outlineCollapsed());
     }
 }

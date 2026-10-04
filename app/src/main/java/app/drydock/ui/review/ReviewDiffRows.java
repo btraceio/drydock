@@ -25,19 +25,6 @@ final class ReviewDiffRows {
     static final int COLLAPSE_THRESHOLD = 4;
 
     /**
-     * Which hunks a build includes. {@link #ALL} is the whole scope; an
-     * intent's own predicate is what selecting it in the rail installs.
-     */
-    @FunctionalInterface
-    interface HunkFilter {
-
-        /** Every hunk of every file. */
-        HunkFilter ALL = (file, hunkIndex) -> true;
-
-        boolean includes(String file, int hunkIndex);
-    }
-
-    /**
      * What the column is currently showing. {@code linksByHunk} carries each
      * hunk's {@link ReadingPath.Link}s, keyed by {@link HunkIds#hunkId};
      * a hunk absent from the map gets no footer row at all, rather than an
@@ -45,32 +32,27 @@ final class ReviewDiffRows {
      * already applies to a hunk with no rows to show.
      */
     record Options(boolean showContext, Set<ReviewDiffRow.RunKey> expandedRuns, int maxRows,
-                   HunkFilter filter, Map<String, List<ReadingPath.Link>> linksByHunk,
+                   Map<String, List<ReadingPath.Link>> linksByHunk,
                    boolean expandRunsByDefault) {
         Options {
             expandedRuns = Set.copyOf(expandedRuns);
             if (maxRows <= 0) {
                 throw new IllegalArgumentException("maxRows must be positive: " + maxRows);
             }
-            filter = filter == null ? HunkFilter.ALL : filter;
             linksByHunk = linksByHunk == null ? Map.of() : Map.copyOf(linksByHunk);
         }
 
         Options(boolean showContext, Set<ReviewDiffRow.RunKey> expandedRuns, int maxRows) {
-            this(showContext, expandedRuns, maxRows, HunkFilter.ALL, Map.of(), false);
+            this(showContext, expandedRuns, maxRows, Map.of(), false);
         }
 
-        Options(boolean showContext, Set<ReviewDiffRow.RunKey> expandedRuns, int maxRows, HunkFilter filter) {
-            this(showContext, expandedRuns, maxRows, filter, Map.of(), false);
-        }
-
-        Options(boolean showContext, Set<ReviewDiffRow.RunKey> expandedRuns, int maxRows, HunkFilter filter,
+        Options(boolean showContext, Set<ReviewDiffRow.RunKey> expandedRuns, int maxRows,
                 Map<String, List<ReadingPath.Link>> linksByHunk) {
-            this(showContext, expandedRuns, maxRows, filter, linksByHunk, false);
+            this(showContext, expandedRuns, maxRows, linksByHunk, false);
         }
 
         static Options defaults(int maxRows) {
-            return new Options(true, Set.of(), maxRows, HunkFilter.ALL, Map.of(), false);
+            return new Options(true, Set.of(), maxRows, Map.of(), false);
         }
     }
 
@@ -84,14 +66,7 @@ final class ReviewDiffRows {
         for (UnifiedDiff.FileDiff file : diff.files()) {
             int hunkIndex = 0;
             for (UnifiedDiff.Hunk hunk : file.hunks()) {
-                // The index still advances for a filtered-out hunk: it is the
-                // hunk's identity within its file, and renumbering what
-                // survives the filter would make an intent's hunk ids point
-                // at someone else's code.
                 int index = hunkIndex++;
-                if (!options.filter().includes(file.path(), index)) {
-                    continue;
-                }
                 List<ReviewDiffRow> card = buildCard(file, hunk, index, options, folds);
                 if (card.isEmpty()) {
                     continue;
@@ -105,9 +80,7 @@ final class ReviewDiffRows {
             }
         }
         if (rows.isEmpty()) {
-            rows.add(new ReviewDiffRow.Message(options.filter() == HunkFilter.ALL
-                    ? "No changes in this scope."
-                    : "This intent's hunks are not in the current diff — show the whole scope to look for them."));
+            rows.add(new ReviewDiffRow.Message("No changes in this scope."));
         }
         return List.copyOf(rows);
     }
@@ -128,26 +101,24 @@ final class ReviewDiffRows {
         for (UnifiedDiff.FileDiff file : diff.files()) {
             int hunkIndex = 0;
             for (UnifiedDiff.Hunk hunk : file.hunks()) {
-                if (options.filter().includes(file.path(), hunkIndex)) {
-                    total += 1 + hunk.lines().size();
-                    int runIndex = 0;
-                    int i = 0;
-                    List<UnifiedDiff.Line> lines = hunk.lines();
-                    while (i < lines.size()) {
-                        if (lines.get(i).kind() != UnifiedDiff.Line.Kind.CONTEXT) {
-                            i++;
-                            continue;
-                        }
-                        int end = i;
-                        while (end < lines.size() && lines.get(end).kind() == UnifiedDiff.Line.Kind.CONTEXT) {
-                            end++;
-                        }
-                        ReviewDiffRow.RunKey key = new ReviewDiffRow.RunKey(file.path(), hunkIndex, runIndex++);
-                        if (end - i > COLLAPSE_THRESHOLD && !options.expandedRuns().contains(key)) {
-                            runs.add(new Run(key, end - i));
-                        }
-                        i = end;
+                total += 1 + hunk.lines().size();
+                int runIndex = 0;
+                int i = 0;
+                List<UnifiedDiff.Line> lines = hunk.lines();
+                while (i < lines.size()) {
+                    if (lines.get(i).kind() != UnifiedDiff.Line.Kind.CONTEXT) {
+                        i++;
+                        continue;
                     }
+                    int end = i;
+                    while (end < lines.size() && lines.get(end).kind() == UnifiedDiff.Line.Kind.CONTEXT) {
+                        end++;
+                    }
+                    ReviewDiffRow.RunKey key = new ReviewDiffRow.RunKey(file.path(), hunkIndex, runIndex++);
+                    if (end - i > COLLAPSE_THRESHOLD && !options.expandedRuns().contains(key)) {
+                        runs.add(new Run(key, end - i));
+                    }
+                    i = end;
                 }
                 hunkIndex++;
             }

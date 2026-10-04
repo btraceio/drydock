@@ -97,9 +97,8 @@
     /* Review destination (Review handoff section 3). The three chrome
      * surfaces are the only greys the Review spec adds; everything else it
      * needs already exists above and is reused under its own semantic name,
-     * because the meanings genuinely differ (a MED-risk intent is not a
+     * because the meanings genuinely differ (a MED-risk step is not a
      * dirty worktree, even though both are amber). */
-    -drydock-intent-rail: #181716;
     -drydock-hunk-header: #1c1b1a;
 
     /* Semantic severities/risks (Review handoff section 3, table). */

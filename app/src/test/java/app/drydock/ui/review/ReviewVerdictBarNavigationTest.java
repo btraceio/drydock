@@ -18,8 +18,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * With every rail collapsed the verdict bar is the only surface left, so it
- * has to be a complete loop on its own: say which intent it is settling, and
- * move between them without the keyboard.
+ * has to be a complete loop on its own: say which file it is settling, and
+ * move between files without the keyboard.
  */
 class ReviewVerdictBarNavigationTest extends ApplicationTest {
 
@@ -29,10 +29,10 @@ class ReviewVerdictBarNavigationTest extends ApplicationTest {
     @Override
     public void start(Stage stage) {
         bar = new ReviewVerdictBar(new ReviewVerdictBar.Host() {
-            @Override public void approve(ReviewVerdictBar.Target target, SessionReviewView.SettleUnit unit) {
+            @Override public void approve(ReviewVerdictBar.Target target) {
                 calls.add("approve");
             }
-            @Override public void requestChanges(ReviewVerdictBar.Target target, SessionReviewView.SettleUnit unit) {
+            @Override public void requestChanges(ReviewVerdictBar.Target target) {
                 calls.add("changes");
             }
             @Override public boolean askAgentToFix(ReviewVerdictBar.Target target) { calls.add("ask"); return true; }
@@ -51,16 +51,16 @@ class ReviewVerdictBarNavigationTest extends ApplicationTest {
     }
 
     @Test
-    void theBarNamesTheIntentItIsSettling() {
-        interact(() -> bar.update(intent(2, "Rename the parser"), Optional.empty(), false));
+    void theBarNamesTheFileItIsSettling() {
+        interact(() -> bar.update(target("2/14 · src/Parser.java"), Optional.empty(), false));
 
-        assertEquals("2 · Rename the parser",
-                ((Label) lookup(".review-verdict-intent").query()).getText());
+        assertEquals("2/14 · src/Parser.java",
+                ((Label) lookup(".review-verdict-target").query()).getText());
     }
 
     @Test
     void theNavigationControlsReachTheSameActionsAsTheKeys() {
-        interact(() -> bar.update(intent(2, "Rename the parser"), Optional.empty(), false));
+        interact(() -> bar.update(target("2/14 · src/Parser.java"), Optional.empty(), false));
 
         interact(() -> ((Button) lookup(".review-verdict-previous").query()).fire());
         interact(() -> ((Button) lookup(".review-verdict-next").query()).fire());
@@ -69,14 +69,37 @@ class ReviewVerdictBarNavigationTest extends ApplicationTest {
     }
 
     @Test
-    void withNoIntentTheBarSaysSoAndDisablesNavigation() {
+    void withNoFileTheBarSaysSoAndDisablesNavigation() {
         interact(() -> bar.update(null, Optional.empty(), false));
 
-        assertEquals("no intent", ((Label) lookup(".review-verdict-intent").query()).getText());
+        assertEquals("no file", ((Label) lookup(".review-verdict-target").query()).getText());
         assertTrue(((Button) lookup(".review-verdict-next").query()).isDisabled());
     }
 
-    private static ReviewVerdictBar.Target intent(int number, String title) {
-        return new ReviewVerdictBar.Target("intent-" + number, number + " · " + title);
+    /**
+     * The hunk diff walks files, so its arrows say so; the tour's say step.
+     * Read off the tooltips because the arrows are bare glyphs.
+     */
+    @Test
+    void theArrowsNameTheFileInTheHunkDiffAndTheStepInTheTour() {
+        interact(() -> bar.update(target("2/14 · src/Parser.java"), Optional.empty(), false));
+
+        assertEquals("Previous file ([)", tooltipOf(".review-verdict-previous"));
+        assertEquals("Next file (])", tooltipOf(".review-verdict-next"));
+
+        interact(() -> bar.setTourMode(true));
+        assertEquals("Previous step ([)", tooltipOf(".review-verdict-previous"));
+        assertEquals("Next step (])", tooltipOf(".review-verdict-next"));
+
+        interact(() -> bar.setTourMode(false));
+        assertEquals("Previous file ([)", tooltipOf(".review-verdict-previous"));
+    }
+
+    private String tooltipOf(String selector) {
+        return ((Button) lookup(selector).query()).getTooltip().getText();
+    }
+
+    private static ReviewVerdictBar.Target target(String label) {
+        return new ReviewVerdictBar.Target("file:" + label, label);
     }
 }

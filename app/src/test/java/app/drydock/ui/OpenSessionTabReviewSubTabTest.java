@@ -3,11 +3,8 @@ package app.drydock.ui;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.git.DiffService;
-import app.drydock.git.UnifiedDiff;
 import app.drydock.review.BaseMove;
-import app.drydock.review.ChangeGraph;
 import app.drydock.review.ReviewAnnotation;
-import app.drydock.review.ReviewIntent;
 import app.drydock.domain.SessionActivity;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
@@ -493,22 +490,6 @@ class OpenSessionTabReviewSubTabTest extends ApplicationTest {
         @Override
         public List<ReviewAnnotation> findings(ReviewScope scope) {
             return List.of();
-        }
-
-        @Override
-        public List<ReviewIntent> intents(ReviewScope scope, UnifiedDiff diff,
-                                          Optional<ChangeGraph> graph) {
-            return List.of();
-        }
-
-        @Override
-        public long groupingVersion(ReviewScope scope) {
-            return 0;
-        }
-
-        @Override
-        public boolean hasReviewerGrouping(ReviewScope scope) {
-            return false;
         }
 
         @Override

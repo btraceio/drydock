@@ -5,7 +5,6 @@ import app.drydock.ui.TestStages;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.ReadingPath;
-import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
 
@@ -194,22 +193,16 @@ class ReviewLinkRowTest extends ApplicationTest {
     }
 
     /**
-     * An intent filter can narrow the column to one hunk before any
-     * footer's click can even fire -- a link is cross-file by construction
-     * (spec §7.2), so its target is routinely a hunk that narrow filter does
-     * not show at all. Left unfixed, the click fires {@link ReviewDiffColumn#revealHunk}
-     * against a row list that never contained the target, which silently
-     * does nothing -- exactly the display/action divergence the brief
-     * warns about.
+     * A link is cross-file by construction (spec §7.2), so its target is
+     * routinely a hunk below the fold. The click must scroll there, not
+     * silently do nothing -- the display/action divergence the brief warns
+     * about.
      */
     @Test
-    void clickingALinkFilteredOutOfTheCurrentViewWidensAndReachesItsTarget() {
+    void clickingALinkToAFileBelowTheFoldReachesItsTarget() {
         showTwoFilesFarApart();
-        ReviewIntent onlyFileA = new ReviewIntent("path:only-a", 1, FILE_A, ReviewIntent.Kind.CHANGE,
-                ReviewIntent.Risk.NONE, "", List.of(HunkIds.hunkId(FILE_A, 0)), Optional.empty(), false);
-        interact(() -> column.setIntent(onlyFileA));
         assertFalse(renderedHunkFiles().contains(FILE_B),
-                "the narrowed filter must exclude the link's target file up front");
+                "the link's target file must start below the fold");
 
         String targetHunkId = HunkIds.hunkId(FILE_B, 0);
         setLinks(Map.of(HunkIds.hunkId(FILE_A, 0),
@@ -220,32 +213,21 @@ class ReviewLinkRowTest extends ApplicationTest {
         WaitForAsyncUtils.waitForFxEvents();
 
         assertTrue(renderedHunkFiles().contains(FILE_B),
-                "a cross-file link must widen out of a one-hunk filter to reach its target, the "
-                        + "way an intent filter narrows the column; rendered "
-                        + renderedHunkFiles());
+                "a cross-file link must reach its target; rendered " + renderedHunkFiles());
     }
 
     /**
-     * Three hunks in one file: a tiny one (index 0, excluded by the
-     * filter), a GIANT one (index 1, included -- pushes index 2 below the
-     * fold), and a tiny one (index 2, included). {@link
-     * ReviewDiffColumn#revealHunk} used to count RENDERED headers in order
-     * rather than match the real hunk index carried on {@link
-     * ReviewDiffRow.HunkHeader#hunkIndex()}, so asking for real hunk 2 (the
-     * second and last rendered header once hunk 0 is filtered out) fell
-     * through that off-by-one onto hunk 1 -- the FIRST rendered header --
-     * while still reporting success.
+     * Three hunks in one file: a tiny one, a GIANT one (pushing index 2
+     * below the fold), and a tiny one. {@link ReviewDiffColumn#revealHunk}
+     * matches the real hunk index carried on {@link
+     * ReviewDiffRow.HunkHeader#hunkIndex()}, so asking for hunk 2 must land
+     * on it rather than on whichever header happens to be on screen.
      */
     @Test
     void revealHunkLandsOnTheRealHunkIndexNotThePositionAmongRenderedHeaders() {
         UnifiedDiff diff = new UnifiedDiff(List.of(threeHunkFile()));
         interact(() -> column.showDiff(scope(), diff));
         WaitForAsyncUtils.waitForFxEvents();
-
-        ReviewIntent excludeFirstHunk = new ReviewIntent("only-1-and-2", 1, FILE_A, ReviewIntent.Kind.CHANGE,
-                ReviewIntent.Risk.NONE, "",
-                List.of(HunkIds.hunkId(FILE_A, 1), HunkIds.hunkId(FILE_A, 2)), Optional.empty(), false);
-        interact(() -> column.setIntent(excludeFirstHunk));
 
         assertFalse(renderedRangeLabels().contains("L300"),
                 "hunk 2 must start below the fold, behind the giant hunk 1; rendered "
@@ -257,8 +239,7 @@ class ReviewLinkRowTest extends ApplicationTest {
 
         assertTrue(reached[0]);
         assertTrue(renderedRangeLabels().contains("L300"),
-                "revealHunk(file, 2) must land on the REAL hunk 2 (\"L300\"), not on hunk 1 -- the "
-                        + "first RENDERED header, and the old counting bug's target; rendered "
+                "revealHunk(file, 2) must land on the REAL hunk 2 (\"L300\"); rendered "
                         + renderedRangeLabels());
     }
 

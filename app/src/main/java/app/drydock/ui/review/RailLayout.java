@@ -9,10 +9,9 @@ package app.drydock.ui.review;
  * them: rails give up their width, in a fixed order, until the code column
  * clears {@link #CODE_MIN_WIDTH}.</p>
  *
- * <p>Two rails, since review moved into the session that owns the checkout:
- * the cross-repo queue rail was the third, and it went with the destination.
- * The board that replaced it is charged for what it actually draws -- the
- * intent rail and the findings margin -- and nothing else.</p>
+ * <p>The board is charged for what it actually draws. The hunk diff has one
+ * rail, the findings margin on the right; the tour has two, the outline on
+ * the left and the step panel (at the margin's widths) on the right.</p>
  */
 final class RailLayout {
 
@@ -26,76 +25,65 @@ final class RailLayout {
     private RailLayout() {
     }
 
-    /** Which rails are collapsed, and whether the rest are in narrow mode. */
-    record Layout(boolean intentsCollapsed, boolean marginCollapsed, boolean narrow) { }
+    /**
+     * Which rails are collapsed, and whether the rest are in narrow mode.
+     * {@code outlineCollapsed} is the tour outline's; in the hunk diff there
+     * is no left rail, and it simply carries the reader's own choice through.
+     */
+    record Layout(boolean outlineCollapsed, boolean marginCollapsed, boolean narrow) { }
 
     /**
      * Gives up rail width in escalating steps until the code column clears
-     * its floor: narrow the rails first, then collapse the margin, then the
-     * intents. A rail the user collapsed by hand starts collapsed and stays
-     * that way however wide the window is.
+     * its floor: narrow the rails first, then collapse them. A rail the user
+     * collapsed by hand starts collapsed and stays that way however wide the
+     * window is.
      *
      * <p>Narrowing comes before any collapse, and that ordering is what makes
-     * the result monotonic in width. The previous design took narrow mode
-     * from its own fixed threshold, which produced the absurd case of
-     * widening the window and <em>losing</em> width: measured at 1150px the
-     * code column had 624px, and at 1210px it had 522px, because a rail came
-     * back at full width on the way up.</p>
+     * the result monotonic in width: an earlier design took narrow mode from
+     * its own fixed threshold, and widening the window could LOSE code width
+     * because a rail came back at full width on the way up.</p>
      *
-     * <p>The last resort is every rail collapsed. Below roughly 630px even
-     * that cannot clear the floor -- there is no third thing to give up, so
-     * the layout stops rather than pretending.</p>
+     * <p>In the tour the outline (a list of step titles) goes before the step
+     * panel, which holds the narrative and the check -- the tour's primary
+     * content. In the hunk diff the margin is the only rail to give up. The
+     * last resort is every rail collapsed; below that there is nothing left
+     * to trade, so the layout stops rather than pretending.</p>
      */
-    static Layout solve(double width, boolean intentsForced, boolean marginForced) {
-        return solve(width, intentsForced, marginForced, SessionReviewView.ReviewMode.DIFF);
-    }
-
-    /**
-     * As above for {@code mode}. In the tour the order of the collapses is
-     * inverted: the left rail (the tour outline) goes before the right one
-     * (the step panel), because the step panel holds the narrative and the
-     * check -- the tour's primary content -- while the outline is a list of
-     * step titles. The widths, and so every threshold, are the hunk diff's:
-     * the outline and the step panel take the intent rail's and the
-     * margin's widths.
-     */
-    static Layout solve(double width, boolean intentsForced, boolean marginForced,
+    static Layout solve(double width, boolean outlineForced, boolean marginForced,
                         SessionReviewView.ReviewMode mode) {
+        boolean outline = outlineForced;
         boolean margin = marginForced;
-        boolean intents = intentsForced;
 
-        if (fits(width, intents, margin, false)) {
-            return new Layout(intents, margin, false);
+        if (fits(width, new Layout(outline, margin, false), mode)) {
+            return new Layout(outline, margin, false);
         }
-        if (fits(width, intents, margin, true)) {
-            return new Layout(intents, margin, true);
+        if (fits(width, new Layout(outline, margin, true), mode)) {
+            return new Layout(outline, margin, true);
         }
         if (mode == SessionReviewView.ReviewMode.TOUR) {
-            intents = true;
-            if (!fits(width, intents, margin, true)) {
+            outline = true;
+            if (!fits(width, new Layout(outline, margin, true), mode)) {
                 margin = true;
             }
-            return new Layout(intents, margin, true);
+            return new Layout(outline, margin, true);
         }
-        margin = true;
-        if (!fits(width, intents, margin, true)) {
-            intents = true;
-        }
-        return new Layout(intents, margin, true);
+        return new Layout(outline, true, true);
     }
 
-    private static boolean fits(double width, boolean intents, boolean margin, boolean narrow) {
-        return width - railsWidth(new Layout(intents, margin, narrow)) >= CODE_MIN_WIDTH;
+    private static boolean fits(double width, Layout layout, SessionReviewView.ReviewMode mode) {
+        return width - railsWidth(layout, mode) >= CODE_MIN_WIDTH;
     }
 
-    /** The total width the rails occupy under {@code layout}. */
-    static double railsWidth(Layout layout) {
-        return railWidth(layout.intentsCollapsed(), layout.narrow(),
-                        ReviewIntentRail.COLLAPSED_WIDTH, ReviewIntentRail.NARROW_WIDTH,
-                        ReviewIntentRail.EXPANDED_WIDTH)
-                + railWidth(layout.marginCollapsed(), layout.narrow(),
-                        ReviewFindingsMargin.COLLAPSED_WIDTH, ReviewFindingsMargin.NARROW_WIDTH,
-                        ReviewFindingsMargin.EXPANDED_WIDTH);
+    /** The total width the rails occupy under {@code layout} in {@code mode}. */
+    static double railsWidth(Layout layout, SessionReviewView.ReviewMode mode) {
+        double margin = railWidth(layout.marginCollapsed(), layout.narrow(),
+                ReviewFindingsMargin.COLLAPSED_WIDTH, ReviewFindingsMargin.NARROW_WIDTH,
+                ReviewFindingsMargin.EXPANDED_WIDTH);
+        if (mode != SessionReviewView.ReviewMode.TOUR) {
+            return margin;
+        }
+        return margin + railWidth(layout.outlineCollapsed(), layout.narrow(),
+                TourOutline.COLLAPSED_WIDTH, TourOutline.NARROW_WIDTH, TourOutline.EXPANDED_WIDTH);
     }
 
     private static double railWidth(boolean collapsed, boolean narrow, double collapsedWidth,

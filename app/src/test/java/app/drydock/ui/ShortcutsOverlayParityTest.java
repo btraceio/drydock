@@ -72,7 +72,7 @@ class ShortcutsOverlayParityTest {
                 .flatMap(keycap -> Arrays.stream(keycap.split(" / ")))
                 .collect(Collectors.toSet());
 
-        Set<String> bound = Set.of("d", "c", "m", "i", "\\", "[", "]", "n", "a", "r", "u",
+        Set<String> bound = Set.of("d", "c", "m", "\\", "[", "]", "n", "a", "r", "u",
                 "⏎", "⇧F", "f", "⇧A", "⇧R", "v", "1", "2", "3", "4", "b", ".", ",", "⇧D");
 
         assertEquals(bound, advertised,

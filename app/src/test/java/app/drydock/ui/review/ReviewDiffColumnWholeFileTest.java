@@ -5,7 +5,6 @@ import app.drydock.git.UnifiedDiff;
 import app.drydock.git.UnifiedDiff.Line;
 import app.drydock.review.HunkIds;
 import app.drydock.review.ReadingPath;
-import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.ui.TestStages;
@@ -102,18 +101,12 @@ class ReviewDiffColumnWholeFileTest extends ApplicationTest {
     }
 
     @Test
-    void wholeFileRenderingIgnoresTheHunkKeyedIntentFilterAndLinks() {
+    void wholeFileRenderingIgnoresTheHunkKeyedLinks() {
         UnifiedDiff whole = diff(40);
-        // An intent that covers only hunk 1 of the review diff, which has no
-        // counterpart in the one-hunk whole-file diff.
-        ReviewIntent intent = new ReviewIntent("i_1", 1, "second hunk", ReviewIntent.Kind.CHANGE,
-                ReviewIntent.Risk.MED, "", List.of(HunkIds.hunkId("src/A.java", 1)),
-                Optional.empty(), false);
         interact(() -> {
             column.showDiff(scope(), twoHunks());
             column.setLinks(Map.of(HunkIds.hunkId("src/A.java", 0),
                     List.of(new ReadingPath.Link("calls", HunkIds.hunkId("src/A.java", 1), "calls b"))));
-            column.setIntent(intent);
             column.setWholeFiles(true);
             column.diagShowWholeFileDiff(whole);
         });
@@ -121,7 +114,7 @@ class ReviewDiffColumnWholeFileTest extends ApplicationTest {
 
         List<ReviewDiffRow> rows = column.diagRows();
         assertEquals(41, rows.stream().filter(row -> row instanceof ReviewDiffRow.Line).count(),
-                "every whole-file line renders despite the intent filter");
+                "every whole-file line renders");
         assertTrue(rows.stream().noneMatch(row -> row instanceof ReviewDiffRow.LinkRow));
     }
 

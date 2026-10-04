@@ -8,7 +8,6 @@ import app.drydock.review.BaseMove;
 import app.drydock.review.Confidence;
 import app.drydock.review.HunkDigest;
 import app.drydock.review.ReviewAnnotation;
-import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.review.ReviewVerdict;
@@ -67,10 +66,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
-        // Two files in DIFFERENT directories, so the fallback grouping yields
-        // two intents to settle: it clusters by directory, so two files under
-        // one would be a single card. src sorts before web, which is what
-        // makes Main.java intent 1.
+        // Two files, one hunk each: Main.java is file 1 of 2, Other.java 2.
         host.diff = new UnifiedDiff(List.of(
                 file("src/Main.java"), file("web/Other.java")));
         view = new SessionReviewView(host, diffService, null);
@@ -265,7 +261,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
     // ---- verdicts -----------------------------------------------------------
 
     @Test
-    void approvingAnIntentRecordsAVerdict() {
+    void approvingRecordsAVerdict() {
         seed();
 
         type(KeyCode.A);
@@ -274,7 +270,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
                 host.store.verdict(scope.id(), digestOfMain()).orElseThrow().decision());
     }
 
-    /** Spec §4.6: approval is refused while a blocking finding of the intent is open. */
+    /** Spec §4.6: approval is refused while a blocking finding on the file is open. */
     @Test
     void approvalIsRefusedWhileABlockingFindingIsOpen() {
         seed(finding("f1", Severity.BLOCKING));
@@ -327,36 +323,36 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
     }
 
     @Test
-    void bracketsMoveBetweenIntents() {
+    void bracketsMoveBetweenFiles() {
         seed();
 
-        assertEquals("1 · Main.java", intentLabel());
+        assertEquals("1/2 · src/Main.java", targetLabel());
         type(KeyCode.CLOSE_BRACKET);
-        assertEquals("2 · Other.java", intentLabel());
+        assertEquals("2/2 · web/Other.java", targetLabel());
         type(KeyCode.CLOSE_BRACKET);
-        assertEquals("2 · Other.java", intentLabel(), "the intent index clamps at the last one");
+        assertEquals("2/2 · web/Other.java", targetLabel(), "the file cursor clamps at the last one");
         type(KeyCode.OPEN_BRACKET);
-        assertEquals("1 · Main.java", intentLabel());
+        assertEquals("1/2 · src/Main.java", targetLabel());
     }
 
     @Test
-    void nJumpsToTheNextUnsettledIntent() {
+    void nJumpsToTheNextUnreadHunk() {
         seed();
         type(KeyCode.A);
 
         type(KeyCode.N);
 
-        assertEquals("2 · Other.java", intentLabel());
+        assertEquals("2/2 · web/Other.java", targetLabel());
     }
 
     /**
-     * Submitting early jumps to the first unsettled intent rather than
+     * Submitting early jumps to the first file with an unread hunk rather than
      * posting a partial review -- and says so. The jump alone was the
      * original defect's other half: Submit silently moved the reader and did
      * nothing else, with no explanation, so the button read as broken.
      */
     @Test
-    void submitJumpsToTheFirstUnsettledIntentWhenIncomplete() {
+    void submitJumpsToTheFirstUnreadFileWhenIncomplete() {
         seed();
         type(KeyCode.CLOSE_BRACKET);
         type(KeyCode.A);
@@ -364,7 +360,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         type(KeyCode.ENTER);
 
         assertTrue(host.submittedScopes.isEmpty(), "an incomplete review must not be posted");
-        assertEquals("1 · Main.java", intentLabel());
+        assertEquals("1/2 · src/Main.java", targetLabel());
         assertTrue(submitRefusal().toLowerCase(Locale.ROOT).contains("verdict"),
                 "the message must say what is blocking: " + submitRefusal());
     }
@@ -479,14 +475,14 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         assertFalse(lookup(".review-findings-scroll").query().isVisible(), "the margin collapses");
         assertTrue(lookup(".review-verdict-action").queryAll().stream().anyMatch(Node::isVisible),
                 "the verdict bar must stay reachable with every rail collapsed");
-        assertEquals("1 · Main.java", intentLabel());
+        assertEquals("1/2 · src/Main.java", targetLabel());
     }
 
     /**
      * Focus mode is a toggle, not a one-way collapse -- {@code f} twice must
-     * return the rails. Its condition is {@code !(intentsCollapsedByUser &amp;&amp;
-     * marginCollapsedByUser)}, so it is the one shortcut whose second press
-     * takes a different branch than its first.
+     * return the rails. Its condition reads the collapse it set, so it is
+     * the one shortcut whose second press takes a different branch than its
+     * first.
      */
     @Test
     void fTogglesFocusModeRatherThanOnlyCollapsing() {
@@ -514,7 +510,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         seed(finding("f1", Severity.QUESTION), other);
 
         assertEquals(1, lookup(".review-finding-card").queryAll().size(),
-                "only the current intent's findings by default");
+                "only the current file's findings by default");
 
         press(KeyCode.SHIFT).press(KeyCode.F).release(KeyCode.F).release(KeyCode.SHIFT);
         WaitForAsyncUtils.waitForFxEvents();
@@ -565,7 +561,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
     }
 
     /**
-     * Fix round 2. "Ask the agent to fix it" hands the intent's open findings
+     * Fix round 2. "Ask the agent to fix it" hands the file's open findings
      * to the bound session -- and with no session bound it hands over
      * NOTHING while looking exactly as though it worked. That is the defect
      * ruling 1 legislated against for the Explorer jump and round 1 fixed on
@@ -610,7 +606,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
 
         type(KeyCode.CLOSE_BRACKET);
 
-        assertEquals("", askRefusal(), "moving to another intent must clear it");
+        assertEquals("", askRefusal(), "moving to another file must clear it");
     }
 
     /**
@@ -795,7 +791,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
             host.store.upsert(finding);
         }
         // The view renders the diff column for a worktree scope; the fake's
-        // diff is what the by-file intent fallback groups.
+        // diff is what the file cursor walks.
         interact(() -> view.showScopes(new SessionReviewScopes.Scopes(minted, Optional.empty()),
                 SessionReviewScopes.Choice.LOCAL));
         interact(() -> view.diagPublishOutcome(minted.id(),
@@ -823,8 +819,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
 
     /**
      * The digest {@code src/Main.java}'s only hunk is approved under -- what
-     * a verdict is keyed by now that sections may overlap. The intent id
-     * ({@code auto:change:src}) keys nothing.
+     * a verdict is keyed by. The file path keys nothing.
      */
     private static String digestOfMain() {
         return HunkDigest.of("src/Main.java", file("src/Main.java").hunks().get(0));
@@ -836,8 +831,8 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
                         UnifiedDiff.Line.Kind.ADD, OptionalInt.empty(), OptionalInt.of(1), "x")))));
     }
 
-    private String intentLabel() {
-        return ((Label) lookup(".review-verdict-intent").query()).getText();
+    private String targetLabel() {
+        return ((Label) lookup(".review-verdict-target").query()).getText();
     }
 
     private TextArea replyBoxOf(int cardIndex) {

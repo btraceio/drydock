@@ -49,7 +49,6 @@ import app.drydock.mcp.WorkspaceMcpSessionContext;
 import app.drydock.process.SshCommandBuilder;
 import app.drydock.review.AnnotationStore;
 import app.drydock.review.BaseMove;
-import app.drydock.review.ChangeGraph;
 import app.drydock.review.IntentGrouping;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
@@ -1874,7 +1873,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * ought to reach.
      */
     private static final Set<KeyCode> REPLAYABLE_OFF_REVIEW_SUBTREE = Set.of(
-            KeyCode.D, KeyCode.C, KeyCode.M, KeyCode.I, KeyCode.BACK_SLASH,
+            KeyCode.D, KeyCode.C, KeyCode.M, KeyCode.BACK_SLASH,
             KeyCode.OPEN_BRACKET, KeyCode.CLOSE_BRACKET, KeyCode.N, KeyCode.A, KeyCode.R,
             KeyCode.U, KeyCode.F, KeyCode.V, KeyCode.DIGIT1, KeyCode.DIGIT2, KeyCode.DIGIT3,
             KeyCode.DIGIT4, KeyCode.B, KeyCode.PERIOD, KeyCode.COMMA);
@@ -2051,22 +2050,6 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         @Override
         public List<ReviewAnnotation> findings(ReviewScope scope) {
             return annotationStore.forScope(scope.id());
-        }
-
-        @Override
-        public List<ReviewIntent> intents(ReviewScope scope, UnifiedDiff diff,
-                                          Optional<ChangeGraph> graph) {
-            return intentGrouping.intentsFor(scope.id(), diff, graph);
-        }
-
-        @Override
-        public long groupingVersion(ReviewScope scope) {
-            return intentGrouping.version(scope.id());
-        }
-
-        @Override
-        public boolean hasReviewerGrouping(ReviewScope scope) {
-            return intentGrouping.hasReviewerGrouping(scope.id());
         }
 
         @Override

@@ -25,9 +25,9 @@ import java.util.function.Consumer;
  */
 final class TourOutline extends VBox {
 
-    static final double EXPANDED_WIDTH = ReviewIntentRail.EXPANDED_WIDTH;
-    static final double NARROW_WIDTH = ReviewIntentRail.NARROW_WIDTH;
-    static final double COLLAPSED_WIDTH = ReviewIntentRail.COLLAPSED_WIDTH;
+    static final double EXPANDED_WIDTH = 232;
+    static final double NARROW_WIDTH = 196;
+    static final double COLLAPSED_WIDTH = 40;
 
     enum RowState { NOT_STARTED, IN_PROGRESS, CHECKING, PASSED, CHANGES, OVERRIDDEN, STALE }
 

@@ -315,7 +315,7 @@ class ReviewDiffRowsTest {
     }
 
     private static ReviewDiffRows.Options withLinks(Map<String, List<ReadingPath.Link>> linksByHunk) {
-        return new ReviewDiffRows.Options(true, Set.of(), 3000, ReviewDiffRows.HunkFilter.ALL, linksByHunk);
+        return new ReviewDiffRows.Options(true, Set.of(), 3000, linksByHunk);
     }
 
     private static ReadingPath.Link link(String kind, String targetFile, int targetHunkIndex, String label) {

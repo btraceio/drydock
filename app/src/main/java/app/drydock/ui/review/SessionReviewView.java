@@ -8,13 +8,10 @@ import app.drydock.mcp.McpActivityLog;
 import app.drydock.review.BaseMove;
 import app.drydock.review.ChangeGraph;
 import app.drydock.review.HunkIds;
-import app.drydock.review.IntentGrouping;
 import app.drydock.review.OutOfDiffFanIn;
 import app.drydock.review.ReadingPath;
 import app.drydock.review.ReviewAnnotation;
-import app.drydock.review.Provenance;
 import app.drydock.review.RecheckDispatch;
-import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Sections;
@@ -51,7 +48,6 @@ import app.drydock.ui.nav.TrailBar;
 
 import javafx.animation.PauseTransition;
 import javafx.application.Platform;
-import javafx.beans.value.ChangeListener;
 import javafx.geometry.Pos;
 import javafx.scene.Node;
 import javafx.scene.control.Button;
@@ -91,8 +87,9 @@ import java.util.function.Function;
 import java.util.function.UnaryOperator;
 
 /**
- * The review board of one session's Review sub-tab (spec §3.2): the intent
- * rail, the diff column, the findings margin and the verdict bar, showing
+ * The review board of one session's Review sub-tab (spec §3.2): the guided
+ * tour or the hunk diff -- the diff column, the findings margin and the
+ * verdict bar -- showing
  * exactly ONE scope -- this checkout's local changes, or the pull request its
  * branch carries -- chosen by the two chips of a {@link ReviewScopeSwitcher}.
  *
@@ -137,54 +134,10 @@ public final class SessionReviewView extends BorderPane {
         List<ReviewAnnotation> findings(ReviewScope scope);
 
         /**
-         * The intents of {@code scope}, grouping {@code diff}: the reviewer's
-         * grouping when one was supplied, otherwise the computed sections of
-         * {@code graph} when one has finished building, otherwise one intent
-         * per (kind, directory) cluster of the diff handed in.
-         *
-         * <p>The diff is a parameter rather than something the host fetches,
-         * because the only correct diff here is the one the caller has
-         * already established belongs to {@code scope}. A host that looked it
-         * up would be free to look up the wrong one, which is exactly the
-         * defect this shape removes.</p>
-         *
-         * <p>{@code graph} is empty both before one has been requested and
-         * while it is still building -- {@link ChangeGraph#of} is blocking
-         * and runs off the FX thread, so this view hands through whatever it
-         * has on hand rather than waiting.</p>
-         */
-        List<ReviewIntent> intents(ReviewScope scope, UnifiedDiff diff, Optional<ChangeGraph> graph);
-
-        /**
-         * How many times {@code scope}'s reviewer-supplied grouping has
-         * changed ({@code IntentGrouping.version}). {@code diff} and {@code
-         * graph} are values this view already compares by identity to keep
-         * {@link #intents()}'s own cache fresh; a reviewer's grouping is the
-         * one input to {@link #intents} that changes with NEITHER of those
-         * changing; this is what lets the cache survive across more than
-         * one call without polling {@link #intents} on every one just to
-         * find out nothing changed -- which is what running {@code
-         * Sections.of} on every navigation keypress amounted to.
-         */
-        long groupingVersion(ReviewScope scope);
-
-        /**
-         * Whether a reviewer has already supplied {@code scope}'s grouping.
-         * A reviewer's grouping always wins over the computed sections (see
-         * {@link #intents}), so building the {@link ChangeGraph} it would
-         * otherwise take to compute them is pure waste when one already has
-         * -- real parsing work, and a background completion whose only
-         * observable effect is a needless extra {@code refreshReviewState}.
-         */
-        boolean hasReviewerGrouping(ReviewScope scope);
-
-        /**
          * The verdict recorded on one hunk, if any -- keyed by the hunk's
-         * content digest, never by an intent id. A section has no verdict of
-         * its own: sections overlap, and an agent may regroup them at any
-         * time, so a verdict keyed on a grouping would be orphaned by that
-         * regrouping (spec §9.2). What a section shows is what its hunks
-         * merge to, which is this view's job to derive.
+         * content digest, never by a grouping. A file or a tour step has no
+         * verdict of its own: what it shows is what its hunks merge to, which
+         * is this view's job to derive (spec §9.2).
          */
         Optional<ReviewVerdict> verdict(ReviewScope scope, String hunkDigest);
 
@@ -193,20 +146,13 @@ public final class SessionReviewView extends BorderPane {
          * empty undoes them all.
          *
          * <p>{@code hunkDigests} is computed by the caller rather than by the
-         * host, for the reason {@link #intents} takes its diff as a parameter:
-         * only this view knows which diff the human is actually looking at,
-         * and a host free to re-derive them is free to derive them from a
-         * different one. {@code blocked} comes along for the same reason:
-         * the host refuses an {@code APPROVED} decision while it is true
-         * (spec §4.6), and only this view can say so -- it is the one place
-         * with the full current intents list a finding's named id has to be
-         * checked against, which {@link #belongsToIntent} needs to tell a
-         * finding that legitimately names a DIFFERENT, still-current intent
-         * from one whose named id no longer resolves to anything at all. A
-         * host computing its own approximation from the intent alone
-         * previously disagreed with the verdict bar's own rendered "blocked"
-         * for exactly that case -- silently refusing a keypress the bar had
-         * just shown as clear.</p>
+         * host: only this view knows which diff the human is actually looking
+         * at, and a host free to re-derive them is free to derive them from a
+         * different one. {@code blocked} comes along for the same reason: the
+         * host refuses an {@code APPROVED} decision while it is true (spec
+         * §4.6), and computing it here, with the rule the verdict bar renders
+         * from ({@link #blockingFindingOpen}), is what keeps the write path
+         * from refusing a keypress the bar just showed as clear.</p>
          */
         void setVerdict(ReviewScope scope, List<String> hunkDigests,
                         Optional<ReviewVerdict.Decision> decision, boolean blocked);
@@ -238,7 +184,7 @@ public final class SessionReviewView extends BorderPane {
 
         /**
          * What moved between {@code recordedBase} and {@code scope}'s current
-         * base, so a base move that provably could not touch a section does
+         * base, so a base move that provably could not touch a file does
          * not spend the reader's attention on it (see {@link BaseMove}).
          *
          * <p>Called on the FX thread, so it must never block: a host that
@@ -345,13 +291,6 @@ public final class SessionReviewView extends BorderPane {
          * already render from -- there is no second kind of note to keep in
          * sync.</p>
          *
-         * <p>{@code annotation} already carries its intent: the view stamps
-         * it with {@link ReviewAnnotation#withIntentId} before calling this,
-         * for the same reason {@link #intents} takes its diff as a parameter
-         * -- the only correct grouping is the one the caller has already
-         * established belongs to this scope's current diff. Empty when no
-         * intent covers the file, which costs the comment nothing -- the
-         * margin falls back to matching it by file.</p>
          */
         void addComment(ReviewScope scope, ReviewAnnotation annotation);
 
@@ -375,7 +314,8 @@ public final class SessionReviewView extends BorderPane {
         void overrideSeverity(ReviewScope scope, ReviewAnnotation finding, Severity severity);
 
         /**
-         * Hands an intent's open findings to the scope's bound session.
+         * Hands open findings to the scope's bound session, under {@code
+         * subject} (the file they are on) as the prompt's heading.
          * False when there is no session to hand them to (or nothing to
          * hand), so a caller can say so rather than appear to have asked --
          * the same contract, and for the same reason, as {@link
@@ -394,13 +334,14 @@ public final class SessionReviewView extends BorderPane {
         boolean sendFindingsToAuthor(ReviewScope scope, List<ReviewAnnotation> findings);
 
         /**
-         * Posts the review once every intent is settled. {@code index}
+         * Posts the review once every hunk is settled. {@code index}
          * locates every finding's lines in the real diff (built from {@link
          * ReviewDiffColumn#displayedDiff()}, not the rendered rows -- see
          * {@link SubmitPlan.DiffIndex}), and {@code decisions} carries one
-         * {@link ReviewVerdict.Decision} per counted intent, in the same
-         * order {@link #submitReview()} already walked them in to confirm
-         * every one had a verdict. Both live here, rather than being
+         * {@link ReviewVerdict.Decision} per file with hunks -- what its
+         * hunks' verdicts merge to -- in diff order, the order {@link
+         * #submitReview()} walked them in to confirm every one was decided.
+         * Both live here, rather than being
          * recomputed by the host, because only this view can see a diff row
          * at all: {@code MainWorkspace} (package {@code app.drydock.ui}) has
          * no visibility into {@code app.drydock.ui.review}'s
@@ -471,25 +412,10 @@ public final class SessionReviewView extends BorderPane {
      */
     public static final String UNRESOLVED_BASE = "unresolved";
 
-    /**
-     * What {@code a} / {@code r} / {@code u} act on (spec §9.6). Reading is
-     * per hunk; settling usually is not, so one key needs several possible
-     * targets rather than one key needing one each.
-     */
-    enum SettleUnit {
-        /** The rail has focus: every hunk of the current section, as before this task. */
-        SECTION,
-        /** The diff column has focus: just the hunk it is anchored on. */
-        HUNK,
-        /** {@code ⇧A} / {@code ⇧R}: every hunk of the current file, regardless of focus. */
-        FILE
-    }
-
     private final Host host;
     private final ReviewScopeSwitcher switcher = new ReviewScopeSwitcher();
     private final ReviewDiffColumn diffColumn;
-    private final ReviewIntentRail intentRail = new ReviewIntentRail();
-    /** Everything a section says about itself, derived from its hunks. */
+    /** What a file and the review say about themselves, derived from the hunks' verdicts. */
     private final SectionStates sections;
 
     /**
@@ -505,20 +431,6 @@ public final class SessionReviewView extends BorderPane {
     private final ReviewFindingsMargin margin;
     private final ReviewVerdictBar verdictBar;
 
-    /**
-     * Re-renders the verdict bar's acting-unit statement on every Scene
-     * focus change (see {@link #settleUnit()}). Held as a field, rather
-     * than an inline lambda passed straight to {@code addListener}, purely
-     * so {@link #close()} can remove the SAME instance it was added with --
-     * {@code ObservableValue.removeListener} matches by reference, and a
-     * second lambda expression is never {@code equals} to the first.
-     * Assigned in the constructor body (not here) because it closes over
-     * {@link #verdictBar}, itself assigned in the constructor body -- a
-     * field initializer referencing it here runs, per javac's definite-
-     * assignment analysis, before that assignment has happened.
-     */
-    private final ChangeListener<Node> focusOwnerListener;
-
     /** The MCP activity panel; absent when no server is running (tests, headless). */
     private final Optional<ReviewMcpActivityPanel> mcpPanel;
 
@@ -533,8 +445,7 @@ public final class SessionReviewView extends BorderPane {
      * run git again. That is not merely an optimisation -- re-scoping
      * publishes {@link DiffOutcome.Diffing} over the entry the moment it is
      * asked for, so the cache would destroy itself on the first switch and
-     * empty the rail, the verdict bar and the file count on every one after
-     * it.</p>
+     * empty the verdict bar and the file count on every one after it.</p>
      */
     private final Map<String, DiffOutcome> outcomeByScope = new HashMap<>();
 
@@ -550,10 +461,8 @@ public final class SessionReviewView extends BorderPane {
 
     /**
      * Each scope's {@link ChangeGraph}, once built. Absent while none has
-     * been requested yet, or one is still building -- {@link #intents()}
-     * passes {@link Optional#empty()} through in that gap, and {@link
-     * IntentGrouping} falls back to the (kind, directory) clustering, so the
-     * rail is never empty while the graph is in flight.
+     * been requested yet, or one is still building -- the link footers, the
+     * tour's impact and staleness widening all do without it meanwhile.
      */
     private final Map<String, ChangeGraph> graphByScope = new HashMap<>();
 
@@ -578,12 +487,7 @@ public final class SessionReviewView extends BorderPane {
      */
     private final Map<String, UnifiedDiff> graphedDiffByScope = new HashMap<>();
 
-    /**
-     * Scopes with a {@link ChangeGraph} build currently in flight, so the
-     * rail can say the grouping on screen is provisional -- the (kind,
-     * directory) fallback, not necessarily the final computed one -- rather
-     * than silently swapping cards under a reviewer with no warning at all.
-     */
+    /** Scopes with a {@link ChangeGraph} build currently in flight. */
     private final Set<String> graphBuilding = new HashSet<>();
 
     /**
@@ -610,36 +514,6 @@ public final class SessionReviewView extends BorderPane {
      * competing for the FX thread with whatever runs next.
      */
     private volatile boolean closed;
-
-    /**
-     * {@link #intents()}'s last computed result, reused across as many
-     * calls -- and as many {@link #refreshReviewState()} passes -- as
-     * {@code scope}, {@code diff}, {@code graph} and {@link
-     * Host#groupingVersion} stay the same. Every navigation keypress
-     * ({@code [}, {@code ]}, {@code n}, {@code a}, {@code r}, {@code u})
-     * ends in a full refresh, and {@link #findingsForMargin}, {@link
-     * #currentIntent()} (itself called from several places), {@link
-     * #renderVerdictBar} and the rail's own {@code setIntents} call all
-     * read {@link #intents()} independently within each one -- so without
-     * this cache, {@code Sections.of} ran on the FX thread multiple times
-     * PER KEYPRESS, measured at over a second of real work on this branch's
-     * own diff, none of which {@code Sections.of}'s own contract permits.
-     *
-     * <p>Those four fields are the ONLY inputs {@link IntentGrouping
-     * intentsFor} has: {@code diff} and {@code graph} are plain values
-     * compared by identity, and {@code groupingVersion} is the one thing
-     * that can change with neither of those changing -- a reviewer's own
-     * {@code set}/{@code clear}. Four unchanged fields is therefore exactly
-     * as fresh a claim as recomputing, for however many refreshes that
-     * holds, which is normally many: a reviewer's grouping changes far less
-     * often than the cursor moves.</p>
-     */
-    private IntentsCacheEntry intentsCache;
-
-    /** One completed {@link #intents()} lookup, keyed by what it was computed from. */
-    private record IntentsCacheEntry(String scopeId, UnifiedDiff diff, ChangeGraph graph,
-                                     long groupingVersion, List<ReviewIntent> intents) {
-    }
 
     /**
      * What a scope's fan-in is until its scan has actually run: {@code
@@ -685,11 +559,10 @@ public final class SessionReviewView extends BorderPane {
     private volatile String fanInScanThread;
 
     /**
-     * {@link #currentPath()}'s last computed result, reused across calls the
-     * same way {@link #intentsCache} is -- {@link ReadingPath#of} runs
-     * {@link Sections#of} first and is, like it, string work over an
-     * already-built graph rather than something to pay for on every
-     * keystroke.
+     * {@link #currentPath()}'s last computed result, reused across calls
+     * while its inputs are unchanged -- {@link ReadingPath#of} runs {@link
+     * Sections#of} first and is, like it, string work over an already-built
+     * graph rather than something to pay for on every keystroke.
      */
     private PathCacheEntry pathCache;
 
@@ -718,53 +591,48 @@ public final class SessionReviewView extends BorderPane {
     /** Told when the human picks the other chip, so the choice can be persisted. */
     private Consumer<SessionReviewScopes.Choice> onChoiceChanged = ignored -> { };
 
-    /** The intent the verdict bar is settling; {@code [} / {@code ]} / {@code n} move it. */
-    private int intentIndex;
+    /**
+     * The file the hunk diff's cursor is on; {@code [} / {@code ]} / {@code
+     * n} move it. A path rather than an index, so a re-diff that adds or
+     * drops a file ahead of it does not move the reader. Null, or a path the
+     * diff no longer has, reads as the first file (see {@link #currentFile}).
+     */
+    private String filePath;
 
     /**
-     * The intent last put on the verdict bar ({@link #showIntentOnBar}), or
-     * null while the bar shows nothing or a tour step. The bar itself only
-     * holds a label and an id; its buttons resolve back to this.
+     * Which of {@link #filePath}'s hunks was last revealed -- where {@code n}
+     * resumes its walk for the next unread hunk.
      */
-    private ReviewIntent verdictBarIntent;
+    private int hunkCursor;
 
     /**
-     * {@link #intents()}'s result as of the last {@link #refreshReviewState}
-     * pass, purely so the NEXT pass can tell whether the grouping changed
-     * underneath the same scope and re-anchor {@link #intentIndex} by
-     * content when it did -- see {@link #reanchorCursor}.
+     * The file last put on the verdict bar ({@link #showFileOnBar}), or null
+     * while the bar shows nothing or a tour step. The bar itself only holds a
+     * label and an id; its buttons resolve back to this.
      */
-    private List<ReviewIntent> lastIntents = List.of();
-
-    /** The scope {@link #lastIntents} belongs to; a scope switch must not reanchor against it. */
-    private String lastIntentsScopeId;
+    private String verdictBarFile;
 
     /**
-     * The id of the intent {@code a}/{@code r} last recorded a verdict on,
-     * so {@code u} can snap the cursor back to it -- see {@link
-     * #undoVerdict}. Cleared once undone, so a second {@code u} with
-     * nothing left to undo is inert rather than reaching for an unrelated
-     * intent. Not touched by {@code [}/{@code ]}/{@code n}: moving the
-     * cursor around must not change what {@code u} targets, or "settle one,
-     * look at another, undo" would undo the wrong one.
+     * The file {@code a}/{@code r} last recorded a verdict in, so {@code u}
+     * can snap the cursor back to it -- see {@link #undoVerdict}. Not touched
+     * by {@code [}/{@code ]}/{@code n}: moving around must not change what
+     * {@code u} targets.
      */
-    private Optional<String> lastSettledIntentId = Optional.empty();
+    private Optional<String> lastSettledFile = Optional.empty();
 
     /**
      * The EXACT digests {@code a}/{@code r} last recorded a verdict on, so
-     * {@code u} clears exactly those and nothing more -- since {@code a}/
-     * {@code r} may have settled one hunk, one section or one file
-     * depending on {@link #settleUnit()} at the time, undoing "the whole
-     * current intent" (as before this task) would over-clear a single-hunk
-     * approval or under-clear a whole-file one.
+     * {@code u} clears exactly those and nothing more -- one hunk, or a
+     * whole file for {@code ⇧A}/{@code ⇧R}. Cleared once undone, so a
+     * second {@code u} is inert rather than reaching for something else.
      */
     private List<String> lastSettledDigests = List.of();
 
     /** Set by {@code m}/{@code f}; remembered independently of the responsive collapse. */
     private boolean marginCollapsedByUser;
 
-    /** Set by {@code i}/{@code f}; remembered independently of the responsive collapse. */
-    private boolean intentsCollapsedByUser;
+    /** Set by {@code f} in the tour; remembered independently of the responsive collapse. */
+    private boolean outlineCollapsedByUser;
 
     private final Label countsLabel = new Label();
 
@@ -776,9 +644,9 @@ public final class SessionReviewView extends BorderPane {
      * {@link #showUnavailable}.
      *
      * <p>Everything except the top bar and the centred state is hidden in that
-     * case, for the reason the destination's empty surface records: an intent
-     * rail reading {@code 0/0}, a findings margin claiming "Nothing flagged in
-     * this intent" when there is no intent, and a verdict bar with dead arrows
+     * case, for the reason the destination's empty surface records: a findings
+     * margin claiming "Nothing flagged in this file" when there is no file,
+     * and a verdict bar with dead arrows
      * and a disabled Submit are regions describing something that does not
      * exist, framing one sentence that does. A surface with nothing in it
      * should be one thing, not the full chrome with the content removed.</p>
@@ -792,7 +660,7 @@ public final class SessionReviewView extends BorderPane {
 
     /**
      * "Run review", out in the top bar rather than only inside a reviewer
-     * menu. An agentic review is the thing that fills the intents rail and
+     * menu. An agentic review is the thing that builds the tour and fills
      * the findings margin, and while it lived behind a menu on a chip
      * labelled with an agent's name, nothing in the surface said it could be
      * asked for at all -- so nothing ever grouped anything.
@@ -805,8 +673,8 @@ public final class SessionReviewView extends BorderPane {
     private Region centre;
 
     /**
-     * Which surface the board shows (spec §5): the guided tour, or today's
-     * hunk diff -- intent rail, findings margin. {@code v} flips
+     * Which surface the board shows (spec §5): the guided tour, or the hunk
+     * diff -- diff column, findings margin. {@code v} flips
      * it; otherwise a scope with a tour (or a run building one) shows the
      * tour.
      */
@@ -968,24 +836,18 @@ public final class SessionReviewView extends BorderPane {
         this.diffColumn = new ReviewDiffColumn(diffService, host::openInExplorer);
         this.margin = new ReviewFindingsMargin(new MarginHost());
         this.verdictBar = new ReviewVerdictBar(new VerdictHost());
-        this.focusOwnerListener =
-                (obs, oldOwner, newOwner) -> verdictBar.showActingUnit(settleUnit());
         getStyleClass().addAll("review-destination", "session-review");
         // Review must never hold the window open. Its computed minimum is the
-        // sum of the rail's and the margin's own minimums plus the code
-        // column -- so below that the content pane stopped shrinking and
-        // simply overflowed the right edge of the window, taking the intent
-        // rail off-screen with it. That is the "unusable at narrow widths"
-        // the responsive collapse exists to fix, and no amount of
-        // re-splitting the rails would have fixed it: the view has to be
-        // allowed to be as narrow as the slot it is given.
+        // sum of the rails' own minimums plus the code column -- so below
+        // that the content pane stopped shrinking and simply overflowed the
+        // right edge of the window, taking a rail off-screen with it. The
+        // view has to be allowed to be as narrow as the slot it is given.
         setMinWidth(0);
 
         setTop(buildTopBar());
-        // The intent rail on the left; the centre carries the code, the
-        // margin and the verdict bar.
+        // The centre carries the code, the margin and the verdict bar; the
+        // tour's outline takes the left while touring (applyMode).
         centre = buildCenter();
-        setLeft(intentRail);
         setCenter(centre);
 
         outline.setOnSelected(this::selectStep);
@@ -998,49 +860,26 @@ public final class SessionReviewView extends BorderPane {
 
         margin.setOnToggleCollapse(() -> setMarginCollapsed(!margin.collapsed()));
         stepPanel.setOnExpand(this::expandStepPanel);
-        intentRail.setOnToggleCollapse(() -> setIntentsCollapsed(!intentRail.collapsed()));
-        intentRail.setSectionStateLookup(this::sectionState);
-        intentRail.setOnSelected(intent -> {
-            List<ReviewIntent> current = intents();
-            int index = current.indexOf(intent);
-            if (index >= 0) {
-                intentIndex = index;
-                refreshReviewState();
-                revealCurrentIntent();
-            }
-        });
         margin.setOnFilterChanged(filter -> refreshReviewState());
         diffColumn.setPinSource(new PinSource());
         diffColumn.setCommentSink(annotation -> selectedScope().ifPresent(scope -> {
-            // The intent that owns this code, so the comment lands under it
-            // rather than floating outside the grouping.
-            Optional<String> intentId = intents().stream()
-                    .filter(intent -> intent.touches(annotation.file()))
-                    .findFirst()
-                    .map(ReviewIntent::id);
-            host.addComment(scope, annotation.withIntentId(intentId));
+            host.addComment(scope, annotation);
             refreshReviewState();
             diffColumn.refreshPins();
         }));
-        // The by-file intent fallback is derived from the diff, and the diff
-        // arrives asynchronously -- so the verdict bar has to be re-rendered
-        // when it lands, or it stays on the "no intent" it correctly computed
-        // from an empty diff and never recovers.
+        // The file cursor is derived from the diff, and the diff arrives
+        // asynchronously -- so the verdict bar has to be re-rendered when it
+        // lands, or it stays on the "no file" it correctly computed from an
+        // empty diff and never recovers.
         diffColumn.setOnDiffResolved((scopeId, outcome) -> {
             outcomeByScope.put(scopeId, outcome);
             boolean selected = selectedScope().map(scope -> scope.id().equals(scopeId)).orElse(false);
             if (outcome instanceof DiffOutcome.Loaded loaded) {
-                // Unconditional (Task 19): the diff column's link footers
-                // (spec §7.2) need this scope's graph regardless of the
-                // rail's own mode or grouping source, not only where a
-                // reviewer's grouping was itself computed from one.
-                // requestGraph is a no-op for a diff
-                // instance it has already graphed or is already building, so
-                // this costs nothing on a re-diff or a re-selection. The
-                // rail's OWN "refining grouping…" banner is gated
-                // separately in refreshReviewState -- a reviewer's already-
-                // final INTENTS grouping must not flash it while this build
-                // runs purely for links.
+                // The diff column's link footers (spec §7.2) and the tour's
+                // impact need this scope's graph. requestGraph is a no-op
+                // for a diff instance it has already graphed or is already
+                // building, so this costs nothing on a re-diff or a
+                // re-selection.
                 requestGraph(scopeId, loaded.diff());
                 migrateTour(scopeId, loaded.diff());
             } else {
@@ -1055,30 +894,6 @@ public final class SessionReviewView extends BorderPane {
             }
         });
 
-        // See settleUnit()'s javadoc for why this reads real Scene focus
-        // rather than a hand-tracked region flag: a flag toggled from a
-        // MOUSE_PRESSED filter on the whole rail/column desyncs from a
-        // scrollbar drag, the rail's own collapse toggle, and keyboard-only
-        // navigation, none of which are a click on a card or into the diff.
-        // The label has to stay live across whatever moves real focus, not
-        // just the actions this view itself triggers, so it listens for
-        // that directly rather than piggybacking on refreshReviewState().
-        //
-        // focusOwnerListener is held as a field, and this add/remove pair
-        // (repeated in close()) is deliberate: the Scene handed in here is
-        // app-lifetime (AppShell builds one for the whole application), so
-        // a listener added and never removed keeps every SessionReviewView
-        // ever opened -- diff column included -- strongly reachable for
-        // the process's life, and re-attaching without removing the old
-        // one first would stack a second listener under the same Scene.
-        sceneProperty().addListener((obs, oldScene, newScene) -> {
-            if (oldScene != null) {
-                oldScene.focusOwnerProperty().removeListener(focusOwnerListener);
-            }
-            if (newScene != null) {
-                newScene.focusOwnerProperty().addListener(focusOwnerListener);
-            }
-        });
         widthProperty().addListener((obs, old, width) -> applyResponsiveLayout(width.doubleValue()));
         addEventFilter(KeyEvent.KEY_PRESSED, this::onKeyPressed);
         setFocusTraversable(true);
@@ -1257,7 +1072,7 @@ public final class SessionReviewView extends BorderPane {
     }
 
     /**
-     * Renders the selected scope: the same body / diff / intent wiring the
+     * Renders the selected scope: the same body / diff wiring the
      * destination's {@code showItem} ran for a queue row.
      */
     private void renderSelectedScope() {
@@ -1265,13 +1080,12 @@ public final class SessionReviewView extends BorderPane {
         headerIcon.setText(headerGlyphFor(scope));
         headerTitle.setText(headerTitleFor(scope));
         headerContext.setText(headerContextFor(scope));
-        intentIndex = 0;
-        // Fallback intent ids are NOT scope-namespaced ("auto:change:src" is
-        // just (kind, directory)), so two different scopes with a similar
-        // layout can mint the identical id -- leaving this set across a
-        // scope switch could make u undo, and jump into, a same-named
-        // intent in the WRONG scope.
-        lastSettledIntentId = Optional.empty();
+        filePath = null;
+        hunkCursor = 0;
+        // The two scopes of one branch share file paths, so leaving these set
+        // across a scope switch could make u undo, and jump into, the same
+        // file in the WRONG scope.
+        lastSettledFile = Optional.empty();
         lastSettledDigests = List.of();
         // Tour cursor and mode are per scope as well: the incoming scope
         // opens on its own first unsettled step, in its own default mode.
@@ -1283,7 +1097,7 @@ public final class SessionReviewView extends BorderPane {
         // did the other way round: a cached diff publishes Loaded
         // synchronously from inside bodyFor, and the diff-resolved handler
         // that fires off it would otherwise render the incoming scope at the
-        // OUTGOING scope's intent index.
+        // OUTGOING scope's file cursor.
         body.getChildren().setAll(bodyFor(scope));
         refreshReviewState();
         applyResponsiveLayout(getWidth());
@@ -1296,8 +1110,7 @@ public final class SessionReviewView extends BorderPane {
 
     /**
      * The centre body: the diff column, or whatever the host supplies ahead
-     * of it -- that override is the seam the findings margin and intent rail
-     * arrive through.
+     * of it.
      *
      * <p>A diff this view has already seen resolve is re-rendered from {@link
      * #outcomeByScope} through {@link ReviewDiffColumn#showDiff}, never by
@@ -1309,9 +1122,7 @@ public final class SessionReviewView extends BorderPane {
      * completion for the outgoing scope is dropped rather than overwriting
      * this one, and it publishes under the scope it was read FOR -- which is
      * what keeps {@code displayedScopeId} equal to the selected scope, and so
-     * keeps {@link #submitReview} from refusing. What it does NOT do for
-     * itself is clear the outgoing scope's intent filter; this does, below,
-     * before handing it the diff.</p>
+     * keeps {@link #submitReview} from refusing.</p>
      *
      * <p>A scope with no checkout cannot be diffed at all ({@link
      * ReviewDiffColumn#setScope} rejects one, because the only diff obtainable
@@ -1329,17 +1140,6 @@ public final class SessionReviewView extends BorderPane {
         // Checked before diffability: a diff already in hand is renderable
         // whether or not git could be run for it again.
         if (outcomeByScope.get(scope.id()) instanceof DiffOutcome.Loaded loaded) {
-            // The outgoing scope's intent must not filter the incoming
-            // scope's diff -- the rule setScope enforces for itself, which
-            // showDiff does not, because it was written for a caller that
-            // never navigates. Left alone, the filter survives: fallback
-            // intent ids are not scope-namespaced ("auto:change:src" is just
-            // (kind, directory)), so the two scopes of one branch collide on
-            // them essentially always, and setIntent early-returns on an
-            // equal id -- leaving the restored column filtered by the OTHER
-            // scope's hunk ids, with its own files missing and nothing on
-            // screen to say so.
-            diffColumn.setIntent(null);
             diffColumn.showDiff(scope, loaded.diff());
             return diffStack;
         }
@@ -1396,49 +1196,22 @@ public final class SessionReviewView extends BorderPane {
     }
 
     /**
-     * Re-reads findings, intents and verdicts from the store. Called on every
-     * store change, including the MCP router's, because a view that renders
-     * from a cached value silently discards the other writer's work.
+     * Re-reads findings, verdicts and the tour from the store. Called on
+     * every store change, including the MCP router's, because a view that
+     * renders from a cached value silently discards the other writer's work.
      */
     public void refreshReviewState() {
-        // #intentsCache is NOT invalidated here: every input intentsFor has
-        // -- scope, diff, graph, the reviewer's groupingVersion -- is
-        // already covered by the cache's own key, so a refresh triggered by
-        // something else entirely (a finding written, a verdict recorded)
-        // correctly reuses it rather than re-running Sections.of to
-        // rediscover the same answer.
         Optional<ReviewScope> scope = selectedScope();
         updateRunReviewButton();
         updateCountsLabel();
         if (scope.isEmpty()) {
             margin.setFindings(List.of());
-            showIntentOnBar(null, Optional.empty(), false);
+            showFileOnBar(null, Optional.empty(), false);
             verdictBar.showProgress(0, 0);
-            // No scope selected means no rail: leaving the previous scope's
-            // cards up here is how the rail came to list a departed item's
-            // files (see the whole-branch review this fixes).
-            intentRail.setIntents(List.of(), null, ReviewIntentRail.Empty.NONE,
-                    Provenance.MEASURED);
-            intentRail.setGroupingPending(false);
             mcpPanel.ifPresent(panel -> panel.setScope(null));
-            lastIntents = List.of();
-            lastIntentsScopeId = null;
             return;
         }
         String scopeId = scope.get().id();
-        List<ReviewIntent> currentIntents = intents();
-        // Re-anchor the cursor BEFORE anything below reads it: a grouping
-        // swap for the SAME scope (the computed graph landing over the
-        // fallback shown while it built, or a reviewer's own regroup) must
-        // not leave intentIndex pointing at whatever now happens to sit at
-        // the same position -- verdictAction reads currentIntent() fresh at
-        // keypress time, so a swap between a read and a keypress would
-        // otherwise record an approval against hunks never actually read.
-        if (scopeId.equals(lastIntentsScopeId) && !currentIntents.equals(lastIntents)) {
-            reanchorCursor(lastIntents, currentIntents);
-        }
-        lastIntents = currentIntents;
-        lastIntentsScopeId = scopeId;
 
         // A verdict (or a diff change) lands as a tour write; the queue moves
         // on once its in-flight check is no longer awaiting the agent.
@@ -1467,23 +1240,6 @@ public final class SessionReviewView extends BorderPane {
         margin.setFindings(findingsForMargin(scope.get()));
         diffColumn.refreshPins();
         diffColumn.setLinks(linksByHunk());
-        // Spec §8: reads and the agent's array order are both the
-        // agent's claim; only a grouping drydock computed itself is
-        // measured. hasReviewerGrouping is exactly that distinction.
-        intentRail.setIntents(currentIntents, currentIntent().map(ReviewIntent::id).orElse(null),
-                emptyReason(),
-                host.hasReviewerGrouping(scope.get())
-                        ? Provenance.CLAIMED
-                        : Provenance.MEASURED);
-        // The graph now builds unconditionally (Task 19, for the diff
-        // column's link footers), but the rail's OWN "refining grouping…"
-        // banner is about the RAIL's content, not the graph's existence: a
-        // reviewer's INTENTS grouping is already final and does not change
-        // when this build lands, so the banner shows only while there is no
-        // reviewer grouping (whose fallback is what the graph completing
-        // actually refines).
-        intentRail.setGroupingPending(graphBuilding.contains(scopeId)
-                && !host.hasReviewerGrouping(scope.get()));
         mcpPanel.filter(Node::isVisible)
                 .ifPresent(panel -> panel.setScope(scope.get()));
         renderVerdictBar(scope.get());
@@ -1491,50 +1247,11 @@ public final class SessionReviewView extends BorderPane {
     }
 
     /**
-     * Re-anchors {@link #intentIndex} across a grouping change for the same
-     * scope: to the same id when it still exists (nothing about the
-     * selected intent actually changed), otherwise to whichever new intent
-     * overlaps it in the most hunks (the grouping changed identity, not the
-     * code being read). Left alone -- clamped to the new list's bounds at
-     * most -- only when nothing in the new grouping shares any hunk with
-     * what was selected, which a scope switch already guards this from
-     * being asked to do at all (see the call site).
-     */
-    private void reanchorCursor(List<ReviewIntent> previous, List<ReviewIntent> current) {
-        if (previous.isEmpty() || current.isEmpty()) {
-            return;
-        }
-        ReviewIntent previouslySelected = previous.get(Math.clamp(intentIndex, 0, previous.size() - 1));
-        for (int i = 0; i < current.size(); i++) {
-            if (current.get(i).id().equals(previouslySelected.id())) {
-                intentIndex = i;
-                return;
-            }
-        }
-        Set<String> previousHunks = new HashSet<>(previouslySelected.hunkIds());
-        int bestIndex = -1;
-        int bestOverlap = 0;
-        for (int i = 0; i < current.size(); i++) {
-            int overlap = 0;
-            for (String hunkId : current.get(i).hunkIds()) {
-                if (previousHunks.contains(hunkId)) {
-                    overlap++;
-                }
-            }
-            if (overlap > bestOverlap) {
-                bestOverlap = overlap;
-                bestIndex = i;
-            }
-        }
-        intentIndex = bestIndex >= 0 ? bestIndex : Math.clamp(intentIndex, 0, current.size() - 1);
-    }
-
-    /**
      * What the top bar states about the board: how much code is in it. The
      * destination said "N items · M repos" here, which a single checkout has
      * no equivalent of -- and the file count is the one number nothing else on
      * the board carries (the chips count findings, the verdict bar counts
-     * intents). Blank while the diff is still loading, or failed: a confident
+     * hunks). Blank while the diff is still loading, or failed: a confident
      * "0 files" would read as "nothing changed".
      */
     private void updateCountsLabel() {
@@ -1545,20 +1262,16 @@ public final class SessionReviewView extends BorderPane {
     }
 
     /**
-     * What the margin shows: the current intent's findings, or the whole
-     * review's when {@code F} is on. A finding that names no intent is shown
-     * either way -- it belongs to the review even if nothing grouped it.
+     * What the margin shows: the current file's findings, or the whole
+     * review's when {@code ⇧F} is on (or there is no file to narrow to).
      */
     private List<ReviewAnnotation> findingsForMargin(ReviewScope scope) {
         List<ReviewAnnotation> all = visibleFindings(scope);
-        if (margin.wholeReview()) {
+        Optional<String> file = currentFile();
+        if (margin.wholeReview() || file.isEmpty()) {
             return all;
         }
-        Optional<ReviewIntent> current = currentIntent();
-        if (current.isEmpty()) {
-            return all;
-        }
-        return all.stream().filter(finding -> belongsToCurrentIntent(finding)).toList();
+        return all.stream().filter(finding -> finding.file().equals(file.get())).toList();
     }
 
     /**
@@ -1573,66 +1286,17 @@ public final class SessionReviewView extends BorderPane {
                 .orElse(all);
     }
 
-    /** Whether a finding belongs under the intent now selected. See {@link #belongsToIntent}. */
-    private boolean belongsToCurrentIntent(ReviewAnnotation finding) {
-        return belongsToIntent(finding, currentIntent().orElse(null));
-    }
-
     /**
-     * Whether {@code finding} belongs under {@code intent}.
-     *
-     * <p>Matched by id when the finding names an intent the current grouping
-     * actually contains, and by file otherwise. That second path is the
-     * important one: a finding can name an intent that no longer exists --
-     * a reviewer re-grouped, or the computed graph landed over the fallback
-     * grouping the finding was recorded against. Matching on the id alone
-     * made such a finding belong to no intent at all, so it silently
-     * disappeared from every margin instead of being shown somewhere. A
-     * finding is a thing a human or an agent went to the trouble of writing
-     * down; it must not be possible for the UI to lose one by regrouping
-     * around it.</p>
-     *
-     * <p>{@code intent} is a parameter rather than always {@link
-     * #currentIntent()} because {@link #blockingFindingOpen} needs the SAME
-     * rule stated for an arbitrary intent -- a finding naming a DIFFERENT
-     * intent that still exists must not count against this one just because
-     * it happens to touch one of this intent's files, which is exactly the
-     * distinction a stale, no-longer-resolvable id cannot make for itself.
-     * Reusing this one method is what keeps the verdict bar's own rendered
-     * "blocked" and the write path's refusal from disagreeing.</p>
-     *
-     * <p>This is a deliberate relaxation from the write-path filter this
-     * method replaced, which ended in {@code .orElse(true)}: an unnamed
-     * finding used to block approval of EVERY intent, no matter which files
-     * it actually touched. Here an unnamed finding only blocks the intents
-     * whose files it touches, same as a named-but-stale one -- consistent
-     * with what the verdict bar already showed, but it does mean an unnamed
-     * blocking finding no longer blocks approval of an intent none of whose
-     * files it touches.</p>
+     * Whether a still-open finding on {@code file} blocks approving its hunks
+     * (spec §4.6). One rule for the verdict bar's rendered "blocked" and for
+     * the write path (every {@code host.setVerdict} call site), so neither
+     * can refuse a keypress the other just showed as clear. By file, not by
+     * the finding's line range: a blocker is about the change in that file,
+     * and the margin shows it under the same file.
      */
-    private boolean belongsToIntent(ReviewAnnotation finding, ReviewIntent intent) {
-        if (intent == null) {
-            return true;
-        }
-        String named = finding.intentId().orElse(null);
-        if (named != null && intents().stream().anyMatch(candidate -> candidate.id().equals(named))) {
-            return named.equals(intent.id());
-        }
-        // Unnamed, or naming an intent this grouping does not have: fall back
-        // to where the finding actually is.
-        return intent.touches(finding.file());
-    }
-
-    /**
-     * Whether a still-open finding blocks approving {@code intent} (spec
-     * §4.6) -- the same rule {@link #belongsToIntent} states for the
-     * verdict bar's own rendered "blocked", reused here so the write path
-     * (every {@code host.setVerdict} call site) can never refuse a keypress
-     * the bar just showed as clear, or the reverse.
-     */
-    private boolean blockingFindingOpen(ReviewScope scope, ReviewIntent intent) {
+    private boolean blockingFindingOpen(ReviewScope scope, String file) {
         return host.findings(scope).stream()
-                .filter(finding -> belongsToIntent(finding, intent))
+                .filter(finding -> finding.file().equals(file))
                 .anyMatch(ReviewAnnotation::blocksApproval);
     }
 
@@ -1643,33 +1307,6 @@ public final class SessionReviewView extends BorderPane {
      */
     private Optional<DiffOutcome> selectedOutcome() {
         return selectedScope().map(scope -> outcomeByScope.get(scope.id()));
-    }
-
-    /**
-     * The selected scope's intents. A scope whose diff has not loaded -- or
-     * never will, because it has no checkout -- has none, and says so
-     * through {@link #emptyReason()} rather than borrowing another's.
-     */
-    private List<ReviewIntent> intents() {
-        Optional<ReviewScope> scope = selectedScope();
-        if (scope.isEmpty()) {
-            return List.of();
-        }
-        if (!(selectedOutcome().orElse(null) instanceof DiffOutcome.Loaded loaded)) {
-            return List.of();
-        }
-        String scopeId = scope.get().id();
-        UnifiedDiff diff = loaded.diff();
-        ChangeGraph graph = graphByScope.get(scopeId);
-        long groupingVersion = host.groupingVersion(scope.get());
-        IntentsCacheEntry cached = intentsCache;
-        if (cached != null && cached.scopeId().equals(scopeId) && cached.diff() == diff
-                && cached.graph() == graph && cached.groupingVersion() == groupingVersion) {
-            return cached.intents();
-        }
-        List<ReviewIntent> computed = host.intents(scope.get(), diff, Optional.ofNullable(graph));
-        intentsCache = new IntentsCacheEntry(scopeId, diff, graph, groupingVersion, computed);
-        return computed;
     }
 
     /**
@@ -1731,9 +1368,7 @@ public final class SessionReviewView extends BorderPane {
     /**
      * Kicks off building {@code diff}'s {@link ChangeGraph} on {@link
      * #SECTION_GRAPH_EXECUTOR}, off the FX thread. Until it finishes, {@code
-     * scopeId} has no entry in {@link #graphByScope}, so {@link #intents()}
-     * passes {@link Optional#empty()} through and the rail shows the (kind,
-     * directory) clustering rather than nothing.
+     * scopeId} has no entry in {@link #graphByScope}.
      *
      * <p>A no-op when {@code diff} is the SAME instance already graphed (or
      * being graphed) for this scope -- every scope flip back to a cached
@@ -1780,19 +1415,16 @@ public final class SessionReviewView extends BorderPane {
                             return;
                         }
                         // The CURRENT generation clears "building" and
-                        // refreshes either way, success or failure: a stale
-                        // "refining grouping..." banner is exactly the
-                        // regression a build that settles without a refresh
-                        // produces, and it would otherwise sit there until
-                        // some unrelated store change happened to refresh.
+                        // refreshes either way, success or failure, so the
+                        // link footers and the tour's impact pick it up.
                         graphBuilding.remove(scopeId);
                         if (failure == null) {
                             graphByScope.put(scopeId, graph);
                             requestFanIn(scopeId, diff, graph);
                         } else {
-                            // The (kind, directory) fallback is the honest
-                            // answer, not a broken rail -- but a failed
-                            // build must not be permanent: graphedDiffByScope
+                            // No graph is an honest answer (no link footers,
+                            // the step panel says why) -- but a failed build
+                            // must not be permanent: graphedDiffByScope
                             // recorded this diff BEFORE the parse ran, so
                             // without clearing it here, requestGraph's own
                             // "already graphed" guard would treat every
@@ -1864,34 +1496,27 @@ public final class SessionReviewView extends BorderPane {
                             landed = new OutOfDiffFanIn.Result(Map.of(),
                                     Optional.of("the caller search failed: " + UiErrors.message(failure)));
                         }
-                        // A scan that confirms what the rail is already
-                        // showing does not disturb the reader. The common
-                        // case is a scope with nothing to grep (no worktree,
-                        // or a checkout git cannot read): the answer is the
-                        // same "unavailable, nothing measured" the board
-                        // started with, and re-rendering the rail and
-                        // re-narrowing the diff column to say so would move
-                        // the ground under whoever is mid-review. It is
-                        // still recorded: the step panel tells "not scanned
-                        // yet" from "scanned, and here is why not", and its
-                        // redraw guards keep the rest of the tour still.
+                        // A scan that confirms what was already assumed does
+                        // not disturb the reader. The common case is a scope
+                        // with nothing to grep (no worktree, or a checkout
+                        // git cannot read): the answer is the same
+                        // "unavailable, nothing measured" the board started
+                        // with. It is still recorded: the step panel tells
+                        // "not scanned yet" from "scanned, and here is why
+                        // not", and its redraw guards keep the tour still.
                         OutOfDiffFanIn.Result previous = fanInFor(scopeId);
-                        boolean railUnchanged = previous.unavailable() == landed.unavailable()
+                        boolean fanInUnchanged = previous.unavailable() == landed.unavailable()
                                 && previous.bySymbol().equals(landed.bySymbol());
                         fanInByScope.put(scopeId, landed);
                         if (selectedScope().map(current -> current.id().equals(scopeId))
                                 .orElse(false)) {
-                            if (railUnchanged) {
+                            if (fanInUnchanged) {
                                 renderTour(currentTour());
                                 return;
                             }
+                            // The scan is the reading path's first rank term,
+                            // so the link footers can change with it.
                             refreshReviewState();
-                            // The scan is the reading path's FIRST rank term,
-                            // so a landing scan can reorder the rail under
-                            // the reader: the selected index then names a
-                            // different step, and the diff column is narrowed
-                            // to the old one until something re-reveals it.
-                            revealCurrentSelection();
                         }
                     });
                 });
@@ -1909,38 +1534,6 @@ public final class SessionReviewView extends BorderPane {
     }
 
     /**
-     * Which empty the rail is showing. A scope with a checkout whose diff has
-     * not arrived is loading; one without a checkout never will; a loaded
-     * diff with no files is a genuine "nothing changed here".
-     */
-    private ReviewIntentRail.Empty emptyReason() {
-        Optional<ReviewScope> scope = selectedScope();
-        if (scope.isEmpty()) {
-            return ReviewIntentRail.Empty.NONE;
-        }
-        DiffOutcome outcome = selectedOutcome().orElse(null);
-        if (outcome instanceof DiffOutcome.Failed) {
-            return ReviewIntentRail.Empty.DIFF_FAILED;
-        }
-        if (outcome instanceof DiffOutcome.Loaded loaded) {
-            return loaded.diff().files().isEmpty()
-                    ? ReviewIntentRail.Empty.NO_CHANGES
-                    : ReviewIntentRail.Empty.NONE;
-        }
-        return scope.get().worktree().isEmpty()
-                ? ReviewIntentRail.Empty.NOT_CHECKED_OUT
-                : ReviewIntentRail.Empty.DIFFING;
-    }
-
-    private Optional<ReviewIntent> currentIntent() {
-        List<ReviewIntent> intents = intents();
-        if (intents.isEmpty()) {
-            return Optional.empty();
-        }
-        return Optional.of(intents.get(Math.clamp(intentIndex, 0, intents.size() - 1)));
-    }
-
-    /**
      * The selected scope's diff, once it has loaded. Empty covers both "still
      * diffing" and "there is no scope" -- neither of which is a diff with no
      * hunks in it.
@@ -1953,191 +1546,113 @@ public final class SessionReviewView extends BorderPane {
 
     /**
      * What the board is showing, for {@link SectionStates}. Empty whenever
-     * there is nothing to derive a section state from -- no scope, or a diff
-     * that has not landed -- which the callers below each answer for
-     * themselves rather than guessing at a default here.
+     * there is nothing to derive a state from -- no scope, or a diff that
+     * has not landed -- which the callers below each answer for themselves.
      */
     private Optional<SectionStates.Board> board() {
         return selectedScope().flatMap(scope -> loadedDiff()
-                .map(diff -> new SectionStates.Board(scope, diff, intents(),
+                .map(diff -> new SectionStates.Board(scope, diff,
                         Optional.ofNullable(graphByScope.get(scope.id())))));
     }
 
-    /** The content digests of the hunks {@code intent} covers; none without a diff. */
-    private List<String> digestsOf(ReviewIntent intent) {
-        return board().map(b -> sections.digestsOf(b, intent)).orElse(List.of());
+    /** The files the hunk diff walks, in diff order; none without a diff. */
+    private List<String> files() {
+        return board().map(sections::filesWithHunks).orElse(List.of());
     }
 
     /**
-     * The digests {@code a}/{@code r}/{@code u} act on for {@code intent}
-     * over {@code unit} -- see {@link SectionStates#digestsForAction}. None
-     * without a diff to derive them from.
-     *
-     * <p>{@code unit} is a parameter, never {@link #settleUnit()} read
-     * afresh in here: the keyboard path computes it once, at key-press time,
-     * and a mouse click on the verdict bar's own Approve/Request-changes
-     * button captures it at PRESS time (see {@code ReviewVerdictBar}) --
-     * pressing a focusable button moves Scene focus off the diff column
-     * before the button's action fires, and re-reading {@code settleUnit()}
-     * here would silently answer with whatever focus became by release,
-     * not what it was when the reader decided to press.</p>
+     * The file the cursor is on: {@link #filePath} while the diff still has
+     * it, otherwise the first file with hunks. Empty without a diff, or for a
+     * diff with nothing to settle.
      */
-    private List<String> digestsForAction(ReviewIntent intent, SettleUnit unit, boolean wholeFile) {
-        return board().map(b -> sections.digestsForAction(b, intent, unit, wholeFile,
-                        diffColumn.currentLineSelection()))
-                .orElse(List.of());
-    }
-
-    /** What {@code intent}'s hunks merge to; nothing without a diff to merge over. */
-    private Optional<ReviewVerdict.Decision> decisionOf(ReviewIntent intent) {
-        return board().flatMap(b -> sections.decisionOf(b, intent));
-    }
-
-    /** One section's rendered state (spec §9.1). */
-    private SectionStates.SectionState sectionState(ReviewIntent intent) {
-        return board().map(b -> sections.stateOf(b, intent))
-                .orElseGet(SectionStates.SectionState::unknown);
-    }
-
-    /** The sections progress is measured over and Submit demands a verdict on. */
-    private List<ReviewIntent> countedSections() {
-        return board().map(sections::counted).orElse(List.of());
-    }
-
-    /**
-     * What {@code a} / {@code r} / {@code u} act on right now (spec §9.6):
-     * {@code HUNK} when the diff column has real focus, {@code SECTION}
-     * otherwise -- the same default the keys have always had, so a reader
-     * who has never clicked into the diff column sees no change.
-     *
-     * <p>Reads the Scene's actual focus owner and walks its parent chain,
-     * rather than a hand-tracked flag toggled from a {@code MOUSE_PRESSED}
-     * filter on the whole rail or column: that flag desyncs the moment
-     * something else moves real focus without going through this view's own
-     * filters -- dragging the diff's scrollbar, clicking the rail's own
-     * collapse toggle, or Tab-key navigation, none of which are "the reader
-     * clicked a card or into the diff." A live Scene read has none of those
-     * gaps, and is equally immune to the bug an earlier attempt hit with
-     * {@code Node.isFocusWithin()}: that bug was a stuck ref-count (see
-     * {@code ReviewIntentRail#rebuild}'s card replacement and JavaFX's
-     * {@code Direction.NEXT} focus-cleanup traversal, in the project's
-     * JavaFX-traps memory) that read {@code true} while the REAL focus
-     * owner's own parent chain never touched the diff column at all -- a
-     * fresh read of {@code getFocusOwner()} every time never accumulates
-     * that kind of staleness.</p>
-     */
-    SettleUnit settleUnit() {
-        return isDescendantOf(getScene() == null ? null : getScene().getFocusOwner(), diffColumn)
-                ? SettleUnit.HUNK
-                : SettleUnit.SECTION;
-    }
-
-    private static boolean isDescendantOf(Node node, Node ancestor) {
-        for (Node n = node; n != null; n = n.getParent()) {
-            if (n == ancestor) {
-                return true;
-            }
+    private Optional<String> currentFile() {
+        List<String> files = files();
+        if (files.isEmpty()) {
+            return Optional.empty();
         }
-        return false;
+        return Optional.of(files.contains(filePath) ? filePath : files.getFirst());
     }
 
     private void renderVerdictBar(ReviewScope scope) {
         Optional<SectionStates.Board> board = board();
-        Optional<ReviewIntent> current = currentIntent();
-        if (current.isEmpty() || board.isEmpty()) {
-            showIntentOnBar(null, Optional.empty(), false);
+        Optional<String> file = currentFile();
+        if (file.isEmpty() || board.isEmpty()) {
+            showFileOnBar(null, Optional.empty(), false);
             verdictBar.showProgress(0, 0);
             verdictBar.showStale(Optional.empty());
-            verdictBar.showActingUnit(settleUnit());
             return;
         }
-        boolean blocked = blockingFindingOpen(scope, current.get());
-        SectionStates.SectionState state = sectionState(current.get());
-        showIntentOnBar(current.get(), state.decision(), blocked);
-        // Progress is the UNION of the counted sections' hunks, counted once.
+        showFileOnBar(file.get(), sections.decisionOf(board.get(), file.get()),
+                blockingFindingOpen(scope, file.get()));
+        // Progress is every hunk of the diff, counted once.
         verdictBar.showProgress(sections.settledHunkCount(board.get()),
                 sections.distinctDigests(board.get()).size());
-        verdictBar.showStale(state.staleness() == SectionStates.Staleness.MOVED
+        verdictBar.showStale(sections.stalenessOf(board.get(), file.get()) == SectionStates.Staleness.MOVED
                 ? Optional.of(new ReviewVerdictBar.StaleInfo(
-                        sections.oldBaseOf(board.get(), current.get()), host.currentBase(scope)))
+                        sections.oldBaseOf(board.get(), file.get()), host.currentBase(scope)))
                 : Optional.empty());
-        verdictBar.showActingUnit(settleUnit());
     }
 
     /**
-     * Points the diff column at the current intent.
-     *
-     * <p>The column narrows to that intent's hunks rather than merely
-     * scrolling to them. Scrolling was what this did before, and on a
-     * 45-file diff it was indistinguishable from doing nothing: the reader
-     * clicked intent 12 and got the same wall of code, so the rail read as
-     * decoration. The column's own {@code whole scope} chip is the way
-     * back out (spec §4.4).</p>
+     * Scrolls the diff column to the cursor's hunk. The column always shows
+     * the whole scope; the cursor only says where in it the reader is.
      */
-    private void revealCurrentIntent() {
-        ReviewIntent intent = currentIntent().orElse(null);
-        diffColumn.setIntent(intent);
-        // Still scrolled, for the case the reader has taken the escape hatch:
-        // the whole scope is on screen and the intent has to be found in it.
-        if (intent != null) {
-            intent.anchor().ifPresent(anchor ->
-                    diffColumn.revealHunk(anchor.file(), anchor.hunkIndex()));
-        }
+    private void revealCurrentFile() {
+        currentFile().ifPresent(file -> diffColumn.revealHunk(file, hunkCursor));
     }
 
-    /** {@code [} / {@code ]}: moves the intent the verdict bar is settling. */
-    private void moveIntent(int delta) {
-        List<ReviewIntent> intents = intents();
-        if (intents.isEmpty()) {
-            return;
-        }
-        intentIndex = (int) Math.clamp((long) intentIndex + delta, 0, intents.size() - 1);
+    /** Puts the cursor on {@code file}'s hunk {@code hunk} and shows it. */
+    private void moveCursorTo(String file, int hunk) {
+        filePath = file;
+        hunkCursor = hunk;
         refreshReviewState();
-        revealCurrentIntent();
+        revealCurrentFile();
     }
 
-    /** {@code n}: jumps to the next intent with no verdict yet. */
-    private void nextUnsettledIntent() {
-        Optional<ReviewScope> scope = selectedScope();
-        List<ReviewIntent> intents = intents();
-        if (scope.isEmpty() || intents.isEmpty()) {
+    /** {@code [} / {@code ]}: the previous / next file, clamped at the ends. */
+    private void moveFile(int delta) {
+        List<String> files = files();
+        Optional<String> current = currentFile();
+        if (current.isEmpty()) {
             return;
         }
-        // Only a section that can actually be settled: a collapsed one has
-        // nothing to read, and one whose hunk ids no longer resolve has
-        // nothing to settle, so parking the cursor on either is a dead end.
-        List<ReviewIntent> countable = countedSections();
-        for (int offset = 1; offset <= intents.size(); offset++) {
-            int candidate = (intentIndex + offset) % intents.size();
-            ReviewIntent intent = intents.get(candidate);
-            if (countable.contains(intent) && decisionOf(intent).isEmpty()) {
-                intentIndex = candidate;
-                refreshReviewState();
-                revealCurrentIntent();
-                return;
+        int index = (int) Math.clamp((long) files.indexOf(current.get()) + delta, 0, files.size() - 1);
+        moveCursorTo(files.get(index), 0);
+    }
+
+    /**
+     * {@code n}: the next hunk with no verdict, walking forward from the
+     * cursor through every file and wrapping round. Nothing unread anywhere
+     * leaves the cursor where it is.
+     */
+    private void nextUnsettledHunk() {
+        Optional<SectionStates.Board> board = board();
+        Optional<String> current = currentFile();
+        if (board.isEmpty() || current.isEmpty()) {
+            return;
+        }
+        List<String> files = sections.filesWithHunks(board.get());
+        int start = files.indexOf(current.get());
+        // One extra lap covers the current file's hunks BEFORE the cursor.
+        for (int offset = 0; offset <= files.size(); offset++) {
+            String file = files.get((start + offset) % files.size());
+            List<String> digests = sections.digestsOfFile(board.get(), file);
+            int from = offset == 0 ? hunkCursor + 1 : 0;
+            int to = offset == files.size() ? Math.min(hunkCursor + 1, digests.size()) : digests.size();
+            for (int hunk = from; hunk < to; hunk++) {
+                if (host.verdict(board.get().scope(), digests.get(hunk)).isEmpty()) {
+                    moveCursorTo(file, hunk);
+                    return;
+                }
             }
         }
     }
 
-    /** {@code [} / {@code ]}: moves the intent cursor. */
-    private void moveSelection(int delta) {
-        moveIntent(delta);
-    }
-
-    /** {@code n}: jumps to the next unsettled intent. */
-    private void nextUnsettled() {
-        nextUnsettledIntent();
-    }
-
     /** Reveals whatever the current mode has selected. */
     private void revealCurrentSelection() {
-        if (mode == ReviewMode.TOUR) {
-            // The tour reads whole files across the change; an intent filter
-            // left over from the hunk diff must not narrow it.
-            diffColumn.setIntent(null);
-            return;
+        if (mode == ReviewMode.DIFF) {
+            revealCurrentFile();
         }
-        revealCurrentIntent();
     }
 
     /**
@@ -2164,7 +1679,7 @@ public final class SessionReviewView extends BorderPane {
                 }
                 Integer number = numbers.get(finding.key());
                 // number == null means the margin is not showing this finding
-                // (the `open` filter, or another intent). The pin dims and
+                // (the `open` filter, or another file). The pin dims and
                 // drops its number rather than inventing one.
                 pins.add(new ReviewDiffColumn.Pin(number == null ? 0 : number,
                         finding.effectiveSeverity().styleClass(), finding.key(), number == null));
@@ -2240,64 +1755,56 @@ public final class SessionReviewView extends BorderPane {
     }
 
     /**
-     * Puts {@code intent} (or nothing) on the verdict bar, remembering it so
-     * the bar's buttons resolve back to exactly the intent it was showing
-     * when they were pressed -- see {@link #intentOnBar}.
+     * Puts {@code file} (or nothing) on the verdict bar as "i/N · path",
+     * remembering it so the bar's buttons resolve back to exactly the file
+     * it was showing when they were pressed -- see {@link #fileOnBar}.
      */
-    private void showIntentOnBar(ReviewIntent intent, Optional<ReviewVerdict.Decision> decision,
-                                 boolean blocked) {
-        verdictBarIntent = intent;
-        verdictBar.update(intent == null ? null
-                        : new ReviewVerdictBar.Target(intent.id(), intent.number() + " · " + intent.title()),
+    private void showFileOnBar(String file, Optional<ReviewVerdict.Decision> decision, boolean blocked) {
+        verdictBarFile = file;
+        if (file == null) {
+            verdictBar.update(null, decision, blocked);
+            return;
+        }
+        List<String> files = files();
+        verdictBar.update(new ReviewVerdictBar.Target("file:" + file,
+                        (files.indexOf(file) + 1) + "/" + files.size() + " · " + file),
                 decision, blocked);
     }
 
-    /** The intent the bar is showing as {@code target}; empty for a tour step or a stale target. */
-    private Optional<ReviewIntent> intentOnBar(ReviewVerdictBar.Target target) {
-        return Optional.ofNullable(verdictBarIntent).filter(intent -> intent.id().equals(target.id()));
+    /** The file the bar is showing as {@code target}; empty for a tour step or a stale target. */
+    private Optional<String> fileOnBar(ReviewVerdictBar.Target target) {
+        return Optional.ofNullable(verdictBarFile).filter(file -> target.id().equals("file:" + file));
     }
 
     /** The verdict bar's window onto the host, with the scope filled in. */
     private final class VerdictHost implements ReviewVerdictBar.Host {
         @Override
-        public void approve(ReviewVerdictBar.Target target, SettleUnit unit) {
+        public void approve(ReviewVerdictBar.Target target) {
             if (mode == ReviewMode.TOUR) {
                 currentTour().ifPresent(SessionReviewView.this::passCurrentStep);
                 return;
             }
-            Optional<ReviewIntent> onBar = intentOnBar(target);
-            if (onBar.isEmpty()) {
-                return;
-            }
-            ReviewIntent intent = onBar.get();
-            selectedScope().ifPresent(scope -> {
-                List<String> digests = digestsForAction(intent, unit, false);
-                Map<String, Optional<ReviewVerdict.Decision>> before = verdictsOf(scope, digests);
-                host.setVerdict(scope, digests, Optional.of(ReviewVerdict.Decision.APPROVED),
-                        blockingFindingOpen(scope, intent));
-                recordHunkOverrides(scope, digests, ReviewVerdict.Decision.APPROVED, before);
-            });
+            fileOnBar(target).ifPresent(file -> settle(file, ReviewVerdict.Decision.APPROVED));
         }
 
         @Override
-        public void requestChanges(ReviewVerdictBar.Target target, SettleUnit unit) {
+        public void requestChanges(ReviewVerdictBar.Target target) {
             if (mode == ReviewMode.TOUR) {
                 if (currentTour().isPresent()) {
                     decideCurrentStep(StepProgress.Decision.CHANGES, Optional.empty());
                 }
                 return;
             }
-            Optional<ReviewIntent> onBar = intentOnBar(target);
-            if (onBar.isEmpty()) {
-                return;
-            }
-            ReviewIntent intent = onBar.get();
+            fileOnBar(target).ifPresent(file -> settle(file, ReviewVerdict.Decision.CHANGES));
+        }
+
+        /** The bar's Approve / Request changes: the next unread hunk of {@code file}. */
+        private void settle(String file, ReviewVerdict.Decision decision) {
             selectedScope().ifPresent(scope -> {
-                List<String> digests = digestsForAction(intent, unit, false);
+                List<String> digests = digestsForAction(file, false);
                 Map<String, Optional<ReviewVerdict.Decision>> before = verdictsOf(scope, digests);
-                host.setVerdict(scope, digests, Optional.of(ReviewVerdict.Decision.CHANGES),
-                        blockingFindingOpen(scope, intent));
-                recordHunkOverrides(scope, digests, ReviewVerdict.Decision.CHANGES, before);
+                host.setVerdict(scope, digests, Optional.of(decision), blockedFor(scope, digests));
+                recordHunkOverrides(scope, digests, decision, before);
             });
         }
 
@@ -2307,22 +1814,22 @@ public final class SessionReviewView extends BorderPane {
             // (or nothing open to send) this hands over nothing at all, and
             // a button that then looks exactly as though it worked is the
             // silent failure ruling 1 legislated against.
-            Optional<ReviewIntent> onBar = intentOnBar(target);
+            Optional<String> onBar = fileOnBar(target);
             if (onBar.isEmpty()) {
                 return false;
             }
-            return selectedScope().map(scope -> host.askAgentToFix(scope, onBar.get().title(),
+            return selectedScope().map(scope -> host.askAgentToFix(scope, onBar.get(),
                             host.findings(scope).stream()
                                     .filter(finding -> !finding.resolved())
                                     .filter(ReviewAnnotation::counts)
-                                    .filter(SessionReviewView.this::belongsToCurrentIntent)
+                                    .filter(finding -> finding.file().equals(onBar.get()))
                                     .toList()))
                     .orElse(false);
         }
 
         @Override
         public void undo(ReviewVerdictBar.Target target) {
-            // Re-review, too (spec §9.2): a stale section's banner button and
+            // Re-review, too (spec §9.2): a stale file's banner button and
             // the plain undo button both just clear what is recorded. An
             // undo is never refused, so the flag here is inert -- passed
             // for the sole reason that host.setVerdict has one parameter,
@@ -2333,9 +1840,9 @@ public final class SessionReviewView extends BorderPane {
                 }
                 return;
             }
-            Optional<ReviewIntent> onBar = intentOnBar(target);
+            Optional<String> onBar = fileOnBar(target);
             selectedScope().filter(scope -> onBar.isPresent()).ifPresent(scope -> {
-                List<String> digests = digestsOf(onBar.get());
+                List<String> digests = digestsOfFile(onBar.get());
                 host.setVerdict(scope, digests, Optional.empty(), false);
                 clearHunkOverrides(scope, digests);
             });
@@ -2343,25 +1850,21 @@ public final class SessionReviewView extends BorderPane {
 
         @Override
         public void confirmStillGood(ReviewVerdictBar.Target target) {
-            Optional<ReviewIntent> onBar = intentOnBar(target);
+            Optional<String> onBar = fileOnBar(target);
             selectedScope().filter(scope -> onBar.isPresent()).ifPresent(scope -> {
-                host.confirmStillGood(scope, digestsOf(onBar.get()));
+                host.confirmStillGood(scope, digestsOfFile(onBar.get()));
                 refreshReviewState();
             });
         }
 
         @Override
         public void nextUnsettled() {
-            // Not nextUnsettledIntent() directly: this overrides an
-            // interface method of the SAME name, so an unqualified call
-            // here would recurse into itself rather than reaching the
-            // outer class's dispatcher.
             if (mode == ReviewMode.TOUR) {
                 currentTour().flatMap(SessionReviewView.this::firstUnsettled)
                         .ifPresent(SessionReviewView.this::selectStep);
                 return;
             }
-            SessionReviewView.this.nextUnsettled();
+            nextUnsettledHunk();
         }
 
         @Override
@@ -2375,7 +1878,7 @@ public final class SessionReviewView extends BorderPane {
                 currentTour().ifPresent(record -> moveStep(record, -1));
                 return;
             }
-            moveSelection(-1);
+            moveFile(-1);
         }
 
         @Override
@@ -2384,8 +1887,38 @@ public final class SessionReviewView extends BorderPane {
                 currentTour().ifPresent(record -> moveStep(record, 1));
                 return;
             }
-            moveSelection(1);
+            moveFile(1);
         }
+    }
+
+    /** Every hunk digest of {@code file}; none without a diff. */
+    private List<String> digestsOfFile(String file) {
+        return board().map(b -> sections.digestsOfFile(b, file)).orElse(List.of());
+    }
+
+    /**
+     * The digests {@code a}/{@code r} act on with the cursor on {@code
+     * file} -- see {@link SectionStates#digestsForAction}. None without a
+     * diff to derive them from.
+     */
+    private List<String> digestsForAction(String file, boolean wholeFile) {
+        return board().map(b -> sections.digestsForAction(b, file, wholeFile,
+                        diffColumn.currentLineSelection()))
+                .orElse(List.of());
+    }
+
+    /**
+     * Whether a blocking finding refuses approving {@code digests}: one open
+     * on any file they belong to. Usually the cursor's file, but a gutter
+     * selection can point {@code a} at a hunk of another one.
+     */
+    private boolean blockedFor(ReviewScope scope, List<String> digests) {
+        Optional<SectionStates.Board> board = board();
+        return board.isPresent() && digests.stream()
+                .map(digest -> sections.fileOfDigest(board.get(), digest))
+                .flatMap(Optional::stream)
+                .distinct()
+                .anyMatch(file -> blockingFindingOpen(scope, file));
     }
 
     /**
@@ -2436,8 +1969,9 @@ public final class SessionReviewView extends BorderPane {
 
     /**
      * Submit (spec §4.6): with anything unsettled this jumps to the first
-     * such intent rather than posting a partial review; once everything is
-     * settled it posts ONE review.
+     * file with an unread hunk rather than posting a partial review; once
+     * everything is settled it posts ONE review, carrying one decision per
+     * file -- what its hunks' verdicts merge to ({@code VerdictMerge}).
      *
      * <p>Refuses while {@link ReviewDiffColumn#displayedDiff()} belongs to a
      * different scope than the one selected -- the window between selecting
@@ -2477,18 +2011,19 @@ public final class SessionReviewView extends BorderPane {
                 return;
             }
         }
-        List<ReviewIntent> counted = countedSections();
         List<ReviewVerdict.Decision> decisions = new ArrayList<>();
-        for (int i = 0; i < counted.size(); i++) {
-            Optional<ReviewVerdict.Decision> decision = decisionOf(counted.get(i));
-            if (decision.isEmpty() && mode == ReviewMode.TOUR) {
-                refuseSubmitFromTour(digestsOf(counted.get(i)), false);
-                return;
-            }
+        Optional<SectionStates.Board> board = board();
+        for (String file : board.map(sections::filesWithHunks).orElse(List.of())) {
+            List<String> digests = sections.digestsOfFile(board.get(), file);
+            Optional<ReviewVerdict.Decision> decision = sections.decisionOf(board.get(), file);
             if (decision.isEmpty()) {
-                intentIndex = intents().indexOf(counted.get(i));
-                refreshReviewState();
-                revealCurrentIntent();
+                if (mode == ReviewMode.TOUR) {
+                    refuseSubmitFromTour(digests, false);
+                    return;
+                }
+                int unread = sections.digestOfFirstUnsettledHunk(board.get(), file)
+                        .map(digests::indexOf).orElse(0);
+                moveCursorTo(file, unread);
                 verdictBar.showSubmitRefused(NEEDS_VERDICT.reason(), NEEDS_VERDICT.detail());
                 return;
             }
@@ -2496,14 +2031,12 @@ public final class SessionReviewView extends BorderPane {
             // (spec §9.2): it was given against a base that has since moved,
             // so posting it is a decision the reader has not actually made
             // about the code as it stands now.
-            if (sectionState(counted.get(i)).staleness() == SectionStates.Staleness.MOVED) {
+            if (sections.stalenessOf(board.get(), file) == SectionStates.Staleness.MOVED) {
                 if (mode == ReviewMode.TOUR) {
-                    refuseSubmitFromTour(digestsOf(counted.get(i)), true);
+                    refuseSubmitFromTour(digests, true);
                     return;
                 }
-                intentIndex = intents().indexOf(counted.get(i));
-                refreshReviewState();
-                revealCurrentIntent();
+                moveCursorTo(file, 0);
                 verdictBar.showSubmitRefused(STALE_BASE.reason(), STALE_BASE.detail());
                 return;
             }
@@ -2515,9 +2048,8 @@ public final class SessionReviewView extends BorderPane {
 
     /**
      * Submit's refusal while the tour is showing. The hunk diff's answer --
-     * move the intent cursor and reveal it -- would narrow a column the tour
-     * does not narrow and settle nothing anyone can see, so here the refusal
-     * jumps to a step: for a stale approval the step covering any of
+     * move the file cursor -- points at nothing the tour shows, so here the
+     * refusal jumps to a step: for a stale approval the step covering any of
      * {@code digests}, otherwise the first unsettled step. A hunk no step
      * covers has no step to jump to, and the footer says where to settle it.
      */
@@ -2632,15 +2164,10 @@ public final class SessionReviewView extends BorderPane {
     // ---- layout + keyboard --------------------------------------------------
 
     /**
-     * The rail and the margin auto-collapse as the window narrows so the code
-     * column is never crushed (spec §4.9). A manual collapse is remembered
-     * separately: a user who collapsed the intents keeps them collapsed when
-     * the window grows back, and one who did not gets them back.
-     *
-     * <p>Three columns rather than the destination's four, which is what
-     * removes the two-page drill-in the destination needed below 980px: with
-     * the queue rail gone {@link RailLayout} has enough to trade at every
-     * width the window can actually be.</p>
+     * The rails auto-collapse as the window narrows so the code column is
+     * never crushed (spec §4.9). A manual collapse is remembered separately:
+     * a user who collapsed a rail keeps it collapsed when the window grows
+     * back, and one who did not gets it back.
      */
     private void applyResponsiveLayout(double width) {
         if (noScope) {
@@ -2649,18 +2176,14 @@ public final class SessionReviewView extends BorderPane {
         }
         showEveryRegion();
         RailLayout.Layout layout =
-                RailLayout.solve(width, intentsCollapsedByUser, marginCollapsedByUser, mode);
+                RailLayout.solve(width, outlineCollapsedByUser, marginCollapsedByUser, mode);
         if (mode == ReviewMode.TOUR) {
             outline.setNarrow(layout.narrow());
-            outline.setCollapsed(layout.intentsCollapsed());
+            outline.setCollapsed(layout.outlineCollapsed());
             stepPanel.setNarrow(layout.narrow());
             stepPanel.setCollapsed(layout.marginCollapsed());
             return;
         }
-        intentRail.setVisible(true);
-        intentRail.setManaged(true);
-        intentRail.setNarrow(layout.narrow());
-        intentRail.setCollapsed(layout.intentsCollapsed());
         margin.setNarrow(layout.narrow());
         margin.setCollapsed(layout.marginCollapsed());
     }
@@ -2673,7 +2196,6 @@ public final class SessionReviewView extends BorderPane {
     private void applyEmptySurface() {
         setLeft(null);
         setCenter(centre);
-        show(intentRail, false);
         show(margin, false);
         show(stepPanel, false);
         show(verdictBar, false);
@@ -2687,8 +2209,8 @@ public final class SessionReviewView extends BorderPane {
         show(stepPanel, true);
         show(verdictBar, true);
         show(itemHeader, true);
-        if (getLeft() == null) {
-            setLeft(mode == ReviewMode.TOUR ? outline : intentRail);
+        if (mode == ReviewMode.TOUR && getLeft() == null) {
+            setLeft(outline);
         }
     }
 
@@ -2719,21 +2241,23 @@ public final class SessionReviewView extends BorderPane {
         }
     }
 
-    /** {@code i}: collapses or expands the intent rail. */
-    private void setIntentsCollapsed(boolean collapsed) {
-        intentsCollapsedByUser = collapsed;
+    /**
+     * {@code f}: collapses every rail so the code owns the window -- the
+     * margin in the hunk diff, the outline and the step panel in the tour. A
+     * toggle, not a one-way collapse, or the second press would be a dead
+     * key.
+     */
+    private void setFocusMode(boolean on) {
+        marginCollapsedByUser = on;
+        if (mode == ReviewMode.TOUR) {
+            outlineCollapsedByUser = on;
+        }
         applyResponsiveLayout(getWidth());
     }
 
-    /**
-     * {@code f}: collapses every rail so code and findings own the window --
-     * the "review mode" behaviour without a separate mode. A toggle, not a
-     * one-way collapse, or the second press would be a dead key.
-     */
-    private void setFocusMode(boolean on) {
-        intentsCollapsedByUser = on;
-        marginCollapsedByUser = on;
-        applyResponsiveLayout(getWidth());
+    /** Whether {@code f} would currently undo focus mode rather than enter it. */
+    private boolean focusModeOn() {
+        return marginCollapsedByUser && (mode != ReviewMode.TOUR || outlineCollapsedByUser);
     }
 
     /**
@@ -2795,90 +2319,67 @@ public final class SessionReviewView extends BorderPane {
     }
 
     /**
-     * {@code a} / {@code r}: records a verdict over {@link #settleUnit()}'s
-     * digests -- one hunk, one file, or the whole section -- and, once it
-     * actually took (the host still refuses APPROVED over a blocking
-     * finding -- see {@code MainWorkspace}'s {@code Host#setVerdict} -- so
-     * recording is not guaranteed), remembers those exact digests as what
-     * {@code u} should undo (see {@link #undoVerdict}). Whether the WHOLE
-     * section is now settled is asked separately -- a single hunk of a
-     * multi-hunk section applying must still let {@code u} undo it, even
-     * though the section itself has not merged to a decision yet -- and only
-     * that separate question decides whether to advance to the next
-     * unsettled intent, via the same walk {@code n} uses.
-     *
-     * @param wholeFile {@code ⇧A}/{@code ⇧R}: every hunk of the current file,
-     *                  regardless of what has focus
+     * {@code a} / {@code r}: records a verdict on the cursor file's next
+     * unread hunk, or with {@code wholeFile} ({@code ⇧A}/{@code ⇧R}) on every
+     * hunk of the file -- and, once it actually took (the host still refuses
+     * APPROVED over a blocking finding, so recording is not guaranteed),
+     * remembers those exact digests as what {@code u} should undo (see
+     * {@link #undoVerdict}). Once the file as a whole is decided this way,
+     * the cursor moves on to the next unread hunk, as {@code n} does.
      */
     private void verdictAction(ReviewVerdict.Decision decision, boolean wholeFile) {
         Optional<ReviewScope> scope = selectedScope();
-        Optional<ReviewIntent> intent = currentIntent();
-        if (scope.isEmpty() || intent.isEmpty()) {
+        Optional<String> file = currentFile();
+        Optional<SectionStates.Board> board = board();
+        if (scope.isEmpty() || file.isEmpty() || board.isEmpty()) {
             return;
         }
-        List<String> digests = digestsForAction(intent.get(), settleUnit(), wholeFile);
+        List<String> digests = digestsForAction(file.get(), wholeFile);
         if (digests.isEmpty()) {
             return;
         }
         Map<String, Optional<ReviewVerdict.Decision>> before = verdictsOf(scope.get(), digests);
-        host.setVerdict(scope.get(), digests, Optional.of(decision),
-                blockingFindingOpen(scope.get(), intent.get()));
+        host.setVerdict(scope.get(), digests, Optional.of(decision), blockedFor(scope.get(), digests));
         boolean applied = digests.stream().allMatch(digest -> host.verdict(scope.get(), digest)
                 .filter(v -> v.decision() == decision).isPresent());
         if (!applied) {
             return;
         }
         recordHunkOverrides(scope.get(), digests, decision, before);
-        lastSettledIntentId = Optional.of(intent.get().id());
+        String settledFile = sections.fileOfDigest(board.get(), digests.getFirst()).orElse(file.get());
+        lastSettledFile = Optional.of(settledFile);
         lastSettledDigests = digests;
-        if (decisionOf(intent.get()).filter(decision::equals).isPresent()) {
-            nextUnsettledIntent();
+        if (sections.decisionOf(board.get(), settledFile).filter(decision::equals).isPresent()) {
+            nextUnsettledHunk();
+        } else {
+            refreshReviewState();
         }
     }
 
     /**
      * {@code u}: undoes exactly the digests {@code a}/{@code r} last
-     * recorded -- NOT the whole intent the cursor currently sits on, and NOT
-     * whatever {@link #settleUnit()} says right now. A human who presses
-     * {@code r}, realises they misread the diff, and presses {@code u}
-     * expects the verdict they just placed to disappear; since {@code r}
-     * itself advances the cursor (see {@link #verdictAction}), undoing
-     * "the current intent" would clear whatever {@code r} advanced TO
-     * instead -- the wrong one, and silently, since nothing before this
-     * looked wrong on screen. Snaps the cursor back to the undone intent
-     * too, so the human sees what changed rather than having to hunt for
-     * it. A second {@code u} with nothing left to undo does nothing, rather
-     * than reaching for an unrelated intent's verdict.
+     * recorded -- NOT whatever the cursor sits on now. Since settling a file
+     * advances the cursor (see {@link #verdictAction}), undoing "the current
+     * file" would clear whatever it advanced TO instead -- the wrong one, and
+     * silently. Snaps the cursor back to the undone file, so the reader sees
+     * what changed. A second {@code u} with nothing left to undo does
+     * nothing.
      */
     private void undoVerdict() {
         Optional<ReviewScope> scope = selectedScope();
-        if (scope.isEmpty() || lastSettledIntentId.isEmpty() || lastSettledDigests.isEmpty()) {
+        if (scope.isEmpty() || lastSettledFile.isEmpty() || lastSettledDigests.isEmpty()) {
             return;
         }
-        List<ReviewIntent> current = intents();
-        int index = -1;
-        for (int i = 0; i < current.size(); i++) {
-            if (current.get(i).id().equals(lastSettledIntentId.get())) {
-                index = i;
-                break;
-            }
-        }
+        String file = lastSettledFile.get();
         List<String> digests = lastSettledDigests;
-        lastSettledIntentId = Optional.empty();
+        lastSettledFile = Optional.empty();
         lastSettledDigests = List.of();
-        if (index < 0) {
-            // The grouping changed under us (a reviewer re-ran, say) and the
-            // intent this would have undone no longer exists -- nothing
-            // sane to undo or jump to.
-            return;
-        }
-        // An undo is never refused (see the VerdictHost#undo javadoc); false
+        // An undo is never refused (see the VerdictHost#undo comment); false
         // is inert here, not a claim that nothing is blocking.
         host.setVerdict(scope.get(), digests, Optional.empty(), false);
         clearHunkOverrides(scope.get(), digests);
-        intentIndex = index;
-        refreshReviewState();
-        revealCurrentIntent();
+        int hunk = Math.max(0, digestsOfFile(file).indexOf(digests.getFirst()));
+        moveCursorTo(file, hunk);
     }
 
     /**
@@ -2899,7 +2400,7 @@ public final class SessionReviewView extends BorderPane {
             if (host.runReview(scope)) {
                 runReviewButton.setText("▶  Review running…");
                 // Only the label, and only until the next selection or state
-                // refresh: what the agent then does shows up as intents and
+                // refresh: what the agent then does shows up as the tour and
                 // findings, which are the real progress indication.
                 if (host.tour(scope).isEmpty()) {
                     tourFailure = Optional.empty();
@@ -3067,17 +2568,16 @@ public final class SessionReviewView extends BorderPane {
                 setMarginCollapsed(!(mode == ReviewMode.TOUR ? stepPanel.collapsed() : margin.collapsed()));
                 yield true;
             }
-            case I -> { setIntentsCollapsed(!intentRail.collapsed()); yield true; }
             case BACK_SLASH -> {
                 // The reader now owns the panel; the tour wait must not close it.
                 mcpOpenedForTour = false;
                 toggleMcpPanel();
                 yield true;
             }
-            // [ and ] step the intent cursor.
-            case OPEN_BRACKET -> { moveSelection(-1); yield true; }
-            case CLOSE_BRACKET -> { moveSelection(1); yield true; }
-            case N -> { nextUnsettled(); yield true; }
+            // [ and ] step the file cursor; n finds the next unread hunk.
+            case OPEN_BRACKET -> { moveFile(-1); yield true; }
+            case CLOSE_BRACKET -> { moveFile(1); yield true; }
+            case N -> { nextUnsettledHunk(); yield true; }
             case A -> {
                 verdictAction(ReviewVerdict.Decision.APPROVED, event.isShiftDown());
                 yield true;
@@ -3093,7 +2593,7 @@ public final class SessionReviewView extends BorderPane {
                 if (event.isShiftDown()) {
                     margin.setWholeReview(!margin.wholeReview());
                 } else {
-                    setFocusMode(!(intentsCollapsedByUser && marginCollapsedByUser));
+                    setFocusMode(!focusModeOn());
                 }
                 yield true;
             }
@@ -3152,22 +2652,6 @@ public final class SessionReviewView extends BorderPane {
      * no-op if the panel was never attached (never opened, or already
      * hidden), so this is always safe to call.</p>
      *
-     * <p>The intent rail's collapse/expand {@code Timeline} is finite (it
-     * self-stops at the end of its keyframe), not {@code INDEFINITE}, so it
-     * is not the leak the panel is -- but stopping it too
-     * means a view closed mid-animation never runs a timeline against a
-     * detached node.</p>
-     *
-     * <p>{@link #focusOwnerListener} is the same shape of leak as the MCP
-     * panel: it is added to the app-lifetime Scene's {@code
-     * focusOwnerProperty}, so an un-removed one keeps this view reachable
-     * for the process's life AND re-renders its verdict bar on every focus
-     * change anywhere in the app, for every session's board ever closed.
-     * The {@link #sceneProperty()} listener already removes it on a genuine
-     * re-parent, but this Scene is never actually swapped in practice (one
-     * Scene for the whole app -- see {@code AppShell}), so this explicit
-     * removal is the one that actually runs.</p>
-     *
      * <p>Call before dropping the last reference to this view -- see {@code
      * OpenSessionTab.disposeNativeResources}.</p>
      */
@@ -3177,10 +2661,6 @@ public final class SessionReviewView extends BorderPane {
         navNoticeTimer.stop();
         riskQueue.close();
         mcpPanel.ifPresent(ReviewMcpActivityPanel::detach);
-        intentRail.stopWidthAnimation();
-        if (getScene() != null) {
-            getScene().focusOwnerProperty().removeListener(focusOwnerListener);
-        }
     }
 
     // ---- tour mode ----------------------------------------------------------
@@ -3218,7 +2698,7 @@ public final class SessionReviewView extends BorderPane {
         }
         boolean touring = mode == ReviewMode.TOUR;
         boolean swapped = false;
-        Node left = touring ? outline : intentRail;
+        Node left = touring ? outline : null;
         if (getLeft() != left) {
             setLeft(left);
             swapped = true;
@@ -3270,7 +2750,7 @@ public final class SessionReviewView extends BorderPane {
             outline.setNotice(Optional.empty());
             outline.setFooter(0, true);
             diffColumn.setStepHeader(Optional.empty());
-            showIntentOnBar(null, Optional.empty(), false);
+            showFileOnBar(null, Optional.empty(), false);
             verdictBar.showProgress(0, 0);
             if (tourMarksShown) {
                 diffColumn.setStepMarkSource(null);
@@ -3536,7 +3016,7 @@ public final class SessionReviewView extends BorderPane {
             case CHANGES -> Optional.of(ReviewVerdict.Decision.CHANGES);
             case NONE -> Optional.empty();
         };
-        verdictBarIntent = null;
+        verdictBarFile = null;
         verdictBar.update(target, decision, false);
         int settled = (int) record.tour().steps().stream()
                 .filter(candidate -> record.progress(candidate.id()).settledForApproval())
@@ -3691,8 +3171,8 @@ public final class SessionReviewView extends BorderPane {
 
     /**
      * The tour's keys, ahead of the hunk diff's table. Only in TOUR mode;
-     * there {@code p}, {@code i} and {@code ⇧F} -- the intent rail's and the
-     * findings margin's keys -- are inert, and so are the step keys while no
+     * there {@code ⇧F} -- the findings margin's key -- is inert, and so are
+     * the step keys while no
      * tour has arrived, rather than acting on a hunk-diff cursor nobody can
      * see.
      */
@@ -3703,9 +3183,6 @@ public final class SessionReviewView extends BorderPane {
         switch (event.getCode()) {
             case V -> {
                 toggleMode();
-                return true;
-            }
-            case I -> {
                 return true;
             }
             case F -> {
@@ -4633,19 +4110,16 @@ public final class SessionReviewView extends BorderPane {
         diffColumn.showDiff(forScope, diff);
     }
 
-    /**
-     * Diagnostic-only: the derived state of the {@code index}-th section.
-     * Routed through {@link ReviewDiagFxThread} like every other {@code diag*}
-     * accessor -- it reads the store and the rail's own grouping, both of
-     * which the FX thread mutates.
-     */
-    SectionStates.SectionState diagSectionState(int index) {
-        return ReviewDiagFxThread.call(() -> {
-            List<ReviewIntent> current = intents();
-            return index >= 0 && index < current.size()
-                    ? sectionState(current.get(index))
-                    : SectionStates.SectionState.unknown();
-        });
+    /** Diagnostic-only: the file the hunk diff's cursor is on, if any. */
+    Optional<String> diagCurrentFile() {
+        return ReviewDiagFxThread.call(this::currentFile);
+    }
+
+    /** Diagnostic-only: whether the current file's verdicts are stale (spec §9.2). */
+    SectionStates.Staleness diagStalenessOfCurrentFile() {
+        return ReviewDiagFxThread.call(() -> board()
+                .flatMap(b -> currentFile().map(file -> sections.stalenessOf(b, file)))
+                .orElse(SectionStates.Staleness.UNKNOWN));
     }
 
     /**
@@ -4654,8 +4128,7 @@ public final class SessionReviewView extends BorderPane {
      * shows a diff and moves straight into clicking the view races that
      * background build's completion -- {@link #refreshReviewState()} runs
      * from its {@code Platform.runLater} callback regardless of success or
-     * failure, rebuilds the rail's cards, and can hand focus somewhere the
-     * click never put it. Letting
+     * failure, and can rebuild the rows a click just focused. Letting
      * a fixture wait on this before a test method starts closes that race
      * instead of leaving every test built on it to hit it by chance.
      */
@@ -4693,8 +4166,7 @@ public final class SessionReviewView extends BorderPane {
 
     /**
      * Diagnostic-only: whether the Scene's real focus owner is inside {@link
-     * #diffColumn} right now -- what {@link #settleUnit()} bases {@code
-     * HUNK} on. A fixture's click-driven {@code clickOn} is a real TestFX
+     * #diffColumn} right now. A fixture's click-driven {@code clickOn} is a real TestFX
      * robot press: Monocle turns it into an FX {@code MouseEvent} on its own
      * schedule, off the calling thread, so a single {@code
      * waitForFxEvents()} after the click can return before that event has
@@ -4708,10 +4180,18 @@ public final class SessionReviewView extends BorderPane {
                 () -> isDescendantOf(getScene() == null ? null : getScene().getFocusOwner(), diffColumn));
     }
 
+    private static boolean isDescendantOf(Node node, Node ancestor) {
+        for (Node n = node; n != null; n = n.getParent()) {
+            if (n == ancestor) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /**
-     * Diagnostic-only: what {@link #settleUnit()} would read right now, and
-     * the Scene focus state it derives that from -- for a test to log when a
-     * settle action lands on the wrong unit. A bare "focus never arrived"
+     * Diagnostic-only: the Scene focus state, for a test to log when focus
+     * did not land where a click aimed it. A bare "focus never arrived"
      * says nothing; naming the owner and its ancestors is what traced a
      * CI-only failure to a click aimed at a diff cell hanging below the
      * list's viewport, whose centre lay over the verdict bar (see {@code
@@ -4720,8 +4200,7 @@ public final class SessionReviewView extends BorderPane {
     String diagFocusSnapshot() {
         return ReviewDiagFxThread.call(() -> {
             Node owner = getScene() == null ? null : getScene().getFocusOwner();
-            return "settleUnit=" + settleUnit()
-                    + " focusOwner=" + diagDescribe(owner)
+            return "focusOwner=" + diagDescribe(owner)
                     + " inDiffColumn=" + isDescendantOf(owner, diffColumn)
                     + " chain=" + diagAncestorChain(owner);
         });
@@ -4755,23 +4234,6 @@ public final class SessionReviewView extends BorderPane {
             sb.append(" < ").append(diagDescribe(n));
         }
         return sb.toString();
-    }
-
-    /** Diagnostic-only: the current rail's intent ids, in rendered order. */
-    List<String> diagIntentIds() {
-        return ReviewDiagFxThread.call(() -> intents().stream().map(ReviewIntent::id).toList());
-    }
-
-    /**
-     * Diagnostic-only: {@link #intents()}'s own return value, unmapped --
-     * so a test can compare it BY REFERENCE across two calls to tell a
-     * cache hit (the same {@link List} instance) from a recomputation (a
-     * new, if equal-content, one). {@link #diagIntentIds} maps to a fresh
-     * {@code List<String>} on every call regardless, so it cannot make that
-     * distinction.
-     */
-    List<ReviewIntent> diagIntents() {
-        return ReviewDiagFxThread.call(this::intents);
     }
 
     /**

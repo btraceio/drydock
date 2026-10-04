@@ -79,12 +79,12 @@ public record SubmitPlan(Event preselected, List<Comment> comments, List<ReviewA
     }
 
     /**
-     * Which review event to preselect from the human's verdicts on this
-     * scope's counted intents. Any {@code CHANGES} outweighs everything else;
-     * an empty list of decisions (a scope with no counted intents) preselects
-     * a plain comment, since {@code SessionReviewView.submitReview()}
-     * only reaches {@code host.submit} once every counted intent has a
-     * verdict, so this is reachable only when there are none to have one.
+     * Which review event to preselect from the human's decisions on this
+     * scope's files. Any {@code CHANGES} outweighs everything else; an empty
+     * list of decisions (a scope with no file to decide) preselects a plain
+     * comment, since {@code SessionReviewView.submitReview()} only reaches
+     * {@code host.submit} once every file with hunks is decided, so this is
+     * reachable only when there are none.
      * Switches over {@code Decision} exhaustively with no {@code default} --
      * a fourth constant must fail to compile here, not silently approve.
      */

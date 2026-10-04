@@ -5,10 +5,7 @@ import app.drydock.git.UnifiedDiff;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.AnnotationStore;
 import app.drydock.review.BaseMove;
-import app.drydock.review.ChangeGraph;
-import app.drydock.review.IntentGrouping;
 import app.drydock.review.ReviewAnnotation;
-import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Severity;
@@ -30,7 +27,7 @@ import java.util.function.UnaryOperator;
 
 /**
  * A {@link SessionReviewView.Host} backed by a real {@link AnnotationStore}
- * and {@link IntentGrouping}, so the view tests exercise the same store the
+ * and {@link TourStore}, so the view tests exercise the same store the
  * app does rather than a bag of stubs -- the (scopeId, id) keying is the
  * thing under test, and a stub would key however the test felt like.
  *
@@ -43,7 +40,6 @@ final class FakeReviewHost implements SessionReviewView.Host {
     final AnnotationStore store;
     /** The real tour store, on a sibling of {@link #store}'s file; closed by the fixture. */
     final TourStore tours;
-    final IntentGrouping intents = new IntentGrouping();
 
     final List<String> handedOffPrompts = new ArrayList<>();
 
@@ -74,7 +70,7 @@ final class FakeReviewHost implements SessionReviewView.Host {
     final java.util.Map<String, app.drydock.review.SubmitPlan.DiffIndex> submittedIndexes = new java.util.HashMap<>();
     final java.util.Map<String, List<ReviewVerdict.Decision>> submittedDecisions = new java.util.HashMap<>();
 
-    /** What {@link #intents} groups by when no reviewer has supplied a grouping. */
+    /** The diff a test shows the board ({@code diagShowDiff}); the host itself never reads it. */
     UnifiedDiff diff = new UnifiedDiff(List.of());
 
     /**
@@ -143,22 +139,6 @@ final class FakeReviewHost implements SessionReviewView.Host {
     @Override
     public List<ReviewAnnotation> findings(ReviewScope scope) {
         return store.forScope(scope.id());
-    }
-
-    @Override
-    public List<ReviewIntent> intents(ReviewScope scope, UnifiedDiff diff,
-                                      Optional<ChangeGraph> graph) {
-        return intents.intentsFor(scope.id(), diff, graph);
-    }
-
-    @Override
-    public long groupingVersion(ReviewScope scope) {
-        return intents.version(scope.id());
-    }
-
-    @Override
-    public boolean hasReviewerGrouping(ReviewScope scope) {
-        return intents.hasReviewerGrouping(scope.id());
     }
 
     @Override

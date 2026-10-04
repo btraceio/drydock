@@ -5,10 +5,9 @@ import app.drydock.git.DiffService;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.review.SessionReviewScopes;
-import javafx.scene.Node;
 import javafx.scene.Scene;
-import javafx.scene.control.Button;
 import javafx.scene.control.Label;
+import javafx.scene.input.KeyCode;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -28,17 +27,17 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * The by-file intent fallback against a REAL asynchronous diff.
+ * The hunk diff's file cursor against a REAL asynchronous diff.
  *
- * <p>The regression this exists for: intents are derived <em>from</em> the
- * diff, and the diff arrives on a background thread. The verdict bar used to
- * render once, before the diff existed, correctly conclude there were no
- * intents, and stay that way -- so Approve, Request change and Submit were
- * all dead on a freshly opened item, with "no intent" as the only clue. Only
- * a screenshot of the running app showed it; every test until now supplied
- * the diff synchronously and so could not.</p>
+ * <p>The regression this exists for: the cursor's files are derived
+ * <em>from</em> the diff, and the diff arrives on a background thread. The
+ * verdict bar used to render once, before the diff existed, correctly
+ * conclude there was nothing to settle, and stay that way -- so Approve,
+ * Request change and Submit were all dead on a freshly opened item. Only a
+ * screenshot of the running app showed it; tests that supply the diff
+ * synchronously cannot.</p>
  */
-class ReviewIntentFallbackTest extends ApplicationTest {
+class ReviewAsyncDiffCursorTest extends ApplicationTest {
 
     private final DiffService diffService = new DiffService();
     private final ReviewScopeRegistry registry = new ReviewScopeRegistry();
@@ -48,7 +47,7 @@ class ReviewIntentFallbackTest extends ApplicationTest {
     @Override
     public void start(Stage stage) {
         try {
-            host = new FakeReviewHost(Files.createTempDirectory("drydock-intent")
+            host = new FakeReviewHost(Files.createTempDirectory("drydock-cursor")
                     .resolve("annotations.json"));
         } catch (IOException e) {
             throw new UncheckedIOException(e);
@@ -68,7 +67,7 @@ class ReviewIntentFallbackTest extends ApplicationTest {
     }
 
     @Test
-    void theVerdictBarPicksUpIntentsOnceTheAsyncDiffLands() throws Exception {
+    void theVerdictBarPicksUpTheFirstFileOnceTheAsyncDiffLands() throws Exception {
         Path repo = repoWithTwoChangedFiles();
         ReviewScope scope = registry.mint(ReviewScopeRegistry.spec(
                 ReviewScope.Kind.WORKING_TREE, repo, Optional.of(repo), "main", "main",
@@ -77,17 +76,17 @@ class ReviewIntentFallbackTest extends ApplicationTest {
         interact(() -> view.showScopes(new SessionReviewScopes.Scopes(scope, Optional.empty()),
                 SessionReviewScopes.Choice.LOCAL));
 
-        assertEquals("1 · B.java", awaitIntentLabel(),
-                "the verdict bar must re-render when the diff arrives, not stay on 'no intent'");
+        assertEquals("1/2 · lib/B.java", awaitTargetLabel(),
+                "the verdict bar must re-render when the diff arrives, not stay on 'no file'");
     }
 
     /**
-     * The reported bug: clicking an intent moved the verdict bar and left the
-     * code exactly where it was, so the rail looked ornamental and there was
-     * no way to read the change an intent describes.
+     * Moving the cursor must move the code: a verdict bar that names the
+     * next file while the column stays where it was settles code nobody
+     * was shown.
      */
     @Test
-    void clickingAnIntentBringsItsFileIntoTheCodeColumn() throws Exception {
+    void theNextFileKeyBringsThatFileIntoTheCodeColumn() throws Exception {
         Path repo = repoWithTwoFilesFarApart();
         ReviewScope scope = registry.mint(ReviewScopeRegistry.spec(
                 ReviewScope.Kind.WORKING_TREE, repo, Optional.of(repo), "main", "main",
@@ -95,20 +94,48 @@ class ReviewIntentFallbackTest extends ApplicationTest {
 
         interact(() -> view.showScopes(new SessionReviewScopes.Scopes(scope, Optional.empty()),
                 SessionReviewScopes.Choice.LOCAL));
-        assertEquals("1 · Alpha.java", awaitIntentLabel());
+        assertEquals("1/2 · alpha/Alpha.java", awaitTargetLabel());
 
         assertFalse(renderedHunkFiles().stream().anyMatch(p -> p.endsWith("Zulu.java")),
                 "the fixture must start with the second file below the fold");
 
-        // fire() rather than clickOn(): what is under test is the handler, not
-        // TestFX's ability to land a pointer on a rail card.
-        List<Node> cards = new ArrayList<>(lookup(".review-intent-card").queryAll());
-        assertEquals(2, cards.size(), "expected one intent per changed directory");
-        interact(((Button) cards.get(1))::fire);
+        interact(view::requestFocus);
+        press(KeyCode.CLOSE_BRACKET).release(KeyCode.CLOSE_BRACKET);
         WaitForAsyncUtils.waitForFxEvents();
 
+        assertEquals("2/2 · zulu/Zulu.java", awaitTargetLabel());
         assertTrue(renderedHunkFiles().stream().anyMatch(p -> p.endsWith("Zulu.java")),
-                "selecting the second intent must scroll to its file; rendered " + renderedHunkFiles());
+                "] must scroll to the next file; rendered " + renderedHunkFiles());
+    }
+
+    /**
+     * A session refresh hands the board the SAME scopes again; the diff is
+     * cached, so {@code bodyFor} restores it through {@code showDiff} rather
+     * than re-running git. That must still land on the first file -- the
+     * cursor AND the code -- not leave the column where the last read
+     * stopped. (Ported from the intent rail's {@code
+     * ReviewLandsOnFirstIntentTest}.)
+     */
+    @Test
+    void showingTheSameScopesAgainLandsBackOnTheFirstFile() throws Exception {
+        Path repo = repoWithTwoFilesFarApart();
+        ReviewScope scope = registry.mint(ReviewScopeRegistry.spec(
+                ReviewScope.Kind.WORKING_TREE, repo, Optional.of(repo), "main", "main",
+                Optional.empty(), Optional.empty()));
+        SessionReviewScopes.Scopes scopes = new SessionReviewScopes.Scopes(scope, Optional.empty());
+        interact(() -> view.showScopes(scopes, SessionReviewScopes.Choice.LOCAL));
+        assertEquals("1/2 · alpha/Alpha.java", awaitTargetLabel());
+        interact(view::requestFocus);
+        press(KeyCode.CLOSE_BRACKET).release(KeyCode.CLOSE_BRACKET);
+        WaitForAsyncUtils.waitForFxEvents();
+        assertEquals("2/2 · zulu/Zulu.java", awaitTargetLabel(), "precondition: moved off file 1");
+
+        interact(() -> view.showScopes(scopes, SessionReviewScopes.Choice.LOCAL));
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertEquals("1/2 · alpha/Alpha.java", awaitTargetLabel());
+        assertTrue(renderedHunkFiles().stream().anyMatch(p -> p.endsWith("Alpha.java")),
+                "showing the same scopes again scrolls back to the first file; rendered " + renderedHunkFiles());
     }
 
     private List<String> renderedHunkFiles() {
@@ -121,7 +148,7 @@ class ReviewIntentFallbackTest extends ApplicationTest {
     /** Two changed files far enough apart that the second starts below the viewport. */
     private static Path repoWithTwoFilesFarApart() throws Exception {
         Path repo = Files.createDirectories(
-                Files.createTempDirectory("drydock-intent-reveal").resolve("repo"));
+                Files.createTempDirectory("drydock-cursor-reveal").resolve("repo"));
         runGit(repo, "init", "-b", "main");
         runGit(repo, "config", "user.name", "Test");
         runGit(repo, "config", "user.email", "test@example.com");
@@ -147,13 +174,13 @@ class ReviewIntentFallbackTest extends ApplicationTest {
     }
 
     /** Polls the label; the diff is a real git process, so its arrival is not instant. */
-    private String awaitIntentLabel() {
+    private String awaitTargetLabel() {
         String last = "";
         for (int i = 0; i < 200; i++) {
             String[] text = new String[1];
-            interact(() -> text[0] = ((Label) lookup(".review-verdict-intent").query()).getText());
+            interact(() -> text[0] = ((Label) lookup(".review-verdict-target").query()).getText());
             last = text[0];
-            if (!"no intent".equals(last)) {
+            if (!"no file".equals(last)) {
                 return last;
             }
             sleep(25);
@@ -163,7 +190,7 @@ class ReviewIntentFallbackTest extends ApplicationTest {
 
     private static Path repoWithTwoChangedFiles() throws Exception {
         Path repo = Files.createDirectories(
-                Files.createTempDirectory("drydock-intent-repo").resolve("repo"));
+                Files.createTempDirectory("drydock-cursor-repo").resolve("repo"));
         runGit(repo, "init", "-b", "main");
         runGit(repo, "config", "user.name", "Test");
         runGit(repo, "config", "user.email", "test@example.com");

@@ -1,11 +1,9 @@
 package app.drydock.ui.review;
 
-import app.drydock.review.HunkIds;
 import app.drydock.ui.TestStages;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.HunkDigest;
-import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.review.SessionReviewScopes;
@@ -32,17 +30,13 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 /**
- * Shared board for the settle-unit tests (spec §9.6): two overlapping
- * sections over three files. Section {@code ①} covers TWO hunks of the same
- * file ({@link #FILE_A}) plus one of {@link #FILE_B}, so a hunk-scoped action
- * is distinguishable from a section-scoped one; it shares {@code FILE_A}'s
- * first hunk with section {@code ②}, so the "settled elsewhere" effect
- * (spec §5.6) is exercised too.
+ * Shared board for the settle-unit tests (spec §9.6): three files, the first
+ * ({@link #FILE_A}) with TWO hunks, so a hunk-scoped action is
+ * distinguishable from a file-scoped one.
  *
  * <p>Modelled on {@link FakeReviewHost}'s use in {@link ReviewHunkProgressTest}:
- * a real store and a real grouping, so the {@code (scopeId, digest)} keying
- * under test is the real thing rather than a stub that keys however a test
- * pleases.</p>
+ * a real store, so the {@code (scopeId, digest)} keying under test is the
+ * real thing rather than a stub that keys however a test pleases.</p>
  */
 abstract class ReviewViewFixture extends ApplicationTest {
 
@@ -88,25 +82,13 @@ abstract class ReviewViewFixture extends ApplicationTest {
         scope = registry.mint(ReviewScopeRegistry.spec(ReviewScope.Kind.WORKING_TREE,
                 Path.of("/tmp/nowhere"), Optional.of(Path.of("/tmp/nowhere")), "main", "main",
                 Optional.empty(), Optional.empty()));
-        host.intents.set(scope.id(), List.of(
-                new ReviewIntent("section-1", 0, "Guards", ReviewIntent.Kind.CHANGE,
-                        ReviewIntent.Risk.MED, "", List.of(
-                                HunkIds.hunkId(FILE_A, 0),
-                                HunkIds.hunkId(FILE_A, 1),
-                                HunkIds.hunkId(FILE_B, 0)),
-                        Optional.empty(), false),
-                new ReviewIntent("section-2", 0, "Profiler", ReviewIntent.Kind.CHANGE,
-                        ReviewIntent.Risk.MED, "", List.of(
-                                HunkIds.hunkId(FILE_A, 0),
-                                HunkIds.hunkId(FILE_C, 0)),
-                        Optional.empty(), false)));
         interact(() -> view.showScopes(new SessionReviewScopes.Scopes(scope, Optional.empty()),
                 SessionReviewScopes.Choice.LOCAL));
         interact(() -> view.diagShowDiff(scope, host.diff));
         WaitForAsyncUtils.waitForFxEvents();
         // diagShowDiff kicks off a ChangeGraph build on a background
         // executor (SessionReviewView#requestGraph); its completion
-        // refreshes the rail and diff column from the FX thread whenever it
+        // refreshes the board and diff column from the FX thread whenever it
         // happens to land. A test that starts clicking before it settles
         // races that refresh -- which can rebuild the very node the click
         // just focused and hand focus somewhere else. Waiting here, once, closes the
@@ -123,22 +105,7 @@ abstract class ReviewViewFixture extends ApplicationTest {
     }
 
     /**
-     * A plain click on a rail card -- what {@link SessionReviewView}'s own
-     * {@code MOUSE_PRESSED} filter on {@code intentRail} reads to decide
-     * {@link SessionReviewView#settleUnit()}. Deliberately not {@code
-     * Node.requestFocus()}/{@code isFocusWithin()}: the rail replaces every
-     * card {@code Button} on each render, and a card discarded while
-     * focused hands focus to whatever JavaFX's {@code Direction.NEXT}
-     * traversal finds next -- which can land inside the diff column and
-     * never leave. A mouse click is real user input either way.
-     */
-    final void focusRail() {
-        clickOn(".review-intent-card");
-        WaitForAsyncUtils.waitForFxEvents();
-    }
-
-    /**
-     * A plain click into the diff column -- see {@link #focusRail}.
+     * A plain click into the diff column.
      *
      * <p>Aims at the list itself, never at {@code ".review-diff-cell"}. A
      * {@code VirtualFlow} keeps a spare cell hanging past the bottom of its

@@ -7,7 +7,6 @@ import javafx.geometry.Pos;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.scene.control.Tooltip;
-import javafx.scene.input.MouseEvent;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
@@ -23,7 +22,7 @@ import java.util.function.Consumer;
  * and is always in the layout, so collapsing the findings margin -- or every
  * rail at once -- can never take the primary action away with it.
  *
- * <p>Approving an intent with an open blocking finding is refused inline
+ * <p>Approving a file with an open blocking finding is refused inline
  * rather than disabled silently: the reader is told which condition is
  * unmet, and the way out (resolve it, or downgrade it after a discussion) is
  * in the margin beside them.</p>
@@ -33,23 +32,18 @@ final class ReviewVerdictBar extends VBox {
     /** What the bar needs from its host. All calls happen on the FX thread. */
     interface Host {
         /**
-         * {@code unit} is the acting unit CAPTURED at the moment the reader
-         * pressed the button (or the live one, for a keyboard/programmatic
-         * fire with no press to capture) -- never re-read at release time.
-         * A real mouse press on this button moves Scene focus off the diff
-         * column before the button's own action fires (JavaFX requests focus
-         * on press for a focusable control), which would otherwise flip
-         * {@link SessionReviewView#settleUnit()} to {@code SECTION}
-         * mid-press and settle the wrong thing on release.
+         * {@code a} -- approves the next unread hunk of the target (in the
+         * tour, passes the current step).
          */
-        void approve(Target target, SessionReviewView.SettleUnit unit);
+        void approve(Target target);
 
-        void requestChanges(Target target, SessionReviewView.SettleUnit unit);
+        /** {@code r} -- requests changes on the next unread hunk of the target (the step, in the tour). */
+        void requestChanges(Target target);
 
         /**
-         * "Ask the agent to fix it" -- hands the intent's open findings to
+         * "Ask the agent to fix it" -- hands the target's open findings to
          * the bound session. False when nothing was handed over: there is no
-         * session to hand them to, or the intent has no open finding to send.
+         * session to hand them to, or the target has no open finding to send.
          *
          * <p>A boolean for the same reason {@code openInExplorer} and {@code
          * SessionReviewView.Host#askAgentToFix} are: this button can do
@@ -59,17 +53,17 @@ final class ReviewVerdictBar extends VBox {
          */
         boolean askAgentToFix(Target target);
 
-        /** {@code u} -- undoes this intent's verdict; also "Re-review" on the stale banner. */
+        /** Undoes the target's verdict; also "Re-review" on the stale banner. */
         void undo(Target target);
 
         /**
          * "Confirm still good" on the stale banner (spec §9.2): rewrites
-         * the section's stale verdicts against the current base rather than
+         * the target's stale verdicts against the current base rather than
          * clearing them.
          */
         void confirmStillGood(Target target);
 
-        /** {@code n} -- moves to the next unsettled intent. */
+        /** {@code n} -- moves to the next unsettled hunk (step, in the tour). */
         void nextUnsettled();
 
         /** {@code ⏎} -- submits the review, once everything is settled. */
@@ -85,7 +79,8 @@ final class ReviewVerdictBar extends VBox {
     /**
      * What the bar is settling right now: an opaque {@code id} the host
      * resolves its buttons back through, and the {@code label} shown as the
-     * bar's title ("3 · Validate the input"). The bar only ever labels the
+     * bar's title ("2/14 · src/Main.java", or a tour step's "3 · Validate the
+     * input"). The bar only ever labels the
      * unit -- what it covers, and whether it is blocked, stay the host's.
      */
     record Target(String id, String label) {
@@ -96,21 +91,20 @@ final class ReviewVerdictBar extends VBox {
     }
 
     /**
-     * A section's stale verdict (spec §9.2): the base it was approved
-     * against, and the scope's base now. Not a {@link ReviewVerdict} --
-     * a section owns no verdict of its own, only what its hunks merge to.
+     * A file's stale verdict (spec §9.2): the base it was approved against,
+     * and the scope's base now. Not a {@link ReviewVerdict} -- a file owns no
+     * verdict of its own, only what its hunks merge to.
      */
     record StaleInfo(String oldBase, String newBase) {
     }
 
     private final Host host;
 
-    private final Label intentLabel = new Label();
+    private final Label targetLabel = new Label();
     private final Button previousButton = new Button("‹");
     private final Button nextButton = new Button("›");
-    // Text and tooltip are both rewritten by render() to name the acting
-    // unit ("Approve (hunk)"); the constructor's construction argument is
-    // only ever visible for the single frame before the first render().
+    // Text and tooltip are both rewritten by render(): "Approve (next unread
+    // hunk)" in the hunk diff, "Approve step" in the tour.
     private final Button approveButton = new Button();
     private final Button requestChangesButton = new Button();
     private final Button askAgentButton = new Button("Ask the agent to fix it");
@@ -134,14 +128,14 @@ final class ReviewVerdictBar extends VBox {
     static final String NOTHING_TO_SEND = "no open findings, or no session";
 
     static final String NOTHING_TO_SEND_DETAIL =
-            "This intent has no open finding to hand over, or this scope has no bound session to "
+            "This file has no open finding to hand over, or this scope has no bound session to "
                     + "hand it to. Open the scope's session first.";
 
     private final Label refusalLabel = new Label();
     /**
      * Why an "Ask the agent to fix it" click handed nothing over -- a THIRD
      * refusal, and a third Label, for the reason {@link #submitRefusalLabel}
-     * documents: the three are independently true (an intent can have a
+     * documents: the three are independently true (a file can have a
      * blocking finding open, no session to hand it to, AND a diff that has
      * not landed). This one sits in the FOOTER rather than beside its own
      * button -- see {@link #showAskRefused} for the measurement that put it
@@ -165,7 +159,7 @@ final class ReviewVerdictBar extends VBox {
     private final Label hintLabel = new Label("press ? for shortcuts");
     /**
      * Why a Submit click did nothing -- distinct from {@link #refusalLabel},
-     * which explains why an INTENT cannot be approved. This one covers
+     * which explains why a FILE cannot be approved. This one covers
      * Submit itself refusing (see {@link #showSubmitRefused}): styled with
      * the same {@code review-verdict-refusal} class so the two read as the
      * same kind of message, but never both are the same {@link Label} --
@@ -181,10 +175,9 @@ final class ReviewVerdictBar extends VBox {
 
     private Target target;
     /**
-     * The SECTION's decision, derived from its hunks by {@code VerdictMerge}
-     * -- not a stored {@link ReviewVerdict}. Sections overlap and so cannot
-     * own a verdict of their own; what the bar shows is what their hunks add
-     * up to.
+     * The target's decision, derived from its hunks by {@code VerdictMerge}
+     * -- not a stored {@link ReviewVerdict}. A file owns no verdict of its
+     * own; what the bar shows is what its hunks add up to.
      */
     private Optional<ReviewVerdict.Decision> decision = Optional.empty();
     private boolean blocked;
@@ -197,40 +190,18 @@ final class ReviewVerdictBar extends VBox {
      * tour, sending problems back is the blocker banner's job.
      */
     private boolean tourMode;
-    /**
-     * What {@code a}/{@code r}/{@code u} act on right now (spec §9.6),
-     * stated on the Approve/Request-changes buttons themselves ("Approve
-     * (hunk)") rather than in a separate label: a droppable label is not on
-     * screen at the code column's floor, and a button whose own text
-     * contradicts what it does ("Approve intent" acting on one hunk) is
-     * worse than no unit statement at all.
-     */
-    private SessionReviewView.SettleUnit actingUnit = SessionReviewView.SettleUnit.SECTION;
-    /**
-     * The acting unit captured at the moment a real mouse press landed on
-     * {@link #approveButton}/{@link #requestChangesButton} -- empty between
-     * presses, and for a keyboard or programmatic {@code fire()} that never
-     * pressed at all. A press moves Scene focus (JavaFX requests it on
-     * press for any focusable control -- see {@code app.css}'s {@code
-     * .review-verdict-action:focused}), which can flip {@link #actingUnit}
-     * mid-press if the reader had the diff column focused; the button must
-     * still act on what it READ when pressed, not what focus became by the
-     * time the reader let go.
-     */
-    private Optional<SessionReviewView.SettleUnit> pressedUnit = Optional.empty();
-
     ReviewVerdictBar(Host host) {
         this.host = host;
         getStyleClass().add("review-verdict-bar");
 
-        intentLabel.getStyleClass().add("review-verdict-intent");
+        targetLabel.getStyleClass().add("review-verdict-target");
         // The bar spans the code column, whose floor is RailLayout.CODE_MIN_WIDTH,
         // and at that width its own contents do not fit. What gives way is
         // decided here rather than by HBox's proportional shrinking, which
         // elided every action label equally: the actions are the point of the
         // bar, the title is context, so the actions keep their width and the
         // title yields. Its tooltip carries what the ellipsis takes.
-        intentLabel.setMinWidth(0);
+        targetLabel.setMinWidth(0);
         for (Button action : List.of(previousButton, nextButton, approveButton,
                 requestChangesButton, askAgentButton, undoButton, confirmStillGoodButton,
                 reReviewButton)) {
@@ -239,36 +210,27 @@ final class ReviewVerdictBar extends VBox {
         navHint.getStyleClass().add("review-verdict-hint");
         // Kept or dropped whole (fitActionRow decides which). Left at its
         // default ellipsis minimum, HBox shrank it alongside the title
-        // whenever the title's preferred width exceeded INTENT_LABEL_MIN --
+        // whenever the title's preferred width exceeded TARGET_LABEL_MIN --
         // so a hint judged to fit still rendered as "n jumps to the n…".
         navHint.setMinWidth(Region.USE_PREF_SIZE);
         HBox.setHgrow(actionSpacer, Priority.ALWAYS);
 
         previousButton.getStyleClass().addAll("review-verdict-nav", "review-verdict-previous");
-        previousButton.setTooltip(new Tooltip("Previous intent ([)"));
+        previousButton.setTooltip(new Tooltip("Previous file ([)"));
         previousButton.setOnAction(e -> host.previous());
 
         nextButton.getStyleClass().addAll("review-verdict-nav", "review-verdict-next");
-        nextButton.setTooltip(new Tooltip("Next intent (])"));
+        nextButton.setTooltip(new Tooltip("Next file (])"));
         nextButton.setOnAction(e -> host.next());
 
         approveButton.getStyleClass().addAll("review-verdict-action", "primary");
-        approveButton.addEventFilter(MouseEvent.MOUSE_PRESSED, e -> pressedUnit = Optional.of(actingUnit));
-        approveButton.setOnAction(e -> {
-            SessionReviewView.SettleUnit unit = consumePressedUnit();
-            withTarget(current -> host.approve(current, unit));
-        });
+        approveButton.setOnAction(e -> withTarget(host::approve));
 
         requestChangesButton.getStyleClass().add("review-verdict-action");
-        requestChangesButton.addEventFilter(MouseEvent.MOUSE_PRESSED,
-                e -> pressedUnit = Optional.of(actingUnit));
-        requestChangesButton.setOnAction(e -> {
-            SessionReviewView.SettleUnit unit = consumePressedUnit();
-            withTarget(current -> host.requestChanges(current, unit));
-        });
+        requestChangesButton.setOnAction(e -> withTarget(host::requestChanges));
 
         askAgentButton.getStyleClass().add("review-verdict-action");
-        askAgentButton.setTooltip(new Tooltip("Hand this intent's open findings to the bound session"));
+        askAgentButton.setTooltip(new Tooltip("Hand this file's open findings to the bound session"));
         askAgentButton.setOnAction(e -> withTarget(current -> {
             if (host.askAgentToFix(current)) {
                 clearAskRefused();
@@ -279,7 +241,7 @@ final class ReviewVerdictBar extends VBox {
             // worse than naming the pair. Short because the footer at the
             // code column's floor has room for about forty characters and
             // not one more -- see showAskRefused -- so the sentence lives in
-            // the tooltip, the way intentLabel's does.
+            // the tooltip, the way targetLabel's does.
             showAskRefused(NOTHING_TO_SEND, NOTHING_TO_SEND_DETAIL);
         }));
         // Both classes, exactly as submitRefusalLabel does: the shared one
@@ -290,7 +252,7 @@ final class ReviewVerdictBar extends VBox {
         askRefusalLabel.setManaged(false);
 
         undoButton.getStyleClass().add("review-verdict-action");
-        undoButton.setTooltip(new Tooltip("Undo this intent's verdict (u)"));
+        undoButton.setTooltip(new Tooltip("Undo this file's verdicts"));
         undoButton.setOnAction(e -> withTarget(host::undo));
 
         // Each also carries a class of its own: the stale banner is the one
@@ -303,7 +265,7 @@ final class ReviewVerdictBar extends VBox {
         confirmStillGoodButton.setOnAction(e -> withTarget(host::confirmStillGood));
 
         reReviewButton.getStyleClass().addAll("review-verdict-action", "review-verdict-re-review");
-        reReviewButton.setTooltip(new Tooltip("Clear this verdict so the section can be re-read"));
+        reReviewButton.setTooltip(new Tooltip("Clear this verdict so the file can be re-read"));
         reReviewButton.setOnAction(e -> withTarget(host::undo));
 
         staleLabel.getStyleClass().add("review-verdict-stale");
@@ -311,13 +273,13 @@ final class ReviewVerdictBar extends VBox {
 
         settledLabel.getStyleClass().add("review-verdict-settled");
         refusalLabel.getStyleClass().add("review-verdict-refusal");
-        // Never squeezed: the intent TITLE is the one thing in this row
-        // allowed to give way (see intentLabel's own minWidth(0)), and
+        // Never squeezed: the target TITLE is the one thing in this row
+        // allowed to give way (see targetLabel's own minWidth(0)), and
         // without this the row took its last three pixels out of the
         // refusal instead -- eliding even the bare glyph, which is the one
         // character that cannot be spared.
         refusalLabel.setMinWidth(Region.USE_PREF_SIZE);
-        refusalLabel.setTooltip(new Tooltip("An open finding of this intent blocks approval. "
+        refusalLabel.setTooltip(new Tooltip("An open finding on this file blocks approval. "
                 + "Resolve it, or lower its severity, in the findings margin."));
         refusalLabel.setVisible(false);
         refusalLabel.setManaged(false);
@@ -368,24 +330,11 @@ final class ReviewVerdictBar extends VBox {
     }
 
     /**
-     * The unit an Approve/Request-changes press just captured, or the LIVE
-     * one when nothing was captured -- a keyboard activation or a test's
-     * {@code Button.fire()} never presses at all, so those correctly read
-     * whatever is current right now rather than a stale snapshot from
-     * whenever this button was last physically pressed.
-     */
-    private SessionReviewView.SettleUnit consumePressedUnit() {
-        SessionReviewView.SettleUnit unit = pressedUnit.orElse(actingUnit);
-        pressedUnit = Optional.empty();
-        return unit;
-    }
-
-    /**
-     * Updates what the bar says about the intent now being settled.
+     * Updates what the bar says about the target now being settled.
      *
-     * @param currentDecision the section's decision, derived from its hunks;
+     * @param currentDecision the target's decision, derived from its hunks;
      *                        empty while any of them is unread
-     * @param blocked whether an open blocking finding refuses approval of this intent
+     * @param blocked whether an open blocking finding refuses approval of this target
      */
     void update(Target currentTarget, Optional<ReviewVerdict.Decision> currentDecision,
                 boolean blocked) {
@@ -404,19 +353,18 @@ final class ReviewVerdictBar extends VBox {
     }
 
     /**
-     * Progress is counted in distinct hunks, never in sections: sections
-     * overlap, so the sum of their sizes exceeds the number of hunks and
-     * "n/m sections settled" measures nothing (spec §5.6).
+     * The tour's unit is the step and its progress counts steps (spec §7);
+     * the hunk diff's unit is the file and its progress counts hunks.
      */
     void setTourMode(boolean on) {
         if (tourMode == on) {
             return;
         }
         tourMode = on;
-        String unit = on ? "step" : "intent";
+        String unit = on ? "step" : "file";
         previousButton.setTooltip(new Tooltip("Previous " + unit + " ([)"));
         nextButton.setTooltip(new Tooltip("Next " + unit + " (])"));
-        undoButton.setTooltip(new Tooltip(on ? "Undo this step's decision (u)" : "Undo this intent's verdict (u)"));
+        undoButton.setTooltip(new Tooltip(on ? "Undo this step's decision (u)" : "Undo this file's verdicts"));
         render();
     }
 
@@ -427,7 +375,7 @@ final class ReviewVerdictBar extends VBox {
     }
 
     /**
-     * Told whether the section now showing has a stale verdict (spec §9.2):
+     * Told whether the file now showing has a stale verdict (spec §9.2):
      * present swaps the normal actions for the banner and its two answers,
      * "Confirm still good" and "Re-review". Empty renders nothing extra --
      * {@link SectionStates.Staleness#UNKNOWN} must say nothing, never warn,
@@ -437,37 +385,6 @@ final class ReviewVerdictBar extends VBox {
     void showStale(Optional<StaleInfo> info) {
         this.stale = info;
         render();
-    }
-
-    /**
-     * Told what {@code a}/{@code r}/{@code u} act on right now (spec §9.6),
-     * so the Approve/Request-changes buttons can say so: a key whose target
-     * depends on focus has to state what it is about to do, or the reader
-     * is guessing.
-     */
-    void showActingUnit(SessionReviewView.SettleUnit unit) {
-        this.actingUnit = unit;
-        render();
-    }
-
-    /**
-     * The word the unit reads as on a button: "Approve (section)",
-     * "Request changes (file)". HUNK reads as "next unread hunk," not
-     * "hunk" alone (reversed ruling): a completed gutter click opens the
-     * comment composer and steals real keyboard focus into its text field,
-     * which the existing {@code TextInputControl} guard then makes a/r
-     * type into rather than trigger, and closing that composer clears the
-     * gutter selection along with it -- so on every real reader path, HUNK
-     * mode settles the section's first UNSETTLED hunk, never literally the
-     * one under the pointer. The label has to promise what the code
-     * actually does.
-     */
-    private static String unitWord(SessionReviewView.SettleUnit unit) {
-        return switch (unit) {
-            case HUNK -> "next unread hunk";
-            case SECTION -> "section";
-            case FILE -> "file";
-        };
     }
 
     /**
@@ -497,7 +414,7 @@ final class ReviewVerdictBar extends VBox {
         submitButton.pseudoClassStateChanged(javafx.css.PseudoClass.getPseudoClass("refused"), true);
         // The two footer refusals are MUTUALLY EXCLUSIVE. Raised together --
         // submit refuses, the reader then clicks "Ask the agent to fix it" on
-        // the same intent, and neither path calls update() -- they and the
+        // the same file, and neither path calls update() -- they and the
         // Submit button share one row's width three ways, and the primary
         // action reads "Sub…". They also describe one sequence of clicks, so
         // the newer one is the one the reader is owed.
@@ -605,17 +522,17 @@ final class ReviewVerdictBar extends VBox {
 
     private void render() {
         if (target == null) {
-            intentLabel.setText("no intent");
+            targetLabel.setText(tourMode ? "no step" : "no file");
             previousButton.setDisable(true);
             nextButton.setDisable(true);
-            actionRow.getChildren().setAll(previousButton, nextButton, intentLabel);
+            actionRow.getChildren().setAll(previousButton, nextButton, targetLabel);
             progressLabel.setText("");
             progressFill.setPrefWidth(0);
             submitButton.setDisable(true);
             return;
         }
-        intentLabel.setText(target.label());
-        intentLabel.setTooltip(new Tooltip(intentLabel.getText()));
+        targetLabel.setText(target.label());
+        targetLabel.setTooltip(new Tooltip(targetLabel.getText()));
         previousButton.setDisable(false);
         nextButton.setDisable(false);
 
@@ -627,25 +544,23 @@ final class ReviewVerdictBar extends VBox {
                         : left + " hunks left · n jumps to the next");
 
         if (stale.isPresent()) {
-            // Takes priority over the settled branch below: a stale section
+            // Takes priority over the settled branch below: a stale file
             // DOES have a decision recorded, but it was given against a base
             // that has since moved, so the plain "settled, here is undo" row
             // would understate what is actually being asked of the reader.
             staleLabel.setText("⚠ approved against base " + shortSha(stale.get().oldBase())
                     + " · base is now " + shortSha(stale.get().newBase()));
-            actionRow.getChildren().setAll(previousButton, nextButton, intentLabel,
+            actionRow.getChildren().setAll(previousButton, nextButton, targetLabel,
                     staleLabel, confirmStillGoodButton, reReviewButton, actionSpacer, navHint);
         } else if (decision.isPresent()) {
             settledLabel.setText(decision.get().label());
             settledLabel.getStyleClass().removeIf(styleClass -> styleClass.startsWith("decision-"));
             settledLabel.getStyleClass().add("decision-" + decision.get().wireName());
-            actionRow.getChildren().setAll(previousButton, nextButton, intentLabel,
+            actionRow.getChildren().setAll(previousButton, nextButton, targetLabel,
                     settledLabel, undoButton, actionSpacer, navHint);
         } else {
-            // Named after the acting unit, not "intent": a button whose own
-            // label contradicts what it is about to do (spec §9.6) is worse
-            // than no unit statement, and this is the one surface that is
-            // never dropped for width, unlike a separate label would be.
+            // Named after the unit it acts on (spec §9.6): this is the one
+            // surface never dropped for width, unlike a separate label.
             if (tourMode) {
                 approveButton.setText("Approve step");
                 requestChangesButton.setText("Request changes on step");
@@ -654,34 +569,29 @@ final class ReviewVerdictBar extends VBox {
                 refusalLabel.setVisible(false);
                 refusalLabel.setManaged(false);
                 approveButton.pseudoClassStateChanged(PseudoClass.getPseudoClass("refused"), false);
-                actionRow.getChildren().setAll(previousButton, nextButton, intentLabel,
+                actionRow.getChildren().setAll(previousButton, nextButton, targetLabel,
                         approveButton, requestChangesButton, actionSpacer, navHint);
                 fitActionRow(actionRow.getWidth());
                 renderProgress();
                 return;
             }
-            String unit = unitWord(actingUnit);
-            approveButton.setText("Approve (" + unit + ")");
-            requestChangesButton.setText("Request changes (" + unit + ")");
-            // HUNK gets its own plain-language tooltip: "this hunk" would
-            // still read as "the one under the pointer," which is exactly
-            // the promise the reversed ruling says the code cannot keep.
-            if (actingUnit == SessionReviewView.SettleUnit.HUNK) {
-                approveButton.setTooltip(new Tooltip(
-                        "Approves the next unread hunk in this section (a)"));
-                requestChangesButton.setTooltip(new Tooltip(
-                        "Requests changes on the next unread hunk in this section (r)"));
-            } else {
-                approveButton.setTooltip(new Tooltip("Approve this " + unit + " (a)"));
-                requestChangesButton.setTooltip(
-                        new Tooltip("Request changes on this " + unit + " (r)"));
-            }
+            // "next unread hunk", not "hunk": a completed gutter click opens
+            // the comment composer and takes keyboard focus, and closing it
+            // clears the selection, so on every real reader path a/r settle
+            // the file's first UNREAD hunk, never literally the one under
+            // the pointer. The label promises what the code does.
+            approveButton.setText("Approve (next unread hunk)");
+            requestChangesButton.setText("Request changes (next unread hunk)");
+            approveButton.setTooltip(new Tooltip(
+                    "Approves the next unread hunk in this file (a) · ⇧A approves the whole file"));
+            requestChangesButton.setTooltip(new Tooltip(
+                    "Requests changes on the next unread hunk in this file (r) · ⇧R the whole file"));
             refusalLabel.setText(BLOCKING_REFUSAL);
             refusalLabel.setVisible(blocked);
             refusalLabel.setManaged(blocked);
             approveButton.pseudoClassStateChanged(
                     javafx.css.PseudoClass.getPseudoClass("refused"), blocked);
-            actionRow.getChildren().setAll(previousButton, nextButton, intentLabel,
+            actionRow.getChildren().setAll(previousButton, nextButton, targetLabel,
                     approveButton, requestChangesButton, askAgentButton,
                     refusalLabel, actionSpacer, navHint);
         }
@@ -700,7 +610,7 @@ final class ReviewVerdictBar extends VBox {
     }
 
     /**
-     * The width the intent title is worth showing at. Below this it says
+     * The width the target title is worth showing at. Below this it says
      * "11 · app…" and stops being context at all, so the hint goes instead --
      * it is the one thing on the bar stated nowhere else only in part: the
      * count repeats in the progress line and in the Submit button, and the
@@ -708,14 +618,14 @@ final class ReviewVerdictBar extends VBox {
      *
      * <p><strong>A reservation, not a floor.</strong> It is what {@link
      * #actionRowWidth} sets aside when deciding what else fits; the layout
-     * never enforces it, because {@code intentLabel.setMinWidth(0)}
+     * never enforces it, because {@code targetLabel.setMinWidth(0)}
      * deliberately lets the title be the thing that yields. At {@code
      * CODE_MIN_WIDTH} with the four actions present the title measures 14px
      * against this 96 -- and that is the design working, not failing. Making
      * it a real floor would mean dropping an action button at that width,
      * which is a decision about the bar, not a bug in this constant.</p>
      */
-    private static final double INTENT_LABEL_MIN = 96;
+    private static final double TARGET_LABEL_MIN = 96;
 
     /**
      * Drops {@link #navHint} when the row cannot hold it, the actions and a
@@ -780,14 +690,14 @@ final class ReviewVerdictBar extends VBox {
      */
     private double actionRowWidth(double width, javafx.scene.Node excluded) {
         double needed = actionRow.getInsets().getLeft() + actionRow.getInsets().getRight()
-                + INTENT_LABEL_MIN;
+                + TARGET_LABEL_MIN;
         int slots = 0;
         for (javafx.scene.Node child : actionRow.getChildren()) {
             if (!child.isManaged() && child != navHint) {
                 continue;
             }
             slots++;
-            if (child == actionSpacer || child == intentLabel || child == excluded
+            if (child == actionSpacer || child == targetLabel || child == excluded
                     || child == navHint) {
                 continue;
             }

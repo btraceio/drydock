@@ -6,7 +6,6 @@ import app.drydock.git.UnifiedDiff;
 import app.drydock.review.HunkIds;
 import app.drydock.review.ReadingPath;
 import app.drydock.review.ReviewAnnotation;
-import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.Severity;
 import app.drydock.ui.UiErrors;
@@ -85,7 +84,7 @@ final class ReviewDiffColumn extends BorderPane {
     interface CommentSink {
         /**
          * Records {@code annotation}, freshly minted by {@link #submitComposer()}.
-         * The sink owns storage (id generation, intent assignment) -- the
+         * The sink owns storage (id generation, scope stamping) -- the
          * column only knows the range and the text, never the store.
          */
         void addComment(ReviewAnnotation annotation);
@@ -124,12 +123,6 @@ final class ReviewDiffColumn extends BorderPane {
     private final Button contextToggle = new Button();
     private final Button untrackedToggle = new Button();
 
-    /**
-     * The escape hatch out of the intent filter (spec §4.4). Present only
-     * while an intent is selected, because "show all" with nothing to show
-     * all of is a control that does nothing.
-     */
-    private final Button scopeToggle = new Button();
     private final ObservableList<ReviewDiffRow> rows = FXCollections.observableArrayList();
     private final ListView<ReviewDiffRow> list = new ListView<>(rows);
 
@@ -160,8 +153,8 @@ final class ReviewDiffColumn extends BorderPane {
      * Notified when a diff resolves, with the scope it resolved for.
      *
      * <p>The scope id is the point: a bare "a diff landed" signal left every
-     * consumer reading whatever diff happened to be current, which is how an
-     * intent rail came to show one scope's files beside another's header.</p>
+     * consumer reading whatever diff happened to be current, which is how the
+     * board came to show one scope's files beside another's header.</p>
      */
     private java.util.function.BiConsumer<String, DiffOutcome> onDiffResolved = (scopeId, outcome) -> { };
 
@@ -182,8 +175,8 @@ final class ReviewDiffColumn extends BorderPane {
      * {@link #onDiffResolved} -- must be built from this field and never
      * from {@link #fullDiff} directly. The two diverge exactly while a
      * toggle is off, and that is the one moment a caller reading the wrong
-     * one produces the defect this toggle exists to avoid: an intent rail
-     * listing files a column has filtered out of view. See
+     * one produces the defect this toggle exists to avoid: a board walking
+     * files a column has filtered out of view. See
      * {@link #publishDisplayed(String)}.
      */
     private UnifiedDiff displayedDiff = new UnifiedDiff(List.of());
@@ -259,15 +252,6 @@ final class ReviewDiffColumn extends BorderPane {
      */
     private Map<String, List<ReadingPath.Link>> linksByHunk = Map.of();
 
-    /**
-     * The intent the column is filtered to, or {@code null} for the whole
-     * scope. Selecting an intent in the rail used only to scroll this column,
-     * which left the rail looking like decoration on a 45-file diff: the
-     * reader clicked intent 12 and got the same wall of code they were
-     * already looking at.
-     */
-    private app.drydock.review.ReviewIntent intentFilter;
-
     private CommentSink commentSink = annotation -> { };
 
     /**
@@ -342,14 +326,6 @@ final class ReviewDiffColumn extends BorderPane {
     private Set<String> selectedKeys = Set.of();
 
     /**
-     * Set by the {@code whole scope} toggle: the reader has asked to see past
-     * the selected intent. Cleared whenever a different intent is selected,
-     * so the escape hatch is per-look rather than a mode that silently
-     * outlives the intent it was opened from.
-     */
-    private boolean showWholeScope;
-
-    /**
      * Guards against a slow diff of a scope the user has already navigated
      * away from overwriting a newer one. Incremented on every request; a
      * completion whose token is stale is dropped.
@@ -371,24 +347,19 @@ final class ReviewDiffColumn extends BorderPane {
         untrackedToggle.setOnAction(e -> toggleUntracked());
         untrackedToggle.setVisible(false);
         untrackedToggle.setManaged(false);
-        scopeToggle.getStyleClass().add("review-chip-button");
-        scopeToggle.setOnAction(e -> toggleWholeScope());
-        scopeToggle.setVisible(false);
-        scopeToggle.setManaged(false);
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
-        HBox header = new HBox(9, summaryLabel, spacer, scopeToggle, untrackedToggle, contextToggle);
+        HBox header = new HBox(9, summaryLabel, spacer, untrackedToggle, contextToggle);
         header.setAlignment(Pos.CENTER_LEFT);
         header.getStyleClass().add("review-diff-header");
         setTop(header);
 
         list.getStyleClass().add("review-diff-list");
         list.setFocusTraversable(false);
-        // Not Tab-traversable (above), but a click still has to plant real
-        // Scene focus here: SessionReviewView.settleUnit() (spec §9.6) reads
-        // the Scene's focus owner to tell a hunk-scoped a/r/u from a
-        // section-scoped one, and a click is the only way a reader lands in
-        // this column today. Node.requestFocus() does not require
+        // Not Tab-traversable (above), but a click still plants real Scene
+        // focus here, so focus stays inside the board (and Review's keys
+        // keep reaching it) after a reader clicks into the code. Node.
+        // requestFocus() does not require
         // focusTraversable -- that flag only gates the Tab engine -- so this
         // does not reopen Tab-key traversal into the list.
         list.addEventFilter(MouseEvent.MOUSE_PRESSED, e -> list.requestFocus());
@@ -437,11 +408,6 @@ final class ReviewDiffColumn extends BorderPane {
         displayedScope = newScope;
         expandedRuns.clear();
         resetWholeFiles();
-        // The outgoing scope's intent must not filter the incoming scope's
-        // diff: its hunk ids name files that are not in it, so the column
-        // would render empty until the new selection caught up.
-        intentFilter = null;
-        showWholeScope = false;
         // Hidden for the duration of the load: its visibility reflects
         // whether the OUTGOING scope's diff had untracked files, which says
         // nothing about the incoming one. applyDiff() re-derives it once the
@@ -494,8 +460,8 @@ final class ReviewDiffColumn extends BorderPane {
      * Notified when a diff resolves, with the scope it resolved for.
      *
      * <p>The scope id is the point: a bare "a diff landed" signal left every
-     * consumer reading whatever diff happened to be current, which is how an
-     * intent rail came to show one scope's files beside another's header.</p>
+     * consumer reading whatever diff happened to be current, which is how the
+     * board came to show one scope's files beside another's header.</p>
      */
     void setOnDiffResolved(java.util.function.BiConsumer<String, DiffOutcome> handler) {
         this.onDiffResolved = handler == null ? (scopeId, outcome) -> { } : handler;
@@ -932,27 +898,21 @@ final class ReviewDiffColumn extends BorderPane {
     /**
      * Scrolls to {@code file}'s hunk whose REAL index (into its own
      * {@code UnifiedDiff.FileDiff.hunks()}) is {@code hunkIndex} -- what
-     * selecting an intent or a link footer brings into view.
-     * Falls back to the file's first rendered card when that exact hunk is
-     * not among them (the diff was re-read and the grouping is one
-     * generation behind, or the column is filtered to hunks that do not
-     * include it).
+     * moving between files ({@code [}/{@code ]}, {@code n}) or a link footer
+     * brings into view. Falls back to the file's first rendered card when
+     * that exact hunk is not among them (a hunk whose every line is hidden
+     * renders no card).
      *
      * <p>Matched by {@link ReviewDiffRow.HunkHeader#hunkIndex()} rather than
-     * by counting rendered headers in order: a filter that hides some of a
-     * file's hunks (an intent naming only some of them) used to make the
-     * Nth RENDERED header stand in for hunk N, landing on the wrong hunk
-     * while still reporting success -- a link footer for hunk 2 of a
-     * three-hunk file would land on whichever hunk happened to render
-     * first if hunk 2 itself were filtered out.</p>
+     * by counting rendered headers in order, so a hunk that renders no card
+     * cannot make the Nth RENDERED header stand in for hunk N.</p>
      *
      * <p>Returns whether the file was reached. It can genuinely be absent:
-     * the intent rail is built from the whole diff while these rows stop at
-     * {@link #MAX_RENDERED_ROWS}, so in a large diff every intent past the
-     * cut has no card to scroll to. That used to return silently, which
-     * read as a dead click -- selecting an intent appeared to do nothing at
-     * all. Now the truncation notice is scrolled into view instead, because
-     * it is the one row that explains why the file is not there.</p>
+     * the board walks the whole diff while these rows stop at {@link
+     * #MAX_RENDERED_ROWS}, so in a large diff every file past the cut has no
+     * card to scroll to. The truncation notice is scrolled into view
+     * instead, because it is the one row that explains why the file is not
+     * there.</p>
      */
     boolean revealHunk(String file, int hunkIndex) {
         int firstCard = -1;
@@ -1008,49 +968,6 @@ final class ReviewDiffColumn extends BorderPane {
             getStyleClass().remove(value.styleClass());
         }
         getStyleClass().add(density.styleClass());
-    }
-
-    /**
-     * Filters the column to {@code intent}, or to the whole scope when it is
-     * {@code null}. Re-selecting the same intent is a no-op so that walking
-     * the rail with {@code [}/{@code ]} and coming back does not discard a
-     * "whole scope" the reader asked for.
-     */
-    void setIntent(app.drydock.review.ReviewIntent intent) {
-        String was = intentFilter == null ? null : intentFilter.id();
-        String now = intent == null ? null : intent.id();
-        if (java.util.Objects.equals(was, now)) {
-            return;
-        }
-        intentFilter = intent;
-        showWholeScope = false;
-        expandedRuns.clear();
-        rebuild();
-    }
-
-    /** The {@code whole scope} / {@code this intent} chip. */
-    private void toggleWholeScope() {
-        showWholeScope = !showWholeScope;
-        rebuild();
-    }
-
-    /** Whether the rows are currently narrowed to one intent. */
-    /**
-     * Whether the rows are narrowed to one intent. Never while whole files
-     * show: the tour reads the change across files, and an intent filter
-     * left from the hunk diff must not narrow it. Leaving tour mode brings
-     * the filter back as it was.
-     */
-    private boolean filtering() {
-        return intentFilter != null && !showWholeScope && !wholeFiles;
-    }
-
-    private ReviewDiffRows.HunkFilter hunkFilter() {
-        if (!filtering()) {
-            return ReviewDiffRows.HunkFilter.ALL;
-        }
-        app.drydock.review.ReviewIntent intent = intentFilter;
-        return intent::containsHunk;
     }
 
     /** {@code c}: shows or hides unchanged lines entirely. */
@@ -1116,7 +1033,6 @@ final class ReviewDiffColumn extends BorderPane {
     void setWholeFiles(boolean on) {
         wholeFiles = on;
         updateContextToggle();
-        updateScopeToggle();
         if (on && wholeFileDiff == null) {
             fetchWholeFiles();
         }
@@ -1246,17 +1162,15 @@ final class ReviewDiffColumn extends BorderPane {
         // toggle), and losing typed text to one of those is the kind of thing
         // a reader never forgives.
         insertComposerRow();
-        updateScopeToggle();
         updateSummary();
         list.scrollTo(0);
     }
 
     private ReviewDiffRows.Options buildOptions() {
-        // Hunk ids (intent filter, links) are review-diff coordinates; the
-        // whole-file diff has different hunks, so it ignores both.
+        // Hunk ids (links) are review-diff coordinates; the whole-file diff
+        // has different hunks, so it ignores them.
         boolean whole = wholeFiles && wholeFileDiff != null;
         return new ReviewDiffRows.Options(showContext, expandedRuns, MAX_RENDERED_ROWS,
-                whole ? ReviewDiffRows.HunkFilter.ALL : hunkFilter(),
                 whole ? Map.of() : linksByHunk,
                 whole && !foldAll);
     }
@@ -1289,48 +1203,15 @@ final class ReviewDiffColumn extends BorderPane {
         insertComposerRow();
     }
 
-    /**
-     * The escape hatch's label. It names what clicking it WOULD show, not
-     * what is showing -- a chip reading "this intent" while the intent is
-     * already the only thing on screen says nothing about what it does.
-     */
-    private void updateScopeToggle() {
-        boolean present = intentFilter != null && !wholeFiles;
-        scopeToggle.setVisible(present);
-        scopeToggle.setManaged(present);
-        if (!present) {
-            return;
-        }
-        scopeToggle.setText(showWholeScope
-                ? "intent " + intentFilter.number() + " only"
-                : "whole scope");
-        scopeToggle.setTooltip(new Tooltip(showWholeScope
-                ? "Narrow back to intent " + intentFilter.number() + ": " + intentFilter.title()
-                : "Show every hunk in this scope, not just intent " + intentFilter.number()));
-    }
-
     private void showMessage(String text) {
         rows.setAll(List.of(new ReviewDiffRow.Message(text)));
         updateSummary();
     }
 
-    /**
-     * The header count. While the column is filtered this counts what is
-     * ACTUALLY on screen and names the intent it belongs to; the scope's own
-     * totals would contradict the rows directly below them.
-     */
+    /** The header count: the scope's files and line totals, or the tour step's header. */
     private void updateSummary() {
         if (wholeFiles && stepHeader.isPresent()) {
             summaryLabel.setText(stepHeader.get() + (wholeFileUnavailable ? "  ·  whole file unavailable" : ""));
-            return;
-        }
-        if (filtering()) {
-            // Hunks, not files: an intent's title often already carries its
-            // file count ("drydock/git · 4 files"), and appending another one
-            // read as "4 files · 4 files".
-            long hunks = rows.stream().filter(ReviewDiffRow.HunkHeader.class::isInstance).count();
-            summaryLabel.setText("intent " + intentFilter.number() + "  ·  " + intentFilter.title()
-                    + "  ·  " + hunks + (hunks == 1 ? " hunk" : " hunks"));
             return;
         }
         int files = displayedDiff.files().size();
@@ -1811,7 +1692,7 @@ final class ReviewDiffColumn extends BorderPane {
      * <p>{@code .review-link-row} carries its OWN {@code -fx-text-fill} in
      * {@code app.css}, the same fix {@code .review-collapsed-run} already
      * needed: a plain {@code Button.setText} has no fill of its own here --
-     * only {@code .review-intent-card}'s child {@code Label}s do -- so it
+     * only some review labels do -- so it
      * falls back to modena's light-button default against this column's dark
      * background (Task 18's 1.13:1 defect, on a different row).</p>
      */
@@ -1840,21 +1721,10 @@ final class ReviewDiffColumn extends BorderPane {
     /**
      * Resolves a raw hunk id -- exactly what a link's own label never shows
      * -- back to the (file, index) {@link #revealHunk} already knows how to
-     * scroll to. The same scroll-into-view path an intent uses, so a link click and a rail click land the reader in the same
-     * place through the same code.
+     * scroll to -- the same scroll-into-view path {@code [}/{@code ]} use.
      */
     private void selectLinkTarget(String hunkId) {
         HunkIds.parseHunkId(hunkId).ifPresent(anchor -> {
-            // A link crosses files by construction (spec §7.2: cross-file
-            // only), so its target is routinely a hunk the CURRENT filter
-            // does not show at all -- an intent filter can name only some
-            // of a file's hunks, or none of the target's. Widening
-            // FIRST is what makes the click land instead of silently
-            // scrolling nowhere on a column revealHunk cannot search.
-            if (!hunkFilter().includes(anchor.file(), anchor.hunkIndex())) {
-                showWholeScope = true;
-                rebuild();
-            }
             boolean reached = revealHunk(anchor.file(), anchor.hunkIndex());
             if (!reached) {
                 // Not swallowed: a link whose target could not be reached
