@@ -49,9 +49,7 @@ import app.drydock.mcp.WorkspaceMcpSessionContext;
 import app.drydock.process.SshCommandBuilder;
 import app.drydock.review.AnnotationStore;
 import app.drydock.review.BaseMove;
-import app.drydock.review.IntentGrouping;
 import app.drydock.review.ReviewAnnotation;
-import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Severity;
 import app.drydock.review.Triage;
@@ -60,6 +58,7 @@ import app.drydock.review.ReviewInstructions;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.review.tour.TourRecord;
+import app.drydock.review.tour.TourStep;
 import app.drydock.review.tour.TourStore;
 import app.drydock.review.SessionReviewScopes;
 import app.drydock.review.SubmitPlan;
@@ -206,9 +205,6 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     private static final Executor REVIEW_GIT_EXECUTOR =
             runnable -> Thread.ofVirtual().name("drydock-review-git").start(runnable);
 
-    /** Bound on diffing one scope to read its intents; the seed is not worth a hang. */
-    private static final long INTENT_DIFF_TIMEOUT_SECONDS = 10;
-
     private static final long AGENT_RENAME_BUDGET_SECONDS =
             WorkspaceMcpSessionContext.RENAME_TIMEOUT_SECONDS / 2;
 
@@ -349,7 +345,6 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      */
     private final Map<ManagedSessionId, Long> reviewResolveInFlight = new HashMap<>();
     private long reviewResolveSequence;
-    private final IntentGrouping intentGrouping = new IntentGrouping();
 
     /** Fires when a session's findings change, so the sidebar can restyle its badges. */
     private Runnable onReviewFindingsChanged = () -> { };
@@ -1959,15 +1954,6 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     }
 
     /**
-     * The intent grouping the MCP router writes and the Review view reads.
-     * Owned here (rather than by the router) because the view renders from it
-     * and the router only supplies it -- one holder, two readers.
-     */
-    public IntentGrouping intentGrouping() {
-        return intentGrouping;
-    }
-
-    /**
      * Wires worktree rediscovery (see {@link #requestWorktreeRefresh}). Same
      * shape as {@link #setOnReviewFindingsChanged}: the workspace changes the
      * repository, the sidebar re-scans it.
@@ -3489,7 +3475,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                     id -> sessionManager.handoffBriefs().stream()
                             .filter(brief -> brief.sessionId().equals(id))
                             .findFirst(),
-                    this::openIntentTitles,
+                    this::openTourStepTitles,
                     stateDirectory.resolve("handoff-seeds"),
                     HANDOFF_EXECUTOR);
             handoffService.sweepStaleSeeds(Instant.now());
@@ -3498,41 +3484,26 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     }
 
     /**
-     * Titles of the review intents on scopes bound to the outgoing session --
-     * the most concrete statement of what is still open, and something a
-     * successor would otherwise re-derive.
+     * Titles of the tour steps still open on scopes bound to the outgoing
+     * session -- the most concrete statement of what is still open, and
+     * something a successor would otherwise re-derive.
      *
-     * <p>Reads the grouping the reviewer already recorded, which needs the
-     * scope's diff, so this runs git. Best-effort throughout: review state is a
-     * nicety in the seed and never a reason to fail a handoff, so anything
-     * unavailable degrades to no intents rather than an exception.</p>
+     * <p>Reads the persisted tour, so it needs neither git nor the scope's
+     * diff. A scope with no tour contributes nothing.</p>
      */
-    private List<String> openIntentTitles(ManagedSessionId sessionId) {
+    private List<String> openTourStepTitles(ManagedSessionId sessionId) {
         List<String> titles = new ArrayList<>();
         for (ReviewScope scope : reviewScopeRegistry.scopes()) {
-            if (!scope.sessionId().equals(Optional.of(sessionId))
-                    || !intentGrouping.hasReviewerGrouping(scope.id())) {
+            if (!scope.sessionId().equals(Optional.of(sessionId))) {
                 continue;
             }
-            if (!scope.diffable()) {
-                continue;   // a PR with no checkout has no diff; see reviewDiff
-            }
-            try {
-                DiffScope diffScope = scope.diffScope();
-                UnifiedDiff diff = diffService
-                        .diff(scope.diffRoot(), diffScope, scope.base(), DiffService.REVIEW_CONTEXT_LINES)
-                        .get(INTENT_DIFF_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-                for (ReviewIntent intent : intentGrouping.intentsFor(scope.id(), diff)) {
-                    if (!titles.contains(intent.title())) {
-                        titles.add(intent.title());
+            tourStore.forScope(scope.id()).ifPresent(record -> {
+                for (TourStep step : record.unsettledSteps()) {
+                    if (!titles.contains(step.title())) {
+                        titles.add(step.title());
                     }
                 }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return List.copyOf(titles);
-            } catch (RuntimeException | ExecutionException | TimeoutException e) {
-                LOG.log(Level.DEBUG, () -> "No intents for scope " + scope.id() + ": " + e.getMessage());
-            }
+            });
         }
         return List.copyOf(titles);
     }

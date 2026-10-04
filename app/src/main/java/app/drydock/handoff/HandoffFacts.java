@@ -18,13 +18,13 @@ import java.util.Optional;
  * reads as "nothing worth mentioning" and this one means "there is nothing".</p>
  */
 public record HandoffFacts(String branch, Optional<String> headCommit, List<String> commitSubjects,
-                           List<String> changedFiles, List<String> openIntents) {
+                           List<String> changedFiles, List<String> openTourSteps) {
 
     public HandoffFacts {
         Objects.requireNonNull(branch, "branch");
         Objects.requireNonNull(headCommit, "headCommit");
         commitSubjects = List.copyOf(Objects.requireNonNull(commitSubjects, "commitSubjects"));
         changedFiles = List.copyOf(Objects.requireNonNull(changedFiles, "changedFiles"));
-        openIntents = List.copyOf(Objects.requireNonNull(openIntents, "openIntents"));
+        openTourSteps = List.copyOf(Objects.requireNonNull(openTourSteps, "openTourSteps"));
     }
 }

@@ -6,7 +6,6 @@ import app.drydock.domain.Workflow;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.RecheckAssessment;
 import app.drydock.review.ReviewAnnotation;
-import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.review.tour.TourRecord;
@@ -93,9 +92,6 @@ public interface McpSessionContext {
     /** The diff of a scope, already parsed. Runs git, so never on the FX thread. */
     UnifiedDiff reviewDiff(ReviewScope scope) throws McpToolException;
 
-    /** Replaces a scope's intent grouping ({@code review_intents}). */
-    void putIntents(String scopeId, List<ReviewIntent> intents);
-
     /** The scope's tour record, if the agent has posted one. */
     Optional<TourRecord> tourOf(String scopeId);
 
@@ -109,17 +105,6 @@ public interface McpSessionContext {
      * that throws stores nothing.
      */
     Optional<TourRecord> updateTour(String scopeId, UnaryOperator<TourRecord> transform);
-
-    /**
-     * {@code scopeId}'s intents over {@code diff}: the reviewer's grouping
-     * when {@link #putIntents} supplied one, otherwise the by-file fallback
-     * -- the same choice {@code SessionReviewView.Host#intents} makes for the
-     * UI. {@code review_state} joins this against {@link #verdictsOf} to
-     * report a verdict under the id an agent actually sent to {@code
-     * review_intents}, rather than whatever internal key a verdict happens
-     * to be stored under.
-     */
-    List<ReviewIntent> intentsOf(String scopeId, UnifiedDiff diff);
 
     /** Upserts findings on {@code finding.id}, so a re-run keeps existing threads. */
     void upsertFindings(List<ReviewAnnotation> findings);

@@ -72,7 +72,7 @@ public final class HandoffSeed {
         // taking over.
         appendList(seed, "Recent commits (newest first, including base history)", facts.commitSubjects());
         appendList(seed, "Uncommitted changes", facts.changedFiles());
-        appendList(seed, "Open review intents", facts.openIntents());
+        appendList(seed, "Open tour steps", facts.openTourSteps());
     }
 
     /** Omits an empty section rather than printing a heading with nothing under it. */

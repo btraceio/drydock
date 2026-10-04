@@ -8,7 +8,7 @@ import java.util.Optional;
 /**
  * The human's decision on one hunk of a diff (Review handoff §7; spec §9.2):
  * keyed by {@code (scopeId, hunkDigest)}, because an agent can regroup the
- * diff into different intents at any time and a verdict keyed on a grouping
+ * diff into different tour steps at any time and a verdict keyed on a grouping
  * would be orphaned by that regrouping. A digest over the hunk's own text
  * survives regrouping unchanged.
  *
@@ -38,7 +38,7 @@ public record ReviewVerdict(String scopeId, String hunkDigest, Decision decision
             return wireName;
         }
 
-        /** The label the intent rail and the verdict bar show once settled. */
+        /** The label the verdict bar shows once settled. */
         public String label() {
             return switch (this) {
                 case APPROVED -> "✓ approved";

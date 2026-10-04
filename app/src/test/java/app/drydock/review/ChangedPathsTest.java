@@ -42,6 +42,35 @@ class ChangedPathsTest {
         assertEquals("README.md", ChangedPaths.fileName("README.md"));
     }
 
+    /** Two cards must not read the same; the clusters' titles are what tell them apart. */
+    @Test
+    void everyClusterTitleIsDistinct() {
+        UnifiedDiff diff = diff(
+                file("app/src/main/java/app/drydock/git/DiffService.java", 1),
+                file("app/src/main/java/app/drydock/ui/review/ReviewDiffColumn.java", 1),
+                file("app/src/test/java/app/drydock/git/DiffServiceTest.java", 1),
+                file("build.gradle.kts", 1));
+
+        List<String> titles = ChangedPaths.clusters(diff).stream().map(ChangedPaths.Cluster::title).toList();
+
+        assertEquals(titles.size(), titles.stream().distinct().count(), titles.toString());
+    }
+
+    @Test
+    void anEmptyDiffHasNoClusters() {
+        assertTrue(ChangedPaths.clusters(new UnifiedDiff(List.of())).isEmpty());
+    }
+
+    /** A file at the repository root has no parent directory to group under. */
+    @Test
+    void rootLevelFilesClusterWithoutCrashing() {
+        List<ChangedPaths.Cluster> clusters = ChangedPaths.clusters(
+                diff(file("README.md", 1), file("build.gradle.kts", 1)));
+
+        assertFalse(clusters.isEmpty());
+        assertTrue(clusters.stream().noneMatch(cluster -> cluster.title().isBlank()));
+    }
+
     @Test
     void clustersReadTheProductionChangeFirstAndKeepTestsApart() {
         UnifiedDiff diff = diff(

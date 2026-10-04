@@ -141,7 +141,7 @@ public final class SessionHandoffService {
     private final SessionDeleter deleter;
     private final ScopeRebinder rebinder;
     private final Function<ManagedSessionId, Optional<HandoffBrief>> briefLookup;
-    private final Function<ManagedSessionId, List<String>> openIntentLookup;
+    private final Function<ManagedSessionId, List<String>> openTourStepLookup;
     private final Path seedDirectory;
     private final Executor backgroundExecutor;
 
@@ -151,7 +151,7 @@ public final class SessionHandoffService {
                                  SessionDeleter deleter,
                                  ScopeRebinder rebinder,
                                  Function<ManagedSessionId, Optional<HandoffBrief>> briefLookup,
-                                 Function<ManagedSessionId, List<String>> openIntentLookup,
+                                 Function<ManagedSessionId, List<String>> openTourStepLookup,
                                  Path seedDirectory,
                                  Executor backgroundExecutor) {
         this.gitStatusService = gitStatusService;
@@ -160,7 +160,7 @@ public final class SessionHandoffService {
         this.deleter = deleter;
         this.rebinder = rebinder;
         this.briefLookup = briefLookup;
-        this.openIntentLookup = openIntentLookup;
+        this.openTourStepLookup = openTourStepLookup;
         this.seedDirectory = seedDirectory;
         this.backgroundExecutor = backgroundExecutor;
     }
@@ -318,11 +318,11 @@ public final class SessionHandoffService {
                 : lines(gitOut(worktree, "log", "--format=%s",
                         "-n", String.valueOf(MAX_COMMIT_SUBJECTS), "HEAD"));
         List<String> changed = capped(lines(gitOut(worktree, "status", "--porcelain")), MAX_CHANGED_FILES);
-        // The intents the human has not settled are the most concrete
+        // The tour steps the human has not settled are the most concrete
         // statement of what is still open; a successor that re-litigates a
         // resolved one is doing the work twice.
         return new HandoffFacts(branch, head, subjects, changed,
-                capped(openIntentLookup.apply(outgoing.id()), MAX_CHANGED_FILES));
+                capped(openTourStepLookup.apply(outgoing.id()), MAX_CHANGED_FILES));
     }
 
     /**

@@ -88,7 +88,7 @@ public record ReviewScope(
 
     /**
      * What this scope's diff covers -- the ONE mapping every reader of a
-     * scope's diff goes through (the diff column, intent grouping, the
+     * scope's diff goes through (the diff column, the tour, the
      * agent's review tools), so a human and an agent can never be shown
      * different code under the same scope id.
      *

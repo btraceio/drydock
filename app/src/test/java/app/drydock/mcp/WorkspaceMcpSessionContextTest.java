@@ -618,7 +618,6 @@ class WorkspaceMcpSessionContextTest {
                 tourStore,
                 new app.drydock.review.ReviewScopeRegistry(),
                 agentRegistry,
-                new app.drydock.review.IntentGrouping(),
                 new app.drydock.git.DiffService(),
                 gitStatusService,
                 worktreeService,

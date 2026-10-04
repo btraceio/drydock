@@ -7,7 +7,6 @@ import app.drydock.review.HunkDigest;
 import app.drydock.review.HunkIds;
 import app.drydock.review.RecheckAssessment;
 import app.drydock.review.ReviewAnnotation;
-import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Sections;
@@ -257,126 +256,6 @@ final class ReviewToolCodec {
         return new JsonArray(entries);
     }
 
-    // ---- review_intents (agent -> drydock) ----------------------------------
-
-    static List<ReviewIntent> intentsFromJson(JsonValue value) throws McpToolException {
-        if (!(value instanceof JsonArray array)) {
-            throw new McpToolException("intents must be an array");
-        }
-        List<ReviewIntent> intents = new ArrayList<>();
-        // Provisional only: IntentGrouping.set re-assigns a dense 1..N over
-        // the order `reads` produces and discards whatever arrives here, so
-        // this numbering never reaches a rail. It is kept because a
-        // ReviewIntent has to carry SOME number to be constructed at all.
-        int number = 1;
-        for (JsonValue element : array.elements()) {
-            if (!(element instanceof JsonObject obj)) {
-                throw new McpToolException("each intent must be an object");
-            }
-            String id = requireString(obj, "id");
-            intents.add(new ReviewIntent(id, number++,
-                    PromptSafety.checkInboundText(requireString(obj, "title"), "intent.title"),
-                    optionalString(obj, "kind").flatMap(ReviewIntent.Kind::fromWire)
-                            .orElse(ReviewIntent.Kind.CHANGE),
-                    optionalString(obj, "risk").flatMap(ReviewIntent.Risk::fromWire)
-                            .orElse(ReviewIntent.Risk.NONE),
-                    PromptSafety.checkInboundText(optionalString(obj, "rationale").orElse(""),
-                            "intent.rationale"),
-                    stringList(obj, "hunkIds"),
-                    collapseFromJson(obj),
-                    obj.get("autoApprove") instanceof JsonBoolean auto && auto.value(),
-                    readsFromJson(obj, id)));
-        }
-        checkReadsResolve(intents);
-        return List.copyOf(intents);
-    }
-
-    /**
-     * One intent's {@code reads}, rejecting a malformed one rather than
-     * quietly reading it as an empty list.
-     *
-     * <p>Decoded here and not through {@link #stringList}, which answers
-     * {@code List.of()} for any non-array and drops any non-string element.
-     * That lenience predates this task and is shared with {@code hunkIds},
-     * where a dropped entry costs at worst one hunk's membership in a group
-     * a human can see and fix. It costs far more here: {@code
-     * "reads":"the-guard"} -- one dependency written without the brackets,
-     * which is the likeliest way to get this wrong -- would decode as
-     * "declared nothing", and the rail would then render the exact REVERSE of
-     * the order the agent asserted. With no diagnostic on any surface, and
-     * {@code reads} echoed on no outbound wire, the agent could not discover
-     * it had happened. Absent and broken must not look the same -- the same
-     * rule {@link app.drydock.review.Graphs#topologicalOrder} keeps for an
-     * edge pointing outside its nodes, and the reason {@link
-     * #checkReadsResolve} exists at all.</p>
-     *
-     * <p>An explicit {@code null} is absent, not broken: it is how several
-     * clients spell an omitted optional field.</p>
-     */
-    private static List<String> readsFromJson(JsonObject obj, String id) throws McpToolException {
-        JsonValue raw = obj.get("reads");
-        if (raw == null || raw instanceof JsonValue.JsonNull) {
-            return List.of();
-        }
-        if (!(raw instanceof JsonArray array)) {
-            throw new McpToolException("intent '" + id + "' has a reads that is not an array; "
-                    + "one dependency is [\"other-id\"], not \"other-id\"");
-        }
-        List<String> reads = new ArrayList<>();
-        for (JsonValue element : array.elements()) {
-            if (!(element instanceof JsonString read)) {
-                throw new McpToolException("intent '" + id + "' has a reads entry that is not a "
-                        + "string; every entry names an intent id in this call");
-            }
-            reads.add(read.value());
-        }
-        return List.copyOf(reads);
-    }
-
-    /**
-     * Rejects the whole batch when a {@code reads} names an id no intent in
-     * the same call carries.
-     *
-     * <p>Checked HERE, at decode, and not where the order is actually built:
-     * {@link app.drydock.review.Graphs#topologicalOrder} does refuse an edge
-     * pointing outside its nodes -- deliberately, so absent and broken cannot
-     * look the same -- but it refuses with an {@link IllegalArgumentException}
-     * on whatever thread {@code IntentGrouping.set} was called from, where
-     * the agent that sent the payload never hears about it. An MCP error
-     * naming the id and the intent that declared it is the report the agent
-     * can act on.</p>
-     *
-     * <p>All-or-nothing, like the rest of the batch: half a grouping, with
-     * some intents' declared order silently dropped, is worse than none.</p>
-     */
-    private static void checkReadsResolve(List<ReviewIntent> intents) throws McpToolException {
-        Set<String> ids = new LinkedHashSet<>();
-        for (ReviewIntent intent : intents) {
-            ids.add(intent.id());
-        }
-        for (ReviewIntent intent : intents) {
-            for (String read : intent.reads()) {
-                if (!ids.contains(read)) {
-                    throw new McpToolException("intent '" + intent.id() + "' reads '" + read
-                            + "', which is not an intent in this call");
-                }
-            }
-        }
-    }
-
-    private static Optional<ReviewIntent.Collapse> collapseFromJson(JsonObject obj)
-            throws McpToolException {
-        if (!(obj.get("collapse") instanceof JsonObject collapse)) {
-            return Optional.empty();
-        }
-        return Optional.of(new ReviewIntent.Collapse(
-                optionalString(collapse, "reason").orElse("generated"),
-                PromptSafety.checkInboundText(optionalString(collapse, "evidence").orElse(""),
-                        "collapse.evidence"),
-                collapse.get("hunkCount") instanceof JsonNumber count ? count.asInt() : 0,
-                collapse.get("fileCount") instanceof JsonNumber count ? count.asInt() : 0));
-    }
-
     // ---- review_recheck (agent -> drydock) ----------------------------------
 
     /**
@@ -390,8 +269,7 @@ final class ReviewToolCodec {
      * {@link HunkDigest#of} is CONTENT-ADDRESSED and deliberately excludes
      * line numbers, so a hunk that merely moved keeps its digest. Storing the
      * positional id would strand every assessment the moment the diff
-     * re-hunked; this walks the diff the same way {@code IntentHunks.digestsOf}
-     * does and stores the digest.</p>
+     * re-hunked; this walks the diff hunk by hunk and stores the digest.</p>
      *
      * <p>The base PAIR is derived, never taken from the wire. {@code fromBase}
      * is the base the hunk's own verdict was recorded against and {@code

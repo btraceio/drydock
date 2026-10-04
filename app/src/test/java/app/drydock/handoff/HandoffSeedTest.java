@@ -98,8 +98,16 @@ class HandoffSeedTest {
 
         assertFalse(seed.contains("**Commits:**"), seed);
         assertFalse(seed.contains("**Uncommitted changes:**"), seed);
-        assertFalse(seed.contains("**Open review intents:**"), seed);
+        assertFalse(seed.contains("**Open tour steps:**"), seed);
         assertTrue(seed.contains("feat/fork"), seed);
+    }
+
+    @Test
+    void unsettledTourStepsAreListedUnderTheirOwnHeading() {
+        String seed = HandoffSeed.compose(Optional.empty(), facts());
+
+        assertTrue(seed.contains("**Open tour steps:**\n- Rework the rail"), seed);
+        assertFalse(seed.contains("intents"), seed);
     }
 
     @Test

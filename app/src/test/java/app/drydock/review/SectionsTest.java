@@ -295,7 +295,7 @@ class SectionsTest {
         UnifiedDiff diff = new UnifiedDiff(List.of(
                 file("web/a.zzz", "nothing"), file("web/b.zzz", "nothing")));
 
-        assertEquals(FallbackIntents.group(diff).size(), sectionsOf(diff).size());
+        assertEquals(ChangedPaths.clusters(diff).size(), sectionsOf(diff).size());
     }
 
     /** A genuine mutual reference is reported as a cycle. */

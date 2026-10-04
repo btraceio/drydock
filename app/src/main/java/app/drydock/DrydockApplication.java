@@ -1367,7 +1367,6 @@ public final class DrydockApplication extends Application {
                 tourStore,
                 reviewScopeRegistry,
                 agentRegistry,
-                mainWorkspace.intentGrouping(),
                 diffService,
                 gitStatusService,
                 worktreeService,

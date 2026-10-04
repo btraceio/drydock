@@ -8,16 +8,13 @@ package app.drydock.review;
  * name -- and is checkable on the spot by looking; a {@link #CLAIMED} one
  * fails as a plausible fabrication and is checkable only against the code the
  * agent says it read.</p>
- *
- * <p>One rendering path, two visibly different warrants -- the treatment
- * {@code ReviewIntent.Collapse} already gets, applied consistently.</p>
  */
 public enum Provenance {
 
     /** Computed here from the diff, by the rules in §4.2 and §4.3. */
     MEASURED("measured"),
 
-    /** Asserted by the reviewing agent, through {@code review_intents} and its {@code reads}. */
+    /** Asserted by the reviewing agent, e.g. a tour step's impact notes. */
     CLAIMED("claimed"),
 
     /**

@@ -47,21 +47,4 @@ class SectionDeterminismTest {
                 Sections.of(diff, ChangeGraph.of(diff)).stream()
                         .map(Sections.Section::hunkIds).toList());
     }
-
-    /** A reviewer's grouping still wins; the computed one is the fallback. */
-    @Test
-    void aReviewerGroupingIsNotRecomputed() {
-        IntentGrouping grouping = new IntentGrouping();
-        ReviewIntent supplied = new ReviewIntent("agent-1", 1, "Crash-protected resolve()",
-                ReviewIntent.Kind.CHANGE, ReviewIntent.Risk.HIGH, "",
-                List.of(HunkIds.hunkId("src/a.cpp", 0)), java.util.Optional.empty(), false);
-        grouping.set("scope-1", List.of(supplied));
-
-        UnifiedDiff diff = diff();
-        List<ReviewIntent> intents = grouping.intentsFor("scope-1", diff,
-                java.util.Optional.of(ChangeGraph.of(diff)));
-
-        assertEquals(List.of("Crash-protected resolve()"),
-                intents.stream().map(ReviewIntent::title).toList());
-    }
 }

@@ -29,9 +29,7 @@ import app.drydock.git.DiffScope;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.agent.api.AgentRegistry;
-import app.drydock.review.IntentGrouping;
 import app.drydock.ui.AgentLabels;
-import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.review.ReviewScopeRegistry;
@@ -152,7 +150,6 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     private final TourStore tourStore;
     private final ReviewScopeRegistry reviewScopeRegistry;
     private final AgentRegistry agentRegistry;
-    private final IntentGrouping intentGrouping;
     private final DiffService diffService;
     private final GitStatusService gitStatusService;
     private final WorktreeService worktreeService;
@@ -180,7 +177,6 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
                                       TourStore tourStore,
                                       ReviewScopeRegistry reviewScopeRegistry,
                                       AgentRegistry agentRegistry,
-                                      IntentGrouping intentGrouping,
                                       DiffService diffService,
                                       GitStatusService gitStatusService,
                                       WorktreeService worktreeService,
@@ -201,7 +197,6 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
         this.tourStore = Objects.requireNonNull(tourStore, "tourStore");
         this.reviewScopeRegistry = Objects.requireNonNull(reviewScopeRegistry, "reviewScopeRegistry");
         this.agentRegistry = Objects.requireNonNull(agentRegistry, "agentRegistry");
-        this.intentGrouping = Objects.requireNonNull(intentGrouping, "intentGrouping");
         this.diffService = Objects.requireNonNull(diffService, "diffService");
         this.gitStatusService = Objects.requireNonNull(gitStatusService, "gitStatusService");
         this.worktreeService = Objects.requireNonNull(worktreeService, "worktreeService");
@@ -350,16 +345,6 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
         Optional<TourRecord> updated = tourStore.mutate(scopeId, transform);
         tourStore.flushPendingSaves();
         return updated;
-    }
-
-    @Override
-    public void putIntents(String scopeId, List<ReviewIntent> intents) {
-        intentGrouping.set(scopeId, intents);
-    }
-
-    @Override
-    public List<ReviewIntent> intentsOf(String scopeId, UnifiedDiff diff) {
-        return intentGrouping.intentsFor(scopeId, diff);
     }
 
     @Override

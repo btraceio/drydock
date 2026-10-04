@@ -5,17 +5,13 @@ import app.drydock.git.UnifiedDiff;
 import app.drydock.mcp.McpSessionRegistry.Spawn;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.Confidence;
-import app.drydock.review.HunkDigest;
-import app.drydock.review.HunkIds;
 import app.drydock.review.ReviewAnnotation;
-import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Severity;
 import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonValue.JsonArray;
 import app.drydock.state.json.JsonValue.JsonBoolean;
-import app.drydock.state.json.JsonValue.JsonNumber;
 import app.drydock.state.json.JsonValue.JsonObject;
 import app.drydock.state.json.JsonValue.JsonString;
 import org.junit.jupiter.api.BeforeEach;
@@ -33,7 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** The Review MCP surface: scope paging, intents, findings, answers and state. */
+/** The Review MCP surface: scope paging, findings, answers and state. */
 class McpToolRouterReviewTest {
 
     private static final String SCOPE = "rs_test";
@@ -164,44 +160,6 @@ class McpToolRouterReviewTest {
         JsonArray prior = (JsonArray) field(result, "priorThreads");
         assertEquals(1, prior.elements().size());
         assertEquals("f1", str(prior.elements().get(0), "id"));
-    }
-
-    // ---- review_intents -----------------------------------------------------
-
-    @Test
-    void reviewIntentsStoresTheGroupingAndNumbersItDensely() throws Exception {
-        JsonObject intents = JsonObject.empty();
-        intents.put("scopeId", new JsonString(SCOPE));
-        intents.put("intents", new JsonArray(List.of(
-                intentJson("i1", "Cursor-exact drag tracking", "HIGH"),
-                intentJson("i2", "Rename Cpm to Drydock", "NONE"))));
-
-        router.call(caller, "review_intents", intents);
-
-        List<ReviewIntent> stored = context.intents.get(SCOPE);
-        assertEquals(List.of("i1", "i2"), stored.stream().map(ReviewIntent::id).toList());
-        assertEquals(List.of(1, 2), stored.stream().map(ReviewIntent::number).toList());
-        assertEquals(ReviewIntent.Risk.HIGH, stored.get(0).risk());
-    }
-
-    @Test
-    void aCollapsedIntentKeepsItsEvidenceAndDoesNotCountTowardProgress() throws Exception {
-        JsonObject collapse = JsonObject.empty();
-        collapse.put("reason", new JsonString("identifier-rename"));
-        collapse.put("evidence", new JsonString("syntax trees identical apart from identifier text"));
-        collapse.put("hunkCount", JsonNumber.of(312));
-        collapse.put("fileCount", JsonNumber.of(14));
-        JsonObject intent = intentJson("i2", "Rename", "NONE");
-        intent.put("collapse", collapse);
-        JsonObject args = JsonObject.empty();
-        args.put("scopeId", new JsonString(SCOPE));
-        args.put("intents", new JsonArray(List.of(intent)));
-
-        router.call(caller, "review_intents", args);
-
-        ReviewIntent stored = context.intents.get(SCOPE).get(0);
-        assertEquals(312, stored.collapse().orElseThrow().hunkCount());
-        assertFalse(stored.countsTowardProgress());
     }
 
     // ---- review_finding -----------------------------------------------------
@@ -365,64 +323,30 @@ class McpToolRouterReviewTest {
     // ---- review_state -------------------------------------------------------
 
     @Test
-    void reviewStateReportsVerdictsFindingsAndSubmission() throws Exception {
+    void reviewStateReportsFindingsAndSubmissionAndNoIntentKey() throws Exception {
         context.annotations.add(finding("f1", Severity.BLOCKING));
-        router.call(caller, "review_intents", intentsArgs(intentJson("i1", "Change", "MED", 0)));
-        context.verdicts.add(new ReviewVerdict(SCOPE, digestOfHunk(0), ReviewVerdict.Decision.CHANGES,
-                Optional.of("needs a test"), Instant.EPOCH, "base-1", "head-1"));
         context.submitted.add(SCOPE);
 
         JsonValue result = router.call(caller, "review_state", args("scopeId", SCOPE));
 
-        JsonValue intent = ((JsonArray) field(result, "intents")).elements().get(0);
-        assertEquals("i1", str(intent, "id"));
-        assertEquals("changes", str(intent, "verdict"));
+        assertFalse(((JsonObject) result).has("intents"), "intents are retired from the wire");
         assertEquals("f1", str(((JsonArray) field(result, "findings")).elements().get(0), "id"));
         assertTrue(((JsonBoolean) field(result, "submitted")).value());
     }
 
     /**
-     * Pins the id-space of {@code review_state}'s intents: the wire {@code
-     * id} is the intent's own id, joined to its hunks' verdicts -- never
-     * whatever key a verdict happens to be stored under. A verdict stored
-     * under a digest that belongs to no registered intent must never surface
-     * as an "intent" id; the old code (reporting {@code
-     * verdict.hunkDigest()} straight through) would have let it through.
-     */
-    @Test
-    void reviewStateReportsTheIntentIdNotTheVerdictsStorageKey() throws Exception {
-        router.call(caller, "review_intents", intentsArgs(intentJson("i1", "Change", "MED", 0)));
-        context.verdicts.add(new ReviewVerdict(SCOPE, digestOfHunk(0), ReviewVerdict.Decision.APPROVED,
-                Optional.empty(), Instant.EPOCH, "base-1", "head-1"));
-        context.verdicts.add(new ReviewVerdict(SCOPE, "orphan-digest-not-an-intent-id",
-                ReviewVerdict.Decision.APPROVED, Optional.empty(), Instant.EPOCH, "base-1", "head-1"));
-
-        JsonValue result = router.call(caller, "review_state", args("scopeId", SCOPE));
-
-        List<String> ids = ((JsonArray) field(result, "intents")).elements().stream()
-                .map(intent -> str(intent, "id")).toList();
-        assertEquals(List.of("i1"), ids, "only a registered intent's own id may appear here");
-    }
-
-    /**
      * A scope whose diff cannot be produced -- a PR with no local checkout,
-     * or a git failure -- must not fail {@code review_state} outright:
-     * findings and submission status do not depend on a diff, only the
-     * per-intent verdict list does. That list is omitted entirely rather
-     * than reported empty, because an empty array reads as "nothing is
-     * settled" -- a false claim -- while an absent key correctly says
-     * "cannot be known right now" (the sidebar's {@code ◨n} badge follows
-     * the same absent-vs-zero rule for the same reason).
+     * or a git failure -- must not fail {@code review_state}: findings and
+     * submission status do not depend on a diff.
      */
     @Test
-    void reviewStateOmitsIntentsWhenTheDiffFailsButKeepsFindingsAndSubmission() throws Exception {
+    void reviewStateStillAnswersWhenTheDiffFails() throws Exception {
         context.annotations.add(finding("f1", Severity.BLOCKING));
         context.submitted.add(SCOPE);
         context.reviewDiffFailure = new McpToolException("pull request #7 is not checked out");
 
         JsonValue result = router.call(caller, "review_state", args("scopeId", SCOPE));
 
-        assertFalse(((JsonObject) result).has("intents"), "an unproducible diff must omit intents, not empty it");
         assertEquals("f1", str(((JsonArray) field(result, "findings")).elements().get(0), "id"));
         assertTrue(((JsonBoolean) field(result, "submitted")).value());
     }
@@ -462,45 +386,6 @@ class McpToolRouterReviewTest {
             list.add(new UnifiedDiff.Hunk("@@ hunk " + h + " @@", lines));
         }
         return new UnifiedDiff(List.of(new UnifiedDiff.FileDiff("src/Main.java", "M", 1, 0, false, false, list)));
-    }
-
-    private static JsonObject intentJson(String id, String title, String risk) {
-        JsonObject obj = JsonObject.empty();
-        obj.put("id", new JsonString(id));
-        obj.put("title", new JsonString(title));
-        obj.put("kind", new JsonString("change"));
-        obj.put("risk", new JsonString(risk));
-        obj.put("rationale", new JsonString("because"));
-        return obj;
-    }
-
-    /**
-     * As above, but naming the hunks the intent covers. {@code review_state}
-     * derives an intent's verdict from its hunks now, so an intent that names
-     * none covers the whole diff and needs every one of its twelve hunks
-     * settled before it reports anything.
-     */
-    private static JsonObject intentJson(String id, String title, String risk, int... hunks) {
-        JsonObject obj = intentJson(id, title, risk);
-        List<JsonValue> ids = new ArrayList<>();
-        for (int hunk : hunks) {
-            ids.add(new JsonString(HunkIds.hunkId("src/Main.java", hunk)));
-        }
-        obj.put("hunkIds", new JsonArray(ids));
-        return obj;
-    }
-
-    /** The digest the {@code index}-th hunk of {@link #diff}'s only file is keyed by. */
-    private static String digestOfHunk(int index) {
-        return HunkDigest.of("src/Main.java", diff(12).files().get(0).hunks().get(index));
-    }
-
-    /** {@code review_intents} args registering one intent, for tests that need review_state to know it. */
-    private static JsonObject intentsArgs(JsonObject intent) {
-        JsonObject args = JsonObject.empty();
-        args.put("scopeId", new JsonString(SCOPE));
-        args.put("intents", new JsonArray(List.of(intent)));
-        return args;
     }
 
     private static JsonObject findingJson(String id, String severity, String body) {

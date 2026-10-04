@@ -62,6 +62,19 @@ public record TourRecord(ReviewTour tour, Map<String, StepProgress> progress,
         return new StepProgress(step.id(), List.of(), Map.of(), StepProgress.Decision.NONE, Optional.empty(), false);
     }
 
+    /**
+     * The steps still open: no decision yet, or a decision that went stale
+     * when the diff moved under it. Tour order.
+     */
+    public List<TourStep> unsettledSteps() {
+        return tour.steps().stream()
+                .filter(step -> {
+                    StepProgress p = progress(step.id());
+                    return p.stale() || p.decision() == StepProgress.Decision.NONE;
+                })
+                .toList();
+    }
+
     public TourRecord withProgress(StepProgress stepProgress) {
         Map<String, StepProgress> next = new LinkedHashMap<>(progress);
         next.put(stepProgress.stepId(), stepProgress);

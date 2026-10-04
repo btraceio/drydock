@@ -14,7 +14,7 @@ import java.util.Optional;
  */
 public enum Severity {
 
-    /** Blocks approval of its intent until it is resolved or discussed. */
+    /** Blocks approval of its file until it is resolved or discussed. */
     BLOCKING("blocking"),
     /** A question rather than a defect. */
     QUESTION("question"),
@@ -53,7 +53,7 @@ public enum Severity {
         return Optional.empty();
     }
 
-    /** Whether a finding of this severity refuses approval of its intent while open. */
+    /** Whether a finding of this severity refuses approval of its file while open. */
     public boolean blocksApproval() {
         return this == BLOCKING;
     }

@@ -10,12 +10,10 @@ import app.drydock.mcp.McpSessionContext.RenameOutcome;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.ChangeGraph;
-import app.drydock.review.IntentHunks;
 import app.drydock.review.OutOfDiffFanIn;
 import app.drydock.review.ReadingPath;
 import app.drydock.review.RecheckAssessment;
 import app.drydock.review.ReviewAnnotation;
-import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Sections;
@@ -180,17 +178,6 @@ public final class McpToolRouter {
                                         + "and whether its declaration changed while call sites were "
                                         + "not edited.")),
                         "scopeId"),
-                descriptor("review_intents",
-                        "Replaces a scope's intent grouping: what the change is trying to do, at what risk, "
-                                + "and which hunks belong to each intent. Optional -- with no call the UI "
-                                + "groups by file.",
-                        JsonObject.empty()
-                                .put("scopeId", schemaString("Review scope handle."))
-                                .put("intents", schemaString("Array of {id, title, kind, risk, "
-                                        + "rationale, hunkIds, reads?, collapse?, autoApprove?}. "
-                                        + "reads names the intents this one is built on; drydock "
-                                        + "orders the rail by it and does not verify it.")),
-                        "scopeId", "intents"),
                 descriptor("review_tour",
                         "Posts the guided tour of a scope: ordered steps a human walks in full files. Validated "
                                 + "against the review diff and stored only if valid; on rejection nothing is stored "
@@ -245,9 +232,9 @@ public final class McpToolRouter {
                                 .put("proposeResolve", schemaBoolean("Suggest that the human resolve it.")),
                         "scopeId", "findingId", "body"),
                 descriptor("review_state",
-                        "What the human has done so far on a scope: per-intent verdicts, per-finding "
-                                + "severity/resolution/threads, and whether the review was submitted. Read "
-                                + "this before a re-run so settled findings are not re-flagged.",
+                        "What the human has done so far on a scope: per-finding severity/resolution/threads, "
+                                + "tour progress, and whether the review was submitted. Read this before a "
+                                + "re-run so settled findings are not re-flagged.",
                         JsonObject.empty().put("scopeId", schemaString("Review scope handle.")),
                         "scopeId"),
                 descriptor("review_recheck",
@@ -329,7 +316,6 @@ public final class McpToolRouter {
             case "review_comments" -> reviewComments(caller, arguments);
             case "review_reply" -> reviewReply(caller, arguments);
             case "review_scope" -> reviewScope(caller, arguments);
-            case "review_intents" -> reviewIntents(caller, arguments);
             case "review_tour" -> reviewTour(caller, arguments);
             case "review_check" -> reviewCheck(caller, arguments);
             case "review_finding" -> reviewFinding(caller, arguments);
@@ -544,18 +530,6 @@ public final class McpToolRouter {
                 .orElse(Set.of());
     }
 
-    private JsonValue reviewIntents(ManagedSessionId caller, JsonValue arguments) throws McpToolException {
-        requireLiveSession(caller);
-        JsonObject args = asObject(arguments);
-        ReviewScope scope = requireScope(caller, args);
-
-        List<ReviewIntent> intents = ReviewToolCodec.intentsFromJson(args.get("intents"));
-        context.putIntents(scope.id(), intents);
-        return JsonObject.empty()
-                .put("scopeId", new JsonString(scope.id()))
-                .put("intents", JsonNumber.of(intents.size()));
-    }
-
     private JsonValue reviewFinding(ManagedSessionId caller, JsonValue arguments) throws McpToolException {
         requireLiveSession(caller);
         JsonObject args = asObject(arguments);
@@ -691,25 +665,15 @@ public final class McpToolRouter {
     }
 
     /**
-     * The wire {@code id} here is intent-keyed, not hunk-keyed: an agent
-     * correlates it against the ids it sent to {@code review_intents}, so
-     * this joins the scope's intents against their verdicts rather than
-     * reporting {@link ReviewVerdict#hunkDigest()} straight through -- a
-     * verdict's own storage key must not leak onto this wire, or the join
-     * silently breaks the moment that key stops being intent-shaped.
+     * What the human has settled on a scope: its findings, whether the review
+     * was submitted and, when a tour exists, the tour's progress.
      *
-     * <p>The join needs a diff (to know the scope's current intents), but
-     * findings and submission status do not -- so a scope whose diff cannot
-     * be produced (a PR with no local checkout, or a git failure) still
-     * reports those two. The {@code intents} key is omitted entirely rather
-     * than emitted empty in that case: an empty array reads as "nothing is
-     * settled", a false claim, whereas an absent key correctly says "cannot
-     * be known right now" (the same absent-vs-zero rule the sidebar's
-     * {@code ◨n} badge follows).</p>
-     *
-     * <p>The join is many-to-one: a verdict is keyed by a hunk's content
-     * digest, and an intent covers several hunks, so what is reported is what
-     * {@link VerdictMerge} makes of them -- never a single stored verdict.</p>
+     * <p>Findings and submission status need no diff, so a scope whose diff
+     * cannot be produced (a PR with no local checkout, or a git failure)
+     * still reports them. The {@code tour} key is omitted in that case rather
+     * than emitted empty: an absent key says "cannot be known right now", an
+     * empty one would claim nothing is settled (the same absent-vs-zero rule
+     * the sidebar's {@code ◨n} badge follows).</p>
      */
     private JsonValue reviewState(ManagedSessionId caller, JsonValue arguments) throws McpToolException {
         requireLiveSession(caller);
@@ -717,12 +681,6 @@ public final class McpToolRouter {
         ReviewScope scope = requireScope(caller, args);
 
         JsonObject result = JsonObject.empty();
-        try {
-            result.put("intents", new JsonArray(intentsStateToJson(scope)));
-        } catch (McpToolException e) {
-            LOG.log(Level.WARNING, "review_state: could not compute a diff for scope "
-                    + scope.id() + "; omitting intents: " + e.getMessage());
-        }
         result.put("findings", new JsonArray(context.findingsOf(scope.id()).stream()
                         .map(ReviewToolCodec::findingStateToJson)
                         .toList()))
@@ -927,38 +885,6 @@ public final class McpToolRouter {
             }
         }
         return errors;
-    }
-
-    /** The scope's intents joined against their verdicts, as {@code review_state} reports them. */
-    private List<JsonValue> intentsStateToJson(ReviewScope scope) throws McpToolException {
-        Map<String, ReviewVerdict> verdictsByDigest = new LinkedHashMap<>();
-        for (ReviewVerdict verdict : context.verdictsOf(scope.id())) {
-            verdictsByDigest.put(verdict.hunkDigest(), verdict);
-        }
-        UnifiedDiff diff = context.reviewDiff(scope);
-        List<JsonValue> intents = new ArrayList<>();
-        for (ReviewIntent intent : context.intentsOf(scope.id(), diff)) {
-            List<Optional<ReviewVerdict>> perHunk = IntentHunks.digestsOf(intent, diff).stream()
-                    .map(digest -> Optional.ofNullable(verdictsByDigest.get(digest)))
-                    .toList();
-            Optional<ReviewVerdict.Decision> decision = VerdictMerge.derive(perHunk);
-            if (decision.isEmpty()) {
-                continue;
-            }
-            // The first note any of the section's hunks carries. A section has
-            // no note of its own -- notes are written against hunks -- and
-            // concatenating several would report text nobody wrote.
-            Optional<String> note = perHunk.stream()
-                    .flatMap(Optional::stream)
-                    .map(ReviewVerdict::note)
-                    .flatMap(Optional::stream)
-                    .findFirst();
-            intents.add(JsonObject.empty()
-                    .put("id", new JsonString(intent.id()))
-                    .put("verdict", new JsonString(decision.get().wireName()))
-                    .put("note", note.<JsonValue>map(JsonString::new).orElse(JsonNull.INSTANCE)));
-        }
-        return intents;
     }
 
     // ---- review_comments -----------------------------------------------

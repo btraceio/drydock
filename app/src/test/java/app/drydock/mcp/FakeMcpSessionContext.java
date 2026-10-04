@@ -7,9 +7,7 @@ import app.drydock.domain.WorkflowId;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.mcp.McpSessionContext.RenameKind;
 import app.drydock.mcp.McpSessionContext.RenameOutcome;
-import app.drydock.review.FallbackIntents;
 import app.drydock.review.ReviewAnnotation;
-import app.drydock.review.ReviewIntent;
 import app.drydock.review.tour.TourRecord;
 
 import java.nio.file.Path;
@@ -112,9 +110,6 @@ final class FakeMcpSessionContext implements McpSessionContext {
      */
     McpToolException reviewDiffFailure;
 
-    /** The last intent grouping {@link #putIntents} received. */
-    final Map<String, List<ReviewIntent>> intents = new HashMap<>();
-
     final Map<String, TourRecord> tours = new HashMap<>();
 
     /** When non-null, {@link #excerpt} answers this regardless of file and line. */
@@ -173,17 +168,6 @@ final class FakeMcpSessionContext implements McpSessionContext {
         TourRecord next = transform.apply(current);
         tours.put(scopeId, next);
         return Optional.of(next);
-    }
-
-    @Override
-    public void putIntents(String scopeId, List<ReviewIntent> newIntents) {
-        intents.put(scopeId, List.copyOf(newIntents));
-    }
-
-    @Override
-    public List<ReviewIntent> intentsOf(String scopeId, UnifiedDiff diff) {
-        List<ReviewIntent> supplied = intents.get(scopeId);
-        return supplied != null ? supplied : FallbackIntents.group(diff);
     }
 
     @Override

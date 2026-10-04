@@ -3078,13 +3078,7 @@ public final class SessionReviewView extends BorderPane {
     }
 
     private Optional<String> firstUnsettled(TourRecord record) {
-        return record.tour().steps().stream()
-                .filter(step -> {
-                    StepProgress p = record.progress(step.id());
-                    return p.stale() || p.decision() == StepProgress.Decision.NONE;
-                })
-                .map(TourStep::id)
-                .findFirst();
+        return record.unsettledSteps().stream().map(TourStep::id).findFirst();
     }
 
     /**

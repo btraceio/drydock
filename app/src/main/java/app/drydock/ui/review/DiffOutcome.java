@@ -8,10 +8,10 @@ import java.util.Objects;
  * What a diff attempt produced for one scope.
  *
  * <p>Three states, not two. "Failed" and "still loading" look identical to
- * anything downstream that only learns about successes, and the intent rail
- * has to tell them apart -- a rail reading "Diffing…" beside a column
+ * anything downstream that only learns about successes, and the review
+ * surface has to tell them apart -- a surface reading "Diffing…" beside a column
  * reading "Could not diff" is the kind of contradiction that taught readers
- * to distrust the rail in the first place.</p>
+ * to distrust the surface in the first place.</p>
  */
 public sealed interface DiffOutcome {
 
