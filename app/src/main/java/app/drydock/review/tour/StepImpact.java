@@ -2,7 +2,9 @@ package app.drydock.review.tour;
 
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.ChangeGraph;
+import app.drydock.review.GrammarRegistry;
 import app.drydock.review.OutOfDiffFanIn;
+import app.drydock.review.SymbolScan;
 import app.drydock.review.SymbolWords;
 
 import java.util.ArrayList;
@@ -176,12 +178,19 @@ public record StepImpact(List<Caller> calledFromOutside, List<InChange> inChange
     }
 
     /**
-     * Identifiers on the step's changed rows, by the lexical rule {@link
-     * SymbolWords} gives every lens, that the change does not declare. A name
-     * declared in more than one changed file is still declared in the
-     * change -- ambiguous, not unknown -- so it is not a callee to resolve.
-     * Most used first, then by name so the cut at {@link #MAX_CALLEES} is
-     * stable.
+     * Identifiers used on the step's changed rows that the change does not
+     * declare. A name declared in more than one changed file is still
+     * declared in the change -- ambiguous, not unknown -- so it is not a
+     * callee to resolve. Most used first, then by name so the cut at {@link
+     * #MAX_CALLEES} is stable.
+     *
+     * <p>Where the file's language has a grammar the names come from its
+     * parse tree ({@link SymbolScan}), uses only, so a comment's words --
+     * which the tree holds as one comment node -- are never names. Without
+     * one the lexical rule {@link SymbolWords} gives every lens reads the
+     * rows, skipping those that start like a comment ({@code //}, {@code
+     * /*}, {@code *}, {@code #}): a deleted "// Legacy helper kept for old
+     * callers" listed five callees that do not exist.</p>
      */
     private static List<String> callees(TourStep step, AnchorIndex index, UnifiedDiff reviewDiff,
                                         ChangeGraph graph) {
@@ -189,19 +198,12 @@ public record StepImpact(List<Caller> calledFromOutside, List<InChange> inChange
         graph.declarationSites().forEach(site -> declared.add(site.name()));
         Map<String, Integer> counts = new TreeMap<>();
         for (UnifiedDiff.FileDiff file : reviewDiff.files()) {
-            for (UnifiedDiff.Hunk hunk : file.hunks()) {
-                for (UnifiedDiff.Line line : hunk.lines()) {
-                    if (line.kind() == UnifiedDiff.Line.Kind.CONTEXT
-                            || !inStep(step, index, file.path(), line.lineKey())) {
-                        continue;
-                    }
-                    Matcher matcher = SymbolWords.IDENTIFIER.matcher(line.text());
-                    while (matcher.find()) {
-                        String name = matcher.group();
-                        if (SymbolWords.isSymbol(name) && !declared.contains(name)) {
-                            counts.merge(name, 1, Integer::sum);
-                        }
-                    }
+            if (step.anchors().stream().noneMatch(anchor -> anchor.file().equals(file.path()))) {
+                continue;
+            }
+            for (String name : usedNames(step, index, file)) {
+                if (SymbolWords.isSymbol(name) && !declared.contains(name)) {
+                    counts.merge(name, 1, Integer::sum);
                 }
             }
         }
@@ -211,5 +213,38 @@ public record StepImpact(List<Caller> calledFromOutside, List<InChange> inChange
                 .limit(MAX_CALLEES)
                 .map(Map.Entry::getKey)
                 .toList();
+    }
+
+    /** Every use of a name on {@code file}'s changed rows inside the step, once per occurrence. */
+    private static List<String> usedNames(TourStep step, AnchorIndex index, UnifiedDiff.FileDiff file) {
+        List<String> names = new ArrayList<>();
+        if (GrammarRegistry.forPath(file.path()).isPresent()) {
+            for (SymbolScan.Symbol symbol : SymbolScan.of(file)) {
+                if (!symbol.declaration() && symbol.onChangedLine()
+                        && inStep(step, index, file.path(), symbol.lineKey())) {
+                    names.add(symbol.name());
+                }
+            }
+            return names;
+        }
+        for (UnifiedDiff.Hunk hunk : file.hunks()) {
+            for (UnifiedDiff.Line line : hunk.lines()) {
+                if (line.kind() == UnifiedDiff.Line.Kind.CONTEXT || looksLikeComment(line.text())
+                        || !inStep(step, index, file.path(), line.lineKey())) {
+                    continue;
+                }
+                Matcher matcher = SymbolWords.IDENTIFIER.matcher(line.text());
+                while (matcher.find()) {
+                    names.add(matcher.group());
+                }
+            }
+        }
+        return names;
+    }
+
+    private static boolean looksLikeComment(String text) {
+        String stripped = text.strip();
+        return stripped.startsWith("//") || stripped.startsWith("/*") || stripped.startsWith("*")
+                || stripped.startsWith("#");
     }
 }

@@ -153,6 +153,53 @@ class StepImpactTest {
         assertTrue(impact.calleesToResolve().contains("outsider"), "callees were " + impact.calleesToResolve());
     }
 
+    /** A deleted helper and the comment above it; Calc.add is the one real call. */
+    private static UnifiedDiff deletedWithComment(String path, String commentMarker) {
+        List<UnifiedDiff.Line> lines = List.of(
+                new UnifiedDiff.Line(UnifiedDiff.Line.Kind.DEL, OptionalInt.of(19), OptionalInt.empty(),
+                        "    " + commentMarker + " Legacy helper kept for old callers."),
+                new UnifiedDiff.Line(UnifiedDiff.Line.Kind.DEL, OptionalInt.of(20), OptionalInt.empty(),
+                        "    " + commentMarker + " Scheduled for removal."),
+                new UnifiedDiff.Line(UnifiedDiff.Line.Kind.DEL, OptionalInt.of(21), OptionalInt.empty(),
+                        "    public static int legacyTwice(int v) {"),
+                new UnifiedDiff.Line(UnifiedDiff.Line.Kind.DEL, OptionalInt.of(22), OptionalInt.empty(),
+                        "        return Calc.add(v, v);"),
+                new UnifiedDiff.Line(UnifiedDiff.Line.Kind.DEL, OptionalInt.of(23), OptionalInt.empty(),
+                        "    }"));
+        return new UnifiedDiff(List.of(new UnifiedDiff.FileDiff(path, "M", 0, 5, false, false,
+                List.of(new UnifiedDiff.Hunk("@@ -19,5 +18,0 @@", lines)))));
+    }
+
+    private static List<String> calleesOfDeletion(UnifiedDiff deleted, String path) {
+        TourStep step = step("d1", new TourAnchor(path, "o19", "o23"));
+        return StepImpact.of(step, new ReviewTour("rs_1", "fp", List.of(step)), deleted,
+                ChangeGraph.of(deleted), new OutOfDiffFanIn.Result(Map.of(), false)).calleesToResolve();
+    }
+
+    @Test
+    void wordsInADeletedCommentAreNotCalleesWhenTheLanguageParses() {
+        String path = "src/Util.java";
+        List<String> callees = calleesOfDeletion(deletedWithComment(path, "//"), path);
+
+        assertTrue(callees.contains("add"), "callees were " + callees);
+        for (String word : List.of("Legacy", "helper", "kept", "callers", "Scheduled", "removal")) {
+            assertFalse(callees.contains(word), word + " is comment text; callees were " + callees);
+        }
+    }
+
+    @Test
+    void commentLinesAreSkippedByTheLexicalFallback() {
+        // No grammar for this extension, so names come from the lexical rule.
+        for (String marker : List.of("//", "#", "*", "/*")) {
+            String path = "src/util.unparsed";
+            List<String> callees = calleesOfDeletion(deletedWithComment(path, marker), path);
+
+            assertTrue(callees.contains("add"), marker + ": callees were " + callees);
+            assertFalse(callees.contains("Legacy"), marker + ": callees were " + callees);
+            assertFalse(callees.contains("Scheduled"), marker + ": callees were " + callees);
+        }
+    }
+
     // ---- fixtures -----------------------------------------------------------
 
     private static TourStep step(String id, TourAnchor anchor) {
