@@ -120,7 +120,7 @@ public final class TourMigration {
             if (start.isEmpty() || end.isEmpty()) {
                 return Optional.empty();
             }
-            TourAnchor moved = new TourAnchor(anchor.file(), start.get(), end.get());
+            TourAnchor moved = anchor.movedTo(start.get(), end.get());
             if (!index.resolves(moved)) {
                 return Optional.empty();
             }
@@ -156,7 +156,7 @@ public final class TourMigration {
             Optional<String> start = mapKey(anchor.file(), anchor.startKey(), oldRows, newRows, fileOfDigest);
             Optional<String> end = mapKey(anchor.file(), anchor.endKey(), oldRows, newRows, fileOfDigest);
             anchors.add(start.isPresent() && end.isPresent()
-                    ? new TourAnchor(anchor.file(), start.get(), end.get())
+                    ? anchor.movedTo(start.get(), end.get())
                     : anchor);
         }
         return new TourStep(step.id(), step.title(), step.narrative(), anchors, step.impactNotes(), step.checks());

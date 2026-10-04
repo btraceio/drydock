@@ -86,6 +86,26 @@ class TourMigrationTest {
         assertTrue(AnchorIndex.of(shifted).resolves(s1.anchors().get(1)));
     }
 
+    @Test
+    void aMovedAnchorKeepsItsClaim() {
+        ReviewTour tour = new ReviewTour(TourFixtures.SCOPE, TourFingerprint.of(twoFileDiff()), List.of(
+                step("s1", List.of(new TourAnchor("src/A.java", "n1", "o20", "Why the first range matters."),
+                        new TourAnchor("src/A.java", "n21", "n22", "The second range is the guard.")),
+                        predict("c1")),
+                step("s2", List.of(new TourAnchor("src/B.java", "o5", "o6")), risk("c2"))));
+        UnifiedDiff.FileDiff shiftedA = file("src/A.java",
+                UNCHANGED_A.hunks().get(0),
+                hunk(ctx(19, 25, "void f() {"), del(20, "  old();"), add(26, "  next();"), ctx(21, 27, "}")));
+        UnifiedDiff shifted = new UnifiedDiff(List.of(shiftedA, twoFileDiff().files().get(1)));
+
+        TourStep s1 = TourMigration.migrate(passed(tour), shifted).record().tour().step("s1").orElseThrow();
+
+        assertEquals("Why the first range matters.", s1.anchors().get(0).note());
+        assertEquals("n26", s1.anchors().get(1).startKey(), "the range moved");
+        assertEquals("The second range is the guard.", s1.anchors().get(1).note(),
+                "and the claim about it moved with it");
+    }
+
     /**
      * src/A.java's second hunk shifted down five lines, and a different hunk
      * now sits at the line numbers it used to have: n21/n22 are new code.

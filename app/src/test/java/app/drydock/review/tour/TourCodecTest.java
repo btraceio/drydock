@@ -13,6 +13,7 @@ import java.util.Optional;
 import static app.drydock.review.tour.TourFixtures.coveringTour;
 import static app.drydock.review.tour.TourFixtures.twoFileDiff;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -42,6 +43,36 @@ class TourCodecTest {
         List<TourStep> steps = TourCodec.stepsFromAgent(JsonParser.parse(
                 ONE_STEP.replace("\"startKey\":\"n1\",\"endKey\":\"n22\"", "\"startKey\":\"n3\"")));
         assertEquals("n3", steps.getFirst().anchors().getFirst().endKey());
+    }
+
+    @Test
+    void anAnchorNoteDecodesAndRoundTripsThroughThePersistedForm() throws Exception {
+        String withNote = ONE_STEP.replace("\"endKey\":\"n22\"",
+                "\"endKey\":\"n22\",\"note\":\"The loop walks the inline chain.\"");
+        TourStep step = TourCodec.stepsFromAgent(JsonParser.parse(withNote)).getFirst();
+        assertEquals("The loop walks the inline chain.", step.anchors().getFirst().note());
+        assertTrue(step.anchors().getFirst().hasNote());
+
+        TourStep restored = TourCodec.stepFromJson(TourCodec.stepToJson(step), "steps[0]");
+        assertEquals(step.anchors(), restored.anchors());
+    }
+
+    @Test
+    void anAnchorWithoutANoteHasNoneAndWritesNoNoteMember() throws Exception {
+        TourStep step = TourCodec.stepsFromAgent(JsonParser.parse(ONE_STEP)).getFirst();
+        assertEquals("", step.anchors().getFirst().note());
+        assertFalse(step.anchors().getFirst().hasNote());
+        assertFalse(JsonWriter.write(TourCodec.stepToJson(step)).contains("\"note\""),
+                "an old-shape step must persist byte-for-byte as it did before the field existed");
+    }
+
+    @Test
+    void anOverlongAnchorNoteIsRejectedNamingItsPath() {
+        String huge = ONE_STEP.replace("\"endKey\":\"n22\"",
+                "\"endKey\":\"n22\",\"note\":\"" + "x".repeat(TourValidator.MAX_ANCHOR_NOTE + 1) + "\"");
+        TourCodec.InvalidTour error = assertThrows(TourCodec.InvalidTour.class,
+                () -> TourCodec.stepsFromAgent(JsonParser.parse(huge)));
+        assertTrue(error.getMessage().contains("steps[0].anchors[0].note"), error.getMessage());
     }
 
     @Test

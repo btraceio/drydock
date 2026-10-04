@@ -29,6 +29,8 @@ public final class TourValidator {
     public static final int MAX_CHECKS_PER_STEP = 6;
     public static final int MAX_NARRATIVE = 1000;
     public static final int MAX_TITLE = 120;
+    /** One claim about one anchored range; short enough to read beside the code it is about. */
+    public static final int MAX_ANCHOR_NOTE = 400;
     public static final int MAX_PROMPT = 1000;
     public static final int MAX_CHOICE = 300;
     public static final int MIN_CHOICES = 2;
