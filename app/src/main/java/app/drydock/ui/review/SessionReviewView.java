@@ -1040,6 +1040,7 @@ public final class SessionReviewView extends BorderPane {
         installNavigation();
 
         margin.setOnToggleCollapse(() -> setMarginCollapsed(!margin.collapsed()));
+        stepPanel.setOnExpand(this::expandStepPanel);
         intentRail.setOnToggleCollapse(() -> setIntentsCollapsed(!intentRail.collapsed()));
         intentRail.setSectionStateLookup(this::sectionState);
         intentRail.setOnSelected(intent -> {
@@ -3196,7 +3197,7 @@ public final class SessionReviewView extends BorderPane {
         }
         showEveryRegion();
         RailLayout.Layout layout =
-                RailLayout.solve(width, intentsCollapsedByUser, marginCollapsedByUser);
+                RailLayout.solve(width, intentsCollapsedByUser, marginCollapsedByUser, mode);
         if (mode == ReviewMode.TOUR) {
             outline.setNarrow(layout.narrow());
             outline.setCollapsed(layout.intentsCollapsed());
@@ -3251,6 +3252,19 @@ public final class SessionReviewView extends BorderPane {
     private void setMarginCollapsed(boolean collapsed) {
         marginCollapsedByUser = collapsed;
         applyResponsiveLayout(getWidth());
+    }
+
+    /**
+     * The collapsed step panel's expand button. A collapse the reader asked
+     * for ({@code m}) is undone; a collapse the window's width forces is
+     * not -- the code column keeps its floor -- so the reader is told to
+     * widen the window rather than left with a button that did nothing.
+     */
+    private void expandStepPanel() {
+        setMarginCollapsed(false);
+        if (stepPanel.collapsed()) {
+            notice("Widen the window to show the step panel beside the code");
+        }
     }
 
     /** {@code i}: collapses or expands the intent rail. */

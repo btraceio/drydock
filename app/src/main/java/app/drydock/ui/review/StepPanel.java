@@ -21,6 +21,7 @@ import javafx.scene.control.Label;
 import javafx.scene.control.ScrollPane;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
+import javafx.scene.control.Tooltip;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyEvent;
 import javafx.scene.layout.FlowPane;
@@ -110,6 +111,9 @@ final class StepPanel extends VBox {
     private Optional<TextArea> riskBox = Optional.empty();
     private Optional<TextField> overrideReason = Optional.empty();
     private Optional<Button> refreshButton = Optional.empty();
+    private final Button expandButton = new Button("‹");
+    private final VBox collapsedStrip = new VBox(expandButton);
+    private Runnable onExpand = () -> { };
     private boolean collapsed;
     private boolean narrow;
 
@@ -118,22 +122,51 @@ final class StepPanel extends VBox {
         getStyleClass().add("step-panel");
         triageSection.getStyleClass().add("step-triage");
         impactSection.getStyleClass().add("step-impact");
-        scroll = new ScrollPane(new VBox(14, content, extraSections));
+        content.getStyleClass().add("step-panel-content");
+        extraSections.getStyleClass().add("step-panel-extra");
+        VBox body = new VBox(14, content, extraSections);
+        body.getStyleClass().add("step-panel-body");
+        scroll = new ScrollPane(body);
         scroll.setFitToWidth(true);
+        scroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
+        scroll.getStyleClass().add("step-panel-scroll");
+        // The column's full height: the panel's content scrolls inside it,
+        // rather than the scroll pane stopping at its preferred height and
+        // clipping whatever impact entry falls below.
+        VBox.setVgrow(scroll, Priority.ALWAYS);
+        // Collapsed, the panel keeps a dark strip with a real Button to
+        // bring it back (m does the same).
+        expandButton.getStyleClass().addAll("panel-header-chevron-button", "step-panel-expand");
+        expandButton.setTooltip(new Tooltip("Expand the step panel (m)"));
+        expandButton.setOnAction(event -> onExpand.run());
+        collapsedStrip.setAlignment(Pos.TOP_CENTER);
+        collapsedStrip.getStyleClass().add("step-panel-collapsed");
+        collapsedStrip.setVisible(false);
+        collapsedStrip.setManaged(false);
+        VBox.setVgrow(collapsedStrip, Priority.ALWAYS);
         // The "↩ back to step N" pill sits above the scroll, outside the
         // content show() rebuilds, so a redraw of the step does not drop it;
         // the view decides when it shows (after a navigation away from the
         // step) and when it goes (b, a step change, an anchor chip).
         backPill.getStyleClass().add("step-back-pill");
+        backPill.setMaxWidth(Double.MAX_VALUE);
         backPill.setOnAction(event -> host.backToStep());
         backPill.setVisible(false);
         backPill.setManaged(false);
-        getChildren().addAll(backPill, scroll);
+        getChildren().addAll(backPill, scroll, collapsedStrip);
         applyWidth();
+    }
+
+    void setOnExpand(Runnable action) {
+        onExpand = action == null ? () -> { } : action;
     }
 
     /** Shows "↩ back to step {@code number}"; see the constructor for who hides it. */
     void showBackPill(int number) {
+        if (collapsed) {
+            // No room for it on the strip; expanding shows the step itself.
+            return;
+        }
         backPill.setText("↩ back to step " + number);
         backPill.setVisible(true);
         backPill.setManaged(true);
@@ -485,8 +518,14 @@ final class StepPanel extends VBox {
 
     void setCollapsed(boolean value) {
         collapsed = value;
-        content.setVisible(!value);
-        extraSections.setVisible(!value);
+        scroll.setVisible(!value);
+        scroll.setManaged(!value);
+        collapsedStrip.setVisible(value);
+        collapsedStrip.setManaged(value);
+        if (value) {
+            backPill.setVisible(false);
+            backPill.setManaged(false);
+        }
         applyWidth();
     }
 

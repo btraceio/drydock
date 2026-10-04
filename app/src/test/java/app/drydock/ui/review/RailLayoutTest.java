@@ -122,4 +122,28 @@ class RailLayoutTest {
     private static boolean allCollapsed(RailLayout.Layout layout) {
         return layout.intentsCollapsed() && layout.marginCollapsed();
     }
+
+    @Test
+    void inATourTheOutlineGoesFirstAndTheStepPanelLast() {
+        // Same arithmetic as theMarginIsTheFirstToGo, order inverted: the
+        // step panel is the tour's primary content. Collapsing the outline
+        // gives 40 + 286 = 326, leaving 574.
+        RailLayout.Layout layout = RailLayout.solve(900, false, false, SessionReviewView.ReviewMode.TOUR);
+
+        assertTrue(layout.intentsCollapsed(), "the outline collapses first");
+        assertFalse(layout.marginCollapsed(), "the step panel stays readable");
+        assertTrue(layout.narrow());
+    }
+
+    @Test
+    void inATourTheThresholdsAreTheHunkDiffs() {
+        // Wide and narrow-but-fitting widths answer exactly as in the hunk
+        // diff; only which rail goes first differs, and at 700 both go.
+        for (double width : new double[] {1800, 1100, 700}) {
+            RailLayout.Layout diff = RailLayout.solve(width, false, false);
+            RailLayout.Layout tour = RailLayout.solve(width, false, false, SessionReviewView.ReviewMode.TOUR);
+            assertTrue(diff.equals(tour), width + ": " + diff + " vs " + tour);
+        }
+        assertTrue(RailLayout.solve(700, false, false, SessionReviewView.ReviewMode.TOUR).marginCollapsed());
+    }
 }

@@ -47,6 +47,20 @@ final class RailLayout {
      * the layout stops rather than pretending.</p>
      */
     static Layout solve(double width, boolean intentsForced, boolean marginForced) {
+        return solve(width, intentsForced, marginForced, SessionReviewView.ReviewMode.DIFF);
+    }
+
+    /**
+     * As above for {@code mode}. In the tour the order of the collapses is
+     * inverted: the left rail (the tour outline) goes before the right one
+     * (the step panel), because the step panel holds the narrative and the
+     * check -- the tour's primary content -- while the outline is a list of
+     * step titles. The widths, and so every threshold, are the hunk diff's:
+     * the outline and the step panel take the intent rail's and the
+     * margin's widths.
+     */
+    static Layout solve(double width, boolean intentsForced, boolean marginForced,
+                        SessionReviewView.ReviewMode mode) {
         boolean margin = marginForced;
         boolean intents = intentsForced;
 
@@ -54,6 +68,13 @@ final class RailLayout {
             return new Layout(intents, margin, false);
         }
         if (fits(width, intents, margin, true)) {
+            return new Layout(intents, margin, true);
+        }
+        if (mode == SessionReviewView.ReviewMode.TOUR) {
+            intents = true;
+            if (!fits(width, intents, margin, true)) {
+                margin = true;
+            }
             return new Layout(intents, margin, true);
         }
         margin = true;

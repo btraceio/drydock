@@ -3369,23 +3369,6 @@
     -fx-border-color: -drydock-text-faint;
     -fx-border-style: segments(3, 3) line-cap round;
 }
-/* The step panel's impact (guided tour, spec §6): each entry a Button laid
- * out as a left-aligned row, each section's warrant a faint tag beside it.
- * A claimed tag is italic for the same reason the stale chip above is; a
- * resolved callee (a language server's answer, when one is wired) is set
- * apart from a name match by weight rather than by a fifth hue. */
-.step-impact-entry {
-    -fx-alignment: center-left;
-}
-.step-impact-tag {
-    -fx-text-fill: -drydock-text-faint;
-}
-.step-impact-tag.provenance-claimed {
-    -fx-font-style: italic;
-}
-.step-impact-entry.provenance-resolved {
-    -fx-font-weight: bold;
-}
 .review-intent-card.collapsed {
     -fx-padding: 7 0 7 0;
     -fx-alignment: center;
@@ -3565,6 +3548,321 @@
     -fx-background-color: -drydock-blocking-soft;
     -fx-background-radius: 6px;
     -fx-padding: 8 10 8 10;
+}
+
+/* ---- Guided tour: outline (left) and step panel (right), spec §5 ---------
+ * They stand where the intent rail and the findings margin stand, so they
+ * wear the same surfaces, borders, text sizes and button language. Every
+ * rule is scoped under .step-panel / .tour-outline: the generic .label and
+ * .button rules below would otherwise out-rank a bare single-class rule. */
+
+.step-panel {
+    -fx-background-color: -drydock-chrome;
+    -fx-border-color: transparent transparent transparent -drydock-border;
+    -fx-border-width: 0 0 0 1;
+}
+.tour-outline {
+    -fx-background-color: -drydock-chrome;
+    -fx-border-color: transparent -drydock-border transparent transparent;
+    -fx-border-width: 0 1 0 0;
+    -fx-padding: 8 6 8 6;
+    -fx-spacing: 8;
+}
+.step-panel .scroll-pane, .step-panel .scroll-pane > .viewport,
+.tour-outline .scroll-pane, .tour-outline .scroll-pane > .viewport {
+    -fx-background-color: transparent;
+    -fx-background: transparent;
+}
+.step-panel .scroll-pane, .tour-outline .scroll-pane {
+    -fx-padding: 0;
+}
+.step-panel-body {
+    -fx-padding: 10 12 14 12;
+}
+.step-panel .label, .tour-outline .label {
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 12px;
+}
+
+/* Buttons in either column: the findings card's action look. */
+.step-panel .button, .tour-outline .button {
+    -fx-background-color: transparent;
+    -fx-background-radius: 6px;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 6px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 11px;
+    -fx-padding: 3 9 3 9;
+    -fx-cursor: hand;
+}
+.step-panel .button:hover, .tour-outline .button:hover {
+    -fx-text-fill: -drydock-text;
+    -fx-border-color: -drydock-text-dim;
+}
+.step-panel .button:focused, .tour-outline .button:focused { -fx-border-color: -drydock-accent; }
+.step-panel .button:disabled, .tour-outline .button:disabled { -fx-opacity: 0.45; }
+.step-panel .button.primary {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-border-color: -drydock-accent;
+    -fx-text-fill: -drydock-accent;
+}
+
+/* Text inputs: the reply field's look. */
+.step-panel .text-field, .step-panel .text-area {
+    -fx-background-color: -drydock-input-bg;
+    -fx-background-radius: 6px;
+    -fx-border-color: -drydock-border;
+    -fx-border-radius: 6px;
+    -fx-text-fill: -drydock-text;
+    -fx-prompt-text-fill: -drydock-text-faint;
+    -fx-highlight-fill: -drydock-sel-bg;
+    -fx-font-size: 11.5px;
+}
+.step-panel .text-area .content { -fx-background-color: -drydock-input-bg; }
+.step-panel .text-field:focused, .step-panel .text-area:focused { -fx-border-color: -drydock-accent; }
+
+/* Header, narrative, anchors. */
+.step-panel .step-panel-header {
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 13px;
+    -fx-font-weight: 700;
+}
+.step-panel .step-panel-narrative {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 12px;
+    -fx-line-spacing: 2px;
+}
+.step-panel .step-anchor-chip {
+    -fx-background-radius: 12px;
+    -fx-border-radius: 12px;
+    -fx-border-color: -drydock-border;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 10.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-padding: 2 8 2 8;
+}
+.step-panel .step-back-pill {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-background-radius: 0;
+    -fx-border-color: transparent transparent -drydock-accent transparent;
+    -fx-border-width: 0 0 1 0;
+    -fx-text-fill: -drydock-accent;
+    -fx-padding: 6 12 6 12;
+}
+
+/* Notices: a one-line transient, the stale notice, the blocker banner. */
+.step-panel .step-panel-transient {
+    -fx-background-color: -drydock-hover;
+    -fx-background-radius: 6px;
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 11.5px;
+    -fx-padding: 6 8 6 8;
+}
+.step-panel .step-stale-notice {
+    -fx-background-color: -drydock-deviation-soft;
+    -fx-background-radius: 6px;
+    -fx-padding: 8;
+}
+.step-panel .step-panel-stale {
+    -fx-text-fill: -drydock-deviation;
+    -fx-font-size: 11.5px;
+}
+.step-panel .step-blocker-banner {
+    -fx-background-color: -drydock-blocking-soft;
+    -fx-background-radius: 8px;
+    -fx-border-color: -drydock-blocking;
+    -fx-border-radius: 8px;
+    -fx-padding: 10;
+}
+
+/* The check. Choices read as left-aligned answers in the verdict bar's
+ * action language, numbered for 1-4. */
+.step-panel .step-check {
+    -fx-border-color: -drydock-border transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+    -fx-padding: 10 0 0 0;
+}
+.step-panel .step-check-prompt {
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 12.5px;
+    -fx-font-weight: 600;
+}
+.step-panel .step-check-explanation {
+    -fx-text-fill: -drydock-question;
+    -fx-font-size: 11.5px;
+}
+.step-panel .step-check-status, .step-panel .step-check-done, .step-panel .step-check-decision {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 11.5px;
+}
+.step-panel .step-check-blocker {
+    -fx-text-fill: -drydock-blocking;
+    -fx-font-size: 11.5px;
+}
+.step-panel .step-choice {
+    -fx-alignment: center-left;
+    -fx-text-alignment: left;
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 12px;
+    -fx-padding: 6 12 6 12;
+}
+.step-panel .step-choice:hover { -fx-border-color: -drydock-text-dim; }
+.step-panel .step-choice:focused { -fx-border-color: -drydock-accent; }
+.step-panel .step-choice-peek {
+    -fx-font-size: 10.5px;
+    -fx-padding: 2 6 2 6;
+}
+.step-panel .step-override-reason { -fx-font-size: 11.5px; }
+.step-panel .step-override {
+    -fx-border-color: -drydock-question;
+    -fx-text-fill: -drydock-question;
+}
+
+/* Findings to triage on the step: the margin's card. */
+.step-panel .step-triage { -fx-spacing: 8; }
+.step-panel .step-triage-header {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10.5px;
+    -fx-font-weight: 700;
+}
+.step-panel .step-finding {
+    -fx-background-color: -drydock-code-bg;
+    -fx-background-radius: 8px;
+    -fx-border-color: -drydock-border;
+    -fx-border-radius: 8px;
+    -fx-padding: 10;
+}
+.step-panel .step-finding-title {
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 12px;
+    -fx-font-weight: 600;
+}
+.step-panel .step-finding-meta {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.step-panel .step-finding-confirm, .step-panel .step-finding-reveal, .step-panel .step-finding-send,
+.step-panel .step-refresh, .step-panel .step-retry {
+    -fx-font-size: 10.5px;
+}
+.step-panel .step-dismiss-reason, .step-panel .step-finding-reply { -fx-font-size: 11px; }
+
+/* The step's impact (spec §6): each entry a Button laid out as a
+ * left-aligned row, each section's warrant a faint tag beside it. A claimed
+ * tag is italic for the same reason the stale chip above is; a resolved
+ * callee (a language server's answer, when one is wired) is set apart from a
+ * name match by weight rather than by a fifth hue. */
+.step-panel .step-impact {
+    -fx-border-color: -drydock-border transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+    -fx-padding: 10 0 0 0;
+}
+.step-panel .step-impact-header {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 10.5px;
+    -fx-font-weight: 700;
+}
+.step-panel .step-impact-tag {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10px;
+}
+.step-panel .step-impact-tag.provenance-claimed {
+    -fx-font-style: italic;
+}
+.step-panel .step-impact-entry {
+    -fx-alignment: center-left;
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 11px;
+    -fx-padding: 4 8 4 8;
+}
+.step-panel .step-impact-entry.provenance-resolved {
+    -fx-font-weight: bold;
+}
+.step-panel .step-impact-caller, .step-panel .step-impact-callee, .step-panel .step-impact-note {
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 10.5px;
+}
+.step-panel .step-impact-edge { -fx-font-size: 11px; }
+.step-panel .step-impact-file {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 10.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.step-panel .step-impact-flag-name {
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 11px;
+}
+.step-panel .step-impact-flag {
+    -fx-text-fill: -drydock-deviation;
+    -fx-font-size: 11px;
+}
+.step-panel .step-impact-pending, .step-panel .step-impact-empty {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11px;
+    -fx-font-style: italic;
+}
+.step-panel .step-impact-unavailable {
+    -fx-text-fill: -drydock-question;
+    -fx-font-size: 11px;
+}
+
+/* Collapsed: the margin's 30px strip, dark, with its expand button. */
+.step-panel .step-panel-collapsed {
+    -fx-padding: 6 0 0 0;
+}
+.step-panel .step-panel-expand {
+    -fx-border-color: transparent;
+    -fx-text-fill: -drydock-text-faint;
+    -fx-padding: 2 5 2 5;
+}
+
+/* The outline: tabs as filter chips, steps as intent cards. */
+.tour-outline .tour-outline-tab {
+    -fx-background-color: transparent;
+    -fx-background-radius: 12px;
+    -fx-border-color: -drydock-border;
+    -fx-border-radius: 12px;
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10.5px;
+    -fx-padding: 2 10 2 10;
+    -fx-cursor: hand;
+}
+.tour-outline .tour-outline-tab:hover { -fx-text-fill: -drydock-text; }
+.tour-outline .tour-outline-tab:selected {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-border-color: -drydock-accent;
+    -fx-text-fill: -drydock-accent;
+}
+.tour-outline .tour-outline-tab:focused { -fx-border-color: -drydock-accent; }
+.tour-outline .tour-outline-row {
+    -fx-alignment: center-left;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 12px;
+    -fx-border-color: -drydock-border;
+    -fx-padding: 7 8 7 8;
+}
+.tour-outline .tour-outline-row:hover {
+    -fx-text-fill: -drydock-text;
+    -fx-border-color: -drydock-border-strong;
+}
+.tour-outline .tour-outline-row-current {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-border-color: -drydock-accent;
+    -fx-text-fill: -drydock-text;
+    -fx-font-weight: 600;
+}
+.tour-outline .tour-outline-row:focused { -fx-border-color: -drydock-accent; }
+.tour-outline .tour-outline-notice {
+    -fx-text-fill: -drydock-deviation;
+    -fx-font-size: 11px;
+}
+
+/* A navigation outcome over the diff column ("Looking for foo…"): the
+ * Explorer's toast, kept to a readable line length. */
+.review-nav-notice {
+    -fx-max-width: 520px;
+    -fx-wrap-text: true;
 }
 
 /* ---- Submit sheet (Task 9): the last stop before a review posts --------- */
