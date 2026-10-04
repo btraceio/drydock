@@ -2638,6 +2638,10 @@ public final class SessionReviewView extends BorderPane {
             swapped = true;
         }
         if (diffColumn.wholeFiles() != touring) {
+            // Before the switch: an oversized hunk diff renders the cursor
+            // file alone, and v reaches here without the state refresh that
+            // otherwise tells the column which file that is.
+            diffColumn.setCursorFile(touring ? null : currentFile().orElse(null));
             diffColumn.setWholeFiles(touring);
         }
         verdictBar.setTourMode(touring);
