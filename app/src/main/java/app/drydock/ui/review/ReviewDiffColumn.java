@@ -38,6 +38,7 @@ import java.lang.System.Logger.Level;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -1229,6 +1230,29 @@ final class ReviewDiffColumn extends BorderPane {
                 .filter(ReviewDiffRow.HunkHeader.class::isInstance)
                 .map(ReviewDiffRow.HunkHeader.class::cast)
                 .anyMatch(header -> header.file().equals(file) && header.hunkIndex() == hunkIndex);
+    }
+
+    /**
+     * Whether every one of {@code lineKeys} -- each {@code "<file>
+     * <lineKey>"} -- has a row on screen: what an approval requires, since a
+     * row past the row cap, or in a file not rendered, is code the reader
+     * has not been shown. Keyed by line rather than by hunk header so the
+     * one rule holds in both views: the whole-file diff numbers its hunks
+     * differently from the review diff, and a hunk whose header renders can
+     * still be cut off partway by the cap. Only unchanged runs ever fold,
+     * so asking about changed rows never trips over a fold.
+     */
+    boolean rendersLines(Collection<String> lineKeys) {
+        Set<String> missing = new HashSet<>(lineKeys);
+        for (ReviewDiffRow row : rows) {
+            if (missing.isEmpty()) {
+                break;
+            }
+            if (row instanceof ReviewDiffRow.Line line) {
+                missing.remove(line.file() + " " + line.lineKey());
+            }
+        }
+        return missing.isEmpty();
     }
 
     private ReviewDiffRows.Options buildOptions() {

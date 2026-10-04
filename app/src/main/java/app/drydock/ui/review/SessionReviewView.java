@@ -1797,6 +1797,12 @@ public final class SessionReviewView extends BorderPane {
      */
     static final String HUNK_NOT_RENDERED = "Not settled: a hunk it covers is past what the diff can show";
 
+    /**
+     * Why {@code a} or "Approve without passing" did nothing in the tour: some
+     * of the step's changed rows are past the whole-file view's row cap.
+     */
+    static final String STEP_NOT_RENDERED = "Not approved: some of this step's lines are past what the diff can show";
+
     /** Whether every one of {@code digests} has its hunk's card rendered in the diff column. */
     private boolean allRendered(List<String> digests) {
         Optional<SectionStates.Board> board = board();

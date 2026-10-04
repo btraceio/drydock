@@ -1038,6 +1038,10 @@ final class TourController {
             stepPanel.focusBanner();
             return;
         }
+        if (!stepRendered(step.get())) {
+            stepPanel.showTransient(SessionReviewView.STEP_NOT_RENDERED);
+            return;
+        }
         List<ReviewAnnotation> findings = stepFindings(step.get());
         Optional<StepGate.Unmet> unmet = StepGate.unmet(step.get(), record.progress(step.get().id()), findings,
                 record);
@@ -1095,6 +1099,10 @@ final class TourController {
                 return;
             }
         }
+        if (!stepRendered(tour.get().tour().step(stepId).orElseThrow())) {
+            stepPanel.showTransient(SessionReviewView.STEP_NOT_RENDERED);
+            return;
+        }
         updateCurrentTour(record -> record.tour().step(stepId).map(step -> {
             StepProgress now = record.progress(stepId);
             if (!now.stale()) {
@@ -1107,6 +1115,28 @@ final class TourController {
             return record.withProgress(new StepProgress(stepId, StepProgress.fresh(step, index).hunkDigests(),
                     now.checks(), StepProgress.Decision.OVERRIDDEN, Optional.of(reason), false));
         }).orElse(record));
+    }
+
+    /**
+     * Whether every changed row {@code step} anchors has a row on screen. The
+     * whole-file view truncates at the column's row cap, and passing or
+     * overriding a step is a claim the reader saw its code -- the rule the
+     * hunk diff's settle follows too ({@link SessionReviewView#HUNK_NOT_RENDERED}).
+     * Rows are taken from the review diff; their line keys are the same in
+     * the whole-file diff the column renders.
+     */
+    private boolean stepRendered(TourStep step) {
+        Optional<UnifiedDiff> diff = view.loadedDiff();
+        if (diff.isEmpty()) {
+            return false;
+        }
+        AnchorIndex index = AnchorIndex.of(diff.get());
+        List<String> keys = index.changedRows().stream()
+                .filter(row -> step.anchors().stream()
+                        .anyMatch(anchor -> index.contains(anchor, row.file(), row.lineKey())))
+                .map(row -> row.file() + " " + row.lineKey())
+                .toList();
+        return diffColumn.rendersLines(keys);
     }
 
     /** Applies {@code transform} to the selected scope's tour, then re-renders it (and so re-syncs verdicts). */
