@@ -91,4 +91,27 @@ class TourMarksTest {
         assertTrue(marks.markAt("src/A.java", "n2").orElseThrow().bandStart());
         assertFalse(marks.markAt("src/A.java", "n1").orElseThrow().bandStart());
     }
+
+    @Test
+    void anotherStepsUnansweredPredictHidesItsAddedRowsToo() {
+        // On s1, s2's PREDICT is still open: reading n4 here would answer it.
+        TourMarks marks = TourMarks.of(record(), DIFF, "s1");
+        StepMark other = marks.markAt("src/A.java", "n4").orElseThrow();
+
+        assertEquals(StepMark.Strength.OTHER, other.strength());
+        assertTrue(other.hidden());
+        assertTrue(other.bandStart());
+        assertEquals("step 2 — hidden until you answer", other.bandLabel());
+        assertEquals("hidden until you answer", marks.markAt("src/A.java", "n2").orElseThrow().bandLabel(),
+                "the current step's band needs no number");
+    }
+
+    @Test
+    void anotherStepsAnsweredPredictLeavesItsRowsReadable() {
+        TourRecord record = record();
+        record = record.withProgress(record.progress("s2").withCheck(
+                StepGrading.answerChoice(predict("c2"), record.progress("s2").check("c2"), 0)));
+
+        assertFalse(TourMarks.of(record, DIFF, "s1").markAt("src/A.java", "n4").orElseThrow().hidden());
+    }
 }

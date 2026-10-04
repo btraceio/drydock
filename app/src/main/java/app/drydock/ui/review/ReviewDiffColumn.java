@@ -1616,15 +1616,17 @@ final class ReviewDiffColumn extends BorderPane {
             StepMark m = mark.get();
             box.getStyleClass().add(m.strength() == StepMark.Strength.CURRENT
                     ? "tour-step-current" : "tour-step-other");
-            if (m.strength() == StepMark.Strength.OTHER && m.tagged()) {
+            if (m.strength() == StepMark.Strength.OTHER && m.tagged() && !m.hidden()) {
                 Label tag = new Label("step " + m.stepNumber());
                 tag.getStyleClass().add("tour-step-tag");
                 box.getChildren().add(tag);
             }
             if (m.hidden()) {
                 // The band replaces only the source text, so the gutters keep
-                // their line numbers; the label sits on the first hidden row.
-                Label band = new Label(m.bandStart() ? "hidden until you answer" : "");
+                // their line numbers; the label sits on the first hidden row,
+                // and names the step when it is another step's (whose own
+                // "step N" tag it then stands in for).
+                Label band = new Label(m.bandStart() ? m.bandLabel() : "");
                 band.getStyleClass().add("tour-predict-band");
                 band.setMaxWidth(Double.MAX_VALUE);
                 HBox.setHgrow(band, Priority.ALWAYS);

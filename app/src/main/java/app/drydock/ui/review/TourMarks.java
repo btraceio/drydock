@@ -10,13 +10,17 @@ import app.drydock.review.tour.TourRecord;
 import app.drydock.review.tour.TourStep;
 
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * The step marks for one rendered diff: which rows belong to the current
  * step, which changed rows belong to which other step, and which added rows
- * an unanswered PREDICT check hides. Computed once per render on the FX
+ * an unanswered PREDICT check hides -- the current step's and every other
+ * step's alike, since the whole files show every step's rows and reading
+ * one elsewhere would answer its check (spec §5). Computed once per render on the FX
  * thread; a tour is at most 40 steps over one diff, so this is cheap.
  */
 final class TourMarks implements ReviewDiffColumn.StepMarkSource {
@@ -37,7 +41,13 @@ final class TourMarks implements ReviewDiffColumn.StepMarkSource {
         AnchorIndex index = AnchorIndex.of(renderedDiff);
         Map<String, StepMark> marks = new HashMap<>();
         Optional<TourStep> current = record.tour().step(currentStepId);
-        boolean hideAdded = current.map(step -> predictPending(step, record.progress(step.id()))).orElse(false);
+        Set<String> pending = new HashSet<>();
+        for (TourStep step : record.tour().steps()) {
+            if (predictPending(step, record.progress(step.id()))) {
+                pending.add(step.id());
+            }
+        }
+        boolean hideAdded = current.map(step -> pending.contains(step.id())).orElse(false);
         for (UnifiedDiff.FileDiff file : renderedDiff.files()) {
             String previousOwner = null;
             boolean previousHidden = false;
@@ -52,13 +62,18 @@ final class TourMarks implements ReviewDiffColumn.StepMarkSource {
                         owner = current.get().id();
                         hidden = hideAdded && line.kind() == UnifiedDiff.Line.Kind.ADD;
                         mark = new StepMark(StepMark.Strength.CURRENT, record.tour().number(owner),
-                                !owner.equals(previousOwner), hidden, hidden && !previousHidden);
+                                !owner.equals(previousOwner), hidden,
+                                hidden && (!previousHidden || !owner.equals(previousOwner)));
                     } else if (changed) {
                         for (TourStep step : record.tour().steps()) {
                             if (!step.id().equals(currentStepId) && inStep(index, step, file.path(), key)) {
                                 owner = step.id();
+                                hidden = pending.contains(owner) && line.kind() == UnifiedDiff.Line.Kind.ADD;
+                                // A band starts afresh where another step's hidden
+                                // rows begin, so each says whose answer it waits for.
                                 mark = new StepMark(StepMark.Strength.OTHER, record.tour().number(owner),
-                                        !owner.equals(previousOwner), false, false);
+                                        !owner.equals(previousOwner), hidden,
+                                        hidden && (!previousHidden || !owner.equals(previousOwner)));
                                 break;
                             }
                         }
