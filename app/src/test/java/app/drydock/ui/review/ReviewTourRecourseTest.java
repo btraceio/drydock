@@ -180,4 +180,19 @@ class ReviewTourRecourseTest extends ReviewTourFixture {
         assertEquals("Can the input ever be a List?", stored.thread().getLast().text());
         assertEquals(Triage.PROPOSED, stored.triage());
     }
+
+    @Test
+    void submitFromTheTourJumpsToTheFirstUnsettledStepAndSaysSo() {
+        key(KeyCode.CLOSE_BRACKET);
+        assertEquals("s2", ReviewDiagFxThread.call(view::diagCurrentStepId));
+
+        key(KeyCode.ENTER);
+
+        assertEquals("s1", ReviewDiagFxThread.call(view::diagCurrentStepId), "the step that needs a decision");
+        assertEquals(SessionReviewView.ReviewMode.TOUR, ReviewDiagFxThread.call(view::diagMode));
+        assertTrue(shown("⚠ " + SessionReviewView.STEP_UNSETTLED.reason()));
+        assertFalse(shown("⚠ " + SessionReviewView.NEEDS_VERDICT.reason()),
+                "the hunk diff's wording would point at a cursor the tour does not show");
+        assertTrue(host.submittedScopes.isEmpty());
+    }
 }

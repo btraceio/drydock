@@ -2966,9 +2966,17 @@ public final class SessionReviewView extends BorderPane {
             "Some approvals were given against a base that has since moved. Confirm they still "
                     + "hold, or re-review them, before submitting.");
 
+    static final SubmitRefusal STEP_UNSETTLED = new SubmitRefusal(
+            "a step is unsettled; jumped to it",
+            "Pass it, approve it without passing, or request changes on it before submitting the review.");
+
+    static final SubmitRefusal UNCOVERED_UNSETTLED = new SubmitRefusal(
+            "an uncovered hunk is unsettled",
+            "Settle it in the hunk diff (v), or refresh the tour so a step covers it.");
+
     /** Every refusal {@link #submitReview} can raise -- see {@link SubmitRefusal}. */
     static final List<SubmitRefusal> SUBMIT_REFUSALS =
-            List.of(DIFF_FAILED, DIFF_LOADING, NEEDS_VERDICT, STALE_BASE);
+            List.of(DIFF_FAILED, DIFF_LOADING, NEEDS_VERDICT, STALE_BASE, STEP_UNSETTLED, UNCOVERED_UNSETTLED);
 
     /**
      * Submit (spec §4.6): with anything unsettled this jumps to the first
@@ -3017,6 +3025,10 @@ public final class SessionReviewView extends BorderPane {
         List<ReviewVerdict.Decision> decisions = new ArrayList<>();
         for (int i = 0; i < counted.size(); i++) {
             Optional<ReviewVerdict.Decision> decision = decisionOf(counted.get(i));
+            if (decision.isEmpty() && mode == ReviewMode.TOUR) {
+                refuseSubmitFromTour(counted.get(i), false);
+                return;
+            }
             if (decision.isEmpty()) {
                 intentIndex = intents().indexOf(counted.get(i));
                 refreshReviewState();
@@ -3029,6 +3041,10 @@ public final class SessionReviewView extends BorderPane {
             // so posting it is a decision the reader has not actually made
             // about the code as it stands now.
             if (sectionState(counted.get(i)).staleness() == SectionStates.Staleness.MOVED) {
+                if (mode == ReviewMode.TOUR) {
+                    refuseSubmitFromTour(counted.get(i), true);
+                    return;
+                }
                 intentIndex = intents().indexOf(counted.get(i));
                 refreshReviewState();
                 revealCurrentIntent();
@@ -3039,6 +3055,31 @@ public final class SessionReviewView extends BorderPane {
         }
         host.submit(scope.get(), buildDiffIndex(diffColumn.displayedDiff()), decisions,
                 lineTextLookup(diffColumn.renderedDiff()), unverifiedOf(scope.get()));
+    }
+
+    /**
+     * Submit's refusal while the tour is showing. The hunk diff's answer --
+     * move the intent cursor and reveal it -- would narrow a column the tour
+     * does not narrow and settle nothing anyone can see, so here the refusal
+     * jumps to a step: for a stale approval the step covering {@code
+     * section}'s hunks, otherwise the first unsettled step. A hunk no step
+     * covers has no step to jump to, and the footer says where to settle it.
+     */
+    private void refuseSubmitFromTour(ReviewIntent section, boolean staleBase) {
+        Optional<TourRecord> tour = currentTour();
+        List<String> digests = digestsOf(section);
+        Optional<String> target = tour.flatMap(record -> {
+            Optional<String> covering = staleBase
+                    ? record.tour().steps().stream()
+                            .map(TourStep::id)
+                            .filter(id -> record.progress(id).hunkDigests().stream().anyMatch(digests::contains))
+                            .findFirst()
+                    : Optional.empty();
+            return covering.or(() -> firstUnsettled(record));
+        });
+        target.ifPresent(this::selectStep);
+        SubmitRefusal refusal = staleBase ? STALE_BASE : target.isPresent() ? STEP_UNSETTLED : UNCOVERED_UNSETTLED;
+        verdictBar.showSubmitRefused(refusal.reason(), refusal.detail());
     }
 
     /** What the review approves without verification: step and hunk overrides, and untriaged agent findings. */
