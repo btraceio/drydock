@@ -1692,16 +1692,23 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      *
      * <p>Eviction is value-aware ({@code remove(key, value)}): a slow failing
      * listing must not evict a newer entry somebody else already installed.</p>
+     *
+     * <p>The freshness check and the install are one atomic {@code compute}:
+     * resolves arrive from git-executor threads as well as the FX thread
+     * (the cold-cache branch read runs first), and a separate get-then-put
+     * let two of them both miss and each spawn its own {@code gh} listing.
+     * Only the caller whose memo was installed spawns; the rest share its
+     * future.</p>
      */
     private CompletableFuture<List<GhCliService.OpenPullRequest>> openPullRequests(Path repositoryRoot) {
-        PullRequestMemo memo = pullRequestMemos.get(repositoryRoot);
-        if (memo != null && memo.isFresh()) {
-            return memo.listing();
-        }
         CompletableFuture<List<GhCliService.OpenPullRequest>> listing = new CompletableFuture<>();
-        PullRequestMemo installed =
+        PullRequestMemo candidate =
                 new PullRequestMemo(System.nanoTime() + PULL_REQUEST_MEMO_NANOS, listing);
-        pullRequestMemos.put(repositoryRoot, installed);
+        PullRequestMemo installed = pullRequestMemos.compute(repositoryRoot,
+                (root, current) -> current != null && current.isFresh() ? current : candidate);
+        if (installed != candidate) {
+            return installed.listing();
+        }
         ghCliService.openPullRequests(repositoryRoot).whenComplete((result, failure) -> {
             if (failure != null) {
                 LOG.log(Level.WARNING, "Could not list pull requests in " + repositoryRoot, failure);
