@@ -1534,8 +1534,9 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * applies. A named choice is also what gets persisted -- the same write
      * the switcher's own chip makes.</p>
      *
-     * <p>Everything after {@code showResolving()} is asynchronous (a git base
-     * measurement and a {@code gh} listing), and EVERY exit -- success,
+     * <p>Everything after {@code showResolving()} is asynchronous (a branch read
+     * when the cache has none, a git base measurement and a {@code gh}
+     * listing), and EVERY exit -- success,
      * failure, and each early return -- replaces that placeholder.</p>
      */
     private void resolveReviewScopes(OpenSessionTab tab, Optional<SessionReviewScopes.Choice> requested) {
@@ -1585,9 +1586,11 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
         long generation = ++reviewResolveSequence;
         reviewResolveInFlight.put(sessionId, generation);
-        openPullRequestOn(repositoryRoot, branch)
-                .thenCompose(pullRequest -> sessionReviewScopes.forCheckout(repositoryRoot, checkoutRoot,
-                        branch, Optional.of(sessionId), pullRequest))
+        // The cached branch is only a hint: on a miss forSessionCheckout asks
+        // git, off this thread, before the PR lookup -- the board is already
+        // on "Resolving…", and every exit below replaces it.
+        sessionReviewScopes.forSessionCheckout(repositoryRoot, checkoutRoot, branch, Optional.of(sessionId),
+                        resolvedBranch -> openPullRequestOn(repositoryRoot, resolvedBranch))
                 .whenComplete((scopes, failure) -> Platform.runLater(() -> {
                     if (!Long.valueOf(generation).equals(reviewResolveInFlight.get(sessionId))) {
                         // Superseded by a later gesture (a chip switch while
@@ -1719,9 +1722,12 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     /**
      * The branch {@code checkoutRoot} is on, from the status the sidebar
      * already fetched, falling back to what {@code git worktree list} reported
-     * for it. Read from cache rather than re-run: this decides which pull
-     * request the checkout carries, not the scope's identity (see {@link
-     * ReviewScopeRegistry}), so a miss costs the PR chip, never a finding.
+     * for it. A hint only, and one that misses whenever the cache is cold --
+     * a worktree created a moment ago, any reveal right after a restart. A
+     * miss is not cheap: on a {@code pr-<n>} checkout the branch decides the
+     * local scope's PR ref, which is part of its identity (see {@link
+     * ReviewScopeRegistry}), so {@link SessionReviewScopes#forSessionCheckout}
+     * asks git itself when this comes back empty.
      */
     private Optional<String> branchOfCheckout(Repository repository, ManagedAgentSession session,
                                               Path checkoutRoot) {
@@ -2614,7 +2620,9 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
         Path root = scope.diffRoot();
         String baseRef = scope.base();
-        String headRef = scope.head();
+        // scope.head() may be the "(no branch)" display label, which is also
+        // the MCP wire value and so stays as it is; git gets HEAD instead.
+        String headRef = SessionReviewScopes.headRevision(scope.head());
         CompletableFuture
                 .supplyAsync(() -> new ReviewBaseline(resolveRef(root, baseRef),
                         resolveRef(root, headRef)), REVIEW_GIT_EXECUTOR)

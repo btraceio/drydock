@@ -131,6 +131,30 @@ class GitStatusServiceTest {
     }
 
     @Test
+    void currentBranchNamesTheCheckedOutBranchAndNothingForADetachedHead(@TempDir Path repo)
+            throws Exception {
+        initRepo(repo, "main");
+        writeFile(repo, "README.md", "hello\n");
+        runGit(repo, "add", "README.md");
+        commit(repo, "initial commit");
+        runGit(repo, "checkout", "-b", "pr-42");
+
+        assertEquals(Optional.of("pr-42"), service.currentBranch(repo).get());
+
+        runGit(repo, "checkout", "--detach", "HEAD");
+
+        assertEquals(Optional.empty(), service.currentBranch(repo).get(),
+                "a detached HEAD is an answer (no branch), not a failure");
+    }
+
+    @Test
+    void currentBranchOfANonRepositoryFailsRatherThanReadingAsDetached(@TempDir Path notARepo) {
+        CompletionException completion = assertThrows(CompletionException.class,
+                () -> service.currentBranch(notARepo).join());
+        assertInstanceOf(GitException.class, completion.getCause());
+    }
+
+    @Test
     void aheadBehindReportedRelativeToUpstream(@TempDir Path remoteDir, @TempDir Path cloneDir) throws Exception {
         Path remote = remoteDir.resolve("remote.git");
         Files.createDirectory(remote);

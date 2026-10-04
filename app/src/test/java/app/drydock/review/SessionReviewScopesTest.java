@@ -17,7 +17,10 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -310,6 +313,100 @@ class SessionReviewScopesTest {
                 repo, detached, Optional.empty(), Optional.empty(), Optional.empty()).get();
 
         assertEquals("(no branch)", resolved.local().head());
+    }
+
+    /**
+     * The reported defect: a {@code pr-<n>} worktree resolved while the UI's
+     * status cache had nothing for it yet (a worktree created a moment ago,
+     * or any reveal right after a restart). The branch came back empty, the
+     * PR lookup was skipped, and a second local identity with head {@code
+     * "(no branch)"} and no PR ref was minted, bound to the session, and
+     * never revoked. A cold cache must cost a git call, not an identity.
+     */
+    @Test
+    void aColdCachePrCheckoutResolvesToExactlyItsPullRequestScopes(
+            @TempDir Path dir, @TempDir Path worktreeParent)
+            throws ExecutionException, InterruptedException, IOException {
+        Path repo = initCommittedRepo(dir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "pr-42").get();
+        ManagedSessionId session = ManagedSessionId.newId();
+        List<GhCliService.OpenPullRequest> listing = List.of(pullRequest(42, "someones-branch"));
+
+        SessionReviewScopes.Scopes resolved = scopes.forSessionCheckout(repo, worktree, Optional.empty(),
+                Optional.of(session),
+                branch -> CompletableFuture.completedFuture(
+                        SessionReviewScopes.pullRequestCarriedBy(listing, branch))).get();
+
+        assertEquals("pr-42", resolved.local().head());
+        assertEquals(42, resolved.local().pr().orElseThrow().number());
+        assertEquals(42, resolved.pullRequest().orElseThrow().pr().orElseThrow().number());
+        List<ReviewScope> minted = registry.scopes().stream()
+                .filter(scope -> scope.sessionId().equals(Optional.of(session)))
+                .toList();
+        assertEquals(2, minted.size(), "exactly {PR/#42, WORKTREE/#42}; got " + minted);
+        assertEquals(Set.of(ReviewScope.Kind.PR, ReviewScope.Kind.WORKTREE),
+                minted.stream().map(ReviewScope::kind).collect(Collectors.toSet()));
+        assertTrue(minted.stream().allMatch(scope -> scope.pr().isPresent()),
+                "no PR-less (no branch) sibling identity: " + minted);
+    }
+
+    /** A cached branch is used as given: the lookup is asked about exactly that branch. */
+    @Test
+    void aWarmCacheBranchIsUsedAsGiven(@TempDir Path dir, @TempDir Path worktreeParent)
+            throws ExecutionException, InterruptedException, IOException {
+        Path repo = initCommittedRepo(dir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feature/x").get();
+        List<Optional<String>> asked = new ArrayList<>();
+
+        SessionReviewScopes.Scopes resolved = scopes.forSessionCheckout(repo, worktree,
+                Optional.of("feature/x"), Optional.empty(), branch -> {
+                    asked.add(branch);
+                    return CompletableFuture.completedFuture(Optional.empty());
+                }).get();
+
+        assertEquals(List.of(Optional.of("feature/x")), asked);
+        assertEquals("feature/x", resolved.local().head());
+    }
+
+    /**
+     * A genuinely detached checkout still resolves with no branch -- and its
+     * baseline head is a real commit. The {@code "(no branch)"} label is for
+     * display and the MCP wire only; handed to {@code rev-parse} it failed
+     * on every board render and left every verdict on the scope undatable.
+     */
+    @Test
+    void aDetachedCheckoutsBaselineHeadIsARealCommit(@TempDir Path dir, @TempDir Path worktreeParent)
+            throws ExecutionException, InterruptedException, IOException {
+        Path repo = initCommittedRepo(dir);
+        Path detached = worktreeParent.resolve("detached");
+        runGit(repo, "worktree", "add", "--detach", detached.toString());
+        List<Optional<String>> asked = new ArrayList<>();
+
+        SessionReviewScopes.Scopes resolved = scopes.forSessionCheckout(repo, detached, Optional.empty(),
+                Optional.empty(), branch -> {
+                    asked.add(branch);
+                    return CompletableFuture.completedFuture(Optional.empty());
+                }).get();
+
+        assertEquals(List.of(Optional.<String>empty()), asked, "a detached HEAD has no branch to look up");
+        assertEquals("(no branch)", resolved.local().head(), "the wire value is unchanged");
+        String revision = SessionReviewScopes.headRevision(resolved.local().head());
+        assertEquals("HEAD", revision);
+        Optional<String> headCommit = gitStatusService.headCommitBlocking(detached);
+        assertTrue(headCommit.isPresent());
+        assertEquals(headCommit, gitStatusService.commitForRefBlocking(detached, revision));
+    }
+
+    /** Every head label that is not a revision reads as {@code HEAD}; a branch is left alone. */
+    @Test
+    void headRevisionMapsOnlyLabelsToHead() {
+        assertEquals("HEAD", SessionReviewScopes.headRevision("(no branch)"));
+        assertEquals("HEAD", SessionReviewScopes.headRevision("(detached)"));
+        assertEquals("HEAD", SessionReviewScopes.headRevision(""));
+        assertEquals("HEAD", SessionReviewScopes.headRevision("  "));
+        assertEquals("HEAD", SessionReviewScopes.headRevision(null));
+        assertEquals("pr-42", SessionReviewScopes.headRevision("pr-42"));
+        assertEquals("feature/x", SessionReviewScopes.headRevision("feature/x"));
     }
 
     /**

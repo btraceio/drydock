@@ -780,6 +780,38 @@ public final class GitStatusService implements AutoCloseable {
         return sha.isEmpty() ? Optional.empty() : Optional.of(sha);
     }
 
+    /**
+     * The branch {@code workingDirectory} has checked out, on this service's
+     * background executor; empty for a detached HEAD.
+     *
+     * <p>{@code symbolic-ref} rather than a full {@link #getStatus}: this is
+     * asked for one fact, and {@code git status} in a JDK-sized checkout takes
+     * seconds. With {@code -q}, exit 1 and no stderr is git's own answer for
+     * "HEAD is not a branch" -- an ordinary state, so empty. Anything else
+     * (not a repository, git missing, a timeout) completes exceptionally with
+     * a {@link GitException}: a failure must not read as "detached".</p>
+     */
+    public CompletableFuture<Optional<String>> currentBranch(Path workingDirectory) {
+        return CompletableFuture.supplyAsync(() -> currentBranchBlocking(workingDirectory), executor);
+    }
+
+    Optional<String> currentBranchBlocking(Path workingDirectory) {
+        Path git = locator.locate()
+                .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
+        List<String> command = List.of(git.toString(), "-C", workingDirectory.toString(),
+                "symbolic-ref", "-q", "--short", "HEAD");
+        ProcessResult result = run(command);
+        if (result.exitCode() == 1 && result.stderr().isBlank()) {
+            return Optional.empty();
+        }
+        if (result.exitCode() != 0) {
+            throw new GitCommandFailedException(command, result.exitCode(),
+                    ProcessRunner.excerpt(result.stderr()));
+        }
+        String branch = result.stdout().strip();
+        return branch.isEmpty() ? Optional.empty() : Optional.of(branch);
+    }
+
     /** Async form of {@link #headCommitBlocking}, on this service's background executor. */
     public CompletableFuture<Optional<String>> headCommit(Path workingDirectory) {
         return CompletableFuture.supplyAsync(() -> headCommitBlocking(workingDirectory), executor);

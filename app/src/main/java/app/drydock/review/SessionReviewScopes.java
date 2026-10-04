@@ -11,6 +11,9 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Function;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * The scopes one checkout offers its session's Review sub-tab (spec §3.2):
@@ -100,6 +103,8 @@ public final class SessionReviewScopes {
     }
 
     private static final String NO_BRANCH = "(no branch)";
+    private static final String DETACHED = "(detached)";
+    private static final Logger LOG = Logger.getLogger(SessionReviewScopes.class.getName());
 
     private final GitStatusService gitStatusService;
     private final ReviewScopeRegistry registry;
@@ -107,6 +112,60 @@ public final class SessionReviewScopes {
     public SessionReviewScopes(GitStatusService gitStatusService, ReviewScopeRegistry registry) {
         this.gitStatusService = Objects.requireNonNull(gitStatusService, "gitStatusService");
         this.registry = Objects.requireNonNull(registry, "registry");
+    }
+
+    /**
+     * Resolves a session's checkout the way the Review board does: the
+     * branch first, then the pull request it carries, then {@link
+     * #forCheckout}. Never blocks the caller.
+     *
+     * <p>{@code cachedBranch} is a hint (the UI's status cache), never the
+     * answer: when it has nothing, the branch is asked of git. On a {@code
+     * pr-<n>} checkout the branch decides the local scope's PR ref, and that
+     * ref is part of the scope's identity -- so an empty branch from a cold
+     * cache (a worktree created a moment ago, any reveal right after a
+     * restart) used to mint a second, PR-less local identity with head
+     * {@code "(no branch)"}, bound to the session and never revoked. A
+     * genuinely detached HEAD still resolves to no branch. A git failure is
+     * logged and degrades to no branch: a scope with the wrong identity is
+     * still better than a board that shows nothing.</p>
+     *
+     * @param pullRequestOf the caller's lookup of the open PR a branch
+     *                      carries; see {@link #pullRequestCarriedBy}
+     */
+    public CompletableFuture<Scopes> forSessionCheckout(Path repositoryRoot, Path checkoutRoot,
+            Optional<String> cachedBranch, Optional<ManagedSessionId> session,
+            Function<Optional<String>, CompletableFuture<Optional<GhCliService.OpenPullRequest>>> pullRequestOf) {
+        Optional<String> hint = cachedBranch.filter(name -> !name.isBlank());
+        CompletableFuture<Optional<String>> branch = hint.isPresent()
+                ? CompletableFuture.completedFuture(hint)
+                : gitStatusService.currentBranch(checkoutRoot).handle((name, failure) -> {
+                    if (failure != null) {
+                        LOG.log(Level.WARNING, "Could not read the branch of " + checkoutRoot
+                                + "; resolving its review scopes as if detached", failure);
+                        return Optional.<String>empty();
+                    }
+                    return name;
+                });
+        return branch.thenCompose(resolved -> pullRequestOf.apply(resolved)
+                .thenCompose(pullRequest -> forCheckout(repositoryRoot, checkoutRoot,
+                        resolved, session, pullRequest)));
+    }
+
+    /**
+     * The revision git should resolve for a scope's {@code head}. The head
+     * is a branch name, or {@link #NO_BRANCH} for a checkout with none --
+     * a label for display and the MCP wire, never a revision. Every such
+     * label (and the {@code "(detached)"} one the sidebar uses) reads as
+     * {@code HEAD}, which is what a local scope's diff compares anyway.
+     * Handed to {@code rev-parse} as-is, the label failed on every board
+     * render and left every verdict on the scope undatable.
+     */
+    public static String headRevision(String head) {
+        if (head == null || head.isBlank() || head.equals(NO_BRANCH) || head.equals(DETACHED)) {
+            return "HEAD";
+        }
+        return head;
     }
 
     /**
