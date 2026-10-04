@@ -86,6 +86,57 @@ class TourMigrationTest {
         assertTrue(AnchorIndex.of(shifted).resolves(s1.anchors().get(1)));
     }
 
+    /**
+     * src/A.java's second hunk shifted down five lines, and a different hunk
+     * now sits at the line numbers it used to have: n21/n22 are new code.
+     */
+    private static UnifiedDiff aShiftedUnderNewCode() {
+        UnifiedDiff.FileDiff shiftedA = file("src/A.java",
+                UNCHANGED_A.hunks().get(0),
+                hunk(ctx(17, 20, "int p;"), add(21, "evil();"), add(22, "worse();"), ctx(18, 23, "int q;")),
+                hunk(ctx(19, 25, "void f() {"), del(20, "  old();"), add(26, "  next();"), ctx(21, 27, "}")));
+        return new UnifiedDiff(List.of(shiftedA, twoFileDiff().files().get(1)));
+    }
+
+    @Test
+    void anAlreadyStaleStepHasItsAnchorsRemappedSoAnOverrideApprovesTheShiftedRows() {
+        ReviewTour tour = new ReviewTour(TourFixtures.SCOPE, TourFingerprint.of(twoFileDiff()), List.of(
+                step("s1", List.of(new TourAnchor("src/A.java", "n1", "n4")), predict("c1")),
+                step("s2", List.of(new TourAnchor("src/A.java", "n21", "n22")), predict("c2"))));
+        TourRecord record = passed(tour);
+        record = record.withProgress(record.progress("s2").withStale(true));
+        UnifiedDiff shifted = aShiftedUnderNewCode();
+
+        TourMigration.Result result = TourMigration.migrate(record, shifted);
+
+        assertTrue(result.record().progress("s2").stale(), "still stale until the agent re-issues it");
+        TourStep s2 = result.record().tour().step("s2").orElseThrow();
+        assertEquals(List.of(new TourAnchor("src/A.java", "n26", "n27")), s2.anchors(),
+                "the old keys n21..n22 are somebody else's code now");
+        AnchorIndex index = AnchorIndex.of(shifted);
+        assertTrue(s2.anchors().stream().allMatch(index::resolves));
+        assertEquals(List.of(HunkDigest.of("src/A.java", shifted.files().get(0).hunks().get(2))),
+                StepProgress.fresh(s2, index).hunkDigests(),
+                "an override keyed off these anchors approves the shifted hunk, not the new one");
+    }
+
+    @Test
+    void aStepGoingStaleRemapsTheEndpointsThatStillMapAndKeepsTheRest() {
+        ReviewTour tour = new ReviewTour(TourFixtures.SCOPE, TourFingerprint.of(twoFileDiff()), List.of(
+                step("s1", List.of(new TourAnchor("src/A.java", "n1", "n4")), predict("c1")),
+                step("s2", List.of(new TourAnchor("src/A.java", "n21", "n22"),
+                        new TourAnchor("src/B.java", "o5", "o6")), risk("c2"))));
+        UnifiedDiff.FileDiff shiftedA = aShiftedUnderNewCode().files().get(0);
+        UnifiedDiff diff = new UnifiedDiff(List.of(shiftedA, bChanged().files().get(1)));
+
+        TourMigration.Result result = TourMigration.migrate(passed(tour), diff);
+
+        assertEquals(List.of("s2"), result.staleStepIds());
+        assertEquals(List.of(new TourAnchor("src/A.java", "n26", "n27"), new TourAnchor("src/B.java", "o5", "o6")),
+                result.record().tour().step("s2").orElseThrow().anchors(),
+                "B's hunk changed, so its endpoints have nowhere to map and stay as they were");
+    }
+
     @Test
     void aNewHunkIsReportedUncovered() {
         UnifiedDiff withC = new UnifiedDiff(List.of(UNCHANGED_A, twoFileDiff().files().get(1),

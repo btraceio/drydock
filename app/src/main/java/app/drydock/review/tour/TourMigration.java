@@ -27,7 +27,9 @@ import java.util.Set;
  * takes in a hunk it was not written against goes stale, its progress kept
  * but no longer counting. Changed rows in no anchor of a live step are
  * uncovered. A step that was already stale stays stale until the agent
- * re-issues it. Hunk overrides are kept only for hunks the new diff still
+ * re-issues it. A stale step's anchor endpoints are remapped the same way
+ * wherever they still map, so the step keeps naming its own code rather than
+ * whatever lands on its old line numbers. Hunk overrides are kept only for hunks the new diff still
  * has.</p>
  *
  * <p>Pure: the caller applies the result through the tour store's one
@@ -68,7 +70,7 @@ public final class TourMigration {
                 live.add(moved.get());
                 progress.put(step.id(), before);
             } else {
-                steps.add(step);
+                steps.add(remapEndpoints(step, record.hunkRows(), newRows, fileOfDigest));
                 progress.put(step.id(), before.withStale(true));
                 stale.add(step.id());
             }
@@ -135,6 +137,27 @@ public final class TourMigration {
         }
         return Optional.of(new TourStep(step.id(), step.title(), step.narrative(), anchors, step.impactNotes(),
                 step.checks()));
+    }
+
+    /**
+     * A stale step's anchors with every endpoint that still maps carried onto
+     * the new diff, and every one that does not left as it was. Its old line
+     * keys can name whatever code now sits at those numbers, and approving
+     * the step without passing keys it to the hunks its anchors touch; an
+     * endpoint left unmapped mostly no longer resolves, and that override
+     * refuses an anchor that does not.
+     */
+    private static TourStep remapEndpoints(TourStep step, Map<String, List<String>> oldRows,
+                                           Map<String, List<String>> newRows, Map<String, String> fileOfDigest) {
+        List<TourAnchor> anchors = new ArrayList<>();
+        for (TourAnchor anchor : step.anchors()) {
+            String start = mapKey(anchor.file(), anchor.startKey(), oldRows, newRows, fileOfDigest)
+                    .orElse(anchor.startKey());
+            String end = mapKey(anchor.file(), anchor.endKey(), oldRows, newRows, fileOfDigest)
+                    .orElse(anchor.endKey());
+            anchors.add(new TourAnchor(anchor.file(), start, end));
+        }
+        return new TourStep(step.id(), step.title(), step.narrative(), anchors, step.impactNotes(), step.checks());
     }
 
     /**

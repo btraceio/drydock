@@ -114,4 +114,26 @@ class TourMarksTest {
 
         assertFalse(TourMarks.of(record, DIFF, "s1").markAt("src/A.java", "n4").orElseThrow().hidden());
     }
+
+    @Test
+    void aRowAlsoInAnotherStepWithAPendingPredictStaysHiddenOnTheCurrentStep() {
+        // s1 (current, answered) spans n1..n3; s2 (PREDICT open) spans n2..n4.
+        // n2 is s1's row, but showing it would answer s2's check.
+        ReviewTour tour = new ReviewTour("rs", TourFingerprint.of(DIFF), List.of(
+                new TourStep("s1", "One", "n", List.of(new TourAnchor("src/A.java", "n1", "n3")), List.of(),
+                        List.of(predict("c1"))),
+                new TourStep("s2", "Two", "n", List.of(new TourAnchor("src/A.java", "n2", "n4")), List.of(),
+                        List.of(predict("c2")))));
+        TourRecord record = TourRecord.fresh(tour, DIFF);
+        record = record.withProgress(record.progress("s1").withCheck(
+                StepGrading.answerChoice(predict("c1"), record.progress("s1").check("c1"), 0)));
+
+        StepMark shared = TourMarks.of(record, DIFF, "s1").markAt("src/A.java", "n2").orElseThrow();
+
+        assertEquals(StepMark.Strength.CURRENT, shared.strength(), "still the current step's row");
+        assertTrue(shared.hidden());
+        assertTrue(shared.bandStart());
+        assertEquals("step 2 — hidden until you answer", shared.bandLabel(),
+                "the band names the step whose answer it waits for");
+    }
 }
