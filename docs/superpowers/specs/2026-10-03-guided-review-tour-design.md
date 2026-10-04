@@ -44,7 +44,7 @@ In `app.drydock.review`:
 ReviewTour(scopeId, diffFingerprint, List<TourStep> steps)
 TourStep(id, title, narrative, List<Anchor> anchors,
          List<ImpactNote> impactNotes, List<TourCheck> checks)
-Anchor(file, startKey, endKey)            // line keys: n<newLine> / o<oldLine>
+Anchor(file, startKey, endKey, note?)     // line keys: n<newLine> / o<oldLine>
 ImpactNote(file, line, text)              // provenance CLAIMED
 TourCheck(id, kind, prompt, choices, answerKey, explanation,
           List<TourCheck> alternates)     // kind ∈ {PREDICT, TRACE, RISK}
@@ -55,6 +55,10 @@ TourCheck(id, kind, prompt, choices, answerKey, explanation,
   address a hunk that only removes lines, or a deleted file; line keys can.
 - `narrative` is two to four sentences: why this part exists and what it
   changes.
+- `note` (optional, ≤ 400 characters) is the one claim an anchored range
+  supports. The diff column shows it under the range's last row (§5), so the
+  explanation sits next to the code it is about. A tour with no notes is
+  valid and renders from the narrative alone.
 - PREDICT and TRACE carry choices and an answer key that must be one of the
   choices. RISK carries neither. Every check carries at least one alternate.
 
@@ -169,8 +173,20 @@ the threshold where it is.
   narrative, then the impact (agent notes pinned on top, then called-from
   and calls lists with their provenance), then the check, then any findings
   on the step's lines that still need triage. Findings also show in the
-  column gutter.
-- **Bottom: the shared trail bar.**
+  column gutter. While a PREDICT is open the order flips: the check leads and
+  the narrative waits behind a "Read the code first" notice, because the
+  narrative states what the added lines do.
+- **Bottom: the key-hints strip, then the shared trail bar.** The strip lists
+  only the keys that work in the current state (answering a check, reading,
+  step decided) and hides with `h`; hidden, a "Shortcuts h" button remains.
+  The choice persists as `reviewKeyHintsHidden` in the UI state.
+
+**Claims in the column.** When a step's anchors carry notes, each range gets a
+numbered badge on its first row and a callout under its last row. One claim
+is active: its callout is expanded and its rows keep the strong highlight;
+the others collapse to one line and their rows recede. Claims are not drawn
+while the step's PREDICT is open, or on rows another step's PREDICT hides --
+they are the explanation, and showing them first would answer the check.
 
 **Shared components.** `PeekLayer`, `NavigationTrail`, `TrailBar`,
 `SearchRail` and `SymbolPeekService` move from `ui.explorer` to a shared
@@ -195,7 +211,9 @@ because a removed row has no line in the post-image.
   Explorer.
 - `b` returns the column to the current step's first anchor. A "↩ back to
   step N" pill shows whenever the viewport is off the step's rows.
-- `.` and `,` move to the next and previous anchor within a step. A
+- `.` and `,` move to the next and previous anchor within a step -- the
+  claims, when it makes them. With no check open to answer, `1`–`4` jump to
+  that claim; a click on a callout makes it active without scrolling. A
   multi-file step shows its anchors as chips.
 
 **Checks in the panel:**
@@ -223,6 +241,7 @@ because a removed row has no line in the post-image.
 - `p` (path mode) and `i` (collapse intents) go with the intent rail; both are
   now unbound.
 - `m` collapses the step panel.
+- `h` hides or shows the key-hints strip (tour only).
 - `c` (show unchanged lines) toggles the folding of unchanged runs.
 - `d` stays density. The search rail's scope toggle, which is `d` in the
   Explorer, is a button and `⇧D` in Review.
@@ -350,7 +369,8 @@ path stay as computed input to the agent.
 - A verdict for a fingerprint other than the current one is dropped.
 
 Tour JSON is decoded with the depth-bounded `JsonParser`, with per-field
-size caps: narrative ≤ 1,000 characters, ≤ 40 steps, ≤ 6 checks per step.
+size caps: narrative ≤ 1,000 characters, anchor note ≤ 400 characters,
+≤ 40 steps, ≤ 6 checks per step.
 
 ## 9. Testing
 
