@@ -1,6 +1,5 @@
 package app.drydock.ui.review;
 
-import app.drydock.review.AnnotationStatus;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.Severity;
 import app.drydock.review.Triage;

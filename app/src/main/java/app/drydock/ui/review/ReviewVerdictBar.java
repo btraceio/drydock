@@ -4,6 +4,7 @@ import app.drydock.review.ReviewVerdict;
 
 import javafx.css.PseudoClass;
 import javafx.geometry.Pos;
+import javafx.scene.Node;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.scene.control.Tooltip;
@@ -411,7 +412,7 @@ final class ReviewVerdictBar extends VBox {
         submitRefusalLabel.setTooltip(new Tooltip(detail));
         submitRefusalLabel.setVisible(true);
         submitRefusalLabel.setManaged(true);
-        submitButton.pseudoClassStateChanged(javafx.css.PseudoClass.getPseudoClass("refused"), true);
+        submitButton.pseudoClassStateChanged(PseudoClass.getPseudoClass("refused"), true);
         // The two footer refusals are MUTUALLY EXCLUSIVE. Raised together --
         // submit refuses, the reader then clicks "Ask the agent to fix it" on
         // the same file, and neither path calls update() -- they and the
@@ -451,7 +452,7 @@ final class ReviewVerdictBar extends VBox {
         askRefusalLabel.setVisible(true);
         askRefusalLabel.setManaged(true);
         askAgentButton.pseudoClassStateChanged(
-                javafx.css.PseudoClass.getPseudoClass("refused"), true);
+                PseudoClass.getPseudoClass("refused"), true);
         // See showSubmitRefused: one refusal in this footer at a time.
         clearSubmitRefused();
         fitFooter();
@@ -461,7 +462,7 @@ final class ReviewVerdictBar extends VBox {
         askRefusalLabel.setVisible(false);
         askRefusalLabel.setManaged(false);
         askAgentButton.pseudoClassStateChanged(
-                javafx.css.PseudoClass.getPseudoClass("refused"), false);
+                PseudoClass.getPseudoClass("refused"), false);
         fitFooter();
     }
 
@@ -495,7 +496,7 @@ final class ReviewVerdictBar extends VBox {
     private double footerWidthWithoutHint() {
         double needed = footer.getInsets().getLeft() + footer.getInsets().getRight();
         int slots = 0;
-        for (javafx.scene.Node child : footer.getChildren()) {
+        for (Node child : footer.getChildren()) {
             if (child == hintLabel || (!child.isManaged() && child != hintLabel)) {
                 continue;
             }
@@ -516,7 +517,7 @@ final class ReviewVerdictBar extends VBox {
     private void clearSubmitRefused() {
         submitRefusalLabel.setVisible(false);
         submitRefusalLabel.setManaged(false);
-        submitButton.pseudoClassStateChanged(javafx.css.PseudoClass.getPseudoClass("refused"), false);
+        submitButton.pseudoClassStateChanged(PseudoClass.getPseudoClass("refused"), false);
         fitFooter();
     }
 
@@ -590,7 +591,7 @@ final class ReviewVerdictBar extends VBox {
             refusalLabel.setVisible(blocked);
             refusalLabel.setManaged(blocked);
             approveButton.pseudoClassStateChanged(
-                    javafx.css.PseudoClass.getPseudoClass("refused"), blocked);
+                    PseudoClass.getPseudoClass("refused"), blocked);
             actionRow.getChildren().setAll(previousButton, nextButton, targetLabel,
                     approveButton, requestChangesButton, askAgentButton,
                     refusalLabel, actionSpacer, navHint);
@@ -688,11 +689,11 @@ final class ReviewVerdictBar extends VBox {
      * decision does not oscillate: dropping it would otherwise free the room
      * that immediately justifies bringing it back.</p>
      */
-    private double actionRowWidth(double width, javafx.scene.Node excluded) {
+    private double actionRowWidth(double width, Node excluded) {
         double needed = actionRow.getInsets().getLeft() + actionRow.getInsets().getRight()
                 + TARGET_LABEL_MIN;
         int slots = 0;
-        for (javafx.scene.Node child : actionRow.getChildren()) {
+        for (Node child : actionRow.getChildren()) {
             if (!child.isManaged() && child != navHint) {
                 continue;
             }

@@ -36,11 +36,10 @@ sealed interface ReviewDiffRow {
      *
      * <p>{@code hunkIndex} is the hunk's REAL index within its file's own
      * {@code UnifiedDiff.FileDiff.hunks()} -- not its position among the
-     * headers a filtered render happens to show. {@link ReviewDiffColumn#revealHunk}
+     * headers a render happens to show. {@link ReviewDiffColumn#revealHunk}
      * used to count rendered headers instead, which matched the wrong hunk
-     * (and reported success doing it) the moment a filter hid some of a
-     * file's hunks: exactly the shape {@code hunkFilter} produces for an
-     * intent that names only some of a file's hunks.</p>
+     * (and reported success doing it) the moment some of a file's hunks
+     * rendered no card.</p>
      *
      * <p>{@code untracked} and {@code staged} carry {@link UnifiedDiff.FileDiff}'s
      * own flags for the {@code untracked}/{@code staged} chip -- they travel

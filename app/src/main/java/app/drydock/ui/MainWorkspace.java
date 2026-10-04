@@ -1837,7 +1837,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * this repairs the symptom directly: whenever a session's Review sub-tab
      * is showing and the event's target is NOT already inside its board (in
      * which case its own filter will see it, and handling it again here too
-     * would double-fire the shortcut -- moving the intent pointer twice,
+     * would double-fire the shortcut -- moving the file cursor twice,
      * say), replay it through {@link SessionReviewView#handleShortcut}.
      * That method's own {@code TextInputControl} guard still applies, so
      * typing in some OTHER text field elsewhere in the workspace (the
@@ -2067,13 +2067,12 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 return;
             }
             // Approval is refused, not merely discouraged, while a blocking
-            // finding of this intent is open (spec §4.6). blocked is the
-            // view's own computation (SessionReviewView#blockingFindingOpen),
-            // not recomputed here: a host free to derive its own answer from
-            // intent alone once disagreed with the verdict bar's rendered
-            // "blocked" for a finding naming a DIFFERENT, still-current
-            // intent that happened to share a file -- the bar showed clear,
-            // and this refused anyway, with no way for a keypress to tell.
+            // finding on the file is open (spec §4.6). blocked is the view's
+            // own computation (SessionReviewView#blockingFindingOpen), not
+            // recomputed here: a host deriving its own answer once disagreed
+            // with the verdict bar's rendered "blocked" -- the bar showed
+            // clear, and this refused anyway, with no way for a keypress to
+            // tell.
             if (decision.get() == ReviewVerdict.Decision.APPROVED && blocked) {
                 return;
             }
@@ -2126,8 +2125,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         /**
          * A comment minted by the diff column's gutter composer -- already a
          * NIT-severity {@code ReviewAnnotation.human(...)} anchored to its
-         * range and stamped with the intent the view resolved from the file
-         * (see {@link SessionReviewView.Host#addComment}). This just
+         * file and range (see {@link SessionReviewView.Host#addComment}). This just
          * re-keys it onto {@code scope} defensively and stores it; there is
          * no second construction site for what a human comment is.
          */
