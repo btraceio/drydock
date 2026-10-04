@@ -223,13 +223,11 @@ public final class IntentGrouping {
         if (sameAsFallback(sections, fallback)) {
             return fallback;
         }
-        // Numbered in the SAME order the rail's PATH mode and
-        // McpToolRouter's review_scope both use (Task 18, correction 4):
+        // Numbered in the SAME order McpToolRouter's review_scope uses (Task 18, correction 4):
         // ReadingPath.of reorders Sections.of's own list by reading order,
         // so a human looking at computed card (1) here and an agent reading
         // section (1) off review_scope never disagree about which section
-        // that is -- and pressing p in the rail does not silently renumber
-        // every card underneath whichever intent a finding or verdict named.
+        // that is.
         List<Sections.Section> ordered =
                 ReadingPath.of(diff, graph.get(), sections, NO_FAN_IN_SCAN).sections();
         Map<String, ReviewIntent> fallbackByHunk = new LinkedHashMap<>();

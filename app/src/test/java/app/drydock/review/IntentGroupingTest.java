@@ -175,7 +175,7 @@ class IntentGroupingTest {
 
     /**
      * Task 18's correction 4: {@code McpToolRouter}'s {@code review_scope}
-     * and the rail's PATH mode both number sections off {@link
+     * numbers sections off {@link
      * ReadingPath#of}'s reading order, not {@link Sections#of}'s own
      * (rank-free) topological order -- so the plain INTENTS cards this class
      * mints must agree, or a human looking at computed card (1) and an agent

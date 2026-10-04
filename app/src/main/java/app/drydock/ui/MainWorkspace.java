@@ -1813,17 +1813,6 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * showing" means now that review is something a session HAS rather than
      * a place the app navigates to.
      */
-    /**
-     * Diagnostic-only: opens the Review board's out-of-diff fan-in popover
-     * (see {@code SessionReviewView#diagOpenFanIn}). Only the {@code
-     * diag.tabScript} driver calls this.
-     */
-    public String diagOpenFanIn() {
-        return showingReviewBoard()
-                .map(SessionReviewView::diagOpenFanIn)
-                .orElse("no review board showing");
-    }
-
     private Optional<SessionReviewView> showingReviewBoard() {
         return currentlySelected()
                 .filter(open -> open.activeSubTab() == OpenSessionTab.SubTab.REVIEW)

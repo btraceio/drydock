@@ -194,11 +194,10 @@ class ReviewLinkRowTest extends ApplicationTest {
     }
 
     /**
-     * PATH mode narrows the column to a synthetic one-hunk intent
-     * ({@code SessionReviewView.pathStepAsIntent}) before any footer's click
-     * can even fire -- a link is cross-file by construction (spec §7.2), so
-     * its target is routinely a hunk that narrow filter does not show at
-     * all. Left unfixed, the click fires {@link ReviewDiffColumn#revealHunk}
+     * An intent filter can narrow the column to one hunk before any
+     * footer's click can even fire -- a link is cross-file by construction
+     * (spec §7.2), so its target is routinely a hunk that narrow filter does
+     * not show at all. Left unfixed, the click fires {@link ReviewDiffColumn#revealHunk}
      * against a row list that never contained the target, which silently
      * does nothing -- exactly the display/action divergence the brief
      * warns about.
@@ -222,7 +221,7 @@ class ReviewLinkRowTest extends ApplicationTest {
 
         assertTrue(renderedHunkFiles().contains(FILE_B),
                 "a cross-file link must widen out of a one-hunk filter to reach its target, the "
-                        + "way PATH mode narrows the column before every footer click; rendered "
+                        + "way an intent filter narrows the column; rendered "
                         + renderedHunkFiles());
     }
 

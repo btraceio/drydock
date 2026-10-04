@@ -10,7 +10,6 @@ import javafx.scene.control.Labeled;
 import javafx.scene.layout.Border;
 import javafx.scene.layout.Region;
 import javafx.scene.paint.Paint;
-import javafx.scene.input.KeyCode;
 import org.junit.jupiter.api.Test;
 import org.testfx.util.WaitForAsyncUtils;
 
@@ -34,9 +33,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p>Spec §8 puts the distinction on the RAIL, which has three order
  * sources -- {@code reads}, the agent's array order, and {@link
  * app.drydock.review.ReadingPath} -- of which the first two are claimed and
- * the third measured. It is deliberately NOT on a path row: §6.4 says
- * {@code ReadingPath} orders the computed grouping only, so a path row is
- * measured by construction.</p>
+ * the third measured.</p>
  */
 class ReviewProvenanceTest extends ReviewViewFixture {
 
@@ -56,20 +53,6 @@ class ReviewProvenanceTest extends ReviewViewFixture {
         assertTrue(railCardStyleClasses().stream()
                         .noneMatch(classes -> classes.contains("provenance-claimed")),
                 "drydock measured this order itself");
-    }
-
-    /**
-     * §6.4: {@code ReadingPath} orders the computed grouping only, so a PATH
-     * row can never be the agent's claim -- even on a board whose INTENTS
-     * grouping is.
-     */
-    @Test
-    void aPathRowIsNeverMarkedClaimed() {
-        pressP();
-        awaitPathReady();
-
-        assertTrue(railCardStyleClasses().stream()
-                        .noneMatch(classes -> classes.contains("provenance-claimed")));
     }
 
     /**
@@ -147,22 +130,6 @@ class ReviewProvenanceTest extends ReviewViewFixture {
     private String tooltipOfFirstCard() {
         Node card = lookup(".review-intent-card").queryAll().iterator().next();
         return ((Button) card).getTooltip().getText();
-    }
-
-    private void pressP() {
-        press(KeyCode.P).release(KeyCode.P);
-        WaitForAsyncUtils.waitForFxEvents();
-    }
-
-    /** PATH mode builds a ChangeGraph on first entry; poll for its rows. */
-    private void awaitPathReady() {
-        long start = System.nanoTime();
-        while (view.pathRowTextsForTest().isEmpty()) {
-            if (System.nanoTime() - start > 30_000_000_000L) {
-                throw new AssertionError("PATH mode never populated any rows");
-            }
-            sleep(50);
-        }
     }
 
     private List<List<String>> railCardStyleClasses() {

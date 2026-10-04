@@ -7,10 +7,8 @@ import app.drydock.git.UnifiedDiff;
 import app.drydock.mcp.McpActivityLog;
 import app.drydock.review.BaseMove;
 import app.drydock.review.ChangeGraph;
-import app.drydock.review.HunkDigest;
 import app.drydock.review.HunkIds;
 import app.drydock.review.IntentGrouping;
-import app.drydock.review.IntentHunks;
 import app.drydock.review.OutOfDiffFanIn;
 import app.drydock.review.ReadingPath;
 import app.drydock.review.ReviewAnnotation;
@@ -75,7 +73,6 @@ import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -485,17 +482,7 @@ public final class SessionReviewView extends BorderPane {
         /** The diff column has focus: just the hunk it is anchored on. */
         HUNK,
         /** {@code ⇧A} / {@code ⇧R}: every hunk of the current file, regardless of focus. */
-        FILE,
-        /**
-         * PATH mode is showing (Task 18): exactly the row selected there,
-         * regardless of where real Scene focus is. Unlike {@code HUNK} --
-         * which settles a SECTION's next unread hunk, never literally the
-         * one under the pointer (see {@code ReviewVerdictBar#unitWord}) --
-         * this settles the literal hunk the rail is displaying, because a
-         * reader looking at one specific row and pressing {@code a} must not
-         * have something else entirely recorded.
-         */
-        PATH_STEP
+        FILE
     }
 
     private final Host host;
@@ -655,16 +642,6 @@ public final class SessionReviewView extends BorderPane {
     }
 
     /**
-     * {@code p}: the rail's second mode, one row per hunk in reading order
-     * across section boundaries (spec §7.1). A mode of the rail, never a
-     * fourth column -- {@link RailLayout} is untouched by this task -- so
-     * this is the ONE bit that decides which of {@link
-     * ReviewIntentRail#setIntents} / {@link ReviewIntentRail#showPath} the
-     * next {@link #refreshReviewState} calls.
-     */
-    private boolean pathMode;
-
-    /**
      * What a scope's fan-in is until its scan has actually run: {@code
      * unavailable=true}, the honest input for a signal nothing has measured
      * yet. {@link ReadingPath#of}'s own reason text says so ("outside callers
@@ -706,9 +683,6 @@ public final class SessionReviewView extends BorderPane {
      * assert it. Volatile: written on a virtual thread, read on the FX one.</p>
      */
     private volatile String fanInScanThread;
-
-    /** The row the verdict bar's {@code [} / {@code ]} / {@code n} move in PATH mode. */
-    private int pathIndex;
 
     /**
      * {@link #currentPath()}'s last computed result, reused across calls the
@@ -766,16 +740,6 @@ public final class SessionReviewView extends BorderPane {
     private String lastIntentsScopeId;
 
     /**
-     * PATH mode's counterpart to {@link #lastIntents}: the steps the rail
-     * last rendered, so a path that RE-SORTS under the reader can be told
-     * from one that merely re-rendered -- see {@link #reanchorPathCursor}.
-     */
-    private List<ReadingPath.Step> lastPathSteps = List.of();
-
-    /** The scope {@link #lastPathSteps} belongs to; a scope switch must not reanchor against it. */
-    private String lastPathScopeId;
-
-    /**
      * The id of the intent {@code a}/{@code r} last recorded a verdict on,
      * so {@code u} can snap the cursor back to it -- see {@link
      * #undoVerdict}. Cleared once undone, so a second {@code u} with
@@ -795,21 +759,6 @@ public final class SessionReviewView extends BorderPane {
      * approval or under-clear a whole-file one.
      */
     private List<String> lastSettledDigests = List.of();
-
-    /**
-     * Whether {@link #lastSettledDigests} was recorded by {@link
-     * #pathVerdictAction} rather than {@link #verdictAction}'s intents-mode
-     * branch -- {@code u} has to know which of the two to undo through,
-     * since a step has no {@code id} the way an intent does (a step's own
-     * identity is its hunk id, tracked in {@link #lastSettledPathHunkId}
-     * instead). Set at the moment a verdict actually took, not read from
-     * {@link #pathMode} at undo time: pressing {@code p} between settling
-     * and undoing must not change which of the two {@code u} reaches for.
-     */
-    private boolean lastSettledWasPath;
-
-    /** PATH mode's counterpart to {@link #lastSettledIntentId}: the exact step {@code u} snaps back to. */
-    private Optional<String> lastSettledPathHunkId = Optional.empty();
 
     /** Set by {@code m}/{@code f}; remembered independently of the responsive collapse. */
     private boolean marginCollapsedByUser;
@@ -857,7 +806,7 @@ public final class SessionReviewView extends BorderPane {
 
     /**
      * Which surface the board shows (spec §5): the guided tour, or today's
-     * hunk diff -- intent rail, findings margin, path mode. {@code v} flips
+     * hunk diff -- intent rail, findings margin. {@code v} flips
      * it; otherwise a scope with a tour (or a run building one) shows the
      * tour.
      */
@@ -1060,21 +1009,6 @@ public final class SessionReviewView extends BorderPane {
                 revealCurrentIntent();
             }
         });
-        intentRail.setOnPathSelected(step -> {
-            List<ReadingPath.Step> steps = currentPath().steps();
-            int index = steps.indexOf(step);
-            if (index >= 0) {
-                pathIndex = index;
-                refreshReviewState();
-                revealCurrentPathStep();
-            }
-        });
-        // The fan-in count is an affordance, not a statistic (spec §7.4):
-        // "called from 7 places outside the change" is the one reason on the
-        // rail naming evidence the reader cannot see from where they are.
-        intentRail.setFanIn(step -> !fanInOccurrences(step.file()).isEmpty(),
-                (step, anchor) -> diffColumn.showFanIn(step.file(),
-                        fanInOccurrences(step.file()), anchor, () -> askAboutFanIn(step)));
         margin.setOnFilterChanged(filter -> refreshReviewState());
         diffColumn.setPinSource(new PinSource());
         diffColumn.setCommentSink(annotation -> selectedScope().ifPresent(scope -> {
@@ -1099,8 +1033,8 @@ public final class SessionReviewView extends BorderPane {
                 // Unconditional (Task 19): the diff column's link footers
                 // (spec §7.2) need this scope's graph regardless of the
                 // rail's own mode or grouping source, not only where a
-                // reviewer's grouping was itself computed from one or where
-                // PATH mode is showing. requestGraph is a no-op for a diff
+                // reviewer's grouping was itself computed from one.
+                // requestGraph is a no-op for a diff
                 // instance it has already graphed or is already building, so
                 // this costs nothing on a re-diff or a re-selection. The
                 // rail's OWN "refining grouping…" banner is gated
@@ -1332,8 +1266,6 @@ public final class SessionReviewView extends BorderPane {
         headerTitle.setText(headerTitleFor(scope));
         headerContext.setText(headerContextFor(scope));
         intentIndex = 0;
-        pathIndex = 0;
-        forgetPathCursorHistory();
         // Fallback intent ids are NOT scope-namespaced ("auto:change:src" is
         // just (kind, directory)), so two different scopes with a similar
         // layout can mint the identical id -- leaving this set across a
@@ -1341,8 +1273,6 @@ public final class SessionReviewView extends BorderPane {
         // intent in the WRONG scope.
         lastSettledIntentId = Optional.empty();
         lastSettledDigests = List.of();
-        lastSettledPathHunkId = Optional.empty();
-        lastSettledWasPath = false;
         // Tour cursor and mode are per scope as well: the incoming scope
         // opens on its own first unsettled step, in its own default mode.
         currentStepId = null;
@@ -1537,47 +1467,23 @@ public final class SessionReviewView extends BorderPane {
         margin.setFindings(findingsForMargin(scope.get()));
         diffColumn.refreshPins();
         diffColumn.setLinks(linksByHunk());
-        if (pathMode) {
-            List<ReadingPath.Step> steps = currentPath().steps();
-            // The same re-anchoring reanchorCursor does for INTENTS, for the
-            // same reason and with more at stake: pathIndex is a POSITION,
-            // and the out-of-diff fan-in scan is the reading path's first
-            // rank term, so a scan landing mid-read re-sorts these steps
-            // under the reader. Clamping alone would leave the cursor on
-            // whatever hunk now occupies that position -- and since
-            // settleUnit() is PATH_STEP unconditionally in this mode, the
-            // reader's next `a` would approve a hunk they were never shown.
-            if (scopeId.equals(lastPathScopeId) && !steps.equals(lastPathSteps)) {
-                pathIndex = reanchorPathCursor(steps);
-            }
-            lastPathSteps = steps;
-            lastPathScopeId = scopeId;
-            if (!steps.isEmpty()) {
-                pathIndex = Math.clamp(pathIndex, 0, steps.size() - 1);
-            }
-            String selectedHunkId = steps.isEmpty() ? null : steps.get(pathIndex).hunkId();
-            intentRail.showPath(steps, selectedHunkId, emptyReason());
-        } else {
-            // Spec §8: reads and the agent's array order are both the
-            // agent's claim; only a grouping drydock computed itself is
-            // measured. hasReviewerGrouping is exactly that distinction.
-            intentRail.setIntents(currentIntents, currentIntent().map(ReviewIntent::id).orElse(null),
-                    emptyReason(),
-                    host.hasReviewerGrouping(scope.get())
-                            ? Provenance.CLAIMED
-                            : Provenance.MEASURED);
-        }
+        // Spec §8: reads and the agent's array order are both the
+        // agent's claim; only a grouping drydock computed itself is
+        // measured. hasReviewerGrouping is exactly that distinction.
+        intentRail.setIntents(currentIntents, currentIntent().map(ReviewIntent::id).orElse(null),
+                emptyReason(),
+                host.hasReviewerGrouping(scope.get())
+                        ? Provenance.CLAIMED
+                        : Provenance.MEASURED);
         // The graph now builds unconditionally (Task 19, for the diff
         // column's link footers), but the rail's OWN "refining grouping…"
         // banner is about the RAIL's content, not the graph's existence: a
         // reviewer's INTENTS grouping is already final and does not change
-        // when this build lands, so the banner stays gated on the same two
-        // cases requestGraph used to be gated on before this task widened
-        // its OWN trigger -- PATH mode (which reads the graph directly) and
-        // no reviewer grouping (whose INTENTS fallback is what the graph
-        // completing actually refines).
+        // when this build lands, so the banner shows only while there is no
+        // reviewer grouping (whose fallback is what the graph completing
+        // actually refines).
         intentRail.setGroupingPending(graphBuilding.contains(scopeId)
-                && (pathMode || !host.hasReviewerGrouping(scope.get())));
+                && !host.hasReviewerGrouping(scope.get()));
         mcpPanel.filter(Node::isVisible)
                 .ifPresent(panel -> panel.setScope(scope.get()));
         renderVerdictBar(scope.get());
@@ -1774,14 +1680,9 @@ public final class SessionReviewView extends BorderPane {
      * {@code Optional} of one, and there is nothing honest to compute a
      * reading order FROM before one exists.
      *
-     * <p>Correction 2 of this task, in code: this calls {@link Sections#of}
-     * exactly once, purely to hand its result to {@link ReadingPath#of} as
-     * the grouping to reorder -- the result of that one call is never itself
-     * rendered. Every reader of PATH mode (the rail, and {@link
-     * #revealCurrentPathStep}) walks {@link ReadingPath.Path#steps()}, whose
-     * {@link ReadingPath.Step#sectionNumber} already indexes {@link
-     * ReadingPath.Path#sections()} -- the grouping's own order is never on
-     * screen anywhere in this mode.</p>
+     * <p>This calls {@link Sections#of} exactly once, purely to hand its
+     * result to {@link ReadingPath#of} as the grouping to reorder; what is
+     * read from the path is its links ({@link #linksByHunk()}).</p>
      */
     private ReadingPath.Path currentPath() {
         Optional<ReviewScope> scope = selectedScope();
@@ -1812,7 +1713,7 @@ public final class SessionReviewView extends BorderPane {
     /**
      * {@link #currentPath()}'s links, keyed by {@link HunkIds#hunkId} --
      * what the diff column renders as a footer beneath each hunk (spec
-     * §7.2), independent of whether the rail itself is in PATH mode. A step
+     * §7.2). A step
      * with no links is left out of the map entirely rather than mapped to an
      * empty list, so {@link ReviewDiffColumn#setLinks} sees exactly the
      * hunks that have something to say and none that do not.
@@ -1905,14 +1806,6 @@ public final class SessionReviewView extends BorderPane {
                         if (!closed && selectedScope().map(scope -> scope.id().equals(scopeId))
                                 .orElse(false)) {
                             refreshReviewState();
-                            // PATH mode's own reveal is a no-op with no graph
-                            // (revealCurrentPathStep falls back to "whole
-                            // scope" -- see its javadoc), and nothing else
-                            // re-narrows the diff column once this landed:
-                            // without this, entering PATH mode BEFORE a graph
-                            // exists leaves the column showing the whole diff
-                            // forever, even once real steps appear in the
-                            // rail moments later.
                             revealCurrentSelection();
                         }
                     });
@@ -2013,43 +1906,6 @@ public final class SessionReviewView extends BorderPane {
      */
     private OutOfDiffFanIn.Result fanInFor(String scopeId) {
         return fanInByScope.getOrDefault(scopeId, FAN_IN_NOT_SCANNED);
-    }
-
-    /**
-     * Every out-of-diff use of what {@code file} declares, by symbol.
-     *
-     * <p>Iterated over {@link ChangeGraph#changedDeclarations()} -- a sorted
-     * set -- rather than over {@code bySymbol()}, whose iteration order is
-     * the scan's to choose and therefore not something a rendered list may
-     * rest on. {@link ReadingPath} documents the same rule for the same
-     * reason; a popover that listed the same callers in a different order on
-     * a second run would be a determinism defect (spec §9.5), not a
-     * cosmetic one.</p>
-     *
-     * <p>Empty for an unavailable scan, so a count that was never measured
-     * cannot render as one that came out zero.</p>
-     */
-    private Map<String, List<OutOfDiffFanIn.Occurrence>> fanInOccurrences(String file) {
-        Optional<ReviewScope> scope = selectedScope();
-        if (scope.isEmpty()) {
-            return Map.of();
-        }
-        ChangeGraph graph = graphByScope.get(scope.get().id());
-        OutOfDiffFanIn.Result fanIn = fanInFor(scope.get().id());
-        if (graph == null || fanIn.unavailable()) {
-            return Map.of();
-        }
-        Map<String, List<OutOfDiffFanIn.Occurrence>> bySymbol = new LinkedHashMap<>();
-        for (String symbol : graph.changedDeclarations()) {
-            if (!graph.fileDeclaring(symbol).filter(file::equals).isPresent()) {
-                continue;
-            }
-            List<OutOfDiffFanIn.Occurrence> occurrences = fanIn.bySymbol().get(symbol);
-            if (occurrences != null && !occurrences.isEmpty()) {
-                bySymbol.put(symbol, List.copyOf(occurrences));
-            }
-        }
-        return bySymbol;
     }
 
     /**
@@ -2171,14 +2027,6 @@ public final class SessionReviewView extends BorderPane {
      * that kind of staleness.</p>
      */
     SettleUnit settleUnit() {
-        // PATH mode wins outright, regardless of focus: the whole point of
-        // the mode is that the reader is looking at one specific hunk, and
-        // "focus happens to be elsewhere" must not silently widen what a/r/u
-        // touch back out to a whole section the reader never opened -- see
-        // the CRITICAL fix this constant carries (Task 18 follow-up).
-        if (pathMode) {
-            return SettleUnit.PATH_STEP;
-        }
         return isDescendantOf(getScene() == null ? null : getScene().getFocusOwner(), diffColumn)
                 ? SettleUnit.HUNK
                 : SettleUnit.SECTION;
@@ -2195,10 +2043,6 @@ public final class SessionReviewView extends BorderPane {
 
     private void renderVerdictBar(ReviewScope scope) {
         Optional<SectionStates.Board> board = board();
-        if (pathMode) {
-            renderVerdictBarForPathStep(scope, board);
-            return;
-        }
         Optional<ReviewIntent> current = currentIntent();
         if (current.isEmpty() || board.isEmpty()) {
             showIntentOnBar(null, Optional.empty(), false);
@@ -2216,41 +2060,6 @@ public final class SessionReviewView extends BorderPane {
         verdictBar.showStale(state.staleness() == SectionStates.Staleness.MOVED
                 ? Optional.of(new ReviewVerdictBar.StaleInfo(
                         sections.oldBaseOf(board.get(), current.get()), host.currentBase(scope)))
-                : Optional.empty());
-        verdictBar.showActingUnit(settleUnit());
-    }
-
-    /**
-     * PATH mode's own verdict-bar render: the SELECTED ROW's own state, not
-     * the (now invisible) intents cursor's -- a screenshot proved the bar
-     * used to read "2 · Profiler" with a completely different row selected,
-     * and clicking Undo cleared two hunks nowhere near the one on screen.
-     * Reuses {@link SectionStates} against a throwaway single-hunk {@link
-     * ReviewIntent} ({@link #pathStepAsIntent}) rather than deriving
-     * anything new: asking "what does this one-hunk grouping's state look
-     * like" is exactly the question {@code SectionStates.stateOf} already
-     * answers correctly for any {@link ReviewIntent}, real or synthetic.
-     * Progress stays the whole-review count either way -- it was never the
-     * current intent's own count, so PATH mode changes nothing about it.
-     */
-    private void renderVerdictBarForPathStep(ReviewScope scope, Optional<SectionStates.Board> board) {
-        Optional<ReadingPath.Step> step = currentPathStep();
-        if (step.isEmpty() || board.isEmpty()) {
-            showIntentOnBar(null, Optional.empty(), false);
-            verdictBar.showProgress(0, 0);
-            verdictBar.showStale(Optional.empty());
-            verdictBar.showActingUnit(settleUnit());
-            return;
-        }
-        ReviewIntent synthetic = pathStepAsIntent(step.get());
-        boolean blocked = blockingFindingOpenForPathStep(scope, step.get(), false);
-        SectionStates.SectionState state = sectionState(synthetic);
-        showIntentOnBar(synthetic, state.decision(), blocked);
-        verdictBar.showProgress(sections.settledHunkCount(board.get()),
-                sections.distinctDigests(board.get()).size());
-        verdictBar.showStale(state.staleness() == SectionStates.Staleness.MOVED
-                ? Optional.of(new ReviewVerdictBar.StaleInfo(
-                        sections.oldBaseOf(board.get(), synthetic), host.currentBase(scope)))
                 : Optional.empty());
         verdictBar.showActingUnit(settleUnit());
     }
@@ -2310,374 +2119,25 @@ public final class SessionReviewView extends BorderPane {
         }
     }
 
-    // ---- PATH mode ------------------------------------------------------------
-
-    /** Which of the rail's two modes is showing -- test seam for the {@code p} parity test. */
-    ReviewIntentRail.Mode railMode() {
-        return intentRail.mode();
-    }
-
-    /**
-     * {@code p}: flips the rail between {@code INTENTS} and {@code PATH}
-     * (spec §7.1). The mode flips immediately either way -- {@link
-     * #refreshReviewState} renders PATH mode with however many steps {@link
-     * #currentPath()} can answer with right now, which is {@code List.of()}
-     * until a {@link ChangeGraph} exists.
-     *
-     * <p>Entering PATH mode is what makes this task ask for a graph a
-     * reviewer's own grouping would otherwise never need: {@link
-     * #requestGraph} is a no-op when one is already in flight or already
-     * built for this diff, so a scope with no reviewer grouping (which
-     * already triggered a build on diff-resolved) pays nothing extra here,
-     * and one that DOES have a reviewer's grouping -- which skips that
-     * automatic build entirely, see {@code Host#hasReviewerGrouping} -- gets
-     * its graph built for the first time, lazily, only once a human actually
-     * asks to read in this order.</p>
-     */
-    private void togglePathMode() {
-        pathMode = !pathMode;
-        if (pathMode) {
-            pathIndex = 0;
-            forgetPathCursorHistory();
-            selectedScope().ifPresent(scope -> loadedDiff().ifPresent(diff ->
-                    requestGraph(scope.id(), diff)));
-        }
-        refreshReviewState();
-        revealCurrentSelection();
-    }
-
-    /** {@code [} / {@code ]}: moves whichever cursor the rail is currently showing. */
+    /** {@code [} / {@code ]}: moves the intent cursor. */
     private void moveSelection(int delta) {
-        if (pathMode) {
-            movePathStep(delta);
-        } else {
-            moveIntent(delta);
-        }
+        moveIntent(delta);
     }
 
-    /** {@code n}: jumps to the next unsettled hunk, in whichever order the rail is showing. */
+    /** {@code n}: jumps to the next unsettled intent. */
     private void nextUnsettled() {
-        if (pathMode) {
-            nextUnsettledPathStep();
-        } else {
-            nextUnsettledIntent();
-        }
+        nextUnsettledIntent();
     }
 
-    /** Reveals whatever the rail's current mode has selected. */
+    /** Reveals whatever the current mode has selected. */
     private void revealCurrentSelection() {
         if (mode == ReviewMode.TOUR) {
-            // The tour reads whole files across the change; an intent or
-            // path-row filter left over from the hunk diff must not narrow it.
+            // The tour reads whole files across the change; an intent filter
+            // left over from the hunk diff must not narrow it.
             diffColumn.setIntent(null);
             return;
         }
-        if (pathMode) {
-            revealCurrentPathStep();
-        } else {
-            revealCurrentIntent();
-        }
-    }
-
-    /**
-     * Points the diff column at the current PATH row -- the same narrowing
-     * {@link #revealCurrentIntent} does for an intent, over a single hunk
-     * instead of a whole section. Built as a one-hunk {@link ReviewIntent}
-     * purely to reuse {@link ReviewDiffColumn#setIntent}'s existing filter
-     * and anchor machinery -- {@code containsHunk} and {@code anchor()} both
-     * already do exactly what a single {@link ReadingPath.Step} needs, and
-     * duplicating them for a second selectable type would be the same
-     * behaviour twice.
-     *
-     * <p>Falls back to the whole scope ({@code setIntent(null)}) while {@link
-     * #currentPath()} has no steps yet -- entering PATH mode before its
-     * {@link ChangeGraph} exists is the common case, not a corner one, so
-     * this must be called again once the graph lands (see {@link
-     * #requestGraph}'s completion callback) or the column would stay on
-     * "whole scope" forever even after the rail fills in with real rows.</p>
-     */
-    private void revealCurrentPathStep() {
-        List<ReadingPath.Step> steps = currentPath().steps();
-        if (steps.isEmpty()) {
-            diffColumn.setIntent(null);
-            return;
-        }
-        ReadingPath.Step step = steps.get(Math.clamp(pathIndex, 0, steps.size() - 1));
-        ReviewIntent synthetic = pathStepAsIntent(step);
-        diffColumn.setIntent(synthetic);
-        synthetic.anchor().ifPresent(anchor -> diffColumn.revealHunk(anchor.file(), anchor.hunkIndex()));
-    }
-
-    /** {@code [} / {@code ]} in PATH mode: moves the row the rail is showing. */
-    private void movePathStep(int delta) {
-        List<ReadingPath.Step> steps = currentPath().steps();
-        if (steps.isEmpty()) {
-            return;
-        }
-        pathIndex = (int) Math.clamp((long) pathIndex + delta, 0, steps.size() - 1);
-        refreshReviewState();
-        revealCurrentPathStep();
-    }
-
-    /**
-     * {@code n} in PATH mode: the next row whose hunk has no verdict yet --
-     * "next unsettled" stated over hunks, which is what it has always meant
-     * (spec's own correction on this task: a property of hunks, not of
-     * whichever grouping the rail happens to be showing).
-     */
-    private void nextUnsettledPathStep() {
-        Optional<ReviewScope> scope = selectedScope();
-        Optional<UnifiedDiff> diff = loadedDiff();
-        List<ReadingPath.Step> steps = currentPath().steps();
-        if (scope.isEmpty() || diff.isEmpty() || steps.isEmpty()) {
-            return;
-        }
-        for (int offset = 1; offset <= steps.size(); offset++) {
-            int candidate = (pathIndex + offset) % steps.size();
-            Optional<String> digest = digestOfPathStep(diff.get(), steps.get(candidate));
-            if (digest.isPresent() && host.verdict(scope.get(), digest.get()).isEmpty()) {
-                pathIndex = candidate;
-                refreshReviewState();
-                revealCurrentPathStep();
-                return;
-            }
-        }
-    }
-
-    /**
-     * Drops what {@link #reanchorPathCursor} re-anchors against, wherever the
-     * cursor is being deliberately put back to the top.
-     *
-     * <p>Without this, the re-anchor fought the reset. {@link
-     * #refreshReviewState} writes {@link #lastPathSteps} only inside its
-     * {@code pathMode} branch, so a path that changed while the reader was
-     * OUT of PATH mode -- any re-diff does it, since {@link #requestGraph} is
-     * kicked from diff resolution regardless of mode, and so does a fan-in
-     * scan landing -- left that memory stale. Pressing {@code p} then set
-     * {@code pathIndex = 0} and the very next refresh moved it straight back
-     * to wherever the remembered hunk had gone, so the cursor sat on row 2
-     * while row 1 was labelled START HERE.
-     *
-     * <p><strong>This is the same defect the re-anchor exists to prevent,
-     * one gesture over</strong> -- a cursor whose position stops matching
-     * what the rail says. Which is the point: re-anchoring is right when the
-     * ground moves UNDER a reader who is standing still, and wrong when the
-     * reader has just asked to start again. The two cases are told apart by
-     * who moved, not by what changed, so every deliberate reset says so
-     * here rather than each one being remembered separately.</p>
-     */
-    private void forgetPathCursorHistory() {
-        lastPathSteps = List.of();
-        lastPathScopeId = null;
-    }
-
-    /**
-     * Where the reader's hunk sits in a path that has just been recomputed.
-     *
-     * <p>Called only when the step list actually CHANGED (see the caller),
-     * so a plain {@code [}/{@code ]} move -- which writes {@link #pathIndex}
-     * and then refreshes against an unchanged list -- is never dragged back
-     * to where it came from.</p>
-     *
-     * <p>Identity is the hunk id, never the position. A hunk that is no
-     * longer in the path at all (a newly-arrived diff dropped it) leaves the
-     * index alone for the caller's clamp to own: there is nowhere honest to
-     * put a cursor whose hunk has gone.</p>
-     */
-    private int reanchorPathCursor(List<ReadingPath.Step> steps) {
-        if (lastPathSteps.isEmpty() || steps.isEmpty()) {
-            return pathIndex;
-        }
-        String hunkId = lastPathSteps.get(Math.clamp(pathIndex, 0, lastPathSteps.size() - 1)).hunkId();
-        for (int index = 0; index < steps.size(); index++) {
-            if (steps.get(index).hunkId().equals(hunkId)) {
-                return index;
-            }
-        }
-        return pathIndex;
-    }
-
-    /** {@code step}'s hunk id, as the single-hunk {@link ReviewIntent} the diff column filters on. */
-    private static ReviewIntent pathStepAsIntent(ReadingPath.Step step) {
-        return new ReviewIntent("path:" + step.hunkId(), step.sectionNumber(), step.file(),
-                ReviewIntent.Kind.CHANGE, ReviewIntent.Risk.NONE, step.reason(),
-                // No reads: a path step is drydock's own single-hunk view of a
-                // section it already ordered, not an intent an agent declared.
-                List.of(step.hunkId()), Optional.empty(), false, List.of());
-    }
-
-    /** The content digest of {@code step}'s one hunk in {@code diff}, if it still resolves. */
-    private static Optional<String> digestOfPathStep(UnifiedDiff diff, ReadingPath.Step step) {
-        List<String> digests = IntentHunks.digestsOf(pathStepAsIntent(step), diff);
-        return digests.isEmpty() ? Optional.empty() : Optional.of(digests.get(0));
-    }
-
-    /**
-     * "Ask the agent" from the fan-in popover: posts the question as a real
-     * review comment on {@code step}'s file and hands it to the scope's bound
-     * session, through the two seams that already exist for exactly those
-     * two things ({@link Host#addComment}, {@link Host#askAgentToFix}).
-     *
-     * <p>Not a new key. {@code a} is the approve gesture on this board, and
-     * a popover that stole it would be Task 18's "acted on something the
-     * reader could not see" defect again; this is a button in the popover
-     * and nothing else.</p>
-     *
-     * <p>The question names the symbols and the file they are declared in --
-     * the fan-in list is lexical and cannot say whether a caller breaks, so
-     * what this surface can honestly do is point the party that can answer
-     * at the right file rather than leaving the reader to retype it.</p>
-     */
-    private boolean askAboutFanIn(ReadingPath.Step step) {
-        Optional<ReviewScope> scope = selectedScope();
-        Map<String, List<OutOfDiffFanIn.Occurrence>> bySymbol = fanInOccurrences(step.file());
-        Optional<String> lineKey = lineKeyOfPathStep(step);
-        if (scope.isEmpty() || bySymbol.isEmpty() || lineKey.isEmpty()) {
-            return false;
-        }
-        int total = bySymbol.values().stream().mapToInt(List::size).sum();
-        String question = "This change alters " + String.join(", ", bySymbol.keySet())
-                + " in " + step.file() + ", and " + total
-                + (total == 1 ? " place" : " places") + " outside the change reference "
-                + (bySymbol.size() == 1 ? "it" : "them")
-                + ". Do any of those callers break, and which ones should I read?";
-        ReviewAnnotation asked = ReviewAnnotation.human(scope.get().id(), step.file(),
-                lineKey.get(), lineKey.get(),
-                new ReviewAnnotation.Message("You", Instant.now(), question));
-        // Stamped with the intent that owns the file, exactly as the gutter
-        // composer's comments are -- a comment outside the grouping is one
-        // the margin has to fall back to matching by file.
-        Optional<String> intentId = intents().stream()
-                .filter(intent -> intent.touches(step.file()))
-                .findFirst()
-                .map(ReviewIntent::id);
-        ReviewAnnotation stamped = asked.withIntentId(intentId);
-        host.addComment(scope.get(), stamped);
-        boolean handedOff = host.askAgentToFix(scope.get(), step.file(), List.of(stamped));
-        refreshReviewState();
-        diffColumn.refreshPins();
-        // Returned, not swallowed: with no bound session the comment is
-        // filed and NOTHING is sent, and a popover that closed on that would
-        // leave the reviewer waiting for an answer nobody was asked for.
-        return handedOff;
-    }
-
-    /**
-     * The line key {@link #askAboutFanIn}'s comment is anchored to: the first
-     * line of {@code step}'s own hunk. Walked with the same {@link
-     * ReviewIntent#containsHunk} test {@link IntentHunks} uses, so the
-     * comment lands on the hunk the row is about rather than on the file's
-     * first one.
-     */
-    private Optional<String> lineKeyOfPathStep(ReadingPath.Step step) {
-        ReviewIntent synthetic = pathStepAsIntent(step);
-        return loadedDiff().flatMap(diff -> {
-            for (UnifiedDiff.FileDiff file : diff.files()) {
-                if (!file.path().equals(step.file())) {
-                    continue;
-                }
-                for (int index = 0; index < file.hunks().size(); index++) {
-                    UnifiedDiff.Hunk hunk = file.hunks().get(index);
-                    if (synthetic.containsHunk(file.path(), index) && !hunk.lines().isEmpty()) {
-                        return Optional.of(hunk.lines().get(0).lineKey());
-                    }
-                }
-            }
-            return Optional.<String>empty();
-        });
-    }
-
-    /** The row PATH mode is currently showing, if any -- empty exactly when {@link #currentPath()} has no steps. */
-    private Optional<ReadingPath.Step> currentPathStep() {
-        List<ReadingPath.Step> steps = currentPath().steps();
-        if (steps.isEmpty()) {
-            return Optional.empty();
-        }
-        return Optional.of(steps.get(Math.clamp(pathIndex, 0, steps.size() - 1)));
-    }
-
-    /**
-     * The REAL intents (sections overlap, so possibly several) that
-     * actually cover {@code step}'s one hunk -- what {@link
-     * #blockingFindingOpenForPathStep} and {@link #openFindingsForPathStep}
-     * both resolve a step through, since neither a blocking finding nor an
-     * agent hand-off can be asked about a throwaway synthetic id ({@link
-     * #pathStepAsIntent}) a finding could never actually name.
-     */
-    private List<ReviewIntent> intentsCoveringPathStep(ReadingPath.Step step) {
-        Optional<HunkIds.Anchor> anchor = pathStepAsIntent(step).anchor();
-        if (anchor.isEmpty()) {
-            return List.of();
-        }
-        return intents().stream()
-                .filter(intent -> intent.containsHunk(anchor.get().file(), anchor.get().hunkIndex()))
-                .toList();
-    }
-
-    /**
-     * The still-open findings {@code step} hands to the agent (spec's own
-     * "ask the agent to fix" gesture) -- resolved through {@code step}'s
-     * REAL covering intents so a finding naming one of them is included the
-     * same way {@link #belongsToCurrentIntent} would from that intent's own
-     * card, with an unnamed/unresolvable finding falling back to the file
-     * when no real intent claims this hunk at all.
-     */
-    private List<ReviewAnnotation> openFindingsForPathStep(ReviewScope scope, ReadingPath.Step step) {
-        List<ReviewIntent> covering = intentsCoveringPathStep(step);
-        return host.findings(scope).stream()
-                .filter(finding -> !finding.resolved())
-                .filter(ReviewAnnotation::counts)
-                .filter(finding -> covering.isEmpty()
-                        ? finding.file().equals(step.file())
-                        : covering.stream().anyMatch(intent -> belongsToIntent(finding, intent)))
-                .toList();
-    }
-
-    /**
-     * Test-only: the row {@code [} / {@code ]} / {@code n} last selected in
-     * PATH mode. Routed through {@link ReviewDiagFxThread} like every other
-     * {@code diag*}-shaped accessor: {@link #pathIndex} is written only on
-     * the FX thread, by the same keypress handling a test drives via a
-     * TestFX robot.
-     */
-    int selectedPathStepForTest() {
-        return ReviewDiagFxThread.call(() -> pathIndex);
-    }
-
-    /**
-     * Test-only: PATH mode's rendered row texts, in rendered order. Routed
-     * through {@link ReviewDiagFxThread} for the same reason every other
-     * {@code diag*} accessor is: it reads the rail's {@code ObservableList}
-     * of rows, which the FX thread rebuilds wholesale on every render.
-     */
-    /**
-     * Diagnostic-only: enters PATH mode if it is not already showing, then
-     * opens the first fan-in popover. The visual pass over that popover has
-     * no other way in -- it is a separate {@code Popup} window, and Robot
-     * input never reaches a diag run.
-     */
-    public String diagOpenFanIn() {
-        return ReviewDiagFxThread.call(() -> {
-            if (!pathMode) {
-                togglePathMode();
-                // The rows togglePathMode just built have no skins until a
-                // CSS pass, and the fan-in control lives inside a row's
-                // graphic -- so without this it has no screen bounds, and
-                // showFanIn builds a popover it has nowhere to show.
-                intentRail.applyCss();
-                intentRail.layout();
-            }
-            return intentRail.diagOpenFanIn();
-        });
-    }
-
-    /** See {@link #fanInScanThread} -- the thread the last fan-in scan ran on. */
-    String diagFanInScanThread() {
-        return fanInScanThread;
-    }
-
-    List<String> pathRowTextsForTest() {
-        return ReviewDiagFxThread.call(intentRail::diagPathRowTexts);
+        revealCurrentIntent();
     }
 
     /**
@@ -2801,18 +2261,8 @@ public final class SessionReviewView extends BorderPane {
     private final class VerdictHost implements ReviewVerdictBar.Host {
         @Override
         public void approve(ReviewVerdictBar.Target target, SettleUnit unit) {
-            // The verdict bar's own Approve button, not just the keyboard:
-            // AGENTS.md requires a shortcut to have a working button
-            // equivalent, and vice versa, so a click here must settle
-            // exactly what `a` does -- the selected PATH row, never
-            // whatever `intent`/`unit` the bar's own (intents-cursor-driven)
-            // render happened to capture.
             if (mode == ReviewMode.TOUR) {
                 currentTour().ifPresent(SessionReviewView.this::passCurrentStep);
-                return;
-            }
-            if (pathMode) {
-                pathVerdictAction(ReviewVerdict.Decision.APPROVED, false);
                 return;
             }
             Optional<ReviewIntent> onBar = intentOnBar(target);
@@ -2837,10 +2287,6 @@ public final class SessionReviewView extends BorderPane {
                 }
                 return;
             }
-            if (pathMode) {
-                pathVerdictAction(ReviewVerdict.Decision.CHANGES, false);
-                return;
-            }
             Optional<ReviewIntent> onBar = intentOnBar(target);
             if (onBar.isEmpty()) {
                 return;
@@ -2857,23 +2303,10 @@ public final class SessionReviewView extends BorderPane {
 
         @Override
         public boolean askAgentToFix(ReviewVerdictBar.Target target) {
-            // Routed through the SELECTED ROW in PATH mode, not the intent
-            // the bar happened to be handed (see the class-level javadoc on
-            // renderVerdictBarForPathStep for why that intent no longer
-            // reflects what is on screen).
-            //
             // The answer is RETURNED, not swallowed: with no session bound
             // (or nothing open to send) this hands over nothing at all, and
             // a button that then looks exactly as though it worked is the
-            // silent failure ruling 1 legislated against -- already fixed
-            // once on the fan-in popover, and this is the same defect one
-            // surface over.
-            if (pathMode) {
-                return currentPathStep().flatMap(step -> selectedScope().map(scope ->
-                                host.askAgentToFix(scope, step.file(),
-                                        openFindingsForPathStep(scope, step))))
-                        .orElse(false);
-            }
+            // silent failure ruling 1 legislated against.
             Optional<ReviewIntent> onBar = intentOnBar(target);
             if (onBar.isEmpty()) {
                 return false;
@@ -2894,24 +2327,10 @@ public final class SessionReviewView extends BorderPane {
             // undo is never refused, so the flag here is inert -- passed
             // for the sole reason that host.setVerdict has one parameter,
             // not two overloads to keep in sync.
-            //
-            // PATH mode clears exactly the SELECTED ROW's one hunk, never
-            // digestsOf(intent) over the (invisible) intents cursor's whole
-            // section -- a screenshot proved that click cleared two hunks
-            // nowhere near the row on screen and left the visible one alone.
             if (mode == ReviewMode.TOUR) {
                 if (currentTour().isPresent()) {
                     decideCurrentStep(StepProgress.Decision.NONE, Optional.empty());
                 }
-                return;
-            }
-            if (pathMode) {
-                currentPathStep().ifPresent(step -> selectedScope().ifPresent(scope ->
-                        loadedDiff().flatMap(diff -> digestOfPathStep(diff, step)).ifPresent(digest -> {
-                            host.setVerdict(scope, List.of(digest),
-                                    Optional.empty(), false);
-                            clearHunkOverrides(scope, List.of(digest));
-                        })));
                 return;
             }
             Optional<ReviewIntent> onBar = intentOnBar(target);
@@ -2924,14 +2343,6 @@ public final class SessionReviewView extends BorderPane {
 
         @Override
         public void confirmStillGood(ReviewVerdictBar.Target target) {
-            if (pathMode) {
-                currentPathStep().ifPresent(step -> selectedScope().ifPresent(scope ->
-                        loadedDiff().flatMap(diff -> digestOfPathStep(diff, step)).ifPresent(digest -> {
-                            host.confirmStillGood(scope, List.of(digest));
-                            refreshReviewState();
-                        })));
-                return;
-            }
             Optional<ReviewIntent> onBar = intentOnBar(target);
             selectedScope().filter(scope -> onBar.isPresent()).ifPresent(scope -> {
                 host.confirmStillGood(scope, digestsOf(onBar.get()));
@@ -3400,15 +2811,6 @@ public final class SessionReviewView extends BorderPane {
      *                  regardless of what has focus
      */
     private void verdictAction(ReviewVerdict.Decision decision, boolean wholeFile) {
-        if (pathMode) {
-            // PATH mode must settle what it shows, never whatever the
-            // intents-mode cursor happens to be sitting on -- the CRITICAL
-            // fix this branch carries. digestsForAction/SectionStates are
-            // deliberately not reached here: they derive digests from an
-            // INTENT, and the whole point is that a PATH row is not one.
-            pathVerdictAction(decision, wholeFile);
-            return;
-        }
         Optional<ReviewScope> scope = selectedScope();
         Optional<ReviewIntent> intent = currentIntent();
         if (scope.isEmpty() || intent.isEmpty()) {
@@ -3427,107 +2829,11 @@ public final class SessionReviewView extends BorderPane {
             return;
         }
         recordHunkOverrides(scope.get(), digests, decision, before);
-        lastSettledWasPath = false;
         lastSettledIntentId = Optional.of(intent.get().id());
         lastSettledDigests = digests;
         if (decisionOf(intent.get()).filter(decision::equals).isPresent()) {
             nextUnsettledIntent();
         }
-    }
-
-    /**
-     * PATH mode's {@code a}/{@code r} (and the verdict bar's own buttons,
-     * routed here the same way -- see {@link VerdictHost}): settles exactly
-     * the selected row's one hunk, or every hunk of its file for {@code
-     * wholeFile} ({@code ⇧A}/{@code ⇧R}). {@code host.setVerdict} takes an
-     * intent purely as a label/blocking-check key (verdicts themselves are
-     * keyed {@code (scopeId, hunkDigest)}, never by intent), so a throwaway
-     * single-hunk {@link ReviewIntent} is exactly as valid a key as a real
-     * one -- see {@link #pathStepAsIntent}.
-     */
-    private void pathVerdictAction(ReviewVerdict.Decision decision, boolean wholeFile) {
-        Optional<ReviewScope> scope = selectedScope();
-        Optional<UnifiedDiff> diff = loadedDiff();
-        List<ReadingPath.Step> steps = currentPath().steps();
-        if (scope.isEmpty() || diff.isEmpty() || steps.isEmpty()) {
-            return;
-        }
-        ReadingPath.Step step = steps.get(Math.clamp(pathIndex, 0, steps.size() - 1));
-        List<String> digests = wholeFile
-                ? digestsOfFileInDiff(diff.get(), step.file())
-                : digestOfPathStep(diff.get(), step).map(List::of).orElse(List.of());
-        if (digests.isEmpty()) {
-            return;
-        }
-        Map<String, Optional<ReviewVerdict.Decision>> before = verdictsOf(scope.get(), digests);
-        host.setVerdict(scope.get(), digests, Optional.of(decision),
-                blockingFindingOpenForPathStep(scope.get(), step, wholeFile));
-        boolean applied = digests.stream().allMatch(digest -> host.verdict(scope.get(), digest)
-                .filter(v -> v.decision() == decision).isPresent());
-        if (!applied) {
-            return;
-        }
-        recordHunkOverrides(scope.get(), digests, decision, before);
-        lastSettledWasPath = true;
-        lastSettledPathHunkId = Optional.of(step.hunkId());
-        lastSettledDigests = digests;
-        // Every digest just written now reads as `decision` (that is what
-        // `applied` just confirmed), so this row is as settled as it is
-        // ever going to be from this one keypress -- advance the same way
-        // verdictAction's intents-mode branch does.
-        nextUnsettledPathStep();
-    }
-
-    /**
-     * Whether a still-open finding blocks approving PATH mode's current
-     * settle target -- {@code step}'s own hunk, or, for {@code wholeFile},
-     * every hunk of its file (spec §4.6).
-     *
-     * <p>PATH mode has no real intent of its own to hand {@link
-     * #blockingFindingOpen}: {@link #pathStepAsIntent}'s synthetic {@code
-     * "path:" + hunkId} can never equal a finding's named {@code intentId},
-     * so asking about it directly answered "not blocked" for every
-     * agent-attributed finding -- the common case, and the whole reason
-     * {@code review_finding} carries an id at all. This asks the SAME
-     * question {@link #belongsToIntent} already answers for INTENTS mode,
-     * but resolved through whichever REAL section(s) actually cover the
-     * hunk(s) about to be settled, so a finding naming one of them still
-     * refuses exactly as it would from that section's own card.</p>
-     */
-    private boolean blockingFindingOpenForPathStep(ReviewScope scope, ReadingPath.Step step,
-                                                   boolean wholeFile) {
-        Optional<HunkIds.Anchor> anchor = pathStepAsIntent(step).anchor();
-        if (anchor.isEmpty()) {
-            return false;
-        }
-        String file = anchor.get().file();
-        List<ReviewIntent> covering = wholeFile
-                ? intents().stream().filter(intent -> intent.touches(file)).toList()
-                : intentsCoveringPathStep(step);
-        if (!covering.isEmpty()) {
-            return covering.stream().anyMatch(intent -> blockingFindingOpen(scope, intent));
-        }
-        // No real intent claims this hunk/file at all (a grouping that has
-        // drifted, or an empty rail) -- fall back to whether any finding on
-        // the file blocks, the same fallback belongsToIntent itself uses for
-        // a finding naming nothing resolvable.
-        return host.findings(scope).stream()
-                .filter(finding -> finding.file().equals(file))
-                .anyMatch(ReviewAnnotation::blocksApproval);
-    }
-
-    /** Every hunk digest of {@code file}, across the whole {@code diff} -- what {@code ⇧A}/{@code ⇧R} settle in PATH mode. */
-    private static List<String> digestsOfFileInDiff(UnifiedDiff diff, String file) {
-        for (UnifiedDiff.FileDiff candidate : diff.files()) {
-            if (candidate.path().equals(file)) {
-                List<String> digests = new ArrayList<>();
-                for (UnifiedDiff.Hunk hunk : candidate.hunks()) {
-                    digests.add(HunkDigest.of(file, hunk));
-                }
-                return digests;
-            }
-        }
-        return List.of();
     }
 
     /**
@@ -3545,10 +2851,6 @@ public final class SessionReviewView extends BorderPane {
      * than reaching for an unrelated intent's verdict.
      */
     private void undoVerdict() {
-        if (lastSettledWasPath) {
-            undoPathVerdict();
-            return;
-        }
         Optional<ReviewScope> scope = selectedScope();
         if (scope.isEmpty() || lastSettledIntentId.isEmpty() || lastSettledDigests.isEmpty()) {
             return;
@@ -3577,42 +2879,6 @@ public final class SessionReviewView extends BorderPane {
         intentIndex = index;
         refreshReviewState();
         revealCurrentIntent();
-    }
-
-    /**
-     * PATH mode's {@code u}: the counterpart to {@link #undoVerdict}'s
-     * intents-mode body, keyed by {@link #lastSettledPathHunkId} rather than
-     * an intent id -- a step has no id of its own, only its (stable) hunk
-     * id.
-     */
-    private void undoPathVerdict() {
-        Optional<ReviewScope> scope = selectedScope();
-        if (scope.isEmpty() || lastSettledPathHunkId.isEmpty() || lastSettledDigests.isEmpty()) {
-            return;
-        }
-        List<ReadingPath.Step> steps = currentPath().steps();
-        int index = -1;
-        for (int i = 0; i < steps.size(); i++) {
-            if (steps.get(i).hunkId().equals(lastSettledPathHunkId.get())) {
-                index = i;
-                break;
-            }
-        }
-        List<String> digests = lastSettledDigests;
-        ReadingPath.Step target = index >= 0 ? steps.get(index) : null;
-        lastSettledPathHunkId = Optional.empty();
-        lastSettledDigests = List.of();
-        lastSettledWasPath = false;
-        if (index < 0) {
-            // The path changed under us (a re-diff landed a new graph) and
-            // the step this would have undone no longer exists.
-            return;
-        }
-        host.setVerdict(scope.get(), digests, Optional.empty(), false);
-        clearHunkOverrides(scope.get(), digests);
-        pathIndex = index;
-        refreshReviewState();
-        revealCurrentPathStep();
     }
 
     /**
@@ -3808,14 +3074,9 @@ public final class SessionReviewView extends BorderPane {
                 toggleMcpPanel();
                 yield true;
             }
-            case P -> { togglePathMode(); yield true; }
-            // [ and ] step whatever the rail is currently listing (spec
-            // §7.1): sections in INTENTS mode, hunks in PATH mode -- one key
-            // rather than a parallel set for the second mode.
+            // [ and ] step the intent cursor.
             case OPEN_BRACKET -> { moveSelection(-1); yield true; }
             case CLOSE_BRACKET -> { moveSelection(1); yield true; }
-            // n keeps meaning "next unsettled", a property of hunks
-            // regardless of which grouping the rail is showing.
             case N -> { nextUnsettled(); yield true; }
             case A -> {
                 verdictAction(ReviewVerdict.Decision.APPROVED, event.isShiftDown());
@@ -4444,7 +3705,7 @@ public final class SessionReviewView extends BorderPane {
                 toggleMode();
                 return true;
             }
-            case P, I -> {
+            case I -> {
                 return true;
             }
             case F -> {
@@ -5410,6 +4671,11 @@ public final class SessionReviewView extends BorderPane {
     /** Diagnostic-only: the host the step panel acts through. */
     StepPanel.Host diagStepHost() {
         return stepHost;
+    }
+
+    /** See {@link #fanInScanThread} -- the thread the last fan-in scan ran on. */
+    String diagFanInScanThread() {
+        return fanInScanThread;
     }
 
     /**

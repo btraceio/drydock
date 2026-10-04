@@ -1487,28 +1487,9 @@ public final class DrydockApplication extends Application {
                 // See the explorerScript driver for why every script has this.
                 case "quit" -> diagQuit(stage);
                 case "shot" -> diagSnapshot(stage, Path.of(arg));
-                // The Review board's out-of-diff fan-in popover, and a
-                // snapshot OF it: a Popup is its own window, so `shot` above
-                // photographs the board behind it rather than the popover.
-                case "fanin" -> System.out.println("[diag] fanin -> "
-                        + mainWorkspace.diagOpenFanIn());
+                // A snapshot of whatever popup window is showing: a Popup is
+                // its own window, so `shot` above photographs what is behind it.
                 case "popupshot" -> diagPopupSnapshot(Path.of(arg));
-                // Opening AND photographing in one FX block, not two script
-                // steps: the popover sets autoHide, and a diag run's window
-                // is not the focused one, so it closes itself the moment the
-                // pulse that opened it ends. "no popup window is showing" is
-                // what a two-step script actually captures.
-                case "faninshot" -> {
-                    // Focused FIRST. A Popup with autoHide closes itself the
-                    // instant its owner window loses (or never had) focus,
-                    // and a diag run's window is not the one the user is
-                    // looking at -- so without this the popover is gone
-                    // before the snapshot in the very same pulse.
-                    stage.toFront();
-                    stage.requestFocus();
-                    System.out.println("[diag] fanin -> " + mainWorkspace.diagOpenFanIn());
-                    diagPopupSnapshot(Path.of(arg));
-                }
                 // DIAG-ONLY, added for the sidebar row-layout visual pass: the
                 // row-overlay's hover fade and pickOnBounds=false passthrough
                 // have no other observable hook (Node.hoverProperty is driven
@@ -1727,8 +1708,7 @@ public final class DrydockApplication extends Application {
      * Snapshots the topmost showing {@code Popup} instead of the primary
      * stage. A popover is its own window: {@code Stage.getScene().snapshot}
      * cannot see one at all, so without this a visual pass over the symbol
-     * lens or the out-of-diff fan-in popover would photograph the board
-     * BEHIND them and read as a clean result.
+     * lens would photograph the board BEHIND it and read as a clean result.
      */
     private static void diagPopupSnapshot(Path target) {
         javafx.stage.Window popup = javafx.stage.Window.getWindows().stream()

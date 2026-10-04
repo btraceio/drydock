@@ -4,7 +4,6 @@ import app.drydock.git.DiffScope;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.HunkIds;
-import app.drydock.review.OutOfDiffFanIn;
 import app.drydock.review.ReadingPath;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewIntent;
@@ -45,7 +44,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.function.BooleanSupplier;
 import java.util.function.Predicate;
 
 /**
@@ -934,7 +932,7 @@ final class ReviewDiffColumn extends BorderPane {
     /**
      * Scrolls to {@code file}'s hunk whose REAL index (into its own
      * {@code UnifiedDiff.FileDiff.hunks()}) is {@code hunkIndex} -- what
-     * selecting an intent, a PATH step, or a link footer brings into view.
+     * selecting an intent or a link footer brings into view.
      * Falls back to the file's first rendered card when that exact hunk is
      * not among them (the diff was re-read and the grouping is one
      * generation behind, or the column is filtered to hunks that do not
@@ -1775,156 +1773,6 @@ final class ReviewDiffColumn extends BorderPane {
         });
     }
 
-    /**
-     * The out-of-diff fan-in popover (spec §7.4): every place the symbols
-     * {@code file} declares are used OUTSIDE this change, with the file and
-     * line of each.
-     *
-     * <p>The symbol lens's popover on a third source, deliberately: same
-     * frame, same chips, same one-click occurrence rows, and the SAME {@code
-     * lensPopup} field -- so it is already part of Escape's unwind order
-     * ({@link #lensOpen}, {@link #hideLens}) and opening either one closes
-     * the other, with no second popover to keep in sync. Inventing a second
-     * interaction for the same gesture is how two popovers start
-     * disagreeing.</p>
-     *
-     * <p>The rows are NOT contorted into {@link SymbolIndex.Occurrence}:
-     * that record's {@code inDiff} flag drives the lens's in-diff /
-     * not-touched chip, and every occurrence here is out-of-diff by
-     * construction -- so the chip says exactly that instead of pretending to
-     * a distinction this source cannot make.</p>
-     *
-     * <p>{@code bySymbol} is rendered in its own iteration order; the caller
-     * owns determinism (see {@code SessionReviewView.fanInOccurrences}).</p>
-     */
-    void showFanIn(String file, Map<String, List<OutOfDiffFanIn.Occurrence>> bySymbol,
-                   Node anchor, BooleanSupplier askTheAgent) {
-        if (bySymbol.isEmpty()) {
-            return;
-        }
-        hideLens();
-        int total = bySymbol.values().stream().mapToInt(List::size).sum();
-
-        VBox content = new VBox(6);
-        content.getStyleClass().add("review-lens");
-
-        Label title = new Label(file);
-        title.getStyleClass().add("review-lens-title");
-        title.setWrapText(true);
-        // "usages", in those words: this list IS the usages view, so it says
-        // so rather than linking somewhere else for it.
-        Label summary = new Label(total + (total == 1 ? " usage" : " usages")
-                + " outside this change · " + bySymbol.size()
-                + (bySymbol.size() == 1 ? " changed symbol" : " changed symbols"));
-        summary.getStyleClass().add("review-lens-summary");
-        Label caveat = new Label("Lexical git grep of the worktree — occurrences, not resolved "
-                + "references. It cannot tell you whether a change here breaks any of them.");
-        caveat.getStyleClass().add("review-lens-caveat");
-        caveat.setWrapText(true);
-
-        // Where the design is honest about its ceiling: nothing mechanical
-        // and diff-scoped can say whether this change breaks these callers,
-        // so the popover puts the reader one click from the party that can.
-        // The label says what the button DOES, both halves of it: the
-        // question is filed as a review comment on this file whether or not
-        // a session is there to receive it, and a reviewer who is not told
-        // that finds a stray comment they did not knowingly write.
-        Button ask = new Button("Ask the agent — files a review comment");
-        ask.getStyleClass().add("review-fanin-ask");
-        ask.setMaxWidth(Double.MAX_VALUE);
-        ask.setWrapText(true);
-
-        // Reused by every row: the Explorer jump can fail (no session, or
-        // its tab is closed), and a row that silently does nothing is worse
-        // than one that says why.
-        Label notice = new Label();
-        notice.getStyleClass().add("review-fanin-notice");
-        notice.setWrapText(true);
-        notice.setVisible(false);
-        notice.setManaged(false);
-
-        // Wired AFTER `notice` exists, and it does NOT hide the popover
-        // first: a hand-off that could not happen has to have somewhere to
-        // say so, and hiding the only surface before running the action
-        // leaves nowhere. Exactly the ordering openOutsideFile uses.
-        ask.setOnAction(e -> {
-            if (askTheAgent.getAsBoolean()) {
-                hideLens();
-                return;
-            }
-            notice.setText("Filed as a review comment on " + file
-                    + ", but nothing was sent — open this scope's session first; "
-                    + "the agent is asked through it.");
-            notice.setVisible(true);
-            notice.setManaged(true);
-        });
-
-        content.getChildren().addAll(title, summary, caveat, ask, notice);
-
-        for (Map.Entry<String, List<OutOfDiffFanIn.Occurrence>> entry : bySymbol.entrySet()) {
-            Label symbol = new Label(entry.getKey());
-            symbol.getStyleClass().add("review-fanin-symbol");
-            content.getChildren().add(symbol);
-            for (OutOfDiffFanIn.Occurrence occurrence : entry.getValue()) {
-                Label chip = new Label("outside this change");
-                chip.getStyleClass().addAll("review-lens-chip", "not-touched");
-                Label where = new Label(occurrence.file() + ":" + occurrence.line());
-                where.getStyleClass().add("review-lens-where");
-                Button jump = UiFormats.literal(new Button(occurrence.text().strip().length() > 60
-                        ? occurrence.text().strip().substring(0, 59) + "…"
-                        : occurrence.text().strip()));
-                jump.getStyleClass().add("review-lens-line");
-                jump.setOnAction(e -> openOutsideFile(occurrence, notice));
-                HBox row = new HBox(6, chip, where);
-                row.setAlignment(Pos.CENTER_LEFT);
-                content.getChildren().addAll(row, jump);
-            }
-        }
-
-        ScrollPane scroll = new ScrollPane(content);
-        scroll.setFitToWidth(true);
-        scroll.setMaxHeight(320);
-        scroll.getStyleClass().add("review-lens-scroll");
-
-        lensPopup = new Popup();
-        lensPopup.setAutoHide(true);
-        lensPopup.getContent().add(scroll);
-        var bounds = anchor.localToScreen(anchor.getBoundsInLocal());
-        if (bounds != null) {
-            // Positioned by the anchor, OWNED by this column. A Popup hides
-            // itself the moment its owner node leaves the scene, and the
-            // anchor here is a rail row that every refresh replaces -- so
-            // owning it would close this popover on the next refresh,
-            // including the one its own "ask" button causes. This column
-            // outlives every such rebuild.
-            lensPopup.show(this, bounds.getMinX(), bounds.getMaxY() + 4);
-        }
-    }
-
-    /**
-     * Opens one out-of-diff occurrence in the Explorer. Unlike the lens's
-     * own rows, {@link #revealLine} is no use here: the file is OUTSIDE the
-     * diff, so this column has no row to reveal. A refused jump writes into
-     * {@code notice} rather than being swallowed -- {@link
-     * ExplorerBridge#openFileAtLine} returns false when there is nowhere to
-     * open it, and this branch has twice had to fix a control that reported
-     * nothing when it did nothing.
-     */
-    private void openOutsideFile(OutOfDiffFanIn.Occurrence occurrence, Label notice) {
-        if (displayedScope == null) {
-            return;
-        }
-        if (explorerBridge.openFileAtLine(displayedScope, Path.of(occurrence.file()),
-                occurrence.line())) {
-            hideLens();
-            return;
-        }
-        notice.setText("Could not open " + occurrence.file()
-                + " — open this scope's session first; the Explorer lives in it.");
-        notice.setVisible(true);
-        notice.setManaged(true);
-    }
-
     /** Closes the lens popover; part of Escape's unwind order. */
     void hideLens() {
         if (lensPopup != null) {
@@ -1992,17 +1840,15 @@ final class ReviewDiffColumn extends BorderPane {
     /**
      * Resolves a raw hunk id -- exactly what a link's own label never shows
      * -- back to the (file, index) {@link #revealHunk} already knows how to
-     * scroll to. The same scroll-into-view path an intent or a PATH step
-     * uses, so a link click and a rail click land the reader in the same
+     * scroll to. The same scroll-into-view path an intent uses, so a link click and a rail click land the reader in the same
      * place through the same code.
      */
     private void selectLinkTarget(String hunkId) {
         HunkIds.parseHunkId(hunkId).ifPresent(anchor -> {
             // A link crosses files by construction (spec §7.2: cross-file
             // only), so its target is routinely a hunk the CURRENT filter
-            // does not show at all -- PATH mode narrows the column to a
-            // synthetic one-hunk intent, and an ordinary intent filter can
-            // just as easily name only some of a file's hunks. Widening
+            // does not show at all -- an intent filter can name only some
+            // of a file's hunks, or none of the target's. Widening
             // FIRST is what makes the click land instead of silently
             // scrolling nowhere on a column revealHunk cannot search.
             if (!hunkFilter().includes(anchor.file(), anchor.hunkIndex())) {

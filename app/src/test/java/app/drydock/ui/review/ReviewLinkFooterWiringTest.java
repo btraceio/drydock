@@ -46,9 +46,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * ReviewViewFixture}'s shared board): {@code Host#hasReviewerGrouping}
  * false is what makes {@link SessionReviewView} request a {@link
  * app.drydock.review.ChangeGraph} on its own, off the FX thread, the moment
- * the diff resolves -- the same trigger PATH mode already relies on (see
- * {@code ReviewPathModeTest}'s own javadoc) -- so no keypress is needed to
- * exercise it here.</p>
+ * the diff resolves -- so no keypress is needed to exercise it here.</p>
  */
 class ReviewLinkFooterWiringTest extends ApplicationTest {
 
@@ -103,7 +101,7 @@ class ReviewLinkFooterWiringTest extends ApplicationTest {
                 Optional.empty(), Optional.empty()));
         // Deliberately no host.intents.set(...): hasReviewerGrouping stays
         // false, which is what makes the graph -- and therefore the links --
-        // build without PATH mode ever being entered.
+        // build with no keypress at all.
         interact(() -> view.showScopes(new SessionReviewScopes.Scopes(scope, Optional.empty()),
                 SessionReviewScopes.Choice.LOCAL));
         // The control half of Task 19 round 2's pin (see the grouped test
