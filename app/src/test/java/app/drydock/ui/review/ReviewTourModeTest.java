@@ -1,5 +1,6 @@
 package app.drydock.ui.review;
 
+import app.drydock.domain.SessionActivity;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.review.tour.StepProgress;
@@ -198,6 +199,36 @@ class ReviewTourModeTest extends ReviewTourFixture {
         showDiff(movedDiff());
         assertEquals(List.of("s2/1", "s2/1"), host.tourRefreshDispatches,
                 "back to the original diff asks once for it; the moved diff was already asked about");
+    }
+
+    @Test
+    void anInlineHarnessIsNotAskedAutomaticallyUntilItCanBe() {
+        host.tourRefreshDispatches.clear();
+        host.supportsAutomaticRecheck = false;
+        try {
+            showDiff(movedDiff());
+            assertTrue(progress("s2").stale(), "the tour is migrated regardless");
+            assertEquals(List.of(), host.tourRefreshDispatches);
+        } finally {
+            host.supportsAutomaticRecheck = true;
+        }
+        showDiff(movedDiff());
+        assertEquals(List.of("s2/1"), host.tourRefreshDispatches, "no claim was taken, so a later publish asks");
+    }
+
+    @Test
+    void aBusyAgentIsNotInterruptedAndIsAskedOnceIdle() {
+        host.tourRefreshDispatches.clear();
+        host.agentActivity = SessionActivity.BUSY;
+        try {
+            showDiff(movedDiff());
+            assertTrue(progress("s2").stale());
+            assertEquals(List.of(), host.tourRefreshDispatches);
+        } finally {
+            host.agentActivity = SessionActivity.IDLE;
+        }
+        showDiff(movedDiff());
+        assertEquals(List.of("s2/1"), host.tourRefreshDispatches);
     }
 
     @Test

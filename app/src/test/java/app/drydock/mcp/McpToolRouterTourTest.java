@@ -287,7 +287,7 @@ class McpToolRouterTourTest extends McpRouterFixture {
     }
 
     @Test
-    void aFullRepostKeepsTheHunkOverridesAndIsMarkedSeeded() throws Exception {
+    void aFullRepostKeepsTheHunkOverridesAndTheSeededFlag() throws Exception {
         router.call(callerId(), "review_tour", coveringArgs());
         TourRecord first = context.tourOf(scopeId()).orElseThrow();
         assertFalse(first.seeded(), "a first tour still has the hunk diff's verdicts to seed");
@@ -300,7 +300,88 @@ class McpToolRouterTourTest extends McpRouterFixture {
         TourRecord second = context.tourOf(scopeId()).orElseThrow();
         assertEquals(Optional.of(new HunkOverride(ReviewVerdict.Decision.CHANGES, "set in the hunk diff")),
                 Optional.ofNullable(second.hunkOverrides().get(digest)));
-        assertTrue(second.seeded(), "the previous tour's derived verdicts are not the hunk diff's");
+        assertFalse(second.seeded(), "an unseeded tour replaced before its first sync still gets seeded");
         assertEquals(StepProgress.Decision.NONE, second.progress("s1").decision());
+
+        context.putTour(second.withSeeded(true));
+        router.call(callerId(), "review_tour", coveringArgs());
+
+        assertTrue(context.tourOf(scopeId()).orElseThrow().seeded(),
+                "a seeded tour's re-post is not seeded again from the previous tour's derived verdicts");
+    }
+
+    @Test
+    void onlyStepsReportsTheStepsStillStale() throws Exception {
+        TourRecord posted = postedWithS1Passed();
+        context.putTour(posted.withProgress(posted.progress("s1").withStale(true))
+                .withProgress(posted.progress("s2").withStale(true)));
+
+        JsonValue result = router.call(callerId(), "review_tour",
+                onlyStepsArgs(step("s2", "src/WidgetUser.java", "n1", "n6", "c9")));
+
+        assertEquals(List.of("s1"), JsonPeek.array(result, "staleRemaining").stream()
+                .map(value -> ((JsonValue.JsonString) value).value()).toList());
+    }
+
+    @Test
+    void anOnlyStepsMergeAppliesToTheRecordAsItIsWhenWritten() throws Exception {
+        postedWithS1Passed();
+        // The reviewer undoes s1 while the agent's merge is in flight.
+        context.beforeTourMutate = () -> {
+            TourRecord now = context.tours.get(scopeId());
+            context.tours.put(scopeId(), now.withProgress(now.progress("s1")
+                    .withDecision(StepProgress.Decision.NONE, Optional.empty())));
+        };
+
+        router.call(callerId(), "review_tour", onlyStepsArgs(step("s2", "src/WidgetUser.java", "n1", "n6", "c9")));
+
+        assertEquals(StepProgress.Decision.NONE, context.tourOf(scopeId()).orElseThrow().progress("s1").decision(),
+                "the undo made between the read and the write survives");
+    }
+
+    @Test
+    void aRepostAppliesToTheRecordAsItIsWhenWritten() throws Exception {
+        router.call(callerId(), "review_tour", coveringArgs());
+        TourRecord first = context.tourOf(scopeId()).orElseThrow();
+        String digest = first.progress("s1").hunkDigests().getFirst();
+        context.beforeTourMutate = () -> context.tours.put(scopeId(), context.tours.get(scopeId())
+                .withHunkOverride(digest, Optional.of(new HunkOverride(ReviewVerdict.Decision.APPROVED, "late"))));
+
+        router.call(callerId(), "review_tour", coveringArgs());
+
+        assertEquals(Optional.of(new HunkOverride(ReviewVerdict.Decision.APPROVED, "late")),
+                Optional.ofNullable(context.tourOf(scopeId()).orElseThrow().hunkOverrides().get(digest)));
+    }
+
+    @Test
+    void aRiskVerdictAppliesToTheRecordAsItIsWhenWritten() throws Exception {
+        awaitingAnswer("an empty list");
+        context.beforeTourMutate = () -> {
+            TourRecord now = context.tours.get(scopeId());
+            context.tours.put(scopeId(), now.withProgress(now.progress("s1")
+                    .withDecision(StepProgress.Decision.PASSED, Optional.empty())));
+        };
+
+        router.call(callerId(), "review_check", checkArgs("holds"));
+
+        assertEquals(CheckProgress.Status.PASSED, storedC2().status());
+        assertEquals(StepProgress.Decision.PASSED, context.tourOf(scopeId()).orElseThrow().progress("s1").decision(),
+                "the pass made between the read and the write survives");
+    }
+
+    @Test
+    void aRiskVerdictForACheckNoLongerAwaitingWhenWrittenIsRejected() throws Exception {
+        awaitingAnswer("an empty list");
+        context.beforeTourMutate = () -> {
+            TourRecord now = context.tours.get(scopeId());
+            context.tours.put(scopeId(), now.withProgress(now.progress("s2").withCheck(
+                    CheckProgress.fresh("c2"))));
+        };
+
+        McpToolException error = assertThrows(McpToolException.class,
+                () -> router.call(callerId(), "review_check", checkArgs("holds")));
+
+        assertTrue(error.getMessage().contains("is not awaiting a verdict"), error.getMessage());
+        assertEquals(CheckProgress.Status.OPEN, storedC2().status());
     }
 }

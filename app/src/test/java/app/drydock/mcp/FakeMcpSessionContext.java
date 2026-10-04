@@ -157,6 +157,24 @@ final class FakeMcpSessionContext implements McpSessionContext {
         tours.put(record.tour().scopeId(), record);
     }
 
+    /**
+     * Runs inside {@link #updateTour}, after the caller read the record and
+     * before its transform runs -- where a concurrent write would land.
+     */
+    Runnable beforeTourMutate = () -> { };
+
+    @Override
+    public Optional<TourRecord> updateTour(String scopeId, UnaryOperator<TourRecord> transform) {
+        beforeTourMutate.run();
+        TourRecord current = tours.get(scopeId);
+        if (current == null) {
+            return Optional.empty();
+        }
+        TourRecord next = transform.apply(current);
+        tours.put(scopeId, next);
+        return Optional.of(next);
+    }
+
     @Override
     public void putIntents(String scopeId, List<ReviewIntent> newIntents) {
         intents.put(scopeId, List.copyOf(newIntents));

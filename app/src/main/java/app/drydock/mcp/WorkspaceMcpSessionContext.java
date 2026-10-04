@@ -346,6 +346,13 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     }
 
     @Override
+    public Optional<TourRecord> updateTour(String scopeId, UnaryOperator<TourRecord> transform) {
+        Optional<TourRecord> updated = tourStore.mutate(scopeId, transform);
+        tourStore.flushPendingSaves();
+        return updated;
+    }
+
+    @Override
     public void putIntents(String scopeId, List<ReviewIntent> intents) {
         intentGrouping.set(scopeId, intents);
     }

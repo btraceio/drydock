@@ -754,37 +754,83 @@ public final class McpToolRouter {
         }
         checkTourText(steps);
         boolean onlySteps = optionalBooleanArg(args, "onlySteps", false);
-        Optional<TourRecord> existing = context.tourOf(scope.id());
-        TourRecord record;
-        if (onlySteps) {
-            record = TourMerge.replaceSteps(existing.orElseThrow(() -> new McpToolException(
-                    "review_tour rejected, nothing stored: onlySteps needs a stored tour, and scope " + scope.id()
-                            + " has no tour; post the whole tour without onlySteps")), steps, diff);
-        } else {
-            record = TourRecord.fresh(new ReviewTour(scope.id(), TourFingerprint.of(diff), steps), diff);
-            if (existing.isPresent()) {
-                // The hunk diff's own decisions survive a re-post, and the
-                // verdicts stored now are the previous tour's derivations,
-                // which must not be seeded as if a human had set them.
-                for (Map.Entry<String, HunkOverride> override : existing.get().hunkOverrides().entrySet()) {
-                    record = record.withHunkOverride(override.getKey(), Optional.of(override.getValue()));
+        List<ReviewAnnotation> findings = context.findingsOf(scope.id());
+        // Read before the store write: it touches the checkout, and the
+        // transform runs under the store's lock.
+        List<String> noteErrors = impactNoteErrors(caller, steps);
+        TourRecord stored;
+        try {
+            if (onlySteps) {
+                String missing = "review_tour rejected, nothing stored: onlySteps needs a stored tour, and scope "
+                        + scope.id() + " has no tour; post the whole tour without onlySteps";
+                if (context.tourOf(scope.id()).isEmpty()) {
+                    throw new McpToolException(missing);
                 }
-                record = record.withSeeded(true);
+                stored = context.updateTour(scope.id(), current -> validated(
+                        TourMerge.replaceSteps(current, steps, diff), diff, findings, noteErrors))
+                        .orElseThrow(() -> new McpToolException(missing));
+            } else {
+                TourRecord fresh = TourRecord.fresh(new ReviewTour(scope.id(), TourFingerprint.of(diff), steps), diff);
+                Optional<TourRecord> replaced = context.updateTour(scope.id(),
+                        current -> validated(repost(fresh, current), diff, findings, noteErrors));
+                if (replaced.isPresent()) {
+                    stored = replaced.get();
+                } else {
+                    stored = validated(fresh, diff, findings, noteErrors);
+                    context.putTour(stored);
+                }
             }
+        } catch (TourRejected e) {
+            throw new McpToolException("review_tour rejected, nothing stored:\n- " + String.join("\n- ", e.errors));
         }
-        List<String> errors = new ArrayList<>(
-                TourValidator.validate(record.tour(), diff, context.findingsOf(scope.id())));
-        errors.addAll(impactNoteErrors(caller, steps));
-        if (!errors.isEmpty()) {
-            throw new McpToolException("review_tour rejected, nothing stored:\n- " + String.join("\n- ", errors));
-        }
-        context.putTour(record);
-        List<TourStep> stored = record.tour().steps();
-        int checks = stored.stream().mapToInt(step -> step.checks().size()).sum();
-        return JsonObject.empty()
+        List<TourStep> storedSteps = stored.tour().steps();
+        int checks = storedSteps.stream().mapToInt(step -> step.checks().size()).sum();
+        JsonObject result = JsonObject.empty()
                 .put("scopeId", new JsonString(scope.id()))
-                .put("steps", JsonNumber.of(stored.size()))
+                .put("steps", JsonNumber.of(storedSteps.size()))
                 .put("checks", JsonNumber.of(checks));
+        if (onlySteps) {
+            result.put("staleRemaining", JsonArray.of(storedSteps.stream()
+                    .filter(step -> stored.progress(step.id()).stale())
+                    .<JsonValue>map(step -> new JsonString(step.id()))
+                    .toList()));
+        }
+        return result;
+    }
+
+    /** A tour store transform's way of refusing: carries every error, and nothing is stored. */
+    private static final class TourRejected extends RuntimeException {
+        private final List<String> errors;
+
+        TourRejected(List<String> errors) {
+            super(String.join("; ", errors), null, false, false);
+            this.errors = List.copyOf(errors);
+        }
+    }
+
+    /** {@code record} if its tour passes full validation; otherwise throws {@link TourRejected}. */
+    private static TourRecord validated(TourRecord record, UnifiedDiff diff, List<ReviewAnnotation> findings,
+                                        List<String> noteErrors) {
+        List<String> errors = new ArrayList<>(TourValidator.validate(record.tour(), diff, findings));
+        errors.addAll(noteErrors);
+        if (!errors.isEmpty()) {
+            throw new TourRejected(errors);
+        }
+        return record;
+    }
+
+    /**
+     * A whole new tour over {@code previous}: the hunk diff's own decisions
+     * survive, and so does whether the hunk diff's pre-tour verdicts were
+     * already seeded -- once seeded, the verdicts stored are the previous
+     * tour's derivations, which must not be seeded as if a human had set them.
+     */
+    private static TourRecord repost(TourRecord fresh, TourRecord previous) {
+        TourRecord record = fresh;
+        for (Map.Entry<String, HunkOverride> override : previous.hunkOverrides().entrySet()) {
+            record = record.withHunkOverride(override.getKey(), Optional.of(override.getValue()));
+        }
+        return record.withSeeded(previous.seeded());
     }
 
     // ---- review_check --------------------------------------------------
@@ -816,8 +862,26 @@ public final class McpToolRouter {
                     .put("dropped", new JsonBoolean(true))
                     .put("reason", new JsonString("the diff changed since this answer was given; verdict dropped"));
         }
-        CheckProgress next = StepGrading.applyRiskVerdict(check, progress, verdict, reason);
-        context.putTour(record.withProgress(record.progress(step.id()).withCheck(next)));
+        CheckProgress[] applied = new CheckProgress[1];
+        try {
+            context.updateTour(scope.id(), latest -> {
+                // Re-checked on the record as it is now: the reviewer may
+                // have retried or reset the check since the read above.
+                TourStep owner = latest.tour().stepOfCheck(checkId)
+                        .orElseThrow(() -> new TourRejected(List.of("no check " + checkId + " in the tour")));
+                TourCheck ownCheck = owner.check(checkId).orElseThrow();
+                CheckProgress now = latest.progress(owner.id()).check(ownCheck.id());
+                if (now.status() != CheckProgress.Status.AWAITING_AGENT) {
+                    throw new TourRejected(List.of("check " + checkId + " is not awaiting a verdict (it is "
+                            + now.status() + ")"));
+                }
+                applied[0] = StepGrading.applyRiskVerdict(ownCheck, now, verdict, reason);
+                return latest.withProgress(latest.progress(owner.id()).withCheck(applied[0]));
+            }).orElseThrow(() -> new McpToolException("scope " + scope.id() + " has no tour"));
+        } catch (TourRejected e) {
+            throw new McpToolException(String.join("; ", e.errors));
+        }
+        CheckProgress next = applied[0];
         return JsonObject.empty()
                 .put("scopeId", new JsonString(scope.id()))
                 .put("checkId", new JsonString(checkId))

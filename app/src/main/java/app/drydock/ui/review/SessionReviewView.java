@@ -4194,20 +4194,18 @@ public final class SessionReviewView extends BorderPane {
     /**
      * Carries {@code scopeId}'s stored tour onto a review diff that moved
      * under it ({@link TourMigration}), through the tour store's one writer,
-     * and asks the agent -- once per diff -- to re-issue the stale steps and
-     * cover the new hunks.
+     * then asks the agent to re-issue what is stale ({@link
+     * #requestTourRefresh}).
      *
-     * <p>Only a NEW diff instance for the scope is considered: a scope flip
-     * or a re-selection republishes the diff it already had, and a tour the
-     * agent posted since then was validated against a fresher diff than
+     * <p>Only a NEW diff instance for the scope is migrated onto: a scope
+     * flip or a re-selection republishes the diff it already had, and a tour
+     * the agent posted since then was validated against a fresher diff than
      * that one -- migrating it back would undo it. A diff with untracked
      * files filtered out is not the review diff the agent sees, so it is
-     * skipped too; turning them back on publishes the real one.</p>
+     * skipped entirely; turning them back on publishes the real one.</p>
      */
     private void migrateTour(String scopeId, UnifiedDiff diff) {
-        if (tourCheckedDiffByScope.get(scopeId) == diff) {
-            return;
-        }
+        boolean newDiff = tourCheckedDiffByScope.get(scopeId) != diff;
         tourCheckedDiffByScope.put(scopeId, diff);
         Optional<ReviewScope> scope = scopeById(scopeId);
         if (scope.isEmpty() || diffColumn.hidesUntracked(scopeId)) {
@@ -4217,29 +4215,44 @@ public final class SessionReviewView extends BorderPane {
         boolean moved = host.tour(scope.get())
                 .map(record -> !record.tour().diffFingerprint().equals(fingerprint))
                 .orElse(false);
-        if (!moved) {
+        if (newDiff && moved) {
+            host.updateTour(scope.get(), record -> record.tour().diffFingerprint().equals(fingerprint)
+                    ? record
+                    : TourMigration.migrate(record, diff).record());
+        }
+        requestTourRefresh(scope.get(), fingerprint, diff);
+    }
+
+    /**
+     * Asks the agent -- once per (scope, diff) -- to re-issue the stale steps
+     * of a tour current for {@code diff} and cover its uncovered hunks.
+     *
+     * <p>Gated like the automatic recheck: an inline harness is never asked
+     * unprompted, and a busy agent is not interrupted. A gated request takes
+     * no claim, so the next publish of the diff asks again; a hand-off that
+     * fails releases its claim for the same reason.</p>
+     */
+    private void requestTourRefresh(ReviewScope scope, String fingerprint, UnifiedDiff diff) {
+        Optional<TourRecord> current = host.tour(scope)
+                .filter(record -> record.tour().diffFingerprint().equals(fingerprint));
+        if (current.isEmpty()) {
             return;
         }
-        List<TourMigration.Result> migrated = new ArrayList<>(1);
-        host.updateTour(scope.get(), record -> {
-            migrated.clear();
-            if (record.tour().diffFingerprint().equals(fingerprint)) {
-                return record;
-            }
-            TourMigration.Result result = TourMigration.migrate(record, diff);
-            migrated.add(result);
-            return result.record();
-        });
-        if (migrated.isEmpty()) {
+        TourRecord record = current.get();
+        List<String> stale = record.tour().steps().stream()
+                .map(TourStep::id)
+                .filter(id -> record.progress(id).stale())
+                .toList();
+        List<String> uncovered = TourMigration.uncoveredHunkIds(record, AnchorIndex.of(diff));
+        if (stale.isEmpty() && uncovered.isEmpty()) {
             return;
         }
-        TourMigration.Result result = migrated.getFirst();
-        if (result.staleStepIds().isEmpty() && result.uncoveredHunkIds().isEmpty()) {
+        if (!host.supportsAutomaticRecheck(scope) || host.agentActivity(scope) == SessionActivity.BUSY) {
             return;
         }
-        if (tourRefreshDispatch.claim(scopeId, fingerprint)
-                && !host.dispatchTourRefresh(scope.get(), result.staleStepIds(), result.uncoveredHunkIds().size())) {
-            tourRefreshDispatch.release(scopeId, fingerprint);
+        if (tourRefreshDispatch.claim(scope.id(), fingerprint)
+                && !host.dispatchTourRefresh(scope, stale, uncovered.size())) {
+            tourRefreshDispatch.release(scope.id(), fingerprint);
         }
     }
 

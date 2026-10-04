@@ -72,6 +72,21 @@ public final class TourMigration {
                 stale.add(step.id());
             }
         }
+        List<String> uncovered = uncoveredHunkIds(live, index);
+        ReviewTour tour = record.tour().withSteps(steps).withFingerprint(TourFingerprint.of(newReviewDiff));
+        TourRecord migrated = new TourRecord(tour, progress, record.hunkOverrides(), newRows,
+                record.reviewAnyway(), false, record.seeded());
+        return new Result(migrated, stale, uncovered);
+    }
+
+    /** Hunks of {@code index}'s diff with a changed row in no anchor of a live (not stale) step of {@code record}. */
+    public static List<String> uncoveredHunkIds(TourRecord record, AnchorIndex index) {
+        return uncoveredHunkIds(record.tour().steps().stream()
+                .filter(step -> !record.progress(step.id()).stale())
+                .toList(), index);
+    }
+
+    private static List<String> uncoveredHunkIds(List<TourStep> live, AnchorIndex index) {
         Set<String> uncovered = new LinkedHashSet<>();
         for (AnchorIndex.ChangedRow row : index.changedRows()) {
             boolean covered = live.stream()
@@ -81,10 +96,7 @@ public final class TourMigration {
                 uncovered.add(ReviewIntent.hunkId(row.file(), row.hunkIndex()));
             }
         }
-        ReviewTour tour = record.tour().withSteps(steps).withFingerprint(TourFingerprint.of(newReviewDiff));
-        TourRecord migrated = new TourRecord(tour, progress, record.hunkOverrides(), newRows,
-                record.reviewAnyway(), false, record.seeded());
-        return new Result(migrated, stale, List.copyOf(uncovered));
+        return List.copyOf(uncovered);
     }
 
     /** {@code step} with its anchors carried onto the new diff, or empty when it cannot be kept. */

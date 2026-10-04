@@ -103,6 +103,14 @@ public interface McpSessionContext {
     void putTour(TourRecord record);
 
     /**
+     * Applies {@code transform} to the scope's CURRENT tour record through
+     * the tour store's one writer, and flushes it to disk; empty, without
+     * calling {@code transform}, when the scope has no tour. A transform
+     * that throws stores nothing.
+     */
+    Optional<TourRecord> updateTour(String scopeId, UnaryOperator<TourRecord> transform);
+
+    /**
      * {@code scopeId}'s intents over {@code diff}: the reviewer's grouping
      * when {@link #putIntents} supplied one, otherwise the by-file fallback
      * -- the same choice {@code SessionReviewView.Host#intents} makes for the
