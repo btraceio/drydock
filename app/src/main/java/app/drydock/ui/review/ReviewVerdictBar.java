@@ -177,6 +177,12 @@ final class ReviewVerdictBar extends VBox {
     private int totalHunks;
     private Optional<StaleInfo> stale = Optional.empty();
     /**
+     * The tour is showing: the unit is the current step, progress counts
+     * steps (spec §7), and "Ask the agent to fix it" is not offered -- in a
+     * tour, sending problems back is the blocker banner's job.
+     */
+    private boolean tourMode;
+    /**
      * What {@code a}/{@code r}/{@code u} act on right now (spec §9.6),
      * stated on the Approve/Request-changes buttons themselves ("Approve
      * (hunk)") rather than in a separate label: a droppable label is not on
@@ -387,6 +393,18 @@ final class ReviewVerdictBar extends VBox {
      * overlap, so the sum of their sizes exceeds the number of hunks and
      * "n/m sections settled" measures nothing (spec §5.6).
      */
+    void setTourMode(boolean on) {
+        if (tourMode == on) {
+            return;
+        }
+        tourMode = on;
+        String unit = on ? "step" : "intent";
+        previousButton.setTooltip(new Tooltip("Previous " + unit + " ([)"));
+        nextButton.setTooltip(new Tooltip("Next " + unit + " (])"));
+        undoButton.setTooltip(new Tooltip(on ? "Undo this step's decision (u)" : "Undo this intent's verdict (u)"));
+        render();
+    }
+
     void showProgress(int settled, int total) {
         this.settledHunks = settled;
         this.totalHunks = total;
@@ -591,9 +609,12 @@ final class ReviewVerdictBar extends VBox {
         previousButton.setDisable(false);
         nextButton.setDisable(false);
 
+        int left = totalHunks - settledHunks;
         navHint.setText(settledHunks >= totalHunks
                 ? "all settled — ⏎ submits"
-                : (totalHunks - settledHunks) + " hunks left · n jumps to the next");
+                : tourMode
+                        ? left + (left == 1 ? " step" : " steps") + " left · n jumps to the next"
+                        : left + " hunks left · n jumps to the next");
 
         if (stale.isPresent()) {
             // Takes priority over the settled branch below: a stale section
@@ -615,6 +636,20 @@ final class ReviewVerdictBar extends VBox {
             // label contradicts what it is about to do (spec §9.6) is worse
             // than no unit statement, and this is the one surface that is
             // never dropped for width, unlike a separate label would be.
+            if (tourMode) {
+                approveButton.setText("Approve step");
+                requestChangesButton.setText("Request changes on step");
+                approveButton.setTooltip(new Tooltip("Pass this step once its checks and findings are done (a)"));
+                requestChangesButton.setTooltip(new Tooltip("Request changes on this step (r)"));
+                refusalLabel.setVisible(false);
+                refusalLabel.setManaged(false);
+                approveButton.pseudoClassStateChanged(javafx.css.PseudoClass.getPseudoClass("refused"), false);
+                actionRow.getChildren().setAll(previousButton, nextButton, intentLabel,
+                        approveButton, requestChangesButton, actionSpacer, navHint);
+                fitActionRow(actionRow.getWidth());
+                renderProgress();
+                return;
+            }
             String unit = unitWord(actingUnit);
             approveButton.setText("Approve (" + unit + ")");
             requestChangesButton.setText("Request changes (" + unit + ")");
@@ -641,8 +676,11 @@ final class ReviewVerdictBar extends VBox {
                     refusalLabel, actionSpacer, navHint);
         }
         fitActionRow(actionRow.getWidth());
+        renderProgress();
+    }
 
-        progressLabel.setText(settledHunks + "/" + totalHunks + " hunks reviewed");
+    private void renderProgress() {
+        progressLabel.setText(settledHunks + "/" + totalHunks + (tourMode ? " steps reviewed" : " hunks reviewed"));
         progressTrack.setPrefWidth(120);
         progressFill.setPrefWidth(totalHunks == 0 ? 0 : 120.0 * settledHunks / totalHunks);
         submitButton.setDisable(false);

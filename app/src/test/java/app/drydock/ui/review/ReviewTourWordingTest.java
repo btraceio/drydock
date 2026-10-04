@@ -1,0 +1,63 @@
+package app.drydock.ui.review;
+
+import javafx.scene.Node;
+import javafx.scene.control.Label;
+import javafx.scene.control.Labeled;
+import javafx.scene.input.KeyCode;
+import org.junit.jupiter.api.Test;
+import org.testfx.util.WaitForAsyncUtils;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+/** In tour mode the verdict bar and the diff header talk about steps, not hunks and intents. */
+class ReviewTourWordingTest extends ReviewTourFixture {
+
+    private boolean shown(String text) {
+        return lookup(text).tryQuery().filter(ReviewTourWordingTest::treeVisible).isPresent();
+    }
+
+    private static boolean treeVisible(Node node) {
+        for (Node at = node; at != null; at = at.getParent()) {
+            if (!at.isVisible()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private String text(String selector) {
+        return ReviewDiagFxThread.call(() -> ((Labeled) lookup(selector).query()).getText());
+    }
+
+    @Test
+    void theVerdictBarNamesTheStepAndCountsSteps() {
+        assertTrue(shown("Approve step"));
+        assertTrue(shown("Request changes on step"));
+        assertFalse(shown("Ask the agent to fix it"), "send-back lives in the blocker banner in a tour");
+        assertEquals("0/2 steps reviewed", text(".review-verdict-progress-label"));
+        assertEquals("2 steps left · n jumps to the next", text(".review-verdict-hint"));
+    }
+
+    @Test
+    void theDiffHeaderShowsTheCurrentStep() {
+        assertEquals("step 1 of 2 · Guards header", text(".review-diff-summary"));
+
+        press(KeyCode.CLOSE_BRACKET).release(KeyCode.CLOSE_BRACKET);
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertEquals("step 2 of 2 · Guards source", text(".review-diff-summary"));
+    }
+
+    @Test
+    void theHunkDiffKeepsItsOwnWording() {
+        press(KeyCode.V).release(KeyCode.V);
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertFalse(shown("Approve step"));
+        assertTrue(text(".review-verdict-progress-label").endsWith("hunks reviewed"));
+        assertFalse(text(".review-diff-summary").startsWith("step "));
+        assertTrue(lookup(".review-diff-summary").query() instanceof Label);
+    }
+}

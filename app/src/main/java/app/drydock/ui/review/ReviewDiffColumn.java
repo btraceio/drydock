@@ -243,6 +243,8 @@ final class ReviewDiffColumn extends BorderPane {
     private UnifiedDiff wholeFileFull;
     private UnifiedDiff wholeFileDiff;
     private boolean wholeFileUnavailable;
+    /** Tour mode's header, naming the current step; see {@link #setStepHeader}. */
+    private Optional<String> stepHeader = Optional.empty();
     private long wholeRequestToken;
     /** {@code c} in whole-file mode: fold every long unchanged run again. */
     private boolean foldAll;
@@ -1033,8 +1035,14 @@ final class ReviewDiffColumn extends BorderPane {
     }
 
     /** Whether the rows are currently narrowed to one intent. */
+    /**
+     * Whether the rows are narrowed to one intent. Never while whole files
+     * show: the tour reads the change across files, and an intent filter
+     * left from the hunk diff must not narrow it. Leaving tour mode brings
+     * the filter back as it was.
+     */
     private boolean filtering() {
-        return intentFilter != null && !showWholeScope;
+        return intentFilter != null && !showWholeScope && !wholeFiles;
     }
 
     private ReviewDiffRows.HunkFilter hunkFilter() {
@@ -1108,6 +1116,7 @@ final class ReviewDiffColumn extends BorderPane {
     void setWholeFiles(boolean on) {
         wholeFiles = on;
         updateContextToggle();
+        updateScopeToggle();
         if (on && wholeFileDiff == null) {
             fetchWholeFiles();
         }
@@ -1286,7 +1295,7 @@ final class ReviewDiffColumn extends BorderPane {
      * already the only thing on screen says nothing about what it does.
      */
     private void updateScopeToggle() {
-        boolean present = intentFilter != null;
+        boolean present = intentFilter != null && !wholeFiles;
         scopeToggle.setVisible(present);
         scopeToggle.setManaged(present);
         if (!present) {
@@ -1311,6 +1320,10 @@ final class ReviewDiffColumn extends BorderPane {
      * totals would contradict the rows directly below them.
      */
     private void updateSummary() {
+        if (wholeFiles && stepHeader.isPresent()) {
+            summaryLabel.setText(stepHeader.get() + (wholeFileUnavailable ? "  ·  whole file unavailable" : ""));
+            return;
+        }
         if (filtering()) {
             // Hunks, not files: an intent's title often already carries its
             // file count ("drydock/git · 4 files"), and appending another one
@@ -1327,6 +1340,19 @@ final class ReviewDiffColumn extends BorderPane {
                 ? ""
                 : files + (files == 1 ? " file" : " files") + "  ·  +" + insertions + " −" + deletions
                         + (wholeFileUnavailable ? "  ·  whole file unavailable" : wholeFiles ? "  ·  whole files" : ""));
+    }
+
+    /**
+     * The header in tour mode: the current step ("step 1 of 3 · title")
+     * rather than the file totals, so the column says what it is showing
+     * the reader through. Empty restores the totals.
+     */
+    void setStepHeader(Optional<String> header) {
+        if (header.equals(stepHeader)) {
+            return;
+        }
+        stepHeader = header;
+        updateSummary();
     }
 
     /** Expands one collapsed run in place; a full rebuild is a single list swap. */

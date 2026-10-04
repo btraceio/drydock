@@ -3916,11 +3916,15 @@ public final class SessionReviewView extends BorderPane {
         if (diffColumn.wholeFiles() != touring) {
             diffColumn.setWholeFiles(touring);
         }
+        verdictBar.setTourMode(touring);
         if (touring) {
             renderTour(tour);
-        } else if (tourMarksShown) {
-            diffColumn.setStepMarkSource(null);
-            tourMarksShown = false;
+        } else {
+            diffColumn.setStepHeader(Optional.empty());
+            if (tourMarksShown) {
+                diffColumn.setStepMarkSource(null);
+                tourMarksShown = false;
+            }
         }
         if (swapped) {
             applyResponsiveLayout(getWidth());
@@ -3950,6 +3954,7 @@ public final class SessionReviewView extends BorderPane {
             shownImpact = null;
             outline.setNotice(Optional.empty());
             outline.setFooter(0, true);
+            diffColumn.setStepHeader(Optional.empty());
             verdictBar.update(null, Optional.empty(), false);
             verdictBar.showProgress(0, 0);
             if (tourMarksShown) {
@@ -3989,6 +3994,8 @@ public final class SessionReviewView extends BorderPane {
                 .orElse(false);
         StepView stepView = new StepView(step, record.tour().number(step.id()), record.tour().steps().size(),
                 progress, StepGate.unmet(step, progress, onStep, record), refreshSent);
+        diffColumn.setStepHeader(Optional.of("step " + stepView.number() + " of " + stepView.total() + " · "
+                + step.title()));
         List<ReviewAnnotation> findings = selectedScope().map(this::visibleFindings).orElse(List.of());
         if (TourFindings.needsBanner(record, findings)) {
             List<ReviewAnnotation> blockers = TourFindings.blockers(findings);
