@@ -1,7 +1,6 @@
 package app.drydock.ui.review;
 
 import app.drydock.ui.TestStages;
-import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewVerdict;
 
 import javafx.scene.Scene;
@@ -54,15 +53,15 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
     @Override
     public void start(Stage stage) {
         bar = new ReviewVerdictBar(new ReviewVerdictBar.Host() {
-            @Override public void approve(ReviewIntent intent, SessionReviewView.SettleUnit unit) { }
-            @Override public void requestChanges(ReviewIntent intent, SessionReviewView.SettleUnit unit) { }
-            @Override public boolean askAgentToFix(ReviewIntent intent) { return askSucceeds; }
-            @Override public void undo(ReviewIntent intent) { }
-            @Override public void confirmStillGood(ReviewIntent intent) { }
+            @Override public void approve(ReviewVerdictBar.Target target, SessionReviewView.SettleUnit unit) { }
+            @Override public void requestChanges(ReviewVerdictBar.Target target, SessionReviewView.SettleUnit unit) { }
+            @Override public boolean askAgentToFix(ReviewVerdictBar.Target target) { return askSucceeds; }
+            @Override public void undo(ReviewVerdictBar.Target target) { }
+            @Override public void confirmStillGood(ReviewVerdictBar.Target target) { }
             @Override public void nextUnsettled() { }
             @Override public void submit() { }
-            @Override public void previousIntent() { }
-            @Override public void nextIntent() { }
+            @Override public void previous() { }
+            @Override public void next() { }
         });
         Scene scene = new Scene(bar, BAR_WIDTH_AT_FLOOR, 200);
         scene.getStylesheets().addAll(
@@ -507,7 +506,7 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
     }
 
 
-    private void show(ReviewIntent intent, Optional<ReviewVerdict.Decision> decision) {
+    private void show(ReviewVerdictBar.Target intent, Optional<ReviewVerdict.Decision> decision) {
         interact(() -> {
             bar.update(intent, decision, false);
             bar.showProgress(1, 7);
@@ -627,8 +626,7 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
         return node.getStyleClass().isEmpty() ? node.toString() : "." + node.getStyleClass().get(0);
     }
 
-    private static ReviewIntent intent(int number, String title) {
-        return new ReviewIntent("auto:" + number, number, title, ReviewIntent.Kind.CHANGE,
-                ReviewIntent.Risk.LOW, "", List.of(), Optional.empty(), false);
+    private static ReviewVerdictBar.Target intent(int number, String title) {
+        return new ReviewVerdictBar.Target("auto:" + number, number + " · " + title);
     }
 }

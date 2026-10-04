@@ -2086,7 +2086,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
 
         @Override
-        public void setVerdict(ReviewScope scope, ReviewIntent intent, List<String> hunkDigests,
+        public void setVerdict(ReviewScope scope, List<String> hunkDigests,
                                Optional<ReviewVerdict.Decision> decision, boolean blocked) {
             if (decision.isEmpty()) {
                 for (String digest : hunkDigests) {
@@ -2195,10 +2195,10 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
 
         @Override
-        public boolean askAgentToFix(ReviewScope scope, ReviewIntent intent,
+        public boolean askAgentToFix(ReviewScope scope, String subject,
                                      List<ReviewAnnotation> findings) {
             return handFindingsToSession(scope,
-                    "Address these review findings on \"" + intent.title() + "\", then summarize what you changed: ",
+                    "Address these review findings on \"" + subject + "\", then summarize what you changed: ",
                     findings);
         }
 

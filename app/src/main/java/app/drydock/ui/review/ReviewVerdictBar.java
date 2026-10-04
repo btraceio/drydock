@@ -1,6 +1,5 @@
 package app.drydock.ui.review;
 
-import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewVerdict;
 
 import javafx.css.PseudoClass;
@@ -15,7 +14,9 @@ import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
 
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.function.Consumer;
 
 /**
  * The verdict bar (spec §4.6). It sits <strong>below both columns</strong>
@@ -41,9 +42,9 @@ final class ReviewVerdictBar extends VBox {
          * {@link SessionReviewView#settleUnit()} to {@code SECTION}
          * mid-press and settle the wrong thing on release.
          */
-        void approve(ReviewIntent intent, SessionReviewView.SettleUnit unit);
+        void approve(Target target, SessionReviewView.SettleUnit unit);
 
-        void requestChanges(ReviewIntent intent, SessionReviewView.SettleUnit unit);
+        void requestChanges(Target target, SessionReviewView.SettleUnit unit);
 
         /**
          * "Ask the agent to fix it" -- hands the intent's open findings to
@@ -56,17 +57,17 @@ final class ReviewVerdictBar extends VBox {
          * that reports nothing when it did nothing is the defect family this
          * branch has now spent three rounds on.</p>
          */
-        boolean askAgentToFix(ReviewIntent intent);
+        boolean askAgentToFix(Target target);
 
         /** {@code u} -- undoes this intent's verdict; also "Re-review" on the stale banner. */
-        void undo(ReviewIntent intent);
+        void undo(Target target);
 
         /**
          * "Confirm still good" on the stale banner (spec §9.2): rewrites
          * the section's stale verdicts against the current base rather than
          * clearing them.
          */
-        void confirmStillGood(ReviewIntent intent);
+        void confirmStillGood(Target target);
 
         /** {@code n} -- moves to the next unsettled intent. */
         void nextUnsettled();
@@ -74,11 +75,24 @@ final class ReviewVerdictBar extends VBox {
         /** {@code ⏎} -- submits the review, once everything is settled. */
         void submit();
 
-        /** {@code [} -- the intent before this one. */
-        void previousIntent();
+        /** {@code [} -- the unit before this one. */
+        void previous();
 
-        /** {@code ]} -- the intent after this one. */
-        void nextIntent();
+        /** {@code ]} -- the unit after this one. */
+        void next();
+    }
+
+    /**
+     * What the bar is settling right now: an opaque {@code id} the host
+     * resolves its buttons back through, and the {@code label} shown as the
+     * bar's title ("3 · Validate the input"). The bar only ever labels the
+     * unit -- what it covers, and whether it is blocked, stay the host's.
+     */
+    record Target(String id, String label) {
+        Target {
+            Objects.requireNonNull(id, "id");
+            Objects.requireNonNull(label, "label");
+        }
     }
 
     /**
@@ -165,7 +179,7 @@ final class ReviewVerdictBar extends VBox {
     private final HBox footer = new HBox(10);
     private final Region footerSpacer = new Region();
 
-    private ReviewIntent intent;
+    private Target target;
     /**
      * The SECTION's decision, derived from its hunks by {@code VerdictMerge}
      * -- not a stored {@link ReviewVerdict}. Sections overlap and so cannot
@@ -232,17 +246,17 @@ final class ReviewVerdictBar extends VBox {
 
         previousButton.getStyleClass().addAll("review-verdict-nav", "review-verdict-previous");
         previousButton.setTooltip(new Tooltip("Previous intent ([)"));
-        previousButton.setOnAction(e -> host.previousIntent());
+        previousButton.setOnAction(e -> host.previous());
 
         nextButton.getStyleClass().addAll("review-verdict-nav", "review-verdict-next");
         nextButton.setTooltip(new Tooltip("Next intent (])"));
-        nextButton.setOnAction(e -> host.nextIntent());
+        nextButton.setOnAction(e -> host.next());
 
         approveButton.getStyleClass().addAll("review-verdict-action", "primary");
         approveButton.addEventFilter(MouseEvent.MOUSE_PRESSED, e -> pressedUnit = Optional.of(actingUnit));
         approveButton.setOnAction(e -> {
             SessionReviewView.SettleUnit unit = consumePressedUnit();
-            withIntent(intent -> host.approve(intent, unit));
+            withTarget(current -> host.approve(current, unit));
         });
 
         requestChangesButton.getStyleClass().add("review-verdict-action");
@@ -250,13 +264,13 @@ final class ReviewVerdictBar extends VBox {
                 e -> pressedUnit = Optional.of(actingUnit));
         requestChangesButton.setOnAction(e -> {
             SessionReviewView.SettleUnit unit = consumePressedUnit();
-            withIntent(intent -> host.requestChanges(intent, unit));
+            withTarget(current -> host.requestChanges(current, unit));
         });
 
         askAgentButton.getStyleClass().add("review-verdict-action");
         askAgentButton.setTooltip(new Tooltip("Hand this intent's open findings to the bound session"));
-        askAgentButton.setOnAction(e -> withIntent(intent -> {
-            if (host.askAgentToFix(intent)) {
+        askAgentButton.setOnAction(e -> withTarget(current -> {
+            if (host.askAgentToFix(current)) {
                 clearAskRefused();
                 return;
             }
@@ -277,7 +291,7 @@ final class ReviewVerdictBar extends VBox {
 
         undoButton.getStyleClass().add("review-verdict-action");
         undoButton.setTooltip(new Tooltip("Undo this intent's verdict (u)"));
-        undoButton.setOnAction(e -> withIntent(host::undo));
+        undoButton.setOnAction(e -> withTarget(host::undo));
 
         // Each also carries a class of its own: the stale banner is the one
         // place two "review-verdict-action" buttons show at once with no
@@ -286,11 +300,11 @@ final class ReviewVerdictBar extends VBox {
                 "review-verdict-confirm-stale");
         confirmStillGoodButton.setTooltip(
                 new Tooltip("Keep this verdict, recorded against the base as it is now"));
-        confirmStillGoodButton.setOnAction(e -> withIntent(host::confirmStillGood));
+        confirmStillGoodButton.setOnAction(e -> withTarget(host::confirmStillGood));
 
         reReviewButton.getStyleClass().addAll("review-verdict-action", "review-verdict-re-review");
         reReviewButton.setTooltip(new Tooltip("Clear this verdict so the section can be re-read"));
-        reReviewButton.setOnAction(e -> withIntent(host::undo));
+        reReviewButton.setOnAction(e -> withTarget(host::undo));
 
         staleLabel.getStyleClass().add("review-verdict-stale");
         staleLabel.setWrapText(true);
@@ -347,9 +361,9 @@ final class ReviewVerdictBar extends VBox {
         render();
     }
 
-    private void withIntent(java.util.function.Consumer<ReviewIntent> action) {
-        if (intent != null) {
-            action.accept(intent);
+    private void withTarget(Consumer<Target> action) {
+        if (target != null) {
+            action.accept(target);
         }
     }
 
@@ -373,9 +387,9 @@ final class ReviewVerdictBar extends VBox {
      *                        empty while any of them is unread
      * @param blocked whether an open blocking finding refuses approval of this intent
      */
-    void update(ReviewIntent currentIntent, Optional<ReviewVerdict.Decision> currentDecision,
+    void update(Target currentTarget, Optional<ReviewVerdict.Decision> currentDecision,
                 boolean blocked) {
-        this.intent = currentIntent;
+        this.target = currentTarget;
         this.decision = currentDecision;
         this.blocked = blocked;
         // Whatever changed enough to call update() again supersedes a
@@ -595,7 +609,7 @@ final class ReviewVerdictBar extends VBox {
     }
 
     private void render() {
-        if (intent == null) {
+        if (target == null) {
             intentLabel.setText("no intent");
             previousButton.setDisable(true);
             nextButton.setDisable(true);
@@ -605,7 +619,7 @@ final class ReviewVerdictBar extends VBox {
             submitButton.setDisable(true);
             return;
         }
-        intentLabel.setText(intent.number() + " · " + intent.title());
+        intentLabel.setText(target.label());
         intentLabel.setTooltip(new Tooltip(intentLabel.getText()));
         previousButton.setDisable(false);
         nextButton.setDisable(false);

@@ -1,7 +1,6 @@
 package app.drydock.ui.review;
 
 import app.drydock.ui.TestStages;
-import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewVerdict;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
@@ -30,19 +29,19 @@ class ReviewVerdictBarNavigationTest extends ApplicationTest {
     @Override
     public void start(Stage stage) {
         bar = new ReviewVerdictBar(new ReviewVerdictBar.Host() {
-            @Override public void approve(ReviewIntent intent, SessionReviewView.SettleUnit unit) {
+            @Override public void approve(ReviewVerdictBar.Target target, SessionReviewView.SettleUnit unit) {
                 calls.add("approve");
             }
-            @Override public void requestChanges(ReviewIntent intent, SessionReviewView.SettleUnit unit) {
+            @Override public void requestChanges(ReviewVerdictBar.Target target, SessionReviewView.SettleUnit unit) {
                 calls.add("changes");
             }
-            @Override public boolean askAgentToFix(ReviewIntent intent) { calls.add("ask"); return true; }
-            @Override public void undo(ReviewIntent intent) { calls.add("undo"); }
-            @Override public void confirmStillGood(ReviewIntent intent) { calls.add("confirm"); }
+            @Override public boolean askAgentToFix(ReviewVerdictBar.Target target) { calls.add("ask"); return true; }
+            @Override public void undo(ReviewVerdictBar.Target target) { calls.add("undo"); }
+            @Override public void confirmStillGood(ReviewVerdictBar.Target target) { calls.add("confirm"); }
             @Override public void nextUnsettled() { calls.add("nextUnsettled"); }
             @Override public void submit() { calls.add("submit"); }
-            @Override public void previousIntent() { calls.add("previous"); }
-            @Override public void nextIntent() { calls.add("next"); }
+            @Override public void previous() { calls.add("previous"); }
+            @Override public void next() { calls.add("next"); }
         });
         Scene scene = new Scene(bar, 900, 200);
         scene.getStylesheets().addAll(
@@ -77,8 +76,7 @@ class ReviewVerdictBarNavigationTest extends ApplicationTest {
         assertTrue(((Button) lookup(".review-verdict-next").query()).isDisabled());
     }
 
-    private static ReviewIntent intent(int number, String title) {
-        return new ReviewIntent("intent-" + number, number, title, ReviewIntent.Kind.CHANGE,
-                ReviewIntent.Risk.LOW, "", List.of(), Optional.empty(), false);
+    private static ReviewVerdictBar.Target intent(int number, String title) {
+        return new ReviewVerdictBar.Target("intent-" + number, number + " · " + title);
     }
 }

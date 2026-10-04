@@ -192,7 +192,7 @@ public final class SessionReviewView extends BorderPane {
         Optional<ReviewVerdict> verdict(ReviewScope scope, String hunkDigest);
 
         /**
-         * Records one verdict per hunk of {@code intent}; {@code decision}
+         * Records one verdict per hunk in {@code hunkDigests}; {@code decision}
          * empty undoes them all.
          *
          * <p>{@code hunkDigests} is computed by the caller rather than by the
@@ -206,12 +206,12 @@ public final class SessionReviewView extends BorderPane {
          * checked against, which {@link #belongsToIntent} needs to tell a
          * finding that legitimately names a DIFFERENT, still-current intent
          * from one whose named id no longer resolves to anything at all. A
-         * host computing its own approximation from {@code intent} alone
+         * host computing its own approximation from the intent alone
          * previously disagreed with the verdict bar's own rendered "blocked"
          * for exactly that case -- silently refusing a keypress the bar had
          * just shown as clear.</p>
          */
-        void setVerdict(ReviewScope scope, ReviewIntent intent, List<String> hunkDigests,
+        void setVerdict(ReviewScope scope, List<String> hunkDigests,
                         Optional<ReviewVerdict.Decision> decision, boolean blocked);
 
         /**
@@ -386,7 +386,7 @@ public final class SessionReviewView extends BorderPane {
          * nothing is the silent failure this branch has now had to fix
          * three times.
          */
-        boolean askAgentToFix(ReviewScope scope, ReviewIntent intent, List<ReviewAnnotation> findings);
+        boolean askAgentToFix(ReviewScope scope, String subject, List<ReviewAnnotation> findings);
 
         /**
          * The tour's "Send back to the author": hands confirmed blocking
@@ -746,6 +746,13 @@ public final class SessionReviewView extends BorderPane {
 
     /** The intent the verdict bar is settling; {@code [} / {@code ]} / {@code n} move it. */
     private int intentIndex;
+
+    /**
+     * The intent last put on the verdict bar ({@link #showIntentOnBar}), or
+     * null while the bar shows nothing or a tour step. The bar itself only
+     * holds a label and an id; its buttons resolve back to this.
+     */
+    private ReviewIntent verdictBarIntent;
 
     /**
      * {@link #intents()}'s result as of the last {@link #refreshReviewState}
@@ -1475,7 +1482,7 @@ public final class SessionReviewView extends BorderPane {
         updateCountsLabel();
         if (scope.isEmpty()) {
             margin.setFindings(List.of());
-            verdictBar.update(null, Optional.empty(), false);
+            showIntentOnBar(null, Optional.empty(), false);
             verdictBar.showProgress(0, 0);
             // No scope selected means no rail: leaving the previous scope's
             // cards up here is how the rail came to list a departed item's
@@ -2194,7 +2201,7 @@ public final class SessionReviewView extends BorderPane {
         }
         Optional<ReviewIntent> current = currentIntent();
         if (current.isEmpty() || board.isEmpty()) {
-            verdictBar.update(null, Optional.empty(), false);
+            showIntentOnBar(null, Optional.empty(), false);
             verdictBar.showProgress(0, 0);
             verdictBar.showStale(Optional.empty());
             verdictBar.showActingUnit(settleUnit());
@@ -2202,7 +2209,7 @@ public final class SessionReviewView extends BorderPane {
         }
         boolean blocked = blockingFindingOpen(scope, current.get());
         SectionStates.SectionState state = sectionState(current.get());
-        verdictBar.update(current.get(), state.decision(), blocked);
+        showIntentOnBar(current.get(), state.decision(), blocked);
         // Progress is the UNION of the counted sections' hunks, counted once.
         verdictBar.showProgress(sections.settledHunkCount(board.get()),
                 sections.distinctDigests(board.get()).size());
@@ -2229,7 +2236,7 @@ public final class SessionReviewView extends BorderPane {
     private void renderVerdictBarForPathStep(ReviewScope scope, Optional<SectionStates.Board> board) {
         Optional<ReadingPath.Step> step = currentPathStep();
         if (step.isEmpty() || board.isEmpty()) {
-            verdictBar.update(null, Optional.empty(), false);
+            showIntentOnBar(null, Optional.empty(), false);
             verdictBar.showProgress(0, 0);
             verdictBar.showStale(Optional.empty());
             verdictBar.showActingUnit(settleUnit());
@@ -2238,7 +2245,7 @@ public final class SessionReviewView extends BorderPane {
         ReviewIntent synthetic = pathStepAsIntent(step.get());
         boolean blocked = blockingFindingOpenForPathStep(scope, step.get(), false);
         SectionStates.SectionState state = sectionState(synthetic);
-        verdictBar.update(synthetic, state.decision(), blocked);
+        showIntentOnBar(synthetic, state.decision(), blocked);
         verdictBar.showProgress(sections.settledHunkCount(board.get()),
                 sections.distinctDigests(board.get()).size());
         verdictBar.showStale(state.staleness() == SectionStates.Staleness.MOVED
@@ -2546,7 +2553,7 @@ public final class SessionReviewView extends BorderPane {
                 .map(ReviewIntent::id);
         ReviewAnnotation stamped = asked.withIntentId(intentId);
         host.addComment(scope.get(), stamped);
-        boolean handedOff = host.askAgentToFix(scope.get(), pathStepAsIntent(step), List.of(stamped));
+        boolean handedOff = host.askAgentToFix(scope.get(), step.file(), List.of(stamped));
         refreshReviewState();
         diffColumn.refreshPins();
         // Returned, not swallowed: with no bound session the comment is
@@ -2772,10 +2779,28 @@ public final class SessionReviewView extends BorderPane {
         }
     }
 
+    /**
+     * Puts {@code intent} (or nothing) on the verdict bar, remembering it so
+     * the bar's buttons resolve back to exactly the intent it was showing
+     * when they were pressed -- see {@link #intentOnBar}.
+     */
+    private void showIntentOnBar(ReviewIntent intent, Optional<ReviewVerdict.Decision> decision,
+                                 boolean blocked) {
+        verdictBarIntent = intent;
+        verdictBar.update(intent == null ? null
+                        : new ReviewVerdictBar.Target(intent.id(), intent.number() + " · " + intent.title()),
+                decision, blocked);
+    }
+
+    /** The intent the bar is showing as {@code target}; empty for a tour step or a stale target. */
+    private Optional<ReviewIntent> intentOnBar(ReviewVerdictBar.Target target) {
+        return Optional.ofNullable(verdictBarIntent).filter(intent -> intent.id().equals(target.id()));
+    }
+
     /** The verdict bar's window onto the host, with the scope filled in. */
     private final class VerdictHost implements ReviewVerdictBar.Host {
         @Override
-        public void approve(ReviewIntent intent, SettleUnit unit) {
+        public void approve(ReviewVerdictBar.Target target, SettleUnit unit) {
             // The verdict bar's own Approve button, not just the keyboard:
             // AGENTS.md requires a shortcut to have a working button
             // equivalent, and vice versa, so a click here must settle
@@ -2790,17 +2815,22 @@ public final class SessionReviewView extends BorderPane {
                 pathVerdictAction(ReviewVerdict.Decision.APPROVED, false);
                 return;
             }
+            Optional<ReviewIntent> onBar = intentOnBar(target);
+            if (onBar.isEmpty()) {
+                return;
+            }
+            ReviewIntent intent = onBar.get();
             selectedScope().ifPresent(scope -> {
                 List<String> digests = digestsForAction(intent, unit, false);
                 Map<String, Optional<ReviewVerdict.Decision>> before = verdictsOf(scope, digests);
-                host.setVerdict(scope, intent, digests, Optional.of(ReviewVerdict.Decision.APPROVED),
+                host.setVerdict(scope, digests, Optional.of(ReviewVerdict.Decision.APPROVED),
                         blockingFindingOpen(scope, intent));
                 recordHunkOverrides(scope, digests, ReviewVerdict.Decision.APPROVED, before);
             });
         }
 
         @Override
-        public void requestChanges(ReviewIntent intent, SettleUnit unit) {
+        public void requestChanges(ReviewVerdictBar.Target target, SettleUnit unit) {
             if (mode == ReviewMode.TOUR) {
                 if (currentTour().isPresent()) {
                     decideCurrentStep(StepProgress.Decision.CHANGES, Optional.empty());
@@ -2811,17 +2841,22 @@ public final class SessionReviewView extends BorderPane {
                 pathVerdictAction(ReviewVerdict.Decision.CHANGES, false);
                 return;
             }
+            Optional<ReviewIntent> onBar = intentOnBar(target);
+            if (onBar.isEmpty()) {
+                return;
+            }
+            ReviewIntent intent = onBar.get();
             selectedScope().ifPresent(scope -> {
                 List<String> digests = digestsForAction(intent, unit, false);
                 Map<String, Optional<ReviewVerdict.Decision>> before = verdictsOf(scope, digests);
-                host.setVerdict(scope, intent, digests, Optional.of(ReviewVerdict.Decision.CHANGES),
+                host.setVerdict(scope, digests, Optional.of(ReviewVerdict.Decision.CHANGES),
                         blockingFindingOpen(scope, intent));
                 recordHunkOverrides(scope, digests, ReviewVerdict.Decision.CHANGES, before);
             });
         }
 
         @Override
-        public boolean askAgentToFix(ReviewIntent intent) {
+        public boolean askAgentToFix(ReviewVerdictBar.Target target) {
             // Routed through the SELECTED ROW in PATH mode, not the intent
             // the bar happened to be handed (see the class-level javadoc on
             // renderVerdictBarForPathStep for why that intent no longer
@@ -2835,11 +2870,15 @@ public final class SessionReviewView extends BorderPane {
             // surface over.
             if (pathMode) {
                 return currentPathStep().flatMap(step -> selectedScope().map(scope ->
-                                host.askAgentToFix(scope, pathStepAsIntent(step),
+                                host.askAgentToFix(scope, step.file(),
                                         openFindingsForPathStep(scope, step))))
                         .orElse(false);
             }
-            return selectedScope().map(scope -> host.askAgentToFix(scope, intent,
+            Optional<ReviewIntent> onBar = intentOnBar(target);
+            if (onBar.isEmpty()) {
+                return false;
+            }
+            return selectedScope().map(scope -> host.askAgentToFix(scope, onBar.get().title(),
                             host.findings(scope).stream()
                                     .filter(finding -> !finding.resolved())
                                     .filter(ReviewAnnotation::counts)
@@ -2849,7 +2888,7 @@ public final class SessionReviewView extends BorderPane {
         }
 
         @Override
-        public void undo(ReviewIntent intent) {
+        public void undo(ReviewVerdictBar.Target target) {
             // Re-review, too (spec §9.2): a stale section's banner button and
             // the plain undo button both just clear what is recorded. An
             // undo is never refused, so the flag here is inert -- passed
@@ -2869,21 +2908,22 @@ public final class SessionReviewView extends BorderPane {
             if (pathMode) {
                 currentPathStep().ifPresent(step -> selectedScope().ifPresent(scope ->
                         loadedDiff().flatMap(diff -> digestOfPathStep(diff, step)).ifPresent(digest -> {
-                            host.setVerdict(scope, pathStepAsIntent(step), List.of(digest),
+                            host.setVerdict(scope, List.of(digest),
                                     Optional.empty(), false);
                             clearHunkOverrides(scope, List.of(digest));
                         })));
                 return;
             }
-            selectedScope().ifPresent(scope -> {
-                List<String> digests = digestsOf(intent);
-                host.setVerdict(scope, intent, digests, Optional.empty(), false);
+            Optional<ReviewIntent> onBar = intentOnBar(target);
+            selectedScope().filter(scope -> onBar.isPresent()).ifPresent(scope -> {
+                List<String> digests = digestsOf(onBar.get());
+                host.setVerdict(scope, digests, Optional.empty(), false);
                 clearHunkOverrides(scope, digests);
             });
         }
 
         @Override
-        public void confirmStillGood(ReviewIntent intent) {
+        public void confirmStillGood(ReviewVerdictBar.Target target) {
             if (pathMode) {
                 currentPathStep().ifPresent(step -> selectedScope().ifPresent(scope ->
                         loadedDiff().flatMap(diff -> digestOfPathStep(diff, step)).ifPresent(digest -> {
@@ -2892,8 +2932,9 @@ public final class SessionReviewView extends BorderPane {
                         })));
                 return;
             }
-            selectedScope().ifPresent(scope -> {
-                host.confirmStillGood(scope, digestsOf(intent));
+            Optional<ReviewIntent> onBar = intentOnBar(target);
+            selectedScope().filter(scope -> onBar.isPresent()).ifPresent(scope -> {
+                host.confirmStillGood(scope, digestsOf(onBar.get()));
                 refreshReviewState();
             });
         }
@@ -2918,7 +2959,7 @@ public final class SessionReviewView extends BorderPane {
         }
 
         @Override
-        public void previousIntent() {
+        public void previous() {
             if (mode == ReviewMode.TOUR) {
                 currentTour().ifPresent(record -> moveStep(record, -1));
                 return;
@@ -2927,7 +2968,7 @@ public final class SessionReviewView extends BorderPane {
         }
 
         @Override
-        public void nextIntent() {
+        public void next() {
             if (mode == ReviewMode.TOUR) {
                 currentTour().ifPresent(record -> moveStep(record, 1));
                 return;
@@ -3030,7 +3071,7 @@ public final class SessionReviewView extends BorderPane {
         for (int i = 0; i < counted.size(); i++) {
             Optional<ReviewVerdict.Decision> decision = decisionOf(counted.get(i));
             if (decision.isEmpty() && mode == ReviewMode.TOUR) {
-                refuseSubmitFromTour(counted.get(i), false);
+                refuseSubmitFromTour(digestsOf(counted.get(i)), false);
                 return;
             }
             if (decision.isEmpty()) {
@@ -3046,7 +3087,7 @@ public final class SessionReviewView extends BorderPane {
             // about the code as it stands now.
             if (sectionState(counted.get(i)).staleness() == SectionStates.Staleness.MOVED) {
                 if (mode == ReviewMode.TOUR) {
-                    refuseSubmitFromTour(counted.get(i), true);
+                    refuseSubmitFromTour(digestsOf(counted.get(i)), true);
                     return;
                 }
                 intentIndex = intents().indexOf(counted.get(i));
@@ -3065,13 +3106,12 @@ public final class SessionReviewView extends BorderPane {
      * Submit's refusal while the tour is showing. The hunk diff's answer --
      * move the intent cursor and reveal it -- would narrow a column the tour
      * does not narrow and settle nothing anyone can see, so here the refusal
-     * jumps to a step: for a stale approval the step covering {@code
-     * section}'s hunks, otherwise the first unsettled step. A hunk no step
+     * jumps to a step: for a stale approval the step covering any of
+     * {@code digests}, otherwise the first unsettled step. A hunk no step
      * covers has no step to jump to, and the footer says where to settle it.
      */
-    private void refuseSubmitFromTour(ReviewIntent section, boolean staleBase) {
+    private void refuseSubmitFromTour(List<String> digests, boolean staleBase) {
         Optional<TourRecord> tour = currentTour();
-        List<String> digests = digestsOf(section);
         Optional<String> target = tour.flatMap(record -> {
             Optional<String> covering = staleBase
                     ? record.tour().steps().stream()
@@ -3379,7 +3419,7 @@ public final class SessionReviewView extends BorderPane {
             return;
         }
         Map<String, Optional<ReviewVerdict.Decision>> before = verdictsOf(scope.get(), digests);
-        host.setVerdict(scope.get(), intent.get(), digests, Optional.of(decision),
+        host.setVerdict(scope.get(), digests, Optional.of(decision),
                 blockingFindingOpen(scope.get(), intent.get()));
         boolean applied = digests.stream().allMatch(digest -> host.verdict(scope.get(), digest)
                 .filter(v -> v.decision() == decision).isPresent());
@@ -3413,7 +3453,6 @@ public final class SessionReviewView extends BorderPane {
             return;
         }
         ReadingPath.Step step = steps.get(Math.clamp(pathIndex, 0, steps.size() - 1));
-        ReviewIntent synthetic = pathStepAsIntent(step);
         List<String> digests = wholeFile
                 ? digestsOfFileInDiff(diff.get(), step.file())
                 : digestOfPathStep(diff.get(), step).map(List::of).orElse(List.of());
@@ -3421,7 +3460,7 @@ public final class SessionReviewView extends BorderPane {
             return;
         }
         Map<String, Optional<ReviewVerdict.Decision>> before = verdictsOf(scope.get(), digests);
-        host.setVerdict(scope.get(), synthetic, digests, Optional.of(decision),
+        host.setVerdict(scope.get(), digests, Optional.of(decision),
                 blockingFindingOpenForPathStep(scope.get(), step, wholeFile));
         boolean applied = digests.stream().allMatch(digest -> host.verdict(scope.get(), digest)
                 .filter(v -> v.decision() == decision).isPresent());
@@ -3533,7 +3572,7 @@ public final class SessionReviewView extends BorderPane {
         }
         // An undo is never refused (see the VerdictHost#undo javadoc); false
         // is inert here, not a claim that nothing is blocking.
-        host.setVerdict(scope.get(), current.get(index), digests, Optional.empty(), false);
+        host.setVerdict(scope.get(), digests, Optional.empty(), false);
         clearHunkOverrides(scope.get(), digests);
         intentIndex = index;
         refreshReviewState();
@@ -3569,7 +3608,7 @@ public final class SessionReviewView extends BorderPane {
             // the step this would have undone no longer exists.
             return;
         }
-        host.setVerdict(scope.get(), pathStepAsIntent(target), digests, Optional.empty(), false);
+        host.setVerdict(scope.get(), digests, Optional.empty(), false);
         clearHunkOverrides(scope.get(), digests);
         pathIndex = index;
         refreshReviewState();
@@ -3970,7 +4009,7 @@ public final class SessionReviewView extends BorderPane {
             outline.setNotice(Optional.empty());
             outline.setFooter(0, true);
             diffColumn.setStepHeader(Optional.empty());
-            verdictBar.update(null, Optional.empty(), false);
+            showIntentOnBar(null, Optional.empty(), false);
             verdictBar.showProgress(0, 0);
             if (tourMarksShown) {
                 diffColumn.setStepMarkSource(null);
@@ -4224,21 +4263,20 @@ public final class SessionReviewView extends BorderPane {
 
     /**
      * The verdict bar in tour mode: the current step as its unit, progress
-     * in steps passed or overridden. The step goes in as a one-off {@link
-     * ReviewIntent} the way {@link #pathStepAsIntent} hands a path row in --
-     * the bar only labels it, and its buttons route back here through
-     * {@link VerdictHost}.
+     * in steps passed or overridden. The bar only labels the step; its
+     * buttons route back here through {@link VerdictHost}, whose tour
+     * branches act on the current step and never read the target.
      */
     private void renderTourVerdictBar(TourRecord record, TourStep step, StepProgress progress) {
-        ReviewIntent asIntent = new ReviewIntent("tour:" + step.id(), record.tour().number(step.id()),
-                step.title(), ReviewIntent.Kind.CHANGE, ReviewIntent.Risk.NONE, step.narrative(),
-                List.of(), Optional.empty(), false, List.of());
+        ReviewVerdictBar.Target target = new ReviewVerdictBar.Target("tour:" + step.id(),
+                record.tour().number(step.id()) + " · " + step.title());
         Optional<ReviewVerdict.Decision> decision = switch (progress.decision()) {
             case PASSED, OVERRIDDEN -> Optional.of(ReviewVerdict.Decision.APPROVED);
             case CHANGES -> Optional.of(ReviewVerdict.Decision.CHANGES);
             case NONE -> Optional.empty();
         };
-        verdictBar.update(asIntent, decision, false);
+        verdictBarIntent = null;
+        verdictBar.update(target, decision, false);
         int settled = (int) record.tour().steps().stream()
                 .filter(candidate -> record.progress(candidate.id()).settledForApproval())
                 .count();

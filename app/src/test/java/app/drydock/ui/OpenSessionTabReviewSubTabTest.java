@@ -517,7 +517,7 @@ class OpenSessionTabReviewSubTabTest extends ApplicationTest {
         }
 
         @Override
-        public void setVerdict(ReviewScope scope, ReviewIntent intent, List<String> hunkDigests,
+        public void setVerdict(ReviewScope scope, List<String> hunkDigests,
                                Optional<ReviewVerdict.Decision> decision, boolean blocked) {
         }
 
@@ -571,7 +571,7 @@ class OpenSessionTabReviewSubTabTest extends ApplicationTest {
         }
 
         @Override
-        public boolean askAgentToFix(ReviewScope scope, ReviewIntent intent, List<ReviewAnnotation> findings) {
+        public boolean askAgentToFix(ReviewScope scope, String subject, List<ReviewAnnotation> findings) {
             return false;
         }
 

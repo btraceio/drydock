@@ -167,7 +167,7 @@ final class FakeReviewHost implements SessionReviewView.Host {
     }
 
     @Override
-    public void setVerdict(ReviewScope scope, ReviewIntent intent, List<String> hunkDigests,
+    public void setVerdict(ReviewScope scope, List<String> hunkDigests,
                            Optional<ReviewVerdict.Decision> decision, boolean blocked) {
         if (decision.isEmpty()) {
             for (String digest : hunkDigests) {
@@ -311,11 +311,11 @@ final class FakeReviewHost implements SessionReviewView.Host {
     boolean sessionBound = true;
 
     @Override
-    public boolean askAgentToFix(ReviewScope scope, ReviewIntent intent, List<ReviewAnnotation> findings) {
+    public boolean askAgentToFix(ReviewScope scope, String subject, List<ReviewAnnotation> findings) {
         if (findings.isEmpty() || !sessionBound) {
             return false;
         }
-        handedOffPrompts.add(intent.title() + ": " + findings.size() + " findings");
+        handedOffPrompts.add(subject + ": " + findings.size() + " findings");
         return true;
     }
 
