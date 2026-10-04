@@ -357,6 +357,38 @@ class SessionReviewScopesTest {
                 "no PR-less (no branch) sibling identity: " + minted);
     }
 
+    /**
+     * gh could not list pull requests (missing, unauthenticated, timing out)
+     * or listed none for a {@code pr-<n>} checkout. The branch alone names
+     * the PR, so the local scope still carries ref #42 and keeps the
+     * identity the PR flow mints with the PR present -- otherwise a gh
+     * hiccup minted a second, PR-less local identity bound to the session.
+     * Identity is the PR number only, so the derived ref needs no URL.
+     */
+    @Test
+    void aPrCheckoutWhoseListingFailedKeepsTheIdentityMintedWithThePullRequest(
+            @TempDir Path dir, @TempDir Path worktreeParent)
+            throws ExecutionException, InterruptedException, IOException {
+        Path repo = initCommittedRepo(dir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "pr-42").get();
+        ManagedSessionId session = ManagedSessionId.newId();
+
+        SessionReviewScopes.Scopes withoutListing = scopes.forSessionCheckout(repo, worktree, Optional.empty(),
+                Optional.of(session), branch -> CompletableFuture.completedFuture(Optional.empty())).get();
+
+        assertEquals(42, withoutListing.local().pr().orElseThrow().number(),
+                "the pr-<n> branch alone carries the PR ref");
+        assertTrue(withoutListing.pullRequest().isEmpty(), "no PR chip without the PR's details");
+
+        SessionReviewScopes.Scopes withPullRequest = scopes.forCheckout(repo, worktree, Optional.of("pr-42"),
+                Optional.of(session), Optional.of(pullRequest(42, "someones-branch"))).get();
+
+        assertEquals(withPullRequest.local().id(), withoutListing.local().id());
+        assertEquals(1, registry.scopes().stream()
+                .filter(scope -> scope.kind() == ReviewScope.Kind.WORKTREE).count(),
+                "one local identity, not two: " + registry.scopes());
+    }
+
     /** A cached branch is used as given: the lookup is asked about exactly that branch. */
     @Test
     void aWarmCacheBranchIsUsedAsGiven(@TempDir Path dir, @TempDir Path worktreeParent)

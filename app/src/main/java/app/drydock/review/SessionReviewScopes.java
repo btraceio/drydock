@@ -22,12 +22,14 @@ import java.util.logging.Logger;
  *
  * <p><strong>Draft is a chip rule, not an identity rule.</strong> The caller
  * hands over any open PR the checkout carries, draft included, because the
- * local scope's {@code PullRequestRef} -- and therefore its identity -- is
- * derived from it. Only the second chip is withheld for a draft. Filtering
- * drafts out in the caller instead would mint {@code (WORKTREE, repo,
- * worktree, ∅)} for a {@code pr-<n>} checkout that another surface may
- * already have minted as {@code (WORKTREE, repo, worktree, <n>)}, and every
- * finding recorded from one would be invisible from the other, silently.</p>
+ * local scope's {@code PullRequestRef} and its base come from it. Only the
+ * second chip is withheld for a draft. On a {@code pr-<n>} checkout the
+ * identity no longer hangs on it alone: with no PR handed over (a dropped
+ * draft, a failed or empty gh listing), {@link #forCheckout} derives the
+ * ref from the branch name, so the scope is still {@code (WORKTREE, repo,
+ * worktree, <n>)} -- never a PR-less sibling whose findings would be
+ * invisible from the other, silently. The PR's declared base still comes
+ * only from the PR, so drafts are still handed over.</p>
  *
  * <p><strong>The kinds are not a free choice.</strong> They are the ones the
  * now-deleted cross-repo queue already minted for the same
@@ -76,15 +78,14 @@ public final class SessionReviewScopes {
      *
      * <p><strong>Drafts are returned, not dropped</strong>, and that is the
      * whole reason this is a named, tested function rather than three lines
-     * inside its caller. Filtering drafts out on the way in is silently
-     * destructive: the result feeds {@link #forCheckout}'s {@code
-     * PullRequestRef}, which is part of the local scope's identity, so
-     * dropping a draft mints {@code (WORKTREE, repo, worktree, ∅)} for a
-     * {@code pr-<n>} checkout that is elsewhere minted as {@code (WORKTREE,
-     * repo, worktree, <n>)} -- and every finding,
-     * verdict and thread recorded from one surface becomes invisible from the
-     * other. Reachable, not theoretical: a review-requested PR can be a
-     * draft, and drydock checks those out as {@code pr-<n>}.</p>
+     * inside its caller. The result feeds {@link #forCheckout}'s {@code
+     * PullRequestRef} (part of the local scope's identity) and its base.
+     * {@code forCheckout} backs a {@code pr-<n>} checkout's ref with the
+     * branch name when nothing is handed over, so a dropped draft no longer
+     * splits the identity -- but it would still lose the PR's URL and
+     * declared base, and the review base would silently fall back to the
+     * default branch. Reachable, not theoretical: a review-requested PR can
+     * be a draft, and drydock checks those out as {@code pr-<n>}.</p>
      *
      * <p>The draft gate lives in {@link #forCheckout}, and withholds the
      * second chip only.</p>
@@ -200,9 +201,17 @@ public final class SessionReviewScopes {
         // every finding already recorded against the worktree from events
         // that have nothing to do with it. The PR scope itself is
         // unaffected: it always carries its ref.
-        Optional<ReviewScope.PullRequestRef> localRef = !mainCheckout
-                && PrCheckoutService.pullRequestNumberOf(head).isPresent()
-                ? ref : Optional.empty();
+        //
+        // On the alias the branch alone names the PR, so the ref does not
+        // wait on the caller's listing: when gh failed (missing,
+        // unauthenticated, timing out) or listed no such PR, the ref is
+        // derived from the branch name. Identity is the PR number only (see
+        // ReviewScopeRegistry.Identity), so the URL-less ref mints the same
+        // id the PR flow mints with the PR in hand -- where an empty ref
+        // minted a second, PR-less local identity bound to the session.
+        Optional<Integer> alias = mainCheckout ? Optional.empty() : PrCheckoutService.pullRequestNumberOf(head);
+        Optional<ReviewScope.PullRequestRef> localRef = alias.isEmpty() ? Optional.empty()
+                : ref.or(() -> Optional.of(new ReviewScope.PullRequestRef(alias.get(), Optional.empty())));
 
         return gitStatusService.defaultBranch(repositoryRoot)
                 .handle((defaultBranch, failure) -> failure == null ? defaultBranch : Optional.<String>empty())

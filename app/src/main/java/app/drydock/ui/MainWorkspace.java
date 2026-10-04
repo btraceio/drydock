@@ -1658,8 +1658,10 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * <p>Every failure degrades to "no pull request", leaving the local scope
      * standing: gh missing, unauthenticated, no GitHub remote and genuinely no
      * PR are not reasons to show this session's review nothing at all. On a
-     * {@code pr-<n>} checkout that degrade also costs the local scope its ref,
-     * so it must stay as brief as a failure actually is -- see {@link
+     * {@code pr-<n>} checkout the local scope keeps its identity regardless
+     * ({@link SessionReviewScopes#forCheckout} derives the ref from the
+     * branch name), but loses the PR chip and the PR's declared base, so the
+     * degrade must stay as brief as a failure actually is -- see {@link
      * #openPullRequests}, which never memoizes one.</p>
      */
     private CompletableFuture<Optional<GhCliService.OpenPullRequest>> openPullRequestOn(
@@ -1679,8 +1681,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * from {@code gh} is evicted rather than remembered, so a gh that was
      * missing, unauthenticated or timing out is retried on the next gesture
      * instead of reading as "no pull requests" for the next half minute --
-     * which on a {@code pr-<n>} checkout would drop the local scope's ref and
-     * mint the wrong identity for as long as the memo stood.
+     * which would withhold the PR chip and the PR's base for as long as the
+     * memo stood.
      *
      * <p>The entry is installed BEFORE the gh call's completion handler is
      * attached, which is why this owns its own future rather than memoizing a
