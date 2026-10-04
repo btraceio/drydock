@@ -36,11 +36,11 @@ session's checkout.
 | Density | `ReviewDensity` | `d` cycles cozy/compact/dense by swapping one style class; the measurements are `px` literals in `app.css`, so density stays relative to the user's absolute interface size. |
 | Queue rail | `ReviewQueueRail` | 236 / 206 narrow / 44 collapsed, animated the way `SessionExplorerView` animates its search rail. Every row is a real focusable `Button`. |
 | Terminal swap | `MainWorkspace.setReviewShowing` | Review is a scene-graph view, so showing it hides every native terminal — one writer (`updateTerminalVisibility`) over three independent conditions (selected tab, modal up, Review showing), and `updateGeometryNow()` on the way back. |
-| Findings + verdicts | `app.drydock.review.AnnotationStore` / `ReviewAnnotation` / `ReviewVerdict` / `ReviewIntent` / `IntentGrouping` | Everything keyed by `(scopeId, id)`. Findings carry severity, confidence, intent, evidence, a proposed patch, ASK chips, a thread and a human severity override. Intents come from `review_intents`, or from the by-file fallback that keeps the verdict bar meaningful with no reviewer configured. |
+| Findings + verdicts | `app.drydock.review.AnnotationStore` / `ReviewAnnotation` / `ReviewVerdict` | Everything keyed by `(scopeId, id)`. Findings carry severity, confidence, evidence, a proposed patch, ASK chips, a thread and a human severity override; they are anchored to a file and line keys, not to a grouping. Verdicts are keyed by `(scopeId, hunk digest)`, so no regrouping can orphan one. |
 | Findings margin | `ReviewFindingsMargin` | 336 / 286 narrow / 30px strip. Cards sit beside the code, never inline. Reply drafts are held by the margin keyed by `(scopeId, id)`, not by the card node — a card is rebuilt whenever its finding changes, and a node-owned draft would go with it. |
-| Verdict bar | `ReviewVerdictBar` | Below both columns and always in the layout, so collapsing every rail cannot take the primary action with it. Approval is refused inline while a blocking finding of the intent is open. |
-| Review MCP tools | `McpToolRouter` + `ReviewToolCodec` | `review_scope` (paged on a byte budget; includes impact notes), `review_intents`, `review_tour` (validated whole, stored only if valid; `onlySteps` replaces just the named steps), `review_check` (an agent's verdict on one tour check), `review_finding` (idempotent upsert; carries triage and `withheldBy`), `review_answer`, `review_state`. Every inbound text field goes through `PromptSafety.checkInboundText`. |
-| Intent rail | `ReviewIntentRail` | 232 / 196 narrow / 40px collapsed. Risk heat bar, kind tag, collapsed-intent note; settled intents dim, and collapse to a status dot rather than a clipped label. |
+| Verdict bar | `ReviewVerdictBar` | Below both columns and always in the layout, so collapsing every rail cannot take the primary action with it. It names its target (the current file in the hunk diff, the current step in the tour), and approval is refused inline while a blocking finding on that file or step is open. |
+| Review MCP tools | `McpToolRouter` + `ReviewToolCodec` | `review_scope` (paged on a byte budget; includes impact notes), `review_tour` (validated whole, stored only if valid; `onlySteps` replaces just the named steps), `review_check` (an agent's verdict on one tour check), `review_finding` (idempotent upsert; carries triage and `withheldBy`), `review_answer`, `review_state` (findings, tour progress, submission; per-intent verdicts are gone). `review_intents` is retired. Every inbound text field goes through `PromptSafety.checkInboundText`. |
+| Tour outline | `TourOutline` | 232 / 196 narrow / 40px collapsed, the left column in tour mode. The hunk diff (`v`) has no left rail: it walks files (`[` / `]`), `n` is the next unsettled hunk, `a` / `r` / `u` act on the next unread hunk and `⇧A` / `⇧R` on the whole file. |
 | PR checkout | `app.drydock.git.PrCheckoutService` + `ReviewCheckoutGate` | Detached worktree, then `gh pr checkout` **inside it**, then a session, then the scope grant. A failed checkout removes the worktree it made. |
 | Symbol lens | `SymbolIndex` + the diff column's popover | A local lexical index of the diff — never MCP. Identifiers it knows get a dotted underline; the popover chips each occurrence `in diff` / `not touched`. |
 | MCP activity | `app.drydock.mcp.McpActivityLog` + `ReviewMcpActivityPanel` | Bounded ring buffer written by the one place every tool call passes through; `\` opens the panel, with a payload inspector and a budget bar. A hidden panel listens to nothing. |
@@ -172,6 +172,12 @@ need a look before the next milestone builds on them.
 - **`OpenSessionTab.openExplorerAt` / `searchInExplorer` are currently
   unreferenced.** They are the `⤢` bridge the diff column consumes; they
   were left in place rather than deleted and recreated one milestone later.
+
+> **Superseded.** The milestone logs below are history. The intent rail, path
+> mode (`p`), the `i` key and the `review_intents` tool were retired once the
+> guided tour became Review's grouping surface (see
+> `docs/superpowers/specs/2026-10-03-guided-review-tour-design.md`); where a log
+> entry below mentions them, read it as a record of what was true then.
 
 ### Review — M2 (diff column)
 

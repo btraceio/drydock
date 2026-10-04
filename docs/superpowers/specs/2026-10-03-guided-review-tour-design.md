@@ -131,8 +131,8 @@ the reviewer dismisses them all, the tour starts. Otherwise:
   commits land, staleness (§3) re-issues only the affected steps.
 - **Review anyway:** the blockers are shown up front, not as checks. A step
   whose anchors contain a `CONFIRMED`, unresolved blocker can only be
-  rejected or overridden. This needs a store query by line range; today's
-  `hasOpenBlockingFinding` is keyed by intent (`AnnotationStore.java:189`).
+  rejected or overridden. This needs a store query by line range; the old
+  intent-keyed `hasOpenBlockingFinding` is gone, and `TourFindings` answers it.
 
 **To pass, a step needs every agent finding on its anchored lines triaged.**
 Submit shows untriaged proposals as a count, and never posts them.
@@ -220,7 +220,8 @@ because a removed row has no line in the post-image.
 
 **Keys retired or moved.**
 
-- `p` (path mode) and `i` (collapse intents) go with the intent rail.
+- `p` (path mode) and `i` (collapse intents) go with the intent rail; both are
+  now unbound.
 - `m` collapses the step panel.
 - `c` (show unchanged lines) toggles the folding of unchanged runs.
 - `d` stays density. The search rail's scope toggle, which is `d` in the
@@ -322,9 +323,12 @@ activity log. Failure clears to an error with **Retry** and **Open diff
 review**.
 
 **The tour replaces the intent rail and path mode.** `review_intents`
-remains for one release, rendered nowhere new, and its description says to
-use `review_tour`. Sections and the reading path stay as computed input to
-the agent.
+is retired: the tool, its descriptor and the `intents` array of `review_state`
+are gone (tour progress is reported under `review_state.tour`), and a finding
+no longer carries an `intentId` (an incoming one is ignored). The hunk diff is
+per file, not per intent: `[` / `]` move between files, `n` finds the next
+unsettled hunk, and the verdict bar names the file. Sections and the reading
+path stay as computed input to the agent.
 
 | Tool | Change |
 |---|---|
@@ -332,7 +336,7 @@ the agent.
 | `review_tour` *(new)* | Submits the tour, or with `onlySteps` replaces stale steps and adds steps for uncovered hunks. Validation is all-or-nothing and lists concrete errors: a hunk not covered; an anchor key that is not a line of the diff; an impact note off-range; a `withheldBy` finding with no check on a step anchoring its lines; a withheld `BLOCKING` finding; a check without an alternate; an answer key not among the choices. |
 | `review_finding` | Agent findings land `PROPOSED`. Optional `withheldBy: checkId`. |
 | `review_check` *(new)* | The agent's verdict on a RISK answer: `holds`, `partly` or `doesNotHold`, with a reason. |
-| `review_state` | Tour progress; RISK answers awaiting a verdict, *with the answer text*; triage outcomes, including dismissal reasons. |
+| `review_state` | No longer reports `intents`. Tour progress; RISK answers awaiting a verdict, *with the answer text*; triage outcomes, including dismissal reasons. |
 
 **RISK grading is pulled, not pushed.**
 
