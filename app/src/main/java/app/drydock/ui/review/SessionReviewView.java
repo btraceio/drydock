@@ -3420,6 +3420,16 @@ public final class SessionReviewView extends BorderPane {
         runReviewOnSelection();
     }
 
+    /** Test-only: whether a Run review is building a tour for the selected scope. */
+    boolean diagTourPending() {
+        return tourController.pending();
+    }
+
+    /** Test-only: whether the tour wait timer is running. */
+    boolean diagTourWaitRunning() {
+        return tourController.waitRunning();
+    }
+
     /** Test-only: the "Building tour…" wait running out, without waiting 15 minutes. */
     void diagExpireTourWait() {
         tourController.expireWait();

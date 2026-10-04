@@ -291,6 +291,53 @@ class ReviewTourModeTest extends ReviewTourFixture {
     }
 
     @Test
+    void buildingTourOffersTheHunkDiffWhileTheWaitKeepsRunning() {
+        host.reviewers.add("claude");
+        try {
+            withoutTourInTourMode();
+            clickOn("Run review");
+            WaitForAsyncUtils.waitForFxEvents();
+            assertTrue(lookup("Open diff review").tryQuery().isPresent(), "Open diff review while building");
+            assertTrue(lookup("Cancel").tryQuery().isPresent(), "Cancel while building");
+            clickOn("Open diff review");
+            WaitForAsyncUtils.waitForFxEvents();
+            assertEquals(SessionReviewView.ReviewMode.DIFF, ReviewDiagFxThread.call(view::diagMode));
+            assertTrue(ReviewDiagFxThread.call(view::diagTourPending), "the wait is still pending");
+            assertTrue(ReviewDiagFxThread.call(view::diagTourWaitRunning), "and still running");
+            interact(() -> {
+                host.tours.put(TourRecord.fresh(tour(scope.id(), host.diff), host.diff));
+                view.refreshReviewState();
+            });
+            WaitForAsyncUtils.waitForFxEvents();
+            assertEquals(SessionReviewView.ReviewMode.DIFF, ReviewDiagFxThread.call(view::diagMode),
+                    "an arriving tour does not yank the reader back");
+            assertEquals(Optional.of("The tour is ready \u2014 press v"), ReviewDiagFxThread.call(view::diagNotice));
+            assertFalse(ReviewDiagFxThread.call(view::diagTourPending));
+        } finally {
+            host.reviewers.clear();
+        }
+    }
+
+    @Test
+    void cancellingBuildingTourReturnsToTheNoTourState() {
+        host.reviewers.add("claude");
+        try {
+            withoutTourInTourMode();
+            clickOn("Run review");
+            WaitForAsyncUtils.waitForFxEvents();
+            clickOn("Cancel");
+            WaitForAsyncUtils.waitForFxEvents();
+            assertFalse(ReviewDiagFxThread.call(view::diagTourPending));
+            assertFalse(ReviewDiagFxThread.call(view::diagTourWaitRunning));
+            assertEquals(SessionReviewView.ReviewMode.TOUR, ReviewDiagFxThread.call(view::diagMode));
+            assertTrue(lookup("No tour yet.").tryQuery().isPresent());
+            assertTrue(lookup("Run review").tryQuery().isPresent());
+        } finally {
+            host.reviewers.clear();
+        }
+    }
+
+    @Test
     void aRunThatCannotStartOffersRetryAndTheDiffReview() {
         withoutTourInTourMode();
         clickOn("Run review");

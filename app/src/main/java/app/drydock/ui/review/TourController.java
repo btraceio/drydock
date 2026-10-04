@@ -30,6 +30,7 @@ import app.drydock.ui.nav.LexicalUsageProvider;
 import app.drydock.ui.nav.NavigationTrail;
 import app.drydock.ui.nav.SymbolPeekService;
 
+import javafx.animation.Animation;
 import javafx.animation.PauseTransition;
 import javafx.application.Platform;
 import javafx.scene.input.KeyEvent;
@@ -332,7 +333,17 @@ final class TourController {
     void endWaitIfArrived(Optional<TourRecord> tour) {
         if (tour.isPresent() && pending()) {
             endTourWait();
+            if (!view.touring()) {
+                // The reader went to the hunk diff while it was built; do not pull them back.
+                view.notice("The tour is ready \u2014 press v");
+            }
         }
+    }
+
+    /** "Cancel" on "Building tour…": gives up the wait and shows the no-tour state, still in tour mode. */
+    private void cancelWait() {
+        endTourWait();
+        render();
     }
 
     /** The hunk diff is showing: no step header, no step marks. */
@@ -387,6 +398,10 @@ final class TourController {
         mcpOpenedForTour = false;
     }
 
+    boolean waitRunning() {
+        return tourWait.getStatus() == Animation.Status.RUNNING;
+    }
+
     /** The "Building tour…" wait running out now. */
     void expireWait() {
         tourWait.stop();
@@ -432,7 +447,7 @@ final class TourController {
         if (tour.isEmpty()) {
             Optional<TourFailure> failure = failureForSelection();
             if (pending()) {
-                outline.showMessage("Building tour…", Optional.empty(), () -> { });
+                outline.showPending("Building tour…", view::openDiffReview, this::cancelWait);
                 stepPanel.showMessage("The agent is writing the tour. Its MCP calls show below.");
             } else if (failure.isPresent()) {
                 outline.showFailure(failure.get().message(), view::runReview, view::openDiffReview);

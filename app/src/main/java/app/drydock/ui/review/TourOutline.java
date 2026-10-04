@@ -182,6 +182,20 @@ final class TourOutline extends VBox {
         });
     }
 
+    /** "Building tour…" with a way out: the hunk diff meanwhile, or giving up the wait. */
+    void showPending(String text, Runnable openDiffReview, Runnable cancel) {
+        rows.getChildren().clear();
+        collapsedStep.setText("");
+        message.getChildren().clear();
+        Label label = new Label(text);
+        label.setWrapText(true);
+        Button diffButton = UiFormats.literal(new Button("Open diff review"));
+        diffButton.setOnAction(event -> openDiffReview.run());
+        Button cancelButton = UiFormats.literal(new Button("Cancel"));
+        cancelButton.setOnAction(event -> cancel.run());
+        message.getChildren().addAll(label, diffButton, cancelButton);
+    }
+
     void showFailure(String text, Runnable retry, Runnable openDiffReview) {
         rows.getChildren().clear();
         collapsedStep.setText("");
