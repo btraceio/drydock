@@ -1,5 +1,6 @@
 package app.drydock.ui.review;
 
+import app.drydock.domain.ManagedSessionId;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.HunkDigest;
@@ -77,7 +78,7 @@ abstract class ReviewTourFixture extends ApplicationTest {
     void showBoard() throws TimeoutException {
         scope = registry.mint(ReviewScopeRegistry.spec(ReviewScope.Kind.WORKING_TREE,
                 Path.of("/tmp/nowhere"), Optional.of(Path.of("/tmp/nowhere")), "main", "main",
-                Optional.empty(), Optional.empty()));
+                Optional.empty(), sessionId()));
         host.tours.put(TourRecord.fresh(tourFor(scope.id(), host.diff), host.diff));
         interact(() -> view.showScopes(new SessionReviewScopes.Scopes(scope, Optional.empty()),
                 SessionReviewScopes.Choice.LOCAL));
@@ -132,6 +133,11 @@ abstract class ReviewTourFixture extends ApplicationTest {
             throw new TimeoutException(
                     "focus never landed in the diff column within 5s; " + view.diagFocusSnapshot());
         }
+    }
+
+    /** The session the scope is bound to; none by default, so nothing is sent to an agent. */
+    Optional<ManagedSessionId> sessionId() {
+        return Optional.empty();
     }
 
     /** The diff the board shows; a subclass may swap in a variant built with {@link #file}. */

@@ -3507,6 +3507,13 @@ public final class SessionReviewView extends BorderPane {
      */
     private void runReviewOnSelection() {
         selectedScope().ifPresent(scope -> {
+            if (host.tour(scope).isPresent()) {
+                // A tour exists: bring it onto the diff. The full-tour
+                // instruction would have the agent re-post every step, and
+                // the reviewer's progress would go with them.
+                refreshTourOnSelection(scope);
+                return;
+            }
             if (host.runReview(scope)) {
                 runReviewButton.setText("▶  Review running…");
                 // Only the label, and only until the next selection or state
@@ -3526,14 +3533,53 @@ public final class SessionReviewView extends BorderPane {
         });
     }
 
-    /** Enables "Run review" only where there is an agent to run it, and says why not. */
+    /** "Refresh tour": the top bar's button on a scope with a tour; see {@link #askForTourRefresh}. */
+    private void refreshTourOnSelection(ReviewScope scope) {
+        runReviewButton.setText("⟳  Refreshing…");
+        if (askForTourRefresh(scope)) {
+            notice("Asked the agent to refresh the tour");
+            renderTour(currentTour());
+        } else {
+            notice("Could not reach this session's agent to refresh the tour");
+        }
+        updateRunReviewButton();
+    }
+
+    /**
+     * The top bar's review button. With no tour it is "Run review": one
+     * click asks the agent for findings and a tour. With a tour it is
+     * "Refresh tour", which asks only for the stale steps and the uncovered
+     * hunks -- and has nothing to ask while the tour is current, so it is
+     * disabled and says so. Disabled, with the reason, where there is no
+     * agent to ask.
+     */
     private void updateRunReviewButton() {
-        boolean runnable = selectedScope().flatMap(ReviewScope::sessionId).isPresent();
-        runReviewButton.setText("▶  Run review");
-        runReviewButton.setDisable(!runnable);
-        runReviewButton.setTooltip(new Tooltip(runnable
-                ? "Ask this session's agent to group the changes into intents and post findings"
-                : "Needs a session — start one for this checkout first"));
+        Optional<ReviewScope> scope = selectedScope();
+        boolean runnable = scope.flatMap(ReviewScope::sessionId).isPresent();
+        Optional<TourRecord> tour = scope.flatMap(host::tour);
+        if (!runnable || tour.isEmpty()) {
+            runReviewButton.setText("▶  Run review");
+            runReviewButton.setDisable(!runnable);
+            runReviewButton.setTooltip(new Tooltip(runnable
+                    ? "Ask this session's agent for findings and a guided tour of the change"
+                    : "Needs a session — start one for this checkout first"));
+            return;
+        }
+        runReviewButton.setText("⟳  Refresh tour");
+        Optional<UnifiedDiff> diff = loadedDiff();
+        if (diff.isEmpty()) {
+            runReviewButton.setDisable(true);
+            runReviewButton.setTooltip(new Tooltip("The diff is still loading"));
+            return;
+        }
+        TourRecord record = tour.get();
+        long stale = record.tour().steps().stream().filter(step -> record.progress(step.id()).stale()).count();
+        int uncovered = TourMigration.uncoveredHunkIds(record, AnchorIndex.of(diff.get())).size();
+        runReviewButton.setDisable(stale == 0 && uncovered == 0);
+        runReviewButton.setTooltip(new Tooltip(stale == 0 && uncovered == 0
+                ? "The tour is current"
+                : "Ask the agent to re-write " + stale + (stale == 1 ? " stale step" : " stale steps")
+                        + " and cover " + uncovered + (uncovered == 1 ? " uncovered hunk" : " uncovered hunks")));
     }
 
     private void cycleDensity() {
