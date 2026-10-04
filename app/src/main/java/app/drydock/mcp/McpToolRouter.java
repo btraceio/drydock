@@ -31,6 +31,8 @@ import app.drydock.review.tour.TourMerge;
 import app.drydock.review.tour.TourRecord;
 import app.drydock.review.tour.TourStep;
 import app.drydock.review.tour.TourValidator;
+import app.drydock.state.json.JsonParseException;
+import app.drydock.state.json.JsonParser;
 import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonValue.JsonArray;
 import app.drydock.state.json.JsonValue.JsonBoolean;
@@ -188,7 +190,7 @@ public final class McpToolRouter {
                                 + "their progress, and the merged tour is validated as a whole.",
                         JsonObject.empty()
                                 .put("scopeId", schemaString("Review scope handle."))
-                                .put("steps", schemaString("Array of {id, title, narrative (<=1000 chars), "
+                                .put("steps", schemaArray("Array of {id, title, narrative (<=1000 chars), "
                                         + "anchors[{file, startKey, endKey?}], impactNotes?[{file, line, text}], "
                                         + "checks[{id, kind: predict|trace|risk, prompt, choices?[{text, at?{file, "
                                         + "line}}] (2-4, not for risk), answer? (0-based, not for risk), explanation, "
@@ -214,7 +216,7 @@ public final class McpToolRouter {
                                 + "Findings land as proposals; the human confirms or dismisses each.",
                         JsonObject.empty()
                                 .put("scopeId", schemaString("Review scope handle."))
-                                .put("findings", schemaString("Array of {id, anchor{file, "
+                                .put("findings", schemaArray("Array of {id, anchor{file, "
                                         + "startKey, endKey?}, severity, confidence, title?, body, "
                                         + "evidence?, patch?, deviatesFrom?, asks?, withheldBy?}.")),
                         "scopeId", "findings"),
@@ -244,7 +246,7 @@ public final class McpToolRouter {
                                 + "with no verdict has nothing to recheck and is refused.",
                         JsonObject.empty()
                                 .put("scopeId", schemaString("Review scope handle."))
-                                .put("assessments", schemaString("Array of {hunkId, affected, why}. "
+                                .put("assessments", schemaArray("Array of {hunkId, affected, why}. "
                                         + "hunkId is a hunk id from review_scope; affected is a "
                                         + "real boolean, not \"true\"; why is REQUIRED whenever "
                                         + "affected is true -- it is the reason a human is shown "
@@ -533,7 +535,7 @@ public final class McpToolRouter {
         JsonObject args = asObject(arguments);
         ReviewScope scope = requireScope(caller, args);
 
-        if (!(args.get("findings") instanceof JsonArray array)) {
+        if (!(arrayArgument(args, "findings") instanceof JsonArray array)) {
             throw new McpToolException("findings must be an array");
         }
         String author = context.reviewerName(caller);
@@ -611,7 +613,7 @@ public final class McpToolRouter {
             verdictsByDigest.put(verdict.hunkDigest(), verdict);
         }
         List<RecheckAssessment> decoded = ReviewToolCodec.assessmentsFromJson(scope.id(),
-                args.get("assessments"), context.reviewDiff(scope), verdictsByDigest, toBase,
+                arrayArgument(args, "assessments"), context.reviewDiff(scope), verdictsByDigest, toBase,
                 Instant.now());
         // Decoded in full before anything is stored, like review_finding: a
         // batch with one bad entry writes nothing rather than half a recheck.
@@ -704,7 +706,7 @@ public final class McpToolRouter {
         UnifiedDiff diff = context.reviewDiff(scope);
         List<TourStep> steps;
         try {
-            steps = TourCodec.stepsFromAgent(args.get("steps"));
+            steps = TourCodec.stepsFromAgent(arrayArgument(args, "steps"));
         } catch (TourCodec.InvalidTour e) {
             throw new McpToolException("review_tour rejected, nothing stored: " + e.getMessage());
         }
@@ -1502,6 +1504,37 @@ public final class McpToolRouter {
         return JsonObject.empty()
                 .put("type", new JsonString("string"))
                 .put("description", new JsonString(description));
+    }
+
+    private static JsonValue schemaArray(String description) {
+        return JsonObject.empty()
+                .put("type", new JsonString("array"))
+                .put("items", JsonObject.empty().put("type", new JsonString("object")))
+                .put("description", new JsonString(description));
+    }
+
+    /**
+     * An array-valued argument, whichever way the client sent it. The schema
+     * says array, but a client may still send the array as a JSON string
+     * (the descriptors used to declare these as strings, and models
+     * stringify nested JSON); a string holding an array is accepted as that
+     * array. Any other value is returned unchanged for the caller's own
+     * "must be an array" refusal, and a string that does not parse to an
+     * array is refused here, naming the argument.
+     */
+    private static JsonValue arrayArgument(JsonObject args, String name) throws McpToolException {
+        JsonValue value = args.get(name);
+        if (!(value instanceof JsonString text)) {
+            return value;
+        }
+        try {
+            if (JsonParser.parse(text.value()) instanceof JsonArray parsed) {
+                return parsed;
+            }
+        } catch (JsonParseException e) {
+            // Falls through to the refusal below: the cause is not the model's to act on.
+        }
+        throw new McpToolException(name + " must be an array (or a JSON string holding one)");
     }
 
     private static JsonValue schemaBoolean(String description) {
