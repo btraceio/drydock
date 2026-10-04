@@ -3,6 +3,7 @@ package app.drydock.ui.review;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.git.UnifiedDiff;
 import javafx.scene.control.Button;
+import javafx.scene.input.KeyCode;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.testfx.util.WaitForAsyncUtils;
@@ -29,6 +30,7 @@ class ReviewTourRefreshButtonTest extends ReviewTourFixture {
     @AfterEach
     void restoreHost() {
         host.supportsAutomaticRecheck = true;
+        host.tourRefreshHandOffSucceeds = true;
         host.tourRefreshDispatches.clear();
         host.reviewRuns.clear();
         host.reviewers.clear();
@@ -71,6 +73,34 @@ class ReviewTourRefreshButtonTest extends ReviewTourFixture {
 
         assertEquals(List.of("s2/1"), host.tourRefreshDispatches);
         assertEquals(List.of(), host.reviewRuns, "never the full-tour instruction");
+    }
+
+    @Test
+    void aFailedRetryKeepsTheClaimTheAutomaticRefreshTook() {
+        host.reviewers.add("claude");
+        UnifiedDiff moved = new UnifiedDiff(List.of(
+                file(FILE_A, "void foo();", "void bar();"),
+                file(FILE_B, "void qux();")));
+        interact(() -> view.diagShowDiff(scope, moved));
+        WaitForAsyncUtils.waitForFxEvents();
+        assertEquals(List.of("s2/1"), host.tourRefreshDispatches, "the automatic path asked and claimed");
+
+        host.tourRefreshHandOffSucceeds = false;
+        clickOn(reviewButton());
+        WaitForAsyncUtils.waitForFxEvents();
+        assertEquals(List.of("s2/1", "s2/1"), host.tourRefreshDispatches, "the manual retry was tried");
+
+        interact(view::requestFocus);
+        press(KeyCode.CLOSE_BRACKET).release(KeyCode.CLOSE_BRACKET);
+        WaitForAsyncUtils.waitForFxEvents();
+        assertEquals("s2", ReviewDiagFxThread.call(view::diagCurrentStepId));
+        assertTrue(lookup("This step's code changed; the agent is re-writing it.").tryQuery().isPresent(),
+                "the automatic request is still out; a failed retry does not take it back");
+        host.tourRefreshHandOffSucceeds = true;
+        interact(() -> view.diagShowDiff(scope, moved));
+        WaitForAsyncUtils.waitForFxEvents();
+        assertEquals(List.of("s2/1", "s2/1"), host.tourRefreshDispatches,
+                "still claimed, so the same diff does not ask the agent again");
     }
 
     @Test

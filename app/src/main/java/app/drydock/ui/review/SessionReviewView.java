@@ -619,7 +619,7 @@ public final class SessionReviewView extends BorderPane {
     /** Set by {@code m}/{@code f}; remembered independently of the responsive collapse. */
     private boolean marginCollapsedByUser;
 
-    /** Set by {@code f} in the tour; remembered independently of the responsive collapse. */
+    /** Set by {@code f} and cleared by the outline's expand button; independent of the responsive collapse. */
     private boolean outlineCollapsedByUser;
 
     private final Label countsLabel = new Label();
@@ -748,6 +748,7 @@ public final class SessionReviewView extends BorderPane {
 
         margin.setOnToggleCollapse(() -> setMarginCollapsed(!margin.collapsed()));
         stepPanel.setOnExpand(this::expandStepPanel);
+        outline.setOnExpand(this::expandOutline);
         margin.setOnFilterChanged(filter -> refreshReviewState());
         diffColumn.setPinSource(new PinSource());
         diffColumn.setCommentSink(annotation -> selectedScope().ifPresent(scope -> {
@@ -2131,21 +2132,37 @@ public final class SessionReviewView extends BorderPane {
         }
     }
 
+    /** The collapsed outline's expand button; as {@link #expandStepPanel}, for the left rail. */
+    private void expandOutline() {
+        outlineCollapsedByUser = false;
+        applyResponsiveLayout(getWidth());
+        if (outline.collapsed()) {
+            notice("Widen the window to show the tour outline beside the code");
+        }
+    }
+
     /**
      * {@code f}: collapses every rail so the code owns the window -- the
      * margin in the hunk diff, the outline and the step panel in the tour. A
      * toggle, not a one-way collapse, or the second press would be a dead
      * key.
+     *
+     * <p>Both modes' rails are set together, whichever mode is showing: set
+     * only the shown mode's, and {@code f} in the hunk diff followed by
+     * {@code v} left the tour half in focus mode (step panel collapsed,
+     * outline open), so the next {@code f} collapsed the rest instead of
+     * leaving focus mode.</p>
      */
     private void setFocusMode(boolean on) {
         marginCollapsedByUser = on;
-        if (mode == ReviewMode.TOUR) {
-            outlineCollapsedByUser = on;
-        }
+        outlineCollapsedByUser = on;
         applyResponsiveLayout(getWidth());
     }
 
-    /** Whether {@code f} would currently undo focus mode rather than enter it. */
+    /**
+     * Whether {@code f} would currently undo focus mode: the reader has
+     * collapsed every rail the current mode shows.
+     */
     private boolean focusModeOn() {
         return marginCollapsedByUser && (mode != ReviewMode.TOUR || outlineCollapsedByUser);
     }

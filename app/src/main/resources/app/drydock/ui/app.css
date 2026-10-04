@@ -3599,6 +3599,20 @@
     -fx-padding: 2 5 2 5;
 }
 
+/* The collapsed outline: the same strip, with the current step's number. */
+.tour-outline .tour-outline-collapsed {
+    -fx-padding: 6 0 0 0;
+}
+.tour-outline .tour-outline-expand {
+    -fx-border-color: transparent;
+    -fx-text-fill: -drydock-text-faint;
+    -fx-padding: 2 5 2 5;
+}
+.tour-outline .tour-outline-collapsed-step {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11px;
+}
+
 /* The outline: tabs as filter chips, steps as cards. */
 .tour-outline .tour-outline-tab {
     -fx-background-color: transparent;

@@ -3,12 +3,14 @@ package app.drydock.ui.review;
 import app.drydock.review.tour.CheckProgress;
 import app.drydock.review.tour.StepProgress;
 import app.drydock.ui.UiFormats;
+import javafx.geometry.Pos;
 import javafx.scene.Node;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.scene.control.ScrollPane;
 import javafx.scene.control.ToggleButton;
 import javafx.scene.control.ToggleGroup;
+import javafx.scene.control.Tooltip;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
@@ -43,7 +45,11 @@ final class TourOutline extends VBox {
     private final VBox searchPane = new VBox();
     private final HBox tabs = new HBox(4, tourTab, searchTab);
     private final ScrollPane scroll;
+    private final Button expandButton = new Button("›");
+    private final Label collapsedStep = new Label();
+    private final VBox collapsedStrip = new VBox(6, expandButton, collapsedStep);
     private Consumer<String> onSelected = id -> { };
+    private Runnable onExpand = () -> { };
     private Runnable onAcknowledge = () -> { };
     private boolean collapsed;
     private boolean narrow;
@@ -72,7 +78,19 @@ final class TourOutline extends VBox {
         VBox.setVgrow(scroll, Priority.ALWAYS);
         tourPane.getChildren().addAll(notice, message, scroll, footer);
         VBox.setVgrow(tourPane, Priority.ALWAYS);
-        getChildren().addAll(tabs, tourPane);
+        // Collapsed, the outline keeps a strip with a real Button to bring
+        // it back and the current step's number -- the same affordance as
+        // the collapsed step panel, rather than a blank 40px.
+        expandButton.getStyleClass().addAll("panel-header-chevron-button", "tour-outline-expand");
+        expandButton.setTooltip(new Tooltip("Expand the tour outline"));
+        expandButton.setOnAction(event -> onExpand.run());
+        collapsedStep.getStyleClass().add("tour-outline-collapsed-step");
+        collapsedStrip.setAlignment(Pos.TOP_CENTER);
+        collapsedStrip.getStyleClass().add("tour-outline-collapsed");
+        collapsedStrip.setVisible(false);
+        collapsedStrip.setManaged(false);
+        VBox.setVgrow(collapsedStrip, Priority.ALWAYS);
+        getChildren().addAll(tabs, tourPane, collapsedStrip);
         applyWidth();
     }
 
@@ -105,11 +123,13 @@ final class TourOutline extends VBox {
     void setRows(List<Row> newRows, String currentStepId) {
         message.getChildren().clear();
         rows.getChildren().clear();
+        collapsedStep.setText("");
         for (Row row : newRows) {
             Button button = UiFormats.literal(new Button(glyph(row.state()) + row.number() + ". " + row.title()));
             button.getStyleClass().add("tour-outline-row");
             if (row.stepId().equals(currentStepId)) {
                 button.getStyleClass().add("tour-outline-row-current");
+                collapsedStep.setText(String.valueOf(row.number()));
             }
             button.setMaxWidth(Double.MAX_VALUE);
             button.setOnAction(event -> onSelected.accept(row.stepId()));
@@ -150,6 +170,7 @@ final class TourOutline extends VBox {
 
     void showMessage(String text, Optional<String> actionLabel, Runnable action) {
         rows.getChildren().clear();
+        collapsedStep.setText("");
         message.getChildren().clear();
         Label label = new Label(text);
         label.setWrapText(true);
@@ -163,6 +184,7 @@ final class TourOutline extends VBox {
 
     void showFailure(String text, Runnable retry, Runnable openDiffReview) {
         rows.getChildren().clear();
+        collapsedStep.setText("");
         message.getChildren().clear();
         Label label = new Label(text);
         label.setWrapText(true);
@@ -179,6 +201,11 @@ final class TourOutline extends VBox {
 
     void setOnAcknowledge(Runnable action) {
         onAcknowledge = action;
+    }
+
+    /** The collapsed strip's expand button. */
+    void setOnExpand(Runnable action) {
+        onExpand = action == null ? () -> { } : action;
     }
 
     /** The Search tab's content -- the shared search rail -- grown to the tab's full height. */
@@ -202,8 +229,13 @@ final class TourOutline extends VBox {
     void setCollapsed(boolean value) {
         collapsed = value;
         tabs.setVisible(!value);
+        tabs.setManaged(!value);
         tourPane.setVisible(!value);
+        tourPane.setManaged(!value);
         searchPane.setVisible(!value);
+        searchPane.setManaged(!value);
+        collapsedStrip.setVisible(value);
+        collapsedStrip.setManaged(value);
         applyWidth();
     }
 

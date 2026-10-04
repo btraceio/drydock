@@ -1,11 +1,14 @@
 package app.drydock.ui.review;
 
+import app.drydock.review.tour.StepProgress;
 import javafx.scene.Node;
 import javafx.scene.control.Label;
 import javafx.scene.control.Labeled;
 import javafx.scene.input.KeyCode;
 import org.junit.jupiter.api.Test;
 import org.testfx.util.WaitForAsyncUtils;
+
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -38,6 +41,19 @@ class ReviewTourWordingTest extends ReviewTourFixture {
         assertFalse(shown("Ask the agent to fix it"), "send-back lives in the blocker banner in a tour");
         assertEquals("0/2 steps reviewed", text(".review-verdict-progress-label"));
         assertEquals("2 steps left · n jumps to the next", text(".review-verdict-hint"));
+    }
+
+    @Test
+    void aStepWithChangesRequestedIsDecidedAndNoLongerCountsAsLeft() {
+        interact(() -> {
+            host.tours.mutate(scope.id(), record -> record.withProgress(record.progress("s1")
+                    .withDecision(StepProgress.Decision.CHANGES, Optional.empty())));
+            view.refreshReviewState();
+        });
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertEquals("1/2 steps reviewed", text(".review-verdict-progress-label"));
+        assertEquals("1 step left · n jumps to the next", text(".review-verdict-hint"));
     }
 
     @Test

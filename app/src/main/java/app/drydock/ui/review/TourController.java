@@ -700,9 +700,13 @@ final class TourController {
 
     /**
      * The verdict bar in tour mode: the current step as its unit, progress
-     * in steps passed or overridden. The bar only labels the step; its
-     * buttons route back through the view's verdict host, whose tour
-     * branches act on the current step and never read the target.
+     * in steps decided -- passed, overridden or sent back with changes
+     * requested, and not stale ({@link TourRecord#unsettledSteps}, which
+     * {@code n} walks too). A step with changes requested is not left to
+     * review; whether Submit accepts the tour stays the submit path's
+     * own rule, not this count. The bar only labels the step; its buttons
+     * route back through the view's verdict host, whose tour branches act
+     * on the current step and never read the target.
      */
     private void renderTourVerdictBar(TourRecord record, TourStep step, StepProgress progress) {
         ReviewVerdictBar.Target target = new ReviewVerdictBar.Target("tour:" + step.id(),
@@ -712,10 +716,8 @@ final class TourController {
             case CHANGES -> Optional.of(ReviewVerdict.Decision.CHANGES);
             case NONE -> Optional.empty();
         };
-        int settled = (int) record.tour().steps().stream()
-                .filter(candidate -> record.progress(candidate.id()).settledForApproval())
-                .count();
-        view.showStepOnVerdictBar(target, decision, settled, record.tour().steps().size());
+        int total = record.tour().steps().size();
+        view.showStepOnVerdictBar(target, decision, total - record.unsettledSteps().size(), total);
     }
 
     /** Files of the review diff with no hunk at all (mode or binary changes); spec §3's footer. */
@@ -864,7 +866,9 @@ final class TourController {
      * automatic gating ({@link #requestTourRefresh}) would say -- the click
      * is the authorisation -- and it takes the per-diff claim, so the
      * automatic path does not ask a second time. A hand-off that fails
-     * releases the claim. True when the request was handed over.
+     * releases the claim -- only one this call took: a claim the automatic
+     * path already holds stands for a request still out, and a failed retry
+     * must not take it back. True when the request was handed over.
      */
     boolean askForTourRefresh(ReviewScope scope) {
         Optional<UnifiedDiff> diff = view.loadedDiff();
@@ -879,11 +883,13 @@ final class TourController {
                 .filter(id -> record.progress(id).stale())
                 .toList();
         int uncovered = TourMigration.uncoveredHunkIds(record, AnchorIndex.of(diff.get())).size();
-        tourRefreshDispatch.claim(scope.id(), fingerprint);
+        boolean took = tourRefreshDispatch.claim(scope.id(), fingerprint);
         if (host.dispatchTourRefresh(scope, stale, uncovered)) {
             return true;
         }
-        tourRefreshDispatch.release(scope.id(), fingerprint);
+        if (took) {
+            tourRefreshDispatch.release(scope.id(), fingerprint);
+        }
         return false;
     }
 
