@@ -40,11 +40,40 @@ class AnnotationStoreTest {
     }
 
     private static ReviewAnnotation finding(String scopeId, String id, Severity severity) {
-        return new ReviewAnnotation(scopeId, id, Optional.of("i1"), "src/Main.java", "n42", "n42",
+        return new ReviewAnnotation(scopeId, id, "src/Main.java", "n42", "n42",
                 severity, Confidence.HIGH, Optional.of("Title"), "Claude", AT,
                 List.of(), Optional.empty(), Optional.empty(), List.of(),
                 List.of(new ReviewAnnotation.Message("Claude", AT, "body")),
                 Optional.empty(), AnnotationStatus.OPEN, Optional.empty(), false);
+    }
+
+    /**
+     * Findings used to carry an {@code intentId}. A file written then must
+     * still load, and the key is not written back: nothing reads it any more.
+     */
+    @Test
+    void anOldFileWithAnIntentIdStillLoadsAndIsRewrittenWithoutIt(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("annotations.json");
+        Files.writeString(file, """
+                {"schemaVersion":6,"annotations":[
+                  {"scopeId":"rs_a","id":"f_old","intentId":"i1","file":"src/Main.java",
+                   "startKey":"n42","endKey":"n42","severity":"blocking","confidence":"high",
+                   "title":"Old","author":"Claude","at":"2026-01-01T00:00:00Z","status":"OPEN"}],
+                 "submitted":[],"verdicts":[]}
+                """);
+
+        try (AnnotationStore store = new AnnotationStore(file)) {
+            ReviewAnnotation loaded = store.byId("rs_a", "f_old").orElseThrow();
+            assertEquals("Old", loaded.title().orElseThrow());
+            assertTrue(loaded.blocksApproval());
+
+            store.mutate(loaded.key(), current -> current.withStatus(AnnotationStatus.RESOLVED));
+            store.flushPendingSaves();
+        }
+
+        String rewritten = Files.readString(file);
+        assertTrue(rewritten.contains("f_old"), rewritten);
+        assertFalse(rewritten.contains("intentId"), rewritten);
     }
 
     @Test
@@ -152,12 +181,12 @@ class AnnotationStoreTest {
     void aResolvedBlockingFindingNoLongerBlocks(@TempDir Path dir) {
         try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
             store.upsert(finding("rs_a", "f1", Severity.BLOCKING));
-            assertTrue(store.hasOpenBlockingFinding("rs_a", "i1"));
+            assertTrue(store.byId("rs_a", "f1").orElseThrow().blocksApproval());
 
             store.mutate(new ReviewAnnotation.Key("rs_a", "f1"),
                     current -> current.withStatus(AnnotationStatus.RESOLVED));
 
-            assertFalse(store.hasOpenBlockingFinding("rs_a", "i1"));
+            assertFalse(store.byId("rs_a", "f1").orElseThrow().blocksApproval());
         }
     }
 
@@ -170,25 +199,10 @@ class AnnotationStoreTest {
             store.mutate(new ReviewAnnotation.Key("rs_a", "f1"),
                     current -> current.withSeverityOverride(Severity.QUESTION));
 
-            assertFalse(store.hasOpenBlockingFinding("rs_a", "i1"));
+            assertFalse(store.byId("rs_a", "f1").orElseThrow().blocksApproval());
             ReviewAnnotation stored = store.byId("rs_a", "f1").orElseThrow();
             assertEquals(Severity.BLOCKING, stored.severity(), "the reviewer's opinion is kept");
             assertEquals(Severity.QUESTION, stored.effectiveSeverity());
-        }
-    }
-
-    @Test
-    void forIntentFiltersWithinOneScope(@TempDir Path dir) {
-        try (AnnotationStore store = new AnnotationStore(dir.resolve("annotations.json"))) {
-            store.upsert(finding("rs_a", "f1"));
-            ReviewAnnotation other = new ReviewAnnotation("rs_a", "f2", Optional.of("i2"),
-                    "src/Other.java", "n1", "n1", Severity.NIT, Confidence.HIGH, Optional.empty(),
-                    "Claude", AT, List.of(), Optional.empty(), Optional.empty(), List.of(),
-                    List.of(), Optional.empty(), AnnotationStatus.OPEN, Optional.empty(), false);
-            store.upsert(other);
-
-            assertEquals(List.of("f1"), store.forIntent("rs_a", "i1").stream()
-                    .map(ReviewAnnotation::id).toList());
         }
     }
 
@@ -238,7 +252,7 @@ class AnnotationStoreTest {
 
     @Test
     void findingsRoundTripThroughJson() {
-        ReviewAnnotation rich = new ReviewAnnotation("rs_a", "f1", Optional.of("i1"),
+        ReviewAnnotation rich = new ReviewAnnotation("rs_a", "f1",
                 "src/Main.java", "n42", "n45", Severity.BLOCKING, Confidence.UNSURE,
                 Optional.of("Event filter never detached"), "Claude", AT,
                 List.of(new ReviewAnnotation.Evidence("leak", "addEventFilter(...)", "java")),

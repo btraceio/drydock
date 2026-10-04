@@ -108,7 +108,7 @@ class McpToolRouterTourTest extends McpRouterFixture {
 
     @Test
     void aTourIsRejectedWhenAStoredFindingIsWithheldByACheckOffItsLines() {
-        context.upsertFindings(List.of(new ReviewAnnotation(scopeId(), "f1", Optional.empty(),
+        context.upsertFindings(List.of(new ReviewAnnotation(scopeId(), "f1",
                 "src/WidgetUser.java", "n2", "n2", Severity.QUESTION, Confidence.HIGH, Optional.empty(), "Claude",
                 Instant.EPOCH, List.of(), Optional.empty(), Optional.empty(), List.of(), List.of(),
                 Optional.empty(), AnnotationStatus.OPEN, Optional.empty(), false, Triage.PROPOSED,

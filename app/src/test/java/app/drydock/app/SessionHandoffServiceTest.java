@@ -418,7 +418,7 @@ class SessionHandoffServiceTest {
     @Test
     void theSeedCarriesTheOutgoingSessionsOpenTourSteps() throws Exception {
         // The most concrete statement of what is still open; a successor that
-        // re-litigates a settled intent does the work twice.
+        // re-litigates a settled step does the work twice.
         service.handOffBlocking(outgoing, AgentKind.CODEX);
 
         assertTrue(seedFileContents().contains("Rework the rail"), seedFileContents());

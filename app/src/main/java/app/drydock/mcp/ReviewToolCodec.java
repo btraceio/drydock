@@ -431,7 +431,6 @@ final class ReviewToolCodec {
         }
 
         return new ReviewAnnotation(scopeId, id,
-                optionalString(obj, "intentId"),
                 file, startKey, endKey,
                 severity,
                 optionalString(obj, "confidence").flatMap(Confidence::fromWire).orElse(Confidence.MEDIUM),

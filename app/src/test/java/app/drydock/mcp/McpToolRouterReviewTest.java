@@ -164,6 +164,22 @@ class McpToolRouterReviewTest {
 
     // ---- review_finding -----------------------------------------------------
 
+    /**
+     * An agent may still send {@code intentId} (it was part of the schema);
+     * that is not an error, the key is simply not read, and the descriptor
+     * no longer advertises it.
+     */
+    @Test
+    void reviewFindingIgnoresAnIncomingIntentIdAndNoLongerAdvertisesIt() throws Exception {
+        router.call(caller, "review_finding", findingArgs("f_legacy", "nit", "still accepted"));
+
+        assertEquals("f_legacy", context.findingsOf(SCOPE).get(0).id());
+        String schema = router.toolDescriptors().stream()
+                .filter(descriptor -> str(descriptor, "name").equals("review_finding"))
+                .findFirst().orElseThrow().toString();
+        assertFalse(schema.contains("intentId"), schema);
+    }
+
     @Test
     void reviewFindingStoresAFindingAgainstItsScope() throws Exception {
         router.call(caller, "review_finding", findingArgs("f_leak_1", "blocking", "body text"));
@@ -365,7 +381,7 @@ class McpToolRouterReviewTest {
     // ---- fixtures -----------------------------------------------------------
 
     private static ReviewAnnotation finding(String id, Severity severity) {
-        return new ReviewAnnotation(SCOPE, id, Optional.of("i1"), "src/Main.java", "n42", "n42",
+        return new ReviewAnnotation(SCOPE, id, "src/Main.java", "n42", "n42",
                 severity, Confidence.HIGH, Optional.of("Title"), "Claude", Instant.EPOCH,
                 List.of(), Optional.empty(), Optional.empty(), List.of(),
                 List.of(new ReviewAnnotation.Message("Claude", Instant.EPOCH, "body")),

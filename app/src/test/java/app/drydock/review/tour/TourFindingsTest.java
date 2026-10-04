@@ -34,7 +34,7 @@ class TourFindingsTest {
 
     private static ReviewAnnotation finding(String id, String file, String key, Severity severity, Triage triage,
                                             Optional<String> withheldBy) {
-        return new ReviewAnnotation(SCOPE, id, Optional.empty(), file, key, key, severity, Confidence.HIGH,
+        return new ReviewAnnotation(SCOPE, id, file, key, key, severity, Confidence.HIGH,
                 Optional.of("Title " + id), "Claude", Instant.EPOCH, List.of(), Optional.empty(), Optional.empty(),
                 List.of(), List.of(), Optional.empty(), AnnotationStatus.OPEN, Optional.empty(), false,
                 triage, withheldBy);

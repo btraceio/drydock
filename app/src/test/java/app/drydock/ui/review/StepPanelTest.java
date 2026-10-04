@@ -305,7 +305,7 @@ class StepPanelTest extends ApplicationTest {
     }
 
     private static ReviewAnnotation proposal(String id) {
-        return new ReviewAnnotation("rs", id, Optional.empty(), "src/A.java", "n4", "n4", Severity.QUESTION,
+        return new ReviewAnnotation("rs", id, "src/A.java", "n4", "n4", Severity.QUESTION,
                 Confidence.HIGH, Optional.of("Title " + id), "Claude", Instant.EPOCH, List.of(), Optional.empty(),
                 Optional.empty(), List.of(), List.of(new ReviewAnnotation.Message("Claude", Instant.EPOCH, "why")),
                 Optional.empty(), AnnotationStatus.OPEN, Optional.empty(), false, Triage.PROPOSED, Optional.empty());

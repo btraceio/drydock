@@ -171,12 +171,9 @@ class ReviewCommentComposerTest extends ApplicationTest {
         assertTrue(host.findings(scope).isEmpty());
     }
 
-    /**
-     * A comment is filed against its file and lines only: the board no
-     * longer has a grouping to stamp it with.
-     */
+    /** A comment is filed against its file and lines only. */
     @Test
-    void theCommentIsFiledAgainstItsFileWithNoGrouping() {
+    void theCommentIsFiledAgainstItsFile() {
         showDiff();
         clickGutter();
         type("a note");
@@ -185,7 +182,6 @@ class ReviewCommentComposerTest extends ApplicationTest {
         WaitForAsyncUtils.waitForFxEvents();
 
         ReviewAnnotation comment = host.findings(scope).get(0);
-        assertTrue(comment.intentId().isEmpty(), "no grouping id: " + comment.intentId());
         assertFalse(comment.file().isBlank());
     }
 

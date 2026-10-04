@@ -21,7 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ReviewTriageMarginTest extends ReviewViewFixture {
 
     private ReviewAnnotation proposed(String id) {
-        return new ReviewAnnotation(scope.id(), id, Optional.of("section-1"), FILE_A, "n1", "n1",
+        return new ReviewAnnotation(scope.id(), id, FILE_A, "n1", "n1",
                 Severity.QUESTION, Confidence.HIGH, Optional.of("Title " + id), "Claude", Instant.EPOCH,
                 List.of(), Optional.empty(), Optional.empty(), List.of(),
                 List.of(new ReviewAnnotation.Message("Claude", Instant.EPOCH, "body of " + id)),
@@ -90,7 +90,7 @@ class ReviewTriageMarginTest extends ReviewViewFixture {
 
     @Test
     void aProposalsPatchCannotBeAppliedUntilItIsConfirmed() {
-        ReviewAnnotation withPatch = new ReviewAnnotation(scope.id(), "f3", Optional.of("section-1"), FILE_A,
+        ReviewAnnotation withPatch = new ReviewAnnotation(scope.id(), "f3", FILE_A,
                 "n1", "n1", Severity.QUESTION, Confidence.HIGH, Optional.of("Title f3"), "Claude", Instant.EPOCH,
                 List.of(), Optional.of(new ReviewAnnotation.Patch("--- a\n+++ b\n", "guard it")), Optional.empty(),
                 List.of(), List.of(new ReviewAnnotation.Message("Claude", Instant.EPOCH, "body of f3")),

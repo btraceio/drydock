@@ -32,7 +32,7 @@ class ReviewTourTriageTest extends ReviewTourFixture {
 
     private ReviewAnnotation finding(String id, String file, Severity severity, Triage triage,
                                      Optional<String> withheldBy) {
-        return new ReviewAnnotation(scope.id(), id, Optional.empty(), file, "n1", "n1", severity, Confidence.HIGH,
+        return new ReviewAnnotation(scope.id(), id, file, "n1", "n1", severity, Confidence.HIGH,
                 Optional.of("Title " + id), "Claude", Instant.EPOCH, List.of(), Optional.empty(), Optional.empty(),
                 List.of(), List.of(new ReviewAnnotation.Message("Claude", Instant.EPOCH, "body of " + id)),
                 Optional.empty(), AnnotationStatus.OPEN, Optional.empty(), false, triage, withheldBy);

@@ -24,7 +24,7 @@ class AnnotationTriageTest {
 
     private static ReviewAnnotation finding(String id, Severity severity, Triage triage,
                                             Optional<String> withheldBy, boolean postToPr) {
-        return new ReviewAnnotation("rs_a", id, Optional.empty(), "src/Main.java", "n10", "n10",
+        return new ReviewAnnotation("rs_a", id, "src/Main.java", "n10", "n10",
                 severity, Confidence.HIGH, Optional.of("Title"), "Claude", AT,
                 List.of(), Optional.empty(), Optional.empty(), List.of(),
                 List.of(new ReviewAnnotation.Message("Claude", AT, "body")),
@@ -97,7 +97,6 @@ class AnnotationTriageTest {
                 base.withReply(new ReviewAnnotation.Message("You", AT, "hm")),
                 base.withPostToPr(true),
                 base.withSeverityOverride(Severity.NIT),
-                base.withIntentId(Optional.of("i1")),
                 base.withScopeId("rs_b"),
                 base.withGithub(new ReviewAnnotation.GitHubComment(1L, "https://x", false)));
 

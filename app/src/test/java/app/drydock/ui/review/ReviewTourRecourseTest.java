@@ -136,7 +136,7 @@ class ReviewTourRecourseTest extends ReviewTourFixture {
     @Test
     void aConfirmedBlockerOnTheStepIsOverriddenFromThePanel() {
         interact(() -> host.tours.mutate(scope.id(), record -> record.withReviewAnyway(true)));
-        host.addFinding(scope, new ReviewAnnotation(scope.id(), "f_block", Optional.empty(), FILE_A, "n1", "n1",
+        host.addFinding(scope, new ReviewAnnotation(scope.id(), "f_block", FILE_A, "n1", "n1",
                 Severity.BLOCKING, Confidence.HIGH, Optional.of("Null deref"), "Claude", Instant.EPOCH, List.of(),
                 Optional.empty(), Optional.empty(), List.of(),
                 List.of(new ReviewAnnotation.Message("Claude", Instant.EPOCH, "It dereferences null.")),
@@ -158,7 +158,7 @@ class ReviewTourRecourseTest extends ReviewTourFixture {
 
     @Test
     void notSureAsksInTheFindingsThreadAndLeavesItProposed() {
-        host.addFinding(scope, new ReviewAnnotation(scope.id(), "f_ask", Optional.empty(), FILE_A, "n1", "n1",
+        host.addFinding(scope, new ReviewAnnotation(scope.id(), "f_ask", FILE_A, "n1", "n1",
                 Severity.QUESTION, Confidence.HIGH, Optional.of("Unchecked cast"), "Claude", Instant.EPOCH,
                 List.of(), Optional.empty(), Optional.empty(), List.of(),
                 List.of(new ReviewAnnotation.Message("Claude", Instant.EPOCH, "This cast is unchecked.")),

@@ -27,7 +27,6 @@ import java.util.UUID;
 public record ReviewAnnotation(
         String scopeId,
         String id,
-        Optional<String> intentId,
         String file,
         String startKey,
         String endKey,
@@ -54,13 +53,13 @@ public record ReviewAnnotation(
      * withheld by nothing. Every call site that predates triage -- humans'
      * own annotations, stored findings, tests -- means exactly this.
      */
-    public ReviewAnnotation(String scopeId, String id, Optional<String> intentId, String file,
+    public ReviewAnnotation(String scopeId, String id, String file,
                             String startKey, String endKey, Severity severity, Confidence confidence,
                             Optional<String> title, String author, Instant at, List<Evidence> evidence,
                             Optional<Patch> patch, Optional<DeviatesFrom> deviatesFrom, List<Ask> asks,
                             List<Message> thread, Optional<Severity> severityOverride,
                             AnnotationStatus status, Optional<GitHubComment> github, boolean postToPr) {
-        this(scopeId, id, intentId, file, startKey, endKey, severity, confidence, title, author, at,
+        this(scopeId, id, file, startKey, endKey, severity, confidence, title, author, at,
                 evidence, patch, deviatesFrom, asks, thread, severityOverride, status, github, postToPr,
                 Triage.CONFIRMED, Optional.empty());
     }
@@ -131,7 +130,6 @@ public record ReviewAnnotation(
     public ReviewAnnotation {
         Objects.requireNonNull(scopeId, "scopeId");
         Objects.requireNonNull(id, "id");
-        Objects.requireNonNull(intentId, "intentId");
         Objects.requireNonNull(file, "file");
         Objects.requireNonNull(startKey, "startKey");
         Objects.requireNonNull(endKey, "endKey");
@@ -181,7 +179,7 @@ public record ReviewAnnotation(
      */
     public static ReviewAnnotation human(String scopeId, String file, String startKey, String endKey,
                                          Message firstMessage, Severity severity) {
-        return new ReviewAnnotation(scopeId, UUID.randomUUID().toString(), Optional.empty(),
+        return new ReviewAnnotation(scopeId, UUID.randomUUID().toString(),
                 file, startKey, endKey, severity, Confidence.HIGH, Optional.empty(),
                 firstMessage.author(), firstMessage.at(), List.of(), Optional.empty(), Optional.empty(),
                 List.of(), List.of(firstMessage), Optional.empty(), AnnotationStatus.OPEN,
@@ -193,7 +191,7 @@ public record ReviewAnnotation(
         return severityOverride.orElse(severity);
     }
 
-    /** Whether this finding refuses approval of its intent right now. */
+    /** Whether this finding refuses approval right now. */
     public boolean blocksApproval() {
         return triage == Triage.CONFIRMED && !resolved() && effectiveSeverity().blocksApproval();
     }
@@ -220,7 +218,7 @@ public record ReviewAnnotation(
     }
 
     public ReviewAnnotation withStatus(AnnotationStatus newStatus) {
-        return new ReviewAnnotation(scopeId, id, intentId, file, startKey, endKey, severity, confidence,
+        return new ReviewAnnotation(scopeId, id, file, startKey, endKey, severity, confidence,
                 title, author, at, evidence, patch, deviatesFrom, asks, thread, severityOverride, newStatus,
                 github, postToPr, triage, withheldBy);
     }
@@ -228,7 +226,7 @@ public record ReviewAnnotation(
     public ReviewAnnotation withReply(Message reply) {
         List<Message> extended = new ArrayList<>(thread);
         extended.add(reply);
-        return new ReviewAnnotation(scopeId, id, intentId, file, startKey, endKey, severity, confidence,
+        return new ReviewAnnotation(scopeId, id, file, startKey, endKey, severity, confidence,
                 title, author, at, evidence, patch, deviatesFrom, asks, extended, severityOverride, status,
                 github, postToPr, triage, withheldBy);
     }
@@ -239,55 +237,42 @@ public record ReviewAnnotation(
      * must be able to see both what it said and what the human decided.
      */
     public ReviewAnnotation withSeverityOverride(Severity override) {
-        return new ReviewAnnotation(scopeId, id, intentId, file, startKey, endKey, severity, confidence,
+        return new ReviewAnnotation(scopeId, id, file, startKey, endKey, severity, confidence,
                 title, author, at, evidence, patch, deviatesFrom, asks, thread,
                 Optional.ofNullable(override), status, github, postToPr, triage, withheldBy);
     }
 
-    /**
-     * Files this finding under {@code newIntentId}. The gutter composer
-     * mints an annotation with no intent (it only knows a line range, never
-     * the grouping); the destination resolves which intent owns the file and
-     * stamps it here before storing, the same way it always has for a gutter
-     * comment.
-     */
-    public ReviewAnnotation withIntentId(Optional<String> newIntentId) {
-        return new ReviewAnnotation(scopeId, id, newIntentId, file, startKey, endKey, severity, confidence,
-                title, author, at, evidence, patch, deviatesFrom, asks, thread, severityOverride, status,
-                github, postToPr, triage, withheldBy);
-    }
-
     /** Re-keys this finding onto another scope (see {@code AnnotationStore.adoptLegacy}). */
     public ReviewAnnotation withScopeId(String newScopeId) {
-        return new ReviewAnnotation(newScopeId, id, intentId, file, startKey, endKey, severity, confidence,
+        return new ReviewAnnotation(newScopeId, id, file, startKey, endKey, severity, confidence,
                 title, author, at, evidence, patch, deviatesFrom, asks, thread, severityOverride, status,
                 github, postToPr, triage, withheldBy);
     }
 
     /** Stamps the GitHub comment this annotation became (or came from). */
     public ReviewAnnotation withGithub(GitHubComment comment) {
-        return new ReviewAnnotation(scopeId, id, intentId, file, startKey, endKey, severity, confidence,
+        return new ReviewAnnotation(scopeId, id, file, startKey, endKey, severity, confidence,
                 title, author, at, evidence, patch, deviatesFrom, asks, thread, severityOverride, status,
                 Optional.of(comment), postToPr, triage, withheldBy);
     }
 
     /** The human's intent to include (or stop including) this in the next submit. */
     public ReviewAnnotation withPostToPr(boolean post) {
-        return new ReviewAnnotation(scopeId, id, intentId, file, startKey, endKey, severity, confidence,
+        return new ReviewAnnotation(scopeId, id, file, startKey, endKey, severity, confidence,
                 title, author, at, evidence, patch, deviatesFrom, asks, thread, severityOverride, status,
                 github, post, triage, withheldBy);
     }
 
     /** The human's triage of this finding. */
     public ReviewAnnotation withTriage(Triage newTriage) {
-        return new ReviewAnnotation(scopeId, id, intentId, file, startKey, endKey, severity, confidence,
+        return new ReviewAnnotation(scopeId, id, file, startKey, endKey, severity, confidence,
                 title, author, at, evidence, patch, deviatesFrom, asks, thread, severityOverride, status,
                 github, postToPr, newTriage, withheldBy);
     }
 
     /** The id of the finding this one is held back behind, if any. */
     public ReviewAnnotation withWithheldBy(Optional<String> newWithheldBy) {
-        return new ReviewAnnotation(scopeId, id, intentId, file, startKey, endKey, severity, confidence,
+        return new ReviewAnnotation(scopeId, id, file, startKey, endKey, severity, confidence,
                 title, author, at, evidence, patch, deviatesFrom, asks, thread, severityOverride, status,
                 github, postToPr, triage, newWithheldBy);
     }

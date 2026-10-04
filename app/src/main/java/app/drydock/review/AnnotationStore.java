@@ -46,7 +46,7 @@ import java.util.function.UnaryOperator;
  * file ({@code annotations.json} beside {@code state.json}).
  *
  * <p><strong>Everything is keyed by {@code (scopeId, id)}.</strong> Finding
- * and intent ids are agent-chosen and repeat across scopes -- a reviewer
+ * ids are agent-chosen and repeat across scopes -- a reviewer
  * re-run against two worktrees produces {@code f_leak_1} in both -- so
  * keying on the id alone made resolving a finding in one worktree resolve it
  * in another. That was a real bug; {@link ReviewAnnotation.Key} is the fix,
@@ -79,7 +79,10 @@ public final class AnnotationStore implements AutoCloseable {
      * no {@code assessments} key and loads with none -- which {@code
      * AnnotationStoreTest} pins rather than assumes. 6: findings carry
      * triage (absent = confirmed) and withheldBy; a v5 file needs no
-     * migration, its findings simply decode as confirmed.
+     * migration, its findings simply decode as confirmed. Findings
+     * no longer carry an {@code intentId}: an older file's key is ignored on read
+     * and not rewritten, and an older reader treats its absence as "no intent"
+     * (it was always optional), so the version is not bumped.
      */
     private static final int SCHEMA_VERSION = 6;
     private static final SecureRandom RANDOM = new SecureRandom();
@@ -163,14 +166,6 @@ public final class AnnotationStore implements AutoCloseable {
         return findings.values().stream().filter(f -> f.scopeId().equals(scopeId)).toList();
     }
 
-    /** Every finding of one intent within one scope. */
-    public synchronized List<ReviewAnnotation> forIntent(String scopeId, String intentId) {
-        return findings.values().stream()
-                .filter(f -> f.scopeId().equals(scopeId))
-                .filter(f -> f.intentId().filter(intentId::equals).isPresent())
-                .toList();
-    }
-
     public synchronized Optional<ReviewAnnotation> byKey(ReviewAnnotation.Key key) {
         return Optional.ofNullable(findings.get(key));
     }
@@ -185,14 +180,6 @@ public final class AnnotationStore implements AutoCloseable {
                 .filter(f -> f.scopeId().equals(scopeId))
                 .filter(f -> !f.resolved() && f.triage() != Triage.DISMISSED)
                 .count();
-    }
-
-    /** Whether any unresolved finding of {@code intentId} refuses approval. */
-    public synchronized boolean hasOpenBlockingFinding(String scopeId, String intentId) {
-        return findings.values().stream()
-                .filter(f -> f.scopeId().equals(scopeId))
-                .filter(f -> intentId == null || f.intentId().filter(intentId::equals).isPresent())
-                .anyMatch(ReviewAnnotation::blocksApproval);
     }
 
     public synchronized Optional<ReviewVerdict> verdict(String scopeId, String hunkDigest) {
@@ -626,7 +613,6 @@ public final class AnnotationStore implements AutoCloseable {
         JsonObject obj = JsonObject.empty();
         obj.put("scopeId", new JsonString(finding.scopeId()));
         obj.put("id", new JsonString(finding.id()));
-        finding.intentId().ifPresent(value -> obj.put("intentId", new JsonString(value)));
         obj.put("file", new JsonString(finding.file()));
         obj.put("startKey", new JsonString(finding.startKey()));
         obj.put("endKey", new JsonString(finding.endKey()));
@@ -739,7 +725,6 @@ public final class AnnotationStore implements AutoCloseable {
         return new ReviewAnnotation(
                 scopeIdFromJson(obj),
                 requireString(obj, "id"),
-                optionalString(obj, "intentId"),
                 requireString(obj, "file"),
                 requireString(obj, "startKey"),
                 requireString(obj, "endKey"),

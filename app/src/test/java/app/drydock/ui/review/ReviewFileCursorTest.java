@@ -320,7 +320,7 @@ class ReviewFileCursorTest extends ApplicationTest {
     }
 
     private ReviewAnnotation finding(String id, String path, Severity severity) {
-        return new ReviewAnnotation("pending", id, Optional.empty(), path, "n1", "n1", severity,
+        return new ReviewAnnotation("pending", id, path, "n1", "n1", severity,
                 Confidence.HIGH, Optional.of("Title " + id), "Claude", Instant.EPOCH, List.of(),
                 Optional.empty(), Optional.empty(), List.of(),
                 List.of(new ReviewAnnotation.Message("Claude", Instant.EPOCH, "body of " + id)),

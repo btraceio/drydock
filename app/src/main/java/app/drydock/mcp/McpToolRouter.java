@@ -216,7 +216,7 @@ public final class McpToolRouter {
                                 + "Findings land as proposals; the human confirms or dismisses each.",
                         JsonObject.empty()
                                 .put("scopeId", schemaString("Review scope handle."))
-                                .put("findings", schemaString("Array of {id, intentId?, anchor{file, "
+                                .put("findings", schemaString("Array of {id, anchor{file, "
                                         + "startKey, endKey?}, severity, confidence, title?, body, "
                                         + "evidence?, patch?, deviatesFrom?, asks?, withheldBy?}.")),
                         "scopeId", "findings"),

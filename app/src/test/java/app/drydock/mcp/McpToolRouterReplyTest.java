@@ -112,7 +112,7 @@ class McpToolRouterReplyTest {
     @Test
     void anIdPresentInTwoAddressableScopesIsRefusedRatherThanGuessed() {
         context.grant(caller, "rs_second");
-        context.annotations.add(new ReviewAnnotation("rs_second", open.id(), Optional.empty(),
+        context.annotations.add(new ReviewAnnotation("rs_second", open.id(),
                 "other.java", "n1", "n1", Severity.QUESTION, Confidence.HIGH, Optional.empty(),
                 "You", Instant.EPOCH, List.of(), Optional.empty(), Optional.empty(), List.of(),
                 List.of(), Optional.empty(), AnnotationStatus.OPEN, Optional.empty(), false));
@@ -127,7 +127,7 @@ class McpToolRouterReplyTest {
     @Test
     void anAmbiguousIdIsResolvedByPassingTheScope() throws Exception {
         context.grant(caller, "rs_second");
-        context.annotations.add(new ReviewAnnotation("rs_second", open.id(), Optional.empty(),
+        context.annotations.add(new ReviewAnnotation("rs_second", open.id(),
                 "other.java", "n1", "n1", Severity.QUESTION, Confidence.HIGH, Optional.empty(),
                 "You", Instant.EPOCH, List.of(), Optional.empty(), Optional.empty(), List.of(),
                 List.of(), Optional.empty(), AnnotationStatus.OPEN, Optional.empty(), false));

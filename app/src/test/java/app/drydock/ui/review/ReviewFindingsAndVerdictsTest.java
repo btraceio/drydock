@@ -169,7 +169,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
     @Test
     void anAskChipPostsItsQuestionAsTheHuman() {
         ReviewAnnotation withAsk = finding("f1", Severity.BLOCKING).withStatus(AnnotationStatus.OPEN);
-        ReviewAnnotation asked = new ReviewAnnotation(scopeId(), "f1", withAsk.intentId(),
+        ReviewAnnotation asked = new ReviewAnnotation(scopeId(), "f1",
                 withAsk.file(), withAsk.startKey(), withAsk.endKey(), withAsk.severity(),
                 withAsk.confidence(), withAsk.title(), withAsk.author(), withAsk.at(),
                 withAsk.evidence(), withAsk.patch(), withAsk.deviatesFrom(),
@@ -189,7 +189,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
     @Test
     void applyPatchIsAHumanClickThatHandsOffToTheSession() {
         ReviewAnnotation base = finding("f1", Severity.BLOCKING);
-        seed(new ReviewAnnotation(scopeId(), "f1", base.intentId(), base.file(), base.startKey(),
+        seed(new ReviewAnnotation(scopeId(), "f1", base.file(), base.startKey(),
                 base.endKey(), base.severity(), base.confidence(), base.title(), base.author(),
                 base.at(), base.evidence(),
                 Optional.of(new ReviewAnnotation.Patch("--- a\n+++ b\n", "one line in onRelease")),
@@ -502,7 +502,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
     @Test
     void shiftFWidensTheMarginToTheWholeReview() {
         ReviewAnnotation other = new ReviewAnnotation(scopeId(), "f_other",
-                Optional.of("auto:change:web"), "web/Other.java", "n1", "n1",
+                "web/Other.java", "n1", "n1",
                 Severity.QUESTION, Confidence.HIGH, Optional.of("elsewhere"), "Claude",
                 Instant.EPOCH, List.of(), Optional.empty(), Optional.empty(), List.of(),
                 List.of(new ReviewAnnotation.Message("Claude", Instant.EPOCH, "elsewhere")),
@@ -809,8 +809,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
     }
 
     private ReviewAnnotation finding(String id, Severity severity) {
-        return new ReviewAnnotation(scopeId(), id, Optional.of("auto:change:src"),
-                "src/Main.java", "n1", "n1", severity, Confidence.HIGH,
+        return new ReviewAnnotation(scopeId(), id, "src/Main.java", "n1", "n1", severity, Confidence.HIGH,
                 Optional.of("Title " + id), "Claude", Instant.EPOCH, List.of(),
                 Optional.empty(), Optional.empty(), List.of(),
                 List.of(new ReviewAnnotation.Message("Claude", Instant.EPOCH, "body of " + id)),
