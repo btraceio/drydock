@@ -212,8 +212,15 @@ public record SubmitPlan(Event preselected, List<Comment> comments, List<ReviewA
 
     /**
      * The review body: {@code summary}, then -- when there are notes -- a
-     * blank line, a heading, and one bullet per note with its excerpt on an
-     * indented line below it.
+     * blank line, a heading, and one bullet per note.
+     *
+     * <p>GitHub renders the body as markdown, so each piece is shaped to
+     * survive that: the location is an inline code span; every line of a
+     * multi-line comment after the first is indented two spaces so it stays
+     * inside its bullet; and the excerpt -- source text, full of {@code <T>},
+     * {@code *} and backticks markdown would otherwise eat -- goes in a
+     * fenced code block inside the bullet, fenced with more backticks than
+     * any run in it.</p>
      */
     public String composeBody(String summary) {
         if (bodyNotes.isEmpty()) {
@@ -225,12 +232,59 @@ public record SubmitPlan(Event preselected, List<Comment> comments, List<ReviewA
         }
         out.append("Comments on lines outside this diff:\n");
         for (BodyNote note : bodyNotes) {
-            out.append("- `").append(note.location()).append("` — ").append(note.body()).append('\n');
+            out.append("- ").append(inlineCode(note.location())).append(" — ")
+                    .append(indentContinuation(note.body())).append('\n');
             if (!note.excerpt().isEmpty()) {
-                out.append("    ").append(note.excerpt()).append('\n');
+                String fence = fenceFor(note.excerpt());
+                out.append('\n').append(LIST_INDENT).append(fence).append('\n');
+                for (String line : note.excerpt().split("\n", -1)) {
+                    out.append(LIST_INDENT).append(line).append('\n');
+                }
+                out.append(LIST_INDENT).append(fence).append('\n');
             }
         }
         return out.toString().stripTrailing();
+    }
+
+    /** How far a line is indented to stay inside a {@code "- "} bullet. */
+    private static final String LIST_INDENT = "  ";
+
+    /** Every line after the first indented into the bullet; blank lines stay blank. */
+    private static String indentContinuation(String text) {
+        String[] lines = text.strip().split("\n", -1);
+        StringBuilder out = new StringBuilder(lines[0]);
+        for (int i = 1; i < lines.length; i++) {
+            out.append('\n');
+            if (!lines[i].isBlank()) {
+                out.append(LIST_INDENT).append(lines[i]);
+            }
+        }
+        return out.toString();
+    }
+
+    /** A code fence longer than the longest backtick run in {@code text}, and at least three. */
+    private static String fenceFor(String text) {
+        return "`".repeat(Math.max(3, longestBacktickRun(text) + 1));
+    }
+
+    /** {@code text} as an inline code span, its delimiter longer than any backtick run inside. */
+    private static String inlineCode(String text) {
+        int run = longestBacktickRun(text);
+        if (run == 0) {
+            return "`" + text + "`";
+        }
+        String delimiter = "`".repeat(run + 1);
+        return delimiter + " " + text + " " + delimiter;
+    }
+
+    private static int longestBacktickRun(String text) {
+        int longest = 0;
+        int current = 0;
+        for (int i = 0; i < text.length(); i++) {
+            current = text.charAt(i) == '`' ? current + 1 : 0;
+            longest = Math.max(longest, current);
+        }
+        return longest;
     }
 
     /** {@code n500} reads {@code 500}; a deleted {@code o5} reads {@code 5(-)}; a range joins both ends. */

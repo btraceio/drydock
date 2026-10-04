@@ -346,4 +346,27 @@ class SubmitPlanTest {
         assertEquals(1, plan.refusals().size());
         assertTrue(plan.bodyNotes().isEmpty());
     }
+
+    @Test
+    void composeBodyFencesTheExcerptAndKeepsAMultiLineBodyInsideItsBullet() {
+        ReviewAnnotation.Message message = new ReviewAnnotation.Message("Reviewer", Instant.now(),
+                "This caller still passes null.\nIt will throw now.");
+        ReviewAnnotation outside = ReviewAnnotation.human("scope-1", "src/Foo.java", "n500", "n500", message);
+        String excerpt = "List<T> *p = `a` + ```b```;";
+        SubmitPlan plan = SubmitPlan.of(List.of(outside), List.of(), EMPTY_INDEX,
+                (file, key) -> Optional.of(excerpt));
+
+        String body = plan.composeBody("LGTM");
+
+        assertEquals("""
+                LGTM
+
+                Comments on lines outside this diff:
+                - `src/Foo.java:500` — This caller still passes null.
+                  It will throw now.
+
+                  ````
+                  List<T> *p = `a` + ```b```;
+                  ````""", body);
+    }
 }
