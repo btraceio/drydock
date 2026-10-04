@@ -67,6 +67,18 @@ class ReviewTourWordingTest extends ReviewTourFixture {
     }
 
     @Test
+    void enteringTheHunkDiffPutsTheCurrentFileAndItsHunkCountsOnTheBarAtOnce() {
+        press(KeyCode.V).release(KeyCode.V);
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertEquals("1/2 · " + FILE_A, text(".review-verdict-target"), "no [ / ] needed to get off the step");
+        assertEquals("0/3 hunks reviewed", text(".review-verdict-progress-label"),
+                "every hunk of the diff, not the tour's 2 steps");
+        assertEquals("3 hunks left · n jumps to the next", text(".review-verdict-hint"));
+        assertTrue(shown("Submit (3 left)"));
+    }
+
+    @Test
     void theHunkDiffKeepsItsOwnWording() {
         press(KeyCode.V).release(KeyCode.V);
         WaitForAsyncUtils.waitForFxEvents();

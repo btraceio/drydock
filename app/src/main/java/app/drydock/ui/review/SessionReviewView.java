@@ -615,6 +615,9 @@ public final class SessionReviewView extends BorderPane {
      */
     private List<String> lastSettledDigests = List.of();
 
+    /** The mode {@link #applyMode} last applied; null before the first. */
+    private ReviewMode appliedMode;
+
     /** Set by {@code m}/{@code f}; remembered independently of the responsive collapse. */
     private boolean marginCollapsedByUser;
 
@@ -2629,7 +2632,13 @@ public final class SessionReviewView extends BorderPane {
             tourController.render(tour);
         } else {
             tourController.clearFromDiffColumn();
+            if (appliedMode != ReviewMode.DIFF) {
+                // The bar still carries the tour's step and step counts; v
+                // and Open diff review reach here without a state refresh.
+                selectedScope().ifPresent(this::renderVerdictBar);
+            }
         }
+        appliedMode = mode;
         if (swapped) {
             applyResponsiveLayout(getWidth());
         }
