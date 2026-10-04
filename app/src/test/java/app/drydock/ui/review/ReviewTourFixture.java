@@ -96,6 +96,10 @@ abstract class ReviewTourFixture extends ApplicationTest {
 
     @AfterEach
     void tearDown() {
+        // Each test gets a new view; an unclosed one keeps its risk queue's
+        // three-minute timeout armed, which then writes to the closed tour
+        // store under whichever test class is running by then.
+        interact(view::close);
         diffService.close();
         host.store.close();
         host.tours.close();
