@@ -205,6 +205,8 @@ final class TourController {
     private boolean shownBannerShelved;
     private TourRecord shownMarksRecord;
     private String shownMarksStepId;
+    /** The anchor the shown marks treat as active; see {@link #anchorIndex}. */
+    private int shownMarksAnchor;
     private StepPanel.ImpactView shownImpact;
 
     /**
@@ -273,6 +275,7 @@ final class TourController {
             render();
         });
         tourWait.setOnFinished(event -> onTourWaitExpired());
+        diffColumn.setOnClaimSelected(this::selectClaim);
     }
 
     TourOutline outline() {
@@ -519,11 +522,13 @@ final class TourController {
                 shownImpact = impactView;
             }
         }
-        if (!tourMarksShown || !record.equals(shownMarksRecord) || !currentStepId.equals(shownMarksStepId)) {
-            diffColumn.setStepMarkSource(new LiveTourMarks(record, currentStepId));
+        if (!tourMarksShown || !record.equals(shownMarksRecord) || !currentStepId.equals(shownMarksStepId)
+                || anchorIndex != shownMarksAnchor) {
+            diffColumn.setStepMarkSource(new LiveTourMarks(record, currentStepId, anchorIndex));
             tourMarksShown = true;
             shownMarksRecord = record;
             shownMarksStepId = currentStepId;
+            shownMarksAnchor = anchorIndex;
         }
         renderTourVerdictBar(record, step, progress);
         syncTourVerdicts(record);
@@ -958,8 +963,8 @@ final class TourController {
         if (digit > 0) {
             // A peek card covers the panel: a digit must not answer a check
             // the reader cannot see.
-            if (!view.peekOpen()) {
-                stepPanel.answerByKey(digit);
+            if (!view.peekOpen() && !stepPanel.answerByKey(digit)) {
+                jumpToClaim(record, digit - 1);
             }
             return true;
         }
@@ -1261,7 +1266,38 @@ final class TourController {
             }
             anchorIndex = Math.floorMod(anchorIndex + delta, count);
             stepPanel.hideBackPill();
+            render(currentTour());
             revealAnchor(step, anchorIndex);
+        });
+    }
+
+    /**
+     * A digit with no check to answer: the step's claim of that number, when
+     * the step makes claims. Without notes there is nothing numbered on screen
+     * for the digit to name, so it stays inert as it always was.
+     */
+    private void jumpToClaim(TourRecord record, int index) {
+        record.tour().step(currentStepId).ifPresent(step -> {
+            if (index < step.anchors().size() && step.anchors().stream().anyMatch(TourAnchor::hasNote)) {
+                anchorIndex = index;
+                stepPanel.hideBackPill();
+                render(Optional.of(record));
+                revealAnchor(step, index);
+            }
+        });
+    }
+
+    /**
+     * A click on a claim's callout: that claim becomes the active one. The
+     * viewport stays put -- the callout the reader clicked is already on screen.
+     */
+    private void selectClaim(int index) {
+        currentTour().flatMap(record -> record.tour().step(currentStepId)).ifPresent(step -> {
+            if (index >= 0 && index < step.anchors().size()) {
+                anchorIndex = index;
+                stepPanel.hideBackPill();
+                render(currentTour());
+            }
         });
     }
 
@@ -1287,12 +1323,14 @@ final class TourController {
     private final class LiveTourMarks implements ReviewDiffColumn.StepMarkSource {
         private final TourRecord record;
         private final String stepId;
+        private final int activeAnchor;
         private UnifiedDiff builtFor;
         private TourMarks marks = TourMarks.none();
 
-        LiveTourMarks(TourRecord record, String stepId) {
+        LiveTourMarks(TourRecord record, String stepId, int activeAnchor) {
             this.record = record;
             this.stepId = stepId;
+            this.activeAnchor = activeAnchor;
         }
 
         @Override
@@ -1302,7 +1340,7 @@ final class TourController {
                 return Optional.empty();
             }
             if (rendered != builtFor) {
-                marks = TourMarks.of(record, rendered, stepId);
+                marks = TourMarks.of(record, rendered, stepId, activeAnchor);
                 builtFor = rendered;
             }
             return marks.markAt(file, lineKey);
@@ -1368,6 +1406,7 @@ final class TourController {
             currentTour().flatMap(record -> record.tour().step(currentStepId)).ifPresent(step -> {
                 anchorIndex = index;
                 stepPanel.hideBackPill();
+                render(currentTour());
                 revealAnchor(step, index);
             });
         }
