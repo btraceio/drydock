@@ -126,7 +126,7 @@ final class TourMarks implements ReviewDiffColumn.StepMarkSource {
     }
 
     /** The first unsettled check of the step is a PREDICT still open. */
-    private static boolean predictPending(TourStep step, StepProgress progress) {
+    static boolean predictPending(TourStep step, StepProgress progress) {
         for (TourCheck check : step.checks()) {
             CheckProgress p = progress.check(check.id());
             if (p.settled()) {

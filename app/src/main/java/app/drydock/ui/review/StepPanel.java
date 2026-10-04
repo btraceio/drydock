@@ -47,6 +47,9 @@ final class StepPanel extends VBox {
     static final double EXPANDED_WIDTH = ReviewFindingsMargin.EXPANDED_WIDTH;
     static final double NARROW_WIDTH = ReviewFindingsMargin.NARROW_WIDTH;
     static final double COLLAPSED_WIDTH = ReviewFindingsMargin.COLLAPSED_WIDTH;
+    /** Stands where the narrative would be while the step's PREDICT is still open. */
+    static final String WITHHELD_NARRATIVE =
+            "Read the code first. The agent's explanation, and its note on each range, unlock when you answer.";
     /** Shown on a step whose code moved under it once a refresh was actually sent to the agent. */
     static final String STALE_NOTICE = "This step's code changed; the agent is re-writing it.";
     /** Shown on a step whose code moved under it while no refresh has been sent for this diff. */
@@ -190,6 +193,20 @@ final class StepPanel extends VBox {
         content.getChildren().clear();
         Label header = new Label("Step " + view.number() + " of " + view.total() + " · " + view.step().title());
         header.getStyleClass().add("step-panel-header");
+        if (TourMarks.predictPending(view.step(), view.progress())) {
+            // Predict first: the narrative states what the added lines do,
+            // which is exactly what the open PREDICT asks, so it stays back
+            // until the reader has committed to an answer -- and the question
+            // leads, where the explanation would have been.
+            Label withheld = new Label(WITHHELD_NARRATIVE);
+            withheld.setWrapText(true);
+            withheld.getStyleClass().addAll("step-panel-narrative", "step-panel-withheld");
+            content.getChildren().addAll(header, checkSection(view), withheld, anchorChips(view));
+            if (view.progress().stale()) {
+                content.getChildren().add(staleNotice(view.refreshDispatched()));
+            }
+            return;
+        }
         Label narrative = new Label(view.step().narrative());
         narrative.setWrapText(true);
         narrative.getStyleClass().add("step-panel-narrative");
