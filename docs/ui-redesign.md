@@ -67,12 +67,13 @@ reviewer, without findings to render.
 Four bugs were found by looking at those images and by nothing else:
 
 - The verdict bar was stuck on **"no intent"** on every freshly opened item,
-  so Approve, Request change and Submit were all dead. Intents fall back to
-  one-per-file and are therefore derived *from* the diff, which arrives
-  asynchronously; the bar rendered once against an empty diff and never
-  re-rendered. Every test until then supplied the diff synchronously and so
-  could not see it. `ReviewIntentFallbackTest` now drives the real
-  asynchronous path.
+  so Approve, Request change and Submit were all dead: its target was
+  derived *from* the diff, which arrives asynchronously, and the bar
+  rendered once against an empty diff and never re-rendered. Every test
+  until then supplied the diff synchronously and so could not see it.
+  Intents are gone; the bar now targets the hunk diff's current file (or
+  the tour's current step), which is just as dependent on the diff, and
+  `ReviewAsyncDiffCursorTest` drives that real asynchronous path.
 - The **`◆n` pins were never on screen.** They rendered correctly, but the
   source column grew to fill the row, pushing each pin to the right edge of
   the *content* — which on a wide diff is far outside the viewport. They now
