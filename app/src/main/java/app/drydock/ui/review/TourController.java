@@ -134,6 +134,9 @@ final class TourController {
         /** The failure's "Open diff review". */
         void openDiffReview();
 
+        /** Keeps the tour showing across refreshes, as the reader's choice, until the scope changes. */
+        void keepTourMode();
+
         void refreshReviewState();
 
         void triageFinding(ReviewScope scope, ReviewAnnotation finding, Triage triage, Optional<String> reason);
@@ -340,9 +343,14 @@ final class TourController {
         }
     }
 
-    /** "Cancel" on "Building tour…": gives up the wait and shows the no-tour state, still in tour mode. */
+    /**
+     * "Cancel" on "Building tour…": gives up the wait and shows the no-tour
+     * state, still in tour mode -- chosen, so the next refresh (with no wait
+     * pending any more) does not drop the board to the hunk diff.
+     */
     private void cancelWait() {
         endTourWait();
+        view.keepTourMode();
         render();
     }
 

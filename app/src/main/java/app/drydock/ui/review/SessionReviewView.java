@@ -3114,6 +3114,12 @@ public final class SessionReviewView extends BorderPane {
         }
 
         @Override
+        public void keepTourMode() {
+            userChoseMode = true;
+            mode = ReviewMode.TOUR;
+        }
+
+        @Override
         public void refreshReviewState() {
             SessionReviewView.this.refreshReviewState();
         }

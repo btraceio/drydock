@@ -338,6 +338,42 @@ class ReviewTourModeTest extends ReviewTourFixture {
     }
 
     @Test
+    void theNoTourStateAfterCancelSurvivesARefreshAndARerunWaitsAfresh() {
+        host.reviewers.add("claude");
+        try {
+            // From the hunk diff, without v: the top bar's Run review (its
+            // button needs a session, so the diag hook stands in) puts the
+            // board into tour mode only because a wait is pending.
+            interact(() -> {
+                host.tours.remove(scope.id());
+                view.refreshReviewState();
+            });
+            WaitForAsyncUtils.waitForFxEvents();
+            assertEquals(SessionReviewView.ReviewMode.DIFF, ReviewDiagFxThread.call(view::diagMode));
+            interact(view::diagRunReview);
+            WaitForAsyncUtils.waitForFxEvents();
+            assertEquals(SessionReviewView.ReviewMode.TOUR, ReviewDiagFxThread.call(view::diagMode));
+            clickOn("Cancel");
+            WaitForAsyncUtils.waitForFxEvents();
+            // Any store write refreshes the board; Cancel chose the tour's
+            // no-tour screen, and a refresh must not drop it to the hunk diff.
+            interact(view::refreshReviewState);
+            WaitForAsyncUtils.waitForFxEvents();
+            assertEquals(SessionReviewView.ReviewMode.TOUR, ReviewDiagFxThread.call(view::diagMode));
+            assertTrue(lookup("No tour yet.").tryQuery().isPresent(), "the no-tour screen is still shown");
+
+            clickOn("Run review");
+            WaitForAsyncUtils.waitForFxEvents();
+            assertEquals(2, host.reviewRuns.size(), "the second Run review asked the host again");
+            assertTrue(ReviewDiagFxThread.call(view::diagTourPending), "a fresh wait is pending");
+            assertTrue(ReviewDiagFxThread.call(view::diagTourWaitRunning), "and running");
+            assertTrue(lookup("Building tour…").tryQuery().isPresent());
+        } finally {
+            host.reviewers.clear();
+        }
+    }
+
+    @Test
     void aRunThatCannotStartOffersRetryAndTheDiffReview() {
         withoutTourInTourMode();
         clickOn("Run review");
