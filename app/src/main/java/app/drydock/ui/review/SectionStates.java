@@ -191,6 +191,28 @@ final class SectionStates {
     }
 
     /**
+     * Whether {@code file}'s staleness is the agent's claim rather than
+     * Drydock's measurement (spec §9.7: "Assessments render as claimed, not
+     * measured"): true when any of its {@code MOVED} verdicts carries an
+     * agent's "affected" recheck for that base pair. A move the file filter
+     * found on its own is measured, so a file with no such assessment reads
+     * as measured even when it is stale.
+     */
+    boolean stalenessClaimed(Board board, String file) {
+        String base = host.currentBase(board.scope());
+        Collection<String> affecting = filesAffecting(board, file);
+        for (String digest : digestsOfFile(board, file)) {
+            Optional<ReviewVerdict> verdict = host.verdict(board.scope(), digest);
+            if (verdict.isPresent()
+                    && stalenessOf(board, verdict.get(), base, affecting) == Staleness.MOVED
+                    && host.assessedAffected(board.scope(), digest, verdict.get().baseCommit(), base)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Asks the agent which approvals a base move disturbed, at most once per
      * move (spec §9.7).
      *

@@ -1466,7 +1466,8 @@ public final class SessionReviewView extends BorderPane {
                 sections.distinctDigests(board.get()).size());
         verdictBar.showStale(sections.stalenessOf(board.get(), file.get()) == SectionStates.Staleness.MOVED
                 ? Optional.of(new ReviewVerdictBar.StaleInfo(
-                        sections.oldBaseOf(board.get(), file.get()), host.currentBase(scope)))
+                        sections.oldBaseOf(board.get(), file.get()), host.currentBase(scope),
+                        sections.stalenessClaimed(board.get(), file.get())))
                 : Optional.empty());
     }
 

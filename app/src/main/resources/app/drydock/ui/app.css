@@ -3289,6 +3289,11 @@
 .review-verdict-settled.decision-approved { -fx-text-fill: -drydock-resolved; }
 .review-verdict-settled.decision-changes { -fx-text-fill: -drydock-question; }
 .review-verdict-settled.decision-auto-approved { -fx-text-fill: -drydock-resolved; }
+/* An agent-asserted stale banner (spec §9.7) reads as claimed, like the
+   step panel's claimed impact tags. */
+.review-verdict-stale.provenance-claimed {
+    -fx-font-style: italic;
+}
 .review-verdict-hint {
     -fx-text-fill: -drydock-text-faint;
     -fx-font-size: 10.5px;

@@ -1,5 +1,6 @@
 package app.drydock.ui.review;
 
+import app.drydock.review.Provenance;
 import app.drydock.review.ReviewVerdict;
 
 import javafx.css.PseudoClass;
@@ -94,9 +95,11 @@ final class ReviewVerdictBar extends VBox {
     /**
      * A file's stale verdict (spec §9.2): the base it was approved against,
      * and the scope's base now. Not a {@link ReviewVerdict} -- a file owns no
-     * verdict of its own, only what its hunks merge to.
+     * verdict of its own, only what its hunks merge to. {@code claimed} is
+     * true when the staleness is an agent's recheck rather than Drydock's
+     * own measurement (spec §9.7), which the banner must say.
      */
-    record StaleInfo(String oldBase, String newBase) {
+    record StaleInfo(String oldBase, String newBase, boolean claimed) {
     }
 
     private final Host host;
@@ -549,8 +552,16 @@ final class ReviewVerdictBar extends VBox {
             // DOES have a decision recorded, but it was given against a base
             // that has since moved, so the plain "settled, here is undo" row
             // would understate what is actually being asked of the reader.
-            staleLabel.setText("⚠ approved against base " + shortSha(stale.get().oldBase())
+            // An agent's "affected" recheck is its assertion, not Drydock's
+            // measurement (spec §9.7), and must not read like one.
+            boolean claimed = stale.get().claimed();
+            staleLabel.setText((claimed ? "⚠ agent: approved against base " : "⚠ approved against base ")
+                    + shortSha(stale.get().oldBase())
                     + " · base is now " + shortSha(stale.get().newBase()));
+            staleLabel.getStyleClass().remove(Provenance.CLAIMED.styleClass());
+            if (claimed) {
+                staleLabel.getStyleClass().add(Provenance.CLAIMED.styleClass());
+            }
             actionRow.getChildren().setAll(previousButton, nextButton, targetLabel,
                     staleLabel, confirmStillGoodButton, reReviewButton, actionSpacer, navHint);
         } else if (decision.isPresent()) {

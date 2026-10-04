@@ -5,6 +5,7 @@ import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.BaseMove;
 import app.drydock.review.HunkDigest;
+import app.drydock.review.RecheckAssessment;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.review.ReviewVerdict;
@@ -152,6 +153,41 @@ class ReviewHunkProgressTest extends ApplicationTest {
         assertEquals(SectionStates.Staleness.MOVED, view.diagStalenessOfCurrentFile());
         assertTrue(staleBanner().startsWith("⚠ approved against base 0000000"),
                 "the bar must say the base moved, got: " + staleBanner());
+    }
+
+    /**
+     * Spec §9.7: an agent's "affected" recheck renders as CLAIMED, never as
+     * measured. The move here touches only a file the scope does not read,
+     * so Drydock's own filter calls it fresh; the stale banner exists only
+     * because the agent said so, and it must read that way.
+     */
+    @Test
+    void theStaleBannerSaysWhenTheAgentIsTheOneClaimingIt() {
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of("docs/README.md")));
+        show();
+        host.store.putAssessment(new RecheckAssessment(scope.id(), digestOf(GUARDS_H),
+                "0".repeat(40), host.baseCommit, true, "the guard moved", Instant.EPOCH));
+        recordAgainstBase(GUARDS_H, "0".repeat(40));
+
+        assertEquals(SectionStates.Staleness.MOVED, view.diagStalenessOfCurrentFile());
+        assertTrue(staleBanner().startsWith("⚠ agent: "),
+                "an agent-asserted staleness must not read identically to a measured one: "
+                        + staleBanner());
+        assertTrue(staleBannerStyleClasses().contains("provenance-claimed"),
+                "the claimed banner must carry the claimed style: " + staleBannerStyleClasses());
+    }
+
+    /** The measured counterpart: Drydock's own filter found the move. */
+    @Test
+    void aMeasuredStaleBannerCarriesNoAgentPrefix() {
+        host.baseDelta = new BaseMove.Delta(false, new TreeSet<>(List.of(GUARDS_H)));
+        show();
+        recordAgainstBase(GUARDS_H, "0".repeat(40));
+
+        assertFalse(staleBanner().contains("agent:"),
+                "a measured move must not be attributed to the agent: " + staleBanner());
+        assertFalse(staleBannerStyleClasses().contains("provenance-claimed"),
+                "a measured banner must not carry the claimed style: " + staleBannerStyleClasses());
     }
 
     /**
@@ -310,6 +346,14 @@ class ReviewHunkProgressTest extends ApplicationTest {
         return nodes.stream().filter(Node::isVisible).filter(node -> node.getScene() != null)
                 .filter(node -> node.getParent() != null)
                 .map(node -> ((Label) node).getText()).findFirst().orElse("");
+    }
+
+    /** The stale banner's style classes; empty when none is showing. */
+    private List<String> staleBannerStyleClasses() {
+        List<Node> nodes = new ArrayList<>();
+        interact(() -> nodes.addAll(lookup(".review-verdict-stale").queryAll()));
+        return nodes.stream().filter(Node::isVisible).filter(node -> node.getParent() != null)
+                .map(node -> List.copyOf(node.getStyleClass())).findFirst().orElse(List.of());
     }
 
     private List<String> labels(String selector) {

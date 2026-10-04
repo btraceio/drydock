@@ -207,7 +207,7 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
     void theStaleBannerFitsAtTheCodeColumnFloor() {
         show(target(2, "drydock/review · 4 files"), Optional.of(ReviewVerdict.Decision.APPROVED));
         interact(() -> bar.showStale(Optional.of(
-                new ReviewVerdictBar.StaleInfo("a1b2c3d4e5f6789", "d4e5f6a1b2c3789"))));
+                new ReviewVerdictBar.StaleInfo("a1b2c3d4e5f6789", "d4e5f6a1b2c3789", false))));
         WaitForAsyncUtils.waitForFxEvents();
         interact(() -> bar.getScene().getRoot().layout());
         WaitForAsyncUtils.waitForFxEvents();
