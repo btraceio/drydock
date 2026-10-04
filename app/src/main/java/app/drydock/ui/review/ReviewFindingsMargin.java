@@ -403,6 +403,8 @@ final class ReviewFindingsMargin extends VBox {
         askChips(finding).ifPresent(card.getChildren()::add);
         if (finding.triage() == Triage.PROPOSED) {
             card.getChildren().add(triageRow(finding));
+        } else if (finding.triage() == Triage.DISMISSED) {
+            card.getChildren().add(reopenRow(finding));
         }
         card.getChildren().add(actions(finding));
         return card;
@@ -661,6 +663,28 @@ final class ReviewFindingsMargin extends VBox {
             }
         });
         return box;
+    }
+
+    /**
+     * A dismissal is not final: Reopen puts the finding back to proposed, so
+     * Confirm / Dismiss / Not sure are offered again, and says so in the
+     * thread -- the agent read the dismissal there, so it reads the reversal
+     * there too.
+     */
+    private Region reopenRow(ReviewAnnotation finding) {
+        Label dismissed = new Label("Dismissed");
+        dismissed.getStyleClass().add("review-card-proposed");
+        Button reopen = new Button("Reopen");
+        reopen.getStyleClass().addAll("review-card-action", "review-card-reopen");
+        reopen.setTooltip(new Tooltip("Take the dismissal back and triage this finding again"));
+        reopen.setOnAction(e -> {
+            host.postMessage(finding, "Reopened");
+            host.triage(finding, Triage.PROPOSED, Optional.empty());
+        });
+        HBox row = new HBox(6, dismissed, reopen);
+        row.setAlignment(Pos.CENTER_LEFT);
+        row.getStyleClass().add("review-card-triage");
+        return row;
     }
 
     private static String keyLabel(String key) {

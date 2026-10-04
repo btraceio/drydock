@@ -106,4 +106,27 @@ class ReviewTriageMarginTest extends ReviewViewFixture {
         refresh();
         assertTrue(!lookup("Apply patch").queryButton().isDisabled());
     }
+
+    @Test
+    void aDismissedCardCanBeReopenedToProposed() {
+        seedAndRefresh(proposed("f4"));
+        clickOn("Dismiss…");
+        clickOn(".review-dismiss-reason");
+        write("not a leak");
+        clickOn("Dismiss");
+        refresh();
+        assertEquals(Triage.DISMISSED, storedTriage("f4"));
+
+        // Dismissed cards show once the margin lists every finding, not just open ones.
+        clickOn("open");
+        refresh();
+        clickOn(lookup(".review-card-reopen").queryButton());
+        refresh();
+
+        assertEquals(Triage.PROPOSED, storedTriage("f4"));
+        List<ReviewAnnotation.Message> thread = host.store.forScope(scope.id()).stream()
+                .filter(f -> f.id().equals("f4")).findFirst().orElseThrow().thread();
+        assertEquals("Reopened", thread.get(thread.size() - 1).text(), "the agent sees it was taken back");
+        assertEquals(1, lookup(".review-card-proposed").queryAll().size(), "triage is offered again");
+    }
 }
