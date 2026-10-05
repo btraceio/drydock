@@ -154,15 +154,49 @@ class StepPanelTest extends ApplicationTest {
     }
 
     @Test
-    void anOpenPredictLeadsWithTheQuestionAndWithholdsTheNarrative() {
+    void anOpenPredictSaysReadTheCodeFirstAndLinksItBeforeAskingTheQuestion() {
         interact(() -> panel.show(view(CheckProgress.fresh("c1"))));
         assertTrue(lookup("Why the guard exists.").tryQuery().isEmpty(),
                 "the narrative says what the added lines do, which is what the PREDICT asks");
-        Node question = lookup("What happens?").query();
-        Node withheld = lookup(StepPanel.WITHHELD_NARRATIVE).query();
-        assertTrue(question.localToScene(question.getBoundsInLocal()).getMinY()
-                        < withheld.localToScene(withheld.getBoundsInLocal()).getMinY(),
-                "the question comes first, where the explanation would have been");
+        double notice = top(lookup(StepPanel.WITHHELD_NARRATIVE).query());
+        double link = top(lookup("src/A.java:3").query());
+        double question = top(lookup("What happens?").query());
+        assertTrue(notice < link, "the notice, then the links to the code it points at");
+        assertTrue(link < question, "and only then the question about that code");
+    }
+
+    private static double top(Node node) {
+        return node.localToScene(node.getBoundsInLocal()).getMinY();
+    }
+
+    @Test
+    void theExpandedWidthIsWhatTheReaderChoseClampedToWhatAPanelCanBe() {
+        interact(() -> panel.setExpandedWidth(480));
+        assertEquals(480, panel.getPrefWidth());
+        assertEquals(480, panel.getMinWidth());
+        assertEquals(480, panel.getMaxWidth());
+
+        interact(() -> panel.setExpandedWidth(50));
+        assertEquals(StepPanel.MIN_WIDTH, panel.getPrefWidth(), "narrower than the narrow width is not readable");
+        interact(() -> panel.setExpandedWidth(5000));
+        assertEquals(StepPanel.MAX_WIDTH, panel.getPrefWidth());
+    }
+
+    @Test
+    void narrowAndCollapsedStillWinOverAChosenWidth() {
+        interact(() -> panel.setExpandedWidth(600));
+
+        interact(() -> panel.setNarrow(true));
+        assertEquals(StepPanel.NARROW_WIDTH, panel.getPrefWidth(), "narrow takes a wide panel back down");
+
+        interact(() -> panel.setCollapsed(true));
+        assertEquals(StepPanel.COLLAPSED_WIDTH, panel.getPrefWidth());
+
+        interact(() -> {
+            panel.setCollapsed(false);
+            panel.setNarrow(false);
+        });
+        assertEquals(600, panel.getPrefWidth(), "and the chosen width comes back with the room");
     }
 
     @Test

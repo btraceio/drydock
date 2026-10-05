@@ -761,6 +761,38 @@ class ApplicationStateCodecTest {
     }
 
     @Test
+    void theStepPanelWidthRoundTripsAndEveryOtherUiChangeKeepsIt() {
+        WorkspaceUiState ui = WorkspaceUiState.empty().withReviewStepPanelWidth(512.5);
+
+        ApplicationState decoded = ApplicationStateCodec.fromJson(
+                ApplicationStateCodec.toJson(ApplicationState.empty().withUi(ui)));
+
+        assertEquals(512.5, decoded.ui().reviewStepPanelWidth());
+        assertEquals(512.5, ui.withSidebarWidth(300).reviewStepPanelWidth());
+        assertEquals(512.5, ui.withTheme(UiTheme.LIGHT).reviewStepPanelWidth());
+        assertEquals(512.5, ui.withReviewKeyHintsHidden(true).reviewStepPanelWidth());
+        assertEquals(512.5, ui.withReviewScopeChoices(Map.of()).reviewStepPanelWidth());
+        assertEquals(512.5, ui.withOpenSessionIds(List.of()).reviewStepPanelWidth());
+        assertTrue(ui.withReviewStepPanelWidth(0).withReviewKeyHintsHidden(true).reviewKeyHintsHidden(),
+                "and setting the width keeps the hints choice");
+    }
+
+    @Test
+    void theStepPanelWidthDecodesToTheDefaultWhenAbsentOrNotAUsableNumber() {
+        for (String member : new String[] {"", ",\"reviewStepPanelWidth\":\"wide\"",
+                ",\"reviewStepPanelWidth\":-40", ",\"reviewStepPanelWidth\":0",
+                ",\"reviewStepPanelWidth\":true"}) {
+            JsonValue json = JsonParser.parse("""
+                    {"schemaVersion":2,"repositories":[],"sessions":[],
+                     "ui":{"selectedRepositoryId":null,"sidebarWidth":288.0,
+                           "expandedRepositoryIds":[],"theme":"DARK"%s}}
+                    """.formatted(member));
+
+            assertEquals(0.0, ApplicationStateCodec.fromJson(json).ui().reviewStepPanelWidth(), member);
+        }
+    }
+
+    @Test
     void reviewKeyHintsAreShownWhenTheMemberIsAbsentOrNotABoolean() {
         // Cosmetic, so lenient: a state file from before the strip existed, or
         // a hand-edited value, must neither fail the load nor hide anything.

@@ -47,6 +47,10 @@ final class StepPanel extends VBox {
     static final double EXPANDED_WIDTH = ReviewFindingsMargin.EXPANDED_WIDTH;
     static final double NARROW_WIDTH = ReviewFindingsMargin.NARROW_WIDTH;
     static final double COLLAPSED_WIDTH = ReviewFindingsMargin.COLLAPSED_WIDTH;
+    /** The narrowest the reader can drag it: the narrow-mode width, below which the panel's controls crowd. */
+    static final double MIN_WIDTH = NARROW_WIDTH;
+    /** The widest, whatever the window: past this the lines of prose are longer than they are easy to read. */
+    static final double MAX_WIDTH = 900;
     /** Stands where the narrative would be while the step's PREDICT is still open. */
     static final String WITHHELD_NARRATIVE =
             "Read the code first. The agent's explanation, and its note on each range, unlock when you answer.";
@@ -120,6 +124,8 @@ final class StepPanel extends VBox {
     private Runnable onExpand = () -> { };
     private boolean collapsed;
     private boolean narrow;
+    /** The width when neither collapsed nor narrow: the default, or what the reader dragged it to. */
+    private double expandedWidth = EXPANDED_WIDTH;
 
     StepPanel(Host host) {
         this.host = host;
@@ -196,15 +202,18 @@ final class StepPanel extends VBox {
         if (TourMarks.predictPending(view.step(), view.progress())) {
             // Predict first: the narrative states what the added lines do,
             // which is exactly what the open PREDICT asks, so it stays back
-            // until the reader has committed to an answer -- and the question
-            // leads, where the explanation would have been.
+            // until the reader has committed to an answer. What replaces it
+            // comes BEFORE the question -- "read the code first", with the
+            // links to the ranges -- because a question about code the reader
+            // has not been pointed at is a question about nothing.
             Label withheld = new Label(WITHHELD_NARRATIVE);
             withheld.setWrapText(true);
             withheld.getStyleClass().addAll("step-panel-narrative", "step-panel-withheld");
-            content.getChildren().addAll(header, checkSection(view), withheld, anchorChips(view));
+            content.getChildren().addAll(header, withheld, anchorChips(view));
             if (view.progress().stale()) {
                 content.getChildren().add(staleNotice(view.refreshDispatched()));
             }
+            content.getChildren().add(checkSection(view));
             return;
         }
         Label narrative = new Label(view.step().narrative());
@@ -552,8 +561,23 @@ final class StepPanel extends VBox {
         applyWidth();
     }
 
+    /**
+     * The width this panel takes while expanded and not narrow, clamped to
+     * {@link #MIN_WIDTH}..{@link #MAX_WIDTH}. Narrow mode still caps it at
+     * {@link #NARROW_WIDTH}, matching {@link RailLayout}, which charges the
+     * same width.
+     */
+    void setExpandedWidth(double width) {
+        expandedWidth = clampWidth(width);
+        applyWidth();
+    }
+
+    static double clampWidth(double width) {
+        return Math.clamp(width, MIN_WIDTH, MAX_WIDTH);
+    }
+
     private void applyWidth() {
-        double width = collapsed ? COLLAPSED_WIDTH : narrow ? NARROW_WIDTH : EXPANDED_WIDTH;
+        double width = collapsed ? COLLAPSED_WIDTH : narrow ? Math.min(NARROW_WIDTH, expandedWidth) : expandedWidth;
         setMinWidth(width);
         setPrefWidth(width);
         setMaxWidth(width);

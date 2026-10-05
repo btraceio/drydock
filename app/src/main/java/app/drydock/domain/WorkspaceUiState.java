@@ -32,7 +32,8 @@ public record WorkspaceUiState(
         List<ManagedSessionId> openSessionIds,
         Optional<ManagedSessionId> selectedSessionId,
         Map<ManagedSessionId, SessionReviewScopes.Choice> reviewScopeChoices,
-        boolean reviewKeyHintsHidden
+        boolean reviewKeyHintsHidden,
+        double reviewStepPanelWidth
 ) {
     /** Design default 288px (handoff README section 2), clamped 220-520 at the SplitPane. */
     public static final double DEFAULT_SIDEBAR_WIDTH = 288.0;
@@ -55,70 +56,93 @@ public record WorkspaceUiState(
         reviewScopeChoices = Map.copyOf(Objects.requireNonNull(reviewScopeChoices, "reviewScopeChoices"));
     }
 
-    /** A state with the review key hints shown, which is what every state written before the field has. */
+    /**
+     * A state with the review key hints shown and the step panel at its default width, which is
+     * what every state written before those fields has.
+     */
     public WorkspaceUiState(Optional<RepositoryId> selectedRepositoryId, double sidebarWidth,
                             Set<RepositoryId> expandedRepositoryIds, UiTheme theme, double uiFontSize,
                             double terminalFontSize, List<ManagedSessionId> openSessionIds,
                             Optional<ManagedSessionId> selectedSessionId,
                             Map<ManagedSessionId, SessionReviewScopes.Choice> reviewScopeChoices) {
         this(selectedRepositoryId, sidebarWidth, expandedRepositoryIds, theme, uiFontSize, terminalFontSize,
-                openSessionIds, selectedSessionId, reviewScopeChoices, false);
+                openSessionIds, selectedSessionId, reviewScopeChoices, false, 0);
     }
 
     public static WorkspaceUiState empty() {
         return new WorkspaceUiState(Optional.empty(), DEFAULT_SIDEBAR_WIDTH, Set.of(), UiTheme.DARK,
-                DEFAULT_UI_FONT_SIZE, DEFAULT_TERMINAL_FONT_SIZE, List.of(), Optional.empty(), Map.of(), false);
+                DEFAULT_UI_FONT_SIZE, DEFAULT_TERMINAL_FONT_SIZE, List.of(), Optional.empty(), Map.of(), false, 0);
     }
 
     public WorkspaceUiState withSelectedRepositoryId(Optional<RepositoryId> newSelectedRepositoryId) {
         return new WorkspaceUiState(newSelectedRepositoryId, sidebarWidth, expandedRepositoryIds, theme,
-                uiFontSize, terminalFontSize, openSessionIds, selectedSessionId, reviewScopeChoices, reviewKeyHintsHidden);
+                uiFontSize, terminalFontSize, openSessionIds, selectedSessionId, reviewScopeChoices,
+                reviewKeyHintsHidden, reviewStepPanelWidth);
     }
 
     public WorkspaceUiState withSidebarWidth(double newSidebarWidth) {
         return new WorkspaceUiState(selectedRepositoryId, newSidebarWidth, expandedRepositoryIds, theme,
-                uiFontSize, terminalFontSize, openSessionIds, selectedSessionId, reviewScopeChoices, reviewKeyHintsHidden);
+                uiFontSize, terminalFontSize, openSessionIds, selectedSessionId, reviewScopeChoices,
+                reviewKeyHintsHidden, reviewStepPanelWidth);
     }
 
     public WorkspaceUiState withExpandedRepositoryIds(Set<RepositoryId> newExpandedRepositoryIds) {
         return new WorkspaceUiState(selectedRepositoryId, sidebarWidth, newExpandedRepositoryIds, theme,
-                uiFontSize, terminalFontSize, openSessionIds, selectedSessionId, reviewScopeChoices, reviewKeyHintsHidden);
+                uiFontSize, terminalFontSize, openSessionIds, selectedSessionId, reviewScopeChoices,
+                reviewKeyHintsHidden, reviewStepPanelWidth);
     }
 
     public WorkspaceUiState withTheme(UiTheme newTheme) {
         return new WorkspaceUiState(selectedRepositoryId, sidebarWidth, expandedRepositoryIds, newTheme,
-                uiFontSize, terminalFontSize, openSessionIds, selectedSessionId, reviewScopeChoices, reviewKeyHintsHidden);
+                uiFontSize, terminalFontSize, openSessionIds, selectedSessionId, reviewScopeChoices,
+                reviewKeyHintsHidden, reviewStepPanelWidth);
     }
 
     public WorkspaceUiState withUiFontSize(double newUiFontSize) {
         return new WorkspaceUiState(selectedRepositoryId, sidebarWidth, expandedRepositoryIds, theme,
-                newUiFontSize, terminalFontSize, openSessionIds, selectedSessionId, reviewScopeChoices, reviewKeyHintsHidden);
+                newUiFontSize, terminalFontSize, openSessionIds, selectedSessionId, reviewScopeChoices,
+                reviewKeyHintsHidden, reviewStepPanelWidth);
     }
 
     public WorkspaceUiState withTerminalFontSize(double newTerminalFontSize) {
         return new WorkspaceUiState(selectedRepositoryId, sidebarWidth, expandedRepositoryIds, theme,
-                uiFontSize, newTerminalFontSize, openSessionIds, selectedSessionId, reviewScopeChoices, reviewKeyHintsHidden);
+                uiFontSize, newTerminalFontSize, openSessionIds, selectedSessionId, reviewScopeChoices,
+                reviewKeyHintsHidden, reviewStepPanelWidth);
     }
 
     public WorkspaceUiState withOpenSessionIds(List<ManagedSessionId> newOpenSessionIds) {
         return new WorkspaceUiState(selectedRepositoryId, sidebarWidth, expandedRepositoryIds, theme,
-                uiFontSize, terminalFontSize, newOpenSessionIds, selectedSessionId, reviewScopeChoices, reviewKeyHintsHidden);
+                uiFontSize, terminalFontSize, newOpenSessionIds, selectedSessionId, reviewScopeChoices,
+                reviewKeyHintsHidden, reviewStepPanelWidth);
     }
 
     public WorkspaceUiState withSelectedSessionId(Optional<ManagedSessionId> newSelectedSessionId) {
         return new WorkspaceUiState(selectedRepositoryId, sidebarWidth, expandedRepositoryIds, theme,
-                uiFontSize, terminalFontSize, openSessionIds, newSelectedSessionId, reviewScopeChoices, reviewKeyHintsHidden);
+                uiFontSize, terminalFontSize, openSessionIds, newSelectedSessionId, reviewScopeChoices,
+                reviewKeyHintsHidden, reviewStepPanelWidth);
     }
 
     public WorkspaceUiState withReviewScopeChoices(
             Map<ManagedSessionId, SessionReviewScopes.Choice> newReviewScopeChoices) {
         return new WorkspaceUiState(selectedRepositoryId, sidebarWidth, expandedRepositoryIds, theme,
-                uiFontSize, terminalFontSize, openSessionIds, selectedSessionId, newReviewScopeChoices, reviewKeyHintsHidden);
+                uiFontSize, terminalFontSize, openSessionIds, selectedSessionId, newReviewScopeChoices,
+                reviewKeyHintsHidden, reviewStepPanelWidth);
     }
 
     /** Whether the reader hid the tour's key-hints strip; a global preference, not a per-session one. */
     public WorkspaceUiState withReviewKeyHintsHidden(boolean hidden) {
         return new WorkspaceUiState(selectedRepositoryId, sidebarWidth, expandedRepositoryIds, theme,
-                uiFontSize, terminalFontSize, openSessionIds, selectedSessionId, reviewScopeChoices, hidden);
+                uiFontSize, terminalFontSize, openSessionIds, selectedSessionId, reviewScopeChoices,
+                hidden, reviewStepPanelWidth);
+    }
+
+    /**
+     * The width the reader dragged the tour's step panel to, in pixels; 0 means the default.
+     * Global, like the key hints: the reader's comfortable reading width is not a per-session fact.
+     */
+    public WorkspaceUiState withReviewStepPanelWidth(double width) {
+        return new WorkspaceUiState(selectedRepositoryId, sidebarWidth, expandedRepositoryIds, theme,
+                uiFontSize, terminalFontSize, openSessionIds, selectedSessionId, reviewScopeChoices,
+                reviewKeyHintsHidden, width);
     }
 }

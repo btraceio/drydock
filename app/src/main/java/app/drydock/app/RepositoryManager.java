@@ -208,6 +208,16 @@ public final class RepositoryManager {
                 : state.withUi(state.ui().withReviewKeyHintsHidden(hidden)));
     }
 
+    /**
+     * Persists the width the reader dragged the tour's step panel to (0 for the default). Global,
+     * and written as a transform on the state store's single owner, like the key-hints choice.
+     */
+    public void updateReviewStepPanelWidth(double width) {
+        stateStore.update(state -> state.ui().reviewStepPanelWidth() == width
+                ? state
+                : state.withUi(state.ui().withReviewStepPanelWidth(width)));
+    }
+
     /** Persists which session tab was active when the app shut down. */
     public void updateSelectedSession(Optional<ManagedSessionId> selectedSessionId) {
         stateStore.update(state -> state.withUi(state.ui().withSelectedSessionId(selectedSessionId)));
