@@ -158,8 +158,14 @@ The tour needs a diffable scope (`ReviewScope.diffable()`). A PR read
 patch-only gets the existing checkout gate before a tour can start.
 
 **Layout:** three columns, as today. `RailLayout` derives its collapse
-threshold from the rail widths, so the step panel's width is chosen to keep
-the threshold where it is.
+threshold from the rail widths, so the step panel's default width is chosen to
+keep the threshold where it is. The reader can drag the edge between the code
+and the step panel to trade code width for reading width (286–900px, and never
+below the code column's 560px floor); the arrow keys do the same when the edge
+has focus, and a double-click or `Home` restores the default. A chosen width
+is one global preference (`reviewStepPanelWidth`), and narrow mode still takes
+the panel back down to 286px when the window cannot hold it -- the floor
+outranks a chosen width, as it outranks every rail.
 
 - **Left: the tour outline**, replacing the intent rail. One row per step,
   with its state: not started, checking, passed, overridden, stale. The

@@ -75,6 +75,8 @@ import java.util.concurrent.Executor;
 import java.util.function.BiFunction;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.DoubleConsumer;
+import java.util.function.DoubleSupplier;
 import java.util.function.Function;
 import java.util.function.UnaryOperator;
 
@@ -424,6 +426,13 @@ public final class SessionReviewView extends BorderPane {
     private BooleanSupplier keyHintsHiddenSource;
     private Consumer<Boolean> onKeyHintsHiddenChanged = hidden -> { };
     private boolean keyHintsHiddenLocal;
+    /** The draggable edge between the code and the step panel; tour mode only. */
+    private final StepSplitter splitter = new StepSplitter(new SplitterHost());
+    /** The step panel's width when expanded: the default, or what the reader dragged it to. */
+    private double stepPanelWidth = StepPanel.EXPANDED_WIDTH;
+    /** Where the dragged width is persisted (0 = default); null for a bare board, which keeps it in memory. */
+    private DoubleSupplier stepPanelWidthSource;
+    private DoubleConsumer onStepPanelWidthChanged = width -> { };
 
     /** The MCP activity panel; absent when no server is running (tests, headless). */
     private final Optional<ReviewMcpActivityPanel> mcpPanel;
@@ -852,7 +861,8 @@ public final class SessionReviewView extends BorderPane {
         // The margin sits BESIDE the code, never inline, so the diff stays
         // continuous (spec §4.5); the verdict bar sits BELOW both, so
         // collapsing the margin never takes the primary action with it.
-        columns = new HBox(body, margin);
+        columns = new HBox(body, splitter, margin);
+        show(splitter, false);
         VBox.setVgrow(columns, Priority.ALWAYS);
 
         VBox centre = new VBox(header, columns);
@@ -971,6 +981,31 @@ public final class SessionReviewView extends BorderPane {
         this.keyHintsHiddenSource = hidden;
         this.onKeyHintsHiddenChanged = onChanged == null ? ignored -> { } : onChanged;
         keyStrip.setHidden(keyHintsHidden());
+    }
+
+    /**
+     * Wires the step panel's width to its persisted home: {@code width} is the
+     * stored width in pixels (0 for the default), read when the tour is shown,
+     * and {@code onChanged} is told the final width when the reader finishes
+     * dragging, or 0 when they reset it. A bare board keeps it in memory.
+     */
+    public void setStepPanelWidthPreference(DoubleSupplier width, DoubleConsumer onChanged) {
+        this.stepPanelWidthSource = width;
+        this.onStepPanelWidthChanged = onChanged == null ? ignored -> { } : onChanged;
+        syncStepPanelWidth();
+    }
+
+    /** Takes the persisted width, clamped to what a panel can be; the window's own limit applies in the layout. */
+    private void syncStepPanelWidth() {
+        if (stepPanelWidthSource == null) {
+            return;
+        }
+        double stored = stepPanelWidthSource.getAsDouble();
+        double wanted = stored > 0 ? StepPanel.clampWidth(stored) : StepPanel.EXPANDED_WIDTH;
+        if (wanted != stepPanelWidth) {
+            stepPanelWidth = wanted;
+            applyResponsiveLayout(getWidth());
+        }
     }
 
     private boolean keyHintsHidden() {
@@ -2144,15 +2179,19 @@ public final class SessionReviewView extends BorderPane {
             return;
         }
         showEveryRegion();
-        RailLayout.Layout layout =
-                RailLayout.solve(width, outlineCollapsedByUser, marginCollapsedByUser, mode);
+        RailLayout.Layout layout = RailLayout.solve(width, outlineCollapsedByUser, marginCollapsedByUser, mode,
+                stepPanelWidth);
         if (mode == ReviewMode.TOUR) {
             outline.setNarrow(layout.narrow());
             outline.setCollapsed(layout.outlineCollapsed());
+            stepPanel.setExpandedWidth(stepPanelWidth);
             stepPanel.setNarrow(layout.narrow());
             stepPanel.setCollapsed(layout.marginCollapsed());
+            // Nothing to drag while the panel is a strip.
+            show(splitter, !layout.marginCollapsed());
             return;
         }
+        show(splitter, false);
         margin.setNarrow(layout.narrow());
         margin.setCollapsed(layout.marginCollapsed());
     }
@@ -2167,6 +2206,7 @@ public final class SessionReviewView extends BorderPane {
         setCenter(centre);
         show(margin, false);
         show(stepPanel, false);
+        show(splitter, false);
         show(verdictBar, false);
         keyStrip.setTourShown(false);
         show(itemHeader, false);
@@ -2704,8 +2744,9 @@ public final class SessionReviewView extends BorderPane {
             swapped = true;
         }
         Node right = touring ? stepPanel : margin;
-        if (columns.getChildren().get(1) != right) {
-            columns.getChildren().set(1, right);
+        // Children: the code, the splitter (tour only), then the right-hand node.
+        if (columns.getChildren().get(2) != right) {
+            columns.getChildren().set(2, right);
             swapped = true;
         }
         if (diffColumn.wholeFiles() != touring) {
@@ -2718,6 +2759,7 @@ public final class SessionReviewView extends BorderPane {
         verdictBar.setTourMode(touring);
         keyStrip.setTourShown(touring);
         if (touring) {
+            syncStepPanelWidth();
             tourController.render(tour);
         } else {
             tourController.clearFromDiffColumn();
@@ -3030,6 +3072,39 @@ public final class SessionReviewView extends BorderPane {
         mode = ReviewMode.DIFF;
         applyMode();
         revealCurrentSelection();
+    }
+
+    /** The splitter's window onto the board's width arithmetic. */
+    private final class SplitterHost implements StepSplitter.Host {
+        @Override
+        public double panelWidth() {
+            return stepPanel.getWidth();
+        }
+
+        @Override
+        public double maxPanelWidth() {
+            // The code column keeps its floor: the panel may take only what the code has above it.
+            double spare = Math.max(0, body.getWidth() - RailLayout.CODE_MIN_WIDTH);
+            return Math.min(StepPanel.MAX_WIDTH, stepPanel.getWidth() + spare);
+        }
+
+        @Override
+        public void resizeTo(double width) {
+            stepPanelWidth = StepPanel.clampWidth(width);
+            applyResponsiveLayout(getWidth());
+        }
+
+        @Override
+        public void commit() {
+            onStepPanelWidthChanged.accept(stepPanelWidth);
+        }
+
+        @Override
+        public void reset() {
+            stepPanelWidth = StepPanel.EXPANDED_WIDTH;
+            applyResponsiveLayout(getWidth());
+            onStepPanelWidthChanged.accept(0);
+        }
     }
 
     /** The tour's window onto the board; see {@link TourController.View}. */

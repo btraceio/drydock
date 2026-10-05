@@ -4857,6 +4857,10 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             view.setKeyHintsPreference(
                     () -> repositoryManager.state().ui().reviewKeyHintsHidden(),
                     repositoryManager::updateReviewKeyHintsHidden);
+            // The step panel's dragged width likewise: one global preference.
+            view.setStepPanelWidthPreference(
+                    () -> repositoryManager.state().ui().reviewStepPanelWidth(),
+                    repositoryManager::updateReviewStepPanelWidth);
             view.setOnChoiceChanged(choice -> {
                 repositoryManager.updateReviewScopeChoice(openTab.sessionId(), choice);
                 view.selectedScope().ifPresent(scope -> openTab.setReviewBadge(openFindingsFor(scope)));

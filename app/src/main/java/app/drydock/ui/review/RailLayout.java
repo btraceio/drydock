@@ -51,18 +51,31 @@ final class RailLayout {
      */
     static Layout solve(double width, boolean outlineForced, boolean marginForced,
                         SessionReviewView.ReviewMode mode) {
+        return solve(width, outlineForced, marginForced, mode, StepPanel.EXPANDED_WIDTH);
+    }
+
+    /**
+     * As above, with the tour's step panel at {@code stepPanelWidth} when
+     * expanded, the width the reader dragged it to. Narrow mode still takes it
+     * down to {@link StepPanel#NARROW_WIDTH}, so the extra width the reader
+     * asked for is the first thing given back when the window cannot hold it
+     * -- the code column's floor outranks a chosen width, as it outranks
+     * every rail.
+     */
+    static Layout solve(double width, boolean outlineForced, boolean marginForced,
+                        SessionReviewView.ReviewMode mode, double stepPanelWidth) {
         boolean outline = outlineForced;
         boolean margin = marginForced;
 
-        if (fits(width, new Layout(outline, margin, false), mode)) {
+        if (fits(width, new Layout(outline, margin, false), mode, stepPanelWidth)) {
             return new Layout(outline, margin, false);
         }
-        if (fits(width, new Layout(outline, margin, true), mode)) {
+        if (fits(width, new Layout(outline, margin, true), mode, stepPanelWidth)) {
             return new Layout(outline, margin, true);
         }
         if (mode == SessionReviewView.ReviewMode.TOUR) {
             outline = true;
-            if (!fits(width, new Layout(outline, margin, true), mode)) {
+            if (!fits(width, new Layout(outline, margin, true), mode, stepPanelWidth)) {
                 margin = true;
             }
             return new Layout(outline, margin, true);
@@ -70,19 +83,26 @@ final class RailLayout {
         return new Layout(outline, true, true);
     }
 
-    private static boolean fits(double width, Layout layout, SessionReviewView.ReviewMode mode) {
-        return width - railsWidth(layout, mode) >= CODE_MIN_WIDTH;
+    private static boolean fits(double width, Layout layout, SessionReviewView.ReviewMode mode,
+                                double stepPanelWidth) {
+        return width - railsWidth(layout, mode, stepPanelWidth) >= CODE_MIN_WIDTH;
     }
 
     /** The total width the rails occupy under {@code layout} in {@code mode}. */
     static double railsWidth(Layout layout, SessionReviewView.ReviewMode mode) {
-        double margin = railWidth(layout.marginCollapsed(), layout.narrow(),
-                ReviewFindingsMargin.COLLAPSED_WIDTH, ReviewFindingsMargin.NARROW_WIDTH,
-                ReviewFindingsMargin.EXPANDED_WIDTH);
+        return railsWidth(layout, mode, StepPanel.EXPANDED_WIDTH);
+    }
+
+    /** As above, with the tour's step panel at {@code stepPanelWidth} when expanded. */
+    static double railsWidth(Layout layout, SessionReviewView.ReviewMode mode, double stepPanelWidth) {
         if (mode != SessionReviewView.ReviewMode.TOUR) {
-            return margin;
+            return railWidth(layout.marginCollapsed(), layout.narrow(),
+                    ReviewFindingsMargin.COLLAPSED_WIDTH, ReviewFindingsMargin.NARROW_WIDTH,
+                    ReviewFindingsMargin.EXPANDED_WIDTH);
         }
-        return margin + railWidth(layout.outlineCollapsed(), layout.narrow(),
+        double panel = railWidth(layout.marginCollapsed(), layout.narrow(),
+                StepPanel.COLLAPSED_WIDTH, Math.min(StepPanel.NARROW_WIDTH, stepPanelWidth), stepPanelWidth);
+        return panel + railWidth(layout.outlineCollapsed(), layout.narrow(),
                 TourOutline.COLLAPSED_WIDTH, TourOutline.NARROW_WIDTH, TourOutline.EXPANDED_WIDTH);
     }
 
