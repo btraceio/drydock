@@ -8,6 +8,7 @@ import app.drydock.agent.api.McpAccess;
 import app.drydock.agent.api.McpDelivery;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdStrategy;
+import app.drydock.agent.providers.HostBinaryLocator;
 import app.drydock.agent.providers.pi.internal.PiCapabilities;
 import app.drydock.agent.providers.pi.internal.PiExecutableLocator;
 import app.drydock.domain.SshRemote;
@@ -129,6 +130,52 @@ class PiAgentProviderTest {
     @Test
     void deliveryIsConfigFile() {
         assertEquals(McpDelivery.CONFIG_FILE, provider().mcpDelivery());
+    }
+
+    /**
+     * When both {@code node} and the {@code pi} script resolve, the launch
+     * invokes {@code node <pi-script>} directly, bypassing the script's
+     * {@code #!/usr/bin/env node} shebang so a bare inherited PATH (a
+     * Finder/Dock launch whose login-shell merge never landed) cannot make
+     * {@code env node} fail with "env: node: No such file or directory".
+     */
+    @Test
+    void nodePrefixBypassesTheShebangWhenBothResolve(@TempDir Path dir) throws Exception {
+        Path fakeNode = Files.createFile(dir.resolve("node"));
+        Path fakePi = Files.createFile(dir.resolve("pi"));
+        Files.setPosixFilePermissions(fakePi, PosixFilePermissions.fromString("rwxr-xr-x"));
+        HostBinaryLocator nodeLocator = new HostBinaryLocator("node", List.of()) {
+            @Override protected Optional<Path> discover() { return Optional.of(fakeNode); }
+        };
+        PiAgentProvider p = new PiAgentProvider(new PiExecutableLocator(fakePi), nodeLocator, null);
+        p.init(new AgentContext(Path.of("/tmp"), Path.of("/tmp/activity"), ForkJoinPool.commonPool()));
+        String command = p.buildCreateCommand(
+                new CreateContext("S", "x", Path.of("/repo"), Optional.empty(), Optional.empty())).command();
+        int nodeIdx = command.indexOf("'" + fakeNode + "'");
+        int piIdx = command.indexOf("'" + fakePi + "'");
+        assertTrue(nodeIdx >= 0 && piIdx > nodeIdx,
+                "node must precede the pi script (bypassing the shebang): " + command);
+        assertTrue(command.endsWith("'" + fakePi + "'"), command);
+    }
+
+    /**
+     * When {@code node} cannot be resolved but {@code pi} can, the launch
+     * falls back to the pi path alone -- relying on the shebang plus a
+     * merged PATH -- rather than emitting a broken {@code node} reference.
+     */
+    @Test
+    void piAloneWhenNodeUnresolved(@TempDir Path dir) throws Exception {
+        Path fakePi = Files.createFile(dir.resolve("pi"));
+        Files.setPosixFilePermissions(fakePi, PosixFilePermissions.fromString("rwxr-xr-x"));
+        HostBinaryLocator noNode = new HostBinaryLocator("node", List.of()) {
+            @Override protected Optional<Path> discover() { return Optional.empty(); }
+        };
+        PiAgentProvider p = new PiAgentProvider(new PiExecutableLocator(fakePi), noNode, null);
+        p.init(new AgentContext(Path.of("/tmp"), Path.of("/tmp/activity"), ForkJoinPool.commonPool()));
+        String command = p.buildCreateCommand(
+                new CreateContext("S", "x", Path.of("/repo"), Optional.empty(), Optional.empty())).command();
+        assertTrue(command.endsWith("'" + fakePi + "'"), command);
+        assertFalse(command.contains(" node"), "no node prefix when unresolved: " + command);
     }
 
     @Test

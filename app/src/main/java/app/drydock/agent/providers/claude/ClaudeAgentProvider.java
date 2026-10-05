@@ -13,6 +13,7 @@ import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdDiscovery;
 import app.drydock.agent.api.SessionIdStrategy;
 import app.drydock.agent.providers.AgentCommands;
+import app.drydock.agent.providers.HostBinaryLocator;
 import app.drydock.agent.spi.AgentProvider;
 import app.drydock.agent.providers.claude.internal.ClaudeCapabilities;
 import app.drydock.agent.providers.claude.internal.ClaudeCapabilityService;
@@ -21,11 +22,13 @@ import app.drydock.agent.providers.claude.internal.ClaudeEvalContainer.EvalSetup
 import app.drydock.agent.providers.claude.internal.ClaudeExecutableLocator;
 import app.drydock.agent.providers.claude.internal.ClaudeHookInstaller;
 import app.drydock.agent.providers.claude.internal.ConversationCatalog;
+import app.drydock.app.LoginShellEnvironment;
 import app.drydock.process.SshCommandBuilder;
 
 import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -40,6 +43,7 @@ public final class ClaudeAgentProvider implements AgentProvider {
             + " -u CLAUDE_EFFORT ";
 
     private final ClaudeExecutableLocator locator;
+    private final HostBinaryLocator ddtoolLocator;
 
     /**
      * The resolved {@code claude} binary, shell-quoted, or bare {@code "claude"} when
@@ -54,6 +58,46 @@ public final class ClaudeAgentProvider implements AgentProvider {
                 .map(p -> AgentCommands.shellQuote(p.toString()))
                 .orElse("claude");
     }
+
+    /**
+     * A {@code PATH=...} assignment spliced into the env prefix when the
+     * host's {@code apiKeyHelper} (managed settings: {@code ddtool auth
+     * token ...}) would run against a PATH that cannot find {@code ddtool}
+     * -- the Finder/Dock launch case where the login-shell merge was slow
+     * or never completed, so the inherited PATH is still launchd's bare
+     * {@code /usr/bin:/bin}. Prepends {@code ddtool}'s directory to the
+     * live (post-merge) PATH, so the helper resolves even from a bare PATH.
+     *
+     * <p>Empty when {@code ddtool} is already on the inherited PATH (the
+     * common case, merge or no), so the launch never overrides a working
+     * PATH -- claude and its bash-tool children keep the full shell PATH.
+     * Only the eval container strips {@code apiKeyHelper} outright (it has
+     * no {@code ddtool} and receives the token as {@code ANTHROPIC_API_KEY}),
+     * so this injection is skipped for eval launches.
+     */
+    private String ddtoolPathInjection() {
+        Optional<Path> ddtool = ddtoolLocator.locate();
+        if (ddtool.isEmpty() || ddtool.get().getParent() == null) {
+            return "";
+        }
+        String dir = ddtool.get().getParent().toString();
+        String realPath = LoginShellEnvironment.currentRealPath();
+        if (realPath != null && pathContainsEntry(realPath, dir)) {
+            return "";
+        }
+        String value = (realPath == null || realPath.isBlank()) ? dir : dir + ":" + realPath;
+        return "PATH=" + AgentCommands.shellQuote(value) + " ";
+    }
+
+    /** True if {@code pathEnv} (colon-separated) already contains {@code dir}. */
+    private static boolean pathContainsEntry(String pathEnv, String dir) {
+        for (String entry : pathEnv.split(":")) {
+            if (entry.equals(dir)) {
+                return true;
+            }
+        }
+        return false;
+    }
     private ClaudeCapabilityService capabilityService;
     private ClaudeConversationSource conversationSource;
     private ClaudeActivityReporter activityReporter;
@@ -64,20 +108,42 @@ public final class ClaudeAgentProvider implements AgentProvider {
     /** Set once by the background probe at {@link #init}; read by {@link #evalAvailable()} on the FX thread. */
     private volatile boolean evalAvailable;
 
+    /**
+     * Fallback locations for {@code ddtool}, tried after the live PATH.
+     * {@code ddtool} is a homebrew cask on this class of machine, so the
+     * homebrew dirs lead; {@code /opt/dogbrew/bin} covers the internal
+     * package manager path.
+     */
+    private static List<Path> ddtoolFallbacks() {
+        String home = System.getProperty("user.home", "");
+        return List.of(
+                Path.of("/opt/homebrew/bin/ddtool"),
+                Path.of("/usr/local/bin/ddtool"),
+                Path.of(home, ".local", "bin", "ddtool"),
+                Path.of("/opt/dogbrew/bin/ddtool"));
+    }
+
     /** Public no-arg constructor required by {@link java.util.ServiceLoader}. */
     public ClaudeAgentProvider() {
-        this(new ClaudeExecutableLocator(), null);
+        this(new ClaudeExecutableLocator(), null, new HostBinaryLocator("ddtool", ddtoolFallbacks()));
     }
 
     /** For tests: inject a locator (e.g. a nonexistent path to force conservative caps). */
     public ClaudeAgentProvider(ClaudeExecutableLocator locator) {
-        this(locator, null);
+        this(locator, null, new HostBinaryLocator("ddtool", ddtoolFallbacks()));
     }
 
     /** For tests: inject the eval container (e.g. a stub that reports unavailable). */
     public ClaudeAgentProvider(ClaudeExecutableLocator locator, ClaudeEvalContainer evalContainer) {
+        this(locator, evalContainer, new HostBinaryLocator("ddtool", ddtoolFallbacks()));
+    }
+
+    /** For tests: inject both, so the PATH-injection form can be exercised deterministically. */
+    ClaudeAgentProvider(ClaudeExecutableLocator locator, ClaudeEvalContainer evalContainer,
+                        HostBinaryLocator ddtoolLocator) {
         this.locator = locator;
         this.evalContainer = evalContainer;
+        this.ddtoolLocator = ddtoolLocator;
     }
 
     @Override
@@ -144,7 +210,8 @@ public final class ClaudeAgentProvider implements AgentProvider {
         // claudeEvalImage Dockerfile at /root/.local/bin), not the host's absolute
         // path -- which does not exist in the container's filesystem.
         String binary = c.evalMode() ? "claude" : claudeBinary();
-        StringBuilder command = new StringBuilder(ENV_CLEANUP_PREFIX).append(binary);
+        String pathInjection = c.evalMode() ? "" : ddtoolPathInjection();
+        StringBuilder command = new StringBuilder(ENV_CLEANUP_PREFIX).append(pathInjection).append(binary);
         boolean sessionIdUsed = false;
         if (caps.supportsName()) {
             command.append(" -n ").append(AgentCommands.shellQuote(c.displayName()));
@@ -179,13 +246,16 @@ public final class ClaudeAgentProvider implements AgentProvider {
         String suffix = activitySettingsFlag(caps) + mcpConfigFlag(caps, r.mcp().flatMap(McpAccess::credentialFile));
         // Eval runs inside a container whose PATH has `claude`, not the host path.
         String binary = r.evalMode() ? "claude" : claudeBinary();
+        // ddtool is not in the eval container and apiKeyHelper is stripped
+        // from its seeded settings, so the PATH injection is host-only.
+        String prefix = ENV_CLEANUP_PREFIX + (r.evalMode() ? "" : ddtoolPathInjection());
         String inner;
         if (r.agentSessionId().isPresent()) {
-            inner = ENV_CLEANUP_PREFIX + binary + " --resume " + AgentCommands.shellQuote(r.agentSessionId().get()) + suffix;
+            inner = prefix + binary + " --resume " + AgentCommands.shellQuote(r.agentSessionId().get()) + suffix;
         } else if (r.agentSessionName().isPresent()) {
-            inner = ENV_CLEANUP_PREFIX + binary + " --resume " + AgentCommands.shellQuote(r.agentSessionName().get()) + suffix;
+            inner = prefix + binary + " --resume " + AgentCommands.shellQuote(r.agentSessionName().get()) + suffix;
         } else {
-            inner = ENV_CLEANUP_PREFIX + binary + " --resume" + suffix;
+            inner = prefix + binary + " --resume" + suffix;
         }
         if (r.evalMode()) {
             // Resume key is the agent session id; for PRESET it equals the

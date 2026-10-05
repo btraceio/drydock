@@ -14,6 +14,7 @@ import app.drydock.agent.api.SessionIdDiscovery;
 import app.drydock.agent.api.SessionIdStrategy;
 import app.drydock.agent.api.SnapshotClaimDiscovery;
 import app.drydock.agent.providers.AgentCommands;
+import app.drydock.agent.providers.HostBinaryLocator;
 import app.drydock.agent.providers.pi.internal.PiCapabilities;
 import app.drydock.agent.providers.pi.internal.PiExecutableLocator;
 import app.drydock.agent.providers.pi.internal.PiExtensionInstaller;
@@ -46,6 +47,22 @@ import java.util.function.Supplier;
  */
 public final class PiAgentProvider implements AgentProvider {
 
+    /**
+     * Fallback locations for the {@code node} interpreter, tried after the
+     * live PATH. Covers Apple Silicon and Intel homebrew, the
+     * {@code ~/.local/bin} native-installer location, and Volta's shim dir;
+     * enough to find a node when the inherited PATH is launchd's bare
+     * {@code /usr/bin:/bin} and the login-shell merge never landed.
+     */
+    private static List<Path> nodeFallbacks() {
+        String home = System.getProperty("user.home", "");
+        return List.of(
+                Path.of("/opt/homebrew/bin/node"),
+                Path.of("/usr/local/bin/node"),
+                Path.of(home, ".local", "bin", "node"),
+                Path.of(home, ".volta", "bin", "node"));
+    }
+
     // Pi refuses to run nested inside itself unless PI_CODING_AGENT is scrubbed.
     private static final List<String> ENV_SCRUB = List.of("PI_CODING_AGENT");
 
@@ -60,6 +77,7 @@ public final class PiAgentProvider implements AgentProvider {
     private static final Logger LOG = System.getLogger(PiAgentProvider.class.getName());
 
     private final PiExecutableLocator locator;
+    private final HostBinaryLocator nodeLocator;
     private final Supplier<PiCapabilities> probe;   // tests only; null in production
     private PiConversationSource conversationSource;
     private SessionIdDiscovery idDiscovery;
@@ -79,17 +97,23 @@ public final class PiAgentProvider implements AgentProvider {
 
     /** Public no-arg constructor required by {@link java.util.ServiceLoader}. */
     public PiAgentProvider() {
-        this(new PiExecutableLocator());
+        this(new PiExecutableLocator(), new HostBinaryLocator("node", nodeFallbacks()), null);
     }
 
     /** For tests: inject a locator (e.g. a nonexistent path to force conservative caps). */
     public PiAgentProvider(PiExecutableLocator locator) {
-        this(locator, null);
+        this(locator, new HostBinaryLocator("node", nodeFallbacks()), null);
     }
 
     /** For tests: inject a version probe, so the bridge form can be exercised without a real pi. */
     PiAgentProvider(PiExecutableLocator locator, Supplier<PiCapabilities> probe) {
+        this(locator, new HostBinaryLocator("node", nodeFallbacks()), probe);
+    }
+
+    /** For tests: inject both locators, so the node-prefix form can be exercised deterministically. */
+    PiAgentProvider(PiExecutableLocator locator, HostBinaryLocator nodeLocator, Supplier<PiCapabilities> probe) {
         this.locator = locator;
+        this.nodeLocator = nodeLocator;
         this.probe = probe;
     }
 
@@ -168,6 +192,36 @@ public final class PiAgentProvider implements AgentProvider {
     }
 
     /**
+     * The token(s) that begin the {@code pi} command. When both {@code node}
+     * and the {@code pi} script resolve to absolute paths, the invocation is
+     * {@code node <pi-script>} -- bypassing the script's
+     * {@code #!/usr/bin/env node} shebang, so the launch does not need
+     * {@code node} on the inherited PATH. That is what keeps pi launching
+     * after a GUI/Finder start whose bare launchd PATH missed {@code node}
+     * (a slow login shell whose merge applied late, or one that never
+     * reported back): the shebang's {@code env node} would search the bare
+     * PATH and fail with {@code env: node: No such file or directory}, while
+     * an absolute {@code node} runs regardless.
+     *
+     * <p>When either is unresolved, falls back to the {@code pi} path alone
+     * (or bare {@code "pi"}) and relies on the shebang plus a merged PATH --
+     * the original behaviour, correct once the login-shell merge has landed.
+     * {@code node} is resolved by {@link HostBinaryLocator} against the live
+     * (post-merge) PATH, so the node chosen is the user's shell node (Volta,
+     * nvm) when the merge succeeded, and a fallback homebrew node only when
+     * the PATH is bare.
+     */
+    private String piBinary() {
+        Optional<Path> pi = locator.locate();
+        Optional<Path> node = nodeLocator.locate();
+        if (pi.isPresent() && node.isPresent()) {
+            return AgentCommands.shellQuote(node.get().toString())
+                    + " " + AgentCommands.shellQuote(pi.get().toString());
+        }
+        return pi.map(p -> AgentCommands.shellQuote(p.toString())).orElse("pi");
+    }
+
+    /**
      * The {@code pi} invocation up to any subcommand: the env prefix, then
      * {@code -e} pointing at drydock's bridge extension. Both are omitted
      * together — a config path with no extension to read it, or an extension
@@ -181,24 +235,6 @@ public final class PiAgentProvider implements AgentProvider {
      * literals in {@link AgentCommands#envPrefix} rather than going through
      * the credential-only {@code fromFiles} channel.</p>
      */
-    /**
-     * The resolved {@code pi} binary, shell-quoted, or bare {@code "pi"} when
-     * the locator found nothing (tests, or a PATH-less launch that also missed
-     * the fallback locations). Using the absolute path when it is known removes
-     * the launch's dependence on the login-shell PATH merge: a GUI/Finder launch
-     * inherits launchd's bare {@code /usr/bin:/bin}, and the merge probe that
-     * repairs it is best-effort and can time out (a slow {@code .zshrc} can
-     * exceed its 3 s window). The binary is resolved once and cached by
-     * {@link PiExecutableLocator#locate()}, which already probes PATH plus
-     * hardcoded fallbacks ({@code ~/.local/bin/pi}, {@code /usr/local/bin/pi},
-     * {@code /opt/homebrew/bin/pi}).
-     */
-    private String piBinary() {
-        return locator.locate()
-                .map(p -> AgentCommands.shellQuote(p.toString()))
-                .orElse("pi");
-    }
-
     private String piCommand(Optional<McpAccess> access, boolean eval) {
         Optional<Path> configFile = access.flatMap(McpAccess::credentialFile);
         // PI_SESSION_ID: the user's pi models.json sends `x-claude-code-session-id: $PI_SESSION_ID`

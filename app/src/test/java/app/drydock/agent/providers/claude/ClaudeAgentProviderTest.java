@@ -7,6 +7,7 @@ import app.drydock.agent.api.EvalTokenResolver;
 import app.drydock.agent.api.LaunchPlan;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdStrategy;
+import app.drydock.agent.providers.HostBinaryLocator;
 import app.drydock.agent.providers.claude.internal.ClaudeEvalContainer;
 import app.drydock.agent.providers.claude.internal.ClaudeEvalContainer.EvalSetup;
 import app.drydock.agent.providers.claude.internal.ClaudeExecutableLocator;
@@ -15,6 +16,7 @@ import org.junit.jupiter.api.Test;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.Executors;
 
@@ -50,10 +52,17 @@ class ClaudeAgentProviderTest {
     /** Force "not found" so capability detection yields the conservative all-false caps deterministically. */
     private ClaudeAgentProvider newProviderNoExecutable() {
         ClaudeAgentProvider provider = new ClaudeAgentProvider(
-                new ClaudeExecutableLocator(Path.of("/nonexistent/claude")));
+                new ClaudeExecutableLocator(Path.of("/nonexistent/claude")), null, noDdtool());
         provider.init(new AgentContext(Path.of("/tmp"), Path.of("/tmp/activity"),
                 Executors.newVirtualThreadPerTaskExecutor()));
         return provider;
+    }
+
+    /** A ddtool locator that never resolves, so PATH injection stays off and the exact command is stable. */
+    private static HostBinaryLocator noDdtool() {
+        return new HostBinaryLocator("ddtool", List.of()) {
+            @Override protected Optional<Path> discover() { return Optional.empty(); }
+        };
     }
 
     @Test
@@ -115,7 +124,7 @@ class ClaudeAgentProviderTest {
         Files.createDirectories(stateDir.resolve("activity"));
         Files.writeString(stateDir.resolve("hooks").resolve("settings.json"), "{}");
         ClaudeAgentProvider provider = new ClaudeAgentProvider(
-                new ClaudeExecutableLocator(Path.of("/nonexistent/claude")), container);
+                new ClaudeExecutableLocator(Path.of("/nonexistent/claude")), container, noDdtool());
         provider.init(new AgentContext(stateDir, stateDir.resolve("activity"),
                 Executors.newVirtualThreadPerTaskExecutor()));
         provider.activity().orElseThrow().install();   // writes hooks/settings.json
@@ -138,5 +147,52 @@ class ClaudeAgentProviderTest {
         org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class, () ->
                 provider.buildCreateCommand(new CreateContext("S", "no-such-sess", Path.of("/tmp"),
                         Optional.empty(), Optional.empty(), true)));
+    }
+
+    /**
+     * When {@code ddtool} resolves to a directory NOT on the inherited PATH
+     * (the Finder/Dock case whose login-shell merge never landed), the
+     * launch prepends {@code ddtool}'s directory to {@code PATH} so the
+     * managed-settings {@code apiKeyHelper} ({@code ddtool auth token ...})
+     * can find it -- otherwise claude exits 127 with "ddtool: command not
+     * found" before the session even starts.
+     */
+    @Test
+    void ddtoolPathIsInjectedWhenNotOnTheInheritedPath(@org.junit.jupiter.api.io.TempDir Path dir)
+            throws Exception {
+        Path fakeDdtool = Files.createFile(dir.resolve("ddtool"));
+        HostBinaryLocator ddtool = new HostBinaryLocator("ddtool", List.of()) {
+            @Override protected Optional<Path> discover() { return Optional.of(fakeDdtool); }
+        };
+        ClaudeAgentProvider provider = new ClaudeAgentProvider(
+                new ClaudeExecutableLocator(Path.of("/nonexistent/claude")), null, ddtool);
+        provider.init(new AgentContext(Path.of("/tmp"), Path.of("/tmp/activity"),
+                Executors.newVirtualThreadPerTaskExecutor()));
+        String command = provider.buildCreateCommand(
+                new CreateContext("S", "uuid", Path.of("/tmp"), Optional.empty(), Optional.empty())).command();
+        int envIdx = command.indexOf(ENV);
+        int pathIdx = command.indexOf("PATH='");
+        int claudeIdx = command.indexOf(" claude", pathIdx < 0 ? 0 : pathIdx);
+        assertTrue(pathIdx > envIdx,
+                "PATH= must follow the env cleanup prefix: " + command);
+        assertTrue(claudeIdx > pathIdx,
+                "PATH= must precede claude: " + command);
+        assertTrue(command.contains(dir.toString()),
+                "ddtool's directory must be on the injected PATH: " + command);
+    }
+
+    /**
+     * When {@code ddtool} is already on the inherited PATH, no {@code PATH=}
+     * override is emitted -- claude and its bash-tool children keep the full
+     * shell PATH rather than a stripped prefix.
+     */
+    @Test
+    void noPathInjectionWhenDdtoolIsAlreadyOnPath() {
+        // noDdtool() -> ddtool unresolved -> nothing to inject.
+        ClaudeAgentProvider provider = newProviderNoExecutable();
+        String command = provider.buildCreateCommand(
+                new CreateContext("S", "uuid", Path.of("/tmp"), Optional.empty(), Optional.empty())).command();
+        assertEquals(ENV + "claude", command);
+        assertFalse(command.contains("PATH='"), "no PATH override when ddtool is absent/on PATH: " + command);
     }
 }
