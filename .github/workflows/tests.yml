@@ -23,7 +23,9 @@ jobs:
     # itself needs no native libraries: libghostty is only wired into the
     # `run` and packaging tasks, never into `test`.
     runs-on: macos-14
-    timeout-minutes: 30
+    # The suite outgrew 30 minutes: 21-24 min through Oct 1, 29 min 11 s on the
+    # last run that finished, and cancelled at the limit on every run since.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
