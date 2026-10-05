@@ -18,6 +18,15 @@ import java.util.Objects;
  */
 public final class ReviewInstructions {
 
+    /**
+     * The ask for anchor notes, shared by the first tour and a refresh. A note
+     * is optional on the wire, so an agent that is never asked sends none and
+     * the claims drydock draws under the code stay dormant.
+     */
+    private static final String ANCHOR_NOTES = "give every anchor a one-sentence note: the single claim "
+            + "that range supports, as a statement about the code (drydock shows it under those lines "
+            + "once the reviewer has answered the step's check, so it may state the answer)";
+
     private ReviewInstructions() {
     }
 
@@ -27,7 +36,7 @@ public final class ReviewInstructions {
                 + ", call review_state first so already-settled findings are not re-flagged, "
                 + "then post review_finding and review_tour against that handle; review_tour is validated "
                 + "(every changed row in a step, each step at least one check with an alternate) and lists "
-                + "every problem if it is rejected, so fix them and post it again";
+                + "every problem if it is rejected, so fix them and post it again; " + ANCHOR_NOTES;
         return supportsSubagents
                 ? "Dispatch a code-review subagent to review the changes in this worktree: it must "
                         + work + ". Report only its summary back here."
@@ -97,6 +106,7 @@ public final class ReviewInstructions {
         }
         return "For review handle " + scopeId + ", the diff changed under your tour: call review_scope and "
                 + "review_state, then call review_tour with onlySteps true to " + String.join(" and ", asks)
-                + "; the steps you do not send keep the reviewer's progress.";
+                + "; the steps you do not send keep the reviewer's progress. For the steps you send, "
+                + ANCHOR_NOTES + ".";
     }
 }
