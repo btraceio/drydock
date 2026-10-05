@@ -53,6 +53,15 @@ public record TourRecord(ReviewTour tour, Map<String, StepProgress> progress,
         return rows;
     }
 
+    /**
+     * How many steps the reviewer has touched (see {@link StepProgress#touched}).
+     * A whole new tour replaces every step's progress, so this is what it
+     * would discard.
+     */
+    public long touchedSteps() {
+        return progress.values().stream().filter(StepProgress::touched).count();
+    }
+
     public StepProgress progress(String stepId) {
         StepProgress existing = progress.get(stepId);
         if (existing != null) {
