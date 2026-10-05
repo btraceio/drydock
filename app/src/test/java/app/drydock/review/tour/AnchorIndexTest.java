@@ -63,4 +63,23 @@ class AnchorIndexTest {
         UnifiedDiff diff = twoFileDiff();
         assertEquals("h_src/A.java_1", AnchorIndex.of(diff).hunks().get(1).hunkId());
     }
+
+    @Test
+    void anAnchorCoveringOnlyAddedRowsHasNothingOtherThanAddedToRead() {
+        // src/A.java hunk 0: ctx n1, ctx n2, ADD n3, ctx n4.
+        assertFalse(index.coversRowsOtherThanAdded(new TourAnchor("src/A.java", "n3", "n3")));
+    }
+
+    @Test
+    void aContextRowRemovedRowOrBothCountAsSomethingToRead() {
+        assertTrue(index.coversRowsOtherThanAdded(new TourAnchor("src/A.java", "n2", "n3")), "context beside the add");
+        assertTrue(index.coversRowsOtherThanAdded(new TourAnchor("src/A.java", "o20", "o20")), "a removed row");
+        assertTrue(index.coversRowsOtherThanAdded(new TourAnchor("src/B.java", "o5", "o6")), "a deletion-only hunk");
+    }
+
+    @Test
+    void anAnchorThatDoesNotResolveCoversNothing() {
+        assertFalse(index.coversRowsOtherThanAdded(new TourAnchor("src/A.java", "n1", "n99")));
+        assertFalse(index.coversRowsOtherThanAdded(new TourAnchor("src/Nope.java", "n1", "n2")));
+    }
 }

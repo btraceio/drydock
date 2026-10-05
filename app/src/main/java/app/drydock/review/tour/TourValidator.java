@@ -132,6 +132,7 @@ public final class TourValidator {
         }
         for (TourCheck check : step.checks()) {
             validateCheck(check, true, checkIds, errors);
+            validatePredictHasSomethingToRead(step, check, index, errors);
         }
         for (ImpactNote note : step.impactNotes()) {
             if (note.file().isBlank()) {
@@ -141,6 +142,33 @@ public final class TourValidator {
             }
             if (note.text().isBlank()) {
                 errors.add(where + "impact note on " + note.file() + " needs text");
+            }
+        }
+    }
+
+    /**
+     * A PREDICT hides the step's added rows until it is answered (spec section
+     * 5), and the reader answers it from what stays visible: the removed and
+     * unchanged rows. A step whose anchors cover only added rows leaves nothing
+     * to read, so a question about them is unanswerable -- that is a TRACE,
+     * which asks about the added lines and hides nothing. Applies to the check
+     * and to each of its alternates, since an open alternate hides the rows
+     * again.
+     */
+    private static void validatePredictHasSomethingToRead(TourStep step, TourCheck check, AnchorIndex index,
+                                                          List<String> errors) {
+        if (step.anchors().stream().anyMatch(index::coversRowsOtherThanAdded)
+                || step.anchors().stream().anyMatch(anchor -> !index.resolves(anchor))) {
+            // Something to read, or an unresolved anchor that is already reported.
+            return;
+        }
+        for (int attempt = 0; attempt < check.versions(); attempt++) {
+            TourCheck version = check.version(attempt);
+            if (version.kind() == TourCheck.Kind.PREDICT) {
+                errors.add("step " + step.id() + ": check " + version.id() + " is a PREDICT, but every row the "
+                        + "step's anchors cover is an added row, and those stay hidden until a PREDICT is "
+                        + "answered -- there is nothing to read. Make it a TRACE (which asks about the added "
+                        + "lines and hides nothing), or anchor the removed or surrounding code too");
             }
         }
     }

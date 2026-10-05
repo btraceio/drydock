@@ -36,7 +36,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class McpToolRouterTourTest extends McpRouterFixture {
 
     private static final String CHECK = """
-            {"id":"%s","kind":"predict","prompt":"What happens?",
+            {"id":"%s","kind":"trace","prompt":"What happens?",
              "choices":[{"text":"a"},{"text":"b"}],"answer":0,"explanation":"Because.",
              "alternates":[{"id":"%s_alt","kind":"risk","prompt":"Risk?","explanation":"E."}]}""";
 
@@ -53,6 +53,19 @@ class McpToolRouterTourTest extends McpRouterFixture {
         return args;
     }
 
+    /**
+     * As {@link #coveringArgs}, but step s1's check is a RISK, which a finding can be withheld behind. A
+     * finding cannot be withheld behind a TRACE, and the fixture's added-only files cannot carry a PREDICT.
+     */
+    private JsonObject riskFirstCoveringArgs() {
+        String riskStep = """
+                {"id":"s1","title":"T s1","narrative":"Why.",
+                 "anchors":[{"file":"src/Widget.java","startKey":"n1","endKey":"n5"}],
+                 "checks":[{"id":"c1","kind":"risk","prompt":"Risk?","explanation":"E.",
+                            "alternates":[{"id":"c1_alt","kind":"risk","prompt":"Again?","explanation":"E."}]}]}""";
+        return tourArgs(riskStep, step("s2", "src/WidgetUser.java", "n1", "n6", "c2"));
+    }
+
     private JsonObject coveringArgs() {
         return tourArgs(step("s1", "src/Widget.java", "n1", "n5", "c1"),
                 step("s2", "src/WidgetUser.java", "n1", "n6", "c2"));
@@ -67,6 +80,23 @@ class McpToolRouterTourTest extends McpRouterFixture {
         TourRecord stored = context.tourOf(scopeId()).orElseThrow();
         assertEquals(2, stored.tour().steps().size());
         assertEquals(1, stored.progress().get("s1").hunkDigests().size());
+    }
+
+    @Test
+    void aPredictOverAnAddedOnlyStepIsRejectedAndStoresNothing() {
+        String predict = CHECK.replace("\"kind\":\"trace\"", "\"kind\":\"predict\"");
+        String predictStep = """
+                {"id":"s1","title":"T","narrative":"Why.",
+                 "anchors":[{"file":"src/Widget.java","startKey":"n1","endKey":"n5"}],
+                 "checks":[%s]}""".formatted(predict.formatted("c1", "c1"));
+        String second = step("s2", "src/WidgetUser.java", "n1", "n6", "c2");
+
+        McpToolException error = assertThrows(McpToolException.class,
+                () -> router.call(callerId(), "review_tour", tourArgs(predictStep, second)));
+
+        assertTrue(error.getMessage().contains("check c1 is a PREDICT"), error.getMessage());
+        assertTrue(error.getMessage().contains("TRACE"), error.getMessage());
+        assertTrue(context.tourOf(scopeId()).isEmpty(), "nothing stored");
     }
 
     @Test
@@ -115,7 +145,7 @@ class McpToolRouterTourTest extends McpRouterFixture {
                 Optional.of("c1"))));
 
         McpToolException error = assertThrows(McpToolException.class,
-                () -> router.call(callerId(), "review_tour", coveringArgs()));
+                () -> router.call(callerId(), "review_tour", riskFirstCoveringArgs()));
 
         assertTrue(error.getMessage().contains(
                 "finding f1 is withheld by check c1, which is not on a step covering src/WidgetUser.java n2"),
@@ -125,7 +155,7 @@ class McpToolRouterTourTest extends McpRouterFixture {
 
     @Test
     void aFindingWithheldByACheckOffItsLinesIsRejectedOnceATourExists() throws Exception {
-        router.call(callerId(), "review_tour", coveringArgs());
+        router.call(callerId(), "review_tour", riskFirstCoveringArgs());
 
         McpToolException error = assertThrows(McpToolException.class,
                 () -> router.call(callerId(), "review_finding", withheldFindingArgs("src/WidgetUser.java", "c1")));
@@ -138,7 +168,7 @@ class McpToolRouterTourTest extends McpRouterFixture {
 
     @Test
     void aFindingWithheldByACheckOnItsLinesIsStored() throws Exception {
-        router.call(callerId(), "review_tour", coveringArgs());
+        router.call(callerId(), "review_tour", riskFirstCoveringArgs());
 
         router.call(callerId(), "review_finding", withheldFindingArgs("src/Widget.java", "c1"));
 

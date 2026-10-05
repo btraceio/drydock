@@ -35,7 +35,7 @@ public final class AnchorIndex {
     public record ChangedRow(String file, String lineKey, int hunkIndex) {
     }
 
-    private record Row(int ordinal, int hunkIndex, boolean changed) {
+    private record Row(int ordinal, int hunkIndex, boolean changed, boolean added) {
     }
 
     private final Map<String, Map<String, Row>> rowsByFile = new LinkedHashMap<>();
@@ -57,7 +57,8 @@ public final class AnchorIndex {
                 index.hunks.add(new HunkRef(file.path(), hunkIndex, HunkDigest.of(file.path(), hunk)));
                 for (UnifiedDiff.Line line : hunk.lines()) {
                     boolean changed = line.kind() != UnifiedDiff.Line.Kind.CONTEXT;
-                    rows.put(line.lineKey(), new Row(ordinal++, hunkIndex, changed));
+                    rows.put(line.lineKey(), new Row(ordinal++, hunkIndex, changed,
+                            line.kind() == UnifiedDiff.Line.Kind.ADD));
                     line.newLine().ifPresent(newLines::add);
                     if (changed) {
                         index.changedRows.add(new ChangedRow(file.path(), line.lineKey(), hunkIndex));
@@ -94,6 +95,23 @@ public final class AnchorIndex {
         }
         return rows.get(anchor.startKey()).ordinal() <= row.ordinal()
                 && row.ordinal() <= rows.get(anchor.endKey()).ordinal();
+    }
+
+    /**
+     * Whether {@code anchor} covers at least one row that is not an added row:
+     * a removed row or an unchanged one. A PREDICT hides a step's added rows
+     * until it is answered, so these are the rows the reader has to answer it
+     * from; an anchor with none leaves nothing to read.
+     */
+    public boolean coversRowsOtherThanAdded(TourAnchor anchor) {
+        if (!resolves(anchor)) {
+            return false;
+        }
+        Map<String, Row> rows = rowsByFile.get(anchor.file());
+        int from = rows.get(anchor.startKey()).ordinal();
+        int to = rows.get(anchor.endKey()).ordinal();
+        return rows.values().stream()
+                .anyMatch(row -> row.ordinal() >= from && row.ordinal() <= to && !row.added());
     }
 
     /** Hunks with at least one changed row inside {@code anchor}, in diff order. */

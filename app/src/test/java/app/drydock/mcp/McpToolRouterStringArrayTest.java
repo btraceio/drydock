@@ -42,11 +42,11 @@ class McpToolRouterStringArrayTest extends McpRouterFixture {
     private static final String STEPS = """
             [{"id":"s1","title":"T","narrative":"Why.",
               "anchors":[{"file":"src/Widget.java","startKey":"n1","endKey":"n5"}],
-              "checks":[{"id":"c1","kind":"predict","prompt":"P?","choices":[{"text":"a"},{"text":"b"}],"answer":0,"explanation":"E.",
+              "checks":[{"id":"c1","kind":"trace","prompt":"P?","choices":[{"text":"a"},{"text":"b"}],"answer":0,"explanation":"E.",
                "alternates":[{"id":"c1_alt","kind":"risk","prompt":"R?","explanation":"E."}]}]},
              {"id":"s2","title":"T","narrative":"Why.",
               "anchors":[{"file":"src/WidgetUser.java","startKey":"n1","endKey":"n6"}],
-              "checks":[{"id":"c2","kind":"predict","prompt":"P?","choices":[{"text":"a"},{"text":"b"}],"answer":0,"explanation":"E.",
+              "checks":[{"id":"c2","kind":"trace","prompt":"P?","choices":[{"text":"a"},{"text":"b"}],"answer":0,"explanation":"E.",
                "alternates":[{"id":"c2_alt","kind":"risk","prompt":"R?","explanation":"E."}]}]}]""";
 
     private JsonObject args(String key, JsonValue value) {
@@ -164,7 +164,7 @@ class McpToolRouterStringArrayTest extends McpRouterFixture {
         String replacement = """
                 [{"id":"s2","title":"T2","narrative":"Why now.",
                   "anchors":[{"file":"src/WidgetUser.java","startKey":"n1","endKey":"n6"}],
-                  "checks":[{"id":"c9","kind":"predict","prompt":"P?","choices":[{"text":"a"},{"text":"b"}],"answer":0,"explanation":"E.",
+                  "checks":[{"id":"c9","kind":"trace","prompt":"P?","choices":[{"text":"a"},{"text":"b"}],"answer":0,"explanation":"E.",
                    "alternates":[{"id":"c9_alt","kind":"risk","prompt":"R?","explanation":"E."}]}]}]""";
 
         router.call(callerId(), "review_tour",
