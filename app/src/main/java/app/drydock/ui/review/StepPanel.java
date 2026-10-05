@@ -196,15 +196,18 @@ final class StepPanel extends VBox {
         if (TourMarks.predictPending(view.step(), view.progress())) {
             // Predict first: the narrative states what the added lines do,
             // which is exactly what the open PREDICT asks, so it stays back
-            // until the reader has committed to an answer -- and the question
-            // leads, where the explanation would have been.
+            // until the reader has committed to an answer. What replaces it
+            // comes BEFORE the question -- "read the code first", with the
+            // links to the ranges -- because a question about code the reader
+            // has not been pointed at is a question about nothing.
             Label withheld = new Label(WITHHELD_NARRATIVE);
             withheld.setWrapText(true);
             withheld.getStyleClass().addAll("step-panel-narrative", "step-panel-withheld");
-            content.getChildren().addAll(header, checkSection(view), withheld, anchorChips(view));
+            content.getChildren().addAll(header, withheld, anchorChips(view));
             if (view.progress().stale()) {
                 content.getChildren().add(staleNotice(view.refreshDispatched()));
             }
+            content.getChildren().add(checkSection(view));
             return;
         }
         Label narrative = new Label(view.step().narrative());
