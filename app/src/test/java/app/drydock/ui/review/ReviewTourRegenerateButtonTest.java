@@ -52,6 +52,26 @@ class ReviewTourRegenerateButtonTest extends ReviewTourFixture {
                 .findFirst().orElseThrow();
     }
 
+    /** What the button looked like straight after a click. */
+    private record AfterClick(String text, boolean disabled, boolean armed) { }
+
+    /**
+     * Clicks the button and reads it in the same FX turn. The window timer runs on a later pulse, so
+     * what is read is what the click itself did -- whatever the machine's speed. Reading after a
+     * robot click instead races the window: on a slow runner the click and the wait for FX events
+     * outlast a short window, and the timer has already reset the button.
+     */
+    private AfterClick fireAndRead() {
+        Button button = regenerate();
+        AfterClick[] result = new AfterClick[1];
+        interact(() -> {
+            button.fire();
+            result[0] = new AfterClick(button.getText(), button.isDisabled(),
+                    button.getStyleClass().contains("armed"));
+        });
+        return result[0];
+    }
+
     private void answerFirstCheck() {
         press(KeyCode.DIGIT2).release(KeyCode.DIGIT2);
         WaitForAsyncUtils.waitForFxEvents();
@@ -116,8 +136,9 @@ class ReviewTourRegenerateButtonTest extends ReviewTourFixture {
         answerFirstCheck();
         interact(() -> view.diagSetRegenerateWindow(Duration.millis(150)));
 
-        clickOn(regenerate());
-        assertEquals(SessionReviewView.REGENERATE_ARMED_LABEL, regenerate().getText());
+        AfterClick afterClick = fireAndRead();
+        assertEquals(SessionReviewView.REGENERATE_ARMED_LABEL, afterClick.text());
+        assertTrue(afterClick.armed());
         WaitForAsyncUtils.waitFor(5, TimeUnit.SECONDS,
                 () -> SessionReviewView.REGENERATE_LABEL.equals(regenerate().getText()));
 
@@ -133,8 +154,9 @@ class ReviewTourRegenerateButtonTest extends ReviewTourFixture {
         host.reviewers.add("claude");
         interact(() -> view.diagSetRegenerateWindow(Duration.millis(150)));
 
-        clickOn(regenerate());
-        assertEquals("⟳  Regenerating…", regenerate().getText());
+        AfterClick afterClick = fireAndRead();
+        assertEquals("⟳  Regenerating…", afterClick.text());
+        assertTrue(afterClick.disabled(), "no second request while one is out");
         WaitForAsyncUtils.waitFor(5, TimeUnit.SECONDS,
                 () -> SessionReviewView.REGENERATE_LABEL.equals(regenerate().getText()));
 
