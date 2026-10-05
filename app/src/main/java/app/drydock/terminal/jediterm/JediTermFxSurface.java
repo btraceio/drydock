@@ -156,6 +156,42 @@ final class JediTermFxSurface implements TerminalSurface {
         killer.start();
     }
 
+    /**
+     * As {@link #closeGracefully} but does not destroy the child — for a
+     * tmux-backed surface whose tmux client is detached externally (SPIKE).
+     * Polls {@code process.isAlive()} then closes the widget; force-destroys
+     * on timeout as a last resort.
+     */
+    @Override
+    public void closeWithoutSignal(long gracePeriodMillis, long pollIntervalMillis, Runnable onDone) {
+        if (closed) {
+            onDone.run();
+            return;
+        }
+        Thread waiter = new Thread(() -> {
+            long deadline = System.currentTimeMillis() + gracePeriodMillis;
+            while (process.isAlive() && System.currentTimeMillis() < deadline) {
+                try {
+                    Thread.sleep(pollIntervalMillis);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+            if (process.isAlive()) {
+                process.destroyForcibly();
+            }
+            closed = true;
+            try {
+                widget.close();
+            } catch (Exception ignored) {
+            }
+            Platform.runLater(onDone);
+        }, "jediterm-surface-close-no-signal");
+        waiter.setDaemon(true);
+        waiter.start();
+    }
+
     @Override
     public void close() {
         if (closed) {

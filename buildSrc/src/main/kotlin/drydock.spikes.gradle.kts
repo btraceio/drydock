@@ -206,3 +206,17 @@ registerGateTask(
         }
     }
 }
+
+// SPIKE: unattended sessions (tmux persistence). Proves TmuxPersistence's
+// wrapLocalCommand + sessionAlive + detachClient against a real tmux server
+// on this machine. No JavaFX, no native build. Exits 0 with SKIP when tmux
+// is absent or the flag is off, so it is safe on runners without tmux.
+// Run: ./gradlew tmuxPersistenceSpike
+registerGateTask(
+    "tmuxPersistenceSpike",
+    "Spike: TmuxPersistence wrap/probe/detach against a real tmux server (unattended-sessions).",
+    "app.drydock.process.TmuxPersistenceSpike",
+    requireNativeBuild = false,
+) {
+    systemProperty("app.drydock.tmux.persistence", "true")
+}

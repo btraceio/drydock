@@ -749,6 +749,30 @@ public final class GhosttySurface implements TerminalSurface, AutoCloseable {
         pollUntilExitedOrTimeout(System.currentTimeMillis() + gracePeriodMillis, pollIntervalMillis, onDone);
     }
 
+    /**
+     * As {@link #closeGracefully} but sends no Ctrl+D — for a tmux-backed
+     * surface whose child (the tmux client) is being made to exit by an
+     * external {@code tmux detach-client} (SPIKE: tmux persistence). Polls
+     * {@link #processExited()} then frees; force-closes on timeout.
+     */
+    @Override
+    public void closeWithoutSignal(long gracePeriodMillis, long pollIntervalMillis, Runnable onDone) {
+        if (closed) {
+            if (onDone != null) {
+                onDone.run();
+            }
+            return;
+        }
+        if (processExited()) {
+            close();
+            if (onDone != null) {
+                onDone.run();
+            }
+            return;
+        }
+        pollUntilExitedOrTimeout(System.currentTimeMillis() + gracePeriodMillis, pollIntervalMillis, onDone);
+    }
+
     private void pollUntilExitedOrTimeout(long deadlineMillis, long pollIntervalMillis, Runnable onDone) {
         if (closed) {
             if (onDone != null) {

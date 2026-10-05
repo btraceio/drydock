@@ -73,6 +73,23 @@ public interface TerminalSurface extends AutoCloseable {
     void closeGracefully(long gracePeriodMillis, long pollIntervalMillis, Runnable onDone);
 
     /**
+     * Closes the surface <em>without sending a signal to the child</em>
+     * (SPIKE: tmux persistence). The caller has already arranged for the
+     * child to exit on its own (e.g. {@code tmux detach-client} detached the
+     * tmux client, which is this surface's child process); this just polls
+     * {@link #processExited()} until the child is gone, then frees the
+     * surface. If the grace period elapses with the child still alive, it
+     * force-closes as a last resort (carrying the same live-child crash risk
+     * as {@link #close()}).
+     *
+     * <p>Contrast {@link #closeGracefully}, which sends Ctrl+D first — that
+     * would be wrong for a tmux-backed surface, where Ctrl+D is forwarded by
+     * tmux into the agent (claude would see EOF and exit), defeating the
+     * persistence.</p>
+     */
+    void closeWithoutSignal(long gracePeriodMillis, long pollIntervalMillis, Runnable onDone);
+
+    /**
      * Sends a binding action string (e.g. {@code "search:needle"}, {@code "end_search"},
      * {@code "navigate_search:next"}) to the terminal core. The string is parsed by
      * the terminal's own binding action parser.

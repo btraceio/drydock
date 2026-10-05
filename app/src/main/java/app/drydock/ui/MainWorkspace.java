@@ -46,6 +46,7 @@ import app.drydock.mcp.McpSessionRegistry.Spawn;
 import app.drydock.config.UserConfig;
 import app.drydock.mcp.WorkspaceMcpSessionContext;
 import app.drydock.process.SshCommandBuilder;
+import app.drydock.process.TmuxPersistence;
 import app.drydock.review.AnnotationStore;
 import app.drydock.review.BaseMove;
 import app.drydock.review.ReviewAnnotation;
@@ -4589,6 +4590,17 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 continue;
             }
             exitRecorded.add(sessionId);
+            // SPIKE: tmux persistence. For a tmux-backed surface, the ghostty
+            // child is the tmux *client*; processExited means the client
+            // detached or the tmux session died — NOT necessarily that the
+            // agent exited. Probe tmux off the FX thread before settling:
+            // alive → the agent survived (close the dead client tab, keep
+            // RUNNING so it stays reattachable); dead → the agent exited
+            // (the normal EXITED path).
+            if (sessionManager.tmuxBacked(sessionId)) {
+                probeTmuxClientExit(sessionId, open);
+                continue;
+            }
             sessionManager.markSessionExited(sessionId).ifPresent(updated -> {
                 LOG.log(Level.INFO, "Session {0} child process exited on its own", sessionId);
                 publishSessions();
@@ -4600,6 +4612,33 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         for (OpenSessionTab open : openTabs.values()) {
             open.pollExitedTerminals();
         }
+    }
+
+    /**
+     * SPIKE: tmux persistence. Settles a tmux-backed surface whose ghostty
+     * child (the tmux client) exited: {@code tmux has-session} off the FX
+     * thread, then on the FX thread either close the dead client tab (agent
+     * alive → stays RUNNING/reattachable) or mark the session EXITED (agent
+     * gone). Daemon thread — a probe stuck past shutdown is harmless.
+     */
+    private void probeTmuxClientExit(ManagedSessionId sessionId, OpenSessionTab open) {
+        Thread probe = new Thread(() -> {
+            boolean alive = TmuxPersistence.sessionAlive(sessionId);
+            Platform.runLater(() -> {
+                if (alive) {
+                    LOG.log(Level.INFO, "tmux client detached; agent still alive — keeping RUNNING: {0}", sessionId);
+                    removeTab(open);
+                    publishSessions();
+                } else {
+                    sessionManager.markSessionExited(sessionId).ifPresent(updated -> {
+                        LOG.log(Level.INFO, "Session {0} agent exited (tmux session gone)", sessionId);
+                        publishSessions();
+                    });
+                }
+            });
+        }, "tmux-exit-probe");
+        probe.setDaemon(true);
+        probe.start();
     }
 
     /** Wired by {@code DrydockApplication} after the activity hooks are installed. */

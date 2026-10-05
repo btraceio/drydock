@@ -33,6 +33,7 @@ import app.drydock.mcp.McpSessionContext.RenameOutcome;
 import app.drydock.mcp.McpSessionRegistry;
 import app.drydock.mcp.McpSessionRegistry.Spawn;
 import app.drydock.mcp.PromptSafety;
+import app.drydock.process.TmuxPersistence;
 import app.drydock.state.ApplicationStateRepository;
 import app.drydock.terminal.api.TerminalHostView;
 import app.drydock.terminal.api.TerminalRuntime;
@@ -161,6 +162,13 @@ public final class SessionManager implements AutoCloseable {
         this.ownsExecutor = ownsExecutor;
         stateStore.update(SessionManager::normalizeLoadedState);
         this.claimedAgentSessionIds = seedClaimedIds(stateStore.state());
+        // SPIKE: tmux persistence. On restart, normalizeLoadedState flips
+        // persisted RUNNING sessions to INACTIVE (no terminal process survives
+        // a restart — true for the non-tmux model). With tmux, the agent may
+        // still be alive in a daemonized tmux server: probe and flip those
+        // back to RUNNING so the sidebar shows them reattachable. Runs off
+        // the calling thread; safe to ignore the result during construction.
+        revalidateTmuxSessions();
     }
 
     /**
@@ -175,6 +183,39 @@ public final class SessionManager implements AutoCloseable {
             s.agentSessionId().ifPresent(ids::add);
         }
         return ids;
+    }
+
+    /**
+     * SPIKE: tmux persistence. On (re)start, probe tmux for every non-RUNNING
+     * local session and flip alive ones to RUNNING — those are agents that
+     * survived a Drydock restart inside a daemonized tmux server. Remote
+     * sessions are not tmux-backed by this spike. Runs on the background
+     * executor (each probe spawns {@code tmux has-session}); failures are
+     * treated as "not alive" and never throw.
+     */
+    private void revalidateTmuxSessions() {
+        if (!TmuxPersistence.enabled()) {
+            return;
+        }
+        try {
+            backgroundExecutor.execute(() -> {
+                for (ManagedAgentSession s : stateStore.state().sessions()) {
+                    if (s.status() == SessionStatus.RUNNING) {
+                        continue;
+                    }
+                    boolean remote = repositoryFor(s).map(Repository::isRemote).orElse(false);
+                    if (remote) {
+                        continue;
+                    }
+                    if (TmuxPersistence.sessionAlive(s.id())) {
+                        updateSession(s.id(), sess -> sess.withStatus(SessionStatus.RUNNING));
+                        LOG.log(Level.INFO, "tmux session alive on startup — marking RUNNING: {0}", s.id());
+                    }
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            LOG.log(Level.DEBUG, "Skipping tmux revalidation: executor shut down");
+        }
     }
 
     /**
@@ -557,7 +598,8 @@ public final class SessionManager implements AutoCloseable {
                     }
                     return new CreatePlan(command, sessionIdUsed);
                 }, backgroundExecutor)
-                .thenCompose(plan -> createSurfaceOnFxThread(app, host, scaleFactor, plan.command(),
+                .thenCompose(plan -> createSurfaceOnFxThread(app, host, scaleFactor,
+                        persistedCommand(plan.command(), surfaceWorkingDirectory, managedSessionId, remote.isPresent()),
                         surfaceWorkingDirectory)
                         .thenApply(surface -> new CreateLaunch(plan, surface)));
     }
@@ -669,7 +711,8 @@ public final class SessionManager implements AutoCloseable {
                                         session.agentSessionName(), session.workingDirectory(), remote, mcp, eval);
                                 return provider.buildResumeCommand(ctx).command();
                             }, backgroundExecutor)
-                            .thenCompose(command -> createSurfaceOnFxThread(app, host, scaleFactor, command,
+                            .thenCompose(command -> createSurfaceOnFxThread(app, host, scaleFactor,
+                                    persistedCommand(command, workingDir, session.id(), remote.isPresent()),
                                     workingDir)
                                     .handleAsync((surface, ex) -> finalizeResume(session, surface, ex),
                                             backgroundExecutor));
@@ -1138,11 +1181,48 @@ public final class SessionManager implements AutoCloseable {
             return CompletableFuture.completedFuture(null);
         }
         CompletableFuture<Void> future = new CompletableFuture<>();
-        Platform.runLater(() -> surface.closeGracefully(gracePeriodMillis, pollIntervalMillis, () -> {
-            onSurfaceClosed(sessionId, surface);
-            future.complete(null);
-        }));
+        // SPIKE: tmux persistence. For a tmux-backed session, detaching the
+        // tmux client (not Ctrl+D) is what closes the surface without killing
+        // the agent: Ctrl+D would be forwarded by tmux into claude (EOF →
+        // exit), defeating the persistence. detach-client is a process spawn
+        // (ProcessRunner, off the FX thread); closeWithoutSignal then polls
+        // the now-detached client to exit and frees the surface safely.
+        boolean tmux = isTmuxBacked(sessionId);
+        if (tmux) {
+            backgroundExecutor.execute(() -> TmuxPersistence.detachClient(sessionId));
+        }
+        Platform.runLater(() -> {
+            Runnable onDone = () -> {
+                onSurfaceClosed(sessionId, surface);
+                future.complete(null);
+            };
+            if (tmux) {
+                surface.closeWithoutSignal(gracePeriodMillis, pollIntervalMillis, onDone);
+            } else {
+                surface.closeGracefully(gracePeriodMillis, pollIntervalMillis, onDone);
+            }
+        });
         return future;
+    }
+
+    /**
+     * Whether this session's surface is backed by a tmux session (SPIKE):
+     * tmux persistence is on and the session is local. Remote sessions are
+     * not tmux-wrapped by this spike. {@link #closeSession} uses this to
+     * choose detach-vs-Ctrl+D.
+     */
+    private boolean isTmuxBacked(ManagedSessionId sessionId) {
+        if (!TmuxPersistence.enabled()) {
+            return false;
+        }
+        return findSession(sessionId)
+                .flatMap(s -> repositoryFor(s).map(Repository::isRemote).map(remote -> !remote))
+                .orElse(true);
+    }
+
+    /** Whether {@code sessionId}'s surface is tmux-backed (SPIKE): tmux on + local. */
+    public boolean tmuxBacked(ManagedSessionId sessionId) {
+        return isTmuxBacked(sessionId);
     }
 
     /**
@@ -1192,7 +1272,32 @@ public final class SessionManager implements AutoCloseable {
         findSession(sessionId).ifPresent(session -> {
             unmarkEvalAsync(session);
             session.agentSessionId().ifPresent(activeRegistry::release);
-            persistUpdatedSession(session.withStatus(SessionStatus.EXITED));
+            // SPIKE: tmux persistence. Closing a tmux-backed surface detaches
+            // the tmux client; the agent keeps running in the tmux server, so
+            // a RUNNING session stays RUNNING (reattachable) rather than
+            // flipping to EXITED. An agent that already exited is EXITED by
+            // the time we get here (the exit watcher probed tmux and marked
+            // it), so it is not revived. The survival is async-verified: if
+            // the tmux session is gone (agent died between detach and probe),
+            // correct to EXITED.
+            SessionStatus next;
+            if (isTmuxBacked(sessionId) && session.status() == SessionStatus.RUNNING) {
+                next = SessionStatus.RUNNING;
+                try {
+                    backgroundExecutor.execute(() -> {
+                        if (!TmuxPersistence.sessionAlive(sessionId)) {
+                            updateSession(sessionId, s -> s.withStatus(SessionStatus.EXITED));
+                        }
+                    });
+                } catch (RejectedExecutionException e) {
+                    // Shutdown drained the executor: leave it RUNNING; the
+                    // next startup's revalidateTmuxSessions() confirms.
+                    LOG.log(Level.DEBUG, "Skipping tmux liveness verify for " + sessionId + " during shutdown");
+                }
+            } else {
+                next = SessionStatus.EXITED;
+            }
+            persistUpdatedSession(session.withStatus(next));
         });
     }
 
@@ -1234,6 +1339,21 @@ public final class SessionManager implements AutoCloseable {
             }
         });
         return future;
+    }
+
+    /**
+     * Wraps a local agent command in a reattachable tmux session when the
+     * tmux-persistence spike is enabled (SPIKE: {@code -Dapp.drydock.tmux.persistence=true}).
+     * Remote sessions are returned unchanged — remote tmux persistence needs
+     * the session name to reach the provider's SSH command builder, which is
+     * deferred. Already-running-in-tmux sessions reattach via the same
+     * {@code -A} command (tmux ignores the shell-command on attach).
+     */
+    private String persistedCommand(String command, String workingDirectory, ManagedSessionId id, boolean remote) {
+        if (!remote && TmuxPersistence.enabled()) {
+            return TmuxPersistence.wrapLocalCommand(command, workingDirectory, id);
+        }
+        return command;
     }
 
     private String defaultDisplayName(Repository repository) {
