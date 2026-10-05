@@ -48,6 +48,22 @@ class ReviewInstructionsTest {
     }
 
     @Test
+    void bothFormsAskForAnAnchorNoteOnEveryAnchor() {
+        for (boolean subagents : new boolean[] {true, false}) {
+            String instruction = ReviewInstructions.forScope("rs_abc123", subagents);
+            assertTrue(instruction.contains("every anchor a one-sentence note"), instruction);
+        }
+    }
+
+    @Test
+    void aTourRefreshAsksForNotesToo() {
+        String line = ReviewInstructions.forTourRefresh("rs_abc123", List.of("s2"), 1);
+
+        assertTrue(line.contains("every anchor a one-sentence note"), line);
+        assertFalse(line.contains("\n"));
+    }
+
+    @Test
     void aRiskCheckRequestNamesTheCheckAndTheToolInOneLine() {
         String line = ReviewInstructions.forRiskCheck("rs_abc123", "c7");
 
