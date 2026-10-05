@@ -170,6 +170,36 @@ class StepPanelTest extends ApplicationTest {
     }
 
     @Test
+    void theExpandedWidthIsWhatTheReaderChoseClampedToWhatAPanelCanBe() {
+        interact(() -> panel.setExpandedWidth(480));
+        assertEquals(480, panel.getPrefWidth());
+        assertEquals(480, panel.getMinWidth());
+        assertEquals(480, panel.getMaxWidth());
+
+        interact(() -> panel.setExpandedWidth(50));
+        assertEquals(StepPanel.MIN_WIDTH, panel.getPrefWidth(), "narrower than the narrow width is not readable");
+        interact(() -> panel.setExpandedWidth(5000));
+        assertEquals(StepPanel.MAX_WIDTH, panel.getPrefWidth());
+    }
+
+    @Test
+    void narrowAndCollapsedStillWinOverAChosenWidth() {
+        interact(() -> panel.setExpandedWidth(600));
+
+        interact(() -> panel.setNarrow(true));
+        assertEquals(StepPanel.NARROW_WIDTH, panel.getPrefWidth(), "narrow takes a wide panel back down");
+
+        interact(() -> panel.setCollapsed(true));
+        assertEquals(StepPanel.COLLAPSED_WIDTH, panel.getPrefWidth());
+
+        interact(() -> {
+            panel.setCollapsed(false);
+            panel.setNarrow(false);
+        });
+        assertEquals(600, panel.getPrefWidth(), "and the chosen width comes back with the room");
+    }
+
+    @Test
     void anAnsweredPredictShowsTheNarrativeAndDropsTheWithheldNotice() {
         CheckProgress passed = new CheckProgress("c1", 0, CheckProgress.Status.PASSED, Optional.empty(),
                 Optional.empty(), Optional.empty());

@@ -175,4 +175,70 @@ class RailLayoutTest {
     private static boolean allCollapsed(RailLayout.Layout layout, SessionReviewView.ReviewMode mode) {
         return layout.marginCollapsed() && (mode != TOUR || layout.outlineCollapsed());
     }
+
+    // ---- the tour's step panel at a width the reader chose ---------------------
+
+    @Test
+    void theDefaultStepPanelWidthChargesWhatTheMarginAlwaysDid() {
+        RailLayout.Layout layout = RailLayout.solve(1800, false, false, TOUR);
+
+        assertEquals(RailLayout.solve(1800, false, false, TOUR, StepPanel.EXPANDED_WIDTH), layout);
+        assertEquals(RailLayout.railsWidth(layout, TOUR),
+                RailLayout.railsWidth(layout, TOUR, StepPanel.EXPANDED_WIDTH));
+        assertEquals(ReviewFindingsMargin.EXPANDED_WIDTH, StepPanel.EXPANDED_WIDTH);
+    }
+
+    @Test
+    void aWiderStepPanelIsChargedAtItsWidthAndOnlyInTheTour() {
+        RailLayout.Layout layout = new RailLayout.Layout(false, false, false);
+
+        assertEquals(TourOutline.EXPANDED_WIDTH + 500, RailLayout.railsWidth(layout, TOUR, 500));
+        assertEquals(ReviewFindingsMargin.EXPANDED_WIDTH, RailLayout.railsWidth(layout, DIFF, 500),
+                "the hunk diff's margin is not the step panel");
+    }
+
+    @Test
+    void theExtraWidthTheReaderAskedForIsTheFirstThingGivenBack() {
+        // Outline 232 + panel 600 leaves 1100 - 832 = 268: no room. Narrow gives
+        // the panel back down to 286 and the outline to 196: 1100 - 482 = 618.
+        RailLayout.Layout layout = RailLayout.solve(1100, false, false, TOUR, 600);
+
+        assertTrue(layout.narrow());
+        assertFalse(layout.marginCollapsed());
+        assertFalse(layout.outlineCollapsed());
+        assertEquals(StepPanel.NARROW_WIDTH + TourOutline.NARROW_WIDTH, RailLayout.railsWidth(layout, TOUR, 600));
+    }
+
+    @Test
+    void aChosenWidthNeverLetsTheCodeColumnDropBelowItsFloorWhenArithmeticAllows() {
+        for (double chosen : new double[] {StepPanel.MIN_WIDTH, 336, 500, StepPanel.MAX_WIDTH}) {
+            for (double width = 700; width <= 2200; width += 10) {
+                RailLayout.Layout layout = RailLayout.solve(width, false, false, TOUR, chosen);
+                double code = width - RailLayout.railsWidth(layout, TOUR, chosen);
+                boolean everythingCollapsed = layout.outlineCollapsed() && layout.marginCollapsed();
+                assertTrue(code >= RailLayout.CODE_MIN_WIDTH || everythingCollapsed,
+                        "chosen " + chosen + " at " + width + " leaves " + code);
+            }
+        }
+    }
+
+    /**
+     * What makes a drag feel steady: the splitter clamps the panel so the code
+     * keeps its floor with the outline still expanded. Within that clamp the
+     * layout must never flip to narrow mid-drag -- that would snap the panel
+     * back to 286 under the pointer and shrink the outline.
+     */
+    @Test
+    void aWidthTheCodeFloorAllowsNeverFlipsTheLayoutToNarrow() {
+        for (double width = 900; width <= 2200; width += 10) {
+            double widestAllowed = width - TourOutline.EXPANDED_WIDTH - RailLayout.CODE_MIN_WIDTH;
+            for (double chosen = StepPanel.MIN_WIDTH; chosen <= Math.min(widestAllowed, StepPanel.MAX_WIDTH);
+                 chosen += 25) {
+                RailLayout.Layout layout = RailLayout.solve(width, false, false, TOUR, chosen);
+                assertFalse(layout.narrow(), "at " + width + " a panel of " + chosen + " leaves the code its floor");
+                assertFalse(layout.marginCollapsed());
+                assertFalse(layout.outlineCollapsed());
+            }
+        }
+    }
 }

@@ -2800,6 +2800,24 @@
 .tour-claim-callout.collapsed .tour-claim-text {
     -fx-text-fill: -drydock-text-dim;
 }
+/* The draggable edge between the code and the step panel. A thin line at rest,
+   the accent while hovered, focused or dragged. */
+.review-splitter {
+    -fx-background-color: transparent;
+    -fx-border-color: transparent transparent transparent -drydock-border;
+    -fx-border-width: 0 0 0 1;
+}
+.review-splitter:hover,
+.review-splitter.dragging {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-border-color: transparent transparent transparent -drydock-accent;
+}
+.review-splitter:focused {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-border-color: transparent transparent transparent -drydock-accent;
+    -fx-border-width: 0 0 0 2;
+}
+
 /* The key-hints strip: the keys that work now, under the code. */
 .tour-key-strip {
     -fx-padding: 6 14 6 14;
