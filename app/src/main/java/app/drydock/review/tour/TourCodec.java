@@ -70,7 +70,8 @@ public final class TourCodec {
             JsonObject anchor = object(anchorArray.elements().get(i), at);
             String start = string(anchor, "startKey", at, MAX_KEY);
             String end = optionalString(anchor, "endKey", at, MAX_KEY).orElse(start);
-            anchors.add(new TourAnchor(string(anchor, "file", at, MAX_PATH), start, end));
+            String note = optionalString(anchor, "note", at, TourValidator.MAX_ANCHOR_NOTE).orElse("");
+            anchors.add(new TourAnchor(string(anchor, "file", at, MAX_PATH), start, end, note));
         }
         List<ImpactNote> notes = new ArrayList<>();
         JsonArray noteArray = array(obj, "impactNotes", path, MAX_NOTES, false);
@@ -128,9 +129,13 @@ public final class TourCodec {
     public static JsonValue stepToJson(TourStep step) {
         List<JsonValue> anchors = new ArrayList<>();
         for (TourAnchor anchor : step.anchors()) {
-            anchors.add(JsonObject.empty().put("file", new JsonString(anchor.file()))
+            JsonObject json = JsonObject.empty().put("file", new JsonString(anchor.file()))
                     .put("startKey", new JsonString(anchor.startKey()))
-                    .put("endKey", new JsonString(anchor.endKey())));
+                    .put("endKey", new JsonString(anchor.endKey()));
+            if (anchor.hasNote()) {
+                json = json.put("note", new JsonString(anchor.note()));
+            }
+            anchors.add(json);
         }
         List<JsonValue> notes = new ArrayList<>();
         for (ImpactNote note : step.impactNotes()) {

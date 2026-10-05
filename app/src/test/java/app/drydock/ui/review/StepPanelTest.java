@@ -154,6 +154,37 @@ class StepPanelTest extends ApplicationTest {
     }
 
     @Test
+    void anOpenPredictLeadsWithTheQuestionAndWithholdsTheNarrative() {
+        interact(() -> panel.show(view(CheckProgress.fresh("c1"))));
+        assertTrue(lookup("Why the guard exists.").tryQuery().isEmpty(),
+                "the narrative says what the added lines do, which is what the PREDICT asks");
+        Node question = lookup("What happens?").query();
+        Node withheld = lookup(StepPanel.WITHHELD_NARRATIVE).query();
+        assertTrue(question.localToScene(question.getBoundsInLocal()).getMinY()
+                        < withheld.localToScene(withheld.getBoundsInLocal()).getMinY(),
+                "the question comes first, where the explanation would have been");
+    }
+
+    @Test
+    void anAnsweredPredictShowsTheNarrativeAndDropsTheWithheldNotice() {
+        CheckProgress passed = new CheckProgress("c1", 0, CheckProgress.Status.PASSED, Optional.empty(),
+                Optional.empty(), Optional.empty());
+        interact(() -> panel.show(view(passed)));
+        assertTrue(lookup("Why the guard exists.").tryQuery().isPresent());
+        assertTrue(lookup(StepPanel.WITHHELD_NARRATIVE).tryQuery().isEmpty());
+    }
+
+    @Test
+    void aRiskCheckNeverWithholdsTheNarrative() {
+        TourCheck risk = new TourCheck("r1", TourCheck.Kind.RISK, "What could break?", List.of(),
+                OptionalInt.empty(), "", List.of());
+        TourStep step = new TourStep("s1", "Guard", "Why the guard exists.", List.of(), List.of(), List.of(risk));
+        interact(() -> panel.show(new StepView(step, 1, 1, new StepProgress("s1", List.of(),
+                Map.of("r1", CheckProgress.fresh("r1")), StepProgress.Decision.NONE, Optional.empty(), false))));
+        assertTrue(lookup("Why the guard exists.").tryQuery().isPresent());
+    }
+
+    @Test
     void anchorChipsGoToTheirAnchor() {
         interact(() -> panel.show(view(CheckProgress.fresh("c1"))));
         clickOn("src/A.java:3");

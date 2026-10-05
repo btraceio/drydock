@@ -14,6 +14,7 @@ import app.drydock.domain.RepositoryId;
 import app.drydock.domain.RepositorySettings;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SshRemote;
+import app.drydock.domain.UiTheme;
 import app.drydock.domain.Workflow;
 import app.drydock.domain.WorkflowBrief;
 import app.drydock.domain.WorkflowId;
@@ -33,6 +34,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -728,6 +730,54 @@ class ApplicationStateCodecTest {
         assertEquals(1, decoded.reviewScopeChoices().size());
         assertEquals(SessionReviewScopes.Choice.LOCAL,
                 decoded.reviewScopeChoices().get(ManagedSessionId.of(OTHER_ID)));
+    }
+
+    @Test
+    void hiddenReviewKeyHintsRoundTrip() {
+        ApplicationState state = ApplicationState.empty()
+                .withUi(WorkspaceUiState.empty().withReviewKeyHintsHidden(true));
+
+        ApplicationState decoded = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state));
+
+        assertTrue(decoded.ui().reviewKeyHintsHidden());
+    }
+
+    @Test
+    void everyOtherUiChangeKeepsTheHiddenHints() {
+        // Each with* rebuilds the record; one that forgot the new component
+        // would silently show the hints again the next time the sidebar was
+        // resized or a session tab opened.
+        WorkspaceUiState hidden = WorkspaceUiState.empty().withReviewKeyHintsHidden(true);
+
+        assertTrue(hidden.withSidebarWidth(300).reviewKeyHintsHidden());
+        assertTrue(hidden.withTheme(UiTheme.LIGHT).reviewKeyHintsHidden());
+        assertTrue(hidden.withUiFontSize(14).reviewKeyHintsHidden());
+        assertTrue(hidden.withTerminalFontSize(14).reviewKeyHintsHidden());
+        assertTrue(hidden.withOpenSessionIds(List.of()).reviewKeyHintsHidden());
+        assertTrue(hidden.withSelectedSessionId(Optional.empty()).reviewKeyHintsHidden());
+        assertTrue(hidden.withSelectedRepositoryId(Optional.empty()).reviewKeyHintsHidden());
+        assertTrue(hidden.withExpandedRepositoryIds(Set.of()).reviewKeyHintsHidden());
+        assertTrue(hidden.withReviewScopeChoices(Map.of()).reviewKeyHintsHidden());
+    }
+
+    @Test
+    void reviewKeyHintsAreShownWhenTheMemberIsAbsentOrNotABoolean() {
+        // Cosmetic, so lenient: a state file from before the strip existed, or
+        // a hand-edited value, must neither fail the load nor hide anything.
+        JsonValue absent = JsonParser.parse("""
+                {"schemaVersion":2,"repositories":[],"sessions":[],
+                 "ui":{"selectedRepositoryId":null,"sidebarWidth":288.0,
+                       "expandedRepositoryIds":[],"theme":"DARK"}}
+                """);
+        JsonValue malformed = JsonParser.parse("""
+                {"schemaVersion":2,"repositories":[],"sessions":[],
+                 "ui":{"selectedRepositoryId":null,"sidebarWidth":288.0,
+                       "expandedRepositoryIds":[],"theme":"DARK",
+                       "reviewKeyHintsHidden":"yes"}}
+                """);
+
+        assertFalse(ApplicationStateCodec.fromJson(absent).ui().reviewKeyHintsHidden());
+        assertFalse(ApplicationStateCodec.fromJson(malformed).ui().reviewKeyHintsHidden());
     }
 
     @Test

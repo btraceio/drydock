@@ -24,6 +24,7 @@ import app.drydock.review.tour.HunkOverride;
 import app.drydock.review.tour.ImpactNote;
 import app.drydock.review.tour.ReviewTour;
 import app.drydock.review.tour.StepGrading;
+import app.drydock.review.tour.TourAnchor;
 import app.drydock.review.tour.TourCheck;
 import app.drydock.review.tour.TourCodec;
 import app.drydock.review.tour.TourFingerprint;
@@ -191,7 +192,9 @@ public final class McpToolRouter {
                         JsonObject.empty()
                                 .put("scopeId", schemaString("Review scope handle."))
                                 .put("steps", schemaArray("Array of {id, title, narrative (<=1000 chars), "
-                                        + "anchors[{file, startKey, endKey?}], impactNotes?[{file, line, text}], "
+                                        + "anchors[{file, startKey, endKey?, note? (<=400 chars: the one claim this "
+                                        + "range supports, shown under its last row)}], "
+                                        + "impactNotes?[{file, line, text}], "
                                         + "checks[{id, kind: predict|trace|risk, prompt, choices?[{text, at?{file, "
                                         + "line}}] (2-4, not for risk), answer? (0-based, not for risk), explanation, "
                                         + "alternates[{...same, no alternates}]}]}; at most 40 steps, 6 checks each."))
@@ -857,6 +860,9 @@ public final class McpToolRouter {
         for (TourStep step : steps) {
             PromptSafety.checkInboundText(step.title(), "tour.step.title");
             PromptSafety.checkInboundText(step.narrative(), "tour.step.narrative");
+            for (TourAnchor anchor : step.anchors()) {
+                PromptSafety.checkInboundText(anchor.note(), "tour.anchor.note");
+            }
             for (ImpactNote note : step.impactNotes()) {
                 PromptSafety.checkInboundText(note.text(), "tour.impactNote.text");
             }

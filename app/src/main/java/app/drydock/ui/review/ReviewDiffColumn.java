@@ -45,6 +45,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.IntConsumer;
 import java.util.function.Predicate;
 
 /**
@@ -712,6 +713,13 @@ final class ReviewDiffColumn extends BorderPane {
     void setStepMarkSource(StepMarkSource source) {
         stepMarks = source == null ? (file, key) -> Optional.empty() : source;
         refreshMarks();
+    }
+
+    private IntConsumer onClaimSelected = index -> { };
+
+    /** What clicking a claim's callout does: the controller makes that anchor the active one. */
+    void setOnClaimSelected(IntConsumer handler) {
+        onClaimSelected = handler == null ? index -> { } : handler;
     }
 
     /** Repaints the step marks through the same cheap render refresh as the pins. */
@@ -1617,7 +1625,51 @@ final class ReviewDiffColumn extends BorderPane {
                 HBox.setHgrow(band, Priority.ALWAYS);
                 box.getChildren().set(box.getChildren().indexOf(source), band);
             }
+            if (m.claim().isPresent()) {
+                StepMark.Claim claim = m.claim().get();
+                box.getStyleClass().add(claim.active() ? "tour-claim-active" : "tour-claim-dim");
+                if (claim.first()) {
+                    // At the row's right edge, like the "step N" tag: the
+                    // gutters on the left keep their width on every row.
+                    box.getChildren().add(claimBadge(claim.number()));
+                }
+            }
+            if (!m.callouts().isEmpty()) {
+                VBox stacked = new VBox(box);
+                stacked.getStyleClass().add("tour-claim-stack");
+                for (StepMark.Callout callout : m.callouts()) {
+                    stacked.getChildren().add(claimCallout(callout));
+                }
+                return stacked;
+            }
         }
+        return box;
+    }
+
+    private static Label claimBadge(int number) {
+        Label badge = new Label(Integer.toString(number));
+        badge.getStyleClass().add("tour-claim-badge");
+        return badge;
+    }
+
+    /**
+     * The claim under the last row of its range: a badge and the agent's
+     * sentence. The active claim shows in full; the others collapse to one
+     * line so the code, not the commentary, is what the column mostly shows.
+     * A real {@link Button}, so the keyboard reaches it, and clicking makes
+     * it the active claim without moving the viewport: the callout is
+     * already on screen.
+     */
+    private Region claimCallout(StepMark.Callout callout) {
+        Button text = UiFormats.literal(new Button(callout.text()));
+        text.getStyleClass().add("tour-claim-text");
+        text.setWrapText(callout.active());
+        text.setMaxWidth(Double.MAX_VALUE);
+        text.setOnAction(event -> onClaimSelected.accept(callout.index()));
+        HBox.setHgrow(text, Priority.ALWAYS);
+        HBox box = new HBox(8, claimBadge(callout.number()), text);
+        box.setAlignment(Pos.TOP_LEFT);
+        box.getStyleClass().addAll("tour-claim-callout", callout.active() ? "active" : "collapsed");
         return box;
     }
 

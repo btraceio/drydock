@@ -73,6 +73,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.function.BiFunction;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.UnaryOperator;
@@ -418,6 +419,11 @@ public final class SessionReviewView extends BorderPane {
     private final RecheckDispatch recheckDispatch = new RecheckDispatch();
     private final ReviewFindingsMargin margin;
     private final ReviewVerdictBar verdictBar;
+    private final TourKeyStrip keyStrip = new TourKeyStrip(this::toggleKeyHints);
+    /** Where the hide/show preference lives; null until the workspace wires it (tests, a bare board). */
+    private BooleanSupplier keyHintsHiddenSource;
+    private Consumer<Boolean> onKeyHintsHiddenChanged = hidden -> { };
+    private boolean keyHintsHiddenLocal;
 
     /** The MCP activity panel; absent when no server is running (tests, headless). */
     private final Optional<ReviewMcpActivityPanel> mcpPanel;
@@ -855,6 +861,8 @@ public final class SessionReviewView extends BorderPane {
             panel.setManaged(false);
             centre.getChildren().add(panel);
         });
+        // The key hints sit just above the verdict bar, in tour mode only.
+        centre.getChildren().add(keyStrip);
         // The verdict bar goes last, so even with the activity panel open it
         // is still the bottom-most thing and still always present.
         centre.getChildren().add(verdictBar);
@@ -950,6 +958,31 @@ public final class SessionReviewView extends BorderPane {
      */
     public void setOnChoiceChanged(Consumer<SessionReviewScopes.Choice> handler) {
         this.onChoiceChanged = handler == null ? ignored -> { } : handler;
+    }
+
+    /**
+     * Wires the key-hints preference to its persisted home: {@code hidden}
+     * is read each time the tour renders, so a board built before the reader
+     * hid the hints in another session still follows it, and {@code onChanged}
+     * is told when this board's reader toggles. Never called by a bare board,
+     * which then keeps the choice in memory.
+     */
+    public void setKeyHintsPreference(BooleanSupplier hidden, Consumer<Boolean> onChanged) {
+        this.keyHintsHiddenSource = hidden;
+        this.onKeyHintsHiddenChanged = onChanged == null ? ignored -> { } : onChanged;
+        keyStrip.setHidden(keyHintsHidden());
+    }
+
+    private boolean keyHintsHidden() {
+        return keyHintsHiddenSource != null ? keyHintsHiddenSource.getAsBoolean() : keyHintsHiddenLocal;
+    }
+
+    /** {@code h}, or the strip's own button: hide the hints, or show them again. */
+    private void toggleKeyHints() {
+        boolean hidden = !keyHintsHidden();
+        keyHintsHiddenLocal = hidden;
+        keyStrip.setHidden(hidden);
+        onKeyHintsHiddenChanged.accept(hidden);
     }
 
     /** The switcher's own callback: re-render on a real change, then tell the workspace. */
@@ -2135,6 +2168,7 @@ public final class SessionReviewView extends BorderPane {
         show(margin, false);
         show(stepPanel, false);
         show(verdictBar, false);
+        keyStrip.setTourShown(false);
         show(itemHeader, false);
         mcpPanel.ifPresent(panel -> show(panel, false));
     }
@@ -2144,6 +2178,7 @@ public final class SessionReviewView extends BorderPane {
         show(margin, true);
         show(stepPanel, true);
         show(verdictBar, true);
+        keyStrip.setTourShown(mode == ReviewMode.TOUR);
         show(itemHeader, true);
         if (mode == ReviewMode.TOUR && getLeft() == null) {
             setLeft(outline);
@@ -2681,6 +2716,7 @@ public final class SessionReviewView extends BorderPane {
             diffColumn.setWholeFiles(touring);
         }
         verdictBar.setTourMode(touring);
+        keyStrip.setTourShown(touring);
         if (touring) {
             tourController.render(tour);
         } else {
@@ -3065,6 +3101,17 @@ public final class SessionReviewView extends BorderPane {
         public void clearVerdictBar() {
             showFileOnBar(null, Optional.empty(), false);
             verdictBar.showProgress(0, 0);
+        }
+
+        @Override
+        public void showKeyHints(List<TourKeyHints.Hint> hints) {
+            keyStrip.setHidden(keyHintsHidden());
+            keyStrip.setHints(hints);
+        }
+
+        @Override
+        public void toggleKeyHints() {
+            SessionReviewView.this.toggleKeyHints();
         }
 
         @Override

@@ -2758,6 +2758,76 @@
 .review-code-row.tour-step-other {
     -fx-opacity: 0.72;
 }
+/* Claims: the current step's anchored ranges, each with the one sentence the
+   agent says about it. The active claim reads strongly; the rest recede. */
+.review-code-row.tour-claim-dim {
+    -fx-opacity: 0.55;
+}
+.review-code-row.tour-claim-active.row-context {
+    -fx-background-color: -drydock-accent-soft;
+}
+.tour-claim-badge {
+    -fx-background-color: -drydock-accent;
+    -fx-background-radius: 10px;
+    -fx-text-fill: -drydock-main;
+    -fx-font-size: 11px;
+    -fx-font-weight: 700;
+    -fx-min-width: 20px;
+    -fx-min-height: 20px;
+    -fx-alignment: center;
+}
+.tour-claim-stack {
+    -fx-spacing: 0;
+}
+.tour-claim-callout {
+    -fx-padding: 6 12 8 36;
+    -fx-background-color: -drydock-hover;
+    -fx-border-color: -drydock-border transparent -drydock-border transparent;
+    -fx-border-width: 1 0 1 0;
+}
+.tour-claim-callout.active {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-border-color: -drydock-accent transparent -drydock-accent transparent;
+}
+.tour-claim-callout .tour-claim-text {
+    -fx-background-color: transparent;
+    -fx-padding: 0;
+    -fx-alignment: top-left;
+    -fx-text-alignment: left;
+    -fx-text-fill: -drydock-text;
+    -fx-font-size: 12.5px;
+}
+.tour-claim-callout.collapsed .tour-claim-text {
+    -fx-text-fill: -drydock-text-dim;
+}
+/* The key-hints strip: the keys that work now, under the code. */
+.tour-key-strip {
+    -fx-padding: 6 14 6 14;
+    -fx-background-color: -drydock-main;
+    -fx-border-color: -drydock-border transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+}
+.tour-key-strip.hidden-hints {
+    -fx-padding: 2 14 2 14;
+}
+.tour-key-strip-label {
+    -fx-font-size: 11.5px;
+    -fx-text-fill: -drydock-text-dim;
+}
+.tour-key-strip-toggle {
+    -fx-background-color: transparent;
+    -fx-border-color: -drydock-border;
+    -fx-border-radius: 6px;
+    -fx-background-radius: 6px;
+    -fx-font-size: 11px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-padding: 2 8 2 8;
+    -fx-content-display: right;
+    -fx-graphic-text-gap: 6;
+}
+.tour-key-strip-toggle:hover {
+    -fx-background-color: -drydock-hover;
+}
 .tour-step-tag {
     -fx-font-size: 10px;
     -fx-text-fill: -drydock-text-dim;
@@ -3418,6 +3488,9 @@
     -fx-text-fill: -drydock-text-dim;
     -fx-font-size: 12px;
     -fx-line-spacing: 2px;
+}
+.step-panel .step-panel-withheld {
+    -fx-font-style: italic;
 }
 .step-panel .step-anchor-chip {
     -fx-background-radius: 12px;
