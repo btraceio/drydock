@@ -195,7 +195,10 @@ public final class McpToolRouter {
                                         + "anchors[{file, startKey, endKey?, note? (<=400 chars: the one claim this "
                                         + "range supports, shown under its last row)}], "
                                         + "impactNotes?[{file, line, text}], "
-                                        + "checks[{id, kind: predict|trace|risk, prompt, choices?[{text, at?{file, "
+                                        + "checks[{id, kind: predict (answerable from the removed and surrounding code: "
+                                        + "the step's added lines stay hidden until it is answered, and a predict "
+                                        + "on a step whose rows are all added is rejected)|trace (about the added "
+                                        + "lines; hides nothing)|risk, prompt, choices?[{text, at?{file, "
                                         + "line}}] (2-4, not for risk), answer? (0-based, not for risk), explanation, "
                                         + "alternates[{...same, no alternates}]}]}; at most 40 steps, 6 checks each."))
                                 .put("onlySteps", schemaBoolean("Merge these steps into the stored tour instead "

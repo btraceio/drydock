@@ -56,6 +56,16 @@ public record StepProgress(String stepId, List<String> hunkDigests, Map<String, 
         return new StepProgress(stepId, hunkDigests, checks, decision, overrideReason, newStale);
     }
 
+    /**
+     * Whether the reviewer has done anything on this step: decided it, or
+     * answered, attempted or begun to answer any of its checks. A step with
+     * none is replaced by a new tour without losing anything.
+     */
+    public boolean touched() {
+        return decision != Decision.NONE || checks.values().stream().anyMatch(check ->
+                check.attempt() > 0 || check.status() != CheckProgress.Status.OPEN || check.riskAnswer().isPresent());
+    }
+
     /** Passed or overridden, and not stale. */
     public boolean settledForApproval() {
         return !stale && (decision == Decision.PASSED || decision == Decision.OVERRIDDEN);

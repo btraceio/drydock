@@ -8,6 +8,9 @@ import java.util.List;
 import java.util.OptionalInt;
 
 import static app.drydock.review.tour.TourFixtures.SCOPE;
+import static app.drydock.review.tour.TourFixtures.add;
+import static app.drydock.review.tour.TourFixtures.file;
+import static app.drydock.review.tour.TourFixtures.hunk;
 import static app.drydock.review.tour.TourFixtures.choice;
 import static app.drydock.review.tour.TourFixtures.coveringTour;
 import static app.drydock.review.tour.TourFixtures.deletedFile;
@@ -139,5 +142,78 @@ class TourValidatorTest {
                 List.of(new ImpactNote("src/C.java", 0, "assumes non-null")), List.of(predict("c1")));
         assertTrue(anyContains(TourValidator.validate(tour(diff, noted), diff),
                 "step s1: impact note on src/C.java needs a line of 1 or more"));
+    }
+
+    // ---- a PREDICT needs something to read ----------------------------------
+
+    /** A file that is entirely added: rows n1..n3, no removed or unchanged row. */
+    private static UnifiedDiff allAddedDiff() {
+        return new UnifiedDiff(List.of(file("src/New.java", hunk(add(1, "a"), add(2, "b"), add(3, "c")))));
+    }
+
+    private static TourCheck trace(String id) {
+        TourCheck alternate = new TourCheck(id + "_alt", TourCheck.Kind.TRACE, "Which line?",
+                List.of(choice("one"), choice("two")), OptionalInt.of(0), "Line one.", List.of());
+        return new TourCheck(id, TourCheck.Kind.TRACE, "Which line guards it?",
+                List.of(choice("one"), choice("two")), OptionalInt.of(0), "Line one.", List.of(alternate));
+    }
+
+    @Test
+    void aPredictOnAStepWhoseAnchorsAreAllAddedRowsIsRejectedWithTheWayOut() {
+        UnifiedDiff added = allAddedDiff();
+        ReviewTour tour = tour(added,
+                step("s1", List.of(new TourAnchor("src/New.java", "n1", "n3")), predict("c1")));
+
+        List<String> errors = TourValidator.validate(tour, added);
+
+        assertTrue(anyContains(errors, "step s1: check c1 is a PREDICT"), errors.toString());
+        assertTrue(anyContains(errors, "nothing to read"), errors.toString());
+        assertTrue(anyContains(errors, "TRACE"), errors.toString());
+    }
+
+    @Test
+    void aTraceOrARiskOnTheSameStepIsFine() {
+        UnifiedDiff added = allAddedDiff();
+        List<TourAnchor> anchors = List.of(new TourAnchor("src/New.java", "n1", "n3"));
+
+        assertEquals(List.of(), TourValidator.validate(tour(added, step("s1", anchors, trace("c1"))), added));
+        assertEquals(List.of(), TourValidator.validate(tour(added, step("s1", anchors, risk("c1"))), added));
+    }
+
+    @Test
+    void aPredictWhoseAnchorsIncludeAnUnchangedOrRemovedRowIsFine() {
+        // src/A.java hunk 1: ctx n20, DEL o20, ADD n21, ctx n22.
+        assertEquals(List.of(), TourValidator.validate(coveringTour(diff), diff));
+        ReviewTour deletionOnly = tour(diff,
+                step("s1", List.of(new TourAnchor("src/A.java", "n1", "n22")), risk("c1")),
+                step("s2", List.of(new TourAnchor("src/B.java", "o5", "o6")), predict("c2")));
+        assertEquals(List.of(), TourValidator.validate(deletionOnly, diff));
+    }
+
+    @Test
+    void oneAnchorWithSomethingToReadIsEnoughForTheStep() {
+        UnifiedDiff mixed = new UnifiedDiff(List.of(
+                file("src/New.java", hunk(add(1, "a"), add(2, "b"))),
+                file("src/Old.java", hunk(TourFixtures.ctx(1, 1, "x"), add(2, "y"), TourFixtures.ctx(2, 3, "z")))));
+        ReviewTour tour = tour(mixed, step("s1", List.of(
+                new TourAnchor("src/New.java", "n1", "n2"), new TourAnchor("src/Old.java", "n1", "n3")),
+                predict("c1")));
+
+        assertEquals(List.of(), TourValidator.validate(tour, mixed));
+    }
+
+    @Test
+    void anAlternatePredictIsHeldToTheSameRuleBecauseItHidesTheRowsAgain() {
+        UnifiedDiff added = allAddedDiff();
+        TourCheck predictAlternate = new TourCheck("c1_alt", TourCheck.Kind.PREDICT, "Again?",
+                List.of(choice("a"), choice("b")), OptionalInt.of(0), "Because.", List.of());
+        TourCheck check = new TourCheck("c1", TourCheck.Kind.TRACE, "Which line?",
+                List.of(choice("one"), choice("two")), OptionalInt.of(0), "One.", List.of(predictAlternate));
+
+        List<String> errors = TourValidator.validate(
+                tour(added, step("s1", List.of(new TourAnchor("src/New.java", "n1", "n3")), check)), added);
+
+        assertTrue(anyContains(errors, "check c1_alt is a PREDICT"), errors.toString());
+        assertTrue(errors.stream().noneMatch(error -> error.contains("check c1 is a PREDICT")), errors.toString());
     }
 }

@@ -64,6 +64,26 @@ class ReviewInstructionsTest {
     }
 
     @Test
+    void bothFormsSayWhichCheckKindToPickAndWhy() {
+        for (boolean subagents : new boolean[] {true, false}) {
+            String instruction = ReviewInstructions.forScope("rs_abc123", subagents);
+            assertTrue(instruction.contains("predict only if its question can be answered from the removed and "
+                    + "surrounding code"), instruction);
+            assertTrue(instruction.contains("hides a step's added lines until a predict is answered"), instruction);
+            assertTrue(instruction.contains("ask about the added lines themselves with a trace check"), instruction);
+            assertFalse(instruction.contains("\n"));
+        }
+    }
+
+    @Test
+    void aTourRefreshSaysWhichCheckKindToPickToo() {
+        String line = ReviewInstructions.forTourRefresh("rs_abc123", List.of("s2"), 1);
+
+        assertTrue(line.contains("ask about the added lines themselves with a trace check"), line);
+        assertFalse(line.contains("\n"));
+    }
+
+    @Test
     void aRiskCheckRequestNamesTheCheckAndTheToolInOneLine() {
         String line = ReviewInstructions.forRiskCheck("rs_abc123", "c7");
 

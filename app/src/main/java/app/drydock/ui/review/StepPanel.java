@@ -53,7 +53,8 @@ final class StepPanel extends VBox {
     static final double MAX_WIDTH = 900;
     /** Stands where the narrative would be while the step's PREDICT is still open. */
     static final String WITHHELD_NARRATIVE =
-            "Read the code first. The agent's explanation, and its note on each range, unlock when you answer.";
+            "Read the surrounding code first. This step's added lines are hidden until you answer, "
+                    + "and the agent's explanation unlocks with them.";
     /** Shown on a step whose code moved under it once a refresh was actually sent to the agent. */
     static final String STALE_NOTICE = "This step's code changed; the agent is re-writing it.";
     /** Shown on a step whose code moved under it while no refresh has been sent for this diff. */
@@ -203,9 +204,9 @@ final class StepPanel extends VBox {
             // Predict first: the narrative states what the added lines do,
             // which is exactly what the open PREDICT asks, so it stays back
             // until the reader has committed to an answer. What replaces it
-            // comes BEFORE the question -- "read the code first", with the
-            // links to the ranges -- because a question about code the reader
-            // has not been pointed at is a question about nothing.
+            // comes BEFORE the question -- what is hidden and what is not,
+            // with the links to the ranges -- because a question about code
+            // the reader has not been pointed at is a question about nothing.
             Label withheld = new Label(WITHHELD_NARRATIVE);
             withheld.setWrapText(true);
             withheld.getStyleClass().addAll("step-panel-narrative", "step-panel-withheld");

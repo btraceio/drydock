@@ -165,6 +165,14 @@ class StepPanelTest extends ApplicationTest {
         assertTrue(link < question, "and only then the question about that code");
     }
 
+    @Test
+    void theNoticeSaysWhatIsHiddenAndWhatIsNot() {
+        assertTrue(StepPanel.WITHHELD_NARRATIVE.contains("surrounding code"));
+        assertTrue(StepPanel.WITHHELD_NARRATIVE.contains("added lines are hidden until you answer"));
+        assertFalse(StepPanel.WITHHELD_NARRATIVE.contains("Read the code first"),
+                "it must not send the reader to read the very lines the diff column hides");
+    }
+
     private static double top(Node node) {
         return node.localToScene(node.getBoundsInLocal()).getMinY();
     }

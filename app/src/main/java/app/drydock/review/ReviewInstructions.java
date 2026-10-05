@@ -27,6 +27,18 @@ public final class ReviewInstructions {
             + "that range supports, as a statement about the code (drydock shows it under those lines "
             + "once the reviewer has answered the step's check, so it may state the answer)";
 
+    /**
+     * Which check kind to pick, shared by the first tour and a refresh. Drydock
+     * hides a step's added lines until its PREDICT is answered, so a PREDICT
+     * about the added lines is a question the reader cannot answer; without
+     * this an agent has only the kind names to go on.
+     */
+    private static final String CHECK_KINDS = "choose each check's kind by what the reviewer can see: predict "
+            + "only if its question can be answered from the removed and surrounding code, because drydock "
+            + "hides a step's added lines until a predict is answered (and rejects a predict on a step whose "
+            + "rows are all added); ask about the added lines themselves with a trace check, which hides "
+            + "nothing";
+
     private ReviewInstructions() {
     }
 
@@ -36,7 +48,7 @@ public final class ReviewInstructions {
                 + ", call review_state first so already-settled findings are not re-flagged, "
                 + "then post review_finding and review_tour against that handle; review_tour is validated "
                 + "(every changed row in a step, each step at least one check with an alternate) and lists "
-                + "every problem if it is rejected, so fix them and post it again; " + ANCHOR_NOTES;
+                + "every problem if it is rejected, so fix them and post it again; " + ANCHOR_NOTES + "; " + CHECK_KINDS;
         return supportsSubagents
                 ? "Dispatch a code-review subagent to review the changes in this worktree: it must "
                         + work + ". Report only its summary back here."
@@ -107,6 +119,6 @@ public final class ReviewInstructions {
         return "For review handle " + scopeId + ", the diff changed under your tour: call review_scope and "
                 + "review_state, then call review_tour with onlySteps true to " + String.join(" and ", asks)
                 + "; the steps you do not send keep the reviewer's progress. For the steps you send, "
-                + ANCHOR_NOTES + ".";
+                + ANCHOR_NOTES + "; " + CHECK_KINDS + ".";
     }
 }

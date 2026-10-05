@@ -2800,6 +2800,12 @@
 .tour-claim-callout.collapsed .tour-claim-text {
     -fx-text-fill: -drydock-text-dim;
 }
+/* "Regenerate tour" waiting for its confirming click: it discards progress, so it says so. */
+.review-chip-button.armed {
+    -fx-border-color: -drydock-accent;
+    -fx-text-fill: -drydock-accent;
+}
+
 /* The draggable edge between the code and the step panel. A 3px line at rest,
    the same width in the accent while hovered, focused or dragged -- the width
    never changes, so nothing shifts under the pointer. */
