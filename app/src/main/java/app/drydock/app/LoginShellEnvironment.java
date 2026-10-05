@@ -14,7 +14,9 @@ import java.nio.charset.CharsetDecoder;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashSet;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Repairs the process {@code PATH} when the application was launched from
@@ -92,43 +94,120 @@ public final class LoginShellEnvironment {
     /**
      * Merges the login shell's PATH into this process's environment. Best
      * effort: a broken/slow shell startup logs a warning and the app
-     * launches with whatever PATH it inherited (correct for terminal
-     * launches, bare for Finder launches). Runs the probe on a daemon
-     * thread so a login shell that hangs (e.g. a blocking zshrc) cannot
-     * hang application startup past {@link #PROBE_TIMEOUT_MILLIS}. A no-op
-     * on non-macOS hosts (see {@link #SUPPORTED}).
+     * launches with whatever PATH it inherited. The probe runs on a daemon
+     * thread so a login shell that hangs (e.g. a blocking zshrc) cannot hang
+     * application startup past {@link #PROBE_TIMEOUT_MILLIS}. A no-op on
+     * non-macOS hosts (see {@link #SUPPORTED}).
+     *
+     * <p>Two apply paths, both race-free against the JDK's one-time
+     * environment snapshot (taken lazily on the first {@code System.getenv}
+     * / {@code ProcessBuilder} use, which {@code Toolkit.getDefaultToolkit}
+     * triggers moments after this returns):
+     *
+     * <p><b>Fast</b> (shell reports PATH within {@code PROBE_TIMEOUT_MILLIS}):
+     * the merge is applied on this (main) thread, then the JDK snapshot is
+     * forced on the same thread, so the snapshot captures the repaired PATH.
+     * Both {@code ProcessBuilder} children (which inherit the snapshot) and
+     * terminal children (ghostty's fork/exec, which inherit the real env)
+     * see the repaired PATH.
+     *
+     * <p><b>Slow</b> (shell takes longer): main proceeds without waiting,
+     * forces the JDK snapshot -- with the inherited, bare PATH -- and hands
+     * the merge to the daemon. When the probe eventually completes the
+     * daemon applies it to the real env with {@code setenv(3)}, strictly
+     * after the snapshot (the handoff latch is released only once the
+     * snapshot is done), so the daemon's {@code setenv} cannot race the
+     * snapshot's {@code environ} read. Terminal-launched sessions (pi,
+     * claude) read the real env and still receive the repaired PATH;
+     * {@code ProcessBuilder}-spawned tools (git/gh/docker/ddtool probes)
+     * keep the bare snapshot. Applying late rather than abandoning is what
+     * keeps a slow zshrc from breaking every agent session: the sessions
+     * launch through the terminal, not the JDK.
      */
     public static void mergeLoginShellPath() {
         if (!SUPPORTED) {
             return;
         }
-        // Once the timeout expires the application proceeds (and the JDK
-        // may take its one-time environment snapshot at any moment); the
-        // still-running daemon worker must then never call setenv(3) -- a
-        // late mutation would race concurrent getenv(3) callers and diverge
-        // from the JDK's snapshot. The flag is checked immediately before
-        // the setenv call.
-        AtomicBoolean abandoned = new AtomicBoolean();
-        Thread worker = new Thread(() -> probeAndMerge(abandoned), "login-shell-path-probe");
+        AtomicReference<String> probed = new AtomicReference<>();
+        CountDownLatch probeDone = new CountDownLatch(1);
+        CountDownLatch mainDecided = new CountDownLatch(1);
+        Thread worker = new Thread(() -> {
+            try {
+                String loginPath = readLoginShellPath();
+                if (loginPath != null) {
+                    probed.set(loginPath);
+                }
+            } catch (Throwable t) {
+                LOG.log(Level.WARNING, "Login shell PATH probe failed; keeping the inherited PATH", t);
+            } finally {
+                probeDone.countDown();
+            }
+            // Wait for main to decide who applies. In the fast case main
+            // applies itself and clears the flag; in the slow case main sets
+            // it after forcing the snapshot. The await is what makes the
+            // boundary (probe finishes right at the timeout) deterministic:
+            // the merge is applied exactly once, never lost and never
+            // doubled, and the daemon's setenv never overlaps the snapshot.
+            try {
+                mainDecided.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+            if (workerShouldApply) {
+                applyMerge(probed.get(), true);
+            }
+        }, "login-shell-path-probe");
         worker.setDaemon(true);
         worker.start();
+        boolean fast;
         try {
-            worker.join(PROBE_TIMEOUT_MILLIS);
+            fast = probeDone.await(PROBE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            fast = false;
         }
-        if (worker.isAlive()) {
-            abandoned.set(true);
+        if (fast) {
+            // Apply on this thread, then force the snapshot AFTER the setenv
+            // so ProcessBuilder children capture the repaired PATH. Both
+            // calls are on the main thread, so no concurrent getenv/setenv.
+            applyMerge(probed.get(), false);
+            System.getenv("PATH");
+            workerShouldApply = false;
+            mainDecided.countDown();
+        } else {
             LOG.log(Level.WARNING, "Login shell did not report its PATH within "
-                    + PROBE_TIMEOUT_MILLIS + "ms; child processes keep the inherited PATH");
+                    + PROBE_TIMEOUT_MILLIS + "ms; the merge will be applied late. "
+                    + "Terminal-launched sessions (pi, claude) still receive the repaired PATH; "
+                    + "ProcessBuilder-spawned tools keep the inherited PATH.");
+            // Force the snapshot BEFORE releasing the handoff, so the daemon's
+            // later setenv cannot race the snapshot's environ read.
+            System.getenv("PATH");
+            workerShouldApply = true;
+            mainDecided.countDown();
         }
     }
 
-    private static void probeAndMerge(AtomicBoolean abandoned) {
+    /**
+     * Set by main after it decides who applies the merge; read by the daemon
+     * after {@code mainDecided} opens. The latch's happens-before makes the
+     * volatile load safe without further sync.
+     */
+    private static volatile boolean workerShouldApply;
+
+    /**
+     * Merges {@code loginPath} into the real {@code PATH}. {@code late} only
+     * changes the log line (the merge is equally correct either way; the
+     * distinction is for diagnosing a slow shell). Null/blank {@code loginPath}
+     * is a failed probe -- logged once on the fast path, silent on the late
+     * path (the slow path already warned about the timeout).
+     */
+    private static void applyMerge(String loginPath, boolean late) {
         try {
-            String loginPath = readLoginShellPath();
             if (loginPath == null || loginPath.isBlank()) {
-                LOG.log(Level.WARNING, "Could not read the login shell PATH; keeping the inherited PATH");
+                if (!late) {
+                    LOG.log(Level.WARNING, "Could not read the login shell PATH; keeping the inherited PATH");
+                }
                 return;
             }
             String current = getenv("PATH");
@@ -149,16 +228,35 @@ public final class LoginShellEnvironment {
             }
             String value = String.join(":", merged);
             if (!value.equals(current)) {
-                if (abandoned.get()) {
-                    LOG.log(Level.WARNING,
-                            "Login shell PATH arrived after the startup timeout; leaving the environment untouched");
-                    return;
-                }
                 setenv("PATH", value);
-                LOG.log(Level.INFO, "PATH merged from the login shell: {0}", value);
+                LOG.log(Level.INFO, "PATH merged from the login shell{0}: {1}",
+                        new Object[] { late ? " (applied late)" : "", value });
             }
         } catch (Throwable t) {
             LOG.log(Level.WARNING, "Login shell PATH merge failed; keeping the inherited PATH", t);
+        }
+    }
+
+    /**
+     * The live value of {@code PATH} in this process's real environment, read
+     * via {@code getenv(3)} -- not the JDK's one-time snapshot, which is
+     * frozen at startup and does not reflect a merge applied after it. For
+     * launch-command builders that must know whether a dependency is already
+     * on the PATH a terminal-launched session will inherit.
+     *
+     * <p>Safe to call after startup, once the login-shell merge has settled
+     * (fast or late); the merge worker's {@code setenv(3)} is done by the
+     * time the user opens a session. Falls back to {@link System#getenv} on
+     * non-macOS hosts.
+     */
+    public static String currentRealPath() {
+        if (!SUPPORTED) {
+            return System.getenv("PATH");
+        }
+        try {
+            return getenv("PATH");
+        } catch (Throwable t) {
+            return System.getenv("PATH");
         }
     }
 
