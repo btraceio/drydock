@@ -15,6 +15,7 @@ class AgentKindTest {
         assertEquals("claude", AgentKind.CLAUDE.persistedName());
         assertEquals("codex", AgentKind.CODEX.persistedName());
         assertEquals("pi", AgentKind.PI.persistedName());
+        assertEquals("terminal", AgentKind.TERMINAL.persistedName());
     }
 
     @Test
@@ -31,7 +32,15 @@ class AgentKindTest {
     }
 
     @Test
-    void preferenceOrderIsClaudeCodexPi() {
-        assertEquals(List.of(AgentKind.CLAUDE, AgentKind.CODEX, AgentKind.PI), AgentKind.preferenceOrder());
+    void preferenceOrderIsClaudeCodexPiTerminal() {
+        assertEquals(List.of(AgentKind.CLAUDE, AgentKind.CODEX, AgentKind.PI, AgentKind.TERMINAL),
+                AgentKind.preferenceOrder());
+    }
+
+    /** TERMINAL is never the resolved default while any agent CLI is available. */
+    @Test
+    void terminalComesLast() {
+        assertEquals(AgentKind.TERMINAL, AgentKind.preferenceOrder()
+                .get(AgentKind.preferenceOrder().size() - 1));
     }
 }

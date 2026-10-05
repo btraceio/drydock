@@ -106,6 +106,7 @@ final class StartSessionModal extends VBox {
 
         Label taskLabel = new Label();
         taskLabel.getStyleClass().add("worktree-field-label");
+        VBox taskBox = new VBox(4, taskLabel, taskField);
 
         commandPreview.getStyleClass().add("worktree-command-preview");
         commandPreview.setWrapText(true);
@@ -115,9 +116,15 @@ final class StartSessionModal extends VBox {
         // Title, task label, and prompt all track the selected agent, so the
         // modal never advertises one agent while the picker has another
         // selected. Runs on selection change and once for the initial choice.
+        // A TERMINAL session has no agent to hand a task to, so the task
+        // field disappears entirely for it (typed text would otherwise be
+        // executed as a shell command).
         Consumer<AgentKind> applyAgent = kind -> {
             String name = agentDisplayName(kind);
             title.setText("Start a " + name + " session");
+            boolean terminal = kind == AgentKind.TERMINAL;
+            taskBox.setManaged(!terminal);
+            taskBox.setVisible(!terminal);
             taskLabel.setText("Task for " + name);
             taskField.setPromptText("Optional: a task for " + name + "; it is typed into the new session");
             boolean evalOk = registry.evalAvailable(kind);
@@ -155,7 +162,7 @@ final class StartSessionModal extends VBox {
         Label targetLabel = new Label("Worktree");
         targetLabel.getStyleClass().add("worktree-field-label");
 
-        getChildren().addAll(header, selector, new VBox(4, targetLabel, target), new VBox(4, taskLabel, taskField),
+        getChildren().addAll(header, selector, new VBox(4, targetLabel, target), taskBox,
                 evalMode, commandPreview, buttons);
         Platform.runLater(taskField::requestFocus);
     }

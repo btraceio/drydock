@@ -2669,6 +2669,7 @@ public final class RepositorySidebar extends VBox {
                 case CLAUDE -> "Eval mode: on (x-target-account: eval via the eval container)"
                         + claudeEvalTokenLine(session);
                 case CODEX -> "Eval mode: on (not supported for Codex; requests are NOT rerouted)";
+                case TERMINAL -> "Eval mode: on (not supported for Terminal; requests are NOT rerouted)";
             };
         }
 

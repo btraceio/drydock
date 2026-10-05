@@ -27,6 +27,7 @@ public final class AgentMarks {
             case CLAUDE -> "✳" + TEXT_PRESENTATION;
             case CODEX -> "◈";
             case PI -> "π";
+            case TERMINAL -> "❯";
         };
     }
 
