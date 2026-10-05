@@ -61,6 +61,14 @@ TourCheck(id, kind, prompt, choices, answerKey, explanation,
   valid and renders from the narrative alone.
 - PREDICT and TRACE carry choices and an answer key that must be one of the
   choices. RISK carries neither. Every check carries at least one alternate.
+- **Which kind to pick** follows from what the reader can see. A PREDICT hides
+  the step's added rows until it is answered (§5), so its question must be
+  answerable from the removed and surrounding code -- "what will this do?",
+  asked over the old version. A question about the added lines themselves ("which
+  line makes this safe?") is a TRACE, which hides nothing. The agent is told
+  this in its prompt and in `review_tour`'s schema, and the validator enforces
+  the floor of it: a PREDICT (or a PREDICT alternate) on a step whose anchors
+  cover only added rows is rejected, since nothing is left to read.
 
 **Coverage invariant.** Every hunk of the scope's diff is covered by at least
 one anchor. An approval that skipped part of the change is exactly the rubber
@@ -179,9 +187,11 @@ outranks a chosen width, as it outranks every rail.
   narrative, then the impact (agent notes pinned on top, then called-from
   and calls lists with their provenance), then the check, then any findings
   on the step's lines that still need triage. Findings also show in the
-  column gutter. While a PREDICT is open the order flips: the check leads and
-  the narrative waits behind a "Read the code first" notice, because the
-  narrative states what the added lines do.
+  column gutter. While a PREDICT is open the order flips: a notice -- the step's
+  added lines are hidden until you answer, the code around them is not --
+  then the links to the step's ranges, then the check, with the narrative held
+  back because it states what the added lines do. The reader is told what is
+  hidden and pointed at what is not before being asked anything.
 - **Bottom: the key-hints strip, then the shared trail bar.** The strip lists
   only the keys that work in the current state (answering a check, reading,
   step decided) and hides with `h`; hidden, a "Shortcuts h" button remains.
@@ -358,7 +368,7 @@ path stay as computed input to the agent.
 | Tool | Change |
 |---|---|
 | `review_scope` | New `impact` include: measured callers and callees per changed symbol, and the signature-changed flags. `sections` and the reading path remain, as the suggested order. |
-| `review_tour` *(new)* | Submits the tour, or with `onlySteps` replaces stale steps and adds steps for uncovered hunks. Validation is all-or-nothing and lists concrete errors: a hunk not covered; an anchor key that is not a line of the diff; an impact note off-range; a `withheldBy` finding with no check on a step anchoring its lines; a withheld `BLOCKING` finding; a check without an alternate; an answer key not among the choices. |
+| `review_tour` *(new)* | Submits the tour, or with `onlySteps` replaces stale steps and adds steps for uncovered hunks. Validation is all-or-nothing and lists concrete errors: a hunk not covered; an anchor key that is not a line of the diff; an impact note off-range; a `withheldBy` finding with no check on a step anchoring its lines; a withheld `BLOCKING` finding; a check without an alternate; an answer key not among the choices; a PREDICT on a step whose anchored rows are all added rows. |
 | `review_finding` | Agent findings land `PROPOSED`. Optional `withheldBy: checkId`. |
 | `review_check` *(new)* | The agent's verdict on a RISK answer: `holds`, `partly` or `doesNotHold`, with a reason. |
 | `review_state` | No longer reports `intents`. Tour progress; RISK answers awaiting a verdict, *with the answer text*; triage outcomes, including dismissal reasons. |
