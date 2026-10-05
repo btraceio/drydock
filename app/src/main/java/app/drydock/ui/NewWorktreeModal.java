@@ -13,6 +13,9 @@ import app.drydock.git.WorktreeNaming;
 import app.drydock.git.WorktreeService;
 import app.drydock.ui.NewWorktreeState.Mode;
 import javafx.application.Platform;
+import javafx.collections.FXCollections;
+import javafx.collections.ObservableList;
+import javafx.collections.transformation.FilteredList;
 import javafx.geometry.Pos;
 import javafx.scene.control.Button;
 import javafx.scene.control.CheckBox;
@@ -85,6 +88,16 @@ final class NewWorktreeModal extends VBox {
      */
     private final TextField newBranchField = new TextField();
     private final ComboBox<BranchRef> branchField = new ComboBox<>();
+    /** The full branch list; {@link #branchFiltered} is the popup view over it. */
+    private final ObservableList<BranchRef> branchSource = FXCollections.observableArrayList();
+    /**
+     * Filters {@link #branchSource} to the picker editor's query. Backing the
+     * combo with a filtered view (rather than filtering {@code getItems()}
+     * in place) lets the dropdown narrow as the user types without a second
+     * item source; see {@link #onPickerTextChanged} for the value lockstep
+     * that keeps the skin from clobbering the editor while it filters.
+     */
+    private final FilteredList<BranchRef> branchFiltered = new FilteredList<>(branchSource);
 
     private final Button refreshButton = new Button("⟳");
     private final Label hintLine = new Label();
@@ -244,6 +257,7 @@ final class NewWorktreeModal extends VBox {
         branchField.setEditable(true);
         branchField.setMaxWidth(Double.MAX_VALUE);
         branchField.getStyleClass().add("worktree-branch-combo");
+        branchField.setItems(branchFiltered);
         branchField.setConverter(new BranchRefConverter());
         branchField.setCellFactory(view -> new ListCell<>() {
             @Override
@@ -268,7 +282,7 @@ final class NewWorktreeModal extends VBox {
         // editor's promptText to the ComboBox's, and setting a bound value
         // throws ("FakeFocusTextField.promptText : A bound value cannot be set").
         branchField.setPromptText("Loading branches…");
-        branchField.getEditor().textProperty().addListener((obs, oldText, newText) -> onBranchTextChanged());
+        branchField.getEditor().textProperty().addListener((obs, oldText, newText) -> onPickerTextChanged());
         // Not optional. ComboBoxPopupControl.updateDisplayNode writes the
         // editor only when the converter's string differs from the text
         // already there -- so picking the OTHER row of a duplicate-named pair,
@@ -452,6 +466,53 @@ final class NewWorktreeModal extends VBox {
     }
 
     /**
+     * The existing-branch picker's editor listener: narrows the dropdown to
+     * branches whose name contains the typed query, re-derives the directory
+     * and state, and -- the load-bearing part -- keeps the picker's value in
+     * lockstep with the editor text.
+     *
+     * <p>The ComboBox skin's {@code updateDisplayNode} re-syncs the editor
+     * from {@code converter.toString(value)} whenever the items change and the
+     * two disagree, so filtering the popup on each keystroke would wipe what
+     * the user just typed: the skin writes the old value's name back over the
+     * new query (verified -- a {@code FilteredList} predicate change fires the
+     * same items-change that {@link #applyCatalog}'s {@code setAll} does, and a
+     * selected value whose name differs from the query is written straight
+     * back into the editor). Keeping {@code value.name()} equal to the editor
+     * text makes the two agree, so the skin writes nothing. Free typing sets a
+     * fabricated local ref, which resolves text-first -- exactly what the
+     * editor text already meant; a picked ref's name already matches the text,
+     * so it is left alone and its remote flag survives for the duplicate-name
+     * disambiguation {@link NewWorktreeState#resolve} exists to support.
+     *
+     * <p>The popup is shown while there are matches to show, and hidden when
+     * the query is cleared or matches nothing -- an empty dropdown is worse
+     * than no dropdown. Suppressed entirely while the picker itself is
+     * invisible: the listener still fires from {@link #applyCatalog}'s editor
+     * repair while the modal is in new-branch mode, and popping a hidden
+     * combo's dropdown would be noise.
+     */
+    private void onPickerTextChanged() {
+        String text = branchField.getEditor().getText();
+        String query = (text == null ? "" : text).strip();
+        branchFiltered.setPredicate(branch -> query.isEmpty()
+                || branch.name().toLowerCase().contains(query.toLowerCase()));
+        BranchRef selected = branchField.getValue();
+        boolean valueMatchesText = selected != null && selected.name().equals(query);
+        if (!valueMatchesText) {
+            branchField.setValue(query.isEmpty() ? null : BranchRef.local(query));
+        }
+        if (branchField.isVisible()) {
+            if (query.isEmpty() || branchFiltered.isEmpty()) {
+                branchField.hide();
+            } else if (!branchField.isShowing()) {
+                branchField.show();
+            }
+        }
+        onBranchTextChanged();
+    }
+
+    /**
      * Both branch controls share this, and only the visible one reaches it:
      * the hidden control's listener still fires (a catalog reload wipes and
      * repairs the combo's editor), and deriving from it would rewrite the
@@ -575,7 +636,7 @@ final class NewWorktreeModal extends VBox {
         // here would compare against text that has not been wiped yet; the
         // restore has to run after that sync.
         String typed = branchField.getEditor().getText();
-        branchField.getItems().setAll(loaded.branches());
+        branchSource.setAll(loaded.branches());
         Platform.runLater(() -> {
             if (!typed.equals(branchField.getEditor().getText())) {
                 branchField.getEditor().setText(typed);

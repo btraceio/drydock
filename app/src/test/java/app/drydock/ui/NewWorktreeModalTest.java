@@ -226,6 +226,97 @@ class NewWorktreeModalTest extends ApplicationTest {
         assertTrue(directory().endsWith("example-login"), directory());
     }
 
+    // ---- the picker is searchable ------------------------------------------
+
+    /**
+     * The existing-branch picker narrows its dropdown to branches whose name
+     * contains the typed query, so a repository with many branches can be
+     * searched rather than scrolled.
+     */
+    @Test
+    void typingNarrowsThePickerToMatchingBranches() {
+        switchMode();
+        interact(() -> picker().getEditor().setText("free"));
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertEquals(1, picker().getItems().size(), picker().getItems() + "");
+        assertEquals("feat/free", picker().getItems().get(0).name());
+    }
+
+    @Test
+    void typingKeepsBothSpellingsofADuplicateNamedBranch() {
+        switchMode();
+        interact(() -> picker().getEditor().setText("foo"));
+        WaitForAsyncUtils.waitForFxEvents();
+
+        // Both the remote-tracking and the local branch literally named
+        // origin/foo match "foo"; the disambiguation rule needs both visible.
+        assertEquals(2, picker().getItems().size());
+        assertEquals(1, picker().getItems().stream().filter(BranchRef::remote).count());
+        assertEquals(1, picker().getItems().stream().filter(b -> !b.remote()).count());
+    }
+
+    @Test
+    void clearingTheQueryRestoresTheFullBranchList() {
+        switchMode();
+        interact(() -> picker().getEditor().setText("free"));
+        WaitForAsyncUtils.waitForFxEvents();
+        interact(() -> picker().getEditor().setText(""));
+        WaitForAsyncUtils.waitForFxEvents();
+
+        // main, feat/free, origin/foo (local), origin/foo (remote), origin/origin/main
+        assertEquals(5, picker().getItems().size(), picker().getItems() + "");
+    }
+
+    @Test
+    void aQueryMatchingNothingLeavesAnEmptyDropdown() {
+        switchMode();
+        interact(() -> picker().getEditor().setText("zzz-no-such"));
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertTrue(picker().getItems().isEmpty());
+    }
+
+    /**
+     * The hazard of filtering an editable ComboBox: its skin re-syncs the
+     * editor from {@code converter.toString(value)} on every items-change, so
+     * once a value is set, typing a new query would be reverted to the old
+     * value's name. The value lockstep keeps {@code value.name()} equal to the
+     * editor text, so the skin writes nothing and the query survives.
+     */
+    @Test
+    void typingAfterAPickIsNotRevertedToThePickedName() {
+        switchMode();
+        interact(() -> picker().getEditor().setText("main"));
+        WaitForAsyncUtils.waitForFxEvents();
+        assertEquals("main", picker().getEditor().getText());
+
+        interact(() -> picker().getEditor().setText("free"));
+        WaitForAsyncUtils.waitForFxEvents();
+
+        assertEquals("free", picker().getEditor().getText(), "the query must survive the filter");
+        assertEquals("feat/free", picker().getItems().get(0).name());
+    }
+
+    /**
+     * A picked ref's remote flag must survive a subsequent keystroke only when
+     * the text still names it; once the user types a different query, the pick
+     * is abandoned and text-first resolution takes over again.
+     */
+    @Test
+    void aPickedRemoteRefIsResolvedAsRemoteWhileItsNameIsStillTyped() {
+        switchMode();
+        interact(() -> picker().getEditor().setText("foo"));
+        WaitForAsyncUtils.waitForFxEvents();
+        interact(() -> picker().setValue(remoteRef("origin/foo")));
+        WaitForAsyncUtils.waitForFxEvents();
+
+        // The pick set the real remote ref; the editor text still names it, so
+        // the value lockstep leaves it alone and the preview tracks the remote.
+        assertTrue(picker().getValue().remote());
+        assertEquals("$ git worktree add " + directory() + " -b foo --track origin/foo", preview());
+    }
+
     // ---- gated while a creation is in flight --------------------------------
 
     @Test
