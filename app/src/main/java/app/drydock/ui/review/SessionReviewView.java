@@ -671,6 +671,16 @@ public final class SessionReviewView extends BorderPane {
      * asked for at all -- so nothing ever grouped anything.
      */
     private final Button runReviewButton = new Button("▶  Run review");
+    /** "Regenerate tour": asks for the whole tour again; shown only where a tour already exists. */
+    private final Button regenerateButton = new Button(REGENERATE_LABEL);
+    /**
+     * Ends the two states a regenerate click leaves the button in -- armed
+     * (waiting for the confirming second click) and dispatched ("Regenerating…")
+     * -- so neither can be stranded if nothing else refreshes the bar.
+     */
+    private final PauseTransition regenerateTimer = new PauseTransition(REGENERATE_CONFIRM_WINDOW);
+    /** The scope the button is armed for; empty when it is not armed. */
+    private Optional<String> regenerateArmedFor = Optional.empty();
     private final VBox body = new VBox();
 
     private ReviewDensity density = ReviewDensity.COZY;
@@ -684,6 +694,11 @@ public final class SessionReviewView extends BorderPane {
      * tour.
      */
     enum ReviewMode { TOUR, DIFF }
+
+    static final String REGENERATE_LABEL = "↻  Regenerate tour";
+    static final String REGENERATE_ARMED_LABEL = "Discard progress?";
+    /** How long the armed button waits for its confirming click, and how long "Regenerating…" is shown. */
+    static final Duration REGENERATE_CONFIRM_WINDOW = Duration.seconds(8);
 
     /** The centre row: the body, then the findings margin or the step panel. */
     private HBox columns;
@@ -831,7 +846,17 @@ public final class SessionReviewView extends BorderPane {
         shortcuts.setTooltip(new Tooltip("Shortcuts (?)"));
         shortcuts.setOnAction(e -> host.showShortcuts());
 
-        HBox bar = new HBox(8, switcher, countsLabel, spacer, runReviewButton, densityButton,
+        regenerateButton.getStyleClass().add("review-chip-button");
+        regenerateButton.setOnAction(e -> regenerateTourOnSelection());
+        regenerateTimer.setOnFinished(event -> {
+            // The window is over: an armed button gives up its arming, which
+            // updateRegenerateButton alone would keep for a still-valid scope.
+            regenerateArmedFor = Optional.empty();
+            updateRegenerateButton();
+        });
+        updateRegenerateButton();
+
+        HBox bar = new HBox(8, switcher, countsLabel, spacer, runReviewButton, regenerateButton, densityButton,
                 shortcuts);
         bar.setAlignment(Pos.CENTER_LEFT);
         bar.getStyleClass().add("review-title-bar");
@@ -2472,6 +2497,80 @@ public final class SessionReviewView extends BorderPane {
         });
     }
 
+    /**
+     * "Regenerate tour": asks the agent for the whole tour again, through the
+     * same instruction as Run review. Unlike "Refresh tour" this re-posts every
+     * step, and a new tour starts every step's progress afresh -- so when the
+     * reviewer has approved or answered anything, the first click only arms the
+     * button ("Discard progress?") and the second, within the confirm window,
+     * sends it. With nothing to lose it sends at once. The old tour stays on
+     * screen until the new one replaces it, or for good if the agent's tour is
+     * rejected.
+     */
+    private void regenerateTourOnSelection() {
+        Optional<ReviewScope> scope = selectedScope();
+        Optional<TourRecord> tour = scope.flatMap(host::tour);
+        if (scope.isEmpty() || tour.isEmpty() || regenerateButton.isDisabled()) {
+            return;
+        }
+        boolean confirmed = regenerateArmedFor.filter(scope.get().id()::equals).isPresent();
+        if (tour.get().touchedSteps() > 0 && !confirmed) {
+            regenerateArmedFor = Optional.of(scope.get().id());
+            regenerateButton.setText(REGENERATE_ARMED_LABEL);
+            regenerateButton.getStyleClass().add("armed");
+            regenerateButton.setTooltip(new Tooltip(discardTooltip(tour.get())));
+            regenerateTimer.playFromStart();
+            return;
+        }
+        regenerateArmedFor = Optional.empty();
+        regenerateButton.getStyleClass().remove("armed");
+        if (host.runReview(scope.get())) {
+            regenerateButton.setText("⟳  Regenerating…");
+            regenerateButton.setDisable(true);
+            notice("Asked the agent to regenerate the tour");
+            // Back to normal if nothing refreshes the bar first.
+            regenerateTimer.playFromStart();
+        } else {
+            notice("Could not reach this session's agent to regenerate the tour");
+            updateRegenerateButton();
+        }
+    }
+
+    private static String discardTooltip(TourRecord record) {
+        long touched = record.touchedSteps();
+        return "Regenerating replaces the whole tour: the approvals and answers on " + touched
+                + (touched == 1 ? " step" : " steps") + " are discarded. Click again to confirm.";
+    }
+
+    /**
+     * The regenerate button's state: shown only with a tour; enabled only with
+     * an agent to ask and a loaded diff. An armed button is disarmed when the
+     * scope it was armed for is no longer the selected one, or when it can no
+     * longer be used; an unrelated refresh does not cancel it.
+     */
+    private void updateRegenerateButton() {
+        Optional<ReviewScope> scope = selectedScope();
+        Optional<TourRecord> tour = scope.flatMap(host::tour);
+        boolean runnable = scope.flatMap(ReviewScope::sessionId).isPresent();
+        boolean usable = tour.isPresent() && runnable && loadedDiff().isPresent();
+        show(regenerateButton, tour.isPresent());
+        boolean stillArmed = usable && regenerateArmedFor.isPresent()
+                && regenerateArmedFor.equals(scope.map(ReviewScope::id));
+        if (stillArmed) {
+            return;
+        }
+        regenerateArmedFor = Optional.empty();
+        regenerateTimer.stop();
+        regenerateButton.getStyleClass().remove("armed");
+        regenerateButton.setText(REGENERATE_LABEL);
+        regenerateButton.setDisable(!usable);
+        regenerateButton.setTooltip(new Tooltip(!runnable
+                ? "Needs a session -- start one for this checkout first"
+                : loadedDiff().isEmpty()
+                        ? "The diff is still loading"
+                        : "Ask the agent to write the whole tour again. Step approvals and answers are discarded."));
+    }
+
     /** "Refresh tour": the top bar's button on a scope with a tour; see {@link TourController#askForTourRefresh}. */
     private void refreshTourOnSelection(ReviewScope scope) {
         runReviewButton.setText("⟳  Refreshing…");
@@ -2493,6 +2592,7 @@ public final class SessionReviewView extends BorderPane {
      * agent to ask.
      */
     private void updateRunReviewButton() {
+        updateRegenerateButton();
         Optional<ReviewScope> scope = selectedScope();
         boolean runnable = scope.flatMap(ReviewScope::sessionId).isPresent();
         Optional<TourRecord> tour = scope.flatMap(host::tour);
@@ -2715,6 +2815,7 @@ public final class SessionReviewView extends BorderPane {
         closed = true;
         tourController.close();
         navNoticeTimer.stop();
+        regenerateTimer.stop();
         mcpPanel.ifPresent(ReviewMcpActivityPanel::detach);
     }
 
@@ -3277,6 +3378,11 @@ public final class SessionReviewView extends BorderPane {
      * other {@code diag*} accessor is: it reads the {@code ObservableList} of
      * children the FX thread replaces wholesale on every render.</p>
      */
+    /** Test-only: shortens the regenerate button's confirm window (and its "Regenerating…" display). */
+    void diagSetRegenerateWindow(Duration window) {
+        regenerateTimer.setDuration(window);
+    }
+
     List<String> diagChipTexts() {
         return ReviewDiagFxThread.call(switcher::diagChipTexts);
     }

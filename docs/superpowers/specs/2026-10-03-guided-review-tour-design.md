@@ -357,6 +357,19 @@ asks for findings and a tour. Review shows "Building tour…" with the MCP
 activity log. Failure clears to an error with **Retry** and **Open diff
 review**.
 
+**Refreshing and regenerating.** With a tour on screen the top bar offers two
+buttons. **Refresh tour** asks only for the stale steps and the uncovered
+hunks, so every step already walked keeps its progress; it is disabled while
+the tour is current. **Regenerate tour** asks for the whole tour again through
+the same instruction as Run review, for when the diff has not moved but the
+tour should be rewritten (a tour written before anchor notes existed, a
+question worth asking differently). A new tour starts every step's progress
+afresh, so when the reviewer has approved or answered anything the first click
+only arms the button ("Discard progress?", the tooltip says how many steps) and
+a second click within eight seconds sends it; with nothing to lose it sends
+at once. The old tour stays on screen until the new one replaces it -- and
+for good if the agent's new tour is rejected.
+
 **The tour replaces the intent rail and path mode.** `review_intents`
 is retired: the tool, its descriptor and the `intents` array of `review_state`
 are gone (tour progress is reported under `review_state.tour`), and a finding
