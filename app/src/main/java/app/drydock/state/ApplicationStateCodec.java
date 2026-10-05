@@ -104,7 +104,8 @@ import java.util.Set;
  *     "openSessionIds": ["<uuid>", ...],
  *     "selectedSessionId": "<uuid>" | null,
  *     "reviewScopeChoices": {"<uuid>": "LOCAL" | "PULL_REQUEST", ...},
- *     "reviewKeyHintsHidden": false
+ *     "reviewKeyHintsHidden": false,
+ *     "reviewStepPanelWidth": 0.0
  *   }
  * }
  * }</pre>
@@ -175,7 +176,10 @@ import java.util.Set;
  * bump was needed and older builds simply ignore it.
  * The {@code reviewKeyHintsHidden} member (whether the tour's key-hints strip
  * was hidden) is likewise lenient: absent or not a boolean decodes to
- * {@code false}, hints shown.
+ * {@code false}, hints shown. The {@code reviewStepPanelWidth} member (the width
+ * the reader dragged the tour's step panel to) is lenient the same way: absent,
+ * not a number, non-finite or not positive decodes to 0, the default width; the
+ * view clamps a stored value at the point of use rather than rewriting it here.
  * No version bump was needed and downgrades stay non-destructive.</p>
  */
 public final class ApplicationStateCodec {
@@ -353,6 +357,7 @@ public final class ApplicationStateCodec {
         }
         obj.put("reviewScopeChoices", reviewScopeChoices);
         obj.put("reviewKeyHintsHidden", new JsonBoolean(ui.reviewKeyHintsHidden()));
+        obj.put("reviewStepPanelWidth", JsonNumber.of(ui.reviewStepPanelWidth()));
         return obj;
     }
 
@@ -734,8 +739,17 @@ public final class ApplicationStateCodec {
         boolean reviewKeyHintsHidden = obj.get("reviewKeyHintsHidden") instanceof JsonBoolean hidden
                 && hidden.value();
 
+        // Cosmetic and lenient too; 0 is "the default width". Clamping to what
+        // the window allows is the view's job, so a hand-edited value is never
+        // silently rewritten here.
+        double reviewStepPanelWidth = obj.get("reviewStepPanelWidth") instanceof JsonNumber width
+                && Double.isFinite(width.asDouble()) && width.asDouble() > 0
+                ? width.asDouble()
+                : 0;
+
         return new WorkspaceUiState(selected, sidebarWidth, expanded, theme, uiFontSize, terminalFontSize,
-                openSessionIds, selectedSessionId, reviewScopeChoices, reviewKeyHintsHidden);
+                openSessionIds, selectedSessionId, reviewScopeChoices, reviewKeyHintsHidden,
+                reviewStepPanelWidth);
     }
 
     private static int readSchemaVersion(JsonObject root) {
