@@ -1,5 +1,6 @@
 package app.drydock.git;
 
+import app.drydock.app.LoginShellEnvironment;
 import app.drydock.process.ProcessResult;
 import app.drydock.process.ProcessRunner;
 import app.drydock.process.ProcessTimeoutException;
@@ -22,6 +23,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -262,7 +264,10 @@ public final class GhCliService implements AutoCloseable {
     }
 
     private static Optional<Path> discover() {
-        String pathEnv = System.getenv("PATH");
+        // The live PATH, not the frozen snapshot: on the late-merge path the
+        // snapshot holds the bare launchd PATH and discovery would stop at
+        // the shim in /usr/local/bin instead of a real gh further along.
+        String pathEnv = LoginShellEnvironment.currentRealPath();
         if (pathEnv != null) {
             for (String dir : pathEnv.split(Pattern.quote(File.pathSeparator))) {
                 if (dir.isBlank()) {
@@ -291,10 +296,25 @@ public final class GhCliService implements AutoCloseable {
 
     // ---- process execution (shared ProcessRunner; null = could not run, callers fall back to empty) ----
 
-    /** Runs {@code command} with {@code workingDirectory} as cwd ({@code gh} resolves the repo from it). */
+    /**
+     * Runs {@code command} with {@code workingDirectory} as cwd ({@code gh}
+     * resolves the repo from it).
+     *
+     * <p>The child gets the live (post-merge) {@code PATH} explicitly. The
+     * JDK's environment snapshot is frozen at launch, and on a Finder/Dock
+     * start whose login-shell PATH merge applied late it still holds the
+     * bare launchd PATH -- under which the gh-shim wrapper cannot re-exec a
+     * real {@code gh} ("exec: gh: not found"), and every listing reports
+     * unavailable.</p>
+     */
     private static ProcessResult runIn(Path workingDirectory, List<String> command) {
+        String livePath = LoginShellEnvironment.currentRealPath();
         try {
-            return ProcessRunner.run(command, workingDirectory, PROCESS_TIMEOUT);
+            if (livePath == null) {
+                return ProcessRunner.run(command, workingDirectory, PROCESS_TIMEOUT);
+            }
+            return ProcessRunner.run(command, new ProcessRunner.Options(
+                    workingDirectory, PROCESS_TIMEOUT, false, Map.of("PATH", livePath)));
         } catch (IOException e) {
             LOG.log(Level.DEBUG, "Could not launch gh: " + e.getMessage());
             return null;
