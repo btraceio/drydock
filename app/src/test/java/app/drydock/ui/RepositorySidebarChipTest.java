@@ -29,6 +29,13 @@ class RepositorySidebarChipTest {
                 RepositorySidebar.remoteChipTooltipText("deploy@build.internal"));
     }
 
+    @Test
+    void sessionBadgeTooltipNamesHostAndPath() {
+        SshRemote remote = new SshRemote("prod-box", "/srv/app");
+        assertEquals("SSH remote session\nHost: prod-box\nPath: /srv/app",
+                RepositorySidebar.sessionRemoteBadgeTooltipText(remote));
+    }
+
     private static Repository localRepo(String name) {
         return new Repository(RepositoryId.newId(), Path.of("/repo/" + name), name,
                 Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT);

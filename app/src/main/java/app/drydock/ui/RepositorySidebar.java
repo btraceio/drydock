@@ -13,6 +13,7 @@ import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionActivity;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionStatusFacet;
+import app.drydock.domain.SshRemote;
 import app.drydock.git.GhCliService;
 import app.drydock.git.GitStatus;
 import app.drydock.git.GitStatusService;
@@ -802,6 +803,27 @@ public final class RepositorySidebar extends VBox {
     /** Tooltip text for a remote-host chip: the full (untruncated) host. */
     static String remoteChipTooltipText(String host) {
         return "Remote host: " + host;
+    }
+
+    /**
+     * Builds the small ⇅ badge marking a session as running against an SSH
+     * remote (sidebar session rows and session tab headers; spec: SSH remote
+     * repositories). Glyph-only -- the repo row above already names the host
+     * with its ⇅ host chip, and the details (host + path on that host) are
+     * on hover. Takes the session repository's {@link SshRemote} itself, so a
+     * local repository (whose {@code remote()} is null) cannot reach it.
+     */
+    static Label buildSessionRemoteBadge(SshRemote remote) {
+        Objects.requireNonNull(remote, "remote");
+        Label badge = new Label("⇅");
+        badge.getStyleClass().add("repo-remote-chip");
+        badge.setTooltip(new Tooltip(sessionRemoteBadgeTooltipText(remote)));
+        return badge;
+    }
+
+    /** Tooltip text for a session's ⇅ badge: the SSH host and the repo path on it. */
+    static String sessionRemoteBadgeTooltipText(SshRemote remote) {
+        return "SSH remote session\nHost: " + remote.host() + "\nPath: " + remote.remotePath();
     }
 
     /**
@@ -2751,7 +2773,14 @@ public final class RepositorySidebar extends VBox {
             HBox actions = new HBox(2, open, stop, delete);
             actions.setAlignment(Pos.CENTER_RIGHT);
 
-            HBox row = new HBox(8, statusCol, name);
+            // ⇅ badge for a session whose repository lives on an SSH host,
+            // between the status marks and the title so it reads as annotating
+            // the title; details (host, path) on hover.
+            HBox row = new HBox(8, statusCol);
+            if (repository.isRemote()) {
+                row.getChildren().add(buildSessionRemoteBadge(repository.remote()));
+            }
+            row.getChildren().add(name);
             if (checkoutStatus != null && checkoutStatus.dirty()) {
                 Region dirtyDot = new Region();
                 dirtyDot.getStyleClass().add("dirty-dot");

@@ -6,6 +6,7 @@ import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.PrState;
 import app.drydock.domain.Repository;
 import app.drydock.domain.SessionStatus;
+import app.drydock.domain.SshRemote;
 import app.drydock.review.SessionReviewScopes;
 import app.drydock.terminal.api.Shortcut;
 import app.drydock.terminal.api.TerminalSpec;
@@ -211,6 +212,8 @@ final class OpenSessionTab {
     private final Label tabCostBadge = new Label();
     /** Marks a tab whose session runs on the eval account; mirrors the sidebar's eval chip. */
     private final Label tabEvalBadge = new Label("eval");
+    /** ⇅ badge shown only when the tab's repository lives on an SSH remote; details on hover. */
+    private final Label tabSshBadge = new Label("⇅");
     private final Button tabCloseButton = new Button("×");
     private final TextField renameField = new TextField();
     private final VBox tabLabels = new VBox(0);
@@ -1070,7 +1073,15 @@ final class OpenSessionTab {
         tabEvalBadge.setTooltip(new Tooltip("Eval mode: this session's model traffic is routed to the eval account"));
         tabEvalBadge.setVisible(false);
         tabEvalBadge.setManaged(false);
-        HBox graphic = new HBox(8, tabStatusCol, projectBadge, tabLabels, tabEvalBadge, tabCostBadge, tabAttentionDot, tabCloseButton);
+        tabSshBadge.getStyleClass().add("repo-remote-chip");
+        // One value drives the tooltip AND the visibility, so the two can never
+        // disagree (remote() is null for a local repo, which map() turns into empty).
+        Optional<SshRemote> sshRemote = repository.map(Repository::remote);
+        sshRemote.ifPresent(remote ->
+                tabSshBadge.setTooltip(new Tooltip(RepositorySidebar.sessionRemoteBadgeTooltipText(remote))));
+        tabSshBadge.setVisible(sshRemote.isPresent());
+        tabSshBadge.setManaged(sshRemote.isPresent());
+        HBox graphic = new HBox(8, tabStatusCol, projectBadge, tabLabels, tabSshBadge, tabEvalBadge, tabCostBadge, tabAttentionDot, tabCloseButton);
         graphic.setAlignment(Pos.CENTER_LEFT);
 
         // Double-click the tab -> inline rename (Enter/blur commits, Esc cancels).
@@ -1420,6 +1431,16 @@ final class OpenSessionTab {
     /** The Review sub-tab button's current text, badge included when set. */
     String diagReviewButtonText() {
         return reviewSubTabButton.getText();
+    }
+
+    /** Whether the tab header's ⇅ SSH badge is shown: visible AND taking layout space. */
+    boolean diagSshBadgeShown() {
+        return tabSshBadge.isVisible() && tabSshBadge.isManaged();
+    }
+
+    /** The tab header's ⇅ SSH badge tooltip text, or empty when it has none. */
+    Optional<String> diagSshBadgeTooltipText() {
+        return Optional.ofNullable(tabSshBadge.getTooltip()).map(Tooltip::getText);
     }
 
     /**
