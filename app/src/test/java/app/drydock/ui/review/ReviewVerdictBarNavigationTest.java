@@ -1,12 +1,12 @@
 package app.drydock.ui.review;
 
+import app.drydock.testing.FxTest;
 import app.drydock.ui.TestStages;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -20,7 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * has to be a complete loop on its own: say which file it is settling, and
  * move between files without the keyboard.
  */
-class ReviewVerdictBarNavigationTest extends ApplicationTest {
+class ReviewVerdictBarNavigationTest extends FxTest {
 
     private final List<String> calls = new ArrayList<>();
     private ReviewVerdictBar bar;

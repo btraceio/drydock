@@ -1,13 +1,13 @@
 package app.drydock.ui.review;
 
+import app.drydock.testing.FxSync;
+import app.drydock.testing.FxTest;
 import javafx.scene.Scene;
 import javafx.scene.input.KeyCode;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Region;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -16,7 +16,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** The splitter's gestures, against a host that only records what it is told. */
-class StepSplitterTest extends ApplicationTest {
+class StepSplitterTest extends FxTest {
 
     private final List<String> log = new ArrayList<>();
     private double width = 400;
@@ -47,7 +47,7 @@ class StepSplitterTest extends ApplicationTest {
     @Test
     void draggingTheEdgeLeftWidensThePanelAndCommitsOnceOnRelease() {
         drag(splitter).dropBy(-30, 0);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals("commit", log.getLast());
         assertEquals(1, log.stream().filter("commit"::equals).count(), "one write per gesture, not per mouse event");
@@ -57,7 +57,7 @@ class StepSplitterTest extends ApplicationTest {
     @Test
     void theCodeFloorStopsTheDragAtTheMax() {
         drag(splitter).dropBy(-300, 0);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals(460, width, "the host said 460 is as wide as the code allows");
     }
@@ -67,7 +67,7 @@ class StepSplitterTest extends ApplicationTest {
         width = StepPanel.MIN_WIDTH + 10;
 
         drag(splitter).dropBy(60, 0);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals(StepPanel.MIN_WIDTH, width, "60px right would go below the minimum; it stops there");
         assertEquals("commit", log.getLast());
@@ -76,7 +76,7 @@ class StepSplitterTest extends ApplicationTest {
     @Test
     void aPlainClickResizesNothingAndWritesNothing() {
         clickOn(splitter);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals(List.of(), log);
     }
@@ -84,7 +84,7 @@ class StepSplitterTest extends ApplicationTest {
     @Test
     void aDoubleClickResetsToTheDefault() {
         doubleClickOn(splitter);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals(List.of("reset"), log);
         assertEquals(StepPanel.EXPANDED_WIDTH, width);
@@ -110,7 +110,7 @@ class StepSplitterTest extends ApplicationTest {
         max = 480;
 
         press(KeyCode.SHIFT).press(KeyCode.LEFT).release(KeyCode.LEFT).release(KeyCode.SHIFT);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals(480, width, "+96 would pass the max, so it stops at it");
     }

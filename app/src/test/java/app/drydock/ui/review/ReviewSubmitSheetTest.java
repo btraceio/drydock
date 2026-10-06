@@ -1,5 +1,7 @@
 package app.drydock.ui.review;
 
+import app.drydock.testing.FxSync;
+import app.drydock.testing.FxTest;
 import app.drydock.ui.TestStages;
 import app.drydock.github.GitHubLineAnchor.Anchor;
 import app.drydock.github.GitHubLineAnchor.Side;
@@ -18,8 +20,6 @@ import javafx.scene.control.ToggleButton;
 import javafx.scene.layout.HBox;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.util.List;
 import java.util.Map;
@@ -43,7 +43,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * network -- exactly as {@link SubmitPlan#of} would have produced it, but
  * without needing a real diff to produce it from.</p>
  */
-class ReviewSubmitSheetTest extends ApplicationTest {
+class ReviewSubmitSheetTest extends FxTest {
 
     private static final ReviewScope.PullRequestRef PR = new ReviewScope.PullRequestRef(7, Optional.empty());
 
@@ -79,14 +79,14 @@ class ReviewSubmitSheetTest extends ApplicationTest {
         assertTrue(submit.isDisabled(), "COMMENT preselected with a blank summary must start disabled");
 
         interact(() -> summaryField().setText("looks good"));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertFalse(submit.isDisabled(), "a non-blank summary must enable Submit under COMMENT");
 
         fireToggle("Approve");
         assertFalse(submit.isDisabled(), "Approve never needs a summary, blank or not");
 
         interact(() -> summaryField().clear());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertFalse(submit.isDisabled(), "Approve stays enabled even once the summary is cleared");
 
         fireToggle("Request changes");
@@ -165,14 +165,14 @@ class ReviewSubmitSheetTest extends ApplicationTest {
         Button submit = submitButton();
         Button cancel = cancelButton();
         interact(() -> sheet.showPosting());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertTrue(submit.isDisabled(), "showPosting must disable Submit");
         assertTrue(cancel.isDisabled(), "showPosting must disable the whole footer, including Cancel");
         assertTrue(progressRow().isVisible(), "showPosting must show the progress row");
 
         interact(() -> sheet.showError("422: body is required"));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertFalse(cancel.isDisabled(), "showError must re-enable the footer");
         // The fixture sheet opens with COMMENT preselected and a blank
@@ -201,12 +201,12 @@ class ReviewSubmitSheetTest extends ApplicationTest {
     void showUnavailableKeepsSubmitDisabledEvenAfterTypingASummary() {
         Button submit = submitButton();
         interact(() -> sheet.showUnavailable("gh is not installed"));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertTrue(submit.isDisabled(), "showUnavailable must leave Submit disabled");
 
         interact(() -> summaryField().setText("looks good"));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertTrue(submit.isDisabled(),
                 "the unavailable flag is sticky -- a summary must not override it");
@@ -215,7 +215,7 @@ class ReviewSubmitSheetTest extends ApplicationTest {
     @Test
     void cancelInvokesOnCancelAndNeverOnSubmit() {
         interact(() -> cancelButton().fire());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertTrue(cancelled.get(), "Cancel must invoke onCancel");
         assertTrue(submitted.isEmpty(), "Cancel must never invoke onSubmit");
@@ -245,10 +245,10 @@ class ReviewSubmitSheetTest extends ApplicationTest {
         write("Looks good, one nit addressed.");
 
         clickOn("Approve");
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         clickOn("Submit review");
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals(1, submitted.size(), "a real click on Submit must invoke onSubmit exactly once");
         assertEquals(Event.APPROVE, submitted.get(0)[0],
@@ -300,7 +300,7 @@ class ReviewSubmitSheetTest extends ApplicationTest {
                     getClass().getResource("/app/drydock/ui/theme-dark.css").toExternalForm());
             stage.setScene(scene);
         });
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     private Button submitButton() {
@@ -330,7 +330,7 @@ class ReviewSubmitSheetTest extends ApplicationTest {
                 .findFirst()
                 .orElseThrow(() -> new AssertionError("no toggle labelled '" + text + "'"))
                 .fire());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     private List<String> queryLabels(String selector) {

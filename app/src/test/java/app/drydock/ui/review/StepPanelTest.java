@@ -11,6 +11,8 @@ import app.drydock.review.tour.StepProgress;
 import app.drydock.review.tour.TourAnchor;
 import app.drydock.review.tour.TourCheck;
 import app.drydock.review.tour.TourStep;
+import app.drydock.testing.FxSync;
+import app.drydock.testing.FxTest;
 import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
@@ -19,8 +21,6 @@ import app.drydock.review.tour.ImpactNote;
 import app.drydock.review.tour.StepImpact;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -33,7 +33,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-class StepPanelTest extends ApplicationTest {
+class StepPanelTest extends FxTest {
 
     private final List<String> calls = new ArrayList<>();
     private StepPanel panel;
@@ -85,7 +85,7 @@ class StepPanelTest extends ApplicationTest {
     void choicesAreNumberedButtonsThatAnswerTheCheck() {
         interact(() -> panel.show(view(CheckProgress.fresh("c1"))));
         clickOn("2  returns");
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertEquals(List.of("answer c1 1"), calls);
     }
 
@@ -147,9 +147,9 @@ class StepPanelTest extends ApplicationTest {
         Button override = lookup("Approve without passing").queryAs(Button.class);
         assertTrue(override.isDisabled());
         clickOn(".step-override-reason").write("trivial rename");
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         clickOn("Approve without passing");
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertEquals(List.of("override trivial rename"), calls);
     }
 
@@ -230,7 +230,7 @@ class StepPanelTest extends ApplicationTest {
     void anchorChipsGoToTheirAnchor() {
         interact(() -> panel.show(view(CheckProgress.fresh("c1"))));
         clickOn("src/A.java:3");
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertEquals(List.of("anchor 0"), calls);
     }
 
@@ -252,7 +252,7 @@ class StepPanelTest extends ApplicationTest {
                 Optional.empty(), Optional.empty());
         interact(() -> panel.show(view(exhausted)));
         clickOn(".step-override-reason").write("   ");
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertTrue(lookup("Approve without passing").queryAs(Button.class).isDisabled());
     }
 
@@ -265,7 +265,7 @@ class StepPanelTest extends ApplicationTest {
                 Map.of("r1", CheckProgress.fresh("r1")), StepProgress.Decision.NONE, Optional.empty(), false));
         interact(() -> panel.show(riskView));
         clickOn(".text-area").write("   ");
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertTrue(lookup("Send answer").queryAs(Button.class).isDisabled());
     }
 
@@ -296,7 +296,7 @@ class StepPanelTest extends ApplicationTest {
         assertTrue(lookup("This step's code changed; the agent is re-writing it.").tryQuery().isEmpty(),
                 "nothing was sent, so nothing is being re-written");
         clickOn("Ask the agent to refresh");
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertEquals(List.of("refresh"), calls);
     }
 
@@ -307,9 +307,9 @@ class StepPanelTest extends ApplicationTest {
         interact(() -> panel.show(stale));
 
         clickOn(".step-override-reason").write("the change is a rename");
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         clickOn("Approve without passing");
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertEquals(List.of("override the change is a rename"), calls);
     }
 
@@ -321,9 +321,9 @@ class StepPanelTest extends ApplicationTest {
 
         assertTrue(lookup("Retry").tryQuery().isPresent());
         clickOn(".step-override-reason").write("agent is down");
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         clickOn("Approve without passing");
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertEquals(List.of("override agent is down"), calls);
     }
 
@@ -339,9 +339,9 @@ class StepPanelTest extends ApplicationTest {
         assertTrue(lookup("All checks passed — press a to approve this step.").tryQuery().isEmpty(),
                 "a press of a cannot approve it");
         clickOn(".step-override-reason").write("fixed in a follow-up");
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         clickOn("Approve without passing");
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertEquals(List.of("override fixed in a follow-up"), calls);
     }
 
@@ -393,11 +393,11 @@ class StepPanelTest extends ApplicationTest {
         assertFalse(treeVisible(lookup(".step-finding-reply").query()), "the reply field waits for Not sure");
 
         clickOn("Not sure");
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         clickOn(".step-finding-reply").write("Is this reachable from the CLI?");
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         clickOn("Send");
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals(List.of("message f1 Is this reachable from the CLI?"), calls,
                 "posted to the thread, and no triage recorded");

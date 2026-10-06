@@ -1,5 +1,6 @@
 package app.drydock.ui;
 
+import app.drydock.testing.FxTest;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
@@ -11,7 +12,6 @@ import javafx.scene.layout.VBox;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
 
 import java.util.List;
 
@@ -30,7 +30,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * gives at a narrower width than the app did -- with the pinning removed it
  * fails at 700px, not 1100px. It guards the property, not the threshold.</p>
  */
-class SessionHeaderLayoutTest extends ApplicationTest {
+class SessionHeaderLayoutTest extends FxTest {
 
     private Region back;
     private VBox titleBlock;

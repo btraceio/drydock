@@ -7,13 +7,13 @@ import app.drydock.review.HunkIds;
 import app.drydock.review.ReadingPath;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
+import app.drydock.testing.FxSync;
+import app.drydock.testing.FxTest;
 import app.drydock.ui.TestStages;
 import javafx.scene.Scene;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -27,7 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-class ReviewDiffColumnWholeFileTest extends ApplicationTest {
+class ReviewDiffColumnWholeFileTest extends FxTest {
 
     private final DiffService diffService = new DiffService();
     private final ReviewScopeRegistry registry = new ReviewScopeRegistry();
@@ -69,7 +69,7 @@ class ReviewDiffColumnWholeFileTest extends ApplicationTest {
             column.setWholeFiles(true);
             column.diagShowWholeFileDiff(whole);
         });
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertSame(whole, ReviewDiagFxThread.call(column::renderedDiff));
         assertEquals(review.files(), ReviewDiagFxThread.call(() -> column.displayedDiff().files()));
@@ -87,7 +87,7 @@ class ReviewDiffColumnWholeFileTest extends ApplicationTest {
             column.diagShowWholeFileDiff(diff(40));
             column.toggleContext();
         });
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         long folded = column.diagRows().stream()
                 .filter(row -> row instanceof ReviewDiffRow.CollapsedRun).count();
         assertEquals(1, folded);
@@ -110,7 +110,7 @@ class ReviewDiffColumnWholeFileTest extends ApplicationTest {
             column.setWholeFiles(true);
             column.diagShowWholeFileDiff(whole);
         });
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         List<ReviewDiffRow> rows = column.diagRows();
         assertEquals(41, rows.stream().filter(row -> row instanceof ReviewDiffRow.Line).count(),
@@ -126,7 +126,7 @@ class ReviewDiffColumnWholeFileTest extends ApplicationTest {
             column.setWholeFiles(true);
             column.applyWholeFileResult(column.wholeRequestToken(), null, new RuntimeException("boom"));
         });
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertTrue(column.wholeFileUnavailable());
         assertSame(column.displayedDiff(), ReviewDiagFxThread.call(column::renderedDiff));
@@ -145,7 +145,7 @@ class ReviewDiffColumnWholeFileTest extends ApplicationTest {
             column.showDiff(scope(), review);
             column.applyWholeFileResult(stale[0], diff(40), null);
         });
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertFalse(column.wholeFileUnavailable());
         assertSame(column.displayedDiff(), ReviewDiagFxThread.call(column::renderedDiff));

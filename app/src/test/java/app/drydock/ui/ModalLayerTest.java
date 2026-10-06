@@ -1,12 +1,12 @@
 package app.drydock.ui;
 
+import app.drydock.testing.FxTest;
 import javafx.scene.Scene;
 import javafx.scene.control.Label;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.StackPane;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -24,7 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * left the pull-request row that opened it disabled and reading "Opening…"
  * for the rest of the process, with no way to review that PR again.</p>
  */
-class ModalLayerTest extends ApplicationTest {
+class ModalLayerTest extends FxTest {
 
     private ModalLayer layer;
     private final List<String> ended = new ArrayList<>();

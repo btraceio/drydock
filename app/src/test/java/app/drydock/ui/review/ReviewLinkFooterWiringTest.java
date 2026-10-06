@@ -1,5 +1,7 @@
 package app.drydock.ui.review;
 
+import app.drydock.testing.FxSync;
+import app.drydock.testing.FxTest;
 import app.drydock.ui.TestStages;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
@@ -14,8 +16,6 @@ import javafx.scene.control.Label;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -44,7 +44,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * app.drydock.review.ChangeGraph} on its own, off the FX thread, the moment
  * the diff resolves -- so no keypress is needed to exercise it here.</p>
  */
-class ReviewLinkFooterWiringTest extends ApplicationTest {
+class ReviewLinkFooterWiringTest extends FxTest {
 
     private static final String DECLARING_FILE = "src/guards.cpp";
     private static final String REFERENCING_FILE = "src/profiler.cpp";
@@ -98,7 +98,7 @@ class ReviewLinkFooterWiringTest extends ApplicationTest {
         interact(() -> view.showScopes(new SessionReviewScopes.Scopes(scope, Optional.empty()),
                 SessionReviewScopes.Choice.LOCAL));
         interact(() -> view.diagShowDiff(scope, host.diff));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         List<String> footers = awaitLinkFooters();
         assertTrue(footers.stream().anyMatch(text -> text.contains("called by")),
@@ -117,7 +117,7 @@ class ReviewLinkFooterWiringTest extends ApplicationTest {
         // still resolve and must not throw.
         Button link = footerButtonContaining("called by");
         interact(link::fire);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertTrue(renderedHunkFiles().contains(REFERENCING_FILE),
                 "the target file must still be reachable after the click resolves its real hunk id");
@@ -131,7 +131,7 @@ class ReviewLinkFooterWiringTest extends ApplicationTest {
             if (!texts.isEmpty()) {
                 return texts;
             }
-            WaitForAsyncUtils.waitForFxEvents();
+            FxSync.waitForFxEvents();
             sleep(50);
         }
         throw new AssertionError("no link footer ever rendered");

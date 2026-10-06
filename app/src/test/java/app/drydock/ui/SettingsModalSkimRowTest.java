@@ -1,13 +1,13 @@
 package app.drydock.ui;
 
 import app.drydock.domain.UiTheme;
+import app.drydock.testing.FxSync;
+import app.drydock.testing.FxTest;
 import javafx.scene.Scene;
 import javafx.scene.control.CheckBox;
 import javafx.scene.layout.StackPane;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.nio.file.Path;
 import java.util.Optional;
@@ -23,7 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * not the default, and it must not write that value straight back the
  * moment it displays it.
  */
-class SettingsModalSkimRowTest extends ApplicationTest {
+class SettingsModalSkimRowTest extends FxTest {
 
     private final AtomicReference<Boolean> saved = new AtomicReference<>();
     private SettingsModal modal;
@@ -85,14 +85,14 @@ class SettingsModalSkimRowTest extends ApplicationTest {
 
     @Test
     void theSkimCheckboxReadsAndWritesThePreference() {
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         CheckBox box = (CheckBox) modal.lookup(".settings-check");
         assertTrue(box.isSelected(), "the modal shows the stored preference, not the default");
         assertFalse(box.isDisabled(), "…and is enabled once the value has arrived");
         assertEquals(null, saved.get(), "showing a value is not a reason to write it back");
 
         interact(() -> box.setSelected(false));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertEquals(Boolean.FALSE, saved.get());
     }
 }

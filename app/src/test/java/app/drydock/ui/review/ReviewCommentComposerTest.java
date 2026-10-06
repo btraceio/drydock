@@ -1,5 +1,7 @@
 package app.drydock.ui.review;
 
+import app.drydock.testing.FxSync;
+import app.drydock.testing.FxTest;
 import app.drydock.ui.TestStages;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
@@ -15,8 +17,6 @@ import javafx.scene.control.TextArea;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -40,7 +40,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * was no way at all to write a comment. These tests are the guard against
  * losing it a second time.</p>
  */
-class ReviewCommentComposerTest extends ApplicationTest {
+class ReviewCommentComposerTest extends FxTest {
 
     private final DiffService diffService = new DiffService();
     private final ReviewScopeRegistry registry = new ReviewScopeRegistry();
@@ -87,7 +87,7 @@ class ReviewCommentComposerTest extends ApplicationTest {
 
         type("this allocation looks unbounded");
         interact(() -> button("Comment").fire());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         List<ReviewAnnotation> saved = host.findings(scope);
         assertEquals(1, saved.size(), "the comment must be stored");
@@ -105,7 +105,7 @@ class ReviewCommentComposerTest extends ApplicationTest {
         type("a note");
 
         interact(() -> button("Comment").fire());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertFalse(composerShowing(), "a saved comment must not leave the composer open");
     }
@@ -117,7 +117,7 @@ class ReviewCommentComposerTest extends ApplicationTest {
         type("never mind");
 
         interact(() -> button("Cancel").fire());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertFalse(composerShowing());
         assertTrue(host.findings(scope).isEmpty(), "cancel must not store anything");
@@ -130,7 +130,7 @@ class ReviewCommentComposerTest extends ApplicationTest {
         clickGutter();
 
         interact(() -> button("Comment").fire());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertTrue(host.findings(scope).isEmpty());
         assertFalse(composerShowing());
@@ -179,7 +179,7 @@ class ReviewCommentComposerTest extends ApplicationTest {
         type("a note");
 
         interact(() -> button("Comment").fire());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         ReviewAnnotation comment = host.findings(scope).get(0);
         assertFalse(comment.file().isBlank());
@@ -194,7 +194,7 @@ class ReviewCommentComposerTest extends ApplicationTest {
         interact(() -> view.showScopes(new SessionReviewScopes.Scopes(scope, Optional.empty()),
                 SessionReviewScopes.Choice.LOCAL));
         interact(() -> view.diagShowDiff(scope, host.diff));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     private void clickGutter() {
@@ -223,7 +223,7 @@ class ReviewCommentComposerTest extends ApplicationTest {
                         + "; rendered " + gutters().stream()
                                 .map(node -> "'" + ((Label) node).getText() + "'").toList()));
         interact(() -> gutter.getOnMouseClicked().handle(mouseClick(gutter)));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     /** The clickable gutter labels of rendered code rows. */
@@ -242,7 +242,7 @@ class ReviewCommentComposerTest extends ApplicationTest {
     private void type(String text) {
         TextArea input = (TextArea) lookup(".review-composer-input").query();
         interact(() -> input.setText(text));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     private javafx.scene.control.Button button(String label) {

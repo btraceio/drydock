@@ -6,10 +6,10 @@ import app.drydock.review.ReviewVerdict;
 import app.drydock.review.tour.StepProgress;
 import app.drydock.review.tour.TourFingerprint;
 import app.drydock.review.tour.TourRecord;
+import app.drydock.testing.FxSync;
 import javafx.scene.Node;
 import javafx.scene.input.KeyCode;
 import org.junit.jupiter.api.Test;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.time.Instant;
 import java.util.List;
@@ -32,7 +32,7 @@ class ReviewTourModeTest extends ReviewTourFixture {
     @Test
     void approvingBeforeTheCheckIsAnsweredDoesNotPassTheStep() {
         press(KeyCode.A).release(KeyCode.A);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertEquals(StepProgress.Decision.NONE, progress("s1").decision());
     }
 
@@ -40,7 +40,7 @@ class ReviewTourModeTest extends ReviewTourFixture {
     void answeringRightThenApprovingPassesTheStepAndApprovesItsHunks() {
         press(KeyCode.DIGIT2).release(KeyCode.DIGIT2);
         press(KeyCode.A).release(KeyCode.A);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertEquals(StepProgress.Decision.PASSED, progress("s1").decision());
         assertEquals(Optional.of(ReviewVerdict.Decision.APPROVED), verdictOfHunk(FILE_A, 0));
         assertEquals(Optional.of(ReviewVerdict.Decision.APPROVED), verdictOfHunk(FILE_A, 1));
@@ -51,36 +51,36 @@ class ReviewTourModeTest extends ReviewTourFixture {
     @Test
     void aWrongAnswerKeepsTheStepOpenOnTheAlternate() {
         press(KeyCode.DIGIT1).release(KeyCode.DIGIT1);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertEquals(1, progress("s1").check("c1").attempt());
     }
 
     @Test
     void vSwitchesToTheHunkDiffAndBack() {
         press(KeyCode.V).release(KeyCode.V);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertEquals(SessionReviewView.ReviewMode.DIFF, ReviewDiagFxThread.call(view::diagMode));
         assertTrue(lookup(".review-findings-margin").tryQuery().isPresent(), "the findings margin is back");
         assertTrue(ReviewDiagFxThread.call(view::getLeft) == null, "and the hunk diff has no left rail");
         press(KeyCode.V).release(KeyCode.V);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertEquals(SessionReviewView.ReviewMode.TOUR, ReviewDiagFxThread.call(view::diagMode));
     }
 
     @Test
     void anApprovalInTheHunkDiffIsRecordedAsAnOverride() throws Exception {
         press(KeyCode.V).release(KeyCode.V);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         focusDiffColumn();
         press(KeyCode.SHIFT).press(KeyCode.A).release(KeyCode.A).release(KeyCode.SHIFT);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertTrue(!host.tours.forScope(scope.id()).orElseThrow().hunkOverrides().isEmpty());
         assertEquals(StepProgress.Decision.NONE, progress("s1").decision(), "the step itself is not passed");
         // Which file the click lands in depends on layout (at 1400x900 it is
         // FILE_B), so check every hunk the approval actually overrode.
         Set<String> overridden = Set.copyOf(host.tours.forScope(scope.id()).orElseThrow().hunkOverrides().keySet());
         press(KeyCode.V).release(KeyCode.V);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         for (String digest : overridden) {
             assertEquals(Optional.of(ReviewVerdict.Decision.APPROVED),
                     ReviewDiagFxThread.call(() -> host.store.verdict(scope.id(), digest).map(ReviewVerdict::decision)),
@@ -92,10 +92,10 @@ class ReviewTourModeTest extends ReviewTourFixture {
     void aFailedRunFromTheHunkDiffShowsItsFailureAndKeepsIt() {
         withoutTour();
         interact(view::diagRunReview);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertFailureShown("Could not reach this session's agent.");
         interact(view::refreshReviewState);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertFailureShown("Could not reach this session's agent.");
     }
 
@@ -105,13 +105,13 @@ class ReviewTourModeTest extends ReviewTourFixture {
         try {
             withoutTour();
             interact(view::diagRunReview);
-            WaitForAsyncUtils.waitForFxEvents();
+            FxSync.waitForFxEvents();
             assertTrue(lookup("Building tour…").tryQuery().isPresent());
             interact(view::diagExpireTourWait);
-            WaitForAsyncUtils.waitForFxEvents();
+            FxSync.waitForFxEvents();
             assertFailureShown("No tour arrived.");
             interact(view::refreshReviewState);
-            WaitForAsyncUtils.waitForFxEvents();
+            FxSync.waitForFxEvents();
             assertFailureShown("No tour arrived.");
         } finally {
             host.reviewers.clear();
@@ -129,7 +129,7 @@ class ReviewTourModeTest extends ReviewTourFixture {
             host.tours.put(TourRecord.fresh(tour(scope.id(), host.diff), host.diff));
             view.refreshReviewState();
         });
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertEquals(SessionReviewView.ReviewMode.TOUR, ReviewDiagFxThread.call(view::diagMode));
         assertEquals(Optional.of(ReviewVerdict.Decision.APPROVED), verdictOfHunk(FILE_A, 0));
         assertTrue(ReviewDiagFxThread.call(() -> host.tours.forScope(scope.id()).orElseThrow()
@@ -156,7 +156,7 @@ class ReviewTourModeTest extends ReviewTourFixture {
             host.tours.put(TourRecord.fresh(tour(scope.id(), host.diff), host.diff).withSeeded(true));
             view.refreshReviewState();
         });
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertEquals(SessionReviewView.ReviewMode.TOUR, ReviewDiagFxThread.call(view::diagMode));
         assertTrue(ReviewDiagFxThread.call(() -> host.tours.forScope(scope.id()).orElseThrow()
                 .hunkOverrides().isEmpty()), "no override was made from a derived verdict");
@@ -171,7 +171,7 @@ class ReviewTourModeTest extends ReviewTourFixture {
 
     private void showDiff(UnifiedDiff diff) {
         interact(() -> view.diagShowDiff(scope, diff));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     @Test
@@ -179,7 +179,7 @@ class ReviewTourModeTest extends ReviewTourFixture {
         host.tourRefreshDispatches.clear();
         press(KeyCode.DIGIT2).release(KeyCode.DIGIT2);
         press(KeyCode.A).release(KeyCode.A);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertEquals(StepProgress.Decision.PASSED, progress("s1").decision());
 
         showDiff(movedDiff());
@@ -261,7 +261,7 @@ class ReviewTourModeTest extends ReviewTourFixture {
             host.tours.remove(scope.id());
             view.refreshReviewState();
         });
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertEquals(SessionReviewView.ReviewMode.DIFF, ReviewDiagFxThread.call(view::diagMode));
     }
 
@@ -271,7 +271,7 @@ class ReviewTourModeTest extends ReviewTourFixture {
         // rebuilt panel would drop a half-typed answer and its focus.
         Node before = lookup(".step-choice").query();
         interact(view::refreshReviewState);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertSame(before, lookup(".step-choice").query());
     }
 
@@ -281,7 +281,7 @@ class ReviewTourModeTest extends ReviewTourFixture {
         try {
             withoutTourInTourMode();
             clickOn("Run review");
-            WaitForAsyncUtils.waitForFxEvents();
+            FxSync.waitForFxEvents();
             assertEquals(1, host.reviewRuns.size(), "the outline's Run review asked the host");
             assertTrue(lookup("Building tour…").tryQuery().isPresent(), "the outline says the tour is coming");
             assertEquals(SessionReviewView.ReviewMode.TOUR, ReviewDiagFxThread.call(view::diagMode));
@@ -296,11 +296,11 @@ class ReviewTourModeTest extends ReviewTourFixture {
         try {
             withoutTourInTourMode();
             clickOn("Run review");
-            WaitForAsyncUtils.waitForFxEvents();
+            FxSync.waitForFxEvents();
             assertTrue(lookup("Open diff review").tryQuery().isPresent(), "Open diff review while building");
             assertTrue(lookup("Cancel").tryQuery().isPresent(), "Cancel while building");
             clickOn("Open diff review");
-            WaitForAsyncUtils.waitForFxEvents();
+            FxSync.waitForFxEvents();
             assertEquals(SessionReviewView.ReviewMode.DIFF, ReviewDiagFxThread.call(view::diagMode));
             assertTrue(ReviewDiagFxThread.call(view::diagTourPending), "the wait is still pending");
             assertTrue(ReviewDiagFxThread.call(view::diagTourWaitRunning), "and still running");
@@ -308,7 +308,7 @@ class ReviewTourModeTest extends ReviewTourFixture {
                 host.tours.put(TourRecord.fresh(tour(scope.id(), host.diff), host.diff));
                 view.refreshReviewState();
             });
-            WaitForAsyncUtils.waitForFxEvents();
+            FxSync.waitForFxEvents();
             assertEquals(SessionReviewView.ReviewMode.DIFF, ReviewDiagFxThread.call(view::diagMode),
                     "an arriving tour does not yank the reader back");
             assertEquals(Optional.of("The tour is ready \u2014 press v"), ReviewDiagFxThread.call(view::diagNotice));
@@ -324,9 +324,9 @@ class ReviewTourModeTest extends ReviewTourFixture {
         try {
             withoutTourInTourMode();
             clickOn("Run review");
-            WaitForAsyncUtils.waitForFxEvents();
+            FxSync.waitForFxEvents();
             clickOn("Cancel");
-            WaitForAsyncUtils.waitForFxEvents();
+            FxSync.waitForFxEvents();
             assertFalse(ReviewDiagFxThread.call(view::diagTourPending));
             assertFalse(ReviewDiagFxThread.call(view::diagTourWaitRunning));
             assertEquals(SessionReviewView.ReviewMode.TOUR, ReviewDiagFxThread.call(view::diagMode));
@@ -348,22 +348,22 @@ class ReviewTourModeTest extends ReviewTourFixture {
                 host.tours.remove(scope.id());
                 view.refreshReviewState();
             });
-            WaitForAsyncUtils.waitForFxEvents();
+            FxSync.waitForFxEvents();
             assertEquals(SessionReviewView.ReviewMode.DIFF, ReviewDiagFxThread.call(view::diagMode));
             interact(view::diagRunReview);
-            WaitForAsyncUtils.waitForFxEvents();
+            FxSync.waitForFxEvents();
             assertEquals(SessionReviewView.ReviewMode.TOUR, ReviewDiagFxThread.call(view::diagMode));
             clickOn("Cancel");
-            WaitForAsyncUtils.waitForFxEvents();
+            FxSync.waitForFxEvents();
             // Any store write refreshes the board; Cancel chose the tour's
             // no-tour screen, and a refresh must not drop it to the hunk diff.
             interact(view::refreshReviewState);
-            WaitForAsyncUtils.waitForFxEvents();
+            FxSync.waitForFxEvents();
             assertEquals(SessionReviewView.ReviewMode.TOUR, ReviewDiagFxThread.call(view::diagMode));
             assertTrue(lookup("No tour yet.").tryQuery().isPresent(), "the no-tour screen is still shown");
 
             clickOn("Run review");
-            WaitForAsyncUtils.waitForFxEvents();
+            FxSync.waitForFxEvents();
             assertEquals(2, host.reviewRuns.size(), "the second Run review asked the host again");
             assertTrue(ReviewDiagFxThread.call(view::diagTourPending), "a fresh wait is pending");
             assertTrue(ReviewDiagFxThread.call(view::diagTourWaitRunning), "and running");
@@ -377,11 +377,11 @@ class ReviewTourModeTest extends ReviewTourFixture {
     void aRunThatCannotStartOffersRetryAndTheDiffReview() {
         withoutTourInTourMode();
         clickOn("Run review");
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertTrue(lookup("Could not reach this session's agent.").tryQuery().isPresent());
         assertTrue(lookup("Retry").tryQuery().isPresent());
         clickOn("Open diff review");
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertEquals(SessionReviewView.ReviewMode.DIFF, ReviewDiagFxThread.call(view::diagMode));
     }
 
@@ -391,11 +391,11 @@ class ReviewTourModeTest extends ReviewTourFixture {
             host.tours.remove(scope.id());
             view.refreshReviewState();
         });
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertEquals(SessionReviewView.ReviewMode.DIFF, ReviewDiagFxThread.call(view::diagMode),
                 "no tour and no run pending: the hunk diff");
         press(KeyCode.V).release(KeyCode.V);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertEquals(SessionReviewView.ReviewMode.TOUR, ReviewDiagFxThread.call(view::diagMode));
     }
 }

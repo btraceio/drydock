@@ -1,5 +1,7 @@
 package app.drydock.ui.review;
 
+import app.drydock.testing.FxSync;
+import app.drydock.testing.FxTest;
 import app.drydock.ui.TestStages;
 import app.drydock.git.DiffService;
 import app.drydock.review.ReviewAnnotation;
@@ -11,8 +13,6 @@ import javafx.scene.control.Label;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -32,7 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * kept them -- which is how a repository with no diffable item at all came
  * to show another repository's files.
  */
-class ReviewScopeIsolationTest extends ApplicationTest {
+class ReviewScopeIsolationTest extends FxTest {
 
     private final DiffService diffService = new DiffService();
     private final ReviewScopeRegistry registry = new ReviewScopeRegistry();
@@ -78,7 +78,7 @@ class ReviewScopeIsolationTest extends ApplicationTest {
         awaitTarget("1/2 · lib/B.java");
 
         view.diagSelectChoice(SessionReviewScopes.Choice.PULL_REQUEST);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals("no file", targetLabel(),
                 "a scope with no diff of its own must show no file, not the previous scope's");
@@ -100,7 +100,7 @@ class ReviewScopeIsolationTest extends ApplicationTest {
         awaitTarget("1/2 · lib/B.java");
 
         view.diagSelectChoice(SessionReviewScopes.Choice.PULL_REQUEST);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         view.diagSelectChoice(SessionReviewScopes.Choice.LOCAL);
 
         awaitTarget("1/2 · lib/B.java");
@@ -130,7 +130,7 @@ class ReviewScopeIsolationTest extends ApplicationTest {
         awaitTarget("1/2 · lib/B.java");
 
         interact(view::showResolving);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals("no file", targetLabel(),
                 "losing the scope must clear the bar, not keep the departed scope's file");

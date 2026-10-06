@@ -1,5 +1,7 @@
 package app.drydock.ui.review;
 
+import app.drydock.testing.FxSync;
+import app.drydock.testing.FxTest;
 import app.drydock.ui.TestStages;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
@@ -18,8 +20,6 @@ import javafx.scene.input.KeyCode;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -45,7 +45,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * {@link SectionStatesTest}, which needs no {@code Stage}. What is here is
  * only what needs a rendered board.</p>
  */
-class ReviewHunkProgressTest extends ApplicationTest {
+class ReviewHunkProgressTest extends FxTest {
 
     private final DiffService diffService = new DiffService();
     private final ReviewScopeRegistry registry = new ReviewScopeRegistry();
@@ -120,7 +120,7 @@ class ReviewHunkProgressTest extends ApplicationTest {
         show();
 
         clickOn(".review-verdict-action");
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertTrue(host.store.verdict(scope.id(), digestOf(GUARDS_H)).isPresent(),
                 "a verdict must be keyed by the hunk's content digest");
@@ -133,10 +133,10 @@ class ReviewHunkProgressTest extends ApplicationTest {
     void undoClearsEveryHunkTheLastSettleRecorded() {
         show();
         press(KeyCode.SHIFT).press(KeyCode.A).release(KeyCode.A).release(KeyCode.SHIFT);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         press(KeyCode.U).release(KeyCode.U);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertTrue(host.store.verdictsFor(scope.id()).isEmpty(),
                 "undo must clear everything the settle recorded");
@@ -221,7 +221,7 @@ class ReviewHunkProgressTest extends ApplicationTest {
         recordAgainstBase(PROFILER, "0".repeat(40));
 
         press(KeyCode.ENTER).release(KeyCode.ENTER);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertTrue(host.submittedScopes.isEmpty(), "a stale approval must not be posted silently");
         // The PRODUCTION constant, not a phrase copied out of it: this
@@ -245,7 +245,7 @@ class ReviewHunkProgressTest extends ApplicationTest {
         assertEquals(SectionStates.Staleness.MOVED, view.diagStalenessOfCurrentFile());
 
         interact(() -> ((Button) lookup(".review-verdict-confirm-stale").query()).fire());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals(SectionStates.Staleness.FRESH, view.diagStalenessOfCurrentFile());
         assertTrue(host.store.verdict(scope.id(), digestOf(GUARDS_H))
@@ -262,7 +262,7 @@ class ReviewHunkProgressTest extends ApplicationTest {
         recordAgainstBase(GUARDS_CPP, "0".repeat(40));
 
         interact(() -> ((Button) lookup(".review-verdict-re-review").query()).fire());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertTrue(host.store.verdict(scope.id(), digestOf(GUARDS_H)).isEmpty(),
                 "re-review must clear the stale verdict so the file can be read again");
@@ -308,7 +308,7 @@ class ReviewHunkProgressTest extends ApplicationTest {
         interact(() -> view.showScopes(new SessionReviewScopes.Scopes(scope, Optional.empty()),
                 SessionReviewScopes.Choice.LOCAL));
         interact(() -> view.diagShowDiff(scope, host.diff));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     private void approve(String file) {
@@ -323,7 +323,7 @@ class ReviewHunkProgressTest extends ApplicationTest {
         host.store.putVerdict(new ReviewVerdict(scope.id(), digestOf(file), decision,
                 Optional.empty(), Instant.EPOCH, base, host.headCommit));
         interact(() -> view.refreshReviewState());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     private String digestOf(String file) {

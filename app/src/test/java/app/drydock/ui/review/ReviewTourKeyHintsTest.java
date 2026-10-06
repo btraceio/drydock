@@ -1,10 +1,10 @@
 package app.drydock.ui.review;
 
+import app.drydock.testing.FxSync;
 import javafx.scene.Node;
 import javafx.scene.control.Button;
 import javafx.scene.input.KeyCode;
 import org.junit.jupiter.api.Test;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -19,7 +19,7 @@ class ReviewTourKeyHintsTest extends ReviewTourFixture {
 
     private void key(KeyCode code) {
         press(code).release(code);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     private Node strip() {

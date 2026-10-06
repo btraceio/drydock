@@ -19,6 +19,8 @@ import app.drydock.terminal.api.TerminalHostView;
 import app.drydock.terminal.api.TerminalRuntime;
 import app.drydock.terminal.api.TerminalSpec;
 import app.drydock.terminal.api.TerminalSurface;
+import app.drydock.testing.FxSync;
+import app.drydock.testing.FxTest;
 import app.drydock.ui.nav.SymbolPeek;
 import app.drydock.ui.review.ReviewNavigation;
 import app.drydock.ui.review.ReviewSubmitSheet;
@@ -31,8 +33,6 @@ import javafx.scene.layout.StackPane;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -57,7 +57,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * every path exercised here (construction, sub-tab switching, the review
  * button's text) never actually calls into.
  */
-class OpenSessionTabReviewSubTabTest extends ApplicationTest {
+class OpenSessionTabReviewSubTabTest extends FxTest {
 
     private final DiffService diffService = new DiffService();
     private Stage stage;
@@ -98,7 +98,7 @@ class OpenSessionTabReviewSubTabTest extends ApplicationTest {
     }
 
     private static void waitForFxEvents() {
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     private OpenSessionTab newTab() {

@@ -7,11 +7,11 @@ import app.drydock.review.tour.TourAnchor;
 import app.drydock.review.tour.TourCheck;
 import app.drydock.review.tour.TourFingerprint;
 import app.drydock.review.tour.TourStep;
+import app.drydock.testing.FxSync;
 import javafx.scene.Node;
 import javafx.scene.control.Labeled;
 import javafx.scene.input.KeyCode;
 import org.junit.jupiter.api.Test;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -96,9 +96,9 @@ class ReviewTourOversizedTest extends ReviewTourFixture {
 
         clickOn(from(lookup(".step-panel")).lookup(".step-override-reason").queryAs(Node.class));
         write("trust me");
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         clickOn(from(lookup(".step-panel")).lookup("Approve without passing").queryButton());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals(StepProgress.Decision.NONE, progress("s2").decision());
         assertTrue(transientNotice().contains(SessionReviewView.STEP_NOT_RENDERED),
@@ -107,7 +107,7 @@ class ReviewTourOversizedTest extends ReviewTourFixture {
 
     private void key(KeyCode code) {
         press(code).release(code);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     private String text(String selector) {

@@ -3,8 +3,8 @@ package app.drydock.ui.review;
 import app.drydock.review.BaseMove;
 import app.drydock.review.HunkDigest;
 import app.drydock.review.ReviewVerdict;
+import app.drydock.testing.FxSync;
 import org.junit.jupiter.api.Test;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.time.Instant;
 import java.util.List;
@@ -69,6 +69,6 @@ class ReviewRecheckDispatchTest extends ReviewViewFixture {
 
     private void render() {
         interact(() -> view.refreshReviewState());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 }

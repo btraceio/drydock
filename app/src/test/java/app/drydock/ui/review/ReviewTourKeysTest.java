@@ -2,10 +2,10 @@ package app.drydock.ui.review;
 
 import app.drydock.review.tour.CheckProgress;
 import app.drydock.review.tour.StepProgress;
+import app.drydock.testing.FxSync;
 import app.drydock.ui.nav.SymbolPeek;
 import javafx.scene.input.KeyCode;
 import org.junit.jupiter.api.Test;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.nio.file.Path;
 import java.util.List;
@@ -20,7 +20,7 @@ class ReviewTourKeysTest extends ReviewTourFixture {
 
     private void key(KeyCode code) {
         press(code).release(code);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     @Test
@@ -28,7 +28,7 @@ class ReviewTourKeysTest extends ReviewTourFixture {
         interact(() -> view.diagPushPeek(new SymbolPeek("bar", "bar · guards.h",
                 Path.of("/tmp/nowhere").resolve(FILE_A), Path.of(FILE_A), 11, List.of("void bar();"), Set.of(),
                 List.of(), true)));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertTrue(ReviewDiagFxThread.call(view::diagPeekOpen));
 
         key(KeyCode.DIGIT2);
@@ -50,7 +50,7 @@ class ReviewTourKeysTest extends ReviewTourFixture {
         key(KeyCode.V);
         focusDiffColumn();
         press(KeyCode.SHIFT).press(KeyCode.A).release(KeyCode.A).release(KeyCode.SHIFT);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals(Map.of(), ReviewDiagFxThread.call(() ->
                         host.tours.forScope(scope.id()).orElseThrow().hunkOverrides()),

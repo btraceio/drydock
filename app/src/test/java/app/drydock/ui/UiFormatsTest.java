@@ -1,10 +1,10 @@
 package app.drydock.ui;
 
+import app.drydock.testing.FxTest;
 import javafx.scene.Node;
 import javafx.scene.control.Label;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
 
 import java.nio.file.Path;
 import java.util.List;
@@ -12,7 +12,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /** The breadcrumb's eliding: which segment gives way when there is no room. */
-class UiFormatsTest extends ApplicationTest {
+class UiFormatsTest extends FxTest {
 
     @Override
     public void start(Stage stage) {

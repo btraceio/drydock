@@ -5,10 +5,10 @@ import app.drydock.review.Confidence;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.Severity;
 import app.drydock.review.Triage;
+import app.drydock.testing.FxSync;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import org.junit.jupiter.api.Test;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.time.Instant;
 import java.util.List;
@@ -37,7 +37,7 @@ class ReviewTriageMarginTest extends ReviewViewFixture {
     /** The real host refreshes the view when the store changes; the fake host leaves that to the test. */
     private void refresh() {
         interact(view::refreshReviewState);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     private void seedAndRefresh(ReviewAnnotation... findings) {

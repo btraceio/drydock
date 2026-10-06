@@ -1,5 +1,7 @@
 package app.drydock.ui.nav;
 
+import app.drydock.testing.FxSync;
+import app.drydock.testing.FxTest;
 import app.drydock.ui.TestStages;
 import app.drydock.search.SessionSearchService;
 import app.drydock.ui.explorer.ExplorerFinding;
@@ -14,8 +16,6 @@ import javafx.scene.control.ToggleButton;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -33,7 +33,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * control, the dimming (never hiding) of out-of-change files, and the footer
  * that is the way back out.
  */
-class SearchRailViewTest extends ApplicationTest {
+class SearchRailViewTest extends FxTest {
 
     private Path root;
     private SessionSearchService searchService;
@@ -120,7 +120,7 @@ class SearchRailViewTest extends ApplicationTest {
                 SearchRail.class.getResource("/app/drydock/ui/theme-dark.css").toExternalForm(),
                 SearchRail.class.getResource("/app/drydock/ui/app.css").toExternalForm());
         TestStages.show(stage, scene);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     @AfterEach
@@ -139,7 +139,7 @@ class SearchRailViewTest extends ApplicationTest {
     }
 
     private void settle() {
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     @Test
@@ -375,8 +375,8 @@ class SearchRailViewTest extends ApplicationTest {
 
     private void waitForRows(java.util.function.IntPredicate enough) {
         try {
-            WaitForAsyncUtils.waitFor(10, java.util.concurrent.TimeUnit.SECONDS,
-                    () -> WaitForAsyncUtils.<Boolean>waitForAsyncFx(2000,
+            FxSync.waitFor(10, java.util.concurrent.TimeUnit.SECONDS,
+                    () -> FxSync.<Boolean>waitForAsyncFx(2000,
                             () -> enough.test(rowNames().size())));
         } catch (java.util.concurrent.TimeoutException e) {
             throw new AssertionError("rows never arrived: " + rowNames().size(), e);
@@ -386,8 +386,8 @@ class SearchRailViewTest extends ApplicationTest {
 
     private void waitForFooter(String fragment) {
         try {
-            WaitForAsyncUtils.waitFor(10, java.util.concurrent.TimeUnit.SECONDS,
-                    () -> WaitForAsyncUtils.<Boolean>waitForAsyncFx(2000,
+            FxSync.waitFor(10, java.util.concurrent.TimeUnit.SECONDS,
+                    () -> FxSync.<Boolean>waitForAsyncFx(2000,
                             () -> footerText().contains(fragment)));
         } catch (java.util.concurrent.TimeoutException e) {
             throw new AssertionError("footer never reported \"" + fragment + "\": " + footerText(), e);

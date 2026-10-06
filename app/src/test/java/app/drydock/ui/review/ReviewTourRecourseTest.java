@@ -8,11 +8,11 @@ import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.Severity;
 import app.drydock.review.Triage;
 import app.drydock.review.tour.StepProgress;
+import app.drydock.testing.FxSync;
 import javafx.scene.Node;
 import javafx.scene.input.KeyCode;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.time.Instant;
 import java.util.List;
@@ -48,12 +48,12 @@ class ReviewTourRecourseTest extends ReviewTourFixture {
 
     private void showDiff(UnifiedDiff diff) {
         interact(() -> view.diagShowDiff(scope, diff));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     private void key(KeyCode code) {
         press(code).release(code);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     private boolean shown(String text) {
@@ -63,9 +63,9 @@ class ReviewTourRecourseTest extends ReviewTourFixture {
     private void overrideWith(String reason) {
         clickOn(from(lookup(".step-panel")).lookup(".step-override-reason").queryAs(Node.class));
         write(reason);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         clickOn(from(lookup(".step-panel")).lookup("Approve without passing").queryButton());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     /** s2 stale under a harness the automatic refresh will not ask, and s2 on screen. */
@@ -89,7 +89,7 @@ class ReviewTourRecourseTest extends ReviewTourFixture {
                 "nothing was sent, so nothing is being re-written");
 
         clickOn(from(lookup(".step-panel")).lookup("Ask the agent to refresh").queryButton());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals(List.of("s2/1"), host.tourRefreshDispatches, "a human click is the authorisation");
         assertTrue(shown("This step's code changed; the agent is re-writing it."));
@@ -102,7 +102,7 @@ class ReviewTourRecourseTest extends ReviewTourFixture {
         host.tourRefreshHandOffSucceeds = false;
 
         clickOn(from(lookup(".step-panel")).lookup("Ask the agent to refresh").queryButton());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals(List.of("s2/1"), host.tourRefreshDispatches);
         assertTrue(lookup(".step-panel-transient").tryQuery().isPresent(), "the failure is shown");
@@ -165,15 +165,15 @@ class ReviewTourRecourseTest extends ReviewTourFixture {
                 Optional.empty(), AnnotationStatus.OPEN, Optional.empty(), false, Triage.PROPOSED,
                 Optional.empty()));
         interact(view::refreshReviewState);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         clickOn(from(lookup(".step-panel")).lookup("Not sure").queryButton());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         clickOn(from(lookup(".step-panel")).lookup(".step-finding-reply").queryAs(Node.class));
         write("Can the input ever be a List?");
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         clickOn(from(lookup(".step-panel")).lookup("Send").queryButton());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         ReviewAnnotation stored = ReviewDiagFxThread.call(() -> host.store.forScope(scope.id()).stream()
                 .filter(finding -> finding.id().equals("f_ask")).findFirst().orElseThrow());

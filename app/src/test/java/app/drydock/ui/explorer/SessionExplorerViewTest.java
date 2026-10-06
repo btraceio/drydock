@@ -1,5 +1,7 @@
 package app.drydock.ui.explorer;
 
+import app.drydock.testing.FxSync;
+import app.drydock.testing.FxTest;
 import app.drydock.ui.TestStages;
 import app.drydock.search.SessionSearchService;
 import app.drydock.ui.nav.PeekLayer;
@@ -12,7 +14,6 @@ import javafx.scene.layout.StackPane;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -29,7 +30,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * only place "is every chip focus-traversable" and "does Esc unwind one
  * card" are actually answerable.
  */
-class SessionExplorerViewTest extends ApplicationTest {
+class SessionExplorerViewTest extends FxTest {
 
     private Path root;
     private SessionSearchService searchService;
@@ -104,7 +105,7 @@ class SessionExplorerViewTest extends ApplicationTest {
         int before = onFx(() -> view.diagPeekDepth());
         interact(() -> view.diagPeek(symbol));
         try {
-            org.testfx.util.WaitForAsyncUtils.waitFor(10, java.util.concurrent.TimeUnit.SECONDS,
+            FxSync.waitFor(10, java.util.concurrent.TimeUnit.SECONDS,
                     () -> onFx(() -> view.diagPeekDepth()) > before);
         } catch (java.util.concurrent.TimeoutException e) {
             throw new AssertionError("no peek card appeared for " + symbol, e);
@@ -114,11 +115,11 @@ class SessionExplorerViewTest extends ApplicationTest {
 
     /** Runs {@code action} on the FX thread and hands its value back. */
     private <T> T onFx(java.util.concurrent.Callable<T> action) {
-        return org.testfx.util.WaitForAsyncUtils.waitForAsyncFx(5000, action);
+        return FxSync.waitForAsyncFx(5000, action);
     }
 
     private void waitForFxEvents() {
-        org.testfx.util.WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     /** Sizes the view within the wrapper; a StackPane lays a child out at its max. */

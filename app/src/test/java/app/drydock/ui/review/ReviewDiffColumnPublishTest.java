@@ -1,5 +1,6 @@
 package app.drydock.ui.review;
 
+import app.drydock.testing.FxTest;
 import app.drydock.ui.TestStages;
 import app.drydock.git.DiffService;
 import app.drydock.review.ReviewScope;
@@ -8,7 +9,6 @@ import javafx.scene.Scene;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -28,7 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
  * scope id the board cannot tell whose diff it received, and without
  * the failure a failed scope is indistinguishable from one still loading.
  */
-class ReviewDiffColumnPublishTest extends ApplicationTest {
+class ReviewDiffColumnPublishTest extends FxTest {
 
     private final DiffService diffService = new DiffService();
     private final ReviewScopeRegistry registry = new ReviewScopeRegistry();

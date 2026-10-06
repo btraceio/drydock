@@ -4,10 +4,10 @@ import app.drydock.domain.HandoffBrief;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.mcp.PromptSafety;
 
+import app.drydock.testing.FxTest;
 import javafx.scene.control.ButtonType;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
 
 import java.time.Instant;
 import java.util.Optional;
@@ -21,7 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * the required slots really are required, and the same per-slot cap the MCP
  * tool enforces applies here too.
  */
-class HandoffEditDialogTest extends ApplicationTest {
+class HandoffEditDialogTest extends FxTest {
 
     @Override
     public void start(Stage stage) {

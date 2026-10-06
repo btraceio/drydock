@@ -1,10 +1,10 @@
 package app.drydock.ui.review;
 
+import app.drydock.testing.FxSync;
 import javafx.scene.Node;
 import javafx.scene.input.KeyCode;
 import javafx.scene.layout.Region;
 import org.junit.jupiter.api.Test;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -40,7 +40,7 @@ class ReviewTourSplitterTest extends ReviewTourFixture {
         double codeBefore = codeColumn().getWidth();
 
         drag(splitter()).dropBy(-120, 0);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals(StepPanel.EXPANDED_WIDTH + 120, panel().getWidth(), 2);
         assertEquals(codeBefore - 120, codeColumn().getWidth(), 2);
@@ -49,7 +49,7 @@ class ReviewTourSplitterTest extends ReviewTourFixture {
     @Test
     void theCodeColumnKeepsItsFloorHoweverFarTheSplitterIsDragged() {
         drag(splitter()).dropBy(-900, 0);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertTrue(codeColumn().getWidth() >= RailLayout.CODE_MIN_WIDTH - 1,
                 "code is " + codeColumn().getWidth());
@@ -62,7 +62,7 @@ class ReviewTourSplitterTest extends ReviewTourFixture {
         interact(() -> view.setStepPanelWidthPreference(() -> 0, saved::add));
 
         drag(splitter()).dropBy(-80, 0);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals(1, saved.size(), "one write per gesture");
         assertEquals(panel().getWidth(), saved.getFirst(), 1);
@@ -76,9 +76,9 @@ class ReviewTourSplitterTest extends ReviewTourFixture {
 
         interact(() -> stored.set(480.0));
         press(KeyCode.V).release(KeyCode.V);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         press(KeyCode.V).release(KeyCode.V);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals(480, panel().getWidth(), 1);
     }
@@ -86,7 +86,7 @@ class ReviewTourSplitterTest extends ReviewTourFixture {
     @Test
     void aStoredWidthBeyondWhatAPanelCanBeIsClamped() {
         interact(() -> view.setStepPanelWidthPreference(() -> 99999, ignored -> { }));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertTrue(panel().getWidth() <= StepPanel.MAX_WIDTH + 0.5);
         assertTrue(codeColumn().getWidth() >= RailLayout.CODE_MIN_WIDTH - 1,
@@ -98,11 +98,11 @@ class ReviewTourSplitterTest extends ReviewTourFixture {
         List<Double> saved = new ArrayList<>();
         interact(() -> view.setStepPanelWidthPreference(() -> 0, saved::add));
         drag(splitter()).dropBy(-100, 0);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         saved.clear();
 
         doubleClickOn(splitter());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals(StepPanel.EXPANDED_WIDTH, panel().getWidth(), 0.5);
         assertEquals(List.of(0.0), saved, "0 is the persisted form of \"the default\"");
@@ -121,11 +121,11 @@ class ReviewTourSplitterTest extends ReviewTourFixture {
     @Test
     void theHunkDiffHasNoSplitterAndAFocusedPanelStripHasNone() throws Exception {
         press(KeyCode.M).release(KeyCode.M);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertFalse(splitter().isManaged(), "a collapsed panel is a strip: nothing to drag");
 
         press(KeyCode.M).release(KeyCode.M);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertTrue(splitter().isManaged());
 
         press(KeyCode.V).release(KeyCode.V);

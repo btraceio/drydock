@@ -4,6 +4,7 @@ import app.drydock.domain.HandoffBrief;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.handoff.HandoffStaleness;
 
+import app.drydock.testing.FxTest;
 import javafx.scene.Scene;
 import javafx.scene.control.Control;
 import javafx.scene.control.Label;
@@ -11,7 +12,6 @@ import javafx.scene.paint.Color;
 import javafx.scene.layout.StackPane;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
 
 import java.time.Instant;
 import java.util.List;
@@ -31,7 +31,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * the human something they cannot act on: the disabled state belongs to
  * <em>Refresh</em> alone, and it has to explain itself.</p>
  */
-class HandoffBannerTest extends ApplicationTest {
+class HandoffBannerTest extends FxTest {
 
     private HandoffBanner banner;
 

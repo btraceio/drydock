@@ -1,5 +1,7 @@
 package app.drydock.ui.review;
 
+import app.drydock.testing.FxSync;
+import app.drydock.testing.FxTest;
 import app.drydock.ui.TestStages;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
@@ -15,8 +17,6 @@ import javafx.scene.layout.Region;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -43,7 +43,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * never had: exactly one scope on screen, chosen by a two-chip
  * switcher.</p>
  */
-class SessionReviewViewTest extends ApplicationTest {
+class SessionReviewViewTest extends FxTest {
 
     /** Wide enough that the responsive layout leaves every rail expanded. */
     private static final double SCENE_WIDTH = 1400;
@@ -227,7 +227,7 @@ class SessionReviewViewTest extends ApplicationTest {
         // And it must still be there once every queued FX event has run: a
         // git call would have failed asynchronously on a path that does not
         // exist and replaced the count with nothing.
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertEquals("2 files", countsText());
     }
 
@@ -282,14 +282,14 @@ class SessionReviewViewTest extends ApplicationTest {
         // land late enough that the lookup below races an empty cell list.
         // Every other diff-driven lookup in this suite already pumps events
         // first; this one predates that convention.
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         // fire() rather than clickOn(): the button lives inside a virtualized
         // ListView cell, so the robot's hit test depends on where the list
         // happens to be scrolled (see ReviewDiffColumnTest).
         Button explorer = (Button) lookup(".review-hunk-explorer").queryAll().iterator().next();
         interact(explorer::fire);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals(List.of(Path.of("src/A.java")), host.explorerJumps);
         assertFalse(explorer.isDisabled(), "the jump reached a session, so nothing should disable it");

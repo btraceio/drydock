@@ -1,5 +1,7 @@
 package app.drydock.ui.review;
 
+import app.drydock.testing.FxSync;
+import app.drydock.testing.FxTest;
 import app.drydock.ui.TestStages;
 import app.drydock.git.DiffService;
 import app.drydock.review.ReviewScope;
@@ -12,8 +14,6 @@ import javafx.scene.layout.Region;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -35,7 +35,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * actually produces rendered rows, that the card edges survive into the
  * scene graph, and that a row never gets pinned to a fixed height.
  */
-class ReviewDiffColumnTest extends ApplicationTest {
+class ReviewDiffColumnTest extends FxTest {
 
     private final DiffService diffService = new DiffService();
     private final ReviewScopeRegistry registry = new ReviewScopeRegistry();
@@ -179,7 +179,7 @@ class ReviewDiffColumnTest extends ApplicationTest {
 
         int before = (int) renderedContextRows();
         interact(((Button) collapsed.get())::fire);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertTrue(renderedContextRows() > before,
                 "expanding must bring the unchanged lines back");
@@ -216,7 +216,7 @@ class ReviewDiffColumnTest extends ApplicationTest {
         // happens to be scrolled. What is under test is the handler, not
         // TestFX's ability to land a pointer on a recycled cell.
         interact(explorer::fire);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertTrue(explorer.isDisabled(), "the jump must disable itself once it has nowhere to go");
         assertTrue(explorer.getTooltip().getText().contains("session"),
@@ -254,7 +254,7 @@ class ReviewDiffColumnTest extends ApplicationTest {
                 "the fixture must start with the second file below the fold");
 
         interact(() -> column.revealHunk("Zulu.java", 0));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertTrue(renderedHunkFiles().contains("Zulu.java"),
                 "reveal must bring the hunk's file into view; rendered " + renderedHunkFiles());
@@ -270,7 +270,7 @@ class ReviewDiffColumnTest extends ApplicationTest {
         List<String> before = renderedHunkFiles();
         boolean[] reached = new boolean[1];
         interact(() -> reached[0] = column.revealHunk("Nowhere.java", 3));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals(before, renderedHunkFiles());
         assertFalse(reached[0], "a file that is not in the diff was not reached");
@@ -297,7 +297,7 @@ class ReviewDiffColumnTest extends ApplicationTest {
 
         boolean[] reached = new boolean[1];
         interact(() -> reached[0] = column.revealHunk("Zulu.java", 0));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         // The return value is the contract the caller acts on, and the one
         // thing that changed: this used to be an indistinguishable silent
@@ -372,7 +372,7 @@ class ReviewDiffColumnTest extends ApplicationTest {
         for (int i = 0; i < 200; i++) {
             List<ReviewDiffRow> rows = column.diagRows();
             if (ready.test(rows)) {
-                WaitForAsyncUtils.waitForFxEvents();
+                FxSync.waitForFxEvents();
                 return rows;
             }
             sleep(25);

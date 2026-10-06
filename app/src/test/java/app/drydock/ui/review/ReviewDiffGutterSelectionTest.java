@@ -1,5 +1,7 @@
 package app.drydock.ui.review;
 
+import app.drydock.testing.FxSync;
+import app.drydock.testing.FxTest;
 import app.drydock.ui.TestStages;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
@@ -20,8 +22,6 @@ import javafx.scene.input.MouseEvent;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -57,7 +57,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * {@code Node} directly: a stale node is by construction detached/replaced,
  * so there is no scene-graph position left for a robot to aim at.</p>
  */
-class ReviewDiffGutterSelectionTest extends ApplicationTest {
+class ReviewDiffGutterSelectionTest extends FxTest {
 
     private final DiffService diffService = new DiffService();
     private final ReviewScopeRegistry registry = new ReviewScopeRegistry();
@@ -259,7 +259,7 @@ class ReviewDiffGutterSelectionTest extends ApplicationTest {
         assertTrue(anchorBefore >= 0, "the click must have set a real anchor");
 
         interact(() -> stale.getOnMousePressed().handle(mouseEvent(MouseEvent.MOUSE_PRESSED, false)));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals(anchorBefore, column.diagSelectionAnchorIndex(),
                 "a stale press must not overwrite a valid anchor with -1");
@@ -277,7 +277,7 @@ class ReviewDiffGutterSelectionTest extends ApplicationTest {
         Set<String> before = column.diagSelectedKeys();
 
         interact(() -> stale.getOnMouseDragEntered().handle(dragEnteredEvent()));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals(before, column.diagSelectedKeys(), "a stale drag-entered must not change the selection");
         assertTrue(column.composerOpen(), "a stale drag-entered must not close the composer either");
@@ -295,12 +295,12 @@ class ReviewDiffGutterSelectionTest extends ApplicationTest {
             input.setText("first line");
             input.positionCaret(input.getText().length());
         });
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         push(KeyCode.ENTER);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         interact(() -> input.appendText("second line"));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertTrue(input.getText().contains("\n"), "Enter must insert a newline: " + input.getText());
         assertEquals("first line\nsecond line", input.getText());
@@ -315,7 +315,7 @@ class ReviewDiffGutterSelectionTest extends ApplicationTest {
                 Path.of("/tmp/nowhere"), Optional.of(Path.of("/tmp/nowhere")), "main", "main",
                 Optional.empty(), Optional.empty()));
         interact(() -> column.showDiff(scope, new UnifiedDiff(List.of(file))));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         // The ListView's virtualized cells realize and lay out over a couple
         // of pulses after the rows land; a real-pointer test clicks at
         // whatever screen bounds the gutter Label currently reports, so a
@@ -340,7 +340,7 @@ class ReviewDiffGutterSelectionTest extends ApplicationTest {
      */
     private void awaitCondition(java.util.function.BooleanSupplier ready, String failureMessage) {
         for (int i = 0; i < 200; i++) {
-            WaitForAsyncUtils.waitForFxEvents();
+            FxSync.waitForFxEvents();
             boolean[] met = new boolean[1];
             interact(() -> met[0] = ready.getAsBoolean());
             if (met[0]) {
@@ -404,7 +404,7 @@ class ReviewDiffGutterSelectionTest extends ApplicationTest {
 
     private void click(Node gutter, boolean shiftDown) {
         interact(() -> gutter.getOnMouseClicked().handle(mouseEvent(MouseEvent.MOUSE_CLICKED, shiftDown)));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     private static MouseEvent mouseEvent(EventType<MouseEvent> type, boolean shiftDown) {

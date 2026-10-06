@@ -1,11 +1,11 @@
 package app.drydock.ui.review;
 
 import app.drydock.review.HunkDigest;
+import app.drydock.testing.FxSync;
 import javafx.scene.control.Button;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.MouseButton;
 import org.junit.jupiter.api.Test;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.util.concurrent.TimeoutException;
 
@@ -24,7 +24,7 @@ class ReviewSettleActionsTest extends ReviewViewFixture {
     void approveWithNothingFocusedSettlesOneHunk() {
         interact(view::requestFocus);
         press(KeyCode.A).release(KeyCode.A);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals(1, settledHunksOf(FILE_A));
         assertTrue(host.store.verdict(scope.id(), digestOfFirstHunkOfFileA()).isPresent());
@@ -35,7 +35,7 @@ class ReviewSettleActionsTest extends ReviewViewFixture {
         focusDiffColumn();
         String afterFocus = view.diagFocusSnapshot();
         press(KeyCode.A).release(KeyCode.A);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         String afterPress = view.diagFocusSnapshot();
 
         assertEquals(1, settledHunksOf(FILE_A),
@@ -46,7 +46,7 @@ class ReviewSettleActionsTest extends ReviewViewFixture {
     void shiftApproveSettlesEveryHunkOfTheCurrentFile() throws TimeoutException {
         focusDiffColumn();
         press(KeyCode.SHIFT).press(KeyCode.A).release(KeyCode.A).release(KeyCode.SHIFT);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals(hunkCountOfCurrentFile(), settledHunksOf(FILE_A));
         assertEquals(0, settledHunksOf(FILE_B), "⇧A is the current file, not the review");
@@ -81,7 +81,7 @@ class ReviewSettleActionsTest extends ReviewViewFixture {
         press(MouseButton.PRIMARY);
         try {
             press(KeyCode.A).release(KeyCode.A);
-            WaitForAsyncUtils.waitForFxEvents();
+            FxSync.waitForFxEvents();
 
             assertEquals(1, settledHunksOf(FILE_A));
             assertTrue(host.store.verdict(scope.id(), digestOfSecondHunkOfFileA()).isPresent(),
@@ -103,7 +103,7 @@ class ReviewSettleActionsTest extends ReviewViewFixture {
         assertEquals("Approve (next unread hunk)", approveButtonText());
 
         focusDiffColumn();
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertEquals("Approve (next unread hunk)", approveButtonText());
     }
 
@@ -117,7 +117,7 @@ class ReviewSettleActionsTest extends ReviewViewFixture {
         focusDiffColumn();
 
         clickOn(".review-verdict-action");
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals(1, settledHunksOf(FILE_A));
     }
@@ -130,16 +130,16 @@ class ReviewSettleActionsTest extends ReviewViewFixture {
     void undoAfterAMouseSettleUndoesTheMouseSettle() {
         interact(view::requestFocus);
         press(KeyCode.A).release(KeyCode.A);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertTrue(host.store.verdict(scope.id(), digestOfFirstHunkOfFileA()).isPresent());
 
         clickOn(".review-verdict-action");
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertTrue(host.store.verdict(scope.id(), digestOfSecondHunkOfFileA()).isPresent());
 
         interact(view::requestFocus);
         press(KeyCode.U).release(KeyCode.U);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertTrue(host.store.verdict(scope.id(), digestOfSecondHunkOfFileA()).isEmpty(),
                 "u undoes the click's settle");

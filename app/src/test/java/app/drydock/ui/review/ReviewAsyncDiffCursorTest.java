@@ -1,5 +1,7 @@
 package app.drydock.ui.review;
 
+import app.drydock.testing.FxSync;
+import app.drydock.testing.FxTest;
 import app.drydock.ui.TestStages;
 import app.drydock.git.DiffService;
 import app.drydock.review.ReviewScope;
@@ -11,8 +13,6 @@ import javafx.scene.input.KeyCode;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -37,7 +37,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * screenshot of the running app showed it; tests that supply the diff
  * synchronously cannot.</p>
  */
-class ReviewAsyncDiffCursorTest extends ApplicationTest {
+class ReviewAsyncDiffCursorTest extends FxTest {
 
     private final DiffService diffService = new DiffService();
     private final ReviewScopeRegistry registry = new ReviewScopeRegistry();
@@ -101,7 +101,7 @@ class ReviewAsyncDiffCursorTest extends ApplicationTest {
 
         interact(view::requestFocus);
         press(KeyCode.CLOSE_BRACKET).release(KeyCode.CLOSE_BRACKET);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals("2/2 · zulu/Zulu.java", awaitTargetLabel());
         assertTrue(renderedHunkFiles().stream().anyMatch(p -> p.endsWith("Zulu.java")),
@@ -126,11 +126,11 @@ class ReviewAsyncDiffCursorTest extends ApplicationTest {
         assertEquals("1/2 · alpha/Alpha.java", awaitTargetLabel());
         interact(view::requestFocus);
         press(KeyCode.CLOSE_BRACKET).release(KeyCode.CLOSE_BRACKET);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertEquals("2/2 · zulu/Zulu.java", awaitTargetLabel(), "precondition: moved off file 1");
 
         interact(() -> view.showScopes(scopes, SessionReviewScopes.Choice.LOCAL));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals("1/2 · alpha/Alpha.java", awaitTargetLabel());
         assertTrue(renderedHunkFiles().stream().anyMatch(p -> p.endsWith("Alpha.java")),

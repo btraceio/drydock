@@ -1,12 +1,12 @@
 package app.drydock.ui;
 
+import app.drydock.testing.FxSync;
+import app.drydock.testing.FxTest;
 import javafx.scene.Scene;
 import javafx.scene.control.Label;
 import javafx.scene.layout.StackPane;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
-import org.testfx.util.WaitForAsyncUtils;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -16,7 +16,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * it" and quietly produces 0x0 would fail exactly the way this whole round
  * exists to stop: a class laying out at nothing, naming no width.
  */
-class TestStagesTest extends ApplicationTest {
+class TestStagesTest extends FxTest {
 
     @Override
     public void start(Stage stage) {
@@ -39,7 +39,7 @@ class TestStagesTest extends ApplicationTest {
             size[1] = extra.getHeight();
             extra.hide();
         });
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertTrue(size[0] > 0 && size[1] > 0,
                 "an unsized scene must still yield a stage with size in it, got "
@@ -57,7 +57,7 @@ class TestStagesTest extends ApplicationTest {
             size[1] = extra.getHeight();
             extra.hide();
         });
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertTrue(Math.abs(size[0] - 640) < 1 && Math.abs(size[1] - 480) < 1,
                 "the stage must take the scene's own size, got "

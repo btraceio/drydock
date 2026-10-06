@@ -19,6 +19,7 @@ import app.drydock.git.WorktreeService;
 import app.drydock.review.RepositoryPullRequests;
 import app.drydock.review.SessionReviewScopes;
 import app.drydock.state.ApplicationStateRepository;
+import app.drydock.testing.FxTest;
 import app.drydock.ui.model.WorkspaceViewModel;
 import javafx.scene.Node;
 import javafx.scene.Scene;
@@ -27,7 +28,6 @@ import javafx.scene.layout.StackPane;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -62,7 +62,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * notes, synthetic pointer input in a headless run reports success without
  * reaching the app, so a click-robot test here would assert nothing.</p>
  */
-class ReviewEntryPointsTest extends ApplicationTest {
+class ReviewEntryPointsTest extends FxTest {
 
     private static final int PR_NUMBER = 42;
 

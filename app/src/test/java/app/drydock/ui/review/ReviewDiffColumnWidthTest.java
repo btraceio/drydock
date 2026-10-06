@@ -1,5 +1,7 @@
 package app.drydock.ui.review;
 
+import app.drydock.testing.FxSync;
+import app.drydock.testing.FxTest;
 import app.drydock.ui.TestStages;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
@@ -13,8 +15,6 @@ import javafx.scene.layout.Region;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -37,7 +37,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p>These tests assert against the rendered node widths rather than the row
  * model, because the row model was never wrong -- only the layout was.</p>
  */
-class ReviewDiffColumnWidthTest extends ApplicationTest {
+class ReviewDiffColumnWidthTest extends FxTest {
 
     /** Comfortably narrower than the long line below, so the two cannot be confused. */
     private static final double COLUMN_WIDTH = 620;
@@ -135,12 +135,12 @@ class ReviewDiffColumnWidthTest extends ApplicationTest {
                 new UnifiedDiff.FileDiff("Sample.java", "M", lines.length, 0, false, false,
                         List.of(new UnifiedDiff.Hunk("@@ -1 +1 @@", diffLines)))));
         interact(() -> column.showDiff(scope(), diff));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         // The virtualized flow decides cell widths in a layout pulse, so the
         // widths are only meaningful once one has actually run.
         for (int i = 0; i < 20; i++) {
             interact(() -> column.layout());
-            WaitForAsyncUtils.waitForFxEvents();
+            FxSync.waitForFxEvents();
         }
     }
 

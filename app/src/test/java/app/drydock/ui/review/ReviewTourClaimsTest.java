@@ -4,11 +4,11 @@ import app.drydock.git.UnifiedDiff;
 import app.drydock.review.tour.ReviewTour;
 import app.drydock.review.tour.TourAnchor;
 import app.drydock.review.tour.TourStep;
+import app.drydock.testing.FxSync;
 import javafx.scene.Node;
 import javafx.scene.control.Button;
 import javafx.scene.input.KeyCode;
 import org.junit.jupiter.api.Test;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.util.List;
 
@@ -35,7 +35,7 @@ class ReviewTourClaimsTest extends ReviewTourFixture {
 
     private void key(KeyCode code) {
         press(code).release(code);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     private List<Node> callouts() {

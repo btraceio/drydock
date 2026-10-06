@@ -1,11 +1,11 @@
 package app.drydock.ui.review;
 
+import app.drydock.testing.FxSync;
+import app.drydock.testing.FxTest;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -14,7 +14,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-class TourKeyStripTest extends ApplicationTest {
+class TourKeyStripTest extends FxTest {
 
     private final AtomicInteger toggles = new AtomicInteger();
     private TourKeyStrip strip;
@@ -46,7 +46,7 @@ class TourKeyStripTest extends ApplicationTest {
         interact(() -> strip.setHints(HINTS));
 
         clickOn(".tour-key-strip-toggle");
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals(1, toggles.get());
         assertFalse(strip.hintsHidden(), "the owner of the preference decides, via setHidden");
@@ -62,7 +62,7 @@ class TourKeyStripTest extends ApplicationTest {
         assertTrue(lookup("answer the check").tryQuery().isEmpty());
         assertEquals("Shortcuts", lookup(".tour-key-strip-toggle").queryAs(Button.class).getText());
         clickOn(".tour-key-strip-toggle");
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertEquals(1, toggles.get(), "the same button brings them back");
     }
 

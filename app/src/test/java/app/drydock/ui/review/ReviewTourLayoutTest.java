@@ -1,5 +1,6 @@
 package app.drydock.ui.review;
 
+import app.drydock.testing.FxSync;
 import javafx.geometry.Pos;
 import javafx.scene.Node;
 import javafx.scene.control.Button;
@@ -11,7 +12,6 @@ import javafx.scene.paint.Color;
 import javafx.scene.paint.Paint;
 import javafx.stage.Window;
 import org.junit.jupiter.api.Test;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.util.List;
 import java.util.Optional;
@@ -50,14 +50,14 @@ class ReviewTourLayoutTest extends ReviewTourFixture {
     private void resizeWindow(double width) {
         Window window = view.getScene().getWindow();
         interact(() -> window.setWidth(width));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         interact(() -> view.layout());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     private void key(KeyCode code) {
         press(code).release(code);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     private boolean railsCollapsed(boolean outlineCollapsed, boolean stepPanelCollapsed) {
@@ -131,7 +131,7 @@ class ReviewTourLayoutTest extends ReviewTourFixture {
             assertTrue(ReviewDiagFxThread.call(() -> treeVisible(expand)));
 
             clickOn(expand);
-            WaitForAsyncUtils.waitForFxEvents();
+            FxSync.waitForFxEvents();
             Optional<String> notice = ReviewDiagFxThread.call(view::diagNotice);
             assertTrue(notice.isPresent(), "too narrow to expand, and it says so rather than doing nothing");
         } finally {
@@ -156,7 +156,7 @@ class ReviewTourLayoutTest extends ReviewTourFixture {
                     ReviewDiagFxThread.call(step::getTextFill), "the number stands off the strip");
 
             clickOn(expand);
-            WaitForAsyncUtils.waitForFxEvents();
+            FxSync.waitForFxEvents();
             assertTrue(ReviewDiagFxThread.call(outline::collapsed), "the width forces it");
             Optional<String> notice = ReviewDiagFxThread.call(view::diagNotice);
             assertTrue(notice.isPresent(), "too narrow to expand, and it says so rather than doing nothing");
@@ -172,7 +172,7 @@ class ReviewTourLayoutTest extends ReviewTourFixture {
         assertTrue(ReviewDiagFxThread.call(outline::collapsed));
 
         clickOn(from(outline).lookup(".tour-outline-expand").queryButton());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertFalse(ReviewDiagFxThread.call(outline::collapsed));
     }

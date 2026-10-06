@@ -13,6 +13,8 @@ import app.drydock.git.WorktreeService;
 import app.drydock.review.RepositoryPullRequests;
 import app.drydock.review.SessionReviewScopes;
 import app.drydock.state.ApplicationStateRepository;
+import app.drydock.testing.FxSync;
+import app.drydock.testing.FxTest;
 import app.drydock.ui.model.WorkspaceViewModel;
 import javafx.scene.Node;
 import javafx.scene.Scene;
@@ -24,8 +26,6 @@ import javafx.scene.layout.StackPane;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -64,7 +64,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * every call so the test can assert not just THAT a re-scan happened but
  * how many, and in what order relative to the worktree actually appearing.</p>
  */
-class RepositorySidebarPullRequestDedupFxTest extends ApplicationTest {
+class RepositorySidebarPullRequestDedupFxTest extends FxTest {
 
     private Path repoRoot;
     private final List<Path> extraWorktreePaths = new ArrayList<>();
@@ -152,7 +152,7 @@ class RepositorySidebarPullRequestDedupFxTest extends ApplicationTest {
         awaitCallCount(1, "the first PR scan");
         assertEquals(repository.root(), source.rootOf(0), "the scan must ask about this repository, not another");
         source.complete(0, listing(pr(7, "Fix login", "pr-7")));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertTrue(groupRowPresent(), "PR #7 has no worktree yet: its group row must be present");
 
@@ -183,7 +183,7 @@ class RepositorySidebarPullRequestDedupFxTest extends ApplicationTest {
                 "the ⟳'s worktree rescan landing while its PR scan is still in flight");
 
         source.complete(1, listing(pr(7, "Fix login", "pr-7")));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         // The worktree rescan's own completion must re-run the PR scan
         // once it lands (this is exactly what a reverted N1/B1/B2 fix
@@ -195,7 +195,7 @@ class RepositorySidebarPullRequestDedupFxTest extends ApplicationTest {
                         + "the pr-7 checkout -- captured inside the Source at the moment that "
                         + "call was made, not re-read now");
         source.complete(2, listing(pr(7, "Fix login", "pr-7")));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         awaitCondition(() -> !groupRowPresent(), "the group row disappearing once the dedup sees the new worktree");
     }
@@ -222,7 +222,7 @@ class RepositorySidebarPullRequestDedupFxTest extends ApplicationTest {
     void aRepoThatChangesWorktreesWhileNotSelectedSelfHealsOnReselect() throws Exception {
         awaitCallCount(1, "the first PR scan");
         source.complete(0, listing(pr(7, "Fix login", "pr-7")));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertTrue(groupRowPresent(), "PR #7 has no worktree yet: its group row must be present");
 
         // Deselect the repo's subtab: nobody is looking at it now.
@@ -258,7 +258,7 @@ class RepositorySidebarPullRequestDedupFxTest extends ApplicationTest {
         assertTrue(hasPr7(worktreeListAt(1)),
                 "the reselect-triggered rescan must use the worktree list that already includes pr-7");
         source.complete(1, listing(pr(7, "Fix login", "pr-7")));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         awaitCondition(() -> !groupRowPresent(), "the group row disappearing once the dedup sees the new worktree");
     }
@@ -274,7 +274,7 @@ class RepositorySidebarPullRequestDedupFxTest extends ApplicationTest {
         source.complete(0, listing(
                 pr(7, "Fix login", "pr-7"),
                 pr(8, "Bump deps", "bump-deps")));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals("PULL REQUESTS (2)", groupLabelText());
 
@@ -302,7 +302,7 @@ class RepositorySidebarPullRequestDedupFxTest extends ApplicationTest {
     void aSecondClickOnAPullRequestRowDoesNotStartASecondMaterialization() throws Exception {
         awaitCallCount(1, "the first PR scan");
         source.complete(0, listing(pr(7, "Fix login", "pr-7")));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         expandPullRequestGroup();
 
         clickReviewPill();
@@ -340,7 +340,7 @@ class RepositorySidebarPullRequestDedupFxTest extends ApplicationTest {
     void theSeamTheWorkspaceCallsRemovesTheRowOfAMaterializedPr() throws Exception {
         awaitCallCount(1, "the first PR scan");
         source.complete(0, listing(pr(7, "Fix login", "pr-7")));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         expandPullRequestGroup();
         assertTrue(pullRequestRowPresent(), "PR #7 has no worktree yet: its row must be present");
 
@@ -356,7 +356,7 @@ class RepositorySidebarPullRequestDedupFxTest extends ApplicationTest {
         assertTrue(hasPr7(worktreeListAt(1)),
                 "the rescan must run against the list that already holds the new worktree");
         source.complete(1, listing(pr(7, "Fix login", "pr-7")));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         awaitCondition(() -> !pullRequestRowPresent(),
                 "the materialized PR's row disappearing -- pressing it again would report that "
@@ -404,7 +404,7 @@ class RepositorySidebarPullRequestDedupFxTest extends ApplicationTest {
             Node row = pullRequestRow();
             clicked.set(row != null && RepositorySidebar.diagClickReviewPill(row));
         });
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertTrue(clicked.get(), "could not find the Review ▸ pill");
     }
 

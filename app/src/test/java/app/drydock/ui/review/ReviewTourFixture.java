@@ -15,15 +15,15 @@ import app.drydock.review.tour.TourCheck;
 import app.drydock.review.tour.TourFingerprint;
 import app.drydock.review.tour.TourRecord;
 import app.drydock.review.tour.TourStep;
+import app.drydock.testing.FxSync;
 import app.drydock.ui.TestStages;
 
+import app.drydock.testing.FxTest;
 import javafx.scene.Scene;
 import javafx.scene.input.MouseButton;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
-import org.testfx.framework.junit5.ApplicationTest;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -46,7 +46,7 @@ import java.util.concurrent.TimeoutException;
  * <p>Shaped like {@link ReviewViewFixture}: one view and host for the class,
  * a fresh scope (and so a fresh tour and verdict namespace) per test.</p>
  */
-abstract class ReviewTourFixture extends ApplicationTest {
+abstract class ReviewTourFixture extends FxTest {
 
     static final String FILE_A = "src/guards.h";
     static final String FILE_B = "src/guards.cpp";
@@ -83,15 +83,15 @@ abstract class ReviewTourFixture extends ApplicationTest {
         interact(() -> view.showScopes(new SessionReviewScopes.Scopes(scope, Optional.empty()),
                 SessionReviewScopes.Choice.LOCAL));
         interact(() -> view.diagShowDiff(scope, host.diff));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         // See ReviewViewFixture#showBoard: the graph build's completion
         // refreshes the board whenever it lands, so wait it out once here.
-        WaitForAsyncUtils.waitFor(10, TimeUnit.SECONDS, () -> !view.diagGraphBuildPending(scope.id()));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitFor(10, TimeUnit.SECONDS, () -> !view.diagGraphBuildPending(scope.id()));
+        FxSync.waitForFxEvents();
         // Un-targeted key presses go to the focus owner; give it to the view
         // so they pass through its key filter.
         interact(view::requestFocus);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     @AfterEach
@@ -130,9 +130,9 @@ abstract class ReviewTourFixture extends ApplicationTest {
         moveTo(".review-diff-list");
         press(MouseButton.PRIMARY);
         release(MouseButton.PRIMARY);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         try {
-            WaitForAsyncUtils.waitFor(5, TimeUnit.SECONDS, view::diagFocusInDiffColumn);
+            FxSync.waitFor(5, TimeUnit.SECONDS, view::diagFocusInDiffColumn);
         } catch (TimeoutException e) {
             throw new TimeoutException(
                     "focus never landed in the diff column within 5s; " + view.diagFocusSnapshot());

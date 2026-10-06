@@ -1,12 +1,12 @@
 package app.drydock.ui.review;
 
 import app.drydock.review.tour.StepProgress;
+import app.drydock.testing.FxSync;
 import javafx.scene.Node;
 import javafx.scene.control.Label;
 import javafx.scene.control.Labeled;
 import javafx.scene.input.KeyCode;
 import org.junit.jupiter.api.Test;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.util.Optional;
 
@@ -50,7 +50,7 @@ class ReviewTourWordingTest extends ReviewTourFixture {
                     .withDecision(StepProgress.Decision.CHANGES, Optional.empty())));
             view.refreshReviewState();
         });
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals("1/2 steps reviewed", text(".review-verdict-progress-label"));
         assertEquals("1 step left · n jumps to the next", text(".review-verdict-hint"));
@@ -61,7 +61,7 @@ class ReviewTourWordingTest extends ReviewTourFixture {
         assertEquals("step 1 of 2 · Guards header", text(".review-diff-summary"));
 
         press(KeyCode.CLOSE_BRACKET).release(KeyCode.CLOSE_BRACKET);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals("step 2 of 2 · Guards source", text(".review-diff-summary"));
     }
@@ -69,7 +69,7 @@ class ReviewTourWordingTest extends ReviewTourFixture {
     @Test
     void enteringTheHunkDiffPutsTheCurrentFileAndItsHunkCountsOnTheBarAtOnce() {
         press(KeyCode.V).release(KeyCode.V);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals("1/2 · " + FILE_A, text(".review-verdict-target"), "no [ / ] needed to get off the step");
         assertEquals("0/3 hunks reviewed", text(".review-verdict-progress-label"),
@@ -81,7 +81,7 @@ class ReviewTourWordingTest extends ReviewTourFixture {
     @Test
     void theHunkDiffKeepsItsOwnWording() {
         press(KeyCode.V).release(KeyCode.V);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertFalse(shown("Approve step"));
         assertTrue(text(".review-verdict-progress-label").endsWith("hunks reviewed"));

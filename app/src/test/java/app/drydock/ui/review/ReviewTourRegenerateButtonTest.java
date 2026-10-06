@@ -4,12 +4,12 @@ import app.drydock.domain.ManagedSessionId;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.review.SessionReviewScopes;
+import app.drydock.testing.FxSync;
 import javafx.scene.control.Button;
 import javafx.scene.input.KeyCode;
 import javafx.util.Duration;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.nio.file.Path;
 import java.util.List;
@@ -74,7 +74,7 @@ class ReviewTourRegenerateButtonTest extends ReviewTourFixture {
 
     private void answerFirstCheck() {
         press(KeyCode.DIGIT2).release(KeyCode.DIGIT2);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     @Test
@@ -93,7 +93,7 @@ class ReviewTourRegenerateButtonTest extends ReviewTourFixture {
         host.reviewers.add("claude");
 
         clickOn(regenerate());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals(List.of(scope.id()), host.reviewRuns, "the full-tour instruction, once");
         assertEquals(List.of(), host.tourRefreshDispatches, "not the stale-steps-only refresh");
@@ -107,7 +107,7 @@ class ReviewTourRegenerateButtonTest extends ReviewTourFixture {
         answerFirstCheck();
 
         clickOn(regenerate());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals(List.of(), host.reviewRuns, "nothing sent yet");
         Button button = regenerate();
@@ -123,7 +123,7 @@ class ReviewTourRegenerateButtonTest extends ReviewTourFixture {
 
         clickOn(regenerate());
         clickOn(regenerate());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals(List.of(scope.id()), host.reviewRuns);
         assertEquals("⟳  Regenerating…", regenerate().getText());
@@ -139,13 +139,13 @@ class ReviewTourRegenerateButtonTest extends ReviewTourFixture {
         AfterClick afterClick = fireAndRead();
         assertEquals(SessionReviewView.REGENERATE_ARMED_LABEL, afterClick.text());
         assertTrue(afterClick.armed());
-        WaitForAsyncUtils.waitFor(5, TimeUnit.SECONDS,
+        FxSync.waitFor(5, TimeUnit.SECONDS,
                 () -> SessionReviewView.REGENERATE_LABEL.equals(regenerate().getText()));
 
         assertEquals(List.of(), host.reviewRuns);
         assertFalse(regenerate().getStyleClass().contains("armed"));
         clickOn(regenerate());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertEquals(List.of(), host.reviewRuns, "after timing out, a click arms again rather than sending");
     }
 
@@ -157,7 +157,7 @@ class ReviewTourRegenerateButtonTest extends ReviewTourFixture {
         AfterClick afterClick = fireAndRead();
         assertEquals("⟳  Regenerating…", afterClick.text());
         assertTrue(afterClick.disabled(), "no second request while one is out");
-        WaitForAsyncUtils.waitFor(5, TimeUnit.SECONDS,
+        FxSync.waitFor(5, TimeUnit.SECONDS,
                 () -> SessionReviewView.REGENERATE_LABEL.equals(regenerate().getText()));
 
         assertFalse(regenerate().isDisabled(), "usable again");
@@ -167,7 +167,7 @@ class ReviewTourRegenerateButtonTest extends ReviewTourFixture {
     void anAgentThatCannotBeReachedSaysSoAndKeepsTheButton() {
         // No reviewers: runReview refuses.
         clickOn(regenerate());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals(List.of(), host.reviewRuns);
         assertEquals(SessionReviewView.REGENERATE_LABEL, regenerate().getText());
@@ -186,7 +186,7 @@ class ReviewTourRegenerateButtonTest extends ReviewTourFixture {
                     SessionReviewScopes.Choice.LOCAL);
             view.diagShowDiff(other, host.diff);
         });
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertTrue(lookup(".review-chip-button").queryAllAs(Button.class).stream()
                 .noneMatch(button -> button.isManaged() && button.getText().contains("Regenerate")),

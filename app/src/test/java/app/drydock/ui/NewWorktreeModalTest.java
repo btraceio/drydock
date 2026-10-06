@@ -8,6 +8,8 @@ import app.drydock.domain.RepositorySettings;
 import app.drydock.git.BranchRef;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.WorktreeService;
+import app.drydock.testing.FxSync;
+import app.drydock.testing.FxTest;
 import app.drydock.ui.NewWorktreeState.Mode;
 import javafx.scene.Node;
 import javafx.scene.Scene;
@@ -26,8 +28,6 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -54,7 +54,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * {@code origin/foo}, and a remote ref whose derived local name cannot be
  * minted.</p>
  */
-class NewWorktreeModalTest extends ApplicationTest {
+class NewWorktreeModalTest extends FxTest {
 
     /** Probe for building a portable ⌘E: the platform decides what SHORTCUT is. */
     private static final KeyCombination SWITCH_MODE =
@@ -106,7 +106,7 @@ class NewWorktreeModalTest extends ApplicationTest {
             AtomicBoolean loaded = new AtomicBoolean();
             interact(() -> loaded.set(!picker().getItems().isEmpty()));
             if (loaded.get()) {
-                WaitForAsyncUtils.waitForFxEvents();
+                FxSync.waitForFxEvents();
                 return;
             }
             Thread.sleep(50);
@@ -237,7 +237,7 @@ class NewWorktreeModalTest extends ApplicationTest {
     void typingNarrowsThePickerToMatchingBranches() {
         switchMode();
         interact(() -> picker().getEditor().setText("free"));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals(1, picker().getItems().size(), picker().getItems() + "");
         assertEquals("feat/free", picker().getItems().get(0).name());
@@ -247,7 +247,7 @@ class NewWorktreeModalTest extends ApplicationTest {
     void typingKeepsBothSpellingsofADuplicateNamedBranch() {
         switchMode();
         interact(() -> picker().getEditor().setText("foo"));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         // Both the remote-tracking and the local branch literally named
         // origin/foo match "foo"; the disambiguation rule needs both visible.
@@ -260,9 +260,9 @@ class NewWorktreeModalTest extends ApplicationTest {
     void clearingTheQueryRestoresTheFullBranchList() {
         switchMode();
         interact(() -> picker().getEditor().setText("free"));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         interact(() -> picker().getEditor().setText(""));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         // main, feat/free, origin/foo (local), origin/foo (remote), origin/origin/main
         assertEquals(5, picker().getItems().size(), picker().getItems() + "");
@@ -272,7 +272,7 @@ class NewWorktreeModalTest extends ApplicationTest {
     void aQueryMatchingNothingLeavesAnEmptyDropdown() {
         switchMode();
         interact(() -> picker().getEditor().setText("zzz-no-such"));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertTrue(picker().getItems().isEmpty());
     }
@@ -288,11 +288,11 @@ class NewWorktreeModalTest extends ApplicationTest {
     void typingAfterAPickIsNotRevertedToThePickedName() {
         switchMode();
         interact(() -> picker().getEditor().setText("main"));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertEquals("main", picker().getEditor().getText());
 
         interact(() -> picker().getEditor().setText("free"));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals("free", picker().getEditor().getText(), "the query must survive the filter");
         assertEquals("feat/free", picker().getItems().get(0).name());
@@ -307,9 +307,9 @@ class NewWorktreeModalTest extends ApplicationTest {
     void aPickedRemoteRefIsResolvedAsRemoteWhileItsNameIsStillTyped() {
         switchMode();
         interact(() -> picker().getEditor().setText("foo"));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         interact(() -> picker().setValue(remoteRef("origin/foo")));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         // The pick set the real remote ref; the editor text still names it, so
         // the value lockstep leaves it alone and the preview tracks the remote.

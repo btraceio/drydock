@@ -1,5 +1,7 @@
 package app.drydock.ui.explorer;
 
+import app.drydock.testing.FxSync;
+import app.drydock.testing.FxTest;
 import app.drydock.ui.TestStages;
 import javafx.scene.Node;
 import javafx.scene.Scene;
@@ -11,7 +13,6 @@ import javafx.scene.layout.Region;
 import javafx.stage.Stage;
 import org.fxmisc.richtext.CodeArea;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
 
 import java.nio.file.Path;
 import java.util.List;
@@ -26,7 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Skim mode's rows through the headless harness: what starts open, what
  * folds away, and what a finding does to a row.
  */
-class SkimViewTest extends ApplicationTest {
+class SkimViewTest extends FxTest {
 
     private static final String SOURCE = """
             class Sidebar {
@@ -69,11 +70,11 @@ class SkimViewTest extends ApplicationTest {
     private void show(Set<Integer> changed, Map<Integer, String> findings) {
         interact(() -> skim.show(Path.of("ui/Sidebar.java"), SOURCE,
                 SourceOutline.parse(SOURCE), changed, findings));
-        org.testfx.util.WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     private void settle() {
-        org.testfx.util.WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     /**
@@ -109,7 +110,7 @@ class SkimViewTest extends ApplicationTest {
      */
     private void waitUntil(String what, java.util.concurrent.Callable<Boolean> condition) {
         try {
-            org.testfx.util.WaitForAsyncUtils.waitFor(5, java.util.concurrent.TimeUnit.SECONDS, condition);
+            FxSync.waitFor(5, java.util.concurrent.TimeUnit.SECONDS, condition);
         } catch (java.util.concurrent.TimeoutException e) {
             throw new AssertionError("timed out waiting until " + what, e);
         }
@@ -187,7 +188,7 @@ class SkimViewTest extends ApplicationTest {
                         && label.getText().startsWith("private helpers")))
                 .findFirst().orElseThrow();
         clickOn(group);
-        org.testfx.util.WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertTrue(rowSignatures().contains("private void snapToGuide() {"));
         assertTrue(rowSignatures().contains("private void persist() {"));
@@ -228,11 +229,11 @@ class SkimViewTest extends ApplicationTest {
         show(Set.of(), Map.of());
         Button first = lookup(".skim-header").queryButton();
         clickOn(first);
-        org.testfx.util.WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertEquals(1, lookup(".skim-code").queryAll().size());
 
         clickOn(lookup(".skim-header").queryButton());
-        org.testfx.util.WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertEquals(0, lookup(".skim-code").queryAll().size(), "clicking again folds it back");
     }
 
@@ -240,7 +241,7 @@ class SkimViewTest extends ApplicationTest {
     void revealingALineOpensTheMemberThatContainsIt() {
         show(Set.of(), Map.of());
         interact(() -> skim.revealLine(8));
-        org.testfx.util.WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals(List.of("void onRelease(MouseEvent e) {"), openRowSignatures());
     }

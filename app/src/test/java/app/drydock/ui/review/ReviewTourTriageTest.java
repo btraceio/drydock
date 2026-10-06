@@ -8,11 +8,11 @@ import app.drydock.review.Triage;
 import app.drydock.review.tour.CheckProgress;
 import app.drydock.review.tour.StepProgress;
 import app.drydock.review.tour.TourRecord;
+import app.drydock.testing.FxSync;
 import javafx.scene.Node;
 import javafx.scene.control.Button;
 import javafx.scene.input.KeyCode;
 import org.junit.jupiter.api.Test;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.time.Instant;
 import java.util.List;
@@ -48,12 +48,12 @@ class ReviewTourTriageTest extends ReviewTourFixture {
             host.addFinding(scope, finding);
         }
         interact(view::refreshReviewState);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     private void key(KeyCode code) {
         press(code).release(code);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     private boolean shown(String text) {
@@ -76,7 +76,7 @@ class ReviewTourTriageTest extends ReviewTourFixture {
     /** Clicks the step panel's own button labelled {@code text}. */
     private void clickInPanel(String text) {
         clickOn(from(lookup(".step-panel")).lookup(text).queryButton());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     @Test
@@ -87,7 +87,7 @@ class ReviewTourTriageTest extends ReviewTourFixture {
         assertFalse(pinned(FILE_A), "no pin before the check is answered");
         key(KeyCode.V);
         press(KeyCode.SHIFT).press(KeyCode.F).release(KeyCode.F).release(KeyCode.SHIFT);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertFalse(view.diagMarginFindingTitles().contains("body of f_guard"),
                 "not in the hunk diff's whole-review margin either");
         press(KeyCode.SHIFT).press(KeyCode.F).release(KeyCode.F).release(KeyCode.SHIFT);

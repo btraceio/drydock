@@ -12,6 +12,8 @@ import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.review.SessionReviewScopes;
 import app.drydock.review.Severity;
+import app.drydock.testing.FxSync;
+import app.drydock.testing.FxTest;
 import app.drydock.ui.TestStages;
 import javafx.scene.Node;
 import javafx.scene.Scene;
@@ -21,8 +23,6 @@ import javafx.scene.input.KeyCode;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -52,7 +52,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * grouping put them in ONE intent, so every assertion here that tells the
  * two files apart is one the intent model could not satisfy.</p>
  */
-class ReviewFileCursorTest extends ApplicationTest {
+class ReviewFileCursorTest extends FxTest {
 
     private static final String FILE_A = "src/Alpha.java";
     private static final String FILE_B = "src/Beta.java";
@@ -195,10 +195,10 @@ class ReviewFileCursorTest extends ApplicationTest {
                     ReviewVerdict.Decision.APPROVED, Optional.empty(), Instant.EPOCH, oldBase, host.headCommit));
         }
         interact(view::refreshReviewState);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         interact(() -> ((Button) lookup(".review-verdict-confirm-stale").query()).fire());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals(Optional.of(SessionReviewView.CONFIRM_NOT_RENDERED), notice());
         assertEquals(oldBase, verdict(FILE_A, 0).orElseThrow().baseCommit(), "nothing is re-dated");
@@ -347,7 +347,7 @@ class ReviewFileCursorTest extends ApplicationTest {
         interact(() -> view.diagPublishOutcome(scope.id(), new DiffOutcome.Loaded(host.diff)));
         interact(() -> view.diagShowDiff(scope, host.diff));
         interact(view::refreshReviewState);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     private ReviewAnnotation finding(String id, String path, Severity severity) {
@@ -367,7 +367,7 @@ class ReviewFileCursorTest extends ApplicationTest {
                 ReviewVerdict.Decision.APPROVED, Optional.empty(), Instant.EPOCH,
                 host.baseCommit, host.headCommit));
         interact(view::refreshReviewState);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     private String digestOf(String path, int hunk) {
@@ -403,13 +403,13 @@ class ReviewFileCursorTest extends ApplicationTest {
     private void type(KeyCode key) {
         interact(view::requestFocus);
         press(key).release(key);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     private void shiftType(KeyCode key) {
         interact(view::requestFocus);
         press(KeyCode.SHIFT).press(key).release(key).release(KeyCode.SHIFT);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     private List<String> renderedFiles() {

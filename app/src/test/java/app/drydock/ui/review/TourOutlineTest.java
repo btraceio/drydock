@@ -2,6 +2,8 @@ package app.drydock.ui.review;
 
 import app.drydock.review.tour.CheckProgress;
 import app.drydock.review.tour.StepProgress;
+import app.drydock.testing.FxSync;
+import app.drydock.testing.FxTest;
 import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
@@ -9,8 +11,6 @@ import javafx.scene.control.ToggleButton;
 import javafx.scene.text.Text;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -22,7 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-class TourOutlineTest extends ApplicationTest {
+class TourOutlineTest extends FxTest {
 
     private final List<String> calls = new ArrayList<>();
     private TourOutline outline;
@@ -74,7 +74,7 @@ class TourOutlineTest extends ApplicationTest {
     void clickingARowSelectsItsStep() {
         interact(() -> outline.setRows(rows(), "s1"));
         clickOn(lookup(".tour-outline-row").nth(2).queryAs(Button.class));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertEquals(List.of("select s3"), calls);
     }
 
@@ -88,7 +88,7 @@ class TourOutlineTest extends ApplicationTest {
         assertTrue(lookup(".tour-outline-row").queryAll().isEmpty());
         interact(() -> outline.showMessage("No tour arrived.", Optional.of("Retry"), () -> calls.add("retry")));
         clickOn("Retry");
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertEquals(List.of("retry"), calls);
     }
 
@@ -97,7 +97,7 @@ class TourOutlineTest extends ApplicationTest {
         interact(() -> outline.setFooter(2, false));
         assertTrue(lookup("2 files without line changes").tryQuery().isPresent());
         clickOn("Acknowledge");
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertEquals(List.of("ack"), calls);
     }
 
@@ -133,14 +133,14 @@ class TourOutlineTest extends ApplicationTest {
         assertTrue(lookup("Tour failed.").tryQuery().isPresent());
         clickOn("Retry");
         clickOn("Open diff review");
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertEquals(List.of("retry", "diff"), calls);
     }
 
     @Test
     void oneTabStaysSelectedWhenTheSelectedTabIsClickedAgain() {
         clickOn("Tour");
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertTrue(lookup(".tour-outline-tab").queryAllAs(ToggleButton.class).stream()
                 .anyMatch(ToggleButton::isSelected));
     }

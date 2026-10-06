@@ -152,15 +152,19 @@ dependencies {
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 
-    // Headless JavaFX harness (see the Monocle block in tasks.test). TestFX
-    // supplies the robot and the node-query DSL; Monocle supplies a Glass
-    // platform that needs no window server, so view tests run identically on
-    // a developer's Mac and on a CI runner with no GUI session. hamcrest is
-    // explicit because testfx-core exposes org.hamcrest.Matcher in its public
-    // API but only declares the dependency at runtime scope.
+    // Headless JavaFX harness (see the Monocle block in tasks.test). Only
+    // testfx-core is used: its real robot (clicks, drags, keyboard) drives
+    // the Glass gesture pipeline the production code depends on. The test
+    // lifecycle is app.drydock.testing.FxTest (toolkit started once per JVM,
+    // fresh stage per test, single-hop FX barriers), so testfx-junit5's
+    // ApplicationTest -- which re-ran FxToolkit.setupApplication before
+    // every test -- is gone. Monocle supplies a Glass platform that needs no
+    // window server, so view tests run identically on a developer's Mac and
+    // on a CI runner with no GUI session. hamcrest is explicit because
+    // testfx-core exposes org.hamcrest.Matcher in its public API but only
+    // declares the dependency at runtime scope.
     testImplementation("org.hamcrest:hamcrest:2.2")
     testImplementation("org.testfx:testfx-core:4.0.18")
-    testImplementation("org.testfx:testfx-junit5:4.0.18")
     testRuntimeOnly("org.testfx:openjfx-monocle:21.0.2")
 }
 

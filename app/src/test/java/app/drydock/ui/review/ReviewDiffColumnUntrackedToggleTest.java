@@ -1,5 +1,7 @@
 package app.drydock.ui.review;
 
+import app.drydock.testing.FxSync;
+import app.drydock.testing.FxTest;
 import app.drydock.ui.TestStages;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
@@ -12,8 +14,6 @@ import javafx.scene.control.Label;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -37,7 +37,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * than re-diffing, and -- the important one -- publishes exactly what it
  * renders so the rest of the board cannot disagree with the column.
  */
-class ReviewDiffColumnUntrackedToggleTest extends ApplicationTest {
+class ReviewDiffColumnUntrackedToggleTest extends FxTest {
 
     private final DiffService diffService = new DiffService();
     private final ReviewScopeRegistry registry = new ReviewScopeRegistry();
@@ -79,7 +79,7 @@ class ReviewDiffColumnUntrackedToggleTest extends ApplicationTest {
 
         Button toggle = untrackedToggle();
         interact(toggle::fire);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         awaitHunkFiles(Set.of("Tracked.java"),
                 "toggling off must hide only the untracked files");
@@ -93,9 +93,9 @@ class ReviewDiffColumnUntrackedToggleTest extends ApplicationTest {
 
         Button toggle = untrackedToggle();
         interact(toggle::fire);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         interact(toggle::fire);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         awaitHunkFiles(Set.of("Tracked.java", "NewA.java", "NewB.java"),
                 "toggling back on must restore the untracked files -- the full diff must have been kept");
@@ -123,7 +123,7 @@ class ReviewDiffColumnUntrackedToggleTest extends ApplicationTest {
 
         Button toggle = untrackedToggle();
         interact(toggle::fire);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         // Let the filtered render settle before comparing the two, or a lagging
         // layout pulse makes this look like a publish/render disagreement when
@@ -188,7 +188,7 @@ class ReviewDiffColumnUntrackedToggleTest extends ApplicationTest {
             if (expected.equals(seen)) {
                 return;
             }
-            WaitForAsyncUtils.waitForFxEvents();
+            FxSync.waitForFxEvents();
             sleep(20);
         }
         assertEquals(expected, seen, message);
@@ -223,7 +223,7 @@ class ReviewDiffColumnUntrackedToggleTest extends ApplicationTest {
         for (int i = 0; i < 200; i++) {
             List<ReviewDiffRow> rows = column.diagRows();
             if (ready.test(rows)) {
-                WaitForAsyncUtils.waitForFxEvents();
+                FxSync.waitForFxEvents();
                 return rows;
             }
             sleep(25);

@@ -6,6 +6,7 @@ import app.drydock.review.tour.StepProgress;
 import app.drydock.review.tour.TourAnchor;
 import app.drydock.review.tour.TourFingerprint;
 import app.drydock.review.tour.TourStep;
+import app.drydock.testing.FxSync;
 import app.drydock.ui.nav.NavigationTrail;
 import app.drydock.ui.nav.PeekLayer;
 import app.drydock.ui.nav.SymbolPeek;
@@ -13,7 +14,6 @@ import javafx.scene.Node;
 import javafx.scene.control.Button;
 import javafx.scene.input.KeyCode;
 import org.junit.jupiter.api.Test;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.nio.file.Path;
 import java.util.List;
@@ -54,7 +54,7 @@ class ReviewTourNavigationTest extends ReviewTourFixture {
 
     private void openPeek() {
         interact(() -> view.diagPushPeek(peekAtBar()));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertTrue(ReviewDiagFxThread.call(view::diagPeekOpen), "the peek opened");
     }
 
@@ -64,7 +64,7 @@ class ReviewTourNavigationTest extends ReviewTourFixture {
 
     private void type(KeyCode code) {
         press(code).release(code);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     @Test
@@ -155,7 +155,7 @@ class ReviewTourNavigationTest extends ReviewTourFixture {
 
     private void typeShifted(KeyCode code) {
         press(KeyCode.SHIFT).press(code).release(code).release(KeyCode.SHIFT);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     private static NavigationTrail.Waypoint elsewhere(String label) {
@@ -171,7 +171,7 @@ class ReviewTourNavigationTest extends ReviewTourFixture {
                 view.diagPushPeek(peekAtBar());
             }
         });
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals(Optional.of("Peek stack is full — esc to unwind"), ReviewDiagFxThread.call(view::diagNotice));
     }
@@ -218,7 +218,7 @@ class ReviewTourNavigationTest extends ReviewTourFixture {
         Node shortcuts = lookup((Node node) -> node instanceof Button button && "?".equals(button.getText()))
                 .query();
         interact(shortcuts::requestFocus);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         type(KeyCode.ENTER);
 

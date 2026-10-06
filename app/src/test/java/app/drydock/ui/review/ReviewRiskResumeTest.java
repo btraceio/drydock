@@ -10,9 +10,9 @@ import app.drydock.review.tour.TourFingerprint;
 import app.drydock.review.tour.TourRecord;
 import app.drydock.review.tour.TourStep;
 import app.drydock.review.SessionReviewScopes;
+import app.drydock.testing.FxSync;
 import javafx.scene.control.Button;
 import org.junit.jupiter.api.Test;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.util.List;
 import java.util.Optional;
@@ -43,7 +43,7 @@ class ReviewRiskResumeTest extends ReviewTourFixture {
         host.tours.put(fresh.withProgress(step));
         interact(() -> view.showScopes(new SessionReviewScopes.Scopes(scope, Optional.empty()),
                 SessionReviewScopes.Choice.LOCAL));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     private static TourCheck predictCheck() {
@@ -59,7 +59,7 @@ class ReviewRiskResumeTest extends ReviewTourFixture {
     void anAnswerLeftAwaitingByAPreviousRunIsAskedAboutAgain() throws Exception {
         storeAwaitingAnswerAndReopen();
 
-        WaitForAsyncUtils.waitFor(5, TimeUnit.SECONDS, () -> host.riskCheckDispatches.contains("r1"));
+        FxSync.waitFor(5, TimeUnit.SECONDS, () -> host.riskCheckDispatches.contains("r1"));
         assertEquals(List.of("r1"), host.riskCheckDispatches);
     }
 
@@ -69,7 +69,7 @@ class ReviewRiskResumeTest extends ReviewTourFixture {
 
         storeAwaitingAnswerAndReopen();
 
-        WaitForAsyncUtils.waitFor(5, TimeUnit.SECONDS, () -> progress("s1").check("r1").status()
+        FxSync.waitFor(5, TimeUnit.SECONDS, () -> progress("s1").check("r1").status()
                 == CheckProgress.Status.AGENT_UNAVAILABLE);
         assertTrue(lookup("Retry").tryQuery().isPresent() || lookup(".button").queryAllAs(
                 Button.class).stream().anyMatch(b -> "Retry".equals(b.getText())));

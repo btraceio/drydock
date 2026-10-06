@@ -1,5 +1,7 @@
 package app.drydock.ui.review;
 
+import app.drydock.testing.FxSync;
+import app.drydock.testing.FxTest;
 import app.drydock.ui.TestStages;
 import app.drydock.review.ReviewVerdict;
 
@@ -13,8 +15,6 @@ import javafx.scene.layout.Region;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -35,7 +35,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * cannot be the standing action; it is a control the reader has to guess
  * at.</p>
  */
-class ReviewVerdictBarFitTest extends ApplicationTest {
+class ReviewVerdictBarFitTest extends FxTest {
 
     /**
      * The width the bar ACTUALLY gets at the code column's floor -- not the
@@ -103,7 +103,7 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
             stage.setWidth(BAR_WIDTH_AT_FLOOR);
             stage.setHeight(200);
         });
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     @Test
@@ -146,7 +146,7 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
         assertFalse(navHintShowing(), "at the floor the nav hint has to go");
 
         interact(() -> bar.getScene().getWindow().setWidth(1400));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertTrue(navHintShowing(), "a wide bar shows the nav hint again");
     }
@@ -165,7 +165,7 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
         for (double width = BAR_WIDTH_AT_FLOOR; width <= 1400; width += 20) {
             double w = width;
             interact(() -> bar.getScene().getWindow().setWidth(w));
-            WaitForAsyncUtils.waitForFxEvents();
+            FxSync.waitForFxEvents();
             interact(() -> bar.getScene().getRoot().layout());
             double[] rendered = new double[2];
             boolean[] managed = new boolean[1];
@@ -208,9 +208,9 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
         show(target(2, "drydock/review · 4 files"), Optional.of(ReviewVerdict.Decision.APPROVED));
         interact(() -> bar.showStale(Optional.of(
                 new ReviewVerdictBar.StaleInfo("a1b2c3d4e5f6789", "d4e5f6a1b2c3789", false))));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         interact(() -> bar.getScene().getRoot().layout());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertNothingTruncated();
     }
@@ -224,7 +224,7 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
     void theApproveButtonNamesTheUnitAndFitsAtTheFloor() {
         show(target(2, "drydock/review · 4 files"), Optional.empty());
         interact(() -> bar.getScene().getRoot().layout());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals("Approve (next unread hunk)", approveButtonText());
         assertNothingTruncated();
@@ -242,9 +242,9 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
         show(target(2, "drydock/review · 4 files"), Optional.empty());
 
         interact(() -> askButton().fire());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         interact(() -> bar.getScene().getRoot().layout());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertTrue(lookup(".review-verdict-ask-refusal").queryAll().stream().anyMatch(Node::isVisible),
                 "the refusal must be showing, or this measures nothing");
@@ -264,9 +264,9 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
             bar.update(target(2, "drydock/review · 4 files"), Optional.empty(), true);
             bar.showProgress(1, 7);
         });
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         interact(() -> bar.getScene().getRoot().layout());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertTrue(lookup(".review-verdict-refusal").queryAll().stream()
                         .filter(node -> !node.getStyleClass().contains("review-verdict-ask-refusal"))
@@ -300,9 +300,9 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
             bar.showProgress(1, 7);
             bar.getScene().getWindow().setWidth(1400);
         });
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         interact(() -> bar.getScene().getRoot().layout());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals("⚠ a blocking finding is still open", blockingRefusalText(),
                 "a wide bar has room for the reason; shortening it there would be a loss");
@@ -333,14 +333,14 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
         show(target(2, "drydock/review · 4 files"), Optional.empty());
         interact(() -> bar.showSubmitRefused(SessionReviewView.NEEDS_VERDICT.reason(),
                 SessionReviewView.NEEDS_VERDICT.detail()));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertTrue(refusalShowing("review-verdict-submit-refusal"));
 
         askSucceeds = false;
         interact(() -> askButton().fire());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         interact(() -> bar.getScene().getRoot().layout());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertTrue(refusalShowing("review-verdict-ask-refusal"), "the newer refusal is the one shown");
         assertFalse(refusalShowing("review-verdict-submit-refusal"),
@@ -361,9 +361,9 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
         for (SessionReviewView.SubmitRefusal refusal : SessionReviewView.SUBMIT_REFUSALS) {
             show(target(2, "drydock/review · 4 files"), Optional.empty());
             interact(() -> bar.showSubmitRefused(refusal.reason(), refusal.detail()));
-            WaitForAsyncUtils.waitForFxEvents();
+            FxSync.waitForFxEvents();
             interact(() -> bar.getScene().getRoot().layout());
-            WaitForAsyncUtils.waitForFxEvents();
+            FxSync.waitForFxEvents();
 
             assertTrue(refusalShowing("review-verdict-submit-refusal"),
                     "'" + refusal.reason() + "' must be showing, or this measures nothing");
@@ -384,14 +384,14 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
         show(target(2, "drydock/review · 4 files"), Optional.empty());
         askSucceeds = false;
         interact(() -> askButton().fire());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertTrue(refusalShowing("review-verdict-ask-refusal"));
 
         interact(() -> bar.showSubmitRefused(SessionReviewView.NEEDS_VERDICT.reason(),
                 SessionReviewView.NEEDS_VERDICT.detail()));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         interact(() -> bar.getScene().getRoot().layout());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertTrue(refusalShowing("review-verdict-submit-refusal"), "the newer refusal is the one shown");
         assertFalse(refusalShowing("review-verdict-ask-refusal"),
@@ -411,11 +411,11 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
     void aWideBarKeepsTheShortcutHintWhileRefusing() {
         show(target(2, "drydock/review · 4 files"), Optional.empty());
         interact(() -> bar.getScene().getWindow().setWidth(1400));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         interact(() -> bar.showSubmitRefused(SessionReviewView.NEEDS_VERDICT.reason(),
                 SessionReviewView.NEEDS_VERDICT.detail()));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertTrue(refusalShowing("review-verdict-submit-refusal"), "the refusal must be up");
         assertTrue(shortcutHintShowing(),
@@ -428,9 +428,9 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
         show(target(2, "drydock/review · 4 files"), Optional.empty());
         interact(() -> bar.showSubmitRefused(SessionReviewView.NEEDS_VERDICT.reason(),
                 SessionReviewView.NEEDS_VERDICT.detail()));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         interact(() -> bar.getScene().getRoot().layout());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertFalse(shortcutHintShowing(), "at the floor the refusal takes the hint's room");
         assertNothingTruncated();
@@ -493,9 +493,9 @@ class ReviewVerdictBarFitTest extends ApplicationTest {
             bar.update(target, decision, false);
             bar.showProgress(1, 7);
         });
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         interact(() -> bar.getScene().getRoot().layout());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     /**

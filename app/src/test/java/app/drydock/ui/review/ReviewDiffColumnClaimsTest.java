@@ -12,6 +12,8 @@ import app.drydock.review.tour.TourCheck;
 import app.drydock.review.tour.TourFingerprint;
 import app.drydock.review.tour.TourRecord;
 import app.drydock.review.tour.TourStep;
+import app.drydock.testing.FxSync;
+import app.drydock.testing.FxTest;
 import app.drydock.ui.TestStages;
 import javafx.scene.Node;
 import javafx.scene.Scene;
@@ -19,8 +21,6 @@ import javafx.scene.control.Button;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -33,7 +33,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** The tour's claims as the diff column draws them: callouts, badges, and what recedes. */
-class ReviewDiffColumnClaimsTest extends ApplicationTest {
+class ReviewDiffColumnClaimsTest extends FxTest {
 
     private final DiffService diffService = new DiffService();
     private final ReviewScopeRegistry registry = new ReviewScopeRegistry();
@@ -96,7 +96,7 @@ class ReviewDiffColumnClaimsTest extends ApplicationTest {
             column.showDiff(scope(), DIFF);
             column.setStepMarkSource(TourMarks.of(answeredRecord(), DIFF, "s1", activeAnchor));
         });
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     private Set<Node> callouts() {
@@ -154,7 +154,7 @@ class ReviewDiffColumnClaimsTest extends ApplicationTest {
                             List.of(predict()))));
             column.setStepMarkSource(TourMarks.of(TourRecord.fresh(tour, DIFF), DIFF, "s1"));
         });
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertEquals(0, callouts().size());
         assertEquals(0, lookup(".tour-claim-badge").queryAll().size());
         assertEquals(0, lookup(".tour-claim-stack").queryAll().size(), "no row is wrapped to carry a callout");

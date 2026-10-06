@@ -2,11 +2,11 @@ package app.drydock.ui.review;
 
 import app.drydock.domain.SessionActivity;
 import app.drydock.review.tour.CheckProgress;
+import app.drydock.testing.FxSync;
+import app.drydock.testing.FxTest;
 import javafx.stage.Stage;
 import javafx.util.Duration;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -21,7 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** The queue sends one risk check at a time and hands a silent one back as unavailable. */
-class RiskCheckQueueTest extends ApplicationTest {
+class RiskCheckQueueTest extends FxTest {
 
     private final List<String> dispatched = Collections.synchronizedList(new ArrayList<>());
     private final List<String> timedOut = Collections.synchronizedList(new ArrayList<>());
@@ -56,15 +56,15 @@ class RiskCheckQueueTest extends ApplicationTest {
     }
 
     private <T> T onFx(Callable<T> work) throws Exception {
-        return WaitForAsyncUtils.asyncFx(work).get(5, TimeUnit.SECONDS);
+        return FxSync.asyncFx(work).get(5, TimeUnit.SECONDS);
     }
 
     private void onFx(Runnable work) throws Exception {
-        WaitForAsyncUtils.asyncFx(work).get(5, TimeUnit.SECONDS);
+        FxSync.asyncFx(work).get(5, TimeUnit.SECONDS);
     }
 
     private void waitFor(Callable<Boolean> condition) throws TimeoutException {
-        WaitForAsyncUtils.waitFor(3, TimeUnit.SECONDS, condition);
+        FxSync.waitFor(3, TimeUnit.SECONDS, condition);
     }
 
     @Test

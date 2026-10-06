@@ -6,14 +6,14 @@ import app.drydock.process.ProcessRunner;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.review.SessionReviewScopes;
+import app.drydock.testing.FxSync;
 import app.drydock.ui.TestStages;
 
+import app.drydock.testing.FxTest;
 import javafx.scene.Scene;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -32,7 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * panel reads for a step's impact. A REAL scan over a real repository: the
  * board spawns the {@code git grep} itself once the change graph lands.
  */
-class ReviewFanInScanTest extends ApplicationTest {
+class ReviewFanInScanTest extends FxTest {
 
     private final ReviewScopeRegistry registry = new ReviewScopeRegistry();
     private final DiffService diffService = new DiffService();
@@ -83,7 +83,7 @@ class ReviewFanInScanTest extends ApplicationTest {
         interact(() -> view.showScopes(new SessionReviewScopes.Scopes(scope, Optional.empty()),
                 SessionReviewScopes.Choice.LOCAL));
         interact(() -> view.diagShowDiff(scope, diff));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         long start = System.nanoTime();
         while (view.diagFanInScanThread() == null) {

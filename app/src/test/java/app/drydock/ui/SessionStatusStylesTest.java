@@ -2,6 +2,7 @@ package app.drydock.ui;
 
 import app.drydock.domain.SessionStatus;
 
+import app.drydock.testing.FxTest;
 import javafx.animation.Animation;
 import javafx.animation.ParallelTransition;
 import javafx.scene.CacheHint;
@@ -10,7 +11,6 @@ import javafx.scene.layout.Region;
 import javafx.scene.layout.StackPane;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -33,7 +33,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * eligibility check the hiding tests below exercise, differing only in the
  * window property consulted.</p>
  */
-class SessionStatusStylesTest extends ApplicationTest {
+class SessionStatusStylesTest extends FxTest {
 
     private Stage stage;
     private StackPane root;

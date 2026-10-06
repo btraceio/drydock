@@ -1,5 +1,7 @@
 package app.drydock.ui.review;
 
+import app.drydock.testing.FxSync;
+import app.drydock.testing.FxTest;
 import app.drydock.ui.TestStages;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
@@ -15,8 +17,6 @@ import javafx.scene.input.MouseButton;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
-import org.testfx.framework.junit5.ApplicationTest;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -38,7 +38,7 @@ import java.util.concurrent.TimeoutException;
  * a real store, so the {@code (scopeId, digest)} keying under test is the
  * real thing rather than a stub that keys however a test pleases.</p>
  */
-abstract class ReviewViewFixture extends ApplicationTest {
+abstract class ReviewViewFixture extends FxTest {
 
     static final String FILE_A = "src/guards.h";
     static final String FILE_B = "src/guards.cpp";
@@ -85,7 +85,7 @@ abstract class ReviewViewFixture extends ApplicationTest {
         interact(() -> view.showScopes(new SessionReviewScopes.Scopes(scope, Optional.empty()),
                 SessionReviewScopes.Choice.LOCAL));
         interact(() -> view.diagShowDiff(scope, host.diff));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         // diagShowDiff kicks off a ChangeGraph build on a background
         // executor (SessionReviewView#requestGraph); its completion
         // refreshes the board and diff column from the FX thread whenever it
@@ -94,8 +94,8 @@ abstract class ReviewViewFixture extends ApplicationTest {
         // just focused and hand focus somewhere else. Waiting here, once, closes the
         // race for every test built on this fixture instead of leaving each
         // one to hit it by chance.
-        WaitForAsyncUtils.waitFor(10, TimeUnit.SECONDS, () -> !view.diagGraphBuildPending(scope.id()));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitFor(10, TimeUnit.SECONDS, () -> !view.diagGraphBuildPending(scope.id()));
+        FxSync.waitForFxEvents();
     }
 
     @AfterEach
@@ -126,9 +126,9 @@ abstract class ReviewViewFixture extends ApplicationTest {
         moveTo(".review-diff-list");
         press(MouseButton.PRIMARY);
         release(MouseButton.PRIMARY);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         try {
-            WaitForAsyncUtils.waitFor(5, TimeUnit.SECONDS, view::diagFocusInDiffColumn);
+            FxSync.waitFor(5, TimeUnit.SECONDS, view::diagFocusInDiffColumn);
         } catch (TimeoutException e) {
             // A bare TimeoutException says only "it never happened", not
             // what focus actually settled on instead.

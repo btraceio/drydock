@@ -13,13 +13,13 @@ import app.drydock.review.tour.StepProgress;
 import app.drydock.review.tour.TourAnchor;
 import app.drydock.review.tour.TourCheck;
 import app.drydock.review.tour.TourStep;
+import app.drydock.testing.FxSync;
 import javafx.scene.Node;
 import javafx.scene.Parent;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
 import javafx.scene.control.Labeled;
 import org.junit.jupiter.api.Test;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -58,7 +58,7 @@ class ReviewTourImpactTest extends ReviewTourFixture {
 
     private void setFanIn(OutOfDiffFanIn.Result result) {
         interact(() -> view.diagSetFanIn(scope.id(), result));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     private List<String> impactTexts() {
@@ -67,7 +67,7 @@ class ReviewTourImpactTest extends ReviewTourFixture {
 
     private void waitForImpactText(String text) throws TimeoutException {
         try {
-            WaitForAsyncUtils.waitFor(10, TimeUnit.SECONDS, () -> impactTexts().contains(text));
+            FxSync.waitFor(10, TimeUnit.SECONDS, () -> impactTexts().contains(text));
         } catch (TimeoutException e) {
             throw new TimeoutException("never showed \"" + text + "\"; panel showed " + impactTexts());
         }
@@ -147,7 +147,7 @@ class ReviewTourImpactTest extends ReviewTourFixture {
 
         Button edge = panelButton("← foo · step 2");
         interact(edge::fire);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals("s2", ReviewDiagFxThread.call(view::diagCurrentStepId));
         waitForImpactText("→ foo · step 1");
@@ -160,7 +160,7 @@ class ReviewTourImpactTest extends ReviewTourFixture {
 
         Button caller = panelButton(":7  foo();");
         interact(caller::fire);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         // The fixture's scope has no checkout to read, so the peek says so
         // over the column -- proof the click reached openLocationPeek.
@@ -175,7 +175,7 @@ class ReviewTourImpactTest extends ReviewTourFixture {
         Button before = panelButton(":7  foo();");
 
         interact(view::refreshReviewState);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertTrue(before == panelButton(":7  foo();"), "the impact section was not rebuilt");
     }
@@ -185,7 +185,7 @@ class ReviewTourImpactTest extends ReviewTourFixture {
         // No diagSetFanIn: the fixture's worktree is not a checkout, so the
         // board's own scan lands unavailable and must still be recorded.
         try {
-            WaitForAsyncUtils.waitFor(30, TimeUnit.SECONDS, () -> impactTexts().stream()
+            FxSync.waitFor(30, TimeUnit.SECONDS, () -> impactTexts().stream()
                     .anyMatch(text -> text.startsWith("callers unavailable: ")));
         } catch (TimeoutException e) {
             throw new TimeoutException("the scan never said why; panel showed " + impactTexts());
@@ -202,7 +202,7 @@ class ReviewTourImpactTest extends ReviewTourFixture {
         // A new diff instance with the same content: the tour stays valid,
         // and requestGraph builds again instead of treating it as graphed.
         interact(() -> view.diagShowDiff(scope, new UnifiedDiff(host.diff.files())));
-        WaitForAsyncUtils.waitFor(10, TimeUnit.SECONDS, () -> !view.diagGraphBuildPending(scope.id()));
+        FxSync.waitFor(10, TimeUnit.SECONDS, () -> !view.diagGraphBuildPending(scope.id()));
 
         waitForImpactText("callers unavailable: the change could not be parsed: unbalanced braces");
         assertFalse(impactTexts().contains("Finding callers…"), impactTexts().toString());

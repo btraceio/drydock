@@ -1,5 +1,7 @@
 package app.drydock.ui.review;
 
+import app.drydock.testing.FxSync;
+import app.drydock.testing.FxTest;
 import app.drydock.ui.TestStages;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
@@ -24,8 +26,6 @@ import javafx.scene.layout.Region;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -50,7 +50,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * they own -- driven through the headless harness against a real
  * {@code AnnotationStore}.
  */
-class ReviewFindingsAndVerdictsTest extends ApplicationTest {
+class ReviewFindingsAndVerdictsTest extends FxTest {
 
     private final DiffService diffService = new DiffService();
     private final ReviewScopeRegistry registry = new ReviewScopeRegistry();
@@ -117,7 +117,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         assertEquals(1, lookup(".review-finding-card").queryAll().size());
 
         interact(() -> ((Button) List.copyOf(lookup(".review-filter-button").queryAll()).get(1)).fire());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals(2, lookup(".review-finding-card").queryAll().size());
     }
@@ -178,7 +178,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         seed(asked);
 
         interact(() -> ((Button) lookup(".review-ask-chip").query()).fire());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         List<ReviewAnnotation.Message> thread = host.store.byId(scope.id(), "f1").orElseThrow().thread();
         assertEquals("Explain why this leaks.", thread.get(thread.size() - 1).text());
@@ -209,7 +209,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         seed(finding("f1", Severity.BLOCKING));
 
         type(KeyCode.M);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         // queryAll() ignores visibility, so assert on what actually collapsed.
         assertFalse(lookup(".review-findings-scroll").query().isVisible(), "the cards collapse away");
@@ -223,7 +223,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         // collapse is remembered, so the responsive solver must not re-apply
         // it on the way back).
         type(KeyCode.M);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertTrue(lookup(".review-findings-scroll").query().isVisible(),
                 "pressing m again must bring the cards back");
     }
@@ -246,7 +246,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
                 "precondition: ReviewAnnotation.human defaults to posting");
 
         clickOn("Included in review");
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         ReviewAnnotation afterToggle = host.store.byId(scope.id(), human.key().id()).orElseThrow();
         assertFalse(afterToggle.postToPr(), "a real click on the toggle must withdraw the comment");
@@ -470,7 +470,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         seed(finding("f1", Severity.QUESTION));
 
         type(KeyCode.F);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertFalse(lookup(".review-findings-scroll").query().isVisible(), "the margin collapses");
         assertTrue(lookup(".review-verdict-action").queryAll().stream().anyMatch(Node::isVisible),
@@ -490,11 +490,11 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         assertTrue(lookup(".review-findings-scroll").query().isVisible());
 
         type(KeyCode.F);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertFalse(lookup(".review-findings-scroll").query().isVisible(), "the margin collapses");
 
         type(KeyCode.F);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         assertTrue(lookup(".review-findings-scroll").query().isVisible(),
                 "pressing f again must give the rails back");
     }
@@ -513,7 +513,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
                 "only the current file's findings by default");
 
         press(KeyCode.SHIFT).press(KeyCode.F).release(KeyCode.F).release(KeyCode.SHIFT);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertEquals(2, lookup(".review-finding-card").queryAll().size());
     }
@@ -556,7 +556,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         interact(() -> view.showScopes(new SessionReviewScopes.Scopes(minted, Optional.empty()),
                 SessionReviewScopes.Choice.LOCAL));
         interact(() -> view.diagPublishOutcome(minted.id(), outcome));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         return minted;
     }
 
@@ -697,13 +697,13 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
      */
     private void atTheFloor() {
         interact(() -> view.getScene().getWindow().setWidth(RailLayout.CODE_MIN_WIDTH));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     /** The refusal on screen is {@code expected}, and it is not truncated. */
     private void assertSubmitRefusalFits(SessionReviewView.SubmitRefusal expected) {
         interact(() -> view.getScene().getRoot().layout());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         Node label = lookup(".review-verdict-submit-refusal").queryAll().stream()
                 .filter(Node::isVisible)
@@ -736,7 +736,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
                 .findFirst()
                 .orElseThrow(() -> new AssertionError("no Ask-the-agent button found"))
                 .fire());
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     /** The text of the verdict bar's ask-refusal label; blank when it is not showing. */
@@ -785,7 +785,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
             view.getScene().getWindow().setWidth(1400);
             view.getScene().getWindow().setHeight(900);
         });
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
         ReviewScope minted = mintScope();
         for (ReviewAnnotation finding : findings) {
             host.store.upsert(finding);
@@ -805,7 +805,7 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
         // diff landing would, so that guard sees a match.
         interact(() -> view.diagShowDiff(minted, host.diff));
         interact(view::refreshReviewState);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     private ReviewAnnotation finding(String id, Severity severity) {
@@ -853,6 +853,6 @@ class ReviewFindingsAndVerdictsTest extends ApplicationTest {
     private void type(KeyCode key) {
         interact(view::requestFocus);
         press(key).release(key);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 }

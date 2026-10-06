@@ -1,6 +1,8 @@
 package app.drydock.ui.review;
 
 import app.drydock.review.HunkIds;
+import app.drydock.testing.FxSync;
+import app.drydock.testing.FxTest;
 import app.drydock.ui.TestStages;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
@@ -15,8 +17,6 @@ import javafx.scene.control.Label;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.testfx.framework.junit5.ApplicationTest;
-import org.testfx.util.WaitForAsyncUtils;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -47,7 +47,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * own headless tests in {@code ReadingPathTest}, so reproducing it here would
  * pin the same behaviour twice under a heavier, git-backed harness.</p>
  */
-class ReviewLinkRowTest extends ApplicationTest {
+class ReviewLinkRowTest extends FxTest {
 
     private static final String FILE_A = "src/guards.h";
     private static final String FILE_B = "src/guards.cpp";
@@ -117,7 +117,7 @@ class ReviewLinkRowTest extends ApplicationTest {
 
         for (ReviewDensity density : ReviewDensity.values()) {
             interact(() -> column.setDensity(density));
-            WaitForAsyncUtils.waitForFxEvents();
+            FxSync.waitForFxEvents();
             List<Double> insets = new ArrayList<>();
             interact(() -> lookup(".review-link-row").queryAll().forEach(node -> {
                 node.applyCss();
@@ -153,7 +153,7 @@ class ReviewLinkRowTest extends ApplicationTest {
 
         Button link = (Button) lookup(".review-link-row").query();
         interact(link::fire);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertTrue(renderedHunkFiles().contains(FILE_B),
                 "clicking the link must scroll to the hunk it names; rendered " + renderedHunkFiles());
@@ -210,7 +210,7 @@ class ReviewLinkRowTest extends ApplicationTest {
 
         Button link = (Button) lookup(".review-link-row").query();
         interact(link::fire);
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertTrue(renderedHunkFiles().contains(FILE_B),
                 "a cross-file link must reach its target; rendered " + renderedHunkFiles());
@@ -227,7 +227,7 @@ class ReviewLinkRowTest extends ApplicationTest {
     void revealHunkLandsOnTheRealHunkIndexNotThePositionAmongRenderedHeaders() {
         UnifiedDiff diff = new UnifiedDiff(List.of(threeHunkFile()));
         interact(() -> column.showDiff(scope(), diff));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertFalse(renderedRangeLabels().contains("L300"),
                 "hunk 2 must start below the fold, behind the giant hunk 1; rendered "
@@ -235,7 +235,7 @@ class ReviewLinkRowTest extends ApplicationTest {
 
         boolean[] reached = new boolean[1];
         interact(() -> reached[0] = column.revealHunk(FILE_A, 2));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
 
         assertTrue(reached[0]);
         assertTrue(renderedRangeLabels().contains("L300"),
@@ -247,7 +247,7 @@ class ReviewLinkRowTest extends ApplicationTest {
 
     private void setLinks(Map<String, List<ReadingPath.Link>> byHunkId) {
         interact(() -> column.setLinks(byHunkId));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     private List<String> linkRowTexts() {
@@ -270,7 +270,7 @@ class ReviewLinkRowTest extends ApplicationTest {
                 javafx.scene.input.MouseEvent.MOUSE_CLICKED, 0, 0, 0, 0,
                 javafx.scene.input.MouseButton.PRIMARY, 1,
                 false, false, false, false, true, false, false, true, false, false, null)));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     private int composerCount() {
@@ -316,7 +316,7 @@ class ReviewLinkRowTest extends ApplicationTest {
                 oneLineFile(FILE_B, "void bar();"),
                 oneLineFile(FILE_C, "void baz();")));
         interact(() -> column.showDiff(scope(), diff));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     /**
@@ -337,7 +337,7 @@ class ReviewLinkRowTest extends ApplicationTest {
                 new UnifiedDiff.FileDiff("src/filler.cpp", "M", 150, 0, false, false, List.of(fillerHunk)),
                 oneLineFile(FILE_B, "void bar();")));
         interact(() -> column.showDiff(scope(), diff));
-        WaitForAsyncUtils.waitForFxEvents();
+        FxSync.waitForFxEvents();
     }
 
     private ReviewScope scope() {
