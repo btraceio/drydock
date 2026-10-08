@@ -12,6 +12,8 @@ state before concluding it is held).
 Branch `feat/review_tour`, worktree
 `.worktrees/drydock-review-tour`. All work committed and signed:
 
+- 95258601 — refusal override into the review body (backlog item 6)
+- 8c791353 — bare inherited calls bind (backlog item 5)
 - 5bfeb2d2 — scoped usage binding, tier 2 (q-lsp-resolution-path)
 - 734d4d73 — deep review ask after the tour (q-post-tour-deep-review)
 - 563d87f3 — tour diagrams: monospace + staged reveals (q-tour-diagrams)
@@ -38,9 +40,23 @@ Branch `feat/review_tour`, worktree
   regression (node dead-rg-replace-flag).
 
 ## Remaining queue
-EMPTY — every cairn question node is resolved and committed. Follow-ups
-recorded but not asked for: LSP tier 3 (its own spec, per §2/§6); the
-fan-in scan over the scoped tier; non-Java binding strategies.
+NOT EMPTY — the complexity-ranked backlog (cairn
+design-backlog-complexity-order) has 3 items left:
+7. Fan-in over the scoped tier — OutOfDiffFanIn is a one-shot blocking
+   name scan; the binder is per-symbol async. Design: batching the
+   binder vs mixed provenance in the fan-in. This is where the
+   remaining usage-link noise surfaces.
+8. Second language binder (Kotlin before Python). Probe-verify grammar
+   shapes FIRST (the Java probe found 4 real bugs before any binder
+   code was written).
+9. LSP tier 3 (jdt.ls) — its own spec (§2/§6); nothing in tier 2 is
+   throwaway for it.
+Backlog item 4 (patch-only fresh-head) closed premise-void: the only
+production PR-scope mint always carries a worktree, so the state
+cannot arise (evidence recorded in the cairn node).
+Done this round additionally: 7d41db75 (ask dies with its session),
+dd2c1853 (posted edits land in threads), 2c86b84b (ask about this
+step), 8c791353, 95258601.
 
 Settled this round (tier 2): binding requires the receiver statically
 derivable AND resolution to the peek's own declaration (unanimous
