@@ -1915,7 +1915,21 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         return replay.test(event);
     }
 
-/**
+    /**
+     * {@code ⌘F} while the Review board is showing: opens its source
+     * viewer's find bar. False when Review is not showing, so the key can
+     * keep its meaning elsewhere (the terminal's own ghostty find).
+     */
+    public boolean openReviewFind() {
+        return showingReviewBoard()
+                .map(board -> {
+                    board.openFind();
+                    return true;
+                })
+                .orElse(false);
+    }
+
+    /**
      * Closes the topmost thing Review has open -- the symbol lens, then the
      * MCP panel -- and reports whether it closed anything. False means Esc
      * should move on and leave Review altogether.

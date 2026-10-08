@@ -2777,8 +2777,16 @@ public final class SessionReviewView extends BorderPane {
      * Returns whether something was closed, so the scene filter knows
      * whether to keep unwinding.
      */
+    /** {@code ⌘F}: the source viewer's find bar, over the rendered rows. */
+    public void openFind() {
+        diffColumn.openFind();
+    }
+
     public boolean unwindOne() {
         if (peekLayer.popOne()) {
+            return true;
+        }
+        if (diffColumn.closeFind()) {
             return true;
         }
         if (diffColumn.lensOpen()) {

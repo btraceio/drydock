@@ -55,6 +55,7 @@ public final class ShortcutsOverlay {
                     {"Back to the current step", "b"},
                     {"Next / previous claim or range in the step", ". / ,"},
                     {"Search scope: change / worktree (tour)", "⇧D"},
+                    {"Find in the diff", "⌘F"},
                     {"In a peek: open / usages / ask the agent", "⏎ / u / a"},
                     {"Answer the current check; with none open, jump to that claim", "1 / 2 / 3 / 4"},
                     {"Approve the step once its checks pass (hunk diff: next unread hunk)", "a"},

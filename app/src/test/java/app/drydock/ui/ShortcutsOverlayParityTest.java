@@ -55,6 +55,7 @@ class ShortcutsOverlayParityTest {
      */
     private static final Set<String> NOT_THE_REVIEW_BOARDS_OWN_BINDING = Set.of(
             "⌘⏎",
+            "⌘F", // the find bar: bound in the global shortcut chain, not handleShortcut
             "⏎ / u / a" // an open peek's keys, which only exist while a peek is open
     );
 

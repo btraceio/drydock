@@ -1000,7 +1000,15 @@ public final class DrydockApplication extends Application {
                     appShell.toggleTheme();
                 }
                 event.consume();
-} else if (cmd && event.isAltDown() && event.getCode() == KeyCode.CLOSE_BRACKET) {
+            } else if (cmd && event.getCode() == KeyCode.F) {
+                // Review's source viewer has a find bar; the terminal's own
+                // ⌘F lives inside its sub-tab (ghostty), and the Explorer
+                // has none yet, so this is Review's to claim while its
+                // board is showing -- and falls through when it is not.
+                if (mainWorkspace.openReviewFind()) {
+                    event.consume();
+                }
+            } else if (cmd && event.isAltDown() && event.getCode() == KeyCode.CLOSE_BRACKET) {
                 // ⌥⌘] cycles terminals within the Terminal sub-tab. Checked
                 // before the plain ⌘] session-tab branch so the alt-modified
                 // bracket never falls through to it.

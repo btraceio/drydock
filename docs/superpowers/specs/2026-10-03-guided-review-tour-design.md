@@ -285,6 +285,15 @@ because a removed row has no line in the post-image.
   its own trail-first claim on them only while the Explorer is showing.
 - `b` returns the column to the current step's first anchor. A "↩ back to
   step N" pill shows whenever the viewport is off the step's rows.
+- **⌘F finds in the diff.** A bar over the column's top-right corner
+  searches the rendered diff's own lines -- folded ones included, so a hit
+  inside a collapsed run still counts and the walk opens the fold when it
+  lands there -- case-insensitively, from two characters up. Enter /
+  shift-Enter step and wrap; every hit row is marked and the row the walk
+  is on carries the accent bar (signaling, not just scrolling); Esc closes
+  the bar and clears the marks. The key is Review's while its board is
+  showing and falls through everywhere else (the terminal's own ghostty
+  find keeps it inside its sub-tab).
 - **Every reveal opens what hid it.** A jump whose target row is missing is
   indistinguishable from a dead button, so `revealLine` falls back before
   giving up: a target inside a collapsed run opens that hunk's folds (a jump

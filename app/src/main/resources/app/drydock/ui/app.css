@@ -2766,6 +2766,47 @@
 .review-code-row.tour-claim-active.row-context {
     -fx-background-color: -drydock-accent-soft;
 }
+/* Find (⌘F) over the rendered rows: every hit reads as one faint block, the
+   row the walk is on gets the accent bar -- signaling where the matches
+   are, not just scrolling between them. Ordered after the row-add/row-del
+   fills so a hit replaces them: the find state is the louder signal. */
+.review-code-row.find-hit {
+    -fx-background-color: -drydock-accent-soft;
+}
+.review-code-row.find-hit-current {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-border-color: transparent transparent transparent -drydock-accent;
+    -fx-border-width: 0 0 0 3;
+}
+/* The find bar floats over the list's top-right corner. */
+.review-find-bar {
+    -fx-background-color: -drydock-sidebar;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 8px;
+    -fx-background-radius: 8px;
+    -fx-padding: 4 7 4 7;
+    -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.55), 18, 0.2, 0, 6);
+}
+.review-find-field {
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 11px;
+    -fx-background-radius: 6px;
+    -fx-border-radius: 6px;
+}
+.review-find-count {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10px;
+    -fx-padding: 0 4 0 4;
+}
+.review-find-action {
+    -fx-background-color: transparent;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 10px;
+    -fx-padding: 2 6 2 6;
+    -fx-background-radius: 6px;
+    -fx-cursor: hand;
+}
+.review-find-action:hover { -fx-text-fill: -drydock-text; -fx-background-color: -drydock-hover; }
 .tour-claim-badge {
     -fx-background-color: -drydock-accent;
     -fx-background-radius: 10px;
