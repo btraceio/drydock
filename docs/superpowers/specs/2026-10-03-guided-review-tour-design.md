@@ -435,17 +435,19 @@ symbol at a file line. Each result carries provenance `MEASURED`, `CLAIMED`,
   bundled grammars, no new dependency, no server lifecycle; Java today,
   per-language strategies). An occurrence binds when its receiver is
   statically derivable -- no receiver or `this` with the member declared on
-  an enclosing class of the same file; a class-name receiver through an
-  import or the same package, followed up the `extends` chain (capped); a
-  local/parameter/field's declared type -- AND the resolved member is the
-  declaration the peek is centred on. A same-named member on an unrelated
-  class is exactly the false link this tier refuses. What it deliberately
-  never claims: interfaces, overloads, type inference, `java.lang` types,
-  implicit outer-class receivers -- those occurrences stay lexical, and
-  the peek says so ("N bound by scope · M name matches", a `scoped` chip
-  per bound row). When the lexical candidate binds nothing but every
-  resolved reference agrees on one other declaration, the peek re-centres
-  on it and marks the declaration scope-bound.
+  an enclosing class of the same file or reached through that class's
+  `extends` chain (capped, cycles refused), so a bare inherited call is as
+  real as a qualified one; a class-name receiver through an import or the
+  same package, followed up the same chain; a local/parameter/field's
+  declared type -- AND the resolved member is the declaration the peek is
+  centred on. A same-named member on an unrelated class is exactly the
+  false link this tier refuses. What it deliberately never claims:
+  interfaces, overloads, type inference, `java.lang` types -- those
+  occurrences stay lexical, and the peek says so ("N bound by scope · M
+  name matches", a `scoped` chip per bound row). When the lexical
+  candidate binds nothing but every resolved reference agrees on one
+  other declaration, the peek re-centres on it and marks the declaration
+  scope-bound.
 - **Resolved (`RESOLVED`)** -- reserved for a language server that has
   indexed the code; a later LSP spec plugs it in, used only when a server
   for the language is running and indexed. The tour never waits on it.

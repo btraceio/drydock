@@ -368,9 +368,9 @@ class JavaScopeBinderTest {
                 "package a;",
                 "class Caller extends Real {",
                 "  void run(Other other) {",
-                "    target();",          // line 5: inherited through Real? No --
-                "    other.target();",    // bare call binds only to classes of THIS file
-                "  }",                   // (extends resolution is receiver-driven)
+                "    target();",          // line 4: inherited through Real
+                "    other.target();",    // line 5: Other.target is not Real.target
+                "  }",
                 "}");
 
         Map<Integer, JavaScopeBinder.Declaration> bound =
@@ -378,11 +378,39 @@ class JavaScopeBinderTest {
                         Optional.of(new JavaScopeBinder.Declaration(Path.of("src/a/Real.java"), 3)),
                         Path.of("src/a/Caller.java")).boundLines();
 
-        // The bare call on line 5: Caller does not declare target, and v1's
-        // bare-call rule is same-file classes only -- inherited bare calls
-        // stay lexical. The honest under-claim, pinned.
-        assertFalse(bound.containsKey(4),
-                "a bare inherited call is v1's known under-claim: it stays lexical");
+        // The bare call on line 4 binds through Caller's extends chain: a
+        // bare inherited call is as real as a qualified one.
+        assertEquals(Optional.of(new JavaScopeBinder.Declaration(Path.of("src/a/Real.java"), 3)),
+                Optional.ofNullable(bound.get(4)),
+                "the bare inherited call binds to Real.target, one extends hop away");
+        // And the stranger on line 5 still does not: Other.target is not
+        // the declaration the peek is about, however real it is on its own.
         assertFalse(bound.containsKey(5), "Other.target is not Real.target");
+    }
+
+    /**
+     * The extends chain for a bare call is walked from the class the
+     * occurrence sits in -- a nested class inherits from ITS superclass,
+     * and the chain is followed at most MAX_SUPERCLASS_DEPTH hops, cycles
+     * refused.
+     */
+    @Test
+    void aDeeplyInheritedBareCallBindsThroughTheChain() throws IOException {
+        java("src/a/Root.java", "package a;", "class Root {", "  void target() {} }");
+        java("src/a/Middle.java", "package a;", "class Middle extends Root {", "}");
+        java("src/a/Caller.java",
+                "package a;",
+                "class Caller extends Middle {",
+                "  void run() {",
+                "    target();",
+                "  }",
+                "}");
+
+        JavaScopeBinder.Binding binding = binder.bind("target",
+                Optional.of(new JavaScopeBinder.Declaration(Path.of("src/a/Root.java"), 3)),
+                Path.of("src/a/Caller.java"));
+
+        assertTrue(binding.boundLines().containsKey(4),
+                "two extends hops: Caller → Middle → Root, still a real reference");
     }
 }

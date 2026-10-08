@@ -174,13 +174,21 @@ final class JavaScopeBinder {
                 symbol, seen);
     }
 
-    /** A bare or {@code this} receiver: any class enclosing the occurrence in this file may own it. */
+    /**
+     * A bare or {@code this} receiver: any class enclosing the occurrence
+     * in this file may own the member -- or reach it through its own
+     * {@code extends} chain, because a bare inherited call (the most
+     * common kind in a codebase with base classes) is a real reference
+     * too. Each enclosing class goes innermost first; the chain walk is
+     * {@link #memberOf}'s, capped and cycle-guarded the same way.
+     */
     private Optional<Declaration> unqualifiedMember(FileModel file, Reference ref, String symbol) {
         if (!ref.unqualified()) {
             return Optional.empty();
         }
         for (int i = ref.enclosingClasses().size() - 1; i >= 0; i--) {
-            Optional<Declaration> found = enclosingMember(file, ref.enclosingClasses().get(i), symbol);
+            Optional<Declaration> found = memberOf(file,
+                    Optional.of(ref.enclosingClasses().get(i)), symbol, new LinkedHashSet<>());
             if (found.isPresent()) {
                 return found;
             }
