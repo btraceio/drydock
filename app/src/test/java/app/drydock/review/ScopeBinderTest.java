@@ -22,15 +22,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * little Java programs on disk so the binder reads exactly what production
  * reads.
  */
-class JavaScopeBinderTest {
+class ScopeBinderTest {
 
     @TempDir
     Path root;
-    private JavaScopeBinder binder;
+    private ScopeBinder binder;
 
     @BeforeEach
     void setUp() {
-        binder = new JavaScopeBinder(root);
+        binder = new ScopeBinder(root);
     }
 
     private void java(String relative, String... lines) throws IOException {
@@ -53,11 +53,11 @@ class JavaScopeBinderTest {
                 "  }",
                 "}");
 
-        JavaScopeBinder.Binding binding = binder.bind("target",
-                Optional.of(new JavaScopeBinder.Declaration(Path.of("src/Caller.java"), 3)),
+        ScopeBinder.Binding binding = binder.bind("target",
+                Optional.of(new ScopeBinder.Declaration(Path.of("src/Caller.java"), 3)),
                 Path.of("src/Caller.java"));
 
-        assertEquals(new JavaScopeBinder.Declaration(Path.of("src/Caller.java"), 3),
+        assertEquals(new ScopeBinder.Declaration(Path.of("src/Caller.java"), 3),
                 binding.boundLines().get(5), "line 5's bare call binds to the declaration on line 3");
     }
 
@@ -73,8 +73,8 @@ class JavaScopeBinderTest {
                 "  }",
                 "}");
 
-        JavaScopeBinder.Binding binding = binder.bind("count",
-                Optional.of(new JavaScopeBinder.Declaration(Path.of("src/Holder.java"), 3)),
+        ScopeBinder.Binding binding = binder.bind("count",
+                Optional.of(new ScopeBinder.Declaration(Path.of("src/Holder.java"), 3)),
                 Path.of("src/Holder.java"));
 
         assertTrue(binding.boundLines().containsKey(5), "this.count binds to the field on line 3");
@@ -99,11 +99,11 @@ class JavaScopeBinderTest {
                 "  }",
                 "}");
 
-        JavaScopeBinder.Binding binding = binder.bind("target",
-                Optional.of(new JavaScopeBinder.Declaration(Path.of("src/a/Helper.java"), 3)),
+        ScopeBinder.Binding binding = binder.bind("target",
+                Optional.of(new ScopeBinder.Declaration(Path.of("src/a/Helper.java"), 3)),
                 Path.of("src/b/Caller.java"));
 
-        assertEquals(new JavaScopeBinder.Declaration(Path.of("src/a/Helper.java"), 3),
+        assertEquals(new ScopeBinder.Declaration(Path.of("src/a/Helper.java"), 3),
                 binding.boundLines().get(6), "the local's type resolves to Helper.java line 3");
     }
 
@@ -124,11 +124,11 @@ class JavaScopeBinderTest {
                 "  }",
                 "}");
 
-        JavaScopeBinder.Binding binding = binder.bind("clamp",
-                Optional.of(new JavaScopeBinder.Declaration(Path.of("src/a/Util.java"), 3)),
+        ScopeBinder.Binding binding = binder.bind("clamp",
+                Optional.of(new ScopeBinder.Declaration(Path.of("src/a/Util.java"), 3)),
                 Path.of("src/b/Caller.java"));
 
-        assertEquals(new JavaScopeBinder.Declaration(Path.of("src/a/Util.java"), 3),
+        assertEquals(new ScopeBinder.Declaration(Path.of("src/a/Util.java"), 3),
                 binding.boundLines().get(5));
     }
 
@@ -148,11 +148,11 @@ class JavaScopeBinderTest {
                 "  }",
                 "}");
 
-        JavaScopeBinder.Binding binding = binder.bind("target",
-                Optional.of(new JavaScopeBinder.Declaration(Path.of("src/a/Peer.java"), 3)),
+        ScopeBinder.Binding binding = binder.bind("target",
+                Optional.of(new ScopeBinder.Declaration(Path.of("src/a/Peer.java"), 3)),
                 Path.of("src/a/Caller.java"));
 
-        assertEquals(new JavaScopeBinder.Declaration(Path.of("src/a/Peer.java"), 3),
+        assertEquals(new ScopeBinder.Declaration(Path.of("src/a/Peer.java"), 3),
                 binding.boundLines().get(4));
     }
 
@@ -178,11 +178,11 @@ class JavaScopeBinderTest {
                 "  }",
                 "}");
 
-        JavaScopeBinder.Binding binding = binder.bind("target",
-                Optional.of(new JavaScopeBinder.Declaration(Path.of("src/a/Base.java"), 3)),
+        ScopeBinder.Binding binding = binder.bind("target",
+                Optional.of(new ScopeBinder.Declaration(Path.of("src/a/Base.java"), 3)),
                 Path.of("src/a/Sub.java"));
 
-        assertEquals(new JavaScopeBinder.Declaration(Path.of("src/a/Base.java"), 3),
+        assertEquals(new ScopeBinder.Declaration(Path.of("src/a/Base.java"), 3),
                 binding.boundLines().get(6), "target binds to Base, one extends hop away");
     }
 
@@ -204,11 +204,11 @@ class JavaScopeBinderTest {
                 "  }",
                 "}");
 
-        JavaScopeBinder.Binding binding = binder.bind("target",
-                Optional.of(new JavaScopeBinder.Declaration(Path.of("src/a/Helper.java"), 3)),
+        ScopeBinder.Binding binding = binder.bind("target",
+                Optional.of(new ScopeBinder.Declaration(Path.of("src/a/Helper.java"), 3)),
                 Path.of("src/a/Holder.java"));
 
-        assertEquals(new JavaScopeBinder.Declaration(Path.of("src/a/Helper.java"), 3),
+        assertEquals(new ScopeBinder.Declaration(Path.of("src/a/Helper.java"), 3),
                 binding.boundLines().get(6));
     }
 
@@ -239,14 +239,14 @@ class JavaScopeBinderTest {
                 "  }",
                 "}");
 
-        JavaScopeBinder.Binding binding = binder.bind("target",
-                Optional.of(new JavaScopeBinder.Declaration(Path.of("src/a/Real.java"), 3)),
+        ScopeBinder.Binding binding = binder.bind("target",
+                Optional.of(new ScopeBinder.Declaration(Path.of("src/a/Real.java"), 3)),
                 Path.of("src/a/Caller.java"));
 
         assertTrue(binding.isEmpty(),
                 "Other.target is a real method, but it is not the symbol the reader asked about"
                         + " -- the call site binds nothing");
-        assertEquals(Optional.of(new JavaScopeBinder.Declaration(Path.of("src/a/Other.java"), 3)),
+        assertEquals(Optional.of(new ScopeBinder.Declaration(Path.of("src/a/Other.java"), 3)),
                 binding.unanimousDeclaration(),
                 "the votes say which declaration the file DOES reference -- a peek that"
                         + " centred on the wrong candidate can read this and re-centre");
@@ -270,7 +270,7 @@ class JavaScopeBinderTest {
                 "}");
 
         assertTrue(binder.bind("target",
-                        Optional.of(new JavaScopeBinder.Declaration(Path.of("src/a/Helper.java"), 3)),
+                        Optional.of(new ScopeBinder.Declaration(Path.of("src/a/Helper.java"), 3)),
                         Path.of("src/a/Caller.java")).isEmpty(),
                 "no type inference here: the receiver's type is a guess, and guesses do not bind");
     }
@@ -306,7 +306,7 @@ class JavaScopeBinderTest {
         // The import names p1.Helper exactly, so this BINDS: ambiguity is
         // only unresolvable when nothing names the package.
         assertEquals(1, binder.bind("target",
-                        Optional.of(new JavaScopeBinder.Declaration(Path.of("src/p1/Helper.java"), 2)),
+                        Optional.of(new ScopeBinder.Declaration(Path.of("src/p1/Helper.java"), 2)),
                         Path.of("src/a/Caller.java")).boundLines().size(),
                 "the import disambiguates");
 
@@ -320,7 +320,7 @@ class JavaScopeBinderTest {
         // No import, no same-package Helper: p1 and p2 are both candidates
         // and neither the file nor the binder can pick.
         assertTrue(binder.bind("target",
-                        Optional.of(new JavaScopeBinder.Declaration(Path.of("src/p1/Helper.java"), 2)),
+                        Optional.of(new ScopeBinder.Declaration(Path.of("src/p1/Helper.java"), 2)),
                         Path.of("src/b/Caller.java")).isEmpty(),
                 "two candidates, no discriminator: refuse rather than guess");
     }
@@ -351,11 +351,11 @@ class JavaScopeBinderTest {
                 "  }",
                 "}");
 
-        JavaScopeBinder.Binding binding = binder.bind("target",
-                Optional.of(new JavaScopeBinder.Declaration(Path.of("src/a/Container.java"), 3)),
+        ScopeBinder.Binding binding = binder.bind("target",
+                Optional.of(new ScopeBinder.Declaration(Path.of("src/a/Container.java"), 3)),
                 Path.of("src/a/Caller.java"));
 
-        assertEquals(new JavaScopeBinder.Declaration(Path.of("src/a/Container.java"), 3),
+        assertEquals(new ScopeBinder.Declaration(Path.of("src/a/Container.java"), 3),
                 binding.boundLines().get(4));
     }
 
@@ -373,14 +373,14 @@ class JavaScopeBinderTest {
                 "  }",
                 "}");
 
-        Map<Integer, JavaScopeBinder.Declaration> bound =
+        Map<Integer, ScopeBinder.Declaration> bound =
                 binder.bind("target",
-                        Optional.of(new JavaScopeBinder.Declaration(Path.of("src/a/Real.java"), 3)),
+                        Optional.of(new ScopeBinder.Declaration(Path.of("src/a/Real.java"), 3)),
                         Path.of("src/a/Caller.java")).boundLines();
 
         // The bare call on line 4 binds through Caller's extends chain: a
         // bare inherited call is as real as a qualified one.
-        assertEquals(Optional.of(new JavaScopeBinder.Declaration(Path.of("src/a/Real.java"), 3)),
+        assertEquals(Optional.of(new ScopeBinder.Declaration(Path.of("src/a/Real.java"), 3)),
                 Optional.ofNullable(bound.get(4)),
                 "the bare inherited call binds to Real.target, one extends hop away");
         // And the stranger on line 5 still does not: Other.target is not
@@ -406,8 +406,8 @@ class JavaScopeBinderTest {
                 "  }",
                 "}");
 
-        JavaScopeBinder.Binding binding = binder.bind("target",
-                Optional.of(new JavaScopeBinder.Declaration(Path.of("src/a/Root.java"), 3)),
+        ScopeBinder.Binding binding = binder.bind("target",
+                Optional.of(new ScopeBinder.Declaration(Path.of("src/a/Root.java"), 3)),
                 Path.of("src/a/Caller.java"));
 
         assertTrue(binding.boundLines().containsKey(4),

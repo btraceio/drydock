@@ -432,8 +432,12 @@ symbol at a file line. Each result carries provenance `MEASURED`, `CLAIMED`,
 - **Lexical (`MEASURED`)** -- the name-matching default: an occurrence of
   the text, honest about being no more than that.
 - **Scoped (`SCOPED`)** -- tree-sitter parse-tree binding (the already
-  bundled grammars, no new dependency, no server lifecycle; Java today,
-  per-language strategies). An occurrence binds when its receiver is
+  bundled grammars, no new dependency, no server lifecycle; Java and
+  Kotlin today, one walk per language and one shared resolution over the
+  walked drafts, each walk built from a probe that read the grammar's
+  real node shapes). Cross-language resolution works too: a Kotlin
+  caller binds a Java declaration through the import, the mixed-repo
+  reality. An occurrence binds when its receiver is
   statically derivable -- no receiver or `this` with the member declared on
   an enclosing class of the same file or reached through that class's
   `extends` chain (capped, cycles refused), so a bare inherited call is as

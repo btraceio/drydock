@@ -343,6 +343,11 @@ public final class OutOfDiffFanIn {
      */
     static final int MAX_BIND_FILES = 200;
 
+    /** Bindable languages today, matching the scope binder's walkers: Java and Kotlin. */
+    static boolean bindable(String fileName) {
+        return fileName.endsWith(".java") || fileName.endsWith(".kt") || fileName.endsWith(".kts");
+    }
+
     /**
      * Classifies the fan-in's occurrences through the scope binder: an
      * occurrence whose receiver the parse tree ties to the symbol's own
@@ -361,24 +366,24 @@ public final class OutOfDiffFanIn {
                 .flatMap(List::stream)
                 .map(Occurrence::file)
                 .distinct()
-                .filter(file -> file.endsWith(".java"))
+                .filter(file -> bindable(file))
                 .map(Path::of)
                 .toList();
         if (javaFiles.isEmpty() || javaFiles.size() > MAX_BIND_FILES) {
             return raw;
         }
-        JavaScopeBinder binder = new JavaScopeBinder(worktree);
+        ScopeBinder binder = new ScopeBinder(worktree);
         Map<String, List<Occurrence>> bound = new TreeMap<>();
         for (Map.Entry<String, List<Occurrence>> entry : raw.entrySet()) {
             String symbol = entry.getKey();
-            Optional<JavaScopeBinder.Declaration> queried = graph.declarationSite(symbol)
+            Optional<ScopeBinder.Declaration> queried = graph.declarationSite(symbol)
                     .filter(site -> site.lineKey().startsWith("n"))
-                    .map(site -> new JavaScopeBinder.Declaration(Path.of(site.file()),
+                    .map(site -> new ScopeBinder.Declaration(Path.of(site.file()),
                             Integer.parseInt(site.lineKey().substring(1))));
             Map<Path, Set<Integer>> boundLinesByFile = new HashMap<>();
             if (queried.isPresent()) {
                 for (Path file : javaFiles) {
-                    JavaScopeBinder.Binding binding = binder.bind(symbol, queried, file);
+                    ScopeBinder.Binding binding = binder.bind(symbol, queried, file);
                     if (!binding.isEmpty()) {
                         boundLinesByFile.put(file, Set.copyOf(binding.boundLines().keySet()));
                     }
@@ -386,7 +391,7 @@ public final class OutOfDiffFanIn {
             }
             List<Occurrence> classified = new ArrayList<>();
             for (Occurrence occurrence : entry.getValue()) {
-                if (occurrence.file().endsWith(".java")) {
+                if (bindable(occurrence.file())) {
                     Set<Integer> lines = boundLinesByFile.get(Path.of(occurrence.file()));
                     if (lines != null && lines.contains(occurrence.line())) {
                         classified.add(new Occurrence(occurrence.file(), occurrence.line(),

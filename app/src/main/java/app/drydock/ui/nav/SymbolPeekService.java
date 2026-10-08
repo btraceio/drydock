@@ -1,6 +1,6 @@
 package app.drydock.ui.nav;
 
-import app.drydock.review.JavaScopeBinder;
+import app.drydock.review.ScopeBinder;
 import app.drydock.review.SymbolWords;
 import app.drydock.search.SessionSearchService;
 import app.drydock.search.SessionSearchService.FileMatches;
@@ -117,13 +117,18 @@ public final class SymbolPeekService {
     /**
      * The scope binder, one per service: its type index walks the repo
      * once, and the file models it parses are reused across every peek.
-     * Lazy, so a non-Java repo never pays for it.
+     * Lazy, so a repo with no bindable language never pays for it.
      */
-    private JavaScopeBinder binder;
+    private ScopeBinder binder;
 
-    private JavaScopeBinder binder() {
+    /** Bindable languages today: Java and Kotlin files carry walkable parse trees. */
+    static boolean bindable(String fileName) {
+        return fileName.endsWith(".java") || fileName.endsWith(".kt") || fileName.endsWith(".kts");
+    }
+
+    private ScopeBinder binder() {
         if (binder == null) {
-            binder = new JavaScopeBinder(searchRoot);
+            binder = new ScopeBinder(searchRoot);
         }
         return binder;
     }
@@ -152,7 +157,7 @@ public final class SymbolPeekService {
                 .orElseThrow();
         boolean declaration = best.score > 0;
 
-        // The scoped tier (Java only for now): occurrences the parse tree
+        // The scoped tier (Java and Kotlin): occurrences the parse tree
         // ties to THIS declaration are real references; a name the text
         // shares with an unrelated member is the noise the lexical tier
         // cannot help but find. Every failure path leaves the lexical
@@ -161,17 +166,17 @@ public final class SymbolPeekService {
         boolean declarationScopeBound = false;
         List<Path> javaFiles = candidates.stream()
                 .map(c -> c.relativePath)
-                .filter(path -> path.getFileName().toString().endsWith(".java"))
+                .filter(path -> bindable(path.getFileName().toString()))
                 .distinct()
                 .toList();
         if (!javaFiles.isEmpty()) {
-            JavaScopeBinder binder = binder();
-            JavaScopeBinder.Declaration queried =
-                    new JavaScopeBinder.Declaration(best.relativePath, best.line);
-            Map<Path, JavaScopeBinder.Binding> bindings = new LinkedHashMap<>();
-            Map<JavaScopeBinder.Declaration, Integer> votes = new LinkedHashMap<>();
+            ScopeBinder binder = binder();
+            ScopeBinder.Declaration queried =
+                    new ScopeBinder.Declaration(best.relativePath, best.line);
+            Map<Path, ScopeBinder.Binding> bindings = new LinkedHashMap<>();
+            Map<ScopeBinder.Declaration, Integer> votes = new LinkedHashMap<>();
             for (Path relative : javaFiles) {
-                JavaScopeBinder.Binding binding = binder.bind(symbol, Optional.of(queried), relative);
+                ScopeBinder.Binding binding = binder.bind(symbol, Optional.of(queried), relative);
                 bindings.put(relative, binding);
                 binding.votes().forEach((found, count) ->
                         votes.merge(found, count, Integer::sum));
@@ -184,7 +189,7 @@ public final class SymbolPeekService {
                 // peek re-centres on what the code actually references.
                 // The re-bind is cheap -- the binder's file models are
                 // cached from the first pass.
-                JavaScopeBinder.Declaration agreed = votes.keySet().iterator().next();
+                ScopeBinder.Declaration agreed = votes.keySet().iterator().next();
                 for (Path relative : javaFiles) {
                     bindings.put(relative, binder.bind(symbol, Optional.of(agreed), relative));
                 }
@@ -215,7 +220,7 @@ public final class SymbolPeekService {
                                     && d.line() == centreLine));
             if (declarationScopeBound) {
                 declaration = true;
-                for (Map.Entry<Path, JavaScopeBinder.Binding> entry : bindings.entrySet()) {
+                for (Map.Entry<Path, ScopeBinder.Binding> entry : bindings.entrySet()) {
                     boundByFile.put(entry.getKey(), Set.copyOf(entry.getValue().boundLines().keySet()));
                 }
             }
