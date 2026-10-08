@@ -2074,6 +2074,24 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * a note that says exactly that rather than implying a check that did
      * not happen.
      */
+    /**
+     * Posts the submit sheet's final wording into each edited finding's
+     * own thread, as a {@code You} reply prefixed "As posted to the PR":
+     * the board keeps the original (the "edited" chip's whole point), and
+     * the wording that actually reached GitHub is now where the reader
+     * and an agent's next round both find it. Static and pure over the
+     * store so the persistence rule is testable without a workspace; a
+     * post that failed runs this never -- a rejected post mutates
+     * nothing.
+     */
+    static void recordEditsInThreads(AnnotationStore store, Map<ReviewAnnotation.Key, String> editedBodies) {
+        for (Map.Entry<ReviewAnnotation.Key, String> edited : editedBodies.entrySet()) {
+            store.mutate(edited.getKey(), finding -> finding.withReply(
+                    new ReviewAnnotation.Message("You", Instant.now(),
+                            "As posted to the PR: " + edited.getValue())));
+        }
+    }
+
     static FreshHead classifyFreshHead(String remoteHead, String localHead) {
         if (remoteHead == null || remoteHead.isBlank()) {
             return FreshHead.uncertain("gh did not answer");
@@ -2509,6 +2527,18 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                                 for (ReviewAnnotation.Key key : plan.posting()) {
                                     annotationStore.mutate(key, finding -> finding.withPostToPr(false));
                                 }
+                                // The wording the PR actually got, into the
+                                // finding's own thread: the board's original
+                                // stays (the "edited" chip's whole point --
+                                // the difference is never silent), but the
+                                // final text is now where both the reader
+                                // and an agent's next round (review_comments)
+                                // see it -- a deep round amends what was
+                                // actually said, not what was drafted.
+                                // Only on Posted: a failed post mutates
+                                // nothing, the sheet stays as the human
+                                // left it.
+                                recordEditsInThreads(annotationStore, sheet.editedBodies());
                                 // Gated the same way reportPostFailure gates its
                                 // sheet.showError: if the human pressed Esc
                                 // mid-post, `sheet` is detached and whatever

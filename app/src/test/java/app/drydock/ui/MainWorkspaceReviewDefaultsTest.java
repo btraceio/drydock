@@ -1,5 +1,6 @@
 package app.drydock.ui;
 
+import app.drydock.review.AnnotationStore;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.Severity;
 import app.drydock.review.Triage;
@@ -7,6 +8,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -107,5 +109,40 @@ class MainWorkspaceReviewDefaultsTest {
         assertTrue(unanswered.note().contains("gh did not answer"), unanswered.note());
         assertTrue(unanswered.note().contains("as reviewed"),
                 "uncertain says what was checked instead of implying a check that did not happen");
+    }
+
+    /**
+     * The sheet's final wording, persisted on Posted: the board's original
+     * body stays (the "edited" chip's difference is never silent), and the
+     * thread carries what actually reached GitHub -- a later round reads
+     * what was posted, not what was drafted.
+     */
+    @Test
+    void postedEditsLandInTheFindingThreadsBesideTheOriginals() throws Exception {
+        java.nio.file.Path store = java.nio.file.Files.createTempDirectory("drydock-edits")
+                .resolve("annotations.json");
+        AnnotationStore annotations = new AnnotationStore(store);
+        try {
+            ReviewAnnotation finding = ReviewAnnotation.human("rs_scope", "src/A.java", "n3", "n3",
+                    new ReviewAnnotation.Message("You", Instant.parse("2026-10-08T10:00:00Z"),
+                            "needs a null check"));
+            annotations.upsert(finding);
+            ReviewAnnotation.Key key = finding.key();
+
+            MainWorkspace.recordEditsInThreads(annotations,
+                    java.util.Map.of(key, "needs a null check (see loadConfig)"));
+
+            ReviewAnnotation updated = annotations.forScope("rs_scope").stream()
+                    .filter(f -> f.key().equals(key)).findFirst().orElseThrow();
+            assertEquals(2, updated.thread().size(), "the original message stays; the posted wording appends");
+            assertEquals("needs a null check", updated.thread().get(0).text());
+            assertEquals("You", updated.thread().get(1).author());
+            assertTrue(updated.thread().get(1).text().startsWith("As posted to the PR: "),
+                    updated.thread().get(1).text());
+            assertTrue(updated.thread().get(1).text().endsWith("(see loadConfig)"),
+                    updated.thread().get(1).text());
+        } finally {
+            annotations.close();
+        }
     }
 }
