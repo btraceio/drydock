@@ -76,10 +76,17 @@ public record SubmitPlan(Event preselected, List<Comment> comments, List<ReviewA
      * {@code o}-key and an {@code n}-key live in different namespaces and
      * cannot be compared by their line numbers alone.
      */
-    public record DiffIndex(Map<String, Integer> positionOfKey, Map<String, Integer> hunkOfKey) {
+    public record DiffIndex(Map<String, Integer> positionOfKey, Map<String, Integer> hunkOfKey, String name) {
+
+        /** The diff a comment anchors to is by default just "this diff". */
+        public DiffIndex(Map<String, Integer> positionOfKey, Map<String, Integer> hunkOfKey) {
+            this(positionOfKey, hunkOfKey, "this diff");
+        }
+
         public DiffIndex {
             Objects.requireNonNull(positionOfKey, "positionOfKey");
             Objects.requireNonNull(hunkOfKey, "hunkOfKey");
+            Objects.requireNonNull(name, "name");
         }
 
         private String key(String file, String lineKey) {
@@ -173,8 +180,8 @@ public record SubmitPlan(Event preselected, List<Comment> comments, List<ReviewA
                 continue;
             }
             if (startPosition == null || endPosition == null) {
-                refusals.add(new Refusal(finding.key(), "line %s is not in this diff"
-                        .formatted(startPosition == null ? finding.startKey() : finding.endKey())));
+                refusals.add(new Refusal(finding.key(), "line %s is not in %s"
+                        .formatted(startPosition == null ? finding.startKey() : finding.endKey(), index.name())));
                 continue;
             }
 

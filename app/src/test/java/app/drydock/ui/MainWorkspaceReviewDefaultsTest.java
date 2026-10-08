@@ -91,4 +91,21 @@ class MainWorkspaceReviewDefaultsTest {
         assertTrue(confirmed.blocksApproval());
         assertTrue(confirmed.counts());
     }
+    @Test
+    void freshHeadClassificationSkipsOnlyWhenTheShasMatch() {
+        MainWorkspace.FreshHead unchanged = MainWorkspace.classifyFreshHead("abc123", "abc123");
+        assertTrue(unchanged.state() == MainWorkspace.FreshHead.State.UNCHANGED);
+        assertTrue(unchanged.note().isEmpty(), "nothing to say when the PR still carries the reviewed head");
+
+        MainWorkspace.FreshHead moved = MainWorkspace.classifyFreshHead("def4567890", "abc123");
+        assertTrue(moved.state() == MainWorkspace.FreshHead.State.MOVED);
+        assertTrue(moved.note().contains("def4567"), "the note names the new head: " + moved.note());
+        assertTrue(moved.note().contains("re-verified"), moved.note());
+
+        MainWorkspace.FreshHead unanswered = MainWorkspace.classifyFreshHead(null, "abc123");
+        assertTrue(unanswered.state() == MainWorkspace.FreshHead.State.UNCERTAIN);
+        assertTrue(unanswered.note().contains("gh did not answer"), unanswered.note());
+        assertTrue(unanswered.note().contains("as reviewed"),
+                "uncertain says what was checked instead of implying a check that did not happen");
+    }
 }

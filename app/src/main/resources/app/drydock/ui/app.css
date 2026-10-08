@@ -3865,6 +3865,11 @@
     -fx-font-size: 9px;
     -fx-padding: 0 6 0 6;
 }
+.review-submit-verification {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 11px;
+    -fx-padding: 2 0 2 0;
+}
 .review-submit-editor {
     -fx-padding: 2 0 2 0;
 }

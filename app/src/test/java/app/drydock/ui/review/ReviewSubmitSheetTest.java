@@ -168,6 +168,22 @@ class ReviewSubmitSheetTest extends FxTest {
                 sheet.editedBodies().get(key), "Esc drops the draft, not the committed edit");
     }
 
+    /**
+     * The fresh-head note: the sheet must say whether the anchors were
+     * checked against the diff as reviewed or against the pull request's
+     * current head -- the human decides what to post on top of that fact.
+     */
+    @Test
+    void theFreshHeadVerificationNoteShowsAboveTheRoutes() {
+        interact(() -> sheet.showVerificationNote(
+                "The pull request has newer commits (def4567…) — every finding's anchor was re-verified."));
+        FxSync.waitForFxEvents();
+
+        List<String> notes = queryLabels(".review-submit-verification");
+        assertEquals(1, notes.size(), "exactly one note, where the routes begin");
+        assertTrue(notes.getFirst().contains("re-verified"), notes.getFirst());
+    }
+
     @Test
     void everyCommentAndRefusalIsListed() {
         Comment ranged = new Comment("src/Foo.java",

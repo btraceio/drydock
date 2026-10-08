@@ -403,6 +403,24 @@ class SubmitPlanTest {
         assertEquals(plan, plan.withBodies(Map.of(new ReviewAnnotation.Key("rs", "nowhere"), "x")));
     }
 
+    /**
+     * A named index makes the refusal say WHAT the line is not in: the
+     * fresh-head verification builds its index as "the PR's current head",
+     * so a finding a newer push displaced is refused against the code as it
+     * stands now, not against an unnamed "this diff".
+     */
+    @Test
+    void aNamedDiffIndexNamesTheDiffTheRefusalCheckedAgainst() {
+        ReviewAnnotation finding = finding("f9", "src/Foo.java", "n5", "n5");
+        SubmitPlan.DiffIndex named = new SubmitPlan.DiffIndex(Map.of(), Map.of(), "the PR's current head");
+
+        SubmitPlan plan = SubmitPlan.of(List.of(finding), List.of(), named);
+
+        assertEquals(1, plan.refusals().size());
+        assertTrue(plan.refusals().getFirst().reason().contains("not in the PR's current head"),
+                plan.refusals().getFirst().reason());
+    }
+
     @Test
     void aMisalignedPlanIsRejectedAtConstruction() {
         GitHubReviewRequest.Comment comment = new GitHubReviewRequest.Comment("src/A.java", "body",

@@ -27,6 +27,7 @@ import app.drydock.git.BranchCheckout;
 import app.drydock.git.ChangedLineService;
 import app.drydock.git.DiffScope;
 import app.drydock.git.DiffService;
+import app.drydock.git.UnifiedDiff;
 import app.drydock.git.GhCliService;
 import app.drydock.git.GitException;
 import app.drydock.git.PrCheckoutService;
@@ -2026,6 +2027,54 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         return next.withPostToPr(true);
     }
 
+    /**
+     * What the fresh-head check decided before the submit sheet opens:
+     * whether the pull request still carries the head the review was read
+     * against. Pure and static so the decision is testable without a
+     * workspace; the note is what the sheet shows, already phrased for a
+     * human, empty when there is nothing to say.
+     */
+    record FreshHead(State state, String note) {
+        enum State { UNCHANGED, MOVED, UNCERTAIN }
+
+        static final FreshHead UNCHANGED = new FreshHead(State.UNCHANGED, "");
+
+        static FreshHead unchanged() {
+            return UNCHANGED;
+        }
+
+        static FreshHead moved(String remote) {
+            return new FreshHead(State.MOVED, "The pull request has newer commits ("
+                    + remote.substring(0, Math.min(8, remote.length())) + "…) — every finding's anchor was "
+                    + "re-verified against its current head; the ones a newer push displaced are listed as "
+                    + "not posting.");
+        }
+
+        static FreshHead uncertain(String why) {
+            return new FreshHead(State.UNCERTAIN, "Could not verify against the pull request's current head ("
+                    + why + ") — anchors were checked against the diff as reviewed.");
+        }
+    }
+
+    /**
+     * The classification behind the fresh-head check: equal shas mean the
+     * review and the pull request still describe the same code, and the
+     * whole verification is skipped; a moved head means the plan must be
+     * rebuilt against the PR's current diff; anything gh could not answer
+     * is UNCERTAIN -- the submit proceeds against the reviewed diff, with
+     * a note that says exactly that rather than implying a check that did
+     * not happen.
+     */
+    static FreshHead classifyFreshHead(String remoteHead, String localHead) {
+        if (remoteHead == null || remoteHead.isBlank()) {
+            return FreshHead.uncertain("gh did not answer");
+        }
+        if (remoteHead.equals(localHead)) {
+            return FreshHead.unchanged();
+        }
+        return FreshHead.moved(remoteHead);
+    }
+
     private final class ReviewHost implements SessionReviewView.Host {
 
         /**
@@ -2322,7 +2371,11 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             // would answer the wrong question.
             boolean[] cancelled = {false};
             modalLayer.show(busyModal("Checking GitHub…"), () -> cancelled[0] = true);
-            gitHubReviewService.unavailableReason(scope.diffRoot()).whenComplete((reason, error) ->
+            gitHubReviewService.unavailableReason(scope.diffRoot())
+                    .thenCompose(reason -> reason.isPresent()
+                            ? CompletableFuture.completedFuture(PreOpenChecks.ghUnavailable(reason.get()))
+                            : verifyFreshHead(scope, pr))
+                    .whenComplete((checks, error) ->
                     Platform.runLater(() -> {
                         submitCheckInFlight.remove(scope.id());
                         if (cancelled[0]) {
@@ -2330,24 +2383,98 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                             // now would bury whatever they opened next.
                             return;
                         }
-                        openSubmitSheet(scope, pr, index, decisions, lineText, unverified,
-                                error != null ? Optional.of("Could not check gh: " + error.getMessage()) : reason);
+                        openSubmitSheet(scope, pr, index, decisions, lineText, unverified, checks,
+                                error != null ? Optional.of("Could not check gh: " + error.getMessage())
+                                        : Optional.empty());
                     }));
         }
 
+        /**
+         * The fresh-head check, off the FX thread, between the availability
+         * check and the sheet: the PR's current head sha against the
+         * checkout's HEAD and -- when they differ -- the PR's current diff,
+         * so the sheet's plan can be built against the code as it stands
+         * now. A scope with no checkout (the patch-only path) skips the
+         * check entirely: there is no local head to compare.
+         */
+        private CompletableFuture<PreOpenChecks> verifyFreshHead(ReviewScope scope, ReviewScope.PullRequestRef pr) {
+            if (scope.worktree().isEmpty()) {
+                return CompletableFuture.completedFuture(PreOpenChecks.fresh(FreshHead.unchanged(), null));
+            }
+            return CompletableFuture.supplyAsync(() -> {
+                String remote = gitHubReviewService.currentHeadSha(scope.diffRoot(), pr.number())
+                        .join()
+                        .orElse(null);
+                FreshHead classified = classifyFreshHead(remote, resolveRef(scope.worktree().orElseThrow(), "HEAD"));
+                if (classified.state() != FreshHead.State.MOVED) {
+                    return PreOpenChecks.fresh(classified, null);
+                }
+                String diffText = gitHubReviewService.pullRequestDiff(scope.diffRoot(), pr.number())
+                        .join()
+                        .orElse(null);
+                if (diffText == null) {
+                    return PreOpenChecks.fresh(
+                            FreshHead.uncertain("the pull request's current diff could not be read"), null);
+                }
+                return PreOpenChecks.fresh(classified, DiffService.parseUnified(diffText));
+            }, REVIEW_GIT_EXECUTOR);
+        }
+
+        /**
+         * What the pre-open checks decided: the reason gh is unusable (the
+         * sheet disables Submit over it), the fresh-head note to show (empty
+         * when there is nothing to say), and the PR's current diff when the
+         * head moved -- the plan is rebuilt against it, so an anchor a newer
+         * push displaced is refused with the fresh head named rather than
+         * posted onto code it no longer describes.
+         */
+        record PreOpenChecks(Optional<String> unavailable, String note, UnifiedDiff freshDiff) {
+
+            static PreOpenChecks ghUnavailable(String reason) {
+                return new PreOpenChecks(Optional.of(reason), "", null);
+            }
+
+            static PreOpenChecks fresh(FreshHead head, UnifiedDiff diff) {
+                return new PreOpenChecks(Optional.empty(), head.note(), diff);
+            }
+        }
         private void openSubmitSheet(ReviewScope scope, ReviewScope.PullRequestRef pr,
                                      SubmitPlan.DiffIndex index, List<ReviewVerdict.Decision> decisions,
                                      BiFunction<String, String, Optional<String>> lineText,
-                                     ReviewSubmitSheet.Unverified unverified,
-                                     Optional<String> unavailableReason) {
-            SubmitPlan plan = SubmitPlan.of(annotationStore.forScope(scope.id()), decisions, index, lineText);
+                                     ReviewSubmitSheet.Unverified unverified, PreOpenChecks checks,
+                                     Optional<String> checkError) {
+            // A moved PR head re-anchors the plan against the code as it
+            // stands now. Deliberately the REFUSAL variant of SubmitPlan.of
+            // (no lineText): a finding a newer push displaced is refused with
+            // the fresh head named in the reason, not folded into the review
+            // body -- posting a note about code that is no longer there is
+            // exactly the publish this verification exists to prevent, and
+            // the Not-posting block is where the human sees and decides.
+            SubmitPlan plan = checks.freshDiff() == null
+                    ? SubmitPlan.of(annotationStore.forScope(scope.id()), decisions, index, lineText)
+                    // The REFUSAL variant (no lineText): a displaced finding
+                    // is refused against the fresh head, never folded into
+                    // the review body -- see the openSubmitSheet javadoc.
+                    : SubmitPlan.of(annotationStore.forScope(scope.id()), decisions,
+                            freshIndex(checks.freshDiff()));
             ReviewSubmitSheet[] holder = new ReviewSubmitSheet[1];
             holder[0] = new ReviewSubmitSheet(plan, pr, unverified,
                     (event, summary) -> postReview(scope, pr,
                             plan.withBodies(holder[0].editedBodies()), event, summary, holder[0]),
                     modalLayer::close);
+            if (!checks.note().isBlank()) {
+                holder[0].showVerificationNote(checks.note());
+            }
             modalLayer.show(holder[0]);
-            unavailableReason.ifPresent(holder[0]::showUnavailable);
+            checks.unavailable().ifPresent(holder[0]::showUnavailable);
+            checkError.ifPresent(holder[0]::showUnavailable);
+        }
+
+        /** The PR's current diff as a comment index, named so a refusal says what it was checked against. */
+        private static SubmitPlan.DiffIndex freshIndex(UnifiedDiff freshDiff) {
+            SubmitPlan.DiffIndex reviewed = SessionReviewView.buildDiffIndex(freshDiff);
+            return new SubmitPlan.DiffIndex(reviewed.positionOfKey(), reviewed.hunkOfKey(),
+                    "the PR's current head");
         }
 
         /**

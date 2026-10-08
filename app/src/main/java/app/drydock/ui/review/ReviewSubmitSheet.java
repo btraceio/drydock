@@ -97,6 +97,7 @@ public final class ReviewSubmitSheet extends VBox {
 
     private final Label errorLabel = new Label();
     private final Label unavailableLabel = new Label();
+    private final Label verificationNote = new Label();
 
     private final Button cancelButton = new Button("Cancel");
     private final Button submitButton = new Button("Submit review");
@@ -124,7 +125,12 @@ public final class ReviewSubmitSheet extends VBox {
         Label title = new Label("Submit review on #" + pr.number());
         title.getStyleClass().add("modal-title");
 
-        VBox content = new VBox(14, buildEventPicker(), buildSummaryField(), buildCommentsBlock());
+        verificationNote.getStyleClass().add("review-submit-verification");
+        verificationNote.setWrapText(true);
+        hide(verificationNote);
+
+        VBox content = new VBox(14, buildEventPicker(), buildSummaryField(), verificationNote,
+                buildCommentsBlock());
         buildBodyNotesBlock().ifPresent(content.getChildren()::add);
         buildUnverifiedBlock().ifPresent(content.getChildren()::add);
         buildRefusalsBlock().ifPresent(content.getChildren()::add);
@@ -471,6 +477,17 @@ public final class ReviewSubmitSheet extends VBox {
         // The footer's own disable just lifted; the submit button's private
         // disable state -- the live rule -- was never touched by showPosting,
         // so nothing further is owed to it here except making it visible again.
+    }
+
+    /**
+     * What the fresh-head verification found, shown above the routes: the
+     * human must know whether the anchors were checked against the diff as
+     * reviewed or against the pull request's current head before deciding
+     * to post.
+     */
+    public void showVerificationNote(String note) {
+        verificationNote.setText(note);
+        show(verificationNote);
     }
 
     /**

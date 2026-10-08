@@ -2126,8 +2126,8 @@ public final class SessionReviewView extends BorderPane {
                 SubmitPlan.untriagedCount(host.findings(scope)));
     }
 
-    /** {@code (file, lineKey)} to that line's text in {@code diff}; empty for a line the diff does not hold. */
-    private static BiFunction<String, String, Optional<String>> lineTextLookup(UnifiedDiff diff) {
+    /** {@code (file, lineKey)} to that line's text in {@code diff}; empty for a line the diff does not hold. Public for the workspace's fresh-head verification. */
+    public static BiFunction<String, String, Optional<String>> lineTextLookup(UnifiedDiff diff) {
         return (file, lineKey) -> {
             if (diff == null) {
                 return Optional.empty();
@@ -2160,7 +2160,8 @@ public final class SessionReviewView extends BorderPane {
      * SubmitPlan#of} refuse a comment whose start and end land in different
      * hunks.
      */
-    private static SubmitPlan.DiffIndex buildDiffIndex(UnifiedDiff diff) {
+    /** {@code (file, lineKey)} to position and hunk; public because the workspace's fresh-head verification builds one from the PR's current diff. */
+    public static SubmitPlan.DiffIndex buildDiffIndex(UnifiedDiff diff) {
         Map<String, Integer> positionOfKey = new HashMap<>();
         Map<String, Integer> hunkOfKey = new HashMap<>();
         int position = 0;
