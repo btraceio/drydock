@@ -194,7 +194,9 @@ public final class McpToolRouter {
                                 + "their progress, and the merged tour is validated as a whole.",
                         JsonObject.empty()
                                 .put("scopeId", schemaString("Review scope handle."))
-                                .put("steps", schemaArray("Array of {id, title, narrative (<=1000 chars), "
+                                .put("steps", schemaArray("Array of {id, title, narrative (<=1000 chars: "
+                                        + "lead with the step's one main point, active voice, define terms at "
+                                        + "first use, and explain before the check asks), "
                                         + "anchors[{file, startKey, endKey?, note? (<=400 chars: the one claim this "
                                         + "range supports, shown under its last row)}], "
                                         + "impactNotes?[{file, line, text}] (at most 8 per step; name-match "

@@ -3508,7 +3508,12 @@
 .step-panel .step-panel-narrative {
     -fx-text-fill: -drydock-text-dim;
     -fx-font-size: 12px;
-    -fx-line-spacing: 2px;
+    /* Additive leading: 4px on a ~14px natural line box lands near the
+       1.4-1.5 line-height readability floor (WCAG 1.4.12's floor is 1.5;
+       JavaFX has no user spacing override to be resilient to, but the
+       reading guidance holds). 2px read as cramped next to the panel's
+       10.5px mono rows. */
+    -fx-line-spacing: 4px;
 }
 .step-panel .step-panel-withheld {
     -fx-font-style: italic;

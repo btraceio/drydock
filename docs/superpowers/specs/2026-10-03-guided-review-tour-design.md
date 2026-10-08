@@ -54,7 +54,7 @@ TourCheck(id, kind, prompt, choices, answerKey, explanation,
   (`UnifiedDiff.Line#lineKey`). A range over post-image line numbers cannot
   address a hunk that only removes lines, or a deleted file; line keys can.
 - `narrative` is two to four sentences: why this part exists and what it
-  changes.
+  changes, written under the authoring rules below.
 - `note` (optional, ≤ 400 characters) is the one claim an anchored range
   supports. The diff column shows it under the range's last row (§5), so the
   explanation sits next to the code it is about. A tour with no notes is
@@ -69,6 +69,52 @@ TourCheck(id, kind, prompt, choices, answerKey, explanation,
   this in its prompt and in `review_tour`'s schema, and the validator enforces
   the floor of it: a PREDICT (or a PREDICT alternate) on a step whose anchors
   cover only added rows is rejected, since nothing is left to read.
+
+
+**Authoring rules (evidence-based).** A tour is studying material, and the
+instruction typed on Run review and refresh carries these rules, each
+grounded in the reading-science literature:
+
+- **Lead with the point, then only what bears on the decision.** The most
+  important message first, no history and no asides -- the plain-language
+  rule that readers scan for what they must know or do (CDC Clear
+  Communication; ODPHP Health Literacy Online,
+  <https://odphp.health.gov/healthliteracyonline/>), and Mayer's coherence
+  principle: interesting-but-irrelevant material costs comprehension
+  (Mayer, *Multimedia Learning*).
+- **Explain before the check asks.** The narrative or an anchor note
+  establishes the change's reasoning first; the PREDICT/TRACE then asks the
+  reviewer to apply it to the code. This is the worked-example effect:
+  studying a worked instance before solving the transfer problem beats
+  unguided problem solving for novices (Sweller & Cooper, 1985;
+  <https://doi.org/10.1207/s15516709cog1202_4> on load), and it is why the
+  grounding rule (§6) and this rule are two faces of one contract: the
+  check may ask only what the tour taught or the code shows.
+- **One concept per step, in one file's contiguous rows where possible.**
+  Splitting a step that carries two independent ideas is Mayer's segmenting
+  principle (learner-paced small segments) and Chandler & Sweller's
+  split-attention work: making a reader hold one file's state while
+  reading another is extraneous load (<https://doi.org/10.1111/j.2044-8279.1992.tb01017.x>).
+- **Plain active-voice sentences, one idea each, terms defined at first
+  use.** The health-literacy canon: short sentences, active voice, common
+  words, define the term where it first appears (CDC "Simply Put",
+  <https://www.cdc.gov/health-literacy/php/develop-materials/plain-language.html>).
+- **The reader is an expert in the language, new to the change.** Explain
+  the change, not the language: guidance that over-explains what an expert
+  already knows is the expertise reversal effect -- support that helps
+  novices actively harms experts (Kalyuga, Ayres, Chandler & Sweller,
+  <https://doi.org/10.1207/s15326985EP3801_4>). The flip side of the
+  plain-language rule: the domain's words are the reader's common words.
+
+**Rendering follows the same evidence.** The step panel wraps the narrative
+(no 80+ character lines -- WCAG 1.4.8 sets 80 glyphs as the AAA ceiling,
+<https://www.w3.org/WAI/WCAG21/Understanding/visual-presentation>), widens
+its leading (WCAG 1.4.12's line-height floor is 1.5,
+<https://www.w3.org/WAI/WCAG22/UNDERSTANDING/text-spacing.html>), keeps
+sentence case, and never fixes a text container's height -- a fixed height
+is what fails 1.4.12 when spacing grows. Staged reveals (a PREDICT hiding
+the added rows until answered) are the segmenting principle in the
+interface: the reader controls the pace.
 
 **Coverage invariant.** Every hunk of the scope's diff is covered by at least
 one anchor. An approval that skipped part of the change is exactly the rubber

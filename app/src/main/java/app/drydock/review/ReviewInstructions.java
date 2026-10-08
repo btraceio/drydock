@@ -51,6 +51,22 @@ public final class ReviewInstructions {
             + "instruction sets, hardware behaviour): teach it in the narrative first, or do not ask it";
 
     /**
+     * How a tour teaches, shared by the first tour and a refresh. Each rule
+     * is the reading-science literature compressed to something an agent
+     * can hold while writing a step; the spec's "Authoring rules" section
+     * carries the citations (Mayer's coherence and segmenting; the
+     * worked-example effect; Chandler & Sweller on split attention; the
+     * CDC/ODPHP plain-language canon; the expertise reversal effect).
+     */
+    private static final String TEACHING = "write the tour as teaching material: lead each narrative with its "
+            + "single most important point, then only what bears on the decision -- no history, no asides; "
+            + "explain the change's reasoning in the narrative or an anchor note BEFORE the check asks the "
+            + "reviewer to apply it; plain active-voice sentences, one idea each, every unfamiliar term "
+            + "defined at first use; one concept per step, in one file's contiguous rows where possible -- "
+            + "split a step that carries two; and the reader is an expert in the language but new to this "
+            + "change: explain the change, not the language";
+
+    /**
      * What an impact note must be, shared by the first tour and a refresh.
      * Drydock's impact data and the agent's own usage searches are name
      * matches; an unverified match is a link to an unrelated file more
@@ -71,7 +87,7 @@ public final class ReviewInstructions {
                 + "then post review_finding and review_tour against that handle; review_tour is validated "
                 + "(every changed row in a step, each step at least one check with an alternate) and lists "
                 + "every problem if it is rejected, so fix them and post it again; " + ANCHOR_NOTES + "; "
-                + CHECK_KINDS + "; " + IMPACT_NOTES + "; " + CHECK_GROUNDING;
+                + CHECK_KINDS + "; " + IMPACT_NOTES + "; " + CHECK_GROUNDING + "; " + TEACHING;
         return supportsSubagents
                 ? "Dispatch a code-review subagent to review the changes in this worktree: it must "
                         + work + ". Report only its summary back here."
@@ -158,6 +174,7 @@ public final class ReviewInstructions {
         return "For review handle " + scopeId + ", the diff changed under your tour: call review_scope and "
                 + "review_state, then call review_tour with onlySteps true to " + String.join(" and ", asks)
                 + "; the steps you do not send keep the reviewer's progress. For the steps you send, "
-                + ANCHOR_NOTES + "; " + CHECK_KINDS + "; " + IMPACT_NOTES + "; " + CHECK_GROUNDING + ".";
+                + ANCHOR_NOTES + "; " + CHECK_KINDS + "; " + IMPACT_NOTES + "; " + CHECK_GROUNDING + "; "
+                + TEACHING + ".";
     }
 }

@@ -137,6 +137,27 @@ class ReviewInstructionsTest {
         assertFalse(line.contains("\n"));
     }
 
+    /**
+     * The tour is studying material; the reading-science rules must reach
+     * every form that asks for one. Each clause maps to a cited principle in
+     * the spec's "Authoring rules" section.
+     */
+    @Test
+    void everyFormTeachesByTheReadingScienceRules() {
+        for (boolean subagents : new boolean[] {true, false}) {
+            String instruction = ReviewInstructions.forScope("rs_abc123", subagents);
+            assertTrue(instruction.contains("lead each narrative with its single most important point"), instruction);
+            assertTrue(instruction.contains("BEFORE the check asks"), instruction);
+            assertTrue(instruction.contains("plain active-voice sentences"), instruction);
+            assertTrue(instruction.contains("one concept per step"), instruction);
+            assertTrue(instruction.contains("explain the change, not the language"), instruction);
+            assertFalse(instruction.contains("\n"));
+        }
+        String refresh = ReviewInstructions.forTourRefresh("rs_abc123", List.of("s2"), 1);
+        assertTrue(refresh.contains("one concept per step"), refresh);
+        assertFalse(refresh.contains("\n"));
+    }
+
     @Test
     void aTourRefreshNamesTheStaleStepsTheUncoveredCountAndOnlyStepsInOneLine() {
         String line = ReviewInstructions.forTourRefresh("rs_abc123", List.of("s2", "s5"), 3);
