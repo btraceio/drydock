@@ -3678,6 +3678,16 @@
     -fx-text-fill: -drydock-deviation;
     -fx-font-size: 11px;
 }
+.step-panel .step-impact-flag-suppressed {
+    -fx-text-fill: -drydock-deviation;
+    -fx-font-size: 11px;
+    -fx-font-style: italic;
+}
+.step-panel .step-impact-suppressed {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11px;
+    -fx-font-style: italic;
+}
 .step-panel .step-impact-pending, .step-panel .step-impact-empty {
     -fx-text-fill: -drydock-text-faint;
     -fx-font-size: 11px;
@@ -4153,7 +4163,15 @@
     -fx-font-size: 9px;
     -fx-padding: 0 0 4 0;
 }
-.peek-usage-row { -fx-padding: 2 0 2 0; }
+.peek-usage-row {
+    -fx-background-color: transparent;
+    -fx-background-radius: 6px;
+    -fx-padding: 2 4 2 4;
+    -fx-cursor: hand;
+    -fx-alignment: center-left;
+}
+.peek-usage-row:hover { -fx-background-color: -drydock-hover; }
+.peek-usage-row:focused { -fx-border-color: -drydock-accent; -fx-border-radius: 6px; }
 .peek-usage-row.untouched { -fx-opacity: 0.6; }
 .peek-usage-loc {
     -fx-text-fill: -drydock-text-dim;

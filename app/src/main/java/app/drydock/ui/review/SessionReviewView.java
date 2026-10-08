@@ -2885,6 +2885,7 @@ public final class SessionReviewView extends BorderPane {
         diffStack.getChildren().setAll(diffColumn, peekLayer, navNotice);
         peekLayer.setOnPromote(this::promotePeek);
         peekLayer.setOnAsk(this::askAboutPeek);
+        peekLayer.setOnOpenOccurrence(this::openOccurrencePeek);
         peekLayer.setOnStackFull(() -> notice("Peek stack is full — esc to unwind"));
         // Absent, not greyed, on a scope no session is bound to (delta hard rules).
         peekLayer.setAgentAvailable(() -> selectedScope().flatMap(ReviewScope::sessionId).isPresent());
@@ -3145,6 +3146,15 @@ public final class SessionReviewView extends BorderPane {
         selectedScope().ifPresent(scope -> notice(host.askAgentAboutPeek(scope, peek)
                 ? "Asked the session about " + peek.symbol() + " — the answer is in the agent view"
                 : "No running session to ask about " + peek.symbol()));
+    }
+
+    /**
+     * A click on a usage row of a peek card: a peek AT the occurrence, in
+     * place -- the claiming location opens as another card on the stack,
+     * so the reader can compare and still unwind with one esc each.
+     */
+    private void openOccurrencePeek(SymbolPeek.Occurrence occurrence) {
+        openLocationPeek(occurrence.relativePath(), occurrence.line());
     }
 
     /** The Search tab's opener: in the column (with a waypoint) when it shows the file, else a location peek. */

@@ -12,6 +12,7 @@ import app.drydock.ui.nav.PeekLayer;
 import app.drydock.ui.nav.SymbolPeek;
 import javafx.scene.Node;
 import javafx.scene.control.Button;
+import javafx.scene.control.Label;
 import javafx.scene.input.KeyCode;
 import org.junit.jupiter.api.Test;
 
@@ -77,6 +78,46 @@ class ReviewTourNavigationTest extends ReviewTourFixture {
 
         assertEquals(StepProgress.Decision.CHANGES, progress("s1").decision(), "u did not undo the step");
         assertTrue(ReviewDiagFxThread.call(view::diagPeekOpen), "the peek is still open");
+    }
+
+    /**
+     * The usages mode's two defects, fixed: the list REPLACES the code (one
+     * scroll region, not the code's own scrollbar nested in a second one),
+     * and each row jumps -- here to a location peek, since this scope has no
+     * checkout to read, which the notice says over the column.
+     */
+    @Test
+    void usagesReplaceTheCodeAndARowPeeksAtItsOccurrence() {
+        interact(() -> view.diagPushPeek(new SymbolPeek("bar", "bar · guards.h",
+                Path.of("/tmp/nowhere").resolve(FILE_A), Path.of(FILE_A), 11,
+                List.of("void bar();"), Set.of(), List.of(
+                        new SymbolPeek.Occurrence(Path.of(FILE_A), 11, "void bar();", true),
+                        new SymbolPeek.Occurrence(Path.of("src/other.cpp"), 3, "return bar();", false)),
+                true)));
+        FxSync.waitForFxEvents();
+
+        type(KeyCode.U);
+
+        assertTrue(ReviewDiagFxThread.call(() -> !view.lookupAll(".peek-usages").isEmpty()),
+                "the usages list is on show");
+        assertTrue(ReviewDiagFxThread.call(() -> view.lookupAll(".peek-code").isEmpty()),
+                "usages replace the code, so the card has ONE scroll region");
+
+        Button other = ReviewDiagFxThread.call(() -> view.lookupAll(".peek-usage-row").stream()
+                .map(Button.class::cast)
+                .filter(row -> row.getGraphic() instanceof javafx.scene.layout.HBox box
+                        && box.getChildren().stream().anyMatch(child -> child instanceof Label label
+                        && label.getText().contains("other.cpp")))
+                .findFirst().orElseThrow());
+        interact(other::fire);
+        FxSync.waitForFxEvents();
+
+        // No checkout to read: the location peek says so over the column --
+        // proof the click reached openOccurrencePeek, not nothing.
+        assertTrue(ReviewDiagFxThread.call(view::diagNotice)
+                        .map(text -> text.contains("src/other.cpp") || text.contains("no checkout"))
+                        .orElse(false),
+                "the row's click tried to peek at the occurrence");
     }
 
     @Test

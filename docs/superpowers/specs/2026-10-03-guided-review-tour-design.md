@@ -218,7 +218,13 @@ because a removed row has no line in the post-image.
   location. It adds no waypoint, and `Esc` closes it. While a peek is open it
   owns `⏎` (open for real), `u` (usages), `a` (ask the agent) and `Esc`.
   Review's key filter, which today catches keys before its children
-  (`SessionReviewView.java:847`), yields these to the open peek.
+  (`SessionReviewView.java:847`), yields these to the open peek. `u`
+  **replaces** the code with the occurrence list -- one scroll region, never
+  the code's own scrollbar nested in a second one -- and every row is a real
+  button that jumps to the place claiming the usage: Review peeks at that
+  location in place (another card on the stack), the Explorer opens the
+  file at that line and collapses the stack onto the trail. `u` again brings
+  the code back.
 - **Waypoints.** Step changes add one, labelled "Step N", and so do promoted
   peeks and search results. `⌘[` and `⌘]` walk the trail in Review. That
   needs a Review branch next to the Explorer's at
