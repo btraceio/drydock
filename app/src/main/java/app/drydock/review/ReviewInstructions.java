@@ -168,6 +168,24 @@ public final class ReviewInstructions {
     }
 
     /**
+     * What the step panel's "Ask about this step" sends: the ids and the
+     * delivery instruction, one line ({@code sendPrompt} submits at the
+     * first newline). The agent reads the step itself through the tour
+     * tools; the answer lands on the board beside the step, the same
+     * delivery the peek's ask uses.
+     */
+    public static String forStepAsk(String questionId, String scopeId, String stepTitle) {
+        Objects.requireNonNull(questionId, "questionId");
+        Objects.requireNonNull(scopeId, "scopeId");
+        Objects.requireNonNull(stepTitle, "stepTitle");
+        return "The reviewer asked a question about the guided tour of handle " + scopeId
+                + ", step \"" + stepTitle + "\" (read it and its checks with review_tour): "
+                + "answer with ONE review_ask_answer call (questionId " + questionId
+                + ", answer: plain text, cite file:line from the step's anchors when it matters) -- "
+                + "the reviewer reads it beside the step they asked about";
+    }
+
+    /**
      * One line asking the agent to judge a reviewer's free-text answer.
      *
      * <p>Carries only the check id: the answer is the reviewer's own text and

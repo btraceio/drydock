@@ -295,7 +295,14 @@ because a removed row has no line in the post-image.
   never has to leave the code they asked about. The id resolves through an
   in-memory pending-question registry scoped to the asking session's
   scopes, so another session's question is refused as unknown and stays
-  answerable by the session it was asked of.
+  answerable by the session it was asked of. A question dies with its
+  session: the workspace's exit watcher expires it, a late answer is
+  refused as unknown, and the board that asked gets a death-notice card
+  rather than a silently stranded promise. The step panel carries the
+  same ask as a quiet button ("Ask the agent about this step"): the
+  prompt names the tour handle and step title, the agent reads the step
+  through `review_tour`, and the answer returns through the identical
+  machinery.
 - **Waypoints.** Step changes add one, labelled "Step N", and so do promoted
   peeks and search results. The trail bar's `‹ ›` buttons walk it. `⌘[` and
   `⌘]` do NOT: while Review is showing they keep their session-tab meaning

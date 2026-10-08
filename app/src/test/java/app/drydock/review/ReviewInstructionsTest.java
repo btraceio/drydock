@@ -145,6 +145,19 @@ class ReviewInstructionsTest {
         assertFalse(line.contains("\n"));
     }
 
+    /** The step ask: the tour's own ids, the reading tools, and the same one-call delivery as a peek. */
+    @Test
+    void aStepAskNamesTheStepTheReadingToolAndTheAnswerToolInOneLine() {
+        String line = ReviewInstructions.forStepAsk("ask-7", "rs_abc123", "The guard");
+
+        assertTrue(line.contains("ask-7"));
+        assertTrue(line.contains("rs_abc123"));
+        assertTrue(line.contains("The guard"));
+        assertTrue(line.contains("review_tour"), "the agent reads the step through the tour tools");
+        assertTrue(line.contains("review_ask_answer"));
+        assertFalse(line.contains("\n"));
+    }
+
     @Test
     void aFindingQuestionNamesTheScopeTheFindingAndTheAnswerToolInOneLine() {
         String line = ReviewInstructions.forFindingQuestion("rs_abc123", "f_9");

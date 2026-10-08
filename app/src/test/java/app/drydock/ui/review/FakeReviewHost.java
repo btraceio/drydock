@@ -11,6 +11,7 @@ import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Severity;
 import app.drydock.review.Triage;
 import app.drydock.review.tour.TourRecord;
+import app.drydock.review.tour.TourStep;
 import app.drydock.review.tour.TourStore;
 import app.drydock.ui.nav.SymbolPeek;
 import javafx.scene.layout.Region;
@@ -346,6 +347,16 @@ final class FakeReviewHost implements SessionReviewView.Host {
     public boolean requestDeepReview(ReviewScope scope) {
         deepReviewRequests++;
         return deepReviewHandoff;
+    }
+
+    /** Step asks seen, and what the next one answers. */
+    int stepAskRequests;
+    boolean stepAskHandoff = true;
+
+    @Override
+    public boolean requestStepAsk(ReviewScope scope, TourStep step) {
+        stepAskRequests++;
+        return stepAskHandoff;
     }
 
     @Override

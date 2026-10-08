@@ -380,6 +380,15 @@ public final class SessionReviewView extends BorderPane {
          */
         boolean requestDeepReview(ReviewScope scope);
 
+        /**
+         * The step panel's "Ask about this step": mints a question id and
+         * sends the step ask to the scope's bound session; the answer
+         * returns through the peek-ask machinery (an answer card on this
+         * board). False when the hand-off did not happen (no bound
+         * session), exactly like {@link #runReview}.
+         */
+        boolean requestStepAsk(ReviewScope scope, TourStep step);
+
         /** {@code scope}'s guided tour with its progress, if the agent has posted one. */
         Optional<TourRecord> tour(ReviewScope scope);
 

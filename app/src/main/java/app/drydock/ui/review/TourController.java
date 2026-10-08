@@ -1418,6 +1418,25 @@ final class TourController {
             overrideCurrentStep(reason);
         }
 
+        /**
+         * The step panel's ask: the question id's minting and the prompt's
+         * sending both live behind the view's host (the workspace owns the
+         * pending-question registry the answer will come back through), so
+         * this only reports the hand-off honestly.
+         */
+        @Override
+        public boolean askAboutStep(TourStep step) {
+            Optional<ReviewScope> scope = view.selectedScope();
+            if (scope.isEmpty()) {
+                return false;
+            }
+            boolean asked = host.requestStepAsk(scope.get(), step);
+            stepPanel.showTransient(asked
+                    ? "Asked -- the answer will appear here"
+                    : "No live session to ask -- open the scope's session first");
+            return asked;
+        }
+
         @Override
         public void requestRefresh() {
             Optional<ReviewScope> scope = view.selectedScope();

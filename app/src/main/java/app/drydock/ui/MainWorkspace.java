@@ -2608,6 +2608,21 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
 
         @Override
+        public boolean requestStepAsk(ReviewScope scope, TourStep step) {
+            if (scope.sessionId().isEmpty()) {
+                return false;
+            }
+            OpenSessionTab open = scope.sessionId().map(openTabs::get).orElse(null);
+            if (open == null || open.isProcessExited()) {
+                return false;
+            }
+            PendingQuestions.PendingAsk ask = pendingQuestions.mint(scope.id(),
+                    "step " + step.title(), scope.sessionId().orElseThrow());
+            open.sendPrompt(ReviewInstructions.forStepAsk(ask.questionId(), scope.id(), step.title()));
+            return true;
+        }
+
+        @Override
         public boolean requestDeepReview(ReviewScope scope) {
             if (scope.sessionId().isEmpty()) {
                 return false;

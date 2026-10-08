@@ -10,6 +10,7 @@ import app.drydock.review.tour.StepGate;
 import app.drydock.review.tour.StepImpact;
 import app.drydock.review.tour.StepProgress;
 import app.drydock.review.tour.TourDiagram;
+import app.drydock.review.tour.TourStep;
 import app.drydock.review.tour.TourAnchor;
 import app.drydock.review.tour.TourCheck;
 import app.drydock.ui.UiFormats;
@@ -80,6 +81,14 @@ final class StepPanel extends VBox {
         void selectStep(String stepId);
         /** "Ask the agent to refresh": a human's request, sent whatever the automatic gating says. */
         void requestRefresh();
+
+        /**
+         * "Ask about this step": hands the step to the scope's agent
+         * (question and answer through the peek-ask machinery). False when
+         * no live session was asked -- the caller must say so, never look
+         * like it worked.
+         */
+        boolean askAboutStep(TourStep step);
         /**
          * Not sure's reply: appended to {@code finding}'s thread, the way the
          * margin's Reply is, and handed to the scope's live session. False
@@ -225,6 +234,7 @@ final class StepPanel extends VBox {
                 content.getChildren().add(staleNotice(view.refreshDispatched()));
             }
             content.getChildren().add(checkSection(view));
+            content.getChildren().add(askStepRow(view));
             return;
         }
         Label narrative = new Label(view.step().narrative());
@@ -237,6 +247,26 @@ final class StepPanel extends VBox {
             content.getChildren().add(staleNotice(view.refreshDispatched()));
         }
         content.getChildren().add(checkSection(view));
+        content.getChildren().add(askStepRow(view));
+    }
+
+    /**
+     * The step's ask: a quiet button under the checks, not a banner -- the
+     * reader who wants the agent's word on the step knows where they are.
+     * Its hand-off reports honestly (the host's boolean), the same contract
+     * as the refresh ask beside it.
+     */
+    private HBox askStepRow(StepView view) {
+        Button ask = new Button("Ask the agent about this step");
+        ask.getStyleClass().add("step-refresh");
+        ask.setOnAction(event -> {
+            if (!host.askAboutStep(view.step())) {
+                showTransient("No live session to ask -- open the scope's session first");
+            }
+        });
+        HBox row = new HBox(ask);
+        row.getStyleClass().add("step-ask-row");
+        return row;
     }
 
     /**

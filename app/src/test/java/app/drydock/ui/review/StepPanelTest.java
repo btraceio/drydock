@@ -75,6 +75,10 @@ class StepPanelTest extends FxTest {
             @Override public void openLocation(String file, int line) { calls.add("open " + file + ":" + line); }
             @Override public void selectStep(String stepId) { calls.add("select " + stepId); }
             @Override public void requestRefresh() { calls.add("refresh"); }
+            @Override public boolean askAboutStep(TourStep step) {
+                calls.add("ask step " + step.title());
+                return stepAskReachable.get();
+            }
             @Override public boolean postMessage(ReviewAnnotation finding, String body) {
                 calls.add("message " + finding.id() + " " + body);
                 return agentReachable.get();
@@ -86,6 +90,10 @@ class StepPanelTest extends FxTest {
 
     /** Flipped by the test for the no-live-session case; the host asks only while it is true. */
     private final java.util.concurrent.atomic.AtomicBoolean agentReachable =
+            new java.util.concurrent.atomic.AtomicBoolean(true);
+
+    /** What the step-ask host will answer; flipped by the refusal test. */
+    private final java.util.concurrent.atomic.AtomicBoolean stepAskReachable =
             new java.util.concurrent.atomic.AtomicBoolean(true);
 
     @Test
@@ -142,6 +150,31 @@ class StepPanelTest extends FxTest {
 
         assertEquals("a → b", lookup(".step-diagram-drawing").queryAs(Label.class).getText());
         assertTrue(lookup(".step-diagram-reveal").queryAll().isEmpty());
+    }
+
+    /** The step's ask is a real button that reports the hand-off honestly. */
+    @Test
+    void theStepAskButtonHandsTheStepToTheHost() {
+        interact(() -> panel.show(view(CheckProgress.fresh("c1"))));
+
+        interact(() -> lookup("Ask the agent about this step").queryAs(Button.class).fire());
+
+        assertEquals(List.of("ask step Guard"), calls);
+    }
+
+    /** A refused hand-off says so: a click that looks like it worked is the silent failure. */
+    @Test
+    void theStepAskSaysSoWhenNoSessionWasAsked() {
+        stepAskReachable.set(false);
+        interact(() -> panel.show(view(CheckProgress.fresh("c1"))));
+
+        interact(() -> lookup("Ask the agent about this step").queryAs(Button.class).fire());
+        FxSync.waitForFxEvents();
+
+        assertTrue(lookup(".step-panel-transient").queryAll().stream()
+                        .anyMatch(node -> ((javafx.scene.control.Label) node).getText()
+                                .contains("No live session")),
+                "a refused hand-off must say so, never look like it worked");
     }
 
     private static String displayed(Button button) {

@@ -479,6 +479,11 @@ class OpenSessionTabReviewSubTabTest extends FxTest {
         }
 
         @Override
+        public boolean requestStepAsk(ReviewScope scope, app.drydock.review.tour.TourStep step) {
+            return false;
+        }
+
+        @Override
         public Optional<Integer> openFindings(ReviewScope scope) {
             return Optional.empty();
         }
