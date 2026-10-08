@@ -83,6 +83,38 @@ class ReviewInstructionsTest {
         assertFalse(line.contains("\n"));
     }
 
+    /**
+     * A question the reviewer cannot answer from the tour or the visible
+     * code tests their background, not the change (hex opcodes, SP handling
+     * on some architecture) -- so both forms forbid it.
+     */
+    @Test
+    void bothFormsForbidQuestionsAssumingKnowledgeTheTourDidNotTeach() {
+        for (boolean subagents : new boolean[] {true, false}) {
+            String instruction = ReviewInstructions.forScope("rs_abc123", subagents);
+            assertTrue(instruction.contains("never from outside knowledge the tour has not taught"), instruction);
+        }
+        String refresh = ReviewInstructions.forTourRefresh("rs_abc123", List.of("s2"), 1);
+        assertTrue(refresh.contains("never from outside knowledge the tour has not taught"), refresh);
+    }
+
+    /**
+     * Name-match searches are not evidence: every impact note must cite a
+     * location the agent read and confirmed, and the count is capped so a
+     * swamped tour is rejected rather than merely noisy.
+     */
+    @Test
+    void bothFormsRequireVerifiedImpactNotesAndCapTheirCount() {
+        for (boolean subagents : new boolean[] {true, false}) {
+            String instruction = ReviewInstructions.forScope("rs_abc123", subagents);
+            assertTrue(instruction.contains("read the location you cite and confirm"), instruction);
+            assertTrue(instruction.contains("at most 8 impact notes"), instruction);
+        }
+        String refresh = ReviewInstructions.forTourRefresh("rs_abc123", List.of("s2"), 1);
+        assertTrue(refresh.contains("read the location you cite and confirm"), refresh);
+        assertTrue(refresh.contains("at most 8 impact notes"), refresh);
+    }
+
     @Test
     void aRiskCheckRequestNamesTheCheckAndTheToolInOneLine() {
         String line = ReviewInstructions.forRiskCheck("rs_abc123", "c7");

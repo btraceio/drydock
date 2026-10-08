@@ -301,13 +301,29 @@ flagged: "declaration changed · N call sites were not edited". This is the
 data TRACE checks are built from.
 
 **Claimed: the agent's impact notes.** These are pinned on top. A note that
-describes a defect must be filed as a finding instead (§4).
+describes a defect must be filed as a finding instead (§4). Impact data
+and the agent's own usage searches are name matches, so a note must cite a
+location the agent **read and confirmed genuinely references the change's
+declaration** -- a same-named member in an unrelated file is a false link,
+not an impact. A step carries **at most 8 impact notes**; more is rejected
+by validation, the same all-or-nothing list as every other tour rule.
 
 **Behaviour.** Measured data is computed off the FX thread, once per scope,
 alongside the graph build. "Finding callers…" shows until the grep returns.
 `OutOfDiffFanIn.Result` gains a reason, so a timeout (the existing 30 s), a
 failure, and no checkout each show as "callers unavailable: <reason>", never
 as an empty list.
+
+**A check's question is grounded.** Whatever its kind (PREDICT, TRACE,
+RISK), a question must be answerable from what the tour itself explains
+(its narratives and anchor notes) or from code the reviewer can see around
+it -- never from outside knowledge the tour has not taught (spec details,
+encodings, instruction sets, hardware behaviour). A question that tests the
+reader's background instead of the change stops the walk: teach it in the
+narrative first, or do not ask it. The instruction typed on Run review and
+refresh carries this rule alongside the kind-picking rule; validation
+enforces only what it can check structurally (a PREDICT must have something
+to read), the grounding itself is the agent's contract.
 
 **`UsageProvider` seam.** It answers usages, declaration and callees for a
 symbol at a file line. Each result carries provenance `MEASURED`, `CLAIMED`
@@ -392,7 +408,7 @@ path stay as computed input to the agent.
 | Tool | Change |
 |---|---|
 | `review_scope` | New `impact` include: measured callers and callees per changed symbol, and the signature-changed flags. `sections` and the reading path remain, as the suggested order. |
-| `review_tour` *(new)* | Submits the tour, or with `onlySteps` replaces stale steps and adds steps for uncovered hunks. Validation is all-or-nothing and lists concrete errors: a hunk not covered; an anchor key that is not a line of the diff; an impact note off-range; a `withheldBy` finding with no check on a step anchoring its lines; a withheld `BLOCKING` finding; a check without an alternate; an answer key not among the choices; a PREDICT on a step whose anchored rows are all added rows. |
+| `review_tour` *(new)* | Submits the tour, or with `onlySteps` replaces stale steps and adds steps for uncovered hunks. Validation is all-or-nothing and lists concrete errors: a hunk not covered; an anchor key that is not a line of the diff; an impact note off-range; more than 8 impact notes on a step; a `withheldBy` finding with no check on a step anchoring its lines; a withheld `BLOCKING` finding; a check without an alternate; an answer key not among the choices; a PREDICT on a step whose anchored rows are all added rows. |
 | `review_finding` | Agent findings land `PROPOSED`. Optional `withheldBy: checkId`. |
 | `review_check` *(new)* | The agent's verdict on a RISK answer: `holds`, `partly` or `doesNotHold`, with a reason. |
 | `review_state` | No longer reports `intents`. Tour progress; RISK answers awaiting a verdict, *with the answer text*; triage outcomes, including dismissal reasons. |

@@ -39,6 +39,28 @@ public final class ReviewInstructions {
             + "rows are all added); ask about the added lines themselves with a trace check, which hides "
             + "nothing";
 
+    /**
+     * The grounding rule for every check question, shared by the first tour
+     * and a refresh. A question the reviewer cannot answer from the tour or
+     * the code in front of them tests their background, not the change --
+     * and a reader who cannot answer stops walking.
+     */
+    private static final String CHECK_GROUNDING = "a check's question, of any kind, must be answerable from "
+            + "what the tour itself explains (its narrative and anchor notes) or from code the reviewer can "
+            + "see around it -- never from outside knowledge the tour has not taught (spec details, encodings, "
+            + "instruction sets, hardware behaviour): teach it in the narrative first, or do not ask it";
+
+    /**
+     * What an impact note must be, shared by the first tour and a refresh.
+     * Drydock's impact data and the agent's own usage searches are name
+     * matches; an unverified match is a link to an unrelated file more
+     * often than not, and the tour drowns in them.
+     */
+    private static final String IMPACT_NOTES = "impact data and any usage search of your own are name matches, "
+            + "not resolved references: before writing an impact note, read the location you cite and confirm "
+            + "it genuinely references the change's declaration -- a same-named field, method or local in an "
+            + "unrelated file is a false link, not an impact, and a step carries at most 8 impact notes";
+
     private ReviewInstructions() {
     }
 
@@ -48,7 +70,8 @@ public final class ReviewInstructions {
                 + ", call review_state first so already-settled findings are not re-flagged, "
                 + "then post review_finding and review_tour against that handle; review_tour is validated "
                 + "(every changed row in a step, each step at least one check with an alternate) and lists "
-                + "every problem if it is rejected, so fix them and post it again; " + ANCHOR_NOTES + "; " + CHECK_KINDS;
+                + "every problem if it is rejected, so fix them and post it again; " + ANCHOR_NOTES + "; "
+                + CHECK_KINDS + "; " + IMPACT_NOTES + "; " + CHECK_GROUNDING;
         return supportsSubagents
                 ? "Dispatch a code-review subagent to review the changes in this worktree: it must "
                         + work + ". Report only its summary back here."
@@ -119,6 +142,6 @@ public final class ReviewInstructions {
         return "For review handle " + scopeId + ", the diff changed under your tour: call review_scope and "
                 + "review_state, then call review_tour with onlySteps true to " + String.join(" and ", asks)
                 + "; the steps you do not send keep the reviewer's progress. For the steps you send, "
-                + ANCHOR_NOTES + "; " + CHECK_KINDS + ".";
+                + ANCHOR_NOTES + "; " + CHECK_KINDS + "; " + IMPACT_NOTES + "; " + CHECK_GROUNDING + ".";
     }
 }

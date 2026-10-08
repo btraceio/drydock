@@ -35,6 +35,12 @@ public final class TourValidator {
     public static final int MAX_CHOICE = 300;
     public static final int MIN_CHOICES = 2;
     public static final int MAX_CHOICES = 4;
+    /**
+     * Impact notes per step. Name-match searches surface more "usages" than
+     * exist; an unbounded list of unverified links swamps the step panel,
+     * so the cap forces the author to keep only the locations it verified.
+     */
+    public static final int MAX_IMPACT_NOTES = 8;
 
     private TourValidator() {
     }
@@ -129,6 +135,10 @@ public final class TourValidator {
         }
         if (step.checks().size() > MAX_CHECKS_PER_STEP) {
             errors.add(where + "has more than " + MAX_CHECKS_PER_STEP + " checks");
+        }
+        if (step.impactNotes().size() > MAX_IMPACT_NOTES) {
+            errors.add(where + "has more than " + MAX_IMPACT_NOTES + " impact notes; keep only the locations "
+                    + "you have read and confirmed genuinely reference the change's declaration");
         }
         for (TourCheck check : step.checks()) {
             validateCheck(check, true, checkIds, errors);
