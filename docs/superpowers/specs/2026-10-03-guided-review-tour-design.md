@@ -278,11 +278,11 @@ because a removed row has no line in the post-image.
   file at that line and collapses the stack onto the trail. `u` again brings
   the code back.
 - **Waypoints.** Step changes add one, labelled "Step N", and so do promoted
-  peeks and search results. `⌘[` and `⌘]` walk the trail in Review. That
-  needs a Review branch next to the Explorer's at
-  `DrydockApplication.java:1009`. While Review is focused, session-tab
-  switching with those keys is unavailable, as it already is in the
-  Explorer.
+  peeks and search results. The trail bar's `‹ ›` buttons walk it. `⌘[` and
+  `⌘]` do NOT: while Review is showing they keep their session-tab meaning
+  (walking a trail whose waypoints are the tour's steps read as the step
+  keys having been hijacked -- reported as a clash), and the Explorer keeps
+  its own trail-first claim on them only while the Explorer is showing.
 - `b` returns the column to the current step's first anchor. A "↩ back to
   step N" pill shows whenever the viewport is off the step's rows.
 - **Every reveal opens what hid it.** A jump whose target row is missing is

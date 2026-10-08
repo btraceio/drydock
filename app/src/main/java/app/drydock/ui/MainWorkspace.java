@@ -1915,7 +1915,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         return replay.test(event);
     }
 
-    /**
+/**
      * Closes the topmost thing Review has open -- the symbol lens, then the
      * MCP panel -- and reports whether it closed anything. False means Esc
      * should move on and leave Review altogether.
@@ -1944,15 +1944,6 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      */
     public boolean navigateExplorerTrail(int direction) {
         return currentlySelected().map(open -> open.navigateExplorerTrail(direction)).orElse(false);
-    }
-
-    /**
-     * {@code ⌘[} / {@code ⌘]} while Review is showing: a step along the
-     * tour's trail, with the same fall-through to session tabs at its ends
-     * as {@link #navigateExplorerTrail}.
-     */
-    public boolean navigateReviewTrail(int direction) {
-        return currentlySelected().map(open -> open.navigateReviewTrail(direction)).orElse(false);
     }
 
     /**
