@@ -271,7 +271,9 @@ class ReviewTourImpactTest extends ReviewTourFixture {
         @Override public void reviewAnyway() { }
         @Override public void backToStep() { }
         @Override public void requestRefresh() { }
-        @Override public void postMessage(ReviewAnnotation finding, String body) { }
+        @Override public boolean postMessage(ReviewAnnotation finding, String body) {
+            return false;
+        }
 
         @Override
         public void openLocation(String file, int line) {

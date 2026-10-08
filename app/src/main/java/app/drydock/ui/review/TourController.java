@@ -1430,11 +1430,12 @@ final class TourController {
         }
 
         @Override
-        public void postMessage(ReviewAnnotation finding, String body) {
-            view.selectedScope().ifPresent(scope -> {
-                host.postMessage(scope, finding, body);
+        public boolean postMessage(ReviewAnnotation finding, String body) {
+            return view.selectedScope().map(scope -> {
+                boolean asked = host.postMessage(scope, finding, body);
                 view.refreshReviewState();
-            });
+                return asked;
+            }).orElse(false);
         }
 
         @Override

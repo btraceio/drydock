@@ -107,6 +107,22 @@ public final class ReviewInstructions {
     }
 
     /**
+     * What drydock asks when a reviewer posts a message into a finding's
+     * thread (spec §4, "Not sure"): the question itself stays in the thread
+     * -- {@code review_comments} carries the messages -- so the prompt
+     * carries only the ids, the same shape as {@link #forRiskCheck}. One
+     * line, for the same reason: it goes through {@code sendPrompt}, which
+     * submits at the first newline.
+     */
+    public static String forFindingQuestion(String scopeId, String findingId) {
+        Objects.requireNonNull(scopeId, "scopeId");
+        Objects.requireNonNull(findingId, "findingId");
+        return "For review handle " + scopeId + ", the reviewer asked a question in finding " + findingId
+                + "'s thread: call review_comments to read it, answer it with review_answer, and revise "
+                + "the finding if they have changed your mind";
+    }
+
+    /**
      * One line asking the agent to judge a reviewer's free-text answer.
      *
      * <p>Carries only the check id: the answer is the reviewer's own text and

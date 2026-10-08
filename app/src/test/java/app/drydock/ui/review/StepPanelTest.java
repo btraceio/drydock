@@ -16,6 +16,7 @@ import app.drydock.testing.FxTest;
 import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
+import javafx.scene.control.Label;
 import javafx.scene.text.Text;
 import app.drydock.review.tour.ImpactNote;
 import app.drydock.review.tour.StepImpact;
@@ -73,13 +74,18 @@ class StepPanelTest extends FxTest {
             @Override public void openLocation(String file, int line) { calls.add("open " + file + ":" + line); }
             @Override public void selectStep(String stepId) { calls.add("select " + stepId); }
             @Override public void requestRefresh() { calls.add("refresh"); }
-            @Override public void postMessage(ReviewAnnotation finding, String body) {
+            @Override public boolean postMessage(ReviewAnnotation finding, String body) {
                 calls.add("message " + finding.id() + " " + body);
+                return agentReachable.get();
             }
         });
         stage.setScene(new Scene(panel, 336, 700));
         stage.show();
     }
+
+    /** Flipped by the test for the no-live-session case; the host asks only while it is true. */
+    private final java.util.concurrent.atomic.AtomicBoolean agentReachable =
+            new java.util.concurrent.atomic.AtomicBoolean(true);
 
     @Test
     void choicesAreNumberedButtonsThatAnswerTheCheck() {
@@ -401,5 +407,34 @@ class StepPanelTest extends FxTest {
 
         assertEquals(List.of("message f1 Is this reachable from the CLI?"), calls,
                 "posted to the thread, and no triage recorded");
+        Label transient_ = lookup(".step-panel-transient").query();
+        assertTrue(transient_.getText().contains("Asked the agent in the finding's thread"),
+                "the send says the agent was asked: " + transient_.getText());
+    }
+
+    /**
+     * The defect this guards: the send used to claim the agent had been
+     * asked whatever the truth was -- with no live session nobody was, and
+     * the reader waited for an answer that was never coming.
+     */
+    @Test
+    void whenNoSessionIsReachableTheSendSaysSoInsteadOfClaimingItAsked() {
+        agentReachable.set(false);
+        interact(() -> {
+            panel.show(view(CheckProgress.fresh("c1")));
+            panel.showTriage(List.of(proposal("f1")));
+        });
+        clickOn("Not sure");
+        FxSync.waitForFxEvents();
+        clickOn(".step-finding-reply").write("Why here and not in the caller?");
+        FxSync.waitForFxEvents();
+        clickOn("Send");
+        FxSync.waitForFxEvents();
+
+        assertEquals(List.of("message f1 Why here and not in the caller?"), calls,
+                "the message still lands in the thread; only the ask fails");
+        Label transient_ = lookup(".step-panel-transient").query();
+        assertTrue(transient_.getText().contains("No running session"), transient_.getText());
+        assertTrue(transient_.getText().contains("waits in the thread"), transient_.getText());
     }
 }

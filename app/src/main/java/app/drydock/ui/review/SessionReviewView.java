@@ -272,8 +272,14 @@ public final class SessionReviewView extends BorderPane {
         /** Resolve / Reopen one finding. */
         void setResolved(ReviewScope scope, ReviewAnnotation finding, boolean resolved);
 
-        /** Appends a human message to a thread (Reply, and the ASK chips). */
-        void postMessage(ReviewScope scope, ReviewAnnotation finding, String body);
+        /**
+         * Appends a human message to a thread (Reply, and the ASK chips) and
+         * hands the question to the scope's live session. False means no
+         * live session: the message is still in the thread -- the agent
+         * reads it on its next review_comments/review_state -- but nobody
+         * was asked now.
+         */
+        boolean postMessage(ReviewScope scope, ReviewAnnotation finding, String body);
 
         /**
          * Records a comment the human wrote against a line or range, minted
@@ -1672,8 +1678,15 @@ public final class SessionReviewView extends BorderPane {
         }
 
         @Override
-        public void postMessage(ReviewAnnotation finding, String body) {
-            selectedScope().ifPresent(scope -> host.postMessage(scope, finding, body));
+        public boolean postMessage(ReviewAnnotation finding, String body) {
+            boolean asked = selectedScope().map(scope -> host.postMessage(scope, finding, body))
+                    .orElse(false);
+            if (!asked) {
+                // The ASK chips promise an answer: when no session is live
+                // the promise must be broken out loud, not by silence.
+                notice("No running session to ask — the message waits in the finding's thread");
+            }
+            return asked;
         }
 
         @Override

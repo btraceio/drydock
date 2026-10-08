@@ -76,8 +76,13 @@ final class StepPanel extends VBox {
         void selectStep(String stepId);
         /** "Ask the agent to refresh": a human's request, sent whatever the automatic gating says. */
         void requestRefresh();
-        /** Not sure's reply: appended to {@code finding}'s thread, the way the margin's Reply is. */
-        void postMessage(ReviewAnnotation finding, String body);
+        /**
+         * Not sure's reply: appended to {@code finding}'s thread, the way the
+         * margin's Reply is, and handed to the scope's live session. False
+         * means no live session was asked; the message is in the thread
+         * either way.
+         */
+        boolean postMessage(ReviewAnnotation finding, String body);
     }
 
     /**
@@ -652,8 +657,10 @@ final class StepPanel extends VBox {
             send.setOnAction(event -> {
                 String body = reply.getText().strip();
                 reply.clear();
-                host.postMessage(finding, body);
-                showTransient("Asked in the finding's thread; it stays proposed until you decide.");
+                boolean asked = host.postMessage(finding, body);
+                showTransient(asked
+                        ? "Asked the agent in the finding's thread; it stays proposed until you decide."
+                        : "No running session — the message waits in the thread for the agent's next visit.");
             });
             HBox field = new HBox(6, reply, send);
             field.setAlignment(Pos.CENTER_LEFT);

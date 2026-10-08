@@ -527,7 +527,8 @@ class OpenSessionTabReviewSubTabTest extends FxTest {
         }
 
         @Override
-        public void postMessage(ReviewScope scope, ReviewAnnotation finding, String body) {
+        public boolean postMessage(ReviewScope scope, ReviewAnnotation finding, String body) {
+            return false;
         }
 
         @Override

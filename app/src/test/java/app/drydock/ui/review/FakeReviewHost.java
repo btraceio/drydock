@@ -241,9 +241,10 @@ final class FakeReviewHost implements SessionReviewView.Host {
     }
 
     @Override
-    public void postMessage(ReviewScope scope, ReviewAnnotation finding, String body) {
+    public boolean postMessage(ReviewScope scope, ReviewAnnotation finding, String body) {
         store.mutate(finding.key(), current -> current.withReply(
                 new ReviewAnnotation.Message("You", Instant.now(), body)));
+        return scope.sessionId().isPresent();
     }
 
     /** Written into the same store the real host uses, so the margin and pins pick it up. */

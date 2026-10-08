@@ -2117,10 +2117,26 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                     resolved ? AnnotationStatus.RESOLVED : AnnotationStatus.OPEN));
         }
 
+        /**
+         * The message lands in the thread AND is handed to the scope's live
+         * session. The thread alone answers nobody: the agent only re-reads
+         * a scope when something sends it there, which is why "Not sure"
+         * and the ASK chips used to do nothing -- the message was stored and
+         * no one was asked (the defect this fixes).
+         */
         @Override
-        public void postMessage(ReviewScope scope, ReviewAnnotation finding, String body) {
+        public boolean postMessage(ReviewScope scope, ReviewAnnotation finding, String body) {
             annotationStore.mutate(finding.key(), current -> current.withReply(
                     new ReviewAnnotation.Message("You", Instant.now(), body)));
+            OpenSessionTab open = scope.sessionId().map(openTabs::get).orElse(null);
+            if (open == null || open.isProcessExited()) {
+                return false;
+            }
+            boolean handedOff = sendToBoundSession(scope,
+                    ReviewInstructions.forFindingQuestion(scope.id(), finding.id()));
+            LOG.log(Level.INFO, () -> (handedOff ? "Asked" : "Could not ask")
+                    + " the agent about finding " + finding.id() + " for scope " + scope.id());
+            return handedOff;
         }
 
         /**

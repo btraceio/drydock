@@ -61,8 +61,12 @@ final class ReviewFindingsMargin extends VBox {
         /** Resolve / Reopen. */
         void setResolved(ReviewAnnotation finding, boolean resolved);
 
-        /** Reply, and the ASK chips, which post a question as the human. */
-        void postMessage(ReviewAnnotation finding, String body);
+        /**
+         * Reply, and the ASK chips, which post a question as the human.
+         * False means no live session was asked; the message is in the
+         * thread either way.
+         */
+        boolean postMessage(ReviewAnnotation finding, String body);
 
         /** {@code Apply patch} -- a human click, never an agent's doing. */
         void applyPatch(ReviewAnnotation finding);

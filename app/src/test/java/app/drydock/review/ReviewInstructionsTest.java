@@ -127,6 +127,17 @@ class ReviewInstructionsTest {
     }
 
     @Test
+    void aFindingQuestionNamesTheScopeTheFindingAndTheAnswerToolInOneLine() {
+        String line = ReviewInstructions.forFindingQuestion("rs_abc123", "f_9");
+
+        assertTrue(line.contains("rs_abc123"));
+        assertTrue(line.contains("f_9"));
+        assertTrue(line.contains("review_comments"));
+        assertTrue(line.contains("review_answer"));
+        assertFalse(line.contains("\n"));
+    }
+
+    @Test
     void aTourRefreshNamesTheStaleStepsTheUncoveredCountAndOnlyStepsInOneLine() {
         String line = ReviewInstructions.forTourRefresh("rs_abc123", List.of("s2", "s5"), 3);
 
