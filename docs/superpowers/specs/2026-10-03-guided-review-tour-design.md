@@ -419,10 +419,29 @@ enforces only what it can check structurally (a PREDICT must have something
 to read), the grounding itself is the agent's contract.
 
 **`UsageProvider` seam.** It answers usages, declaration and callees for a
-symbol at a file line. Each result carries provenance `MEASURED`, `CLAIMED`
-or `RESOLVED`. The lexical implementation ships here. A later LSP spec plugs
-in a resolving one, used only when a server for the language is running and
-indexed. The tour never waits on it.
+symbol at a file line. Each result carries provenance `MEASURED`, `CLAIMED`,
+`SCOPED` or `RESOLVED`. Three tiers ship in this order:
+
+- **Lexical (`MEASURED`)** -- the name-matching default: an occurrence of
+  the text, honest about being no more than that.
+- **Scoped (`SCOPED`)** -- tree-sitter parse-tree binding (the already
+  bundled grammars, no new dependency, no server lifecycle; Java today,
+  per-language strategies). An occurrence binds when its receiver is
+  statically derivable -- no receiver or `this` with the member declared on
+  an enclosing class of the same file; a class-name receiver through an
+  import or the same package, followed up the `extends` chain (capped); a
+  local/parameter/field's declared type -- AND the resolved member is the
+  declaration the peek is centred on. A same-named member on an unrelated
+  class is exactly the false link this tier refuses. What it deliberately
+  never claims: interfaces, overloads, type inference, `java.lang` types,
+  implicit outer-class receivers -- those occurrences stay lexical, and
+  the peek says so ("N bound by scope · M name matches", a `scoped` chip
+  per bound row). When the lexical candidate binds nothing but every
+  resolved reference agrees on one other declaration, the peek re-centres
+  on it and marks the declaration scope-bound.
+- **Resolved (`RESOLVED`)** -- reserved for a language server that has
+  indexed the code; a later LSP spec plugs it in, used only when a server
+  for the language is running and indexed. The tour never waits on it.
 
 ## 7. Comments, verdicts, persistence
 

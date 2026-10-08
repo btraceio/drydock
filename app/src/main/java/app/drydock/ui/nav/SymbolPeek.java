@@ -25,11 +25,29 @@ public record SymbolPeek(
         List<String> lines,
         Set<Integer> changedLines,
         List<Occurrence> occurrences,
-        boolean resolvedDeclaration
+        boolean resolvedDeclaration,
+        boolean declarationScopeBound
 ) {
 
-    /** One place the symbol appears; {@code inDiff} drives the {@code in diff} chip. */
-    public record Occurrence(Path relativePath, int line, String text, boolean inDiff) {
+    /** The older shape: a peek with no scope information, lexical tier throughout. */
+    public SymbolPeek(String symbol, String title, Path file, Path relativePath, int startLine,
+                      List<String> lines, Set<Integer> changedLines, List<Occurrence> occurrences,
+                      boolean resolvedDeclaration) {
+        this(symbol, title, file, relativePath, startLine, lines, changedLines, occurrences,
+                resolvedDeclaration, false);
+    }
+
+    /**
+     * One place the symbol appears. {@code inDiff} drives the {@code in
+     * diff} chip; {@code bound} says the scope binder tied this occurrence
+     * to the peeked declaration -- a real reference, not a shared name.
+     */
+    public record Occurrence(Path relativePath, int line, String text, boolean inDiff, boolean bound) {
+
+        public Occurrence(Path relativePath, int line, String text, boolean inDiff) {
+            this(relativePath, line, text, inDiff, false);
+        }
+
         public Occurrence {
             Objects.requireNonNull(relativePath, "relativePath");
             Objects.requireNonNull(text, "text");
@@ -41,6 +59,7 @@ public record SymbolPeek(
         }
     }
 
+    /** {@code declarationScopeBound}: the binder confirmed the declaration, not the scoring heuristic. */
     public SymbolPeek {
         Objects.requireNonNull(symbol, "symbol");
         Objects.requireNonNull(title, "title");

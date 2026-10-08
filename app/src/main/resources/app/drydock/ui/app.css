@@ -4300,6 +4300,15 @@
     -fx-font-size: 9.5px;
     -fx-padding: 0 6 0 6;
 }
+.peek-usage-chip-scoped {
+    -fx-background-color: -drydock-accent-dim;
+    -fx-background-radius: 6;
+    -fx-padding: 1 5 1 5;
+    -fx-font-size: 10px;
+}
+.step-panel .step-impact-entry.provenance-scoped {
+    -fx-border-color: -drydock-border;
+}
 .peek-usage-chip-diff {
     -fx-background-color: -drydock-running-soft;
     -fx-background-radius: 10px;

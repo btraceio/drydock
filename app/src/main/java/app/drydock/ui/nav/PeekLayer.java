@@ -261,6 +261,12 @@ public final class PeekLayer extends Pane {
         return card;
     }
 
+    private static Label scopedChip() {
+        Label chip = new Label("scoped");
+        chip.getStyleClass().add("peek-usage-chip-scoped");
+        return chip;
+    }
+
     private Node buildCode(SymbolPeek peek, boolean usages) {
         if (usages) {
             // The list REPLACES the code, it is not appended under it: the
@@ -311,8 +317,14 @@ public final class PeekLayer extends Pane {
     private Node buildUsages(SymbolPeek peek) {
         VBox list = new VBox(2);
         list.getStyleClass().add("peek-usages");
-        Label heading = new Label("USAGES · " + peek.occurrences().size()
-                + " (lexical occurrences — click a row to go there)"
+        long bound = peek.occurrences().stream().filter(SymbolPeek.Occurrence::bound).count();
+        int total = peek.occurrences().size();
+        String warrant = bound == 0
+                ? "lexical name matches"
+                : bound + " bound by scope · " + (total - bound)
+                        + (total - bound == 1 ? " name match" : " name matches");
+        Label heading = new Label("USAGES · " + total + " (" + warrant
+                + " — click a row to go there)"
                 + (peek.resolvedDeclaration() ? "" : " · no declaration found"));
         heading.getStyleClass().add("peek-usages-title");
         heading.setWrapText(true);
@@ -327,7 +339,14 @@ public final class PeekLayer extends Pane {
             where.setMaxWidth(Double.MAX_VALUE);
             Label chip = new Label(occurrence.inDiff() ? "in diff" : "not touched");
             chip.getStyleClass().add(occurrence.inDiff() ? "peek-usage-chip-diff" : "peek-usage-chip");
-            HBox row = new HBox(7, where, chip);
+            // A bound row says so: it is a real reference, not a shared
+            // name, and the difference is exactly what the reader is
+            // scanning the list for.
+            List<Node> rowChildren = new ArrayList<>(List.of(where, chip));
+            if (occurrence.bound()) {
+                rowChildren.add(scopedChip());
+            }
+            HBox row = new HBox(7, rowChildren.toArray(Node[]::new));
             row.setAlignment(Pos.CENTER_LEFT);
             // A real Button, not a labelled row: the row IS the navigation,
             // so it must be focusable and answer Enter/Space like every

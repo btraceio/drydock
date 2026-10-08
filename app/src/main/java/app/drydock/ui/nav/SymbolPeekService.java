@@ -11,6 +11,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -112,6 +113,20 @@ public final class SymbolPeekService {
         }, resolveExecutor);
     }
 
+    /**
+     * The scope binder, one per service: its type index walks the repo
+     * once, and the file models it parses are reused across every peek.
+     * Lazy, so a non-Java repo never pays for it.
+     */
+    private JavaScopeBinder binder;
+
+    private JavaScopeBinder binder() {
+        if (binder == null) {
+            binder = new JavaScopeBinder(searchRoot);
+        }
+        return binder;
+    }
+
     private Optional<SymbolPeek> resolve(String symbol, List<FileMatches> files, Map<Path, Set<Integer>> changed) {
         List<Candidate> candidates = new ArrayList<>();
         // Compiled once per peek, not once per matching line: a common
@@ -130,16 +145,85 @@ public final class SymbolPeekService {
         if (candidates.isEmpty()) {
             return Optional.empty();
         }
-        List<SymbolPeek.Occurrence> occurrences = candidates.stream()
-                .map(c -> new SymbolPeek.Occurrence(c.relativePath, c.line, c.text,
-                        changed.getOrDefault(c.relativePath, Set.of()).contains(c.line)))
-                .toList();
-
         Candidate best = candidates.stream()
                 .max(Comparator.comparingInt((Candidate c) -> c.score)
                         .thenComparing(c -> -c.line))
                 .orElseThrow();
         boolean declaration = best.score > 0;
+
+        // The scoped tier (Java only for now): occurrences the parse tree
+        // ties to THIS declaration are real references; a name the text
+        // shares with an unrelated member is the noise the lexical tier
+        // cannot help but find. Every failure path leaves the lexical
+        // answer exactly as it was.
+        Map<Path, Set<Integer>> boundByFile = new LinkedHashMap<>();
+        boolean declarationScopeBound = false;
+        List<Path> javaFiles = candidates.stream()
+                .map(c -> c.relativePath)
+                .filter(path -> path.getFileName().toString().endsWith(".java"))
+                .distinct()
+                .toList();
+        if (!javaFiles.isEmpty()) {
+            JavaScopeBinder binder = binder();
+            JavaScopeBinder.Declaration queried =
+                    new JavaScopeBinder.Declaration(best.relativePath, best.line);
+            Map<Path, JavaScopeBinder.Binding> bindings = new LinkedHashMap<>();
+            Map<JavaScopeBinder.Declaration, Integer> votes = new LinkedHashMap<>();
+            for (Path relative : javaFiles) {
+                JavaScopeBinder.Binding binding = binder.bind(symbol, Optional.of(queried), relative);
+                bindings.put(relative, binding);
+                binding.votes().forEach((found, count) ->
+                        votes.merge(found, count, Integer::sum));
+            }
+            boolean anyBound = bindings.values().stream().anyMatch(binding -> !binding.isEmpty());
+            if (!anyBound && votes.size() == 1) {
+                // The lexical candidate bound nothing, but every reference
+                // that resolved agrees on one other declaration: the
+                // candidate was a same-named member elsewhere, and the
+                // peek re-centres on what the code actually references.
+                // The re-bind is cheap -- the binder's file models are
+                // cached from the first pass.
+                JavaScopeBinder.Declaration agreed = votes.keySet().iterator().next();
+                for (Path relative : javaFiles) {
+                    bindings.put(relative, binder.bind(symbol, Optional.of(agreed), relative));
+                }
+                anyBound = bindings.values().stream().anyMatch(binding -> !binding.isEmpty());
+                if (anyBound) {
+                    Candidate at = candidates.stream()
+                            .filter(c -> c.relativePath.equals(agreed.relativePath())
+                                    && c.line == agreed.line())
+                            .findFirst().orElse(null);
+                    if (at != null) {
+                        best = at;
+                        declaration = true;
+                    }
+                    // When the agreed declaration is not among the search's
+                    // own hits (a declaration line outside the matched set),
+                    // the peek keeps its lexical centre and still shows the
+                    // bound occurrences -- the binding stands on its own.
+                }
+            }
+            // The centre the peek shows now: if bound occurrences resolve
+            // to exactly it, the binder -- not the scoring heuristic --
+            // confirmed the declaration.
+            Path centreFile = best.relativePath;
+            int centreLine = best.line;
+            declarationScopeBound = bindings.values().stream().anyMatch(binding ->
+                    binding.boundLines().values().stream()
+                            .anyMatch(d -> d.relativePath().equals(centreFile)
+                                    && d.line() == centreLine));
+            if (declarationScopeBound) {
+                declaration = true;
+                for (Map.Entry<Path, JavaScopeBinder.Binding> entry : bindings.entrySet()) {
+                    boundByFile.put(entry.getKey(), Set.copyOf(entry.getValue().boundLines().keySet()));
+                }
+            }
+        }
+        List<SymbolPeek.Occurrence> occurrences = candidates.stream()
+                .map(c -> new SymbolPeek.Occurrence(c.relativePath, c.line, c.text,
+                        changed.getOrDefault(c.relativePath, Set.of()).contains(c.line),
+                        boundByFile.getOrDefault(c.relativePath, Set.of()).contains(c.line)))
+                .toList();
 
         List<String> excerpt = readExcerpt(best.file, best.line);
         if (excerpt.isEmpty()) {
@@ -153,9 +237,10 @@ public final class SymbolPeekService {
             }
         }
         String title = symbol + " · " + best.relativePath.getFileName()
-                + (declaration ? "" : " · first occurrence");
+                + (declaration ? (declarationScopeBound ? " · scope-bound declaration" : "")
+                        : " · first occurrence");
         return Optional.of(new SymbolPeek(symbol, title, best.file, best.relativePath, best.line,
-                excerpt, changedInExcerpt, occurrences, declaration));
+                excerpt, changedInExcerpt, occurrences, declaration, declarationScopeBound));
     }
 
     private record Candidate(Path file, Path relativePath, int line, String text, int score) {

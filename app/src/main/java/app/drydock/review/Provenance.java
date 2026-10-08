@@ -18,6 +18,15 @@ public enum Provenance {
     CLAIMED("claimed"),
 
     /**
+     * Bound by scoped analysis of the parse tree ({@code JavaScopeBinder}),
+     * not by name matching: the receiver was statically derivable and its
+     * declaration carries the member. The tier below a language server --
+     * no type checking, so interfaces and overloads stay lexical -- but a
+     * real reference, not a shared name.
+     */
+    SCOPED("scoped"),
+
+    /**
      * Answered by a resolving source -- a language server that has indexed
      * the code -- rather than by name matching. Reserved for that seam
      * ({@link UsageProvider}); nothing here produces it yet.
@@ -40,6 +49,7 @@ public enum Provenance {
         return switch (this) {
             case MEASURED -> "";
             case CLAIMED -> "provenance-claimed";
+            case SCOPED -> "provenance-scoped";
             case RESOLVED -> "provenance-resolved";
         };
     }

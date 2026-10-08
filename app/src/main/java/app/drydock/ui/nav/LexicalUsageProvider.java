@@ -50,7 +50,11 @@ public final class LexicalUsageProvider implements UsageProvider {
         return peek.apply(symbol).thenApply(found -> found
                 .map(best -> new Usage(best.relativePath().toString(), best.startLine(),
                         best.lines().isEmpty() ? "" : best.lines().get(0).strip(),
-                        Provenance.MEASURED, best.resolvedDeclaration())));
+                        // A scope-bound declaration was confirmed by the
+                        // parse tree, not the scoring heuristic -- the tier
+                        // the provenance says it is.
+                        best.declarationScopeBound() ? Provenance.SCOPED : Provenance.MEASURED,
+                        best.resolvedDeclaration())));
     }
 
     @Override
@@ -58,7 +62,9 @@ public final class LexicalUsageProvider implements UsageProvider {
         return peek.apply(symbol).thenApply(found -> found
                 .map(best -> best.occurrences().stream()
                         .map(occurrence -> new Usage(occurrence.relativePath().toString(),
-                                occurrence.line(), occurrence.text(), Provenance.MEASURED, false))
+                                occurrence.line(), occurrence.text(),
+                                occurrence.bound() ? Provenance.SCOPED : Provenance.MEASURED,
+                                false))
                         .toList())
                 .orElse(List.of()));
     }
