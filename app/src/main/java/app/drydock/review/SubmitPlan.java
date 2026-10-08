@@ -27,6 +27,15 @@ public record SubmitPlan(Event preselected, List<Comment> comments, List<ReviewA
         posting = List.copyOf(posting);
         refusals = List.copyOf(refusals);
         bodyNotes = List.copyOf(bodyNotes);
+        // The invariant withBodies (and the sheet's per-finding editing)
+        // relies on: posting's first comments.size() entries name the
+        // findings the comments carry, in order, and the rest name the body
+        // notes. Made structural so a future builder cannot silently break
+        // the alignment the editing keys on.
+        if (posting.size() != comments.size() + bodyNotes.size()) {
+            throw new IllegalArgumentException("posting (" + posting.size() + ") must align with comments ("
+                    + comments.size() + ") plus body notes (" + bodyNotes.size() + ")");
+        }
     }
 
     /**
@@ -294,6 +303,35 @@ public record SubmitPlan(Event preselected, List<Comment> comments, List<ReviewA
 
     private static String labelOf(String key) {
         return key.startsWith("o") ? key.substring(1) + "(-)" : key.substring(1);
+    }
+
+    /**
+     * The plan with every comment's and body note's text replaced by the
+     * human's edits: what the submit sheet's per-finding editing produces
+     * before the post. Keyed by the finding's annotation key (the sheet
+     * knows it from {@link #posting()}), applied to both routes -- an
+     * inline comment and a body note are the same finding wearing two
+     * transports. Everything else -- anchors, refusals, the preselected
+     * event -- is carried over unchanged: the edit rewords the finding, it
+     * does not re-decide it.
+     */
+    public SubmitPlan withBodies(Map<ReviewAnnotation.Key, String> editedBodies) {
+        if (editedBodies.isEmpty()) {
+            return this;
+        }
+        List<Comment> rewordedComments = new ArrayList<>();
+        List<BodyNote> rewordedNotes = new ArrayList<>();
+        for (int i = 0; i < comments.size(); i++) {
+            String replacement = editedBodies.get(posting.get(i));
+            rewordedComments.add(replacement == null ? comments.get(i)
+                    : new Comment(comments.get(i).path(), replacement, comments.get(i).anchor()));
+        }
+        for (BodyNote note : bodyNotes) {
+            String replacement = editedBodies.get(note.key());
+            rewordedNotes.add(replacement == null ? note
+                    : new BodyNote(note.key(), note.file(), note.lineLabel(), note.excerpt(), replacement));
+        }
+        return new SubmitPlan(preselected, rewordedComments, posting, refusals, rewordedNotes);
     }
 
     /** How many findings still wait for a human's confirm-or-dismiss: proposed and unresolved. */

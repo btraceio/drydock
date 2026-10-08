@@ -2343,7 +2343,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             SubmitPlan plan = SubmitPlan.of(annotationStore.forScope(scope.id()), decisions, index, lineText);
             ReviewSubmitSheet[] holder = new ReviewSubmitSheet[1];
             holder[0] = new ReviewSubmitSheet(plan, pr, unverified,
-                    (event, summary) -> postReview(scope, pr, plan, event, summary, holder[0]),
+                    (event, summary) -> postReview(scope, pr,
+                            plan.withBodies(holder[0].editedBodies()), event, summary, holder[0]),
                     modalLayer::close);
             modalLayer.show(holder[0]);
             unavailableReason.ifPresent(holder[0]::showUnavailable);

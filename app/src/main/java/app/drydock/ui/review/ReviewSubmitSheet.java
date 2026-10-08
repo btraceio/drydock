@@ -4,6 +4,7 @@ import app.drydock.github.GitHubLineAnchor.Anchor;
 import app.drydock.github.GitHubLineAnchor.Side;
 import app.drydock.github.GitHubReviewRequest.Comment;
 import app.drydock.github.GitHubReviewRequest.Event;
+import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.SubmitPlan;
 
@@ -21,7 +22,9 @@ import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.function.BiConsumer;
 
@@ -71,6 +74,14 @@ public final class ReviewSubmitSheet extends VBox {
 
     private final SubmitPlan plan;
     private final Unverified unverified;
+    /**
+     * The human's rewordings for this submission, keyed by the finding's
+     * annotation key ({@code plan.posting()} aligns with the comments, in
+     * order; body notes carry their key). Empty until an edit commits, and
+     * visible in the row as an "edited" chip -- what posts may differ from
+     * what the board shows, and the difference must never be silent.
+     */
+    private final Map<ReviewAnnotation.Key, String> editedBodies = new LinkedHashMap<>();
     private final BiConsumer<Event, String> onSubmit;
     private final Runnable onCancel;
 
@@ -239,15 +250,29 @@ public final class ReviewSubmitSheet extends VBox {
 
     // ---- what will (and will not) post -------------------------------------
 
-    /** Every comment the plan would post: {@code file:L40–48} (or a single line) plus its first line. */
+    /** The edits the sheet has collected; the caller folds them into the plan before posting. */
+    public Map<ReviewAnnotation.Key, String> editedBodies() {
+        return Map.copyOf(editedBodies);
+    }
+
+    private String bodyFor(ReviewAnnotation.Key key, String original) {
+        return editedBodies.getOrDefault(key, original);
+    }
+
+    /**
+     * Every comment the plan would post: {@code file:L40–48} (or a single
+     * line) plus its first line -- and, when the human reworded it for the
+     * post, the edited text and an "edited" chip, because the posted body
+     * now differs from the finding the board still shows.
+     */
     private Region buildCommentsBlock() {
         Label header = new Label("Inline comments (" + plan.comments().size() + ")");
         header.getStyleClass().addAll("modal-hint", "review-submit-route-inline");
 
         VBox rows = new VBox(6);
         rows.getStyleClass().add("review-submit-comments");
-        for (Comment comment : plan.comments()) {
-            rows.getChildren().add(commentRow(comment));
+        for (int i = 0; i < plan.comments().size(); i++) {
+            rows.getChildren().add(commentRow(plan.comments().get(i), plan.posting().get(i)));
         }
 
         VBox block = new VBox(6, header, rows);
@@ -264,13 +289,8 @@ public final class ReviewSubmitSheet extends VBox {
         header.getStyleClass().addAll("modal-hint", "review-submit-route-body");
         VBox rows = new VBox(6);
         for (SubmitPlan.BodyNote note : plan.bodyNotes()) {
-            Label location = new Label(note.location());
-            location.getStyleClass().add("review-submit-note-location");
-            Label body = new Label(firstLine(note.body()));
-            body.getStyleClass().add("review-submit-comment-body");
-            HBox row = new HBox(8, location, body);
-            row.getStyleClass().add("review-submit-comment-row");
-            rows.getChildren().add(row);
+            rows.getChildren().add(editableRow(note.location(), note.key(), note.body(),
+                    "review-submit-note-location"));
         }
         VBox block = new VBox(6, header, rows);
         block.getStyleClass().add("review-submit-body-notes");
@@ -287,14 +307,79 @@ public final class ReviewSubmitSheet extends VBox {
         return Optional.of(new VBox(line));
     }
 
-    private static Region commentRow(Comment comment) {
-        Label location = new Label(locationOf(comment));
-        location.getStyleClass().add("review-submit-comment-location");
-        Label body = new Label(firstLine(comment.body()));
-        body.getStyleClass().add("review-submit-comment-body");
-        HBox row = new HBox(8, location, body);
+    /** One posting row: where, the text that will post, and the Edit that rewords it. */
+    private Region commentRow(Comment comment, ReviewAnnotation.Key key) {
+        return editableRow(locationOf(comment), key, comment.body(), "review-submit-comment-location");
+    }
+
+    /**
+     * A row whose text can be reworded for the post. The edit changes what
+     * is POSTED, not the stored finding -- the board keeps the original,
+     * so the row carries an "edited" chip to keep the difference from being
+     * silent. The editor is a multi-line composer: ⌘⏎ saves it, Esc drops
+     * the draft, the same gestures the summary uses.
+     */
+    private Region editableRow(String locationText, ReviewAnnotation.Key key, String originalBody,
+                               String locationStyleClass) {
+        HBox row = new HBox(8);
         row.getStyleClass().add("review-submit-comment-row");
+        Runnable[] holder = new Runnable[1];
+        Runnable refresh = () -> {
+            Label location = new Label(locationText);
+            location.getStyleClass().add(locationStyleClass);
+            Label body = new Label(firstLine(bodyFor(key, originalBody)));
+            body.getStyleClass().add("review-submit-comment-body");
+            HBox.setHgrow(body, Priority.ALWAYS);
+            body.setMaxWidth(Double.MAX_VALUE);
+            row.getChildren().setAll(location, body);
+            if (editedBodies.containsKey(key)) {
+                Label chip = new Label("edited");
+                chip.getStyleClass().add("review-submit-edited-chip");
+                row.getChildren().add(chip);
+            }
+            Button edit = new Button("Edit");
+            edit.getStyleClass().add("review-submit-edit-button");
+            edit.setOnAction(e -> row.getChildren().setAll(editor(row, key, originalBody, holder[0])));
+            row.getChildren().add(edit);
+        };
+        holder[0] = refresh;
+        refresh.run();
         return row;
+    }
+
+    /** The row's edit state: a multi-line draft with ⌘⏎ to save and Esc to drop. */
+    private Region editor(HBox row, ReviewAnnotation.Key key, String originalBody, Runnable refresh) {
+        TextArea draft = new TextArea(bodyFor(key, originalBody));
+        draft.getStyleClass().add("review-composer-input");
+        draft.setWrapText(true);
+        draft.setPrefRowCount(3);
+        Label hint = new Label("⌘⏎ saves · Esc cancels");
+        hint.getStyleClass().add("modal-hint");
+        draft.addEventFilter(javafx.scene.input.KeyEvent.KEY_PRESSED, event -> {
+            switch (event.getCode()) {
+                case ENTER -> {
+                    if (event.isShortcutDown()) {
+                        String text = draft.getText() == null ? "" : draft.getText().strip();
+                        if (!text.isEmpty()) {
+                            editedBodies.put(key, text);
+                        }
+                        refresh.run();
+                        event.consume();
+                    }
+                }
+                case ESCAPE -> {
+                    refresh.run();
+                    event.consume();
+                }
+                default -> { }
+            }
+        });
+        VBox editor = new VBox(4, draft, hint);
+        editor.getStyleClass().add("review-submit-editor");
+        // The draft takes the focus the click that opened it came from --
+        // typing is the whole point of the state.
+        javafx.application.Platform.runLater(draft::requestFocus);
+        return editor;
     }
 
     /**

@@ -1,5 +1,7 @@
 package app.drydock.review;
 
+import app.drydock.github.GitHubLineAnchor;
+import app.drydock.github.GitHubReviewRequest;
 import app.drydock.github.GitHubReviewRequest.Event;
 import org.junit.jupiter.api.Test;
 
@@ -7,8 +9,10 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -368,5 +372,43 @@ class SubmitPlanTest {
                   ````
                   List<T> *p = `a` + ```b```;
                   ````""", body);
+    }
+
+    /**
+     * The submit sheet's per-finding editing rewords through withBodies: a
+     * comment's and a body note's text replaced by the finding's key, the
+     * anchors, routes, refusals and preselected event carried over
+     * unchanged, and unknown keys ignored.
+     */
+    @Test
+    void withBodiesRewordsBothRoutesByKeyAndCarriesEverythingElseOver() {
+        ReviewAnnotation.Key inlineKey = new ReviewAnnotation.Key("rs", "f-inline");
+        ReviewAnnotation.Key noteKey = new ReviewAnnotation.Key("rs", "f-note");
+        GitHubReviewRequest.Comment comment = new GitHubReviewRequest.Comment("src/A.java", "original inline",
+                new GitHubLineAnchor.Anchor(12, GitHubLineAnchor.Side.RIGHT, OptionalInt.empty(), Optional.empty()));
+        SubmitPlan.BodyNote note = new SubmitPlan.BodyNote(noteKey, "src/B.java", "500", "excerpt", "original note");
+        SubmitPlan plan = new SubmitPlan(GitHubReviewRequest.Event.APPROVE, List.of(comment),
+                List.of(inlineKey, noteKey), List.of(), List.of(note));
+
+        SubmitPlan reworded = plan.withBodies(Map.of(inlineKey, "reworded inline", noteKey, "reworded note"));
+
+        assertEquals("reworded inline", reworded.comments().getFirst().body());
+        assertEquals(12, reworded.comments().getFirst().anchor().line());
+        assertEquals("reworded note", reworded.bodyNotes().getFirst().body());
+        assertEquals("excerpt", reworded.bodyNotes().getFirst().excerpt());
+        assertEquals(List.of(inlineKey, noteKey), reworded.posting());
+        assertEquals(GitHubReviewRequest.Event.APPROVE, reworded.preselected());
+
+        // An unknown key is ignored, and the empty map is the same plan.
+        assertEquals(plan, plan.withBodies(Map.of(new ReviewAnnotation.Key("rs", "nowhere"), "x")));
+    }
+
+    @Test
+    void aMisalignedPlanIsRejectedAtConstruction() {
+        GitHubReviewRequest.Comment comment = new GitHubReviewRequest.Comment("src/A.java", "body",
+                new GitHubLineAnchor.Anchor(12, GitHubLineAnchor.Side.RIGHT, OptionalInt.empty(), Optional.empty()));
+        assertThrows(IllegalArgumentException.class,
+                () -> new SubmitPlan(GitHubReviewRequest.Event.APPROVE, List.of(comment), List.of(), List.of(), List.of()),
+                "posting must align with comments plus body notes -- the editing keys on it");
     }
 }
