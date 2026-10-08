@@ -56,6 +56,7 @@ class ReviewVerdictBarFitTest extends FxTest {
             @Override public void approve(ReviewVerdictBar.Target target) { }
             @Override public void requestChanges(ReviewVerdictBar.Target target) { }
             @Override public boolean askAgentToFix(ReviewVerdictBar.Target target) { return askSucceeds; }
+            @Override public boolean requestDeepReview() { return false; }
             @Override public void undo(ReviewVerdictBar.Target target) { }
             @Override public void confirmStillGood(ReviewVerdictBar.Target target) { }
             @Override public void nextUnsettled() { }

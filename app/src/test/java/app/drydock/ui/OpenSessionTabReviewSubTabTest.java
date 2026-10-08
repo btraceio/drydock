@@ -474,6 +474,11 @@ class OpenSessionTabReviewSubTabTest extends FxTest {
         }
 
         @Override
+        public boolean requestDeepReview(ReviewScope scope) {
+            return false;
+        }
+
+        @Override
         public Optional<Integer> openFindings(ReviewScope scope) {
             return Optional.empty();
         }

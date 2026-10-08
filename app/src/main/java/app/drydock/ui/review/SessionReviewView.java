@@ -371,6 +371,15 @@ public final class SessionReviewView extends BorderPane {
          */
         boolean runReview(ReviewScope scope);
 
+        /**
+         * Asks the scope's agent for the deeper second pass over the change
+         * ({@code ReviewInstructions.forDeepReview}) once every step of the
+         * tour is settled. False when the hand-off did not happen (no bound
+         * session), exactly like {@link #runReview}: the caller shows the
+         * refusal, never a click that looks like it worked.
+         */
+        boolean requestDeepReview(ReviewScope scope);
+
         /** {@code scope}'s guided tour with its progress, if the agent has posted one. */
         Optional<TourRecord> tour(ReviewScope scope);
 
@@ -1811,6 +1820,11 @@ public final class SessionReviewView extends BorderPane {
                 recordHunkOverrides(scope, digests, decision, before);
                 rememberSettle(scope, digests, decision, file);
             });
+        }
+
+        @Override
+        public boolean requestDeepReview() {
+            return selectedScope().map(host::requestDeepReview).orElse(false);
         }
 
         @Override

@@ -47,6 +47,39 @@ class ReviewTriageMarginTest extends ReviewViewFixture {
         refresh();
     }
 
+    private ReviewAnnotation confirmed(String id) {
+        return new ReviewAnnotation(scope.id(), id, FILE_A, "n2", "n2",
+                Severity.QUESTION, Confidence.HIGH, Optional.of("Title " + id), "Claude", Instant.EPOCH,
+                List.of(), Optional.empty(), Optional.empty(), List.of(),
+                List.of(new ReviewAnnotation.Message("Claude", Instant.EPOCH, "body of " + id)),
+                Optional.empty(), AnnotationStatus.OPEN, Optional.empty(), false,
+                Triage.CONFIRMED, Optional.empty());
+    }
+
+    /**
+     * The walk after a deep review: its amendments arrive as proposals, and
+     * the proposed filter is the delta queue -- only what this round's
+     * reviewer has not triaged yet, so the second pass is walked without
+     * re-reading the whole margin.
+     */
+    @Test
+    void theProposedFilterShowsOnlyUntriagedFindings() {
+        seedAndRefresh(proposed("f1"), confirmed("f2"), proposed("f3"));
+
+        interact(() -> lookup("proposed").queryAs(Button.class).fire());
+        FxSync.waitForFxEvents();
+
+        assertEquals(2, lookup(".review-finding-card").queryAll().size(),
+                "the delta: proposals only, the confirmed finding is out of the walk");
+        assertTrue(lookup(".review-card-proposed").queryAll().size() >= 1,
+                "what shows is untriaged");
+
+        interact(() -> lookup("open").queryAs(Button.class).fire());
+        FxSync.waitForFxEvents();
+        assertEquals(3, lookup(".review-finding-card").queryAll().size(),
+                "open is the round-trip home: unresolved and not dismissed, confirmed included");
+    }
+
     @Test
     void aProposalShowsItsChipAndCannotBePostedYet() {
         seedAndRefresh(proposed("f1"));

@@ -436,6 +436,19 @@ lines, which the whole-file view makes reachable. At Submit:
 - The submit sheet shows which route each comment takes.
 - Sending to the author carries all of them.
 
+**The finished tour offers its second pass.** Once every step is settled,
+the verdict bar carries a "Deep review…" button: it hands the bound
+session a one-line, harness-agnostic ask -- use a review-loop tool if the
+agent has one (sphinx, a code-review command), else re-read the diff
+deeply -- that AMENDS this round rather than replacing it: settled
+findings are ground truth read through `review_state`, corrections go
+into the finding's own thread, and new findings land as proposals the
+reviewer triages. The amendments are walked through the findings
+margin's "proposed" filter: only what this round's reviewer has not
+triaged yet, so the delta is one walk, not a re-read of the whole
+margin. drydock never probes for a harness or runs one itself; it frames
+the ask and the agent's own tooling does the rest.
+
 **The submit sheet is a curate-then-post pass.** Confirmed findings post
 by default (the confirm IS the vouch; the card's toggle remains the
 explicit opt-out, and only the transition into confirmed promotes, so no

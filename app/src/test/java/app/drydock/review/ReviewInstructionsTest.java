@@ -126,6 +126,25 @@ class ReviewInstructionsTest {
         assertFalse(line.contains("\n"));
     }
 
+    /**
+     * The deep round's ask: names the scope, is harness-agnostic (sphinx,
+     * code-review, or a plain re-read), and above all AMENDS rather than
+     * replaces -- the settled round is ground truth to build on, not
+     * material to re-litigate wholesale.
+     */
+    @Test
+    void aDeepReviewRequestAmendsTheRoundInOneLine() {
+        String line = ReviewInstructions.forDeepReview("rs_abc123");
+
+        assertTrue(line.contains("rs_abc123"));
+        assertTrue(line.contains("AMEND"), line);
+        assertTrue(line.contains("never replace"), line);
+        assertTrue(line.contains("review_state"), "the agent must read what is settled first");
+        assertTrue(line.contains("review_finding"), "new findings land as proposals");
+        assertTrue(line.contains("sphinx, code-review"), "harness-agnostic, not sphinx-only");
+        assertFalse(line.contains("\n"));
+    }
+
     @Test
     void aFindingQuestionNamesTheScopeTheFindingAndTheAnswerToolInOneLine() {
         String line = ReviewInstructions.forFindingQuestion("rs_abc123", "f_9");

@@ -116,7 +116,10 @@ class ReviewFindingsAndVerdictsTest extends FxTest {
 
         assertEquals(1, lookup(".review-finding-card").queryAll().size());
 
-        interact(() -> ((Button) List.copyOf(lookup(".review-filter-button").queryAll()).get(1)).fire());
+        // By text, not position: the margin header gained a third chip
+        // ("proposed"), and a positional click is exactly how that kind of
+        // change turns into a wrong-button failure.
+        interact(() -> lookup("open").queryAs(Button.class).fire());
         FxSync.waitForFxEvents();
 
         assertEquals(2, lookup(".review-finding-card").queryAll().size());

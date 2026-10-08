@@ -2578,6 +2578,17 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
 
         @Override
+        public boolean requestDeepReview(ReviewScope scope) {
+            if (scope.sessionId().isEmpty()) {
+                return false;
+            }
+            boolean handedOff = sendToBoundSession(scope, ReviewInstructions.forDeepReview(scope.id()));
+            LOG.log(Level.INFO, () -> (handedOff ? "Dispatched" : "Could not dispatch")
+                    + " the deep review for scope " + scope.id());
+            return handedOff;
+        }
+
+        @Override
         public Optional<TourRecord> tour(ReviewScope scope) {
             return tourStore.forScope(scope.id());
         }

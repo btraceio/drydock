@@ -329,6 +329,9 @@ final class FakeReviewHost implements SessionReviewView.Host {
     /** Whether a reviewer is available at all; empty models "no reviewer configured". */
     final List<String> reviewers = new ArrayList<>();
     final List<String> reviewRuns = new ArrayList<>();
+    /** Deep-review dispatches seen, and what the next one answers. */
+    int deepReviewRequests;
+    boolean deepReviewHandoff = true;
 
     @Override
     public boolean runReview(ReviewScope scope) {
@@ -337,6 +340,12 @@ final class FakeReviewHost implements SessionReviewView.Host {
         }
         reviewRuns.add(scope.id());
         return true;
+    }
+
+    @Override
+    public boolean requestDeepReview(ReviewScope scope) {
+        deepReviewRequests++;
+        return deepReviewHandoff;
     }
 
     @Override

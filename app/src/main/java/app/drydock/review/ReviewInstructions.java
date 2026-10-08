@@ -174,6 +174,30 @@ public final class ReviewInstructions {
      * reaches the agent through {@code review_state}, not typed into its
      * prompt.</p>
      */
+    /**
+     * What the verdict bar's "Deep review…" asks once every step of the
+     * tour is settled: a deeper second pass over the same change that
+     * AMENDS the tour round instead of replacing it. One line, for the
+     * same reason as {@link #forFindingQuestion}.
+     *
+     * <p>Harness-agnostic on purpose: drydock cannot know whether this
+     * session's agent has a review-loop tool (sphinx, a code-review
+     * command), so the prompt asks for the deeper pass and lets the agent
+     * use whatever it has -- including only its own re-reading. What is
+     * NOT optional is amending rather than replacing: the tour round's
+     * settled findings and the reviewer's triage are the ground the
+     * second pass builds on, not material to re-litigate wholesale.</p>
+     */
+    public static String forDeepReview(String scopeId) {
+        return "The reviewer finished the guided tour of handle " + scopeId + ": run a deeper "
+                + "review of the same change now -- a review-loop tool (sphinx, code-review) if "
+                + "you have one, otherwise a fresh deep re-read -- and AMEND the tour round, "
+                + "never replace it: read review_state first (settled findings are settled, "
+                + "and their threads are where you correct yourself), revise or withdraw what "
+                + "the second pass shows wrong through review_answer, and add new findings "
+                + "with review_finding -- they land as proposals the reviewer triages";
+    }
+
     public static String forRiskCheck(String scopeId, String checkId) {
         Objects.requireNonNull(scopeId, "scopeId");
         Objects.requireNonNull(checkId, "checkId");
