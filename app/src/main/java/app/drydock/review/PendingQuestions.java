@@ -1,7 +1,11 @@
 package app.drydock.review;
 
+import app.drydock.domain.ManagedSessionId;
+
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
@@ -30,8 +34,13 @@ import java.util.function.Predicate;
  */
 public final class PendingQuestions {
 
-    /** One question still waiting for its answer. */
-    public record PendingAsk(String questionId, String scopeId, String symbol, Instant askedAt) {
+    /**
+     * One question still waiting for its answer. The session it was asked
+     * of is part of the question: an ask dies when that session exits, not
+     * when any other thing about the app changes.
+     */
+    public record PendingAsk(String questionId, String scopeId, String symbol,
+                             ManagedSessionId sessionId, Instant askedAt) {
     }
 
     /** A question and the answer that closed it. */
@@ -63,8 +72,9 @@ public final class PendingQuestions {
     }
 
     /** Records a fresh question and returns the id its answer must name. */
-    public synchronized PendingAsk mint(String scopeId, String symbol) {
-        PendingAsk ask = new PendingAsk("ask-" + counter.incrementAndGet(), scopeId, symbol, Instant.now());
+    public synchronized PendingAsk mint(String scopeId, String symbol, ManagedSessionId sessionId) {
+        PendingAsk ask = new PendingAsk("ask-" + counter.incrementAndGet(), scopeId, symbol,
+                sessionId, Instant.now());
         pending.put(ask.questionId(), ask);
         while (pending.size() > MAX_PENDING) {
             Iterator<PendingAsk> oldest = pending.values().iterator();
@@ -102,5 +112,24 @@ public final class PendingQuestions {
     /** How many questions are still open. Visible for tests. */
     public synchronized int size() {
         return pending.size();
+    }
+
+    /**
+     * Every question asked of the now-exited {@code sessionId}, removed
+     * from the registry: the session they were asked of can no longer
+     * answer them, so they stop being answerable at all -- a late {@code
+     * review_ask_answer} for one of them must be refused as unknown
+     * rather than resurrect it.
+     */
+    public synchronized List<PendingAsk> expireSession(ManagedSessionId sessionId) {
+        List<PendingAsk> expired = new ArrayList<>();
+        pending.values().removeIf(ask -> {
+            if (ask.sessionId().equals(sessionId)) {
+                expired.add(ask);
+                return true;
+            }
+            return false;
+        });
+        return expired;
     }
 }

@@ -2623,8 +2623,10 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             // peek context plus the delivery instruction is the whole
             // question. The minted id is the correlation -- the answer has
             // to land back on THIS board, not in the agent's conversation.
-            PendingQuestions.PendingAsk ask =
-                    pendingQuestions.mint(scope.id(), peek.symbol());
+            // open != null above proves the session binding; the ask dies
+            // with exactly that session.
+            PendingQuestions.PendingAsk ask = pendingQuestions.mint(scope.id(), peek.symbol(),
+                    scope.sessionId().orElseThrow());
             open.sendPrompt(peek.askPrompt() + " " + ReviewInstructions.forPeekAsk(ask.questionId()));
             return true;
         }
@@ -2938,6 +2940,27 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * not silenced -- a delivered-but-lost answer is a lie the question's
      * id made possible, and it must at least be findable in the log.
      */
+    /**
+     * An ask whose session exited before answering. Delivered like an
+     * answer -- to the board that asked -- but as a death notice, so the
+     * reader is never left with a promise that quietly stopped being one.
+     */
+    private void deliverAskExpired(PendingQuestions.PendingAsk ask) {
+        Platform.runLater(() -> {
+            OpenSessionTab tab = reviewScopeRegistry.byId(ask.scopeId())
+                    .flatMap(scope -> scope.sessionId())
+                    .map(openTabs::get)
+                    .orElse(null);
+            SessionReviewView view = tab == null ? null : tab.reviewView().orElse(null);
+            if (view == null) {
+                LOG.log(Level.INFO, () -> "Expired ask " + ask.questionId()
+                        + " could not be shown: no review view for scope " + ask.scopeId());
+                return;
+            }
+            view.showAskExpired(ask);
+        });
+    }
+
     private void deliverAskAnswer(PendingQuestions.AnsweredAsk answered) {
         Platform.runLater(() -> {
             OpenSessionTab tab = reviewScopeRegistry.byId(answered.ask().scopeId())
@@ -4820,6 +4843,14 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 continue;
             }
             exitRecorded.add(sessionId);
+            // Every peek question asked of this session dies with it: no
+            // answer can come now, and a late one must be refused rather
+            // than resurrect a dead question.
+            for (PendingQuestions.PendingAsk ask : pendingQuestions.expireSession(sessionId)) {
+                LOG.log(Level.INFO, () -> "Ask " + ask.questionId() + " about " + ask.symbol()
+                        + " died with session " + sessionId);
+                deliverAskExpired(ask);
+            }
             // SPIKE: tmux persistence. For a tmux-backed surface, the ghostty
             // child is the tmux *client*; processExited means the client
             // detached or the tmux session died — NOT necessarily that the

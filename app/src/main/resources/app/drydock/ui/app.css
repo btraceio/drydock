@@ -3904,6 +3904,13 @@
     -fx-font-size: 12px;
     -fx-text-fill: -drydock-text;
 }
+.ask-answer-card.ask-expired {
+    -fx-border-color: -drydock-border;
+    -fx-opacity: 0.85;
+}
+.ask-answer-body.ask-expired {
+    -fx-text-fill: -drydock-text-dim;
+}
 .ask-answer-close {
     -fx-background-color: transparent;
     -fx-border-color: transparent;

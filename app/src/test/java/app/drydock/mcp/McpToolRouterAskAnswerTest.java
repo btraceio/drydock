@@ -35,7 +35,7 @@ class McpToolRouterAskAnswerTest {
         registry.mint(caller, Spawn.ALLOWED);
         router = new McpToolRouter(context, registry);
         context.grant(caller, SCOPE);
-        ask = context.pendingQuestions.mint(SCOPE, "loadConfig");
+        ask = context.pendingQuestions.mint(SCOPE, "loadConfig", caller);
     }
 
     @Test

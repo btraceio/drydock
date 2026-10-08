@@ -81,6 +81,7 @@ class ReviewAskAnswerTest extends FxTest {
     private static PendingQuestions.AnsweredAsk answered(String symbol, String answer) {
         PendingQuestions.PendingAsk ask =
                 new PendingQuestions.PendingAsk("ask-1", "rs_scope", symbol,
+                        app.drydock.domain.ManagedSessionId.newId(),
                         Instant.parse("2026-10-08T12:00:00Z"));
         return new PendingQuestions.AnsweredAsk(ask, answer, Instant.now());
     }
@@ -97,6 +98,24 @@ class ReviewAskAnswerTest extends FxTest {
         assertTrue(lookup(".ask-answer-title").queryAll().stream()
                 .map(node -> ((Label) node).getText()).findFirst().orElse("").contains("loadConfig"),
                 "the card names the symbol it answers about");
+    }
+
+    /** The death notice: no answer came, and the card says why rather than leaving a silent gap. */
+    @Test
+    void anExpiredAskShowsItsDeathNotice() {
+        showBoard();
+        interact(() -> view.showAskExpired(new PendingQuestions.PendingAsk("ask-9", "rs_scope",
+                "loadConfig", app.drydock.domain.ManagedSessionId.newId(),
+                Instant.parse("2026-10-08T12:00:00Z"))));
+        FxSync.waitForFxEvents();
+
+        List<String> notices = lookup(".ask-answer-body").queryAll().stream()
+                .map(node -> ((Label) node).getText()).toList();
+        assertEquals(1, notices.size());
+        assertTrue(notices.getFirst().contains("ended before answering"), notices.getFirst());
+        assertTrue(lookup(".ask-answer-card").queryAll().stream()
+                        .anyMatch(node -> node.getStyleClass().contains("ask-expired")),
+                "the death card is marked, so it can never read like an answer");
     }
 
     @Test

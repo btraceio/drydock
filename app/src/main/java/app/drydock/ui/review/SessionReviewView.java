@@ -3212,6 +3212,39 @@ public final class SessionReviewView extends BorderPane {
      * dismissed; the question was asked HERE, so this is where the reader
      * is waiting.
      */
+    /**
+     * An ask whose session ended before answering, shown as the answer's
+     * honest absence: the reader asked, and no answer can come. Kept
+     * until dismissed like an answer, so the dead promise is seen rather
+     * than silently dropped -- but marked as a death, never styled like
+     * an answer.
+     */
+    public void showAskExpired(PendingQuestions.PendingAsk ask) {
+        Label title = new Label(ask.symbol() + " — asked " + UiFormats.relativeTime(ask.askedAt())
+                + " · no answer came");
+        title.getStyleClass().add("ask-answer-title");
+        Label body = new Label("The session ended before answering this question.");
+        body.getStyleClass().add("ask-answer-body");
+        body.getStyleClass().add("ask-expired");
+        body.setWrapText(true);
+        Button close = new Button("✕");
+        close.getStyleClass().add("ask-answer-close");
+        HBox header = new HBox(7, title, close);
+        header.setAlignment(Pos.CENTER_LEFT);
+        VBox card = new VBox(6, header, body);
+        card.getStyleClass().addAll("ask-answer-card", "ask-expired");
+        HBox.setHgrow(title, Priority.ALWAYS);
+        close.setOnAction(event -> {
+            askAnswers.getChildren().remove(card);
+            refreshAskAnswersVisibility();
+        });
+        askAnswers.getChildren().add(card);
+        if (askAnswers.getChildren().size() > MAX_ASK_ANSWERS) {
+            askAnswers.getChildren().removeFirst();
+        }
+        refreshAskAnswersVisibility();
+    }
+
     public void showAskAnswer(PendingQuestions.AnsweredAsk answered) {
         PendingQuestions.PendingAsk ask = answered.ask();
         Label title = new Label(ask.symbol() + " — asked " + UiFormats.relativeTime(ask.askedAt()));
