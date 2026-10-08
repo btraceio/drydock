@@ -9,6 +9,7 @@ import app.drydock.review.tour.ImpactNote;
 import app.drydock.review.tour.StepGate;
 import app.drydock.review.tour.StepImpact;
 import app.drydock.review.tour.StepProgress;
+import app.drydock.review.tour.TourDiagram;
 import app.drydock.review.tour.TourAnchor;
 import app.drydock.review.tour.TourCheck;
 import app.drydock.ui.UiFormats;
@@ -51,6 +52,9 @@ final class StepPanel extends VBox {
     static final double MIN_WIDTH = NARROW_WIDTH;
     /** The widest, whatever the window: past this the lines of prose are longer than they are easy to read. */
     static final double MAX_WIDTH = 900;
+    /** How many of the current step's diagram stages are shown; resets with every {@link #show}. */
+    private int diagramRevealed = 1;
+
     /** Stands where the narrative would be while the step's PREDICT is still open. */
     static final String WITHHELD_NARRATIVE =
             "Read the surrounding code first. This step's added lines are hidden until you answer, "
@@ -203,6 +207,7 @@ final class StepPanel extends VBox {
         overrideReason = Optional.empty();
         refreshButton = Optional.empty();
         content.getChildren().clear();
+        diagramRevealed = 1;
         Label header = new Label("Step " + view.number() + " of " + view.total() + " · " + view.step().title());
         header.getStyleClass().add("step-panel-header");
         if (TourMarks.predictPending(view.step(), view.progress())) {
@@ -226,10 +231,53 @@ final class StepPanel extends VBox {
         narrative.setWrapText(true);
         narrative.getStyleClass().add("step-panel-narrative");
         content.getChildren().addAll(header, narrative, anchorChips(view));
+        view.step().diagram().ifPresent(diagram ->
+                content.getChildren().add(diagramSection(diagram)));
         if (view.progress().stale()) {
             content.getChildren().add(staleNotice(view.refreshDispatched()));
         }
         content.getChildren().add(checkSection(view));
+    }
+
+    /**
+    /**
+     * The step's diagram, revealed one stage at a time. The first stage is
+     * visible from the start -- a drawing that shows nothing until a click
+     * looks broken, not withheld -- and a real Button reveals each next
+     * stage, mirroring how the PREDICT reveal holds back the answer until
+     * the reader has committed. The reveal count is reading state, not
+     * progress: it resets when the panel re-shows the step, unlike check
+     * answers which persist.
+     */
+    private VBox diagramSection(TourDiagram diagram) {
+        VBox box = new VBox(6);
+        box.getStyleClass().add("step-diagram");
+        if (!diagram.caption().isBlank()) {
+            Label caption = new Label(diagram.caption());
+            caption.getStyleClass().add("step-diagram-caption");
+            caption.setWrapText(true);
+            box.getChildren().add(caption);
+        }
+        Label drawing = new Label(diagram.visibleText(diagramRevealed));
+        drawing.getStyleClass().add("step-diagram-drawing");
+        box.getChildren().add(drawing);
+        if (diagramRevealed < diagram.stages().size()) {
+            Button reveal = new Button("Reveal stage " + (diagramRevealed + 1)
+                    + " of " + diagram.stages().size());
+            reveal.getStyleClass().add("step-diagram-reveal");
+            reveal.setOnAction(event -> {
+                diagramRevealed++;
+                drawing.setText(diagram.visibleText(diagramRevealed));
+                if (diagramRevealed >= diagram.stages().size()) {
+                    box.getChildren().remove(reveal);
+                } else {
+                    reveal.setText("Reveal stage " + (diagramRevealed + 1)
+                            + " of " + diagram.stages().size());
+                }
+            });
+            box.getChildren().add(reveal);
+        }
+        return box;
     }
 
     /**

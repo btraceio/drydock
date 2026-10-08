@@ -10,6 +10,7 @@ import app.drydock.review.tour.StepGate;
 import app.drydock.review.tour.StepProgress;
 import app.drydock.review.tour.TourAnchor;
 import app.drydock.review.tour.TourCheck;
+import app.drydock.review.tour.TourDiagram;
 import app.drydock.review.tour.TourStep;
 import app.drydock.testing.FxSync;
 import app.drydock.testing.FxTest;
@@ -93,6 +94,54 @@ class StepPanelTest extends FxTest {
         clickOn("2  returns");
         FxSync.waitForFxEvents();
         assertEquals(List.of("answer c1 1"), calls);
+    }
+
+    /**
+     * The step's diagram: stage 1 visible from the start, a real Button
+     * revealing each next stage, and none left when the drawing is whole.
+     */
+    @Test
+    void aDiagramRevealsOneStageAtATime() {
+        TourStep step = new TourStep("s1", "Guard", "Why the guard exists.",
+                List.of(new TourAnchor("src/A.java", "n3", "n9")), List.of(), List.of(predict()),
+                Optional.of(new TourDiagram("Fan-in",
+                        List.of("a → b", "a → c", "a → d"))));
+        CheckProgress answered = new CheckProgress("c1", 1, CheckProgress.Status.PASSED, Optional.empty(),
+                Optional.empty(), Optional.empty());
+        interact(() -> panel.show(new StepView(step, 1, 3, new StepProgress("s1", List.of(),
+                Map.of("c1", answered), StepProgress.Decision.NONE, Optional.empty(), false))));
+        FxSync.waitForFxEvents();
+
+        Label drawing = lookup(".step-diagram-drawing").queryAs(Label.class);
+        assertEquals("a → b", drawing.getText(), "the first stage is visible from the start");
+        assertEquals("Fan-in", lookup(".step-diagram-caption").queryAs(Label.class).getText());
+
+        Button reveal = lookup(".step-diagram-reveal").queryAs(Button.class);
+        assertEquals("Reveal stage 2 of 3", displayed(reveal));
+        interact(reveal::fire);
+        FxSync.waitForFxEvents();
+        assertEquals("a → b\na → c", drawing.getText(), "stages continue the drawing, they are not separate pictures");
+
+        interact(reveal::fire);
+        FxSync.waitForFxEvents();
+        assertEquals("a → b\na → c\na → d", drawing.getText());
+        assertTrue(lookup(".step-diagram-reveal").queryAll().isEmpty(),
+                "nothing left to reveal: the button goes, the drawing stays");
+    }
+
+    /** One stage needs no reveal button -- the drawing is already whole. */
+    @Test
+    void aSingleStageDiagramHasNoRevealButton() {
+        TourStep step = new TourStep("s1", "Guard", "Why the guard exists.",
+                List.of(new TourAnchor("src/A.java", "n3", "n9")), List.of(), List.of(predict()),
+                Optional.of(new TourDiagram("Fan-in", List.of("a → b"))));
+        CheckProgress answered = new CheckProgress("c1", 1, CheckProgress.Status.PASSED, Optional.empty(),
+                Optional.empty(), Optional.empty());
+        interact(() -> panel.show(new StepView(step, 1, 3, new StepProgress("s1", List.of(),
+                Map.of("c1", answered), StepProgress.Decision.NONE, Optional.empty(), false))));
+
+        assertEquals("a → b", lookup(".step-diagram-drawing").queryAs(Label.class).getText());
+        assertTrue(lookup(".step-diagram-reveal").queryAll().isEmpty());
     }
 
     private static String displayed(Button button) {

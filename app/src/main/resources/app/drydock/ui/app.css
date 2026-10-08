@@ -3546,7 +3546,26 @@
     -fx-font-size: 13px;
     -fx-font-weight: 700;
 }
-.step-panel .step-panel-narrative {
+.step-panel .step-diagram {
+    -fx-background-color: -drydock-panel;
+    -fx-background-radius: 6;
+    -fx-border-radius: 6;
+    -fx-border-color: -drydock-border;
+    -fx-padding: 8 10 8 10;
+}
+.step-diagram-caption {
+    -fx-font-size: 11px;
+    -fx-text-fill: -drydock-text-dim;
+}
+.step-diagram-drawing {
+    -fx-font-family: monospace;
+    -fx-font-size: 11px;
+    -fx-text-fill: -drydock-text;
+}
+.step-diagram-reveal {
+    -fx-font-size: 11px;
+}
+.step-panel-narrative {
     -fx-text-fill: -drydock-text-dim;
     -fx-font-size: 12px;
     /* Additive leading: 4px on a ~14px natural line box lands near the

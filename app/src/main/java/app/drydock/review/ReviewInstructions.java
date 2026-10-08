@@ -77,6 +77,20 @@ public final class ReviewInstructions {
             + "it genuinely references the change's declaration -- a same-named field, method or local in an "
             + "unrelated file is a false link, not an impact, and a step carries at most 8 impact notes";
 
+    /**
+     * When a step's structure is better drawn than said: one optional
+     * monospace diagram per step, its stages revealed in reading order.
+     * The constraint that is not obvious from the wire: stages CONTINUE
+     * the drawing, they are not separate pictures, so each stage is the
+     * lines that belong below what the reader has already seen.
+     */
+    private static final String DIAGRAM = "where a step's structure is easier drawn than said, attach one "
+            + "diagram: monospace box-drawing characters and spaces (never tabs -- a tab stops wherever "
+            + "the panel font says and the drawing arrives crooked), lines under 100 characters, and its "
+            + "stages continue the drawing top to bottom, each stage revealed after the one above it, "
+            + "holding back the conclusion the way a withheld narrative does; most steps need no diagram, "
+            + "one that adds nothing is noise";
+
     private ReviewInstructions() {
     }
 
@@ -87,7 +101,8 @@ public final class ReviewInstructions {
                 + "then post review_finding and review_tour against that handle; review_tour is validated "
                 + "(every changed row in a step, each step at least one check with an alternate) and lists "
                 + "every problem if it is rejected, so fix them and post it again; " + ANCHOR_NOTES + "; "
-                + CHECK_KINDS + "; " + IMPACT_NOTES + "; " + CHECK_GROUNDING + "; " + TEACHING;
+                + CHECK_KINDS + "; " + IMPACT_NOTES + "; " + CHECK_GROUNDING + "; " + TEACHING
+                + "; " + DIAGRAM;
         return supportsSubagents
                 ? "Dispatch a code-review subagent to review the changes in this worktree: it must "
                         + work + ". Report only its summary back here."
@@ -189,6 +204,6 @@ public final class ReviewInstructions {
                 + "review_state, then call review_tour with onlySteps true to " + String.join(" and ", asks)
                 + "; the steps you do not send keep the reviewer's progress. For the steps you send, "
                 + ANCHOR_NOTES + "; " + CHECK_KINDS + "; " + IMPACT_NOTES + "; " + CHECK_GROUNDING + "; "
-                + TEACHING + ".";
+                + TEACHING + "; " + DIAGRAM + ".";
     }
 }

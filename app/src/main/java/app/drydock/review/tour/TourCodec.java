@@ -78,7 +78,7 @@ public final class TourCodec {
         for (TourStep step : steps) {
             List<TourCheck> checks = step.checks().stream().map(TourCodec::scattered).toList();
             scattered.add(new TourStep(step.id(), step.title(), step.narrative(), step.anchors(),
-                    step.impactNotes(), checks));
+                    step.impactNotes(), checks, step.diagram()));
         }
         return scattered;
     }
@@ -135,7 +135,25 @@ public final class TourCodec {
         for (int i = 0; i < checkArray.elements().size(); i++) {
             checks.add(checkFromJson(checkArray.elements().get(i), path + ".checks[" + i + "]", true));
         }
-        return new TourStep(id, title, narrative, anchors, notes, checks);
+        Optional<TourDiagram> diagram = obj.get("diagram") == null
+                ? Optional.empty()
+                : Optional.of(diagramFromJson(obj.get("diagram"), path + ".diagram"));
+        return new TourStep(id, title, narrative, anchors, notes, checks, diagram);
+    }
+
+    /**
+     * A diagram's wire shape: {@code {caption, stages: [string, ...]}}.
+     * Optional at the step level, so every tour written before diagrams
+     * decodes unchanged; the stages' own limits are the validator's.
+     */
+    private static TourDiagram diagramFromJson(JsonValue value, String path) throws InvalidTour {
+        JsonObject obj = object(value, path);
+        String caption = optionalString(obj, "caption", path, TourValidator.MAX_DIAGRAM_CAPTION).orElse("");
+        List<String> stages = strings(array(obj, "stages", path, TourValidator.MAX_DIAGRAM_STAGES, true));
+        if (stages.isEmpty()) {
+            throw new InvalidTour(path + ".stages: a diagram needs at least one stage");
+        }
+        return new TourDiagram(caption, stages);
     }
 
     private static TourCheck checkFromJson(JsonValue value, String path, boolean topLevel) throws InvalidTour {
@@ -195,12 +213,20 @@ public final class TourCodec {
         for (TourCheck check : step.checks()) {
             checks.add(checkToJson(check));
         }
-        return JsonObject.empty().put("id", new JsonString(step.id()))
+        JsonObject json = JsonObject.empty().put("id", new JsonString(step.id()))
                 .put("title", new JsonString(step.title()))
                 .put("narrative", new JsonString(step.narrative()))
                 .put("anchors", JsonArray.of(anchors))
                 .put("impactNotes", JsonArray.of(notes))
                 .put("checks", JsonArray.of(checks));
+        // Absent when there is no diagram: a tour without one is the wire's
+        // older shape, and an empty object here would decode as a diagram
+        // with no stages (a validation error) rather than as no diagram.
+        step.diagram().ifPresent(diagram -> json.put("diagram", JsonObject.empty()
+                .put("caption", new JsonString(diagram.caption()))
+                .put("stages", JsonArray.of(diagram.stages().stream()
+                        .map(text -> (JsonValue) new JsonString(text)).toList()))));
+        return json;
     }
 
     private static JsonValue checkToJson(TourCheck check) {

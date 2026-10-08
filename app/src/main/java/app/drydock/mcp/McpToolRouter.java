@@ -211,7 +211,12 @@ public final class McpToolRouter {
                                         + "tour explains or from code the reviewer can see -- never from "
                                         + "outside knowledge the tour has not taught), choices?[{text, at?{file, "
                                         + "line}}] (2-4, not for risk), answer? (0-based, not for risk), explanation, "
-                                        + "alternates[{...same, no alternates}]}]}; at most 40 steps, 6 checks each."))
+                                        + "alternates[{...same, no alternates}]}], "
+                                        + "diagram?{caption, stages: up to 4 monospace text stages, "
+                                        + "each continuing the drawing above it, revealed one per "
+                                        + "click -- draw with spaces, never tabs (a tab stops "
+                                        + "wherever the panel font says), keep lines under 100 chars}"
+                                        + "]}; at most 40 steps, 6 checks each."))
                                 .put("onlySteps", schemaBoolean("Merge these steps into the stored tour instead "
                                         + "of replacing it: re-issue stale steps, add steps for uncovered hunks. "
                                         + "Needs a stored tour.")),

@@ -42,6 +42,13 @@ public final class TourValidator {
      */
     public static final int MAX_IMPACT_NOTES = 8;
 
+    /** A step carries at most one diagram: a step explains one idea, and two drawings compete for it. */
+    public static final int MAX_DIAGRAM_STAGES = 4;
+    public static final int MAX_STAGE = 500;
+    /** Wide lines wrap in the panel's monospace block and the drawing breaks. */
+    public static final int MAX_DIAGRAM_LINE = 100;
+    public static final int MAX_DIAGRAM_CAPTION = 120;
+
     private TourValidator() {
     }
 
@@ -109,6 +116,51 @@ public final class TourValidator {
         return errors;
     }
 
+    /**
+     * A diagram's limits keep the drawing readable in the panel: at most
+     * {@link #MAX_DIAGRAM_STAGES} stages, each small enough to read
+     * without scrolling the panel away, and lines narrow enough not to
+     * wrap. Tabs are rejected outright -- a tab stops wherever the
+     * renderer's font says, so the drawing that aligned in the agent's
+     * head arrives crooked.
+     */
+    private static void validateDiagram(String stepId, TourDiagram diagram, List<String> errors) {
+        String where = "step " + stepId + " diagram: ";
+        if (diagram.caption().length() > MAX_DIAGRAM_CAPTION) {
+            errors.add(where + "caption is longer than " + MAX_DIAGRAM_CAPTION + " characters");
+        }
+        if (diagram.stages().isEmpty()) {
+            errors.add(where + "needs at least one stage");
+        } else if (diagram.stages().size() > MAX_DIAGRAM_STAGES) {
+            errors.add(where + "has more than " + MAX_DIAGRAM_STAGES + " stages");
+        }
+        for (int i = 0; i < diagram.stages().size(); i++) {
+            String stage = diagram.stages().get(i);
+            String stageWhere = where + "stage " + (i + 1) + ": ";
+            if (stage.isBlank()) {
+                errors.add(stageWhere + "is blank");
+            } else if (stage.length() > MAX_STAGE) {
+                errors.add(stageWhere + "is longer than " + MAX_STAGE + " characters");
+            }
+            if (stage.indexOf('\t') >= 0) {
+                errors.add(stageWhere + "uses tabs -- draw with spaces, a tab stops wherever "
+                        + "the panel's font says and the drawing arrives crooked");
+            }
+            for (int lineStart = 0; lineStart < stage.length(); ) {
+                int lineEnd = stage.indexOf('\n', lineStart);
+                if (lineEnd < 0) {
+                    lineEnd = stage.length();
+                }
+                if (lineEnd - lineStart > MAX_DIAGRAM_LINE) {
+                    errors.add(stageWhere + "has a line longer than " + MAX_DIAGRAM_LINE
+                            + " characters -- it wraps in the panel and the drawing breaks");
+                    break;
+                }
+                lineStart = lineEnd + 1;
+            }
+        }
+    }
+
     private static void validateStep(TourStep step, AnchorIndex index, Set<String> checkIds, List<String> errors) {
         String where = "step " + step.id() + ": ";
         if (step.title().isBlank()) {
@@ -124,6 +176,7 @@ public final class TourValidator {
         if (step.anchors().isEmpty()) {
             errors.add(where + "needs at least one anchor");
         }
+        step.diagram().ifPresent(diagram -> validateDiagram(step.id(), diagram, errors));
         for (TourAnchor anchor : step.anchors()) {
             if (!index.resolves(anchor)) {
                 errors.add(where + "anchor " + anchor.file() + " " + anchor.startKey() + ".." + anchor.endKey()

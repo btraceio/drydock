@@ -43,11 +43,13 @@ In `app.drydock.review`:
 ```
 ReviewTour(scopeId, diffFingerprint, List<TourStep> steps)
 TourStep(id, title, narrative, List<Anchor> anchors,
-         List<ImpactNote> impactNotes, List<TourCheck> checks)
+         List<ImpactNote> impactNotes, List<TourCheck> checks,
+         diagram?)                          // optional, ≤ 1 per step
 Anchor(file, startKey, endKey, note?)     // line keys: n<newLine> / o<oldLine>
 ImpactNote(file, line, text)              // provenance CLAIMED
 TourCheck(id, kind, prompt, choices, answerKey, explanation,
           List<TourCheck> alternates)     // kind ∈ {PREDICT, TRACE, RISK}
+TourDiagram(caption?, stages)            // monospace text, ≤ 4 stages
 ```
 
 - **Anchors are line-key ranges**, the same keys findings already use
@@ -59,6 +61,16 @@ TourCheck(id, kind, prompt, choices, answerKey, explanation,
   supports. The diff column shows it under the range's last row (§5), so the
   explanation sits next to the code it is about. A tour with no notes is
   valid and renders from the narrative alone.
+- `diagram` (optional) is for structure easier drawn than said: one
+  monospace drawing per step, box-drawing characters and spaces (never
+  tabs -- a tab stops wherever the panel font says and the drawing arrives
+  crooked; lines ≤ 100 characters so they do not wrap). Its stages CONTINUE
+  the drawing top to bottom, each revealed by a click after the one above
+  it -- the same segmenting a withheld narrative applies, holding back the
+  conclusion until the reader has read what leads to it. The first stage is
+  visible from the start; the reveal is reading state, not progress: it
+  resets when the panel re-shows the step, unlike check answers which
+  persist. Most steps need no diagram; one that adds nothing is noise.
 - PREDICT and TRACE carry choices and an answer key that must be one of the
   choices. RISK carries neither. Every check carries at least one alternate.
 - **The correct answer's position carries no signal.** Whatever order the

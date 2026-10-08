@@ -111,6 +111,46 @@ class TourCodecTest {
     }
 
     @Test
+    void aDiagramDecodesAndRoundTripsThroughThePersistedForm() throws Exception {
+        String withDiagram = ONE_STEP.replace("\"narrative\":\"Why.\",",
+                "\"narrative\":\"Why.\",\"diagram\":{\"caption\":\"Fan-in\",\"stages\":[\"a → b\",\"a → c\"]},");
+        TourStep step = TourCodec.stepsFromAgent(JsonParser.parse(withDiagram)).getFirst();
+        assertEquals(new TourDiagram("Fan-in", List.of("a → b", "a → c")), step.diagram().orElseThrow());
+
+        TourStep restored = TourCodec.stepFromJson(TourCodec.stepToJson(step), "steps[0]");
+        assertEquals(step.diagram(), restored.diagram(), "the persisted form keeps the diagram");
+    }
+
+    @Test
+    void aStepWithoutADiagramDecodesEmptyAndWritesNoDiagramMember() throws Exception {
+        TourStep step = TourCodec.stepsFromAgent(JsonParser.parse(ONE_STEP)).getFirst();
+        assertTrue(step.diagram().isEmpty());
+        assertFalse(JsonWriter.write(TourCodec.stepToJson(step)).contains("\"diagram\""),
+                "an old-shape step must persist byte-for-byte as it did before the field existed");
+    }
+
+    @Test
+    void aDiagramWithoutStagesIsRejectedNamingItsPath() {
+        TourCodec.InvalidTour error = assertThrows(TourCodec.InvalidTour.class, () -> TourCodec.stepsFromAgent(
+                JsonParser.parse(ONE_STEP.replace("\"narrative\":\"Why.\",",
+                        "\"narrative\":\"Why.\",\"diagram\":{\"stages\":[]},"))));
+        assertTrue(error.getMessage().contains("steps[0].diagram.stages"), error.getMessage());
+    }
+
+    @Test
+    void moreStagesThanTheCapIsRejectedAtDecode() {
+        StringBuilder stages = new StringBuilder();
+        for (int i = 0; i <= TourValidator.MAX_DIAGRAM_STAGES; i++) {
+            stages.append(i > 0 ? "," : "").append("\"stage\"");
+        }
+        TourCodec.InvalidTour error = assertThrows(TourCodec.InvalidTour.class, () -> TourCodec.stepsFromAgent(
+                JsonParser.parse(ONE_STEP.replace("\"narrative\":\"Why.\",",
+                        "\"narrative\":\"Why.\",\"diagram\":{\"stages\":[" + stages + "]},"))));
+        assertTrue(error.getMessage().contains("at most " + TourValidator.MAX_DIAGRAM_STAGES + " entries"),
+                error.getMessage());
+    }
+
+    @Test
     void anAnchorWithoutANoteHasNoneAndWritesNoNoteMember() throws Exception {
         TourStep step = TourCodec.stepsFromAgent(JsonParser.parse(ONE_STEP)).getFirst();
         assertEquals("", step.anchors().getFirst().note());
