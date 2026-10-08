@@ -269,6 +269,22 @@ public final class ChangeGraph {
         return unmodifiable(referencesInBySymbol.get(symbol));
     }
 
+    /**
+     * The site the uniquely-declared {@code symbol} is declared at, when
+     * exactly one changed file declares it. A symbol declared in several
+     * files is not bindable -- which site would it be? -- and answers
+     * empty, the same shape as a miss.
+     */
+    public Optional<DeclarationSite> declarationSite(String symbol) {
+        String file = fileByUniqueDeclaration.get(symbol);
+        if (file == null) {
+            return Optional.empty();
+        }
+        return declarationSites.stream()
+                .filter(site -> site.name().equals(symbol) && site.file().equals(file))
+                .findFirst();
+    }
+
     /** The one changed file declaring {@code symbol}, when exactly one does. */
     public Optional<String> fileDeclaring(String symbol) {
         return Optional.ofNullable(fileByUniqueDeclaration.get(symbol));

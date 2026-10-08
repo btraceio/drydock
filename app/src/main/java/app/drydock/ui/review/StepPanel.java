@@ -458,9 +458,14 @@ final class StepPanel extends VBox {
             impactSection.getChildren().add(impactLabel(file, "step-impact-file"));
             for (StepImpact.Caller caller : callers) {
                 String text = ":" + caller.line() + "  " + caller.text().strip()
+                        + (caller.bound() ? " · scoped" : "")
                         + (caller.inChangedFile() ? " · in a changed file" : "");
-                impactSection.getChildren().add(locationEntry(text, caller.file(), caller.line(),
-                        "step-impact-caller"));
+                Button entry = locationEntry(text, caller.file(), caller.line(),
+                        "step-impact-caller");
+                if (caller.bound()) {
+                    entry.getStyleClass().add(Provenance.SCOPED.styleClass());
+                }
+                impactSection.getChildren().add(entry);
             }
         });
     }

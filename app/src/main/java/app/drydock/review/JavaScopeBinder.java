@@ -1,6 +1,5 @@
-package app.drydock.ui.nav;
+package app.drydock.review;
 
-import app.drydock.review.GrammarRegistry;
 import org.treesitter.TSLanguage;
 import org.treesitter.TSNode;
 import org.treesitter.TSParser;
@@ -54,7 +53,7 @@ import java.util.Set;
  * grammar that fails to load or a file that fails to parse binds nothing
  * -- the caller keeps the lexical answer, never an error.</p>
  */
-final class JavaScopeBinder {
+public final class JavaScopeBinder {
 
     /** Guard against pathological trees; the binder declines rather than crawls. */
     private static final long MAX_FILE_BYTES = 2 * 1024 * 1024;
@@ -70,7 +69,7 @@ final class JavaScopeBinder {
             Set.of(".git", "node_modules", "build", ".gradle", "out", "target");
 
     /** One found declaration: the member's file and 1-based line. */
-    record Declaration(Path relativePath, int line) {
+    public record Declaration(Path relativePath, int line) {
     }
 
     /**
@@ -79,16 +78,16 @@ final class JavaScopeBinder {
      * votes, so a caller whose candidate bound nothing can see whether the
      * references agree on a different one.
      */
-    record Binding(Map<Integer, Declaration> boundLines, Map<Declaration, Integer> votes) {
+    public record Binding(Map<Integer, Declaration> boundLines, Map<Declaration, Integer> votes) {
 
         static final Binding NONE = new Binding(Map.of(), Map.of());
 
-        boolean isEmpty() {
+        public boolean isEmpty() {
             return boundLines.isEmpty();
         }
 
         /** The declaration this file's references agree on, when they agree on exactly one. */
-        Optional<Declaration> unanimousDeclaration() {
+        public Optional<Declaration> unanimousDeclaration() {
             return votes.size() == 1 ? Optional.of(votes.keySet().iterator().next()) : Optional.empty();
         }
     }
@@ -99,7 +98,7 @@ final class JavaScopeBinder {
     /** Parsed file models: a peek query and each of its receiver types parses once. */
     private final Map<Path, Optional<FileModel>> models = new HashMap<>();
 
-    JavaScopeBinder(Path root) {
+    public JavaScopeBinder(Path root) {
         this.root = root.toAbsolutePath().normalize();
     }
 
@@ -111,7 +110,7 @@ final class JavaScopeBinder {
      * when nothing binds: a valid answer, not a failure; every unbound
      * occurrence keeps its lexical-tier warrant.
      */
-    Binding bind(String symbol, Optional<Declaration> queried, Path relative) {
+    public Binding bind(String symbol, Optional<Declaration> queried, Path relative) {
         return model(root.resolve(relative))
                 .map(file -> bind(file, symbol, queried))
                 .orElse(Binding.NONE);

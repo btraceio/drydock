@@ -447,7 +447,15 @@ symbol at a file line. Each result carries provenance `MEASURED`, `CLAIMED`,
   name matches", a `scoped` chip per bound row). When the lexical
   candidate binds nothing but every resolved reference agrees on one
   other declaration, the peek re-centres on it and marks the declaration
-  scope-bound.
+  scope-bound. The out-of-diff fan-in runs the same classification over
+  its scan: each occurrence carries its tier, the step's caller rows say
+  which are scoped, and the agent's impact wire ({@code bound}) separates
+  real references from name matches -- the change graph's declaration
+  site is the binding target, so the same-name stranger is refused here
+  exactly as it is in the peek. Classification is budgeted (at most 200
+  occurrence files parsed per scan, one binder, models cached); beyond
+  the budget the occurrences stay unclassified, which is the honest
+  default, not a silently dropped flag.
 - **Resolved (`RESOLVED`)** -- reserved for a language server that has
   indexed the code; a later LSP spec plugs it in, used only when a server
   for the language is running and indexed. The tour never waits on it.

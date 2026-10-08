@@ -17,6 +17,7 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -208,6 +209,59 @@ class OutOfDiffFanInTest {
         assertTrue(files.contains("src/Other.java"), "plain caller missing: " + files);
         assertTrue(files.contains("src/café.txt"), "non-ASCII caller missing: " + files);
         assertFalse(files.contains("src/Guards.java"), "the changed file itself must be excluded");
+    }
+
+    /**
+     * The scoped tier inside the scan: a caller whose receiver the parse
+     * tree ties to the changed declaration is bound; a same-named method on
+     * an unrelated class stays a name match, however real it is on its own.
+     * The changed declaration's site comes from the change graph, so the
+     * binding binds to THAT declaration -- the fan-in's own question.
+     */
+    @Test
+    void scanClassifiesJavaCallersThroughTheScopeBinder(@TempDir Path dir)
+            throws IOException, InterruptedException {
+        Path repo = Files.createDirectories(dir.resolve("repo"));
+        runGit(repo, "init", "-b", "main");
+        runGit(repo, "config", "user.name", "Test");
+        runGit(repo, "config", "user.email", "test@example.com");
+        Files.createDirectories(repo.resolve("src/a"));
+        // The changed file declares clamp (on an added line, so the graph
+        // records its site); the sibling classes give the scan one real
+        // reference and one same-named stranger.
+        Files.writeString(repo.resolve("src/a/Util.java"),
+                "package a;\nclass Util {\n  static int clamp(int v) { return v; }\n}\n",
+                StandardCharsets.UTF_8);
+        Files.writeString(repo.resolve("src/a/Real.java"),
+                "package a;\nimport a.Util;\nclass Real {\n  int run(int v) { return Util.clamp(v); }\n}\n",
+                StandardCharsets.UTF_8);
+        Files.writeString(repo.resolve("src/a/Other.java"),
+                "package a;\nclass Other {\n  void clamp() {} \n}\nclass Stranger {\n"
+                        + "  void go(Other other) { other.clamp(); }\n}\n",
+                StandardCharsets.UTF_8);
+        runGit(repo, "add", "-A");
+        runGit(repo, "commit", "-m", "initial commit");
+        // The hunk must place the declaration at its REAL new-line number
+        // (3, after the package and class lines): the graph's site is the
+        // binder's target, and a site off by two binds nothing -- correctly,
+        // which is exactly what the first draft of this test proved.
+        ChangeGraph graph = ChangeGraph.of(new UnifiedDiff(
+                List.of(file("src/a/Util.java",
+                        "package a;", "class Util {", "  static int clamp(int v) { return v; }"))));
+
+        OutOfDiffFanIn.Result result = OutOfDiffFanIn.scan(repo, graph, Set.of("src/a/Util.java"));
+
+        assertFalse(result.unavailable());
+        List<OutOfDiffFanIn.Occurrence> hits = result.bySymbol().get("clamp");
+        assertNotNull(hits, "the scan found the name");
+        List<OutOfDiffFanIn.Occurrence> real = hits.stream()
+                .filter(occurrence -> occurrence.file().equals("src/a/Real.java")).toList();
+        List<OutOfDiffFanIn.Occurrence> stranger = hits.stream()
+                .filter(occurrence -> occurrence.file().equals("src/a/Other.java")).toList();
+        assertTrue(real.stream().anyMatch(OutOfDiffFanIn.Occurrence::bound),
+                "Util.clamp is a real reference: " + real);
+        assertTrue(stranger.stream().noneMatch(OutOfDiffFanIn.Occurrence::bound),
+                "Other.clamp is a same-named stranger: " + stranger);
     }
 
     @Test

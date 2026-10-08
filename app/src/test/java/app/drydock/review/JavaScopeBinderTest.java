@@ -1,4 +1,4 @@
-package app.drydock.ui.nav;
+package app.drydock.review;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;

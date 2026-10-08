@@ -123,12 +123,23 @@ public final class OutOfDiffFanIn {
      * included -- deliberately, not a missed {@code .strip()}: the popover
      * this feeds is showing a source line, and its original indentation is
      * part of reading it, not noise to trim.
+     *
+     * <p>{@code bound} is the scope tier: the parse tree tied this
+     * occurrence to the symbol's own declaration -- a real reference, not a
+     * shared name. False is the default and the honest fallback: it means
+     * "not proven", which covers a name-only match AND an occurrence the
+     * classification budget did not reach.</p>
      */
-    public record Occurrence(String file, int line, String text, boolean inChangedFile) {
+    public record Occurrence(String file, int line, String text, boolean inChangedFile, boolean bound) {
 
-        /** An occurrence in a file the change does not touch. */
+        /** An occurrence in a file the change does not touch, unclassified. */
         public Occurrence(String file, int line, String text) {
-            this(file, line, text, false);
+            this(file, line, text, false, false);
+        }
+
+        /** An occurrence in a changed file, unclassified. */
+        public Occurrence(String file, int line, String text, boolean inChangedFile) {
+            this(file, line, text, inChangedFile, false);
         }
     }
 
@@ -302,7 +313,7 @@ public final class OutOfDiffFanIn {
                     raw.put(symbol, hits);
                 }
             }
-            return classified(raw);
+            return classified(bindScope(worktree, graph, raw));
         } catch (ProcessTimeoutException e) {
             LOG.log(Level.WARNING, "git grep for out-of-diff fan-in timed out", e);
             return Result.unavailable("git grep timed out after " + TIMEOUT.toSeconds() + " s");
@@ -321,6 +332,73 @@ public final class OutOfDiffFanIn {
                 }
             }
         }
+    }
+
+    /**
+     * Files whose occurrences the scope classification may parse. A cap, not
+     * a target: past it the rest stay unclassified -- {@code bound} false,
+     * the honest "not proven" -- because a monster repository must not turn
+     * the fan-in scan into a whole-repo parse. The parse results are cached
+     * per binder, so the cap bounds TOTAL files, not per symbol.
+     */
+    static final int MAX_BIND_FILES = 200;
+
+    /**
+     * Classifies the fan-in's occurrences through the scope binder: an
+     * occurrence whose receiver the parse tree ties to the symbol's own
+     * declaration carries {@code bound} true, and a same-named member on an
+     * unrelated class stays a name match. The classification runs only for
+     * Java files under the {@link #MAX_BIND_FILES} budget; everything else,
+     * and every failure, leaves the occurrence exactly as the grep found it.
+     *
+     * <p>Ambiguity refuses, same as the binder itself: a symbol several
+     * changed files declare has no single declaration to bind to, so all its
+     * occurrences stay name-tier.</p>
+     */
+    static Map<String, List<Occurrence>> bindScope(Path worktree, ChangeGraph graph,
+                                                    Map<String, List<Occurrence>> raw) {
+        List<Path> javaFiles = raw.values().stream()
+                .flatMap(List::stream)
+                .map(Occurrence::file)
+                .distinct()
+                .filter(file -> file.endsWith(".java"))
+                .map(Path::of)
+                .toList();
+        if (javaFiles.isEmpty() || javaFiles.size() > MAX_BIND_FILES) {
+            return raw;
+        }
+        JavaScopeBinder binder = new JavaScopeBinder(worktree);
+        Map<String, List<Occurrence>> bound = new TreeMap<>();
+        for (Map.Entry<String, List<Occurrence>> entry : raw.entrySet()) {
+            String symbol = entry.getKey();
+            Optional<JavaScopeBinder.Declaration> queried = graph.declarationSite(symbol)
+                    .filter(site -> site.lineKey().startsWith("n"))
+                    .map(site -> new JavaScopeBinder.Declaration(Path.of(site.file()),
+                            Integer.parseInt(site.lineKey().substring(1))));
+            Map<Path, Set<Integer>> boundLinesByFile = new HashMap<>();
+            if (queried.isPresent()) {
+                for (Path file : javaFiles) {
+                    JavaScopeBinder.Binding binding = binder.bind(symbol, queried, file);
+                    if (!binding.isEmpty()) {
+                        boundLinesByFile.put(file, Set.copyOf(binding.boundLines().keySet()));
+                    }
+                }
+            }
+            List<Occurrence> classified = new ArrayList<>();
+            for (Occurrence occurrence : entry.getValue()) {
+                if (occurrence.file().endsWith(".java")) {
+                    Set<Integer> lines = boundLinesByFile.get(Path.of(occurrence.file()));
+                    if (lines != null && lines.contains(occurrence.line())) {
+                        classified.add(new Occurrence(occurrence.file(), occurrence.line(),
+                                occurrence.text(), occurrence.inChangedFile(), true));
+                        continue;
+                    }
+                }
+                classified.add(occurrence);
+            }
+            bound.put(symbol, List.copyOf(classified));
+        }
+        return bound;
     }
 
     /**

@@ -64,7 +64,18 @@ public record StepImpact(List<Caller> calledFromOutside, List<Suppressed> suppre
 
     public enum Direction { CALLS, CALLED_BY }
 
-    public record Caller(String symbol, String file, int line, String text, boolean inChangedFile) {
+    /**
+     * One caller of a step's declaration. {@code bound} is the scope tier:
+     * the parse tree tied the call to this declaration, where the lexical
+     * tier only found a shared name.
+     */
+    public record Caller(String symbol, String file, int line, String text, boolean inChangedFile,
+                         boolean bound) {
+
+        /** The unclassified shape: a name match, proven by nothing. */
+        public Caller(String symbol, String file, int line, String text, boolean inChangedFile) {
+            this(symbol, file, line, text, inChangedFile, false);
+        }
     }
 
     /** A declaration of the step whose attributable occurrences were too many to list, and how many there were. */
@@ -107,7 +118,7 @@ public record StepImpact(List<Caller> calledFromOutside, List<Suppressed> suppre
             }
             for (OutOfDiffFanIn.Occurrence occurrence : fanIn.bySymbol().getOrDefault(symbol, List.of())) {
                 callers.add(new Caller(symbol, occurrence.file(), occurrence.line(), occurrence.text(),
-                        occurrence.inChangedFile()));
+                        occurrence.inChangedFile(), occurrence.bound()));
             }
         }
         callers.sort(Comparator.comparing(Caller::file).thenComparingInt(Caller::line)

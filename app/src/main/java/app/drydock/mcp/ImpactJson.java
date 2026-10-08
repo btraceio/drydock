@@ -22,7 +22,11 @@ import java.util.TreeSet;
  * <p>{@code signatureChanged} is true when the declaration sits on a changed
  * row (every site does) and its name still appears on lines the change did
  * not edit; {@code uneditedCallSites} counts those lines. Both are name
- * matches, not resolved references.</p>
+ * matches. Each {@code calledFrom} entry also carries {@code bound}: true
+ * when scoped analysis (the JavaScopeBinder tier, spec §6) tied the
+ * occurrence to THIS declaration through a statically derivable receiver
+ * -- a real reference -- and false for a plain name match, the honest
+ * default for anything the classification did not or could not reach.</p>
  *
  * <p>A symbol whose attributable occurrences exceed {@link
  * OutOfDiffFanIn#MAX_ATTRIBUTABLE} is reported as a count, not a list:
@@ -59,7 +63,8 @@ final class ImpactJson {
                 calledFrom.add(JsonObject.empty()
                         .put("file", new JsonString(caller.file()))
                         .put("line", JsonNumber.of(caller.line()))
-                        .put("inChangedFile", new JsonBoolean(caller.inChangedFile())));
+                        .put("inChangedFile", new JsonBoolean(caller.inChangedFile()))
+                        .put("bound", new JsonBoolean(caller.bound())));
             }
             SortedSet<String> calls = new TreeSet<>();
             for (ChangeGraph.Hunk hunk : graph.hunksDeclaring(site.name())) {

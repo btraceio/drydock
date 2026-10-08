@@ -1,5 +1,6 @@
 package app.drydock.ui.nav;
 
+import app.drydock.review.JavaScopeBinder;
 import app.drydock.review.SymbolWords;
 import app.drydock.search.SessionSearchService;
 import app.drydock.search.SessionSearchService.FileMatches;
