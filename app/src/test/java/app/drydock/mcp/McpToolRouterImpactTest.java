@@ -148,6 +148,54 @@ class McpToolRouterImpactTest extends McpRouterFixture {
         assertEquals(1, num(run, "uneditedCallSites"));
     }
 
+    /**
+     * The swamping fix, end to end through the real grep: a file outside the
+     * change that declares its own {@code run} is dropped whole -- its
+     * occurrences are uses of its own symbol, not callers of the change's --
+     * while a file that only calls {@code run} keeps its row.
+     */
+    @Test
+    void aFileOutsideTheChangeThatDeclaresItsOwnRunIsDroppedWhole(@TempDir Path dir) throws Exception {
+        Path repo = repoWhereRunIsCalledFromOutside(dir);
+        Files.writeString(repo.resolve("src/OwnRun.java"),
+                "class OwnRun {\n    void run() {\n    }\n    void go() { run(); }\n}\n");
+        runGit(repo, "add", "-A");
+        bindScopeTo(repo);
+
+        JsonValue result = callReviewScopeValue(scopeId(), "impact", null, McpToolRouter.DEFAULT_SCOPE_BYTES);
+
+        JsonValue run = entryFor(result, "run");
+        List<JsonValue> calledFrom = array(run, "calledFrom");
+        assertEquals(1, calledFrom.size(), "only the genuine caller: " + calledFrom);
+        assertEquals("src/Outside.java", str(calledFrom.get(0), "file"));
+    }
+
+    /**
+     * Past the attribution cap a symbol is a count, not a list: calledFrom
+     * empties, tooCommonToAttribute carries the number, and the
+     * signature-changed signal survives (the change DID leave unedited
+     * sites spelling the name).
+     */
+    @Test
+    void aTooCommonSymbolIsACountNotARowPerOccurrence(@TempDir Path dir) throws Exception {
+        Path repo = repoWhereRunIsCalledFromOutside(dir);
+        for (int i = 1; i <= app.drydock.review.OutOfDiffFanIn.MAX_ATTRIBUTABLE; i++) {
+            Files.writeString(repo.resolve("src/Caller" + i + ".java"),
+                    "class Caller" + i + " { void go() { new Widget().run(); } }\n");
+        }
+        runGit(repo, "add", "-A");
+        bindScopeTo(repo);
+
+        JsonValue result = callReviewScopeValue(scopeId(), "impact", null, McpToolRouter.DEFAULT_SCOPE_BYTES);
+
+        JsonValue run = entryFor(result, "run");
+        assertEquals(List.of(), array(run, "calledFrom"), "51 rows would be a wall: " + result);
+        assertEquals(app.drydock.review.OutOfDiffFanIn.MAX_ATTRIBUTABLE + 1,
+                num(run, "tooCommonToAttribute"));
+        assertTrue(bool(run, "signatureChanged"));
+        assertEquals(app.drydock.review.OutOfDiffFanIn.MAX_ATTRIBUTABLE + 1, num(run, "uneditedCallSites"));
+    }
+
     // ---- fixtures -----------------------------------------------------------
 
     private static JsonValue entryFor(JsonValue result, String symbol) {

@@ -24,6 +24,13 @@ import java.util.TreeSet;
  * not edit; {@code uneditedCallSites} counts those lines. Both are name
  * matches, not resolved references.</p>
  *
+ * <p>A symbol whose attributable occurrences exceed {@link
+ * OutOfDiffFanIn#MAX_ATTRIBUTABLE} is reported as a count, not a list:
+ * {@code calledFrom} is empty and {@code tooCommonToAttribute} carries how
+ * many there were. At that size the rows are links to unrelated same-named
+ * symbols more often than not -- the count is the honest signal, and an
+ * agent citing a caller should read the caller's file first.</p>
+ *
  * <p>{@code callsInChange} names what the hunks declaring the symbol
  * reference in other changed files -- callees inside the change. Callees
  * outside it would each cost a search, and stay with the UI.</p>
@@ -45,6 +52,8 @@ final class ImpactJson {
             List<OutOfDiffFanIn.Occurrence> callers = ambiguous
                     ? List.of()
                     : fanIn.bySymbol().getOrDefault(site.name(), List.of());
+            Integer tooCommon = ambiguous ? null : fanIn.suppressedCounts().get(site.name());
+            int occurrences = fanIn.occurrences(site.name());
             List<JsonValue> calledFrom = new ArrayList<>();
             for (OutOfDiffFanIn.Occurrence caller : callers) {
                 calledFrom.add(JsonObject.empty()
@@ -64,8 +73,11 @@ final class ImpactJson {
                     .put("calledFrom", new JsonArray(calledFrom))
                     .put("callsInChange", new JsonArray(calls.stream()
                             .map(name -> (JsonValue) new JsonString(name)).toList()))
-                    .put("signatureChanged", new JsonBoolean(!callers.isEmpty()))
-                    .put("uneditedCallSites", JsonNumber.of(callers.size()));
+                    .put("signatureChanged", new JsonBoolean(!ambiguous && occurrences > 0))
+                    .put("uneditedCallSites", JsonNumber.of(ambiguous ? 0 : occurrences));
+            if (tooCommon != null) {
+                entry.put("tooCommonToAttribute", JsonNumber.of(tooCommon));
+            }
             if (ambiguous) {
                 entry.put("ambiguous", new JsonBoolean(true));
             }

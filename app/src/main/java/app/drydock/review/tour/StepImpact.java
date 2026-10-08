@@ -32,26 +32,32 @@ import java.util.regex.Matcher;
  * unrelated {@code foo}, and a signature flag counts such lines too: the
  * flag says "a declaration changed and these lines spell its name without
  * having been edited", which is what a reviewer needs to go and look, not
- * a compiler's verdict.</p>
+ * a compiler's verdict. A symbol too common to attribute is not listed at
+ * all -- it arrives in {@code suppressedCallers} as a count, so the noise
+ * never reaches the rows the reviewer clicks.</p>
  *
  * <p>Pure and blocking-free given its inputs, but its inputs are not: the
  * graph and the scan are built off the FX thread, and so is this.</p>
  *
- * @param calledFromOutside occurrences of the step's declarations outside
- *                          the change, by file then line
- * @param inChange          edges to other steps of the tour through the
- *                          change graph
- * @param calleesToResolve  names used on the step's changed rows that the
- *                          change does not declare, most used first, at most
- *                          {@link #MAX_CALLEES}
- * @param signatureFlags    declarations on changed rows whose name still
- *                          appears on unedited lines
- * @param unavailableReason why the caller scan could not run; present means
- *                          {@code calledFromOutside} is absent, not empty
+ * @param calledFromOutside  occurrences of the step's declarations outside
+ *                           the change, by file then line
+ * @param suppressedCallers  the step's declarations whose attributable
+ *                           occurrences were too many to list (see {@link
+ *                           OutOfDiffFanIn#MAX_ATTRIBUTABLE}): a count per
+ *                           symbol, never rows
+ * @param inChange           edges to other steps of the tour through the
+ *                           change graph
+ * @param calleesToResolve   names used on the step's changed rows that the
+ *                           change does not declare, most used first, at most
+ *                           {@link #MAX_CALLEES}
+ * @param signatureFlags     declarations on changed rows whose name still
+ *                           appears on unedited lines
+ * @param unavailableReason  why the caller scan could not run; present means
+ *                           {@code calledFromOutside} is absent, not empty
  */
-public record StepImpact(List<Caller> calledFromOutside, List<InChange> inChange,
-                         List<String> calleesToResolve, List<SignatureFlag> signatureFlags,
-                         Optional<String> unavailableReason) {
+public record StepImpact(List<Caller> calledFromOutside, List<Suppressed> suppressedCallers,
+                         List<InChange> inChange, List<String> calleesToResolve,
+                         List<SignatureFlag> signatureFlags, Optional<String> unavailableReason) {
 
     /** Each callee is a search when it is resolved, so the list is capped. */
     public static final int MAX_CALLEES = 8;
@@ -59,6 +65,10 @@ public record StepImpact(List<Caller> calledFromOutside, List<InChange> inChange
     public enum Direction { CALLS, CALLED_BY }
 
     public record Caller(String symbol, String file, int line, String text, boolean inChangedFile) {
+    }
+
+    /** A declaration of the step whose attributable occurrences were too many to list, and how many there were. */
+    public record Suppressed(String symbol, int occurrences) {
     }
 
     /** {@code symbol} links this step to step {@code otherStepNumber} ({@code otherStepId}). */
@@ -71,6 +81,7 @@ public record StepImpact(List<Caller> calledFromOutside, List<InChange> inChange
 
     public StepImpact {
         calledFromOutside = List.copyOf(calledFromOutside);
+        suppressedCallers = List.copyOf(suppressedCallers);
         inChange = List.copyOf(inChange);
         calleesToResolve = List.copyOf(calleesToResolve);
         signatureFlags = List.copyOf(signatureFlags);
@@ -87,7 +98,13 @@ public record StepImpact(List<Caller> calledFromOutside, List<InChange> inChange
         sites.forEach(site -> symbols.add(site.name()));
 
         List<Caller> callers = new ArrayList<>();
+        List<Suppressed> suppressed = new ArrayList<>();
         for (String symbol : symbols) {
+            Integer count = fanIn.suppressedCounts().get(symbol);
+            if (count != null) {
+                suppressed.add(new Suppressed(symbol, count));
+                continue;
+            }
             for (OutOfDiffFanIn.Occurrence occurrence : fanIn.bySymbol().getOrDefault(symbol, List.of())) {
                 callers.add(new Caller(symbol, occurrence.file(), occurrence.line(), occurrence.text(),
                         occurrence.inChangedFile()));
@@ -107,13 +124,15 @@ public record StepImpact(List<Caller> calledFromOutside, List<InChange> inChange
             // Every site is a declaration on a changed row by construction,
             // and the scan already dropped occurrences on changed rows, so
             // whatever it found is an unedited line still spelling the name.
-            int unedited = fanIn.bySymbol().getOrDefault(site.name(), List.of()).size();
+            // occurrences() counts the suppressed ones too, so a symbol too
+            // common to list is still flagged, with its real count.
+            int unedited = fanIn.occurrences(site.name());
             if (unedited > 0) {
                 flags.add(new SignatureFlag(site.name(), site.file(), site.lineKey(), unedited));
             }
         }
 
-        return new StepImpact(callers, inChange(step, tour, index, graph, symbols),
+        return new StepImpact(callers, suppressed, inChange(step, tour, index, graph, symbols),
                 callees(step, index, reviewDiff, graph), flags, fanIn.unavailableReason());
     }
 

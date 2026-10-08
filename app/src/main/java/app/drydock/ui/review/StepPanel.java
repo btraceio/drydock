@@ -342,17 +342,28 @@ final class StepPanel extends VBox {
         impactSection.getChildren().add(heading("Signature changed", Provenance.MEASURED));
         for (StepImpact.SignatureFlag flag : measured.signatureFlags()) {
             int count = flag.uneditedCallSites();
+            boolean tooCommon = measured.suppressedCallers().stream()
+                    .anyMatch(suppressed -> suppressed.symbol().equals(flag.symbol()));
             impactSection.getChildren().add(impactLabel(flag.symbol() + " in " + flag.file(), "step-impact-flag-name"));
             impactSection.getChildren().add(impactLabel("declaration changed · " + count
-                    + (count == 1 ? " call site was not edited" : " call sites were not edited"),
-                    "step-impact-flag"));
+                    + (count == 1 ? " call site was not edited" : " call sites were not edited")
+                    + (tooCommon ? " · too common to attribute" : ""),
+                    tooCommon ? "step-impact-flag-suppressed" : "step-impact-flag"));
         }
     }
 
     private void showCallers(StepImpact measured) {
         impactSection.getChildren().add(heading("Called from outside the change", null));
         impactSection.getChildren().add(impactLabel("occurrences, not resolved references", "step-impact-tag"));
-        if (measured.calledFromOutside().isEmpty()) {
+        for (StepImpact.Suppressed suppressed : measured.suppressedCallers()) {
+            // A count, not N rows: past the attribution cap the rows are
+            // links to unrelated files more often than not (the reason the
+            // cap exists), so the reviewer gets the number and the honesty
+            // tag, never a wall.
+            impactSection.getChildren().add(impactLabel(suppressed.symbol() + " · " + suppressed.occurrences()
+                    + " occurrences outside the change — too common to attribute", "step-impact-suppressed"));
+        }
+        if (measured.calledFromOutside().isEmpty() && measured.suppressedCallers().isEmpty()) {
             impactSection.getChildren().add(impactLabel("No callers outside the change", "step-impact-empty"));
             return;
         }

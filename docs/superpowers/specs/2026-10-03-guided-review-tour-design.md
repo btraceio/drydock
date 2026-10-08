@@ -277,6 +277,17 @@ Three kinds of evidence, each labelled with its provenance.
   changed file (`OutOfDiffFanIn.java:233-240`). It changes to drop only
   occurrences *on changed lines*. An unedited call site in an edited file is
   precisely where a signature change breaks.
+  Two de-noising rules keep the list readable where a common name would
+  otherwise swamp it with links to unrelated files. A file **outside the
+  change whose own occurrence lines look like a declaration of the symbol**
+  (its own field, method, type or local of that name -- a line-lexical
+  probe, no per-file parse) is dropped whole for that symbol: its
+  occurrences are uses of its own symbol, not callers of the change's.
+  And a symbol with more than `MAX_ATTRIBUTABLE` (50) surviving occurrences
+  is **counted, not listed**: its rows leave the caller list and show as
+  one line -- "N occurrences outside the change — too common to attribute" --
+  while the signature-changed flag keeps the real count, so suppressing a
+  list never silences the signal.
 - **Called from / calls, inside the change.** `ChangeGraph` edges. Each
   names the step that owns the other end ("→ `JmpCtxScope` · step 1").
 - **Calls, outside the change.** Identifiers on the step's changed lines

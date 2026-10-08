@@ -229,7 +229,7 @@ final class TourController {
             new OutOfDiffFanIn.Result(Map.of(), Optional.empty());
 
     private static final StepImpact NO_IMPACT =
-            new StepImpact(List.of(), List.of(), List.of(), List.of(), Optional.empty());
+            new StepImpact(List.of(), List.of(), List.of(), List.of(), List.of(), Optional.empty());
 
     /**
      * Every step's measured impact, computed off the FX thread on the
@@ -584,7 +584,7 @@ final class TourController {
             Optional<String> failure = view.graphFailure(scopeId, diff.get());
             if (failure.isPresent()) {
                 // No graph is coming for this diff: say why, never "Finding callers…" for good.
-                StepImpact unparsed = new StepImpact(List.of(), List.of(), List.of(), List.of(),
+                StepImpact unparsed = new StepImpact(List.of(), List.of(), List.of(), List.of(), List.of(),
                         Optional.of("the change could not be parsed: " + failure.get()));
                 return new StepPanel.ImpactView(step.impactNotes(), unparsed, Map.of(), false, Optional.empty(),
                         true);
@@ -658,7 +658,7 @@ final class TourController {
                         }
                         LOG.log(Level.WARNING, "Could not measure the tour's impact for scope "
                                 + key.scopeId(), failure);
-                        StepImpact unmeasured = new StepImpact(List.of(), List.of(), List.of(), List.of(),
+                        StepImpact unmeasured = new StepImpact(List.of(), List.of(), List.of(), List.of(), List.of(),
                                 Optional.of("the impact could not be measured: " + UiErrors.message(failure)));
                         Map<String, StepImpact> computed = new HashMap<>();
                         Set<String> everyStep = new HashSet<>();

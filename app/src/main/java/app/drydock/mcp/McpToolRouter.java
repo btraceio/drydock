@@ -175,7 +175,10 @@ public final class McpToolRouter {
                                         + "\"sections\" returns drydock's computed grouping: "
                                         + "accept and name it, or regroup deliberately. "
                                         + "\"impact\" returns, per changed declaration, its callers "
-                                        + "outside the change (name matches, not resolved references) "
+                                        + "outside the change (name matches, not resolved references; a "
+                                        + "file that declares a symbol of its own with the same name is "
+                                        + "already dropped, and a symbol whose attributable occurrences "
+                                        + "are too many to list comes as tooCommonToAttribute, a count) "
                                         + "and whether its declaration changed while call sites were "
                                         + "not edited.")),
                         "scopeId"),

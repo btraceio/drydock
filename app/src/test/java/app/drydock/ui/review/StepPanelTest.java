@@ -114,7 +114,7 @@ class StepPanelTest extends FxTest {
     void anImpactEntryWithAnUnderscoreIsShownVerbatim() {
         interact(() -> panel.showImpact(new StepPanel.ImpactView(
                 List.of(new ImpactNote("src/snake_case.h", 1, "keep max_value in range")),
-                new StepImpact(List.of(), List.of(), List.of(), List.of(), Optional.empty()),
+                new StepImpact(List.of(), List.of(), List.of(), List.of(), List.of(), Optional.empty()),
                 Map.of(), false, Optional.empty(), true)));
         Button entry = lookup("src/snake_case.h:1 — keep max_value in range").queryAs(Button.class);
         assertFalse(entry.isMnemonicParsing());
