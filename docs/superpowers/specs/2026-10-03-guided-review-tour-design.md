@@ -417,6 +417,19 @@ lines, which the whole-file view makes reachable. At Submit:
 - The submit sheet shows which route each comment takes.
 - Sending to the author carries all of them.
 
+**The submit sheet is a curate-then-post pass.** Confirmed findings post
+by default (the confirm IS the vouch; the card's toggle remains the
+explicit opt-out, and only the transition into confirmed promotes, so no
+redundant confirm can undo an exclusion). Every posting row can be
+reworded for the post (⌘⏎ saves, Esc drops the draft); an edited row is
+chipped "edited" because the board still shows the original and the
+difference must never be silent. Before the sheet opens, the PR's current
+head sha is compared with the checkout's HEAD: equal shas skip the check,
+a moved head re-anchors the whole plan against the PR's current diff --
+a finding a newer push displaced is refused against "the PR's current
+head", never folded into the body -- and an unanswered gh is said out
+loud ("checked against the diff as reviewed") rather than implied.
+
 **Verdicts are derived from steps, never written by them.** Step progress is
 stored on its own. The one stored verdict per hunk (`ReviewVerdict`, keyed by
 scope and hunk digest) is computed from the steps covering that hunk:
