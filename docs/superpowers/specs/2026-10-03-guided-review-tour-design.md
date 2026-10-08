@@ -276,7 +276,14 @@ because a removed row has no line in the post-image.
   button that jumps to the place claiming the usage: Review peeks at that
   location in place (another card on the stack), the Explorer opens the
   file at that line and collapses the stack onto the trail. `u` again brings
-  the code back.
+  the code back. `a` asks the bound session about the peeked symbol, and
+  the ANSWER lands on this board: the prompt names a question id and asks
+  for one `review_ask_answer` tool call, which closes the question and
+  shows the text as a dismissible card over the diff column -- the reader
+  never has to leave the code they asked about. The id resolves through an
+  in-memory pending-question registry scoped to the asking session's
+  scopes, so another session's question is refused as unknown and stays
+  answerable by the session it was asked of.
 - **Waypoints.** Step changes add one, labelled "Step N", and so do promoted
   peeks and search results. The trail bar's `‹ ›` buttons walk it. `⌘[` and
   `⌘]` do NOT: while Review is showing they keep their session-tab meaning

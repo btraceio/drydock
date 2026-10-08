@@ -57,6 +57,7 @@ import app.drydock.review.Triage;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.ReviewInstructions;
 import app.drydock.review.ReviewScope;
+import app.drydock.review.PendingQuestions;
 import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.review.tour.TourRecord;
 import app.drydock.review.tour.TourStep;
@@ -307,6 +308,14 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
     private final PrCheckoutService prCheckoutService = new PrCheckoutService();
     private final ReviewScopeRegistry reviewScopeRegistry;
+
+    /**
+     * Peek questions this run has asked an agent and is waiting on; the
+     * answer arrives through {@code review_ask_answer} on the MCP thread
+     * and is delivered by {@link #deliverAskAnswer}'s FX hop.
+     */
+    private final PendingQuestions pendingQuestions =
+            new PendingQuestions(this::deliverAskAnswer);
     /** Resolves one checkout's scopes for its session's Review sub-tab (spec §3.2). */
     private final SessionReviewScopes sessionReviewScopes;
 
@@ -2599,7 +2608,13 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             if (open == null || open.isProcessExited()) {
                 return false;
             }
-            open.sendPrompt(peek.askPrompt());
+            // One line: sendPrompt submits at the first newline, and the
+            // peek context plus the delivery instruction is the whole
+            // question. The minted id is the correlation -- the answer has
+            // to land back on THIS board, not in the agent's conversation.
+            PendingQuestions.PendingAsk ask =
+                    pendingQuestions.mint(scope.id(), peek.symbol());
+            open.sendPrompt(peek.askPrompt() + " " + ReviewInstructions.forPeekAsk(ask.questionId()));
             return true;
         }
 
@@ -2900,6 +2915,35 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * False when there is no session or its tab is not open -- the caller
      * then records nothing, because the hand-off did not happen.
      */
+    /** The review-board question registry; wired into the MCP context so {@code review_ask_answer} can close questions. */
+    public PendingQuestions pendingQuestions() {
+        return pendingQuestions;
+    }
+
+    /**
+     * An ask's answer, from the MCP thread: hop to FX and show it on the
+     * asking board. The scope may have lost its session or the view may
+     * never have been built (a board that cannot ask); both are logged,
+     * not silenced -- a delivered-but-lost answer is a lie the question's
+     * id made possible, and it must at least be findable in the log.
+     */
+    private void deliverAskAnswer(PendingQuestions.AnsweredAsk answered) {
+        Platform.runLater(() -> {
+            OpenSessionTab tab = reviewScopeRegistry.byId(answered.ask().scopeId())
+                    .flatMap(scope -> scope.sessionId())
+                    .map(openTabs::get)
+                    .orElse(null);
+            SessionReviewView view = tab == null ? null : tab.reviewView().orElse(null);
+            if (view == null) {
+                LOG.log(Level.INFO, () -> "Ask answer for " + answered.ask().questionId()
+                        + " could not be shown: no review view for scope "
+                        + answered.ask().scopeId());
+                return;
+            }
+            view.showAskAnswer(answered);
+        });
+    }
+
     private boolean sendToBoundSession(ReviewScope scope, String prompt) {
         OpenSessionTab open = scope.sessionId().map(openTabs::get).orElse(null);
         if (open == null) {

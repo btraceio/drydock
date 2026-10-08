@@ -10,6 +10,7 @@ import app.drydock.review.ChangeGraph;
 import app.drydock.review.HunkIds;
 import app.drydock.review.OutOfDiffFanIn;
 import app.drydock.review.ReadingPath;
+import app.drydock.review.PendingQuestions;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.RecheckDispatch;
 import app.drydock.review.ReviewScope;
@@ -30,6 +31,7 @@ import app.drydock.review.tour.TourMigration;
 import app.drydock.review.tour.TourRecord;
 import app.drydock.review.tour.TourStep;
 import app.drydock.ui.UiErrors;
+import app.drydock.ui.UiFormats;
 import app.drydock.ui.nav.ExplorerTrailStore;
 import app.drydock.ui.nav.NavigationTrail;
 import app.drydock.ui.nav.PeekLayer;
@@ -729,6 +731,17 @@ public final class SessionReviewView extends BorderPane {
      */
     private final Label navNotice = new Label();
     private final PauseTransition navNoticeTimer = new PauseTransition(Duration.seconds(2.6));
+
+    /** Answer cards kept on the column at once; the oldest drops off a longer stack. */
+    private static final int MAX_ASK_ANSWERS = 5;
+
+    /**
+     * Answers to peek questions ({@code a}), one card each, shown until
+     * dismissed: an answer is the payload the question existed for, so it
+     * must outlive the 2.6s notice and stay readable beside the code it is
+     * about -- unlike the notice, which only says where to look next.
+     */
+    private final VBox askAnswers = new VBox(6);
 
     /**
      * The session's trail: step changes, promoted peeks and search results
@@ -2904,7 +2917,15 @@ public final class SessionReviewView extends BorderPane {
         navNotice.setVisible(false);
         navNotice.setManaged(false);
         navNoticeTimer.setOnFinished(event -> clearNotice());
-        diffStack.getChildren().setAll(diffColumn, peekLayer, navNotice);
+        askAnswers.getStyleClass().add("ask-answers");
+        // Not pick-on-bounds: an answers stack wider than its cards must
+        // not fence the diff column's mouse off, the same rule the peek
+        // layer follows for its own pane.
+        askAnswers.setPickOnBounds(false);
+        askAnswers.setVisible(false);
+        askAnswers.setManaged(false);
+        diffStack.getChildren().setAll(diffColumn, peekLayer, navNotice, askAnswers);
+        StackPane.setAlignment(askAnswers, Pos.TOP_CENTER);
         peekLayer.setOnPromote(this::promotePeek);
         peekLayer.setOnAsk(this::askAboutPeek);
         peekLayer.setOnOpenOccurrence(this::openOccurrencePeek);
@@ -3166,8 +3187,48 @@ public final class SessionReviewView extends BorderPane {
 
     private void askAboutPeek(SymbolPeek peek) {
         selectedScope().ifPresent(scope -> notice(host.askAgentAboutPeek(scope, peek)
-                ? "Asked the session about " + peek.symbol() + " — the answer is in the agent view"
+                ? "Asked the session about " + peek.symbol() + " — the answer will appear here"
                 : "No running session to ask about " + peek.symbol()));
+    }
+
+    /**
+     * An ask's answer, delivered by the workspace when the agent's {@code
+     * review_ask_answer} closes the question. Shown as a card over the
+     * diff column -- where the peek that asked sits -- and kept until
+     * dismissed; the question was asked HERE, so this is where the reader
+     * is waiting.
+     */
+    public void showAskAnswer(PendingQuestions.AnsweredAsk answered) {
+        PendingQuestions.PendingAsk ask = answered.ask();
+        Label title = new Label(ask.symbol() + " — asked " + UiFormats.relativeTime(ask.askedAt()));
+        title.getStyleClass().add("ask-answer-title");
+        Label body = new Label(answered.answer());
+        body.getStyleClass().add("ask-answer-body");
+        body.setWrapText(true);
+        Button close = new Button("✕");
+        close.getStyleClass().add("ask-answer-close");
+        HBox header = new HBox(7, title, close);
+        header.setAlignment(Pos.CENTER_LEFT);
+        VBox card = new VBox(6, header, body);
+        card.getStyleClass().add("ask-answer-card");
+        HBox.setHgrow(title, Priority.ALWAYS);
+        close.setOnAction(event -> {
+            askAnswers.getChildren().remove(card);
+            refreshAskAnswersVisibility();
+        });
+        askAnswers.getChildren().add(card);
+        // A long stack scrolls rather than eating the column: the cards are
+        // appended bottom, the newest always visible.
+        if (askAnswers.getChildren().size() > MAX_ASK_ANSWERS) {
+            askAnswers.getChildren().removeFirst();
+        }
+        refreshAskAnswersVisibility();
+    }
+
+    private void refreshAskAnswersVisibility() {
+        boolean any = !askAnswers.getChildren().isEmpty();
+        askAnswers.setVisible(any);
+        askAnswers.setManaged(any);
     }
 
     /**

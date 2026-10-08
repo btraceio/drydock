@@ -7,6 +7,7 @@ import app.drydock.domain.WorkflowId;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.mcp.McpSessionContext.RenameKind;
 import app.drydock.mcp.McpSessionContext.RenameOutcome;
+import app.drydock.review.PendingQuestions;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.tour.TourRecord;
 
@@ -47,6 +48,13 @@ final class FakeMcpSessionContext implements McpSessionContext {
 
     /** When set, {@link #createWorktree} and {@link #startSession} throw this. */
     McpToolException failure;
+
+    /**
+     * Backs {@link #answerAsk}: the fake owns the registry so tests mint
+     * questions and the router closes them, the real split of MainWorkspace
+     * (mint) and WorkspaceMcpSessionContext (answer).
+     */
+    final PendingQuestions pendingQuestions = new PendingQuestions(null);
 
     /** As a real session's status does; cleared to model a claude that has exited. */
     boolean sessionRunning = true;
@@ -127,6 +135,12 @@ final class FakeMcpSessionContext implements McpSessionContext {
     }
 
     @Override
+    public Optional<PendingQuestions.AnsweredAsk> answerAsk(String questionId, ManagedSessionId caller,
+                                                            String answer) {
+        return pendingQuestions.answer(questionId, ask -> addressableScopes
+                .getOrDefault(caller, Set.of()).contains(ask.scopeId()), answer);
+    }
+
     public Optional<app.drydock.review.ReviewScope> reviewScope(String scopeId, ManagedSessionId caller) {
         if (!addressableScopes.getOrDefault(caller, Set.of()).contains(scopeId)) {
             return Optional.empty();

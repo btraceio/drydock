@@ -11,6 +11,7 @@ import app.drydock.review.AnnotationStatus;
 import app.drydock.review.ChangeGraph;
 import app.drydock.review.OutOfDiffFanIn;
 import app.drydock.review.ReadingPath;
+import app.drydock.review.PendingQuestions;
 import app.drydock.review.RecheckAssessment;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewScope;
@@ -247,6 +248,15 @@ public final class McpToolRouter {
                                         + "question, deviation or nit."))
                                 .put("proposeResolve", schemaBoolean("Suggest that the human resolve it.")),
                         "scopeId", "findingId", "body"),
+                descriptor("review_ask_answer",
+                        "Answers a peek question the reviewer asked from the review board (the "
+                                + "prompt named a questionId). One call closes the question; the "
+                                + "reviewer reads the answer beside the code they asked about, not "
+                                + "in this conversation.",
+                        JsonObject.empty()
+                                .put("questionId", schemaString("The ask-N id the question's prompt named."))
+                                .put("answer", schemaString("The answer. Plain text.")),
+                        "questionId", "answer"),
                 descriptor("review_state",
                         "What the human has done so far on a scope: per-finding severity/resolution/threads, "
                                 + "tour progress, and whether the review was submitted. Read this before a "
@@ -336,6 +346,7 @@ public final class McpToolRouter {
             case "review_check" -> reviewCheck(caller, arguments);
             case "review_finding" -> reviewFinding(caller, arguments);
             case "review_answer" -> reviewAnswer(caller, arguments);
+            case "review_ask_answer" -> reviewAskAnswer(caller, arguments);
             case "review_state" -> reviewState(caller, arguments);
             case "review_recheck" -> reviewRecheck(caller, arguments);
             case "worktree_create" -> worktreeCreate(caller, arguments);
@@ -678,6 +689,27 @@ public final class McpToolRouter {
                 .put("id", new JsonString(updated.id()))
                 .put("scopeId", new JsonString(updated.scopeId()))
                 .put("messages", JsonNumber.of(updated.thread().size()));
+    }
+
+    /**
+     * {@code review_ask_answer}: closes a peek question and hands the
+     * answer to the board that asked it. Unknown, foreign and already-
+     * answered ids are one message, the same indistinguishability as
+     * {@code reviewScope} -- an agent must learn nothing from a refusal.
+     */
+    private JsonValue reviewAskAnswer(ManagedSessionId caller, JsonValue arguments) throws McpToolException {
+        requireLiveSession(caller);
+        JsonObject args = asObject(arguments);
+        String questionId = requiredStringArg(args, "questionId");
+        String answer = PromptSafety.checkInboundText(requiredStringArg(args, "answer"), "answer");
+
+        PendingQuestions.AnsweredAsk answered = context.answerAsk(questionId, caller, answer)
+                .orElseThrow(() -> new McpToolException("No pending question '" + questionId
+                        + "' for this session."));
+        return JsonObject.empty()
+                .put("questionId", new JsonString(questionId))
+                .put("symbol", new JsonString(answered.ask().symbol()))
+                .put("scopeId", new JsonString(answered.ask().scopeId()));
     }
 
     /**

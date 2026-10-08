@@ -139,6 +139,20 @@ public final class ReviewInstructions {
     }
 
     /**
+     * What a peek's {@code a} asks: the peek context itself is the typed
+     * question, so this is only the delivery instruction, appended to it
+     * on the same line ({@code sendPrompt} submits at the first newline).
+     * One {@code review_ask_answer} call closes the question; the reviewer
+     * reads the answer beside the code, not in this conversation.
+     */
+    public static String forPeekAsk(String questionId) {
+        Objects.requireNonNull(questionId, "questionId");
+        return "Answer with ONE review_ask_answer call (questionId " + questionId
+                + ", answer: plain text, cite file:line from the peek when it matters) -- "
+                + "the reviewer reads it beside the code they asked about";
+    }
+
+    /**
      * One line asking the agent to judge a reviewer's free-text answer.
      *
      * <p>Carries only the check id: the answer is the reviewer's own text and
