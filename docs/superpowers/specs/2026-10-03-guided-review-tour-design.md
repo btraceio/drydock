@@ -61,6 +61,12 @@ TourCheck(id, kind, prompt, choices, answerKey, explanation,
   valid and renders from the narrative alone.
 - PREDICT and TRACE carry choices and an answer key that must be one of the
   choices. RISK carries neither. Every check carries at least one alternate.
+- **The correct answer's position carries no signal.** Whatever order the
+  agent drafts (its drafts put the right answer first, which teaches the
+  reader to stop reading the options), the agent boundary scatters it
+  deterministically from the check id and the key -- the key moves with its
+  choice, the store never re-scatters on load, so progress recorded against
+  these positions stays gradable.
 - **Which kind to pick** follows from what the reader can see. A PREDICT hides
   the step's added rows until it is answered (§5), so its question must be
   answerable from the removed and surrounding code -- "what will this do?",

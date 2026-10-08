@@ -55,7 +55,56 @@ public final class TourCodec {
         for (int i = 0; i < array.elements().size(); i++) {
             steps.add(stepFromJson(array.elements().get(i), "steps[" + i + "]"));
         }
-        return steps;
+        return scattered(steps);
+    }
+
+    /**
+     * Moves each graded check's correct answer off whatever position the
+     * agent drafted it at. The drafts put it first, and a choice list whose
+     * first option is always the right one teaches the reader to stop
+     * reading the options -- position must carry no signal. The new position
+     * comes from the check id and the answer key, so the same posted tour
+     * always scatters the same way: stored progress records the chosen
+     * index, and a tour that re-ordered itself on every load would grade
+     * yesterday's answers against a moved key.
+     *
+     * <p>Called at the agent boundary ({@link #stepsFromAgent}) ONLY: the
+     * tour store decodes persisted tours through the same {@code fromJson}
+     * path, and what is already stored must come back exactly as it was
+     * scattered when posted -- a second pass would move the key again.</p>
+     */
+    static List<TourStep> scattered(List<TourStep> steps) {
+        List<TourStep> scattered = new ArrayList<>();
+        for (TourStep step : steps) {
+            List<TourCheck> checks = step.checks().stream().map(TourCodec::scattered).toList();
+            scattered.add(new TourStep(step.id(), step.title(), step.narrative(), step.anchors(),
+                    step.impactNotes(), checks));
+        }
+        return scattered;
+    }
+
+    private static TourCheck scattered(TourCheck check) {
+        List<TourCheck> alternates = check.alternates().stream().map(TourCodec::scattered).toList();
+        List<TourCheck.Choice> choices = check.choices();
+        if (!check.answer().isPresent() || choices.size() < 2) {
+            return new TourCheck(check.id(), check.kind(), check.prompt(), choices, check.answer(),
+                    check.explanation(), alternates);
+        }
+        int answer = check.answer().getAsInt();
+        // hashCode() of a String is stable in OpenJDK; anything else would
+        // still be deterministic per process, which is all the store needs.
+        int target = Math.floorMod(check.id().hashCode() + answer, choices.size());
+        int delta = Math.floorMod(target - answer, choices.size());
+        if (delta == 0) {
+            return new TourCheck(check.id(), check.kind(), check.prompt(), choices, check.answer(),
+                    check.explanation(), alternates);
+        }
+        List<TourCheck.Choice> rotated = new ArrayList<>();
+        for (int i = 0; i < choices.size(); i++) {
+            rotated.add(choices.get(Math.floorMod(i - delta, choices.size())));
+        }
+        return new TourCheck(check.id(), check.kind(), check.prompt(), rotated, OptionalInt.of(target),
+                check.explanation(), alternates);
     }
 
     public static TourStep stepFromJson(JsonValue value, String path) throws InvalidTour {

@@ -13,6 +13,7 @@ import java.util.Optional;
 import static app.drydock.review.tour.TourFixtures.coveringTour;
 import static app.drydock.review.tour.TourFixtures.twoFileDiff;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -36,6 +37,58 @@ class TourCodecTest {
         assertEquals(1, check.answer().getAsInt());
         assertEquals(new TourCheck.Location("src/C.java", 88), check.choices().get(1).at().orElseThrow());
         assertEquals(TourCheck.Kind.RISK, check.alternates().getFirst().kind());
+    }
+
+    /**
+     * The agent's drafts put the correct answer first, and a choice list
+     * whose first option is always right teaches the reader to stop reading
+     * the options. The agent boundary scatters the key's position,
+     * deterministically from the check id and the answer key, moving the
+     * key with its choice; the alternates scatter the same way.
+     */
+    @Test
+    void theCorrectAnswerIsScatteredOffItsDraftedPosition() throws Exception {
+        String drafted = """
+                [{"id":"s1","title":"Guard","narrative":"Why.",
+                  "anchors":[{"file":"src/A.java","startKey":"n1"}],
+                  "checks":[{"id":"qx9","kind":"trace","prompt":"Which line makes this safe?",
+                             "choices":[{"text":"the guard"},{"text":"the loop"},{"text":"the cast"}],
+                             "answer":0,"explanation":"The guard.",
+                             "alternates":[{"id":"qx9a","kind":"trace","prompt":"Again?",
+                                "choices":[{"text":"yes"},{"text":"no"}],"answer":1,"explanation":"No."}]}]}]
+                """;
+        List<TourStep> steps = TourCodec.stepsFromAgent(JsonParser.parse(drafted));
+        TourCheck check = steps.getFirst().checks().getFirst();
+        int target = Math.floorMod("qx9".hashCode(), 3);
+        assertEquals(target, check.answer().getAsInt(), "the position is derived from id and key");
+        assertNotEquals(0, target, "for this id the key must not stay first");
+        assertEquals("the guard", check.choices().get(target).text(), "the key moved with its choice");
+        TourCheck alternate = check.alternates().getFirst();
+        assertEquals("no", alternate.choices().get(alternate.answer().getAsInt()).text(),
+                "the alternate's key follows its choice too");
+        assertEquals(check, TourCodec.stepsFromAgent(JsonParser.parse(drafted)).getFirst().checks().getFirst(),
+                "the same post scatters the same way every time");
+    }
+
+    /**
+     * The store decodes persisted tours through {@code recordFromJson},
+     * which must NOT scatter: what is stored was scattered when it was
+     * posted, and a second pass would move the key out from under the
+     * progress the reviewer already recorded against these positions.
+     */
+    @Test
+    void thePersistedFormDecodesWithoutScatteringAgain() throws Exception {
+        String stored = """
+                {"tour":{"scopeId":"rs_1","fingerprint":"fp","steps":[{"id":"s1","title":"T","narrative":"N.",
+                  "anchors":[{"file":"src/A.java","startKey":"n1"}],
+                  "checks":[{"id":"qx9","kind":"trace","prompt":"P?","choices":[{"text":"a"},{"text":"b"}],
+                             "answer":0,"explanation":"E."}]}]},
+                 "progress":{},"hunkOverrides":{},"hunkRows":{},"reviewAnyway":false,"shelved":false}
+                """;
+        TourCheck check = TourCodec.recordFromJson(JsonParser.parse(stored)).orElseThrow()
+                .tour().steps().getFirst().checks().getFirst();
+        assertEquals(0, check.answer().getAsInt(), "stored tours come back exactly as stored");
+        assertEquals("a", check.choices().getFirst().text());
     }
 
     @Test
