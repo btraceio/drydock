@@ -460,9 +460,13 @@ symbol at a file line. Each result carries provenance `MEASURED`, `CLAIMED`,
   occurrence files parsed per scan, one binder, models cached); beyond
   the budget the occurrences stay unclassified, which is the honest
   default, not a silently dropped flag.
-- **Resolved (`RESOLVED`)** -- reserved for a language server that has
-  indexed the code; a later LSP spec plugs it in, used only when a server
-  for the language is running and indexed. The tour never waits on it.
+- **Resolved (`RESOLVED`)** -- a language server that has indexed the
+  code. Specified in [Tier 3: a language server behind the provenance
+  seam](2026-10-08-lsp-tier3-usage-resolution.md): opt-in by
+  configuration (never downloaded), one jdt.ls server per worktree,
+  upgrade-only composition over the tiers below, and a readiness state
+  machine (`INDEXED` or it does not answer) whose every failure path
+  lands on this tier list. The tour never waits on it.
 
 ## 7. Comments, verdicts, persistence
 
