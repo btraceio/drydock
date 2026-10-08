@@ -1222,7 +1222,12 @@ final class TourController {
     private void revealAnchor(TourStep step, int anchorIndex) {
         if (anchorIndex >= 0 && anchorIndex < step.anchors().size()) {
             TourAnchor anchor = step.anchors().get(anchorIndex);
-            diffColumn.revealLine(anchor.file(), anchor.startKey());
+            if (!diffColumn.revealLine(anchor.file(), anchor.startKey())) {
+                // A reveal that lands nowhere reads as a dead button; the
+                // honest outcome is to say where the line went.
+                view.notice("The step's anchor " + anchor.file() + " " + anchor.startKey()
+                        + " is not on screen — the diff is truncated past it");
+            }
         }
     }
 
@@ -1494,7 +1499,10 @@ final class TourController {
 
         @Override
         public void revealFinding(ReviewAnnotation finding) {
-            diffColumn.revealLine(finding.file(), finding.startKey());
+            if (!diffColumn.revealLine(finding.file(), finding.startKey())) {
+                view.notice("The finding's line " + finding.file() + " " + finding.startKey()
+                        + " is not on screen — the diff is truncated past it");
+            }
         }
 
         @Override

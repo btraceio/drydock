@@ -279,6 +279,13 @@ because a removed row has no line in the post-image.
   Explorer.
 - `b` returns the column to the current step's first anchor. A "↩ back to
   step N" pill shows whenever the viewport is off the step's rows.
+- **Every reveal opens what hid it.** A jump whose target row is missing is
+  indistinguishable from a dead button, so `revealLine` falls back before
+  giving up: a target inside a collapsed run opens that hunk's folds (a jump
+  is a navigation intent; `c` re-folds), a target past the row cap reaches
+  its hunk header, and a target the rendered diff does not carry returns
+  false so the caller says so over the column instead of silently doing
+  nothing.
 - `.` and `,` move to the next and previous anchor within a step -- the
   claims, when it makes them. With no check open to answer, `1`–`4` jump to
   that claim; a click on a callout makes it active without scrolling. A

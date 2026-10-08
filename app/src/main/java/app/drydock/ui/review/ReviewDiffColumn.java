@@ -41,6 +41,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -909,15 +910,76 @@ final class ReviewDiffColumn extends BorderPane {
         return selectionAnchorIndex();
     }
 
-    /** Scrolls to the row anchored at {@code lineKey} in {@code file} (card → line linkage). */
-    void revealLine(String file, String lineKey) {
+    /**
+     * Scrolls to the row anchored at {@code lineKey} in {@code file} (card →
+     * line linkage), opening whatever hid it. A reveal that lands nowhere is
+     * indistinguishable from a dead button -- a jump to a location inside a
+     * folded run used to do nothing at all -- so a target the exact scan
+     * misses gets fallbacks: a line inside a collapsed run opens that hunk's
+     * folds first, a line past the row cap reaches its hunk header, and a
+     * line the rendered diff does not carry returns false for the caller to
+     * say so rather than stay silent.
+     */
+    boolean revealLine(String file, String lineKey) {
         for (int i = 0; i < rows.size(); i++) {
             if (rows.get(i) instanceof ReviewDiffRow.Line line
                     && line.file().equals(file) && line.lineKey().equals(lineKey)) {
                 list.scrollTo(Math.max(0, i - 3));
-                return;
+                return true;
             }
         }
+        return revealHidden(file, lineKey);
+    }
+
+    /**
+     * The fallbacks of {@link #revealLine}: find the hunk of the rendered
+     * diff whose lines carry {@code lineKey}, open every fold of that hunk
+     * (a jump is a navigation intent; the reader asked to land THERE, and
+     * {@code c} re-folds), and try the exact row again. Still missing (the
+     * row cap cut the hunk short) scrolls to the hunk's header. A key no
+     * hunk carries -- a file the column does not show, or a key from another
+     * diff -- is not this column's to reveal.
+     */
+    private boolean revealHidden(String file, String lineKey) {
+        UnifiedDiff rendered = renderedDiff();
+        if (rendered == null) {
+            return false;
+        }
+        for (UnifiedDiff.FileDiff fileDiff : rendered.files()) {
+            if (!fileDiff.path().equals(file)) {
+                continue;
+            }
+            for (int h = 0; h < fileDiff.hunks().size(); h++) {
+                boolean carries = fileDiff.hunks().get(h).lines().stream()
+                        .anyMatch(line -> line.lineKey().equals(lineKey));
+                if (!carries) {
+                    continue;
+                }
+                boolean openedAFold = false;
+                for (ReviewDiffRow row : rows) {
+                    if (row instanceof ReviewDiffRow.CollapsedRun run
+                            && run.file().equals(file) && run.hunkIndex() == h) {
+                        expandedRuns.add(run.key());
+                        openedAFold = true;
+                    }
+                }
+                if (openedAFold) {
+                    // Not rebuild(): that scrolls to the top, and the whole
+                    // point is to land on the target.
+                    rows.setAll(buildRows());
+                    for (int i = 0; i < rows.size(); i++) {
+                        if (rows.get(i) instanceof ReviewDiffRow.Line line
+                                && line.file().equals(file) && line.lineKey().equals(lineKey)) {
+                            list.scrollTo(Math.max(0, i - 3));
+                            return true;
+                        }
+                    }
+                }
+                return revealHunk(file, h);
+            }
+            return false;
+        }
+        return false;
     }
 
     /**

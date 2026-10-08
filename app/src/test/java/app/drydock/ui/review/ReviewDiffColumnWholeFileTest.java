@@ -93,6 +93,82 @@ class ReviewDiffColumnWholeFileTest extends FxTest {
         assertEquals(1, folded);
     }
 
+    /**
+     * The reported defect: a jump to a location inside a folded run did
+     * nothing at all -- the exact scan found no row and stopped, which is
+     * indistinguishable from a dead button. The reveal now opens the
+     * hunk's folds and lands on the row it was asked for.
+     */
+    @Test
+    void revealingALineInsideAFoldedRunOpensTheFoldAndLandsThere() {
+        interact(() -> {
+            column.showDiff(scope(), diff(3));
+            column.setWholeFiles(true);
+            column.diagShowWholeFileDiff(diff(40));
+            column.toggleContext(); // c: fold every long run again
+        });
+        FxSync.waitForFxEvents();
+        assertTrue(column.diagRows().stream().anyMatch(row -> row instanceof ReviewDiffRow.CollapsedRun),
+                "the fixture must start folded");
+
+        boolean[] reached = new boolean[1];
+        interact(() -> reached[0] = column.revealLine("src/A.java", "n20"));
+        FxSync.waitForFxEvents();
+
+        assertTrue(reached[0], "the reveal must say it landed");
+        assertTrue(column.diagRows().stream().anyMatch(row -> row instanceof ReviewDiffRow.Line line
+                        && line.lineKey().equals("n20")),
+                "the fold opened around the target, so its row renders now");
+    }
+
+    /**
+     * The other half of the report: N deleted lines replaced by M added,
+     * the review pointing at the original line of the deletion. Deleted
+     * rows never fold, so in whole-file mode the reveal lands on them.
+     */
+    @Test
+    void revealingTheOriginalLineOfADeletionLandsOnItsDeletedRow() {
+        List<Line> lines = new ArrayList<>();
+        for (int n = 1; n <= 30; n++) {
+            lines.add(new Line(Line.Kind.CONTEXT, OptionalInt.of(n), OptionalInt.of(n), "ctx " + n));
+        }
+        for (int n = 31; n <= 33; n++) {
+            lines.add(new Line(Line.Kind.DEL, OptionalInt.of(n), OptionalInt.empty(), "old " + n));
+        }
+        lines.add(new Line(Line.Kind.ADD, OptionalInt.empty(), OptionalInt.of(31), "the replacement"));
+        UnifiedDiff whole = new UnifiedDiff(List.of(new UnifiedDiff.FileDiff("src/A.java", "M", 3, 1,
+                false, false, List.of(new UnifiedDiff.Hunk("@@ -1,33 +1,31 @@", lines)))));
+        interact(() -> {
+            column.showDiff(scope(), diff(3));
+            column.setWholeFiles(true);
+            column.diagShowWholeFileDiff(whole);
+        });
+        FxSync.waitForFxEvents();
+
+        for (String key : new String[] {"o31", "o32", "o33", "n31"}) {
+            boolean[] reached = new boolean[1];
+            interact(() -> reached[0] = column.revealLine("src/A.java", key));
+            FxSync.waitForFxEvents();
+            assertTrue(reached[0], key + " must be reachable");
+        }
+    }
+
+    /** A key no hunk of the rendered diff carries is not this column's to reveal: false, said out loud. */
+    @Test
+    void revealingALineTheDiffDoesNotCarryReturnsFalse() {
+        interact(() -> {
+            column.showDiff(scope(), diff(3));
+            column.setWholeFiles(true);
+            column.diagShowWholeFileDiff(diff(40));
+        });
+        FxSync.waitForFxEvents();
+
+        boolean[] reached = new boolean[1];
+        interact(() -> reached[0] = column.revealLine("src/A.java", "o9999"));
+        FxSync.waitForFxEvents();
+        assertFalse(reached[0]);
+    }
+
     private static UnifiedDiff twoHunks() {
         List<Line> first = List.of(new Line(Line.Kind.ADD, OptionalInt.empty(), OptionalInt.of(1), "a"));
         List<Line> second = List.of(new Line(Line.Kind.ADD, OptionalInt.empty(), OptionalInt.of(90), "b"));
