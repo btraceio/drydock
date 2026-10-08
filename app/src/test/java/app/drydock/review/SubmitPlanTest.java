@@ -12,6 +12,7 @@ import java.util.Optional;
 import java.util.OptionalInt;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -419,6 +420,38 @@ class SubmitPlanTest {
         assertEquals(1, plan.refusals().size());
         assertTrue(plan.refusals().getFirst().reason().contains("not in the PR's current head"),
                 plan.refusals().getFirst().reason());
+    }
+
+    /**
+     * The override path: a refused finding moves into the review body as a
+     * path:line note -- the human decided the content belongs in the review
+     * even though the moved diff cannot place an inline anchor -- and the
+     * posting/comments invariant keeps holding.
+     */
+    @Test
+    void anOverriddenRefusalBecomesABodyNote() {
+        ReviewAnnotation finding = finding("f9", "src/Foo.java", "n5", "n5");
+        SubmitPlan plan = SubmitPlan.of(List.of(finding), List.of(),
+                new SubmitPlan.DiffIndex(Map.of(), Map.of(), "the PR's current head"));
+
+        assertEquals(1, plan.refusals().size());
+        SubmitPlan overridden = plan.withBodyFallback(List.of(new SubmitPlan.BodyNote(
+                finding.key(), "src/Foo.java", "line n5", "  the moved line", "body of f9")));
+
+        assertTrue(overridden.refusals().isEmpty(), "the override retires the refusal");
+        assertEquals(1, overridden.bodyNotes().size());
+        assertEquals(List.of(finding.key()), overridden.posting(),
+                "the moved key joins posting, after the comments' entries (there are none here)");
+        assertEquals("body of f9", overridden.bodyNotes().getFirst().body());
+    }
+
+    @Test
+    void noOverridesChangeNothing() {
+        ReviewAnnotation finding = finding("f9", "src/Foo.java", "n5", "n5");
+        SubmitPlan plan = SubmitPlan.of(List.of(finding), List.of(),
+                new SubmitPlan.DiffIndex(Map.of(), Map.of(), "the PR's current head"));
+
+        assertSame(plan, plan.withBodyFallback(List.of()));
     }
 
     @Test

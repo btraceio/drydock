@@ -488,7 +488,13 @@ head sha is compared with the checkout's HEAD: equal shas skip the check,
 a moved head re-anchors the whole plan against the PR's current diff --
 a finding a newer push displaced is refused against "the PR's current
 head", never folded into the body -- and an unanswered gh is said out
-loud ("checked against the diff as reviewed") rather than implied.
+loud ("checked against the diff as reviewed") rather than implied. A
+refusal carries its own per-finding escape hatch: "Post in the review
+body" moves the finding into the body as a path:line note, anchored and
+excerpted from the diff as REVIEWED -- the human decided the content
+belongs in the review, and the body is where it lands without a 422
+from GitHub or a comment silently placed on the moved diff's wrong
+line.
 
 **Verdicts are derived from steps, never written by them.** Step progress is
 stored on its own. The one stored verdict per hunk (`ReviewVerdict`, keyed by

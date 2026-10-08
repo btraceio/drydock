@@ -14,6 +14,7 @@ import app.drydock.review.SubmitPlan;
 import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
+import javafx.scene.control.CheckBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.ToggleButton;
@@ -182,6 +183,28 @@ class ReviewSubmitSheetTest extends FxTest {
         List<String> notes = queryLabels(".review-submit-verification");
         assertEquals(1, notes.size(), "exactly one note, where the routes begin");
         assertTrue(notes.getFirst().contains("re-verified"), notes.getFirst());
+    }
+
+    /** A refused finding can be ticked into the review body; the sheet reports exactly the ticked keys. */
+    @Test
+    void aRefusalCanBeOverriddenIntoTheBody() {
+        ReviewAnnotation finding = ReviewAnnotation.human("rs_scope", "src/Foo.java", "n5", "n5",
+                new ReviewAnnotation.Message("You", java.time.Instant.EPOCH, "moved by the new push"));
+        rebuildSheet(SubmitPlan.of(List.of(finding), List.of(),
+                new SubmitPlan.DiffIndex(java.util.Map.of(), java.util.Map.of(), "the PR's current head")));
+        FxSync.waitForFxEvents();
+
+        CheckBox override = lookup(".review-submit-refusal-override").query();
+        interact(() -> override.setSelected(true));
+        FxSync.waitForFxEvents();
+
+        assertEquals(java.util.Set.of(finding.key()),
+                sheet.overriddenRefusals(),
+                "the ticked refusal is reported for the submit click");
+
+        interact(() -> override.setSelected(false));
+        assertEquals(java.util.Set.of(), sheet.overriddenRefusals(),
+                "unticking withdraws the override before the click");
     }
 
     @Test

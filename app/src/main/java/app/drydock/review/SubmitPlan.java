@@ -304,7 +304,8 @@ public record SubmitPlan(Event preselected, List<Comment> comments, List<ReviewA
     }
 
     /** {@code n500} reads {@code 500}; a deleted {@code o5} reads {@code 5(-)}; a range joins both ends. */
-    private static String lineLabel(String startKey, String endKey) {
+    /** The path:line label a body note anchors with; public for the workspace's override path. */
+    public static String lineLabel(String startKey, String endKey) {
         return startKey.equals(endKey) ? labelOf(startKey) : labelOf(startKey) + "–" + labelOf(endKey);
     }
 
@@ -341,6 +342,33 @@ public record SubmitPlan(Event preselected, List<Comment> comments, List<ReviewA
         return new SubmitPlan(preselected, rewordedComments, posting, refusals, rewordedNotes);
     }
 
+    /**
+     * Moves overridden refusals into the review body as path:line notes --
+     * the same route a finding outside the GitHub diff already takes. The
+     * human decided the finding's content belongs in this review even
+     * though the moved diff can no longer place an inline anchor for it;
+     * the body is where it lands without either a 422 from GitHub or a
+     * comment silently attached to the wrong line.
+     *
+     * <p>The constructor invariant keeps holding: the moved keys append to
+     * {@code posting} in the same order their notes append to
+     * {@code bodyNotes}, after the comments' entries.</p>
+     */
+    public SubmitPlan withBodyFallback(List<BodyNote> overridden) {
+        if (overridden.isEmpty()) {
+            return this;
+        }
+        java.util.Set<ReviewAnnotation.Key> keys = overridden.stream()
+                .map(BodyNote::key).collect(java.util.stream.Collectors.toCollection(java.util.LinkedHashSet::new));
+        List<Refusal> kept = refusals.stream()
+                .filter(refusal -> !keys.contains(refusal.key())).toList();
+        List<BodyNote> notes = new ArrayList<>(bodyNotes);
+        notes.addAll(overridden);
+        List<ReviewAnnotation.Key> postingNow = new ArrayList<>(posting);
+        postingNow.addAll(keys);
+        return new SubmitPlan(preselected, comments, postingNow, kept, notes);
+    }
+
     /** How many findings still wait for a human's confirm-or-dismiss: proposed and unresolved. */
     public static long untriagedCount(List<ReviewAnnotation> findings) {
         return findings.stream()
@@ -349,7 +377,8 @@ public record SubmitPlan(Event preselected, List<Comment> comments, List<ReviewA
     }
 
     /** The last message the human wrote on this thread, falling back to the finding's own first message. */
-    private static String bodyOf(ReviewAnnotation finding) {
+    /** The thread's last human wording, falling back to its first message; public for the override path. */
+    public static String bodyOf(ReviewAnnotation finding) {
         List<ReviewAnnotation.Message> thread = finding.thread();
         for (int i = thread.size() - 1; i >= 0; i--) {
             ReviewAnnotation.Message message = thread.get(i);

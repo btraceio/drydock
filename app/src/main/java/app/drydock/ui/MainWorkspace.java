@@ -2487,7 +2487,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             ReviewSubmitSheet[] holder = new ReviewSubmitSheet[1];
             holder[0] = new ReviewSubmitSheet(plan, pr, unverified,
                     (event, summary) -> postReview(scope, pr,
-                            plan.withBodies(holder[0].editedBodies()), event, summary, holder[0]),
+                            finalPlan(holder[0], plan, scope, lineText), event, summary, holder[0]),
                     modalLayer::close);
             if (!checks.note().isBlank()) {
                 holder[0].showVerificationNote(checks.note());
@@ -2496,6 +2496,34 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             checks.unavailable().ifPresent(holder[0]::showUnavailable);
             checkError.ifPresent(holder[0]::showUnavailable);
         }
+
+    /**
+     * The plan at submit time: the sheet's rewordings, plus the refused
+     * findings the human overrode into the review body -- built from the
+     * finding and the REVIEWED diff's line text (the anchor and its
+     * excerpt are the ones the review actually read, which is the point of
+     * an override: the content posts, on its own terms, not on the moved
+     * diff's).
+     */
+    private SubmitPlan finalPlan(ReviewSubmitSheet sheet, SubmitPlan plan, ReviewScope scope,
+                                 BiFunction<String, String, Optional<String>> lineText) {
+        SubmitPlan reworded = plan.withBodies(sheet.editedBodies());
+        java.util.Set<ReviewAnnotation.Key> overridden = sheet.overriddenRefusals();
+        if (overridden.isEmpty()) {
+            return reworded;
+        }
+        List<SubmitPlan.BodyNote> notes = new ArrayList<>();
+        for (ReviewAnnotation.Key key : overridden) {
+            annotationStore.forScope(scope.id()).stream()
+                    .filter(finding -> finding.key().equals(key))
+                    .findFirst()
+                    .ifPresent(finding -> notes.add(new SubmitPlan.BodyNote(key, finding.file(),
+                            SubmitPlan.lineLabel(finding.startKey(), finding.endKey()),
+                            lineText.apply(finding.file(), finding.startKey()).orElse(""),
+                            SubmitPlan.bodyOf(finding))));
+        }
+        return reworded.withBodyFallback(notes);
+    }
 
         /** The PR's current diff as a comment index, named so a refusal says what it was checked against. */
         private static SubmitPlan.DiffIndex freshIndex(UnifiedDiff freshDiff) {

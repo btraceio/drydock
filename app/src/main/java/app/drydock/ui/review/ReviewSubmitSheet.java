@@ -10,7 +10,9 @@ import app.drydock.review.SubmitPlan;
 
 import javafx.geometry.Pos;
 import javafx.scene.control.Button;
+import javafx.scene.control.CheckBox;
 import javafx.scene.control.Label;
+import javafx.scene.control.Tooltip;
 import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.ScrollPane;
 import javafx.scene.control.TextArea;
@@ -23,6 +25,7 @@ import javafx.scene.layout.VBox;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -82,6 +85,14 @@ public final class ReviewSubmitSheet extends VBox {
      * what the board shows, and the difference must never be silent.
      */
     private final Map<ReviewAnnotation.Key, String> editedBodies = new LinkedHashMap<>();
+
+    /**
+     * Refused findings the human chose to post in the review body anyway:
+     * the content belongs in the review even though the moved diff can no
+     * longer place an inline anchor for it. Keyed like the edits, read at
+     * the submit click.
+     */
+    private final java.util.Set<ReviewAnnotation.Key> overriddenRefusals = new LinkedHashSet<>();
     private final BiConsumer<Event, String> onSubmit;
     private final Runnable onCancel;
 
@@ -261,6 +272,11 @@ public final class ReviewSubmitSheet extends VBox {
         return Map.copyOf(editedBodies);
     }
 
+    /** The refusal keys whose boxes the human ticked: post them as body notes. */
+    public java.util.Set<ReviewAnnotation.Key> overriddenRefusals() {
+        return java.util.Set.copyOf(overriddenRefusals);
+    }
+
     private String bodyFor(ReviewAnnotation.Key key, String original) {
         return editedBodies.getOrDefault(key, original);
     }
@@ -437,7 +453,23 @@ public final class ReviewSubmitSheet extends VBox {
             Label reason = new Label(refusal.reason());
             reason.getStyleClass().add("review-submit-refusal");
             reason.setWrapText(true);
-            rows.getChildren().add(reason);
+            CheckBox postInBody = new CheckBox("Post in the review body");
+            postInBody.getStyleClass().add("review-submit-refusal-override");
+            postInBody.setTooltip(new Tooltip("Post this finding's content as a path:line note in the"
+                    + " review body, where the moved diff cannot misplace it and GitHub cannot 422 it"));
+            if (overriddenRefusals.contains(refusal.key())) {
+                postInBody.setSelected(true);
+            }
+            postInBody.selectedProperty().addListener((obs, was, now) -> {
+                if (now) {
+                    overriddenRefusals.add(refusal.key());
+                } else {
+                    overriddenRefusals.remove(refusal.key());
+                }
+            });
+            HBox row = new HBox(10, reason, postInBody);
+            row.setAlignment(Pos.CENTER_LEFT);
+            rows.getChildren().add(row);
         }
 
         VBox block = new VBox(6, header, rows);
