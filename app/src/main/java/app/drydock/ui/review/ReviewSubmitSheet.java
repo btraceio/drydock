@@ -141,6 +141,11 @@ public final class ReviewSubmitSheet extends VBox {
         cancelButton.setOnAction(e -> onCancel.run());
         submitButton.getStyleClass().addAll("review-verdict-action", "primary");
         submitButton.setOnAction(e -> submit());
+        // Enter submits from anywhere EXCEPT the summary itself (a TextArea
+        // consumes plain Enter as a newline, so the two never collide) --
+        // the last screen before an irreversible post should not need the
+        // mouse.
+        submitButton.setDefaultButton(true);
         Region footerSpacer = new Region();
         HBox.setHgrow(footerSpacer, Priority.ALWAYS);
         footer.getChildren().setAll(footerSpacer, cancelButton, submitButton);
@@ -199,9 +204,19 @@ public final class ReviewSubmitSheet extends VBox {
 
     private Region buildSummaryField() {
         summaryField.getStyleClass().add("review-composer-input");
-        summaryField.setPromptText("Leave a summary comment…");
+        summaryField.setPromptText("Leave a summary comment… ⌘⏎ submits");
         summaryField.setWrapText(true);
         summaryField.setPrefRowCount(4);
+        // Enter inside the composer is a newline; the submit gesture from
+        // inside it is ⌘⏎ -- the same contract the step panel's free-text
+        // answer uses, so every multi-line box on the board submits the
+        // same way.
+        summaryField.addEventFilter(javafx.scene.input.KeyEvent.KEY_PRESSED, event -> {
+            if (event.getCode() == javafx.scene.input.KeyCode.ENTER && event.isShortcutDown()) {
+                submit();
+                event.consume();
+            }
+        });
         // The disabled rule is live: every keystroke re-evaluates it against
         // whichever event is selected right now, not just the one at open.
         summaryField.textProperty().addListener((obs, old, text) -> updateSubmitEnabled());

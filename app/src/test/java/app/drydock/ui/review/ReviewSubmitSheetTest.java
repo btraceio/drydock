@@ -93,6 +93,39 @@ class ReviewSubmitSheetTest extends FxTest {
         assertTrue(submit.isDisabled(), "Request changes with a blank summary must disable Submit again");
     }
 
+    /**
+     * The composer is a multi-line box: plain Enter is a newline (and does
+     * NOT submit), ⌘⏎ submits from inside it -- the same contract as the
+     * step panel's free-text answer -- and Enter submits from anywhere
+     * outside it (the default button).
+     */
+    @Test
+    void theSummaryIsAMultiLineComposerWithCmdEnterToSubmit() {
+        TextArea summary = lookup(".review-composer-input").query();
+        interact(() -> {
+            summary.requestFocus();
+            summary.setText("First line");
+            summary.positionCaret(summary.getText().length());
+        });
+        press(javafx.scene.input.KeyCode.ENTER).release(javafx.scene.input.KeyCode.ENTER);
+        interact(() -> summary.appendText("second line"));
+        FxSync.waitForFxEvents();
+
+        assertEquals("First line\nsecond line", summary.getText(),
+                "plain Enter is a newline, not a submit");
+        assertTrue(submitted.isEmpty(), "Enter inside the composer must not submit");
+
+        // Shortcut down BEFORE Enter, or Enter's KEY_PRESSED carries no
+        // shortcut modifier -- the robot presses what it is given in order.
+        press(javafx.scene.input.KeyCode.SHORTCUT);
+        press(javafx.scene.input.KeyCode.ENTER).release(javafx.scene.input.KeyCode.ENTER);
+        release(javafx.scene.input.KeyCode.SHORTCUT);
+        FxSync.waitForFxEvents();
+
+        assertEquals(1, submitted.size(), "⌘⏎ submits from inside the composer");
+        assertEquals("First line\nsecond line", submitted.get(0)[1]);
+    }
+
     @Test
     void everyCommentAndRefusalIsListed() {
         Comment ranged = new Comment("src/Foo.java",

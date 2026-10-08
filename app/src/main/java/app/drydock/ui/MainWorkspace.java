@@ -2002,6 +2002,30 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     }
 
     /** A session's Review sub-tab's window onto the workspace. */
+    /**
+     * Confirming a finding promotes it onto the pull request by default:
+     * "confirmed" is the human vouching for it, and a vouched-for finding
+     * that silently drops out of the posted review was the recurring
+     * complaint -- every one had to be hand-toggled "Post to PR" after being
+     * confirmed, and the ones nobody toggled posted nothing. The explicit
+     * opt-out survives: the margin's toggle is enabled only on a finding
+     * that already {@linkplain ReviewAnnotation#counts() counts} (confirmed),
+     * so this default can never override an exclusion a human actually made
+     * -- only fill the silent default the other way. Pure and static so the
+     * rule is testable without a workspace.
+     */
+    static ReviewAnnotation confirmedForPosting(ReviewAnnotation current, Triage triage) {
+        ReviewAnnotation next = current.withTriage(triage);
+        // The TRANSITION into confirmed promotes; a redundant confirm of an
+        // already-confirmed finding must not, or a human's later exclusion
+        // (postToPr off, triage still confirmed) would be silently undone
+        // by any code path that re-ran the confirm.
+        if (triage != Triage.CONFIRMED || current.triage() == Triage.CONFIRMED || current.postToPr()) {
+            return next;
+        }
+        return next.withPostToPr(true);
+    }
+
     private final class ReviewHost implements SessionReviewView.Host {
 
         /**
@@ -2236,11 +2260,13 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         public void setTriage(ReviewScope scope, ReviewAnnotation finding, Triage triage,
                               Optional<String> reason) {
             annotationStore.mutate(finding.key(), current -> {
-                ReviewAnnotation next = current.withTriage(triage);
+                ReviewAnnotation next = confirmedForPosting(current, triage);
                 return reason.map(r -> next.withReply(
                         new ReviewAnnotation.Message("You", Instant.now(), "Dismissed: " + r))).orElse(next);
             });
         }
+
+
 
         /**
          * A PR scope posts to GitHub and stays in Review -- reviewing
