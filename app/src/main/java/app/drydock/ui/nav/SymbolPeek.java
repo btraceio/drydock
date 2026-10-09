@@ -1,5 +1,7 @@
 package app.drydock.ui.nav;
 
+import app.drydock.review.Provenance;
+
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Objects;
@@ -40,9 +42,25 @@ public record SymbolPeek(
     /**
      * One place the symbol appears. {@code inDiff} drives the {@code in
      * diff} chip; {@code bound} says the scope binder tied this occurrence
-     * to the peeked declaration -- a real reference, not a shared name.
+     * to the peeked declaration -- a real reference, not a shared name;
+     * {@code provenance} is the tier that found it (spec §7 of the usage-
+     * resolution design, 2026-10-08: a language server's confirmation
+     * upgrades its row to {@link Provenance#RESOLVED} without erasing or
+     * reordering anything the lower tiers produced).
      */
-    public record Occurrence(Path relativePath, int line, String text, boolean inDiff, boolean bound) {
+    public record Occurrence(Path relativePath, int line, String text, boolean inDiff, boolean bound,
+                             Provenance provenance) {
+
+        /**
+         * The pre-tier-3 shape: {@code bound} was all an occurrence knew
+         * about its warrant, so the provenance is derived from it -- a
+         * bound row is {@link Provenance#SCOPED}, everything else a
+         * {@link Provenance#MEASURED} name match. Every existing caller
+         * compiles against this arity and behaves exactly as before.
+         */
+        public Occurrence(Path relativePath, int line, String text, boolean inDiff, boolean bound) {
+            this(relativePath, line, text, inDiff, bound, bound ? Provenance.SCOPED : Provenance.MEASURED);
+        }
 
         public Occurrence(Path relativePath, int line, String text, boolean inDiff) {
             this(relativePath, line, text, inDiff, false);
@@ -51,6 +69,7 @@ public record SymbolPeek(
         public Occurrence {
             Objects.requireNonNull(relativePath, "relativePath");
             Objects.requireNonNull(text, "text");
+            Objects.requireNonNull(provenance, "provenance");
         }
 
         /** {@code Sidebar.java L118} -- the prototype's usage-row label. */

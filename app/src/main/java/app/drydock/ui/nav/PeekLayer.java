@@ -1,5 +1,6 @@
 package app.drydock.ui.nav;
 
+import app.drydock.review.Provenance;
 import app.drydock.ui.code.SyntaxHighlighter;
 import javafx.geometry.Pos;
 import javafx.scene.Node;
@@ -50,6 +51,15 @@ public final class PeekLayer extends Pane {
 
     /** The usages list's own body cap: taller than the code's, because it is the only thing on show. */
     private static final double USAGE_MAX_BODY_HEIGHT = 300;
+
+    /**
+     * Whether the one-per-session language-server hint has shown. One app
+     * run is one session (usage-resolution design 2026-10-08, §§3 and 8):
+     * the hint is quiet by contract -- never an error, never a dialog -- and
+     * saying it every peek would be the nagging the "quiet" is there to
+     * prevent. FX-thread-only state, like every render input here.
+     */
+    private static boolean languageServerHintShown;
 
     private final List<SymbolPeek> stack = new ArrayList<>();
     private final List<Region> cards = new ArrayList<>();
@@ -258,12 +268,60 @@ public final class PeekLayer extends Pane {
         VBox card = new VBox(header, body, footer);
         card.getStyleClass().add("peek-card");
         card.setPrefWidth(CARD_WIDTH);
+        maybeAddLanguageServerHint(card, peek);
         return card;
+    }
+
+    /**
+     * The one-per-session quiet footer hint (usage-resolution design
+     * 2026-10-08, §§3 and 8): on the FIRST tier-3-eligible peek of the app
+     * run -- a {@code .java} symbol peek, the only kind a JDT server could
+     * have answered -- when no occurrence resolved. A server that answered
+     * something shows its resolved rows instead; a non-Java peek is never
+     * eligible; a location-only peek has no occurrences to resolve. Never
+     * an error, never a dialog, never twice.
+     */
+    private void maybeAddLanguageServerHint(VBox card, SymbolPeek peek) {
+        if (languageServerHintShown || peek.occurrences().isEmpty()) {
+            return;
+        }
+        String fileName = peek.file().getFileName() == null ? "" : peek.file().getFileName().toString();
+        if (!fileName.endsWith(".java")) {
+            return;
+        }
+        boolean anyResolved = peek.occurrences().stream()
+                .anyMatch(occurrence -> occurrence.provenance() == Provenance.RESOLVED);
+        if (anyResolved) {
+            return;
+        }
+        languageServerHintShown = true;
+        Label hint = new Label("Exact references need a language server — see Settings");
+        hint.getStyleClass().add("peek-lsp-hint");
+        hint.setWrapText(true);
+        card.getChildren().add(hint);
+    }
+
+    /** Test-only: the hint is once per app run, so a test session resets its session. */
+    static void resetLanguageServerHintForTest() {
+        languageServerHintShown = false;
     }
 
     private static Label scopedChip() {
         Label chip = new Label("scoped");
         chip.getStyleClass().add("peek-usage-chip-scoped");
+        return chip;
+    }
+
+    /**
+     * A language server confirmed this row (usage-resolution design
+     * 2026-10-08, §7): the scoped chip's shape in the resolved tone -- one
+     * chip shape, the label says the tier. Carries the provenance's own
+     * modifier class ({@code provenance-resolved}) beside the peek's, the
+     * same convention the step panel's resolved entries follow.
+     */
+    private static Label resolvedChip() {
+        Label chip = new Label("resolved");
+        chip.getStyleClass().addAll("peek-usage-chip-resolved", Provenance.RESOLVED.styleClass());
         return chip;
     }
 
@@ -319,6 +377,12 @@ public final class PeekLayer extends Pane {
         list.getStyleClass().add("peek-usages");
         long bound = peek.occurrences().stream().filter(SymbolPeek.Occurrence::bound).count();
         int total = peek.occurrences().size();
+        // The counts the server line names (§7): from provenance, because
+        // that is the tier each row actually carries.
+        long resolved = peek.occurrences().stream()
+                .filter(occurrence -> occurrence.provenance() == Provenance.RESOLVED).count();
+        long scoped = peek.occurrences().stream()
+                .filter(occurrence -> occurrence.provenance() == Provenance.SCOPED).count();
         String warrant = bound == 0
                 ? "lexical name matches"
                 : bound + " bound by scope · " + (total - bound)
@@ -329,6 +393,16 @@ public final class PeekLayer extends Pane {
         heading.getStyleClass().add("peek-usages-title");
         heading.setWrapText(true);
         list.getChildren().add(heading);
+        if (resolved > 0) {
+            // The server line (§7): the only reliable "a server answered"
+            // signal is a row it confirmed -- the composed answer's status
+            // is always ANSWERED (the lexical floor), so a server that
+            // confirmed nothing keeps the ordinary headline.
+            Label server = new Label(resolved + " resolved · " + scoped + " scoped · "
+                    + (total - resolved - scoped) + " name matches");
+            server.getStyleClass().add("peek-usages-server");
+            list.getChildren().add(server);
+        }
         List<SymbolPeek.Occurrence> shown = peek.occurrences().size() > MAX_USAGES_SHOWN
                 ? peek.occurrences().subList(0, MAX_USAGES_SHOWN)
                 : peek.occurrences();
@@ -341,9 +415,12 @@ public final class PeekLayer extends Pane {
             chip.getStyleClass().add(occurrence.inDiff() ? "peek-usage-chip-diff" : "peek-usage-chip");
             // A bound row says so: it is a real reference, not a shared
             // name, and the difference is exactly what the reader is
-            // scanning the list for.
+            // scanning the list for. A RESOLVED row says the stronger thing
+            // instead -- one chip, the highest tier it earned.
             List<Node> rowChildren = new ArrayList<>(List.of(where, chip));
-            if (occurrence.bound()) {
+            if (occurrence.provenance() == Provenance.RESOLVED) {
+                rowChildren.add(resolvedChip());
+            } else if (occurrence.bound()) {
                 rowChildren.add(scopedChip());
             }
             HBox row = new HBox(7, rowChildren.toArray(Node[]::new));

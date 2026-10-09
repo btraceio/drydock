@@ -26,7 +26,6 @@ import app.drydock.review.tour.TourMigration;
 import app.drydock.review.tour.TourRecord;
 import app.drydock.review.tour.TourStep;
 import app.drydock.ui.UiErrors;
-import app.drydock.ui.nav.LexicalUsageProvider;
 import app.drydock.ui.nav.NavigationTrail;
 import app.drydock.ui.nav.SymbolPeekService;
 
@@ -695,7 +694,15 @@ final class TourController {
             return;
         }
         ReviewNavigation nav = navigation.get();
-        UsageProvider provider = new LexicalUsageProvider(new SymbolPeekService(nav.root(), nav.search()),
+        // The ONE provider construction site (usage-resolution design
+        // 2026-10-08, §7): the host's factory, the same one the diff
+        // column's peeks go through, so the step panel's callees and the
+        // peeks share whatever tier the workspace composes. The default is
+        // exactly the lexical provider this method built itself before the
+        // factory existed; the resolution below never waits on a higher
+        // tier (§6) because the composed future already carries the
+        // lexical floor.
+        UsageProvider provider = host.usageProvider(new SymbolPeekService(nav.root(), nav.search()),
                 view.changedLinesOfReviewDiff());
         for (String name : wanted) {
             calleesResolving.add(name);

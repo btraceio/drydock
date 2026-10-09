@@ -20,6 +20,7 @@ import app.drydock.review.SessionReviewScopes;
 import app.drydock.review.Severity;
 import app.drydock.review.Triage;
 import app.drydock.review.SubmitPlan;
+import app.drydock.review.UsageProvider;
 import app.drydock.review.tour.AnchorIndex;
 import app.drydock.review.tour.CheckProgress;
 import app.drydock.review.tour.HunkOverride;
@@ -33,6 +34,7 @@ import app.drydock.review.tour.TourStep;
 import app.drydock.ui.UiErrors;
 import app.drydock.ui.UiFormats;
 import app.drydock.ui.nav.ExplorerTrailStore;
+import app.drydock.ui.nav.LexicalUsageProvider;
 import app.drydock.ui.nav.NavigationTrail;
 import app.drydock.ui.nav.PeekLayer;
 import app.drydock.ui.nav.SearchRail;
@@ -411,6 +413,26 @@ public final class SessionReviewView extends BorderPane {
          * memory.
          */
         Optional<ReviewNavigation> navigation(ReviewScope scope);
+
+        /**
+         * The usage provider for this board's symbol peeks and callee
+         * resolution (usage-resolution design 2026-10-08, §7: the seam's
+         * single construction site). One factory so the review's two
+         * provider consumers -- the peek over the diff column and the step
+         * panel's callees -- share whatever tier the workspace composes
+         * behind it. The default is exactly the lexical construction the
+         * board built before the factory existed: a {@link
+         * LexicalUsageProvider} over {@code peeks}, marking occurrences
+         * against {@code changedLines}. A higher tier wraps that floor
+         * upgrade-only (§7), and neither consumer ever waits on it (§6:
+         * the lower tier's answer is already in the composed future).
+         *
+         * <p>Called on the FX thread; the provider it returns answers
+         * asynchronously, off it.</p>
+         */
+        default UsageProvider usageProvider(SymbolPeekService peeks, Map<Path, Set<Integer>> changedLines) {
+            return new LexicalUsageProvider(peeks, changedLines);
+        }
 
         /**
          * A peek's {@code a}: asks the session bound to {@code scope} about
@@ -3117,7 +3139,13 @@ public final class SessionReviewView extends BorderPane {
             return false;
         }
         ReviewNavigation nav = navigation.get();
-        pushPeekWhenReady(new SymbolPeekService(nav.root(), nav.search()).peek(symbol, changedLinesOfReviewDiff()),
+        Map<Path, Set<Integer>> changed = changedLinesOfReviewDiff();
+        SymbolPeekService peeks = new SymbolPeekService(nav.root(), nav.search());
+        // The one provider construction site (§7): the board asks its host,
+        // so the peek and the step panel's callees share whatever tier the
+        // workspace composes. A location-only peek (no symbol to resolve)
+        // stays a plain file read; this path resolves a symbol.
+        pushPeekWhenReady(peeks.peek(symbol, changed, host.usageProvider(peeks, changed)),
                 "Looking for " + symbol + "…", "Nothing found for " + symbol, "Could not search for " + symbol);
         return true;
     }
@@ -3760,6 +3788,11 @@ public final class SessionReviewView extends BorderPane {
     /** Test-only: opens {@code peek} over the diff column as a resolved symbol click would. */
     public void diagPushPeek(SymbolPeek peek) {
         peekLayer.push(peek);
+    }
+
+    /** Diagnostic-only: peeks at {@code symbol} exactly as the diff column's symbol click would. */
+    public boolean diagPeekAtSymbol(String symbol) {
+        return peekAtSymbol(symbol);
     }
 
     /** Diagnostic-only: whether a peek card is open. Call on the FX thread. */

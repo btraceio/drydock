@@ -1,7 +1,11 @@
 package app.drydock.ui.nav;
 
+import app.drydock.review.Provenance;
 import app.drydock.review.ScopeBinder;
 import app.drydock.review.SymbolWords;
+import app.drydock.review.UsageProvider;
+import app.drydock.review.UsageProvider.Usage;
+import app.drydock.review.UsageProvider.UsagesAnswer;
 import app.drydock.search.SessionSearchService;
 import app.drydock.search.SessionSearchService.FileMatches;
 import app.drydock.search.SessionSearchService.TextMatch;
@@ -16,6 +20,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -84,6 +89,95 @@ public final class SymbolPeekService {
         Map<Path, Set<Integer>> changed = Map.copyOf(changedLines);
         return searchService.searchText(searchRoot, symbol)
                 .thenApplyAsync(matches -> resolve(symbol, matches, changed), resolveExecutor);
+    }
+
+    /**
+     * The peek through a {@link UsageProvider} (usage-resolution design
+     * 2026-10-08, §§6–7): the provider's declaration answer centres the
+     * card, its usages answer is the occurrence list. With the lexical
+     * provider the card is exactly what {@link #peek(String, Map)} builds,
+     * because the composition is upgrade-only: a provider whose rows
+     * carry no {@link Provenance#RESOLVED} confirmation changes nothing,
+     * and one that does upgrades exactly those occurrences (the tier's
+     * per-occurrence path, MEASURED/SCOPED → RESOLVED, computed off the FX
+     * thread like every peek; §6). A provider declaration with {@code
+     * resolvedDeclaration} true re-centres the card the way the tier-2
+     * unanimous re-centre below does -- the peek shows what the reader
+     * asked about, named by what it actually is (§7).
+     *
+     * <p>The two provider queries can each be a real search, so they run
+     * on the provider's own futures and are combined on this service's
+     * executor; the caller never waits on the FX thread (§6).</p>
+     */
+    public CompletableFuture<Optional<SymbolPeek>> peek(String symbol, Map<Path, Set<Integer>> changedLines,
+                                                        UsageProvider provider) {
+        if (symbol == null || symbol.length() < MIN_SYMBOL_LENGTH) {
+            return CompletableFuture.completedFuture(Optional.empty());
+        }
+        Map<Path, Set<Integer>> changed = Map.copyOf(changedLines);
+        UsageProvider usages = Objects.requireNonNull(provider, "provider");
+        return usages.declaration(symbol)
+                .thenCombineAsync(usages.usagesAnswer(symbol),
+                        (declaration, answer) -> compose(symbol, declaration, answer, changed), resolveExecutor);
+    }
+
+    /**
+     * Maps the provider's answers back onto the peek card's shape, off the
+     * FX thread (§6): occurrences preserve the answer's text and order, the
+     * declaration becomes the card's centre, excerpt and changed-line
+     * marks are read exactly as the lexical path reads them.
+     */
+    private Optional<SymbolPeek> compose(String symbol, Optional<Usage> declaration, UsagesAnswer answer,
+                                        Map<Path, Set<Integer>> changed) {
+        List<SymbolPeek.Occurrence> occurrences = answer.usages().stream()
+                .map(row -> toOccurrence(row, changed))
+                .toList();
+        Usage centre;
+        if (declaration.isPresent()) {
+            centre = declaration.get();
+        } else if (occurrences.isEmpty()) {
+            return Optional.empty();
+        } else {
+            // Defensive only -- the floor's declaration and rows come from
+            // one peek -- but a provider that answered rows and no candidate
+            // still opens the card, on the first occurrence, the peek's own
+            // rule for "no declaration found".
+            Usage first = answer.usages().get(0);
+            centre = new Usage(first.file(), first.line(), first.text(), first.provenance(), false);
+        }
+        Path relativePath = Path.of(centre.file());
+        Path file = searchRoot.toAbsolutePath().normalize().resolve(relativePath).normalize();
+        List<String> excerpt = readExcerpt(file, centre.line());
+        if (excerpt.isEmpty()) {
+            excerpt = List.of(centre.text());
+        }
+        Set<Integer> changedInExcerpt = new java.util.LinkedHashSet<>();
+        Set<Integer> fileChanged = changed.getOrDefault(relativePath, Set.of());
+        for (int i = 0; i < excerpt.size(); i++) {
+            if (fileChanged.contains(centre.line() + i)) {
+                changedInExcerpt.add(centre.line() + i);
+            }
+        }
+        boolean scopeBound = centre.provenance() == Provenance.SCOPED;
+        boolean resolved = centre.provenance() == Provenance.RESOLVED;
+        String title = symbol + " · " + relativePath.getFileName()
+                + (centre.resolvedDeclaration()
+                        ? (scopeBound ? " · scope-bound declaration"
+                                : resolved ? " · resolved declaration" : "")
+                        : " · first occurrence");
+        return Optional.of(new SymbolPeek(symbol, title, file, relativePath, centre.line(),
+                excerpt, changedInExcerpt, occurrences, centre.resolvedDeclaration(), scopeBound));
+    }
+
+    /** One usages row back onto an occurrence, with the row's warrant (§7). */
+    private static SymbolPeek.Occurrence toOccurrence(Usage row, Map<Path, Set<Integer>> changed) {
+        Path relativePath = Path.of(row.file());
+        boolean inDiff = changed.getOrDefault(relativePath, Set.of()).contains(row.line());
+        // A RESOLVED row is as bound as a SCOPED one -- the warrant is
+        // stronger, not different, so the existing bound readers keep
+        // their meaning.
+        boolean bound = row.provenance() == Provenance.SCOPED || row.provenance() == Provenance.RESOLVED;
+        return new SymbolPeek.Occurrence(relativePath, row.line(), row.text(), inDiff, bound, row.provenance());
     }
 
     /**

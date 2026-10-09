@@ -3547,7 +3547,7 @@
     -fx-font-weight: 700;
 }
 .step-panel .step-diagram {
-    -fx-background-color: -drydock-panel;
+    -fx-background-color: -drydock-sidebar;
     -fx-background-radius: 6;
     -fx-border-radius: 6;
     -fx-border-color: -drydock-border;
@@ -3888,7 +3888,7 @@
     -fx-padding: 8 0 0 0;
 }
 .ask-answer-card {
-    -fx-background-color: -drydock-panel;
+    -fx-background-color: -drydock-sidebar;
     -fx-background-radius: 8;
     -fx-border-radius: 8;
     -fx-border-color: -drydock-border;
@@ -4308,10 +4308,34 @@
     -fx-padding: 0 6 0 6;
 }
 .peek-usage-chip-scoped {
-    -fx-background-color: -drydock-accent-dim;
+    -fx-background-color: -drydock-accent-soft;
     -fx-background-radius: 6;
     -fx-padding: 1 5 1 5;
     -fx-font-size: 10px;
+}
+/* A language server confirmed the row (usage-resolution design 2026-10-08,
+ * §7): the scoped chip's shape in the resolved tone -- one chip shape, the
+ * label says the tier. */
+.peek-usage-chip-resolved {
+    -fx-background-color: -drydock-resolved-soft;
+    -fx-background-radius: 6;
+    -fx-text-fill: -drydock-resolved;
+    -fx-padding: 1 5 1 5;
+    -fx-font-size: 10px;
+}
+/* The usages headline's server line (§7): counts by tier, under the title,
+ * faint so the headline stays the primary sentence. */
+.peek-usages-server {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 10px;
+    -fx-padding: 0 0 2 0;
+}
+/* The one-per-session quiet hint (§§3, 8): faint on purpose -- a missing
+ * language server is never an error the reviewer must dismiss. */
+.peek-lsp-hint {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10px;
+    -fx-padding: 2 11 6 11;
 }
 .step-panel .step-impact-entry.provenance-scoped {
     -fx-border-color: -drydock-border;
