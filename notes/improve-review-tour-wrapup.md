@@ -12,6 +12,8 @@ state before concluding it is held).
 Branch `feat/review_tour`, worktree
 `.worktrees/drydock-review-tour`. All work committed and signed:
 
+- 7505c96d — Kotlin joins the scope tier (backlog item 8)
+- 27350473 — fan-in carries its scope tier (backlog item 7)
 - 95258601 — refusal override into the review body (backlog item 6)
 - 8c791353 — bare inherited calls bind (backlog item 5)
 - 5bfeb2d2 — scoped usage binding, tier 2 (q-lsp-resolution-path)
@@ -40,17 +42,20 @@ Branch `feat/review_tour`, worktree
   regression (node dead-rg-replace-flag).
 
 ## Remaining queue
-NOT EMPTY — the complexity-ranked backlog (cairn
-design-backlog-complexity-order) has 3 items left:
-7. Fan-in over the scoped tier — OutOfDiffFanIn is a one-shot blocking
-   name scan; the binder is per-symbol async. Design: batching the
-   binder vs mixed provenance in the fan-in. This is where the
-   remaining usage-link noise surfaces.
-8. Second language binder (Kotlin before Python). Probe-verify grammar
-   shapes FIRST (the Java probe found 4 real bugs before any binder
-   code was written).
-9. LSP tier 3 (jdt.ls) — its own spec (§2/§6); nothing in tier 2 is
-   throwaway for it.
+ONE item left in the complexity-ranked backlog (cairn
+design-backlog-complexity-order):
+9. LSP tier 3 (jdt.ls) — its own SPEC (a document, not code): server
+   discovery by config (never auto-download), a minimal hand-rolled
+   stdio JSON-RPC client (no LSP4J, house style), per-worktree
+   lifecycle, a readiness race with lexical fallback, text sync
+   without owning the editor. Everything in tiers 2-3 (the seam, the
+   fallback, the re-centring, Provenance semantics) serves it
+   unchanged. The new-spec doc goes in docs/superpowers/specs/ per the
+   house doc rules.
+Item 8 done: ScopeBinder + TreeWalker split (Java/Kotlin walkers, shared
+resolution); type index walks .java/.kt/.kts; cross-language binding
+(Kotlin caller → Java declaration) works and is tested; fan-in + peek
+gates extended to Kotlin.
 Backlog item 4 (patch-only fresh-head) closed premise-void: the only
 production PR-scope mint always carries a worktree, so the state
 cannot arise (evidence recorded in the cairn node).

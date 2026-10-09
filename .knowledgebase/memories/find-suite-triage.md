@@ -27,3 +27,16 @@ non-regression modes pass or fail identically in isolation.
 The distinction matters for verification claims: report these as
 environmental with the isolation rerun as evidence, not as silently
 ignored failures.
+
+## Update 2026-10-08 (verified by baseline run)
+The "pass in isolation" claim for the git-worktree timeout set NO
+LONGER holds on this machine: GitStatusServiceTest's four worktree-add
+tests fail even in an isolation run, and the decisive check is now a
+STASHED BASELINE rerun — all four (plus
+WorkspaceMcpSessionContextTest.adoptingARemoteOnlyBranch…) reproduce
+on a clean tree without the branch's diff, proving them environmental
+(slow worktree-add beyond the command timeout), never regressions.
+Triage rule going forward: a suspected environmental failure gets the
+baseline rerun, not just the isolation rerun. Never run a bare
+`git stash drop` after a pop when other sessions' stashes share the
+stack — drop by name or check `stash list` first.

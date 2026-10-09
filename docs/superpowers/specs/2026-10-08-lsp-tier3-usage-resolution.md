@@ -197,7 +197,15 @@ STARTING → READY → INDEXING → INDEXED
   within 60 s of ServiceReady (cached workspace, nothing to import),
   ends the state machine honestly: error → `NOT_INDEXED` for the
   session (tier stays off for this server, the hint explains);
-  no-task → straight to `INDEXED`.
+  no-task → straight to `INDEXED`. A started task that never reports
+  completion is capped at **10 minutes from the first started task** —
+  cold Gradle imports with dependency downloads land comfortably
+  under it for projects of this scale and the `-data` cache makes warm
+  ones seconds, so the cap only decides whether the tier ever turns on
+  this session, never what the reviewer sees meanwhile (tiers 1–2 answer
+  through all of `INDEXING`) — and expiry ends the same way as an
+  error: `NOT_INDEXED` for the session, no late acceptance of a
+  completion that arrives after the cap.
 
 Only `INDEXED` servers answer tier-3 queries. Until then — and this is
 the whole point of the fallback design — queries are answered
@@ -263,8 +271,24 @@ about, named by what it actually is.
 
 **Positions.** LSP lines are 0-based; `Usage` lines are 1-based. The
 +1/−1 lives in `LspUsageProvider` alone. LSP characters are UTF-16
-units — for the Java identifiers this seam queries, ASCII, and the
-column is derived from the line text we already hold, never assumed.
+units — for the Java identifiers this seam queries, ASCII. The column
+is derived from the **raw file line** at the queried `Usage`'s line
+(one bounded read per query, off the FX thread), never assumed: the
+text the seam itself carries is stripped of leading indentation at its
+sources (`SymbolPeekService`, `SymbolIndex`, `LexicalUsageProvider` all
+`strip()` before storing it), so a column computed from the carried
+text would land short of the identifier — inside the token to its left
+— and a language server resolves the token *at* the offset, so the
+position would answer for the wrong identifier while wearing
+`RESOLVED`, the one miss the upgrade-only contract cannot absorb. When
+the raw line cannot be read, the carried text is the fallback column —
+and then a guard is mandatory: **no definition-derived answer is
+accepted unless the declaration line read back contains the symbol as
+a whole word**. That guard is applied to every definition acceptance
+(the raw-read path too — it costs one `contains` and covers every other
+way the position could drift), and it transitively protects the
+references query, which is asked at the now-guarded declaration
+position.
 
 **Fan-in stays tier 2 in v1.** `OutOfDiffFanIn` runs one budgeted scan
 over the whole out-of-diff tree; mixing a server round-trip per changed
