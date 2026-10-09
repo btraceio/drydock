@@ -1589,6 +1589,23 @@ public final class DrydockApplication extends Application {
                     mainWorkspace.diagShowSubTab(arg);
                     System.out.println("[diag] subtab " + arg.strip());
                 }
+                // ⌘F over the review board exactly as the global shortcut
+                // chain dispatches it, then a typed query through the field's
+                // own text property -- the exact path a reader's typing
+                // takes -- so a blanking repro can be scripted with shots.
+                case "findopen" -> {
+                    boolean opened = mainWorkspace.openReviewFind();
+                    System.out.println("[diag] findopen -> " + opened
+                            + ", focus owner: " + describeFocusOwner());
+                }
+                case "findtext" -> {
+                    String read = mainWorkspace.diagFindText(arg);
+                    System.out.println("[diag] findtext -> " + read);
+                }
+                case "findstate" -> {
+                    System.out.println("[diag] findstate -> " + mainWorkspace.diagFindState());
+                    System.out.println("[diag] findlist -> " + mainWorkspace.diagFindListState());
+                }
                 case "rename" -> {
                     mainWorkspace.diagStartRename();
                     System.out.println("[diag] rename started");

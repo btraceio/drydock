@@ -1995,6 +1995,27 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 .orElse(false);
     }
 
+    /** Diagnostic-only: types into the review board's find field and reports its text. */
+    public String diagFindText(String text) {
+        return showingReviewBoard()
+                .map(board -> board.diagFindText(text))
+                .orElse("(review not showing)");
+    }
+
+    /** Diagnostic-only: the review board's find state (open, query, count, rendered rows). */
+    public String diagFindState() {
+        return showingReviewBoard()
+                .map(SessionReviewView::diagFindState)
+                .orElse("(review not showing)");
+    }
+
+    /** Diagnostic-only: the review board's diff list's layout numbers. */
+    public String diagFindListState() {
+        return showingReviewBoard()
+                .map(SessionReviewView::diagFindListState)
+                .orElse("(review not showing)");
+    }
+
     /**
      * ⌘⇧M anywhere: the MCP console's toggle. The reader's own gesture ends
      * any tour wait's claim on the console's visibility, so a wait that ends

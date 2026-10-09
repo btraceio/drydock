@@ -840,10 +840,25 @@ final class ReviewDiffColumn extends BorderPane {
      * {@link #renderGeneration}) is what makes this cheap even though it
      * still touches the whole {@link #rows} list.
      */
+    /**
+     * Forces every visible cell to rebuild its graphic against the current
+     * {@link #renderGeneration}.
+     *
+     * <p>{@link ListView#refresh()} is the whole of it: it re-populates the
+     * visible cells in place (their {@code updateItem} runs again, and the
+     * cache keyed on {@link #renderGeneration} then rebuilds what changed),
+     * without touching {@link #rows} at all. The first version swapped the
+     * items list to empty and back, and that double setAll left the
+     * VirtualFlow's paint layer out of sync with the scene graph: after a
+     * find keystroke rebuilt the rows, thirteen live cells with correctly
+     * sized graphics sat inside the viewport while the card painted nothing
+     * but background (captured on film via the diag driver: 13 cells,
+     * y=44..268, zero non-background pixels). A single-pulse detouch of
+     * every cell also broke live press gestures -- see
+     * {@link DiffCell#updateItem} -- so the refresh is the fix for both.</p>
+     */
     private void refreshRender() {
-        List<ReviewDiffRow> current = List.copyOf(rows);
-        rows.setAll(List.of());
-        rows.setAll(current);
+        list.refresh();
     }
 
     // ---- gutter range selection ---------------------------------------------
@@ -992,6 +1007,88 @@ final class ReviewDiffColumn extends BorderPane {
         }
     }
 
+    /** Diagnostic-only: scrolls the diff list a few rows, for scripted repaint probes. */
+    void diagScrollListBy(int rows_) {
+        list.scrollTo(rows_);
+    }
+
+    /** Diagnostic-only: types into the find field via its text property; returns the text it now has. */
+    String diagFindText(String text) {
+        findField.setText(text);
+        return findField.getText() == null ? "" : findField.getText();
+    }
+
+    /**
+     * Diagnostic-only: the find walk's state and the list's own render
+     * state, for a scripted repro of a reported blanking -- typed text,
+     * open flag, match count, cursor, and how many rows the list carries.
+     */
+    String diagFindState() {
+        return "findOpen=" + findOpen + " query='" + (findField.getText() == null ? "" : findField.getText())
+                + "' matches=" + findMatchKeys.size() + " cursor=" + findCursor
+                + " renderedRows=" + rows.size()
+                + " hits=" + findHitKeys.size() + " currentKey=" + findCurrentKey;
+    }
+
+    /**
+     * Diagnostic-only: the list's real layout numbers (its own size, the
+     * viewport's, the scroll position, how many cells VirtualFlow keeps and
+     * the first cell's geometry) -- the numbers a blank render must be
+     * explainable from.
+     */
+    String diagListLayoutState() {
+        javafx.scene.Node viewport = list.lookup(".virtual-flow");
+        StringBuilder out = new StringBuilder();
+        out.append("listW=").append((int) list.getWidth()).append(" listH=").append((int) list.getHeight())
+                .append(" items=").append(list.getItems().size())
+                .append(" flow=").append(viewport == null ? "none" : viewport.getClass().getSimpleName())
+                .append(" flowW=").append(viewport == null ? -1 : (int) viewport.getBoundsInParent().getWidth())
+                .append(" flowH=").append(viewport == null ? -1 : (int) viewport.getBoundsInParent().getHeight());
+        int cells = 0;
+        int firstIndex = -1;
+        String firstBounds = "-";
+        String firstGraphic = "-";
+        StringBuilder cellYs = new StringBuilder();
+        for (javafx.scene.Node node : list.lookupAll(".list-cell")) {
+            if (node instanceof javafx.scene.control.ListCell<?> cell && !cell.isEmpty()) {
+                cells++;
+                if (cellYs.length() < 120) {
+                    cellYs.append(" i=").append(cell.getIndex())
+                            .append(" y=").append((int) cellY(cell))
+                            .append(" vis=").append(cell.isVisible());
+                    if (firstIndex < 0) {
+                        firstIndex = cell.getIndex();
+                        firstBounds = (int) cell.getWidth() + "x" + (int) cell.getHeight();
+                        firstGraphic = cell.getGraphic() == null ? "none"
+                                : (int) cell.getGraphic().getBoundsInParent().getWidth() + "x"
+                                        + (int) cell.getGraphic().getBoundsInParent().getHeight();
+                    }
+                }
+            }
+        }
+        out.append(" cells=").append(cells).append(" firstIndex=").append(firstIndex)
+                .append(" firstBounds=").append(firstBounds).append(" firstGraphic=").append(firstGraphic)
+                .append(" ys [").append(cellYs).append(" ]");
+        return out.toString();
+    }
+
+    /** The cell's Y in the flow's space (the clip that can hide it). */
+    private static double cellY(javafx.scene.control.ListCell<?> cell) {
+        javafx.scene.Node flow = cell.getParent();
+        int steps = 0;
+        while (flow != null && !flow.getStyleClass().contains("virtual-flow") && steps < 5) {
+            flow = flow.getParent();
+            steps++;
+        }
+        if (flow == null) {
+            return cell.getBoundsInParent().getMinY();
+        }
+        return cell.localToScene(cell.getBoundsInLocal().getMinX(), cell.getBoundsInLocal().getMinY(), true).getY()
+                - flow.localToScene(0, 0, true).getY();
+    }
+
+
+
     /**
      * One key of the gutter selection -- {@code "<file> <lineKey>"}, the
      * same shape every key in this class already uses -- so {@link
@@ -1057,6 +1154,15 @@ final class ReviewDiffColumn extends BorderPane {
         HBox bar = new HBox(6, findField, findCount, previous, next, close);
         bar.setAlignment(Pos.CENTER_LEFT);
         bar.getStyleClass().add("review-find-bar");
+        // The float's size is the bar's OWN preferred size, capped. Left to
+        // its defaults an HBox's max is unbounded, and a managed child of a
+        // StackPane is then stretched to the STACK's full size -- the bar's
+        // opaque .review-find-bar background painted over the whole diff, and
+        // ⌘F looked like the review had gone empty (the field sat mid-left of
+        // the giant bar, which is the position the first report described).
+        // Capped, the StackPane's TOP_RIGHT alignment pins the small bar in
+        // the corner it was designed for.
+        bar.setMaxSize(Region.USE_PREF_SIZE, Region.USE_PREF_SIZE);
         bar.setVisible(false);
         bar.setManaged(false);
         return bar;
@@ -1879,7 +1985,7 @@ final class ReviewDiffColumn extends BorderPane {
     /**
      * Opens the hunk's file on github.com or in github.dev (the web editor),
      * resolved from the scope's checkout per click. A checkout whose origin
-     * is not github.com -- or with no checkout at all -- disables the button
+     * is not github.com — or with no checkout at all — disables the button
      * with a tooltip saying so, the same honesty {@link #openInExplorer}
      * renders; nothing invented is opened.
      */

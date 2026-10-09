@@ -844,9 +844,10 @@ public final class SessionReviewView extends BorderPane {
     private boolean userChoseMode;
 
     /**
-     * @param activityLog the MCP traffic log the {@code \} panel renders, or
+     * @param activityLog the MCP traffic log the tour wait's progress reads
+     *                    its drydock-call counts and its last-call line from, or
      *                    {@code null} when no server is running -- Review must
-     *                    work with no agent at all, so the panel is optional
+     *                    work with no agent at all
      */
     public SessionReviewView(Host host, DiffService diffService, McpActivityLog activityLog) {
         this.host = host;
@@ -3687,6 +3688,24 @@ public final class SessionReviewView extends BorderPane {
     /** Diagnostic-only: the file the hunk diff's cursor is on, if any. */
     Optional<String> diagCurrentFile() {
         return ReviewDiagFxThread.call(this::currentFile);
+    }
+
+    /** Diagnostic-only: types into the find field through its own text property, the way typing does. */
+    public String diagFindText(String text) {
+        return ReviewDiagFxThread.call(() -> {
+            String typed = diffColumn.diagFindText(text);
+            return typed;
+        });
+    }
+
+    /** Diagnostic-only: the find bar's state, for a scripted blanking repro. */
+    public String diagFindState() {
+        return ReviewDiagFxThread.call(diffColumn::diagFindState);
+    }
+
+    /** Diagnostic-only: the diff list's layout numbers, for the same repro. */
+    public String diagFindListState() {
+        return ReviewDiagFxThread.call(diffColumn::diagListLayoutState);
     }
 
     /** Diagnostic-only: the cursor as {@code "<file>#<hunk>"}, or empty. */
