@@ -125,6 +125,66 @@ class LspClientTest {
         }
     }
 
+    /**
+     * Serves {@code data} once {@link #release} is called, then blocks until
+     * closed -- never an EOF, so only a framing error can end the reader.
+     */
+    private static final class BytesThenBlockInputStream extends InputStream {
+        private final byte[] data;
+        private final CountDownLatch released = new CountDownLatch(1);
+        private final CountDownLatch closed = new CountDownLatch(1);
+        private int position;
+
+        BytesThenBlockInputStream(byte[] data) {
+            this.data = data;
+        }
+
+        void release() {
+            released.countDown();
+        }
+
+        @Override
+        public int read() throws IOException {
+            await(released);
+            if (position < data.length) {
+                return data[position++] & 0xff;
+            }
+            await(closed);
+            return -1;
+        }
+
+        @Override
+        public int read(byte[] buffer, int offset, int length) throws IOException {
+            if (length == 0) {
+                return 0;
+            }
+            await(released);
+            if (position < data.length) {
+                int count = Math.min(length, data.length - position);
+                System.arraycopy(data, position, buffer, offset, count);
+                position += count;
+                return count;
+            }
+            await(closed);
+            return -1;
+        }
+
+        @Override
+        public void close() {
+            released.countDown();
+            closed.countDown();
+        }
+
+        private static void await(CountDownLatch latch) throws IOException {
+            try {
+                latch.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("interrupted", e);
+            }
+        }
+    }
+
     /** Serves at most {@code chunkSize} bytes per read, splitting every body. */
     private static final class ChunkedInputStream extends InputStream {
         private final byte[] data;
@@ -581,5 +641,54 @@ class LspClientTest {
             assertFalse(client.readerThread().isAlive(),
                     "the reader thread must end on close");
         }
+    }
+
+    // ------------------------------------------------------ framing bounds
+
+    /** Feeds {@code input} after a request is pending; the request must fail as a transport error. */
+    private static void assertInputTerminatesTheClient(byte[] input) throws Exception {
+        BytesThenBlockInputStream in = new BytesThenBlockInputStream(input);
+        try (LspClient client = new LspClient(in, new ByteArrayOutputStream(), settings(), null)) {
+            CompletableFuture<JsonValue> pending = client.request("hangs", null);
+            in.release();
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> pending.get(5, TimeUnit.SECONDS),
+                    "a framing error must fail the pending request promptly, never hang or OOM");
+            assertInstanceOf(LspClient.TransportException.class, failure.getCause());
+            assertTrue(client.request("late", null).isCompletedExceptionally(),
+                    "the terminated client is closed");
+        }
+    }
+
+    @Test
+    void anOversizedContentLengthTerminatesTheClient() throws Exception {
+        assertInputTerminatesTheClient(raw("Content-Length: " + (LspClient.MAX_CONTENT_LENGTH + 1) + "\r\n\r\n"));
+    }
+
+    @Test
+    void aNegativeContentLengthTerminatesTheClient() throws Exception {
+        assertInputTerminatesTheClient(raw("Content-Length: -1\r\n\r\n"));
+    }
+
+    @Test
+    void anUnterminatedHeaderBlockTerminatesTheClient() throws Exception {
+        byte[] noTerminator = new byte[70 * 1024];
+        java.util.Arrays.fill(noTerminator, (byte) 'a');
+        assertInputTerminatesTheClient(noTerminator);
+    }
+
+    @Test
+    void aLargeFrameUnderTheCapIsAccepted() throws Exception {
+        String padding = "x".repeat(1024 * 1024);
+        byte[] large = frame("{\"jsonrpc\":\"2.0\",\"method\":\"big/notification\","
+                + "\"params\":{\"text\":\"" + padding + "\"}}");
+        assertTrue(large.length < LspClient.MAX_CONTENT_LENGTH);
+        RecordingListener listener = new RecordingListener(1);
+        BytesThenBlockInputStream in = new BytesThenBlockInputStream(large);
+        try (LspClient ignored = new LspClient(in, new ByteArrayOutputStream(), settings(), listener)) {
+            in.release();
+            listener.await();
+        }
+        assertEquals("big/notification", listener.received.get(0).method());
     }
 }

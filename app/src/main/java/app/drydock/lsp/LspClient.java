@@ -83,6 +83,12 @@ public final class LspClient implements AutoCloseable {
     /** Spec section 4: per-request timeout before the tier falls back. */
     static final long DEFAULT_REQUEST_TIMEOUT_MILLIS = 10_000;
 
+    /** Upper bound on one frame body; a larger advertised length means a corrupt stream, not a message. */
+    static final int MAX_CONTENT_LENGTH = 64 * 1024 * 1024;
+
+    /** Upper bound on one header block; stray output without a CRLFCRLF terminator ends the transport. */
+    static final int MAX_HEADER_BYTES = 64 * 1024;
+
     /** JSON-RPC "method not found" — the answer to every server request this client does not implement. */
     private static final int METHOD_NOT_FOUND = -32601;
 
@@ -297,6 +303,9 @@ public final class LspClient implements AutoCloseable {
                 }
                 return null;
             }
+            if (buffer.size() >= MAX_HEADER_BYTES) { // fatal: runReader terminates the transport
+                throw new IOException("LSP header block exceeds " + MAX_HEADER_BYTES + " bytes");
+            }
             buffer.write(b);
             if (b == HEADER_TERMINATOR[matched]) {
                 matched++;
@@ -315,11 +324,18 @@ public final class LspClient implements AutoCloseable {
             }
             if (line.substring(0, colon).trim().equalsIgnoreCase("Content-Length")) {
                 String value = line.substring(colon + 1).trim();
+                int length;
                 try {
-                    return Integer.parseInt(value);
+                    length = Integer.parseInt(value);
                 } catch (NumberFormatException e) {
                     throw new IOException("malformed Content-Length header: " + line.trim());
                 }
+                // Checked before any allocation: an out-of-range frame is a fatal transport error
+                // (runReader terminates and fails every pending request), never an OOM or a skip.
+                if (length < 0 || length > MAX_CONTENT_LENGTH) {
+                    throw new IOException("Content-Length " + length + " outside 0.." + MAX_CONTENT_LENGTH);
+                }
+                return length;
             }
         }
         throw new IOException("frame without a Content-Length header: " + headerBlock.trim());
