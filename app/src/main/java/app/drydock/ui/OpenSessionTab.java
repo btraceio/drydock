@@ -1076,6 +1076,9 @@ final class OpenSessionTab {
         tabSshBadge.getStyleClass().add("repo-remote-chip");
         // One value drives the tooltip AND the visibility, so the two can never
         // disagree (remote() is null for a local repo, which map() turns into empty).
+        // Deliberately a construction-time snapshot: a live session's repository
+        // remote association is immutable for the session's life -- the sidebar's
+        // per-render badge reads the same immutable value.
         Optional<SshRemote> sshRemote = repository.map(Repository::remote);
         sshRemote.ifPresent(remote ->
                 tabSshBadge.setTooltip(new Tooltip(RepositorySidebar.sessionRemoteBadgeTooltipText(remote))));
@@ -1690,13 +1693,27 @@ final class OpenSessionTab {
     }
 
     /**
-     * Types {@code instruction} into the live claude process as real
-     * keystrokes, then submits it with Return; see {@link TerminalBridge#sendPrompt}.
+     * Whether the tab's terminal surface is adopted, i.e. a {@link
+     * #sendPrompt} call just now would DELIVER to the process rather than
+     * park in the hold slot. Read together with {@code sendPrompt}'s true to
+     * tell a delivered hand-off from a held one; benignly racy (a surface
+     * adopted in between reads as held), which only mislabels a delivered
+     * prompt as held.
+     */
+    boolean surfaceAdopted() {
+        return bridge.surfaceAdopted();
+    }
+
+    /**
+     * Types {@code instruction} into the live session's process as real
+     * keystrokes, then submits it — see {@link TerminalBridge#sendPrompt},
+     * which also returns whether the instruction will reach the process
+     * (typed now, or queued because the surface is still being attached).
      * The instruction must be a single line: an embedded newline would
      * submit early.
      */
-    void sendPrompt(String instruction) {
-        bridge.sendPrompt(instruction);
+    boolean sendPrompt(String instruction) {
+        return bridge.sendPrompt(instruction);
     }
 
     /**

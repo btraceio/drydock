@@ -72,6 +72,9 @@ final class TerminalBridge {
     private final ChangeListener<Number> scaleYListener;
 
     private TerminalSurface surface;
+
+    /** Types a prompt before a surface is adopted, delivered on adopt. */
+    private String pendingPrompt;
     private boolean disposed;
     private boolean surfaceClosing;
     /** Whether MainWorkspace wants this tab's terminal shown (selected tab, no modal). */
@@ -139,8 +142,37 @@ final class TerminalBridge {
      * label removal can fire a synchronous geometry update, which must see
      * the surface but need not see the input listeners).</p>
      */
+    /**
+     * Whether a terminal surface is adopted, i.e. a {@link #sendPrompt} call
+     * right now would DELIVER to the process rather than park in the hold
+     * slot. Read together with {@code sendPrompt}'s true to distinguish a
+     * delivered hand-off from a held one.
+     */
+    boolean surfaceAdopted() {
+        return surface != null;
+    }
+
     void adoptSurface(TerminalSurface surface) {
         this.surface = surface;
+        // Deliver what was typed while nothing was attached, at the moment
+        // something is: the ask the reader made still goes out, instead of
+        // having been silently swallowed. One submit; a failure here leaves
+        // the prompt gone, which is the same loss the pre-queue code had --
+        // but now a Run review's own wait will say nothing arrived.
+        if (pendingPrompt != null) {
+            String instruction = pendingPrompt;
+            pendingPrompt = null;
+            try {
+                surface.submitLine(instruction);
+            } catch (IllegalStateException e) {
+                // Surface closed in the teardown gap; see tickAndDraw's identical catch. The
+                // prompt is gone and a caller that reported true for the hold was promised a
+                // dispatch that will not happen -- never silent: the WARNING is the only way
+                // to diagnose why a claimed dispatch (e.g. a Run review) never arrived.
+                LOG.log(Logger.Level.WARNING,
+                        "Held prompt dropped in the adoption gap for session " + sessionId.get(), e);
+            }
+        }
     }
 
     /**
@@ -352,21 +384,40 @@ final class TerminalBridge {
     }
 
     /**
-     * Types {@code instruction} into the live claude process as real
-     * keystrokes, then submits it with Return ({@link
-     * TerminalSurface#submitLine} -- the per-codepoint keyboard codepath,
-     * not paste semantics, which corrupt input once claude enables
-     * bracketed paste). The instruction must be a single line: an embedded
-     * newline would submit early.
+     * Types {@code instruction} into the live session's process as real
+     * keystrokes, then submits it - see {@link TerminalSurface#submitLine}
+     * -- the per-codepoint keyboard codepath, not paste semantics, which
+     * corrupt input once claude enables bracketed paste. The instruction
+     * must be a single line: an embedded newline would submit early.
+     *
+     * <p>Returns true only when the instruction will reach the process: it
+     * was typed, or it was accepted for delivery the moment a surface is
+     * adopted. False says the tab is unwritable (closed, being closed) -- a
+     * caller recording a claim on a dispatch must not claim one it did not
+     * make. Before this contract, a prompt typed while a tab was still
+     * coming up was dropped with no word of it, and a Run review reported
+     * running while producing nothing for its whole 15-minute wait.</p>
+     *
+     * <p>A prompt typed before adoption is held in ONE slot, not a queue:
+     * a re-click of Run review within that window replaces what was held,
+     * so what eventually reaches the process is the ask the reader asked
+     * last -- reviews re-ask themselves, and two stacked identical asks
+     * would each spawn their own subagent.</p>
      */
-    void sendPrompt(String instruction) {
-        if (disposed || surfaceClosing || surface == null) {
-            return;
+    boolean sendPrompt(String instruction) {
+        if (disposed || surfaceClosing) {
+            return false;
+        }
+        if (surface == null) {
+            pendingPrompt = instruction;
+            return true;
         }
         try {
             surface.submitLine(instruction);
+            return true;
         } catch (IllegalStateException e) {
             // Surface closed in the teardown gap; see tickAndDraw's identical catch.
+            return false;
         }
     }
 
@@ -516,6 +567,13 @@ final class TerminalBridge {
      */
     void markSurfaceClosing() {
         surfaceClosing = true;
+        // A prompt held for delivery dies with the tab: nothing will ever
+        // adopt a surface again, so anything still held is undeliverable.
+        // sendPrompt refuses from here on (false), and a caller that reported
+        // true for the hold was reporting a dispatch that will not happen --
+        // its own claim logic (automatic recheck/refresh releases on false)
+        // cannot see this, so the hold is the honest last state.
+        pendingPrompt = null;
     }
 
     /**
@@ -530,6 +588,15 @@ final class TerminalBridge {
             return;
         }
         disposed = true;
+        // Every teardown path must invalidate a held prompt, not just
+        // markSurfaceClosing: a bridge disposed without that call would leave
+        // a prompt parked forever, and a caller that recorded a claim on the
+        // held true would wait on a dispatch that can never happen.
+        if (pendingPrompt != null) {
+            LOG.log(Logger.Level.WARNING, "Disposed bridge still held a prompt for session "
+                    + sessionId.get() + "; it is now undeliverable");
+            pendingPrompt = null;
+        }
         assert Platform.isFxApplicationThread() : "native resource teardown must run on the FX Application Thread";
         // Drop the output-scale listeners so a closed tab's bridge is not
         // kept alive (and re-driven) by the window's scale properties.

@@ -2149,11 +2149,15 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 return;
             }
             finding.patch().ifPresent(patch -> {
-                boolean handedOff = sendToBoundSession(scope,
+                Handoff handoff = sendToBoundSession(scope,
                         "Apply this proposed patch from the review of " + finding.file()
                                 + " (" + patch.summary() + "), then summarize what changed:\n"
                                 + patch.unified());
-                if (handedOff) {
+                // HELD counts as sent, deliberately: the held ask is delivered
+                // on adoption and a drop is the bridge's WARNING log -- the
+                // alternative (claim only DELIVERED) would leave the finding
+                // unsent-looking while the agent is about to receive it.
+                if (handoff != Handoff.REFUSED) {
                     annotationStore.mutate(finding.key(),
                             current -> current.withStatus(AnnotationStatus.SENT));
                 }
@@ -2196,7 +2200,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                         .append(finding.startKey()).append(": ")
                         .append(finding.displayTitle().replaceAll("\\s+", " ")).append(". ");
             }
-            if (!sendToBoundSession(scope, prompt.toString().strip())) {
+            if (sendToBoundSession(scope, prompt.toString().strip()) == Handoff.REFUSED) {
                 return false;
             }
             for (ReviewAnnotation finding : findings) {
@@ -2390,7 +2394,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             if (scope.sessionId().isEmpty()) {
                 return false;
             }
-            return sendToBoundSession(scope, reviewInstruction(scope));
+            return sendToBoundSession(scope, reviewInstruction(scope)) != Handoff.REFUSED;
         }
 
         @Override
@@ -2487,15 +2491,16 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             if (open == null || open.isProcessExited()) {
                 return false;
             }
-            boolean handedOff = sendToBoundSession(scope,
+            Handoff handoff = sendToBoundSession(scope,
                     ReviewInstructions.forRecheck(scope.id(), fromBase, toBase));
             // The one automatic dispatch on this surface, and the only one with
             // no human watching it land. Review called out that it left no
             // trace anywhere: a recheck that silently never happened looked
-            // exactly like one nobody needed.
-            LOG.log(Level.INFO, () -> (handedOff ? "Dispatched" : "Could not dispatch")
-                    + " a recheck for scope " + scope.id() + " (" + fromBase + " -> " + toBase + ")");
-            return handedOff;
+            // exactly like one nobody needed. HELD is named as held, not as
+            // dispatched -- the ask is not with the agent yet.
+            LOG.log(Level.INFO, () -> "Recheck for scope " + scope.id() + " (" + fromBase + " -> " + toBase
+                    + "): " + handoffDescription(handoff));
+            return handoff != Handoff.REFUSED;
         }
 
         @Override
@@ -2504,10 +2509,10 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             if (open == null || open.isProcessExited()) {
                 return false;
             }
-            boolean handedOff = sendToBoundSession(scope, ReviewInstructions.forRiskCheck(scope.id(), checkId));
-            LOG.log(Level.INFO, () -> (handedOff ? "Asked" : "Could not ask") + " the agent to judge check "
-                    + checkId + " for scope " + scope.id());
-            return handedOff;
+            Handoff handoff = sendToBoundSession(scope, ReviewInstructions.forRiskCheck(scope.id(), checkId));
+            LOG.log(Level.INFO, () -> "Risk check " + checkId + " for scope " + scope.id() + ": "
+                    + handoffDescription(handoff));
+            return handoff != Handoff.REFUSED;
         }
 
         /** The tour refresh, sent like {@link #dispatchRiskCheck}: an automatic hand-off, so it is logged. */
@@ -2517,11 +2522,11 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             if (open == null || open.isProcessExited()) {
                 return false;
             }
-            boolean handedOff = sendToBoundSession(scope,
+            Handoff handoff = sendToBoundSession(scope,
                     ReviewInstructions.forTourRefresh(scope.id(), staleStepIds, uncoveredHunks));
-            LOG.log(Level.INFO, () -> (handedOff ? "Asked" : "Could not ask") + " the agent to refresh the tour of "
-                    + "scope " + scope.id() + " (stale " + staleStepIds + ", " + uncoveredHunks + " uncovered hunks)");
-            return handedOff;
+            LOG.log(Level.INFO, () -> "Tour refresh for scope " + scope.id() + " (stale " + staleStepIds
+                    + ", " + uncoveredHunks + " uncovered hunks): " + handoffDescription(handoff));
+            return handoff != Handoff.REFUSED;
         }
 
         @Override
@@ -2721,17 +2726,57 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     }
 
     /**
-     * Sends {@code prompt} to the scope's bound session's live terminal.
-     * False when there is no session or its tab is not open -- the caller
-     * then records nothing, because the hand-off did not happen.
+     * The outcome of a review hand-off to a scope's bound session terminal.
+     * The three outcomes are distinct on purpose: a HELD prompt has NOT
+     * reached the process -- it sits in the tab's single hold slot for the
+     * moment the surface is attached, and a tab dying before adoption loses
+     * it (logged, never silent). Callers decide per outcome whether a held
+     * ask counts as a recorded claim; none of them may treat REFUSED as
+     * anything but "nothing was sent".
      */
-    private boolean sendToBoundSession(ReviewScope scope, String prompt) {
+    private enum Handoff {
+        /** The terminal submitted the prompt to the running process. */
+        DELIVERED,
+        /**
+         * Parked in the tab's hold slot, for the moment the terminal's
+         * surface is attached (a tab still starting). Delivered on adoption;
+         * a loss is the bridge's WARNING log.
+         */
+        HELD,
+        /** No session, no tab, or the tab is going away: nothing was sent, nothing is held. */
+        REFUSED
+    }
+
+    /** The one-line outcome a log line names, per {@link Handoff}. */
+    private static String handoffDescription(Handoff handoff) {
+        return switch (handoff) {
+            case DELIVERED -> "dispatched";
+            case HELD -> "held for the tab's terminal to come up";
+            case REFUSED -> "could not dispatch";
+        };
+    }
+
+    /**
+     * Sends {@code prompt} to the scope's bound session's live terminal and
+     * reports the outcome: {@link Handoff#DELIVERED} when the terminal
+     * submitted it, {@link Handoff#HELD} when it is parked for the moment
+     * the terminal's surface is attached (a tab that is still starting),
+     * {@link Handoff#REFUSED} when there is no session, no tab, or the tab is
+     * going away. The distinction is the claim contract: a HELD ask is not
+     * yet with the agent, so a caller recording "sent" decides explicitly
+     * that HELD counts (the adoption delivers it, a drop is logged).
+     */
+    private Handoff sendToBoundSession(ReviewScope scope, String prompt) {
         OpenSessionTab open = scope.sessionId().map(openTabs::get).orElse(null);
         if (open == null) {
-            return false;
+            return Handoff.REFUSED;
         }
-        open.sendPrompt(prompt);
-        return true;
+        if (!open.sendPrompt(prompt)) {
+            return Handoff.REFUSED;
+        }
+        // Benignly racy: a surface adopted between the two reads mislabels a
+        // delivered prompt as held -- the prompt itself is delivered either way.
+        return open.surfaceAdopted() ? Handoff.DELIVERED : Handoff.HELD;
     }
 
     /** ⌘⇧]: selects the next session tab (wraps around). */
