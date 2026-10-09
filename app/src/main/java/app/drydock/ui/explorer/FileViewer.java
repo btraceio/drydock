@@ -99,7 +99,7 @@ final class FileViewer extends BorderPane {
     /** Findings anchored in the open files; empty without a review scope. */
     private java.util.function.Function<Path, List<ExplorerFinding>> findingsProvider = path -> List.of();
 
-    /** The rail's current query, whose per-line hits are the blue minimap ticks. */
+    /** The rail's current query, whose per-line hits are the blue minimap ticks and whose text the viewer highlights in place. */
     private String searchQuery = "";
 
     /** GitHub deep links this viewer opens from the breadcrumb trail. */
@@ -211,6 +211,8 @@ final class FileViewer extends BorderPane {
     private static final Duration HIGHLIGHT_DEBOUNCE = Duration.ofMillis(150);
 
     private PauseTransition highlightDebounce;
+    /** The live search-highlight debounce, keyed to the rail's settled query. */
+    private PauseTransition searchDebounce;
 
     /** Coalescing window for the post-save diff refresh (the cache is shared with Review). */
     private static final Duration DIFF_REFRESH_COALESCE = Duration.ofSeconds(2);
@@ -372,9 +374,14 @@ final class FileViewer extends BorderPane {
             updateSkimToggle();
             // setSearchQuery only refreshes the tab on screen, so a tab
             // arriving from the background catches up on the current query
-            // here -- otherwise its ticks would show a stale search.
+            // here -- otherwise its ticks (and, now, its text highlight)
+            // would show a stale search.
             if (newTab != null) {
                 refreshMinimap(newTab);
+                CodeArea backOnScreen = areaOf(newTab);
+                if (!searchQuery.isEmpty() && backOnScreen != null) {
+                    rehighlight(newTab, backOnScreen, backOnScreen.getText());
+                }
             }
             onFileShown.accept(newTab == null ? null : (Path) newTab.getProperties().get("drydock.relative"));
         });
@@ -499,7 +506,13 @@ final class FileViewer extends BorderPane {
         this.findingsProvider = provider == null ? path -> List.of() : provider;
     }
 
-    /** The query whose hits the blue minimap ticks show; set by the rail's search. */
+    /**
+     * The query whose hits the blue minimap ticks show; set by the rail's search.
+     * The viewer highlights every match of it in the open file's text too, as a
+     * second style layer over the lexer's (see {@link #rehighlight}), debounced
+     * the same way the rail's keystrokes are: both views must move together,
+     * and this runs once per settled query, not per character.
+     */
     void setSearchQuery(String query) {
         this.searchQuery = query == null ? "" : query.strip();
         // Only the tab on screen, not every open one. Each refresh does a
@@ -510,7 +523,34 @@ final class FileViewer extends BorderPane {
         Tab selected = fileTabs.getSelectionModel().getSelectedItem();
         if (selected != null) {
             refreshMinimap(selected);
+            scheduleSearchHighlight(selected);
         }
+    }
+
+    /**
+     * Applies the current query's match highlight to {@code tab}'s area,
+     * coalesced across the debounce window. Inert without an area (a tab
+     * still loading has none to style).
+     */
+    private void scheduleSearchHighlight(Tab tab) {
+        CodeArea area = areaOf(tab);
+        if (area == null) {
+            return;
+        }
+        if (searchDebounce == null) {
+            searchDebounce = new PauseTransition(
+                    javafx.util.Duration.millis(HIGHLIGHT_DEBOUNCE.toMillis()));
+        }
+        // Re-keyed on every keystroke; the handler re-reads the CURRENT
+        // selection's text at fire time.
+        Tab highlighted = fileTabs.getSelectionModel().getSelectedItem();
+        searchDebounce.setOnFinished(e -> {
+            CodeArea target = highlighted == null ? null : areaOf(highlighted);
+            if (target != null) {
+                rehighlight(highlighted, target, target.getText());
+            }
+        });
+        searchDebounce.playFromStart();
     }
 
     /** {@code z} and the skim/full segmented toggle: per file, and remembered per file. */
@@ -1015,6 +1055,10 @@ final class FileViewer extends BorderPane {
         if (highlightDebounce != null) {
             highlightDebounce.stop();
             highlightDebounce = null;
+        }
+        if (searchDebounce != null) {
+            searchDebounce.stop();
+            searchDebounce = null;
         }
         if (diffRefreshDebounce != null) {
             diffRefreshDebounce.stop();
@@ -1535,47 +1579,26 @@ final class FileViewer extends BorderPane {
             String text = content.text();
             SyntaxHighlighter.Language language =
                     SyntaxHighlighter.Language.fromFileName(file.getFileName().toString());
-            var spans = SyntaxHighlighter.computeHighlighting(text, language);
-            // Search-match highlighting is a SECOND style layer on top of
-            // the lexer spans (handoff: "match highlight as a second style
-            // layer"), merged by union so the token color survives.
-            if (highlightQuery != null && !highlightQuery.isBlank()) {
-                spans = spans.overlay(matchSpans(text, highlightQuery), (base, match) -> {
-                    if (match.isEmpty()) {
-                        return base;
-                    }
-                    List<String> merged = new ArrayList<>(base);
-                    merged.addAll(match);
-                    return merged;
-                });
-            }
-            // The symbol lens (delta part 1): identifiers this file uses more
-            // than once carry an underline and open a peek. Computed here,
-            // with the lexer spans, and NOT re-derived while typing -- the
-            // same load-time-artifact rule the search-match layer follows.
-            Set<String> lensSymbols = SymbolLens.symbolsIn(text);
-            spans = spans.overlay(SymbolLens.spans(text, lensSymbols), (base, lens) -> {
-                if (lens.isEmpty()) {
-                    return base;
-                }
-                List<String> merged = new ArrayList<>(base);
-                merged.addAll(lens);
-                return merged;
-            });
-            // The file's shape, for skim mode and the minimap. Parsed here,
-            // off the FX thread, with everything else this load computes.
+            // The rail's match click names the query it clicked by; every
+            // other opener falls back to the standing query, so the painted
+            // matches and the minimap ticks (which read the field) agree.
+            String effectiveQuery = highlightQuery != null && !highlightQuery.isBlank()
+                    ? highlightQuery : searchQuery;
+            var styled = computeStyledLayers(text, language, effectiveQuery);
+            // The file's shape, for skim mode and the minimap. Parsed off
+            // the FX thread, with everything else this load computes -- the
+            // parse is a full pass over the file, and a FX-thread parse of a
+            // large file is a visible hitch on every open.
             SourceOutline outline = SourceOutline.parse(text);
-            var styled = spans;
             Platform.runLater(() -> {
-                tab.getProperties().put("drydock.lens", lensSymbols);
-                tab.getProperties().put("drydock.outline", outline);
+                tab.getProperties().put("drydock.lens", styled.lensSymbols());
                 // Text first, editing second: a failure attaching editing
                 // (the session constructor's IllegalArgumentException, a
                 // RejectedExecutionException) must degrade to a working
                 // read-only tab, not a permanently blank one.
                 replaceTextQuietly(tab, area, text);
                 if (text.length() > 0) {
-                    area.setStyleSpans(0, styled);
+                    area.setStyleSpans(0, styled.spans());
                 }
                 // The tab may have been closed while this load was off the
                 // FX thread; setOnClosed only cleans up a session that
@@ -1981,6 +2004,12 @@ final class FileViewer extends BorderPane {
      * for the life of the process. Called from the owning tab's removal and
      * from the shutdown chain.</p>
      */
+    /** Diagnostic/test-only: the open code area whose tab carries {@code file}, null while loading. */
+    CodeArea diagOpenArea(Path file) {
+        Tab tab = openFiles.get(file);
+        return tab == null ? null : (CodeArea) tab.getProperties().get("drydock.area");
+    }
+
     void dispose() {
         dispose(true);
     }
@@ -2046,28 +2075,81 @@ final class FileViewer extends BorderPane {
     }
 
     /**
-     * Recomputes the lexer spans for {@code area} off the FX thread. The
-     * search-match layer is deliberately not re-derived: it is a load-time
-     * artifact of "open from search result", and recomputing it while the
-     * user types would fight the caret.
+     * Recomputes the styled layers for {@code area} off the FX thread: the
+     * lexer's spans, the symbol lens and the standing query's matches, via
+     * the shared {@link #computeStyledLayers} -- so a redraw after an edit,
+     * or after a keystroke in the search rail, never drops the query's match
+     * marks or the symbol lens the way a lexer-only rebuild did.
      */
     private void rehighlight(Tab tab, CodeArea area, String text) {
         Path file = (Path) tab.getProperties().get("drydock.file");
         if (file == null) {
             return;
         }
-        SyntaxHighlighter.Language language =
-                SyntaxHighlighter.Language.fromFileName(file.getFileName().toString());
         Thread.ofVirtual().start(() -> {
-            var spans = SyntaxHighlighter.computeHighlighting(text, language);
+            StyleComputation styled = computeStyledLayers(text, SyntaxHighlighter.Language
+                    .fromFileName(file.getFileName().toString()), searchQuery);
             Platform.runLater(() -> {
-                if (text.equals(area.getText()) && !text.isEmpty()) {
-                    area.setStyleSpans(0, spans);
+                if (!text.equals(area.getText()) || text.isEmpty()) {
+                    return;
                 }
+                area.setStyleSpans(0, styled.spans());
+                // The lens the properties map carries has to match the spans
+                // now painted, or peek-at-click reads an out-of-date symbol set.
+                tab.getProperties().put("drydock.lens", styled.lensSymbols());
             });
         });
     }
 
+    /**
+     * One computation of the viewer's full style layering: the lexer's
+     * spans, the symbol lens's underline, and (when {@link #searchQuery}
+     * names something) the query's matches as the second layer. Shared by
+     * the open path, the edit-path rehighlight and the live search
+     * highlight, so all three agree on what a styled file looks like -- the
+     * open-time-only match layer was how a file opened from a rail match
+     * could lose its highlight to the very next rehighlight.
+     *
+     * <p>Runs off the FX thread. The lens set it returns goes back into the
+     * tab's properties by the caller, together with the spans, so a peek's
+     * click test always reads the same set the area paints.</p>
+     */
+    private record StyleComputation(StyleSpans<Collection<String>> spans, Set<String> lensSymbols) { }
+
+    private StyleComputation computeStyledLayers(String text,
+                                                 SyntaxHighlighter.Language language,
+                                                 String query) {
+        StyleSpans<Collection<String>> spans = SyntaxHighlighter.computeHighlighting(text, language);
+        // Search-match highlighting is a SECOND style layer on top of
+        // the lexer spans (handoff: "match highlight as a second style
+        // layer"), merged by union so the token color survives.
+        if (!query.isEmpty()) {
+            spans = spans.overlay(matchSpans(text, query), (base, match) -> {
+                if (match.isEmpty()) {
+                    return base;
+                }
+                List<String> merged = new ArrayList<>(base);
+                merged.addAll(match);
+                return merged;
+            });
+        }
+        // The symbol lens (delta part 1): identifiers this file uses more
+        // than once carry an underline and open a peek. Computed here,
+        // with the lexer spans, and NOT re-derived while typing -- the
+        // same load-time-artifact rule the search-match layer follows.
+        Set<String> lensSymbols = SymbolLens.symbolsIn(text);
+        spans = spans.overlay(SymbolLens.spans(text, lensSymbols), (base, lens) -> {
+            if (lens.isEmpty()) {
+                return base;
+            }
+            List<String> merged = new ArrayList<>(base);
+            merged.addAll(lens);
+            return merged;
+        });
+        return new StyleComputation(spans, lensSymbols);
+    }
+
+    /** Re-styles {@code tab}'s area after a settled edit, debounced the same way. */
     private void scheduleRehighlight(Tab tab, CodeArea area) {
         if (highlightDebounce != null) {
             highlightDebounce.stop();
@@ -2212,6 +2294,7 @@ final class FileViewer extends BorderPane {
             return;
         }
         int line = Math.max(1, currentLineOf(tab));
+        GitHubLinkService.Link[] target = {null};
         // Two quick git lookups on their own thread; the click returns at
         // once and the open happens when they land.
         githubLinks.linkOf(searchRoot, relativePath, line).thenAccept(link ->
@@ -2221,7 +2304,8 @@ final class FileViewer extends BorderPane {
                         button.setTooltip(new Tooltip("This checkout has no github.com remote to link to"));
                         return;
                     }
-                    githubLinks.openInBrowser(vscode ? link.get().vscodeUrl() : link.get().githubUrl());
+                    target[0] = link.get();
+                    githubLinks.openInBrowser(vscode ? target[0].vscodeUrl() : target[0].githubUrl());
                 }));
     }
 
