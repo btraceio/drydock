@@ -104,6 +104,14 @@ public final class SessionExplorerView extends HBox {
     }
 
     /**
+     * Whether the peek's once-per-session language-server hint applies (tier 3
+     * known to be unconfigured); see {@link app.drydock.ui.nav.PeekLayer#setLanguageServerHintApplies}.
+     */
+    public void setLanguageServerHintApplies(BooleanSupplier applies) {
+        viewer.setLanguageServerHintApplies(applies);
+    }
+
+    /**
      * {@code ⌘[} / {@code ⌘]} along the trail. False when the trail cannot
      * move that way, which is what lets the global shortcut fall back to its
      * original meaning (previous/next session tab) at the trail's ends

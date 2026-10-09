@@ -17,6 +17,7 @@ import javafx.scene.layout.VBox;
 import javafx.stage.DirectoryChooser;
 
 import java.io.File;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -315,7 +316,19 @@ public final class SettingsModal extends VBox {
             if (committing[0] || text.equals(lastCommitted[0])) {
                 return;
             }
-            Optional<Path> directory = text.isEmpty() ? Optional.empty() : Optional.of(Path.of(text));
+            // A real commit attempt: clear any earlier invalid-path message.
+            hint.getStyleClass().setAll("settings-hint");
+            hint.setText("New worktrees are created here.");
+            Optional<Path> directory;
+            try {
+                directory = text.isEmpty() ? Optional.empty() : Optional.of(Path.of(text));
+            } catch (InvalidPathException invalid) {
+                // Inline, before anything is disabled or saved: the row stays
+                // usable and the user fixes the text here.
+                hint.getStyleClass().setAll("worktree-error");
+                hint.setText("Not a valid path: " + invalid.getReason());
+                return;
+            }
             committing[0] = true;
             field.setDisable(true);
             browse.setDisable(true);
@@ -475,7 +488,16 @@ public final class SettingsModal extends VBox {
             if (committing[0] || text.equals(lastCommitted[0])) {
                 return; // a no-op close or a re-entered focus-loss: no progress to clear
             }
-            Optional<Path> directory = text.isEmpty() ? Optional.empty() : Optional.of(Path.of(text));
+            Optional<Path> directory;
+            try {
+                directory = text.isEmpty() ? Optional.empty() : Optional.of(Path.of(text));
+            } catch (InvalidPathException invalid) {
+                // Inline, never a dialog, and before committing[0]: nothing is
+                // disabled or saved, so the row stays usable for a retry.
+                status.getStyleClass().setAll("worktree-error", "language-server-status");
+                status.setText("Not a valid path: " + invalid.getReason());
+                return;
+            }
             committing[0] = true;
             field.setDisable(true);
             browse.setDisable(true);

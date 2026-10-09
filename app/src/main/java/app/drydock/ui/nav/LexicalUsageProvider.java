@@ -19,6 +19,11 @@ import java.util.function.Function;
  *
  * <p>{@code changedLines} is the diff scope the peek marks occurrences
  * against, captured once by the caller.</p>
+ *
+ * <p>It inherits {@link UsageProvider#usagesAnswer(String)}'s default, which
+ * is always ANSWERED: the lexical tier is the floor every higher tier
+ * composes over (spec §7), so an empty list means "no occurrences found",
+ * never "could not look".</p>
  */
 public final class LexicalUsageProvider implements UsageProvider {
 
@@ -67,15 +72,5 @@ public final class LexicalUsageProvider implements UsageProvider {
                                 false))
                         .toList())
                 .orElse(List.of()));
-    }
-
-    /**
-     * The lexical tier always answers -- it is the floor every higher
-     * tier composes over (spec §7). An empty list means "no occurrences
-     * found", never "could not look": the answer is always ANSWERED.
-     */
-    @Override
-    public CompletableFuture<UsagesAnswer> usagesAnswer(String symbol) {
-        return usages(symbol).thenApply(rows -> new UsagesAnswer(rows, UsagesAnswer.Status.ANSWERED));
     }
 }

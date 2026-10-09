@@ -547,7 +547,9 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         // §5: a worktree the sidebar actually removed takes its language
         // server AND its persistent ~/.drydock/lsp/<slug> cache with it. The
         // listener fires on WorktreeService's executor thread, off the FX
-        // thread, and never for a removal that failed.
+        // thread, and never for a removal that failed. It returns at once:
+        // the close and the cache delete run on their own virtual thread,
+        // so that executor (and the removal future) never waits on them.
         worktreeService.addRemovalListener((repositoryRoot, removed) ->
                 languageServers.removeAndDeleteCache(removed));
 
@@ -645,8 +647,10 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             skimDefaultCache.set(config.openChangedFilesInSkim());
             // §3: a language-server config change retires every live manager
             // so the next eligible peek lazily starts one under the new paths.
-            // Runs on UserConfig's executor, not the FX thread -- retiring
-            // closes, and a close blocks up to its shutdown grace.
+            // Runs on UserConfig's executor, not the FX thread, and never
+            // blocks it: the swap and drain happen here, the retired
+            // managers close on their own virtual threads (SAVE_EXECUTOR and
+            // UserConfig's executor never wait on a shutdown grace).
             languageServers.updateConfig(config.languageServer());
         });
     }
@@ -665,9 +669,11 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * tier from handing out new ones (§5, the app-stop path; DrydockApplication
      * registers this in its exception-isolated closes). Idempotent, and
      * exception-isolated per manager -- one failed close never skips the
-     * rest. Blocking (each close is already bounded: ~2 s shutdown grace
-     * plus the process close), bounded overall by the small number of live
-     * worktrees.
+     * rest. The registry's one blocking path: the closes run in parallel,
+     * and the wait for them -- and for every earlier retirement still
+     * running -- is bounded by ONE overall
+     * {@link LanguageServerRegistry#CLOSE_ALL_DEADLINE_MILLIS} deadline
+     * (10 s), not one per manager. Runs from DrydockApplication's stop.
      */
     public void closeLanguageServers() {
         languageServers.closeAll();
@@ -2752,6 +2758,12 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         public UsageProvider usageProvider(SymbolPeekService peeks, Map<Path, Set<Integer>> changedLines) {
             UsageProvider lexical = SessionReviewView.Host.super.usageProvider(peeks, changedLines);
             return MainWorkspace.this.languageServers.provider(lexical, reviewRoot);
+        }
+
+        /** The peek's "see Settings" hint applies only while tier 3 is known to be unconfigured. */
+        @Override
+        public boolean languageServerHintApplies() {
+            return MainWorkspace.this.languageServers.hintApplies();
         }
 
         /** The Explorer's peek question ({@link SymbolPeek#askPrompt}), sent to the scope's own session. */
@@ -5180,6 +5192,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         // server. A second session on the same checkout re-creates it lazily
         // on its next eligible peek, warm from the kept -data cache. Off the
         // FX thread -- a manager close blocks up to its shutdown grace.
+        // Other boards' providers look the manager up per query, so none
+        // keeps querying the closed one.
         openTab.worktreeRoot().ifPresent(languageServers::closeForAsync);
         return openTab.disposeNativeResources();
     }
@@ -5204,15 +5218,6 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     }
 
     /**
-     * Creates one tab's {@link TerminalRuntime} + {@link TerminalHostView}
-     * pair (still without a surface -- {@link SessionManager} attaches that)
-     * and wraps them in a fresh {@link OpenSessionTab}, per Gate 0C/0D/0E's
-     * one-runtime-per-window/view pattern, one instance per tab here. The
-     * wakeup callback is bound to the {@link OpenSessionTab} itself via a
-     * one-element holder, since the runtime requires the callback up front,
-     * before the {@link OpenSessionTab} it needs to call back into can exist.
-     */
-    /**
      * The local checkout root a tab's review operates on (usage-resolution
      * tier 3, §§5/8): the session's search root for a local repository,
      * empty for a remote-only one (no checkout to search, no language server
@@ -5225,6 +5230,15 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 : Optional.of(searchRoot);
     }
 
+    /**
+     * Creates one tab's {@link TerminalRuntime} + {@link TerminalHostView}
+     * pair (still without a surface -- {@link SessionManager} attaches that)
+     * and wraps them in a fresh {@link OpenSessionTab}, per Gate 0C/0D/0E's
+     * one-runtime-per-window/view pattern, one instance per tab here. The
+     * wakeup callback is bound to the {@link OpenSessionTab} itself via a
+     * one-element holder, since the runtime requires the callback up front,
+     * before the {@link OpenSessionTab} it needs to call back into can exist.
+     */
     private OpenSessionTab createOpenSessionTab(ManagedSessionId sessionId, String displayName, String agentName,
                                                  AgentKind agentKind, boolean unsupportedAgent,
                                                  Optional<Repository> repository, Path searchRoot) {
@@ -5365,6 +5379,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 // The peek card's "ask the agent" is absent unless this tab's
                 // own process is alive to be asked (delta hard rules).
                 explorer.setAgentBridge(() -> !openTab.isProcessExited(), openTab::sendPrompt);
+                // The quiet "see Settings" peek hint only while tier 3 is known unconfigured.
+                explorer.setLanguageServerHintApplies(languageServers::hintApplies);
                 // Findings for the file being read, so skim rows carry their
                 // ◆ chip and the minimap its red ticks. Read live from the
                 // store rather than snapshotted: the reviewer writes findings
@@ -5408,26 +5424,45 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * created lazily -- never at worktree open, only when the review's
      * usage-provider factory ({@link ReviewHost#usageProvider}) is first
      * asked for a configured worktree; the manager's own lazy start does
-     * everything else, including the §3 validation.
+     * everything else, including the §3 validation. The registry is the
+     * single owner of managers: the providers it hands out look the
+     * worktree's manager up once per query ({@link #managerFor}) and never
+     * capture one, so a manager retired by a tab close, a config change or a
+     * removal is never queried again -- the next eligible query lazily
+     * re-creates one under the current config.
      *
      * <p><strong>Off by default</strong> (§3): with no {@code jdtHome}
      * configured, every {@link #provider} call returns the lexical floor
      * unchanged -- the same instance, so the unconfigured path is
      * byte-identical to tier 2. A config change ({@link #updateConfig})
-     * closes and removes every manager so the next eligible query lazily
-     * starts one under the new paths. Tab close ({@link #closeForAsync})
-     * releases that worktree's starting/running server; actual worktree
-     * removal ({@link #removeAndDeleteCache}) also deletes only that
-     * worktree's persistent ~/.drydock/lsp/&lt;slug&gt; cache; and
-     * {@link #closeAll} is the idempotent app-stop path. Every close is
-     * exception-isolated per manager (one failure never skips the rest).
-     * The blocking paths ({@link #updateConfig}, {@link #closeFor},
-     * {@link #removeAndDeleteCache}, {@link #closeAll}) must never run on
-     * the FX thread -- each close blocks up to its ~2 s shutdown grace
-     * plus the process close; {@link #provider} (FX thread) and
-     * {@link #closeForAsync} (FX thread) are the only FX-thread entries.</p>
+     * retires every manager so the next eligible query lazily starts one
+     * under the new paths. Tab close ({@link #closeForAsync}) releases that
+     * worktree's starting/running server; actual worktree removal
+     * ({@link #removeAndDeleteCache}) also deletes only that worktree's
+     * persistent ~/.drydock/lsp/&lt;slug&gt; cache; and {@link #closeAll} is
+     * the idempotent app-stop path. Every close is exception-isolated per
+     * manager (one failure never skips the rest).</p>
+     *
+     * <p>One {@link #lock} serializes config/closed writes, drains, removals
+     * and manager creation, so no manager is ever created under a config
+     * {@link #updateConfig} already replaced; it is never held across a
+     * blocking close. Every blocking close and cache walk runs on its own
+     * registered virtual thread ({@link #offThread}; N managers close in
+     * parallel), so the FX thread, UserConfig's single-thread executor and
+     * WorktreeService's executor never wait on one. The only blocking paths
+     * are {@link #closeFor} (synchronous by contract) and {@link #closeAll},
+     * which awaits every retirement still running -- earlier ones included --
+     * under ONE overall {@link #CLOSE_ALL_DEADLINE_MILLIS} deadline, not one
+     * per manager.</p>
      */
     static final class LanguageServerRegistry {
+
+        /**
+         * Overall bound on {@link #closeAll}'s wait: about one manager's worst
+         * close (~2 s shutdown grace + ~7 s client/process joins) plus slack,
+         * whatever the worktree count, since the closes run in parallel.
+         */
+        static final long CLOSE_ALL_DEADLINE_MILLIS = 10_000;
 
         private final Map<Path, JdtServerManager> managers = new ConcurrentHashMap<>();
         /** Where the tier-3 wrappers read files; released by {@link #closeAll} (lifecycle symmetry). */
@@ -5446,9 +5481,23 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         private final Map<Path, Path> canonicalKeys = new ConcurrentHashMap<>();
         private final BiFunction<Path, UserConfig.LanguageServer, JdtServerManager> managerFactory;
         private final BiConsumer<Path, UserConfig.LanguageServer> cacheDeleter;
+        /**
+         * Serializes writes to {@link #config}, {@link #closed} and
+         * {@link #configLoaded}, every drain and removal, and every manager
+         * creation; never held across a blocking close, join or cache walk.
+         */
+        private final Object lock = new Object();
+        /** Every off-thread retirement still running; {@link #closeAll} awaits them all. */
+        private final Set<CompletableFuture<Void>> retiring = ConcurrentHashMap.newKeySet();
         private volatile UserConfig.LanguageServer config =
                 new UserConfig.LanguageServer(Optional.empty(), Optional.empty());
         private volatile boolean closed;
+        /**
+         * Whether a config was ever delivered by {@link #updateConfig}; written
+         * AFTER {@link #config}, so a true read here makes the loaded config
+         * visible. Until then "unconfigured" is unknown, not empty.
+         */
+        private volatile boolean configLoaded;
 
         /** Production: real managers, the ProcessRunner java probe, ~/.drydock/lsp caches. */
         LanguageServerRegistry() {
@@ -5472,16 +5521,14 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
         /**
          * Deletes {@code root}'s persistent ~/.drydock/lsp/&lt;slug&gt; cache
-         * (§4: kept across closes, deleted only on worktree removal). A
-         * throwaway manager carries the slug knowledge: construction is
-         * cheap and validates nothing, so an unconfigured tier (no
-         * {@code jdtHome}) still deletes its cache.
+         * (§4: kept across closes, deleted only on worktree removal) straight
+         * from the path through {@link JdtServerManager}'s static helpers, so
+         * an unconfigured tier (no {@code jdtHome}) still deletes it and no
+         * manager or scheduler is built. The config is not needed.
          */
         private static void deleteCacheFor(Path root, UserConfig.LanguageServer config) {
-            UserConfig.LanguageServer effective = config.jdtHome().isPresent() ? config
-                    : new UserConfig.LanguageServer(Optional.of(root), Optional.empty());
-            try (JdtServerManager throwaway = productionManager(root, effective)) {
-                throwaway.deleteCache();
+            try {
+                JdtServerManager.deleteCacheDir(JdtServerManager.dataDirFor(root, null));
             } catch (RuntimeException e) {
                 LOG.log(Level.WARNING, "could not delete the language server cache of " + root, e);
             }
@@ -5490,14 +5537,23 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         /**
          * Caches the asynchronously loaded config; a change retires every
          * live manager (§3) so the next eligible query starts fresh under
-         * the new paths. Runs on UserConfig's executor, never the FX thread.
+         * the new paths. Runs on UserConfig's single-thread executor: the
+         * swap and drain happen here, under {@link #lock} and in order with
+         * every other load, and return at once; the blocking closes run on
+         * registered virtual threads, so that executor never stalls. The
+         * future completes when the retired managers are closed (already
+         * complete when nothing was retired).
          */
-        void updateConfig(UserConfig.LanguageServer next) {
-            if (closed || next.equals(config)) {
-                return;
+        CompletableFuture<Void> updateConfig(UserConfig.LanguageServer next) {
+            List<JdtServerManager> retired = List.of();
+            synchronized (lock) {
+                if (!closed && !next.equals(config)) {
+                    config = next;
+                    retired = drainLocked();
+                }
+                configLoaded = true; // after config: a true read makes the loaded config visible
             }
-            config = next;
-            closeEach(drain());
+            return closeEach(retired);
         }
 
         /**
@@ -5505,58 +5561,141 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
          * when tier 3 is gated off -- no checkout, no configuration, or the
          * registry closed; the same instance, byte-identical to the
          * default -- otherwise the floor wrapped upgrade-only over this
-         * worktree's lazily created manager. Called on the FX thread; the
-         * provider it returns answers asynchronously, off it.
+         * worktree's manager, which the provider looks up through
+         * {@link #managerFor} once per query (created eagerly here once, so
+         * the laziness oracle counts it; it starts nothing). Called on the
+         * FX thread; the provider it returns answers asynchronously, off it.
          */
         UsageProvider provider(UsageProvider lexical, Optional<Path> worktreeRoot) {
             if (closed || worktreeRoot.isEmpty() || config.jdtHome().isEmpty()) {
                 return lexical;
             }
             Path root = key(worktreeRoot.get());
-            JdtServerManager manager = managers.computeIfAbsent(root, key -> managerFactory.apply(key, config));
-            return new LspUsageProvider(lexical, root, manager, fileReader);
+            if (managerFor(root).isEmpty()) {
+                return lexical;
+            }
+            return new LspUsageProvider(lexical, root, () -> managerFor(root), fileReader);
+        }
+
+        /**
+         * The worktree's manager under the current config, created lazily;
+         * empty while the tier is gated off (closed or unconfigured). Holds
+         * {@link #lock} so no manager is ever created under a retired config.
+         * {@code root} is already a registry key.
+         */
+        Optional<JdtServerManager> managerFor(Path root) {
+            synchronized (lock) {
+                if (closed || config.jdtHome().isEmpty()) {
+                    return Optional.empty();
+                }
+                UserConfig.LanguageServer current = config;
+                return Optional.of(managers.computeIfAbsent(root, k -> managerFactory.apply(k, current)));
+            }
+        }
+
+        /**
+         * Whether the peek's once-per-session "see Settings" hint applies: a
+         * config was loaded, the tier is open, and no {@code jdtHome} is set.
+         * FX-safe: volatile reads only, no I/O; read order loaded, closed, config.
+         */
+        boolean hintApplies() {
+            return configLoaded && !closed && config.jdtHome().isEmpty();
         }
 
         /**
          * FX-thread entry for tab close (§5): pays nothing when the worktree
-         * has no manager, otherwise schedules the blocking close off the FX
-         * thread (a manager close blocks up to its shutdown grace).
+         * has no manager, otherwise detaches it now and closes it on a
+         * registered virtual thread (a manager close blocks up to its
+         * shutdown grace). Other tabs' providers on the same checkout look
+         * the manager up per query, so they re-create it on their next one.
          */
         void closeForAsync(Path root) {
-            if (managers.containsKey(key(root))) {
-                Thread.ofVirtual().name("lsp-tab-close").start(() -> closeFor(root));
+            Path normalized = key(root);
+            JdtServerManager manager;
+            synchronized (lock) {
+                manager = managers.remove(normalized);
+            }
+            if (manager != null) {
+                closeEach(List.of(manager));
             }
         }
 
         /** Closes (cancelling a starting one) and removes the worktree's manager; blocking. */
         void closeFor(Path root) {
-            JdtServerManager manager = managers.remove(key(root));
+            Path normalized = key(root);
+            JdtServerManager manager;
+            synchronized (lock) {
+                manager = managers.remove(normalized);
+            }
             if (manager != null) {
                 closeQuietly(manager);
             }
         }
 
         /**
-         * Worktree removal (§5): close and remove the worktree's manager and
-         * delete its persistent cache -- and delete the cache even when no
-         * manager ever existed, since the cache outlives every manager
-         * (§4: kept between runs). Blocking; runs on WorktreeService's
-         * executor.
+         * Worktree removal (§5): detaches the worktree's manager now, then --
+         * on a registered virtual thread, close BEFORE delete so no live
+         * jdt.ls holds the -data dir while it goes -- closes it and deletes
+         * its persistent cache, the cache even when no manager ever existed
+         * (§4: it outlives every manager). Called on WorktreeService's
+         * executor, which never waits on either: the removal future
+         * completes with git. The returned future completes when both are done.
          */
-        void removeAndDeleteCache(Path root) {
+        CompletableFuture<Void> removeAndDeleteCache(Path root) {
             Path normalized = key(root);
-            JdtServerManager manager = managers.remove(normalized);
-            if (manager != null) {
-                closeQuietly(manager);
+            JdtServerManager manager;
+            UserConfig.LanguageServer snapshot;
+            synchronized (lock) {
+                manager = managers.remove(normalized);
+                snapshot = config;
             }
-            cacheDeleter.accept(normalized, config);
+            return offThread("lsp-worktree-removed", () -> {
+                if (manager != null) {
+                    closeQuietly(manager);
+                }
+                try {
+                    cacheDeleter.accept(normalized, snapshot);
+                } catch (RuntimeException e) {
+                    LOG.log(Level.WARNING, "could not delete the language server cache of " + normalized, e);
+                }
+            });
         }
 
-        /** The idempotent stop path (§5): closes every manager and ends the tier. */
+        /**
+         * The idempotent stop path (§5): ends the tier, closes every manager
+         * in parallel, and awaits those closes AND every earlier retirement
+         * still running (config change, tab close, removal) under one overall
+         * {@link #CLOSE_ALL_DEADLINE_MILLIS} deadline. A close still running
+         * at the deadline is logged and left to finish (each is self-bounded);
+         * it is never interrupted. Blocking by design (app stop).
+         */
         void closeAll() {
-            closed = true;
-            closeEach(drain());
-            fileReader.shutdown();
+            List<JdtServerManager> drained;
+            synchronized (lock) {
+                if (closed) {
+                    return;
+                }
+                closed = true;
+                drained = drainLocked();
+            }
+            closeEach(drained);
+            List<CompletableFuture<Void>> pending = List.copyOf(retiring);
+            try {
+                CompletableFuture.allOf(pending.toArray(CompletableFuture[]::new))
+                        .get(CLOSE_ALL_DEADLINE_MILLIS, TimeUnit.MILLISECONDS);
+            } catch (TimeoutException e) {
+                long unfinished = pending.stream().filter(future -> !future.isDone()).count();
+                LOG.log(Level.WARNING, unfinished + " of " + pending.size()
+                        + " JDT language server closes still running after " + CLOSE_ALL_DEADLINE_MILLIS
+                        + " ms; each is self-bounded and finishes in the background");
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                LOG.log(Level.WARNING, "interrupted while awaiting the JDT language server closes", e);
+            } catch (ExecutionException e) { // cannot happen: every retirement completes normally
+                LOG.log(Level.WARNING, "a JDT language server retirement failed", e);
+            } finally {
+                fileReader.shutdown();
+            }
         }
 
         /** The live-manager count; the laziness oracle. */
@@ -5570,7 +5709,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                     WorktreeService::canonical);
         }
 
-        private List<JdtServerManager> drain() {
+        /** Removes every manager; the caller holds {@link #lock}. */
+        private List<JdtServerManager> drainLocked() {
             List<JdtServerManager> toClose = new ArrayList<>();
             for (Path key : List.copyOf(managers.keySet())) {
                 JdtServerManager manager = managers.remove(key);
@@ -5581,10 +5721,49 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             return toClose;
         }
 
-        private static void closeEach(List<JdtServerManager> toClose) {
-            for (JdtServerManager manager : toClose) {
-                closeQuietly(manager);
+        /**
+         * Closes {@code toClose} in parallel, one registered virtual thread per
+         * manager, so N closes take about one close's time; nothing to close
+         * starts no thread. The future completes when every close ended.
+         */
+        private CompletableFuture<Void> closeEach(List<JdtServerManager> toClose) {
+            if (toClose.isEmpty()) {
+                return CompletableFuture.completedFuture(null);
             }
+            CompletableFuture<?>[] closes = new CompletableFuture<?>[toClose.size()];
+            for (int i = 0; i < closes.length; i++) {
+                JdtServerManager manager = toClose.get(i);
+                closes[i] = offThread("lsp-close", () -> closeQuietly(manager));
+            }
+            return CompletableFuture.allOf(closes);
+        }
+
+        /**
+         * The registry's only way off the caller's thread: runs blocking
+         * close/delete work on its own virtual thread, registered in
+         * {@link #retiring} until it ends so {@link #closeAll} can await it.
+         * A failure is logged, never silent; the future always completes
+         * normally, and is never left registered.
+         */
+        private CompletableFuture<Void> offThread(String name, Runnable work) {
+            CompletableFuture<Void> done = new CompletableFuture<>();
+            retiring.add(done);
+            done.whenComplete((ignored, error) -> retiring.remove(done));
+            try {
+                Thread.ofVirtual().name(name).start(() -> {
+                    try {
+                        work.run();
+                    } catch (RuntimeException e) {
+                        LOG.log(Level.WARNING, "language server retirement failed (" + name + ")", e);
+                    } finally {
+                        done.complete(null);
+                    }
+                });
+            } catch (RuntimeException e) {
+                LOG.log(Level.WARNING, "could not start language server retirement (" + name + ")", e);
+                done.complete(null);
+            }
+            return done;
         }
 
         private static void closeQuietly(JdtServerManager manager) {

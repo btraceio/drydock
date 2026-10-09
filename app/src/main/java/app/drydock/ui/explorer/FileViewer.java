@@ -684,6 +684,11 @@ final class FileViewer extends BorderPane {
         peekLayer.setAgentAvailable(available);
     }
 
+    /** See {@link PeekLayer#setLanguageServerHintApplies}: the hint is claimed only when it applies. */
+    void setLanguageServerHintApplies(java.util.function.BooleanSupplier applies) {
+        peekLayer.setLanguageServerHintApplies(applies);
+    }
+
     /** Handler for the peek card's {@code a}: hands the symbol and its occurrences to the bound session. */
     void setOnAskAgent(java.util.function.Consumer<SymbolPeek> handler) {
         peekLayer.setOnAsk(handler);

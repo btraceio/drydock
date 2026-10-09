@@ -435,6 +435,18 @@ public final class SessionReviewView extends BorderPane {
         }
 
         /**
+         * Whether the peek's quiet once-per-session "see Settings" hint
+         * applies: true only while usage-resolution tier 3 is known to be
+         * unconfigured, so a configured server (starting, indexing, invalid)
+         * is never told to go configure itself, and an inapplicable peek never
+         * claims the once-per-session hint. FX thread; must not block.
+         * Default: applies (the unwired behaviour).
+         */
+        default boolean languageServerHintApplies() {
+            return true;
+        }
+
+        /**
          * A peek's {@code a}: asks the session bound to {@code scope} about
          * {@code peek}, as the Explorer's peek does. False when there is no
          * running session to ask.
@@ -2977,6 +2989,7 @@ public final class SessionReviewView extends BorderPane {
         peekLayer.setOnStackFull(() -> notice("Peek stack is full — esc to unwind"));
         // Absent, not greyed, on a scope no session is bound to (delta hard rules).
         peekLayer.setAgentAvailable(() -> selectedScope().flatMap(ReviewScope::sessionId).isPresent());
+        peekLayer.setLanguageServerHintApplies(host::languageServerHintApplies);
         diffColumn.setSymbolClickHandler(this::peekAtSymbol);
         trailBar.setOnStep(direction -> navigateTrail(direction));
         trailBar.setOnGoTo(index -> trail.goTo(index).ifPresent(waypoint -> {

@@ -72,6 +72,8 @@ public final class PeekLayer extends Pane {
     private Runnable onStackFull = () -> { };
     private Runnable onChanged = () -> { };
     private BooleanSupplier agentAvailable = () -> false;
+    /** Whether the language-server hint applies at all; see {@link #setLanguageServerHintApplies}. */
+    private BooleanSupplier languageServerHintApplies = () -> true;
 
     public PeekLayer() {
         getStyleClass().add("peek-layer");
@@ -120,6 +122,19 @@ public final class PeekLayer extends Pane {
      */
     public void setAgentAvailable(BooleanSupplier available) {
         this.agentAvailable = available == null ? () -> false : available;
+    }
+
+    /**
+     * Whether the once-per-session language-server hint applies: the owner
+     * answers true only while usage-resolution tier 3 is known to be
+     * unconfigured. A configured tier (starting, indexing, invalid, ...) is
+     * never told to go configure itself, and a peek the hint does not apply
+     * to never claims the once-per-session flag -- it stays available for a
+     * peek it does apply to. Evaluated on the FX thread at card build; must
+     * be cheap and non-blocking. Default: applies (unwired behaviour).
+     */
+    public void setLanguageServerHintApplies(BooleanSupplier applies) {
+        this.languageServerHintApplies = applies == null ? () -> true : applies;
     }
 
     public int depth() {
@@ -278,8 +293,11 @@ public final class PeekLayer extends Pane {
      * run -- a {@code .java} symbol peek, the only kind a JDT server could
      * have answered -- when no occurrence resolved. A server that answered
      * something shows its resolved rows instead; a non-Java peek is never
-     * eligible; a location-only peek has no occurrences to resolve. Never
-     * an error, never a dialog, never twice.
+     * eligible; a location-only peek has no occurrences to resolve; and the
+     * owner's {@link #setLanguageServerHintApplies applicability check}
+     * (tier 3 unconfigured) must hold. The once-per-session flag is claimed
+     * only when the hint is actually added. Never an error, never a dialog,
+     * never twice.
      */
     private void maybeAddLanguageServerHint(VBox card, SymbolPeek peek) {
         if (languageServerHintShown || peek.occurrences().isEmpty()) {
@@ -293,6 +311,9 @@ public final class PeekLayer extends Pane {
                 .anyMatch(occurrence -> occurrence.provenance() == Provenance.RESOLVED);
         if (anyResolved) {
             return;
+        }
+        if (!languageServerHintApplies.getAsBoolean()) {
+            return; // not applicable (tier 3 configured, or not yet known): the claim is kept
         }
         languageServerHintShown = true;
         Label hint = new Label("Exact references need a language server — see Settings");
