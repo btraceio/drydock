@@ -43,6 +43,8 @@ final class FakeReviewHost implements SessionReviewView.Host {
     final TourStore tours;
 
     final List<String> handedOffPrompts = new ArrayList<>();
+    /** The subjects every bar-Explain ask named, in order. */
+    final List<String> handedOffExplains = new ArrayList<>();
 
     /** Whether {@link #showMcpConsole} succeeds (the console "exists"); the counters follow. */
     boolean consoleAutoOpens;
@@ -298,6 +300,15 @@ final class FakeReviewHost implements SessionReviewView.Host {
      * through {@code sendToBoundSession}'s own boolean.
      */
     boolean sessionBound = true;
+
+    @Override
+    public boolean askAgentToExplain(ReviewScope scope, String subject) {
+        if (!sessionBound) {
+            return false;
+        }
+        handedOffExplains.add(subject);
+        return true;
+    }
 
     @Override
     public boolean showMcpConsole() {

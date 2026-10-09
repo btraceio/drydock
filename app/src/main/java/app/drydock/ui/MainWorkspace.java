@@ -2416,6 +2416,20 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                     findings);
         }
 
+        /**
+         * The bar's Explain: the prompt carries the ask; the agent's answer
+         * arrives in its own conversation, which is where the reader looks
+         * for it -- the same delivery path every other free-text ask takes.
+         */
+        @Override
+        public boolean askAgentToExplain(ReviewScope scope, String subject) {
+            Handoff handoff = sendToBoundSession(scope,
+                    ReviewInstructions.forExplain(scope.id(), subject));
+            LOG.log(Level.INFO, () -> "Asked the agent to explain " + subject + " for scope "
+                    + scope.id() + " (" + handoffDescription(handoff) + ")");
+            return handoff != Handoff.REFUSED;
+        }
+
         @Override
         public boolean sendFindingsToAuthor(ReviewScope scope, List<ReviewAnnotation> findings) {
             return handFindingsToSession(scope,

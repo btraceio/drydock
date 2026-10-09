@@ -160,6 +160,20 @@ public final class ReviewInstructions {
      * One {@code review_ask_answer} call closes the question; the reviewer
      * reads the answer beside the code, not in this conversation.
      */
+    /**
+     * What the verdict bar's "Explain" sends: the agent reads the change
+     * itself through the tools and replies in its own conversation, so this
+     * carries the ask and the read-only shape of it, one line ({@code
+     * sendPrompt} submits at the first newline).
+     */
+    public static String forExplain(String scopeId, String subject) {
+        Objects.requireNonNull(scopeId, "scopeId");
+        Objects.requireNonNull(subject, "subject");
+        return "For review handle " + scopeId + ": explain the change on \"" + subject + "\" -- read its "
+                + "hunks in review_scope and the code around them, then reply here with what it does, why it "
+                + "is built this way, and what to double-check before approving; read-only ask, record no findings";
+    }
+
     public static String forPeekAsk(String questionId) {
         Objects.requireNonNull(questionId, "questionId");
         return "Answer with ONE review_ask_answer call (questionId " + questionId

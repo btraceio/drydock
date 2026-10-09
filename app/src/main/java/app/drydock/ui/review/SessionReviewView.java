@@ -346,6 +346,16 @@ public final class SessionReviewView extends BorderPane {
         boolean askAgentToFix(ReviewScope scope, String subject, List<ReviewAnnotation> findings);
 
         /**
+         * Asks the scope's bound session to READ the file's change and
+         * explain it in its own conversation. False when there is no session
+         * to ask (the caller must say so, never pretend). Default false, so
+         * hosts that predate the ask stay valid.
+         */
+        default boolean askAgentToExplain(ReviewScope scope, String subject) {
+            return false;
+        }
+
+        /**
          * The tour's "Send back to the author": hands confirmed blocking
          * findings to the scope's bound session through the same path as
          * {@link #askAgentToFix}, marking them sent. False when nothing was
@@ -1852,23 +1862,16 @@ public final class SessionReviewView extends BorderPane {
         }
 
         /**
-         * The bar's Approve / Request changes: the next unread hunk of
-         * {@code file}. Remembered for {@code u} through {@link
-         * #rememberSettle}, as a key's settle is, so {@code u} after a click
-         * undoes the click, not the keyboard settle before it.
+         * The bar's Approve / Request changes settle exactly what {@code
+         * a}/{@code r} settle -- the bar's target IS the cursor file in the
+         * hunk diff -- and then advance the cursor the same way. The bar's
+         * version used to stop at the settle and leave the reader on the
+         * hunk they had just cleared, which the label "(next unread hunk)"
+         * promised and the cursor did not do. Both paths remember the settle
+         * inside {@link #rememberSettle}, shared, so they never drift apart.
          */
         private void settle(String file, ReviewVerdict.Decision decision) {
-            selectedScope().ifPresent(scope -> {
-                List<String> digests = digestsForAction(file, false);
-                if (!allRendered(digests)) {
-                    notice(HUNK_NOT_RENDERED);
-                    return;
-                }
-                Map<String, Optional<ReviewVerdict.Decision>> before = verdictsOf(scope, digests);
-                host.setVerdict(scope, digests, Optional.of(decision), blockedFor(scope, digests));
-                recordHunkOverrides(scope, digests, decision, before);
-                rememberSettle(scope, digests, decision, file);
-            });
+            verdictAction(decision, false);
         }
 
         @Override
@@ -1892,6 +1895,18 @@ public final class SessionReviewView extends BorderPane {
                                     .filter(ReviewAnnotation::counts)
                                     .filter(finding -> finding.file().equals(onBar.get()))
                                     .toList()))
+                    .orElse(false);
+        }
+
+        @Override
+        public boolean askAgentToExplain(ReviewVerdictBar.Target target) {
+            // Same never-pretend rule as askAgentToFix above: the boolean is
+            // the bar's only honesty, so it is returned untouched.
+            Optional<String> onBar = fileOnBar(target);
+            if (onBar.isEmpty()) {
+                return false;
+            }
+            return selectedScope().map(scope -> host.askAgentToExplain(scope, onBar.get()))
                     .orElse(false);
         }
 

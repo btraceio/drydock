@@ -63,6 +63,17 @@ final class ReviewVerdictBar extends VBox {
          */
         boolean askAgentToFix(Target target);
 
+        /**
+         * "Explain" -- asks the bound session to read the target's change
+         * and explain it in its own conversation. False when there is no
+         * session to ask, with the same never-pretend reasoning as
+         * {@code askAgentToFix}. Default false: a host without the ask
+         * (older test fixtures) refuses, exactly as it should.
+         */
+        default boolean askAgentToExplain(Target target) {
+            return false;
+        }
+
         /** Undoes the target's verdict; also "Re-review" on the stale banner. */
         void undo(Target target);
 
@@ -120,6 +131,12 @@ final class ReviewVerdictBar extends VBox {
     private final Button approveButton = new Button();
     private final Button requestChangesButton = new Button();
     private final Button askAgentButton = new Button("Ask the agent to fix it");
+    /**
+     * The bar's second ask: an explanation rather than a fix. Short text on
+     * purpose -- the action row's fit logic drops the nav hint before it
+     * squeezes anything else -- and the full ask lives in the tooltip.
+     */
+    private final Button askExplainButton = new Button("Explain");
 
     /**
      * The tour's second pass: offered only in tour mode, only when every
@@ -278,6 +295,18 @@ final class ReviewVerdictBar extends VBox {
             // not one more -- see showAskRefused -- so the sentence lives in
             // the tooltip, the way targetLabel's does.
             showAskRefused(NOTHING_TO_SEND, NOTHING_TO_SEND_DETAIL);
+        }));
+        askExplainButton.getStyleClass().addAll("review-verdict-action", "review-verdict-explain");
+        askExplainButton.setTooltip(new Tooltip(
+                "Ask the bound session to read this file's change and explain it in its conversation: "
+                        + "what it does, why it is built this way, what to double-check"));
+        askExplainButton.setOnAction(e -> withTarget(current -> {
+            if (host.askAgentToExplain(current)) {
+                clearAskRefused();
+                return;
+            }
+            // The one cause a boolean can name honestly: no session to ask.
+            showAskRefused(NO_SESSION_TO_ASK, NO_SESSION_TO_ASK_DETAIL);
         }));
         // Both classes, exactly as submitRefusalLabel does: the shared one
         // for the visual treatment, its own so a test can find THIS label
@@ -485,8 +514,10 @@ final class ReviewVerdictBar extends VBox {
         askRefusalLabel.setTooltip(new Tooltip(detail));
         askRefusalLabel.setVisible(true);
         askRefusalLabel.setManaged(true);
-        askAgentButton.pseudoClassStateChanged(
-                PseudoClass.getPseudoClass("refused"), true);
+        for (Button ask : List.of(askAgentButton, askExplainButton)) {
+            ask.pseudoClassStateChanged(
+                    PseudoClass.getPseudoClass("refused"), true);
+        }
         // See showSubmitRefused: one refusal in this footer at a time.
         clearSubmitRefused();
         fitFooter();
@@ -495,8 +526,10 @@ final class ReviewVerdictBar extends VBox {
     private void clearAskRefused() {
         askRefusalLabel.setVisible(false);
         askRefusalLabel.setManaged(false);
-        askAgentButton.pseudoClassStateChanged(
-                PseudoClass.getPseudoClass("refused"), false);
+        for (Button ask : List.of(askAgentButton, askExplainButton)) {
+            ask.pseudoClassStateChanged(
+                    PseudoClass.getPseudoClass("refused"), false);
+        }
         fitFooter();
     }
 
@@ -645,7 +678,7 @@ final class ReviewVerdictBar extends VBox {
             approveButton.pseudoClassStateChanged(
                     PseudoClass.getPseudoClass("refused"), blocked);
             actionRow.getChildren().setAll(previousButton, nextButton, targetLabel,
-                    approveButton, requestChangesButton, askAgentButton,
+                    approveButton, requestChangesButton, askAgentButton, askExplainButton,
                     refusalLabel, actionSpacer, navHint);
         }
         fitActionRow(actionRow.getWidth());
@@ -729,6 +762,16 @@ final class ReviewVerdictBar extends VBox {
         boolean room = width - actionRowWidth(width, navHint) >= navHint.prefWidth(-1);
         navHint.setVisible(room);
         navHint.setManaged(room);
+        // Next to yield is the Explain ask -- a secondary affordance in a row
+        // that must stay operable at the code column's floor, where the
+        // first measurements had it truncated to "Expla…" (a button whose
+        // own label is elided cannot be the standing action; this file
+        // exists because of that defect). Dropped WHOLE, never elided -- the
+        // nav hint's rule -- and back as soon as the row can hold it.
+        boolean explainRoom = width - actionRowWidth(width, askExplainButton)
+                >= askExplainButton.prefWidth(-1);
+        askExplainButton.setVisible(explainRoom);
+        askExplainButton.setManaged(explainRoom);
     }
 
     /**
