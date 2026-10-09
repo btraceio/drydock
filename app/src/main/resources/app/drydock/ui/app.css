@@ -2726,6 +2726,23 @@
 }
 /* Same quiet affordance, github.com and github.dev: the file links ride
  * beside ⤢ in the first hunk header, and the breadcrumb's trailing group. */
+.review-hunk-github, .file-link-button {
+    -fx-background-color: transparent;
+    -fx-background-radius: 6px;
+    -fx-border-color: transparent;
+    -fx-border-radius: 6px;
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10.5px;
+    -fx-padding: 2 8 2 8;
+    -fx-cursor: hand;
+}
+.review-hunk-github:hover, .file-link-button:hover {
+    -fx-text-fill: -drydock-text;
+    -fx-background-color: -drydock-hover;
+}
+.review-hunk-github:disabled, .file-link-button:disabled {
+    -fx-opacity: 0.45;
+}
 .review-hunk-explorer:hover {
     -fx-text-fill: -drydock-text;
     -fx-background-color: -drydock-hover;

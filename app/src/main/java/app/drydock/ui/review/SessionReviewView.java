@@ -1,6 +1,7 @@
 package app.drydock.ui.review;
 
 import app.drydock.domain.SessionActivity;
+import app.drydock.github.GitHubLinkService;
 import app.drydock.git.DiffService;
 import app.drydock.git.ReviewBase;
 import app.drydock.git.UnifiedDiff;
@@ -1170,6 +1171,7 @@ public final class SessionReviewView extends BorderPane {
         tourController.resetForScope();
         userChoseMode = false;
         bindNavigation(scope);
+        probeGitHubLinks(scope);
         // The cursor is reset BEFORE the body is built, which the destination
         // did the other way round: a cached diff publishes Loaded
         // synchronously from inside bodyFor, and the diff-resolved handler
@@ -3167,6 +3169,61 @@ public final class SessionReviewView extends BorderPane {
     private void notice(String message) {
         showNotice(message);
         navNoticeTimer.playFromStart();
+    }
+
+    // ---- GitHub quick links -------------------------------------------------
+
+    /** The GitHub deep-link service; stateless, so one per board is one too many already. */
+    private final GitHubLinkService githubLinks = new GitHubLinkService();
+    /** Drops a stale probe's apply; a scope switch could otherwise re-enable another repo's links. */
+    private long githubLinkProbeToken;
+    /** The same staleness guard for a click's link resolution. */
+    private long githubOpenToken;
+
+    /**
+     * Asks once per scope whether its checkout's origin is github.com, and
+     * only then renders the hunk headers' GitHub / vscode buttons. An absent
+     * or non-GitHub remote leaves the off -- a dead pair of buttons on every
+     * hunk header is clutter, and a click that resolves nothing is a worse
+     * discovery path than no buttons at all.
+     */
+    private void probeGitHubLinks(ReviewScope scope) {
+        long token = ++githubLinkProbeToken;
+        if (!scope.diffable()) {
+            return;
+        }
+        githubLinks.remoteOf(scope.diffRoot()).thenAccept(remote -> Platform.runLater(() -> {
+            if (token != githubLinkProbeToken) {
+                return; // the scope moved on while git answered
+            }
+            diffColumn.setGitHubLinks(remote.isPresent() ? SessionReviewView.this::openOnGitHub : null);
+            diffColumn.refreshPins();
+        }));
+    }
+
+    /**
+     * The hunk header buttons' opener: resolves the file/line against the
+     * scope's checkout asynchronously (two quick git queries, per click, so
+     * the sha is always the commit the reader is on) and opens the browser.
+     * Reports a failed resolution the way every other navigation outcome
+     * does, over the column.
+     */
+    private boolean openOnGitHub(ReviewScope scope, String file, int line, boolean vscode) {
+        if (scope == null || !scope.diffable()) {
+            return false;
+        }
+        long token = ++githubOpenToken;
+        githubLinks.linkOf(scope.diffRoot(), file, line).thenAccept(link -> Platform.runLater(() -> {
+            if (token != githubOpenToken) {
+                return;
+            }
+            if (link.isEmpty()) {
+                notice("This checkout has no github.com remote to link to");
+                return;
+            }
+            githubLinks.openInBrowser(vscode ? link.get().vscodeUrl() : link.get().githubUrl());
+        }));
+        return true;
     }
 
     /** A progress line over the diff column; stays until {@link #clearNotice} or the next notice. */

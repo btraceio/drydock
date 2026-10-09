@@ -1818,6 +1818,23 @@ final class ReviewDiffColumn extends BorderPane {
         explorer.setOnAction(e -> openInExplorer(header, explorer));
 
         List<Node> children = new ArrayList<>(List.of(file, range));
+        // The GitHub links ride the FIRST hunk header of a file: a file's
+        // later hunk headers would repeat two buttons that resolve to the
+        // same place every time.
+        if (header.hunkIndex() == 0 && gitHubLinks != null) {
+            Button github = new Button("GitHub");
+            github.getStyleClass().add("review-hunk-github");
+            github.setTooltip(new Tooltip("Open " + header.file() + " at line " + header.startLine()
+                    + " on github.com (HEAD)"));
+            github.setOnAction(e -> openOnGitHub(header, github));
+            Button vscode = new Button("vscode");
+            vscode.getStyleClass().add("review-hunk-github");
+            vscode.setTooltip(new Tooltip("Open " + header.file() + " at line " + header.startLine()
+                    + " in github.dev (the web editor)"));
+            vscode.setOnAction(e -> openOnGitHub(header, vscode));
+            children.add(github);
+            children.add(vscode);
+        }
         // untracked wins when both are somehow true: "never committed" is
         // the more important fact to surface, and the combination should
         // not be constructible anyway (an untracked file has nothing in the
@@ -1857,6 +1874,39 @@ final class ReviewDiffColumn extends BorderPane {
             button.setTooltip(new Tooltip("Open this scope's session first — the Explorer lives in it"));
             button.setDisable(true);
         }
+    }
+
+    /**
+     * Opens the hunk's file on github.com or in github.dev (the web editor),
+     * resolved from the scope's checkout per click. A checkout whose origin
+     * is not github.com -- or with no checkout at all -- disables the button
+     * with a tooltip saying so, the same honesty {@link #openInExplorer}
+     * renders; nothing invented is opened.
+     */
+    private void openOnGitHub(ReviewDiffRow.HunkHeader header, Button button) {
+        if (!gitHubLinks.open(displayedScope, header.file(), header.startLine(),
+                button.getText().equals("vscode"))) {
+            button.setTooltip(new Tooltip("This checkout has no github.com remote to link to"));
+            button.setDisable(true);
+        }
+    }
+
+    /**
+     * The hunk headers' GitHub links; null (tests, headless) means the
+     * buttons do not render at all. The column hands the link the SCOPE it
+     * is displaying -- the checkout a link resolves against is the column's
+     * knowledge, not the caller's.
+     */
+    interface GitHubLinks {
+        /** Opens {@code file} at 1-based {@code line}; false when there is no github.com remote. */
+        boolean open(ReviewScope scope, String file, int line, boolean vscode);
+    }
+
+    private GitHubLinks gitHubLinks;
+
+    /** Wires the GitHub link buttons; without one they do not render at all. */
+    void setGitHubLinks(GitHubLinks links) {
+        this.gitHubLinks = links;
     }
 
     private Region buildLine(ReviewDiffRow.Line row) {

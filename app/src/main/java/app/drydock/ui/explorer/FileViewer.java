@@ -1,5 +1,6 @@
 package app.drydock.ui.explorer;
 
+import app.drydock.github.GitHubLinkService;
 import app.drydock.ui.UiFormats;
 import app.drydock.ui.nav.NavigationTrail;
 import app.drydock.ui.nav.PeekLayer;
@@ -100,6 +101,11 @@ final class FileViewer extends BorderPane {
 
     /** The rail's current query, whose per-line hits are the blue minimap ticks. */
     private String searchQuery = "";
+
+    /** GitHub deep links this viewer opens from the breadcrumb trail. */
+    private final GitHubLinkService githubLinks = new GitHubLinkService();
+    /** Whether the checkout's origin is github.com; probed once, async, before the buttons ever show. */
+    private volatile boolean githubAvailable;
 
     /** Samples what is on screen so a member the reader dwelt on goes grey (see {@link #sampleDwell}). */
     private javafx.animation.Timeline dwellSampler;
@@ -238,6 +244,17 @@ final class FileViewer extends BorderPane {
     FileViewer(Path searchRoot) {
         this.searchRoot = searchRoot;
         getStyleClass().add("file-viewer");
+
+        // The breadcrumb's GitHub links resolve against this checkout; the
+        // probe is one async git query, and only a github.com origin ever
+        // makes the buttons appear (nothing invented is rendered).
+        githubLinks.remoteOf(searchRoot).thenAccept(remote -> {
+            githubAvailable = remote.isPresent();
+            if (githubAvailable) {
+                javafx.application.Platform.runLater(() ->
+                        updateBreadcrumb(fileTabs.getSelectionModel().getSelectedItem()));
+            }
+        });
 
         fileTabs.getStyleClass().add("viewer-tabs");
         fileTabs.setTabClosingPolicy(TabPane.TabClosingPolicy.ALL_TABS);
@@ -2154,8 +2171,58 @@ final class FileViewer extends BorderPane {
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
         breadcrumb.getChildren().addAll(spacer, skimSegment, statusChip, gutterToggle);
+        updateGitHubLinks(tab, shown);
         updateSkimToggle();
         updateStatusChip();
+    }
+
+    /**
+     * The breadcrumb's trailing GitHub links: github.com and github.dev
+     * (the web editor), at the file and the READER'S CURRENT LINE (the caret
+     * line, not line 1 -- the link should land where they were reading).
+     * Resolved against the session root per click, and only rendered when
+     * the checkout's origin is github.com; anything else leaves the
+     * breadcrumb as it was.
+     */
+    private void updateGitHubLinks(Tab tab, Path shown) {
+        if (!githubAvailable) {
+            return;
+        }
+        String relative = shown.toString().replace('\\', '/');
+        Button github = new Button("GitHub");
+        github.getStyleClass().add("file-link-button");
+        github.setTooltip(new Tooltip("Open on github.com at the current line (HEAD)"));
+        github.setFocusTraversable(false);
+        github.setOnAction(e -> openOnGitHub(tab, relative, false, github));
+        Button vscode = new Button("vscode");
+        vscode.getStyleClass().add("file-link-button");
+        vscode.setTooltip(new Tooltip("Open in github.dev (the web editor) at the current line"));
+        vscode.setFocusTraversable(false);
+        vscode.setOnAction(e -> openOnGitHub(tab, relative, true, vscode));
+        // The links sit in the breadcrumb's trailing group, before the skim
+        // toggle -- they are navigation, the chip and the gutter toggle are
+        // the file's state.
+        breadcrumb.getChildren().addAll(breadcrumb.getChildren().size() - 3,
+                List.of(github, vscode));
+    }
+
+    private void openOnGitHub(Tab tab, String relativePath, boolean vscode, Button button) {
+        if (searchRoot == null) {
+            button.setDisable(true);
+            return;
+        }
+        int line = Math.max(1, currentLineOf(tab));
+        // Two quick git lookups on their own thread; the click returns at
+        // once and the open happens when they land.
+        githubLinks.linkOf(searchRoot, relativePath, line).thenAccept(link ->
+                javafx.application.Platform.runLater(() -> {
+                    if (link.isEmpty()) {
+                        button.setDisable(true);
+                        button.setTooltip(new Tooltip("This checkout has no github.com remote to link to"));
+                        return;
+                    }
+                    githubLinks.openInBrowser(vscode ? link.get().vscodeUrl() : link.get().githubUrl());
+                }));
     }
 
     /**
