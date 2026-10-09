@@ -24,6 +24,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
@@ -32,7 +33,9 @@ import java.lang.System.Logger.Level;
  * The tier-3 composition at the usage seam (spec docs/superpowers/specs/
  * 2026-10-08-lsp-tier3-usage-resolution.md, §7): an upgrade-only wrapper
  * over an injected lower-tier {@link UsageProvider} (the lexical one) and
- * the per-worktree {@link JdtServerManager}.
+ * the per-worktree {@link JdtServerManager}, obtained from its source once per
+ * query and never captured: a manager its owner retired is never queried again,
+ * and an empty source (tier off) leaves the fallback's answer unchanged.
  *
  * <p>Constraints, all from §7 unless marked:</p>
  * <ul>
@@ -84,31 +87,64 @@ public final class LspUsageProvider implements UsageProvider, AutoCloseable {
 
     private final UsageProvider fallback;
     private final Path root;
-    private final JdtServerManager manager;
+    /** {@link #root} with symlinks resolved (macOS /var -> /private/var); server URIs may come in either form. */
+    private final Path realRoot;
+    private final Supplier<Optional<JdtServerManager>> manager;
     private final Executor fileReader;
     private final ExecutorService ownedReader;
+
+    /**
+     * The fallback's in-flight declaration, so one peek's declaration() and
+     * usagesAnswer() of the same symbol share ONE lexical scan (the host builds
+     * a provider per peek, which asks both). Single slot, take-once: a matching
+     * call consumes it, any other call stores its own; a replaced or consumed
+     * symbol asked again simply scans again -- a repeated scan, never a lost,
+     * stale or cross-symbol answer. The fallback's future is shared as-is, an
+     * exceptional one included, and is only ever chained from.
+     */
+    private final AtomicReference<DeclarationMemo> declarationMemo = new AtomicReference<>();
+
+    private record DeclarationMemo(String symbol, CompletableFuture<Optional<Usage>> answer) { }
 
     /**
      * Production constructor; the file reads run on a per-instance
      * virtual-thread executor {@link #close()} releases.
      */
     public LspUsageProvider(UsageProvider fallback, Path worktreeRoot, JdtServerManager manager) {
-        this(fallback, worktreeRoot, manager, Executors.newVirtualThreadPerTaskExecutor(), true);
+        this(fallback, worktreeRoot, fixed(manager), Executors.newVirtualThreadPerTaskExecutor(), true);
     }
 
     /** Full-seam constructor; the injected executor is not owned and never released here. */
     public LspUsageProvider(UsageProvider fallback, Path worktreeRoot, JdtServerManager manager,
                             Executor fileReader) {
+        this(fallback, worktreeRoot, fixed(manager), fileReader, false);
+    }
+
+    /**
+     * Registry constructor: the worktree's manager is looked up from {@code manager}
+     * once per query (declaration or usagesAnswer), never captured, so a manager its
+     * owner retired is never queried again; an empty lookup leaves the fallback's answer
+     * unchanged. The injected executor is not owned.
+     */
+    public LspUsageProvider(UsageProvider fallback, Path worktreeRoot,
+                            Supplier<Optional<JdtServerManager>> manager, Executor fileReader) {
         this(fallback, worktreeRoot, manager, fileReader, false);
     }
 
-    private LspUsageProvider(UsageProvider fallback, Path worktreeRoot, JdtServerManager manager,
+    private LspUsageProvider(UsageProvider fallback, Path worktreeRoot,
+                             Supplier<Optional<JdtServerManager>> manager,
                              Executor fileReader, boolean owned) {
         this.fallback = Objects.requireNonNull(fallback, "fallback");
         this.root = Objects.requireNonNull(worktreeRoot, "worktreeRoot").toAbsolutePath().normalize();
+        this.realRoot = canonical(this.root);
         this.manager = Objects.requireNonNull(manager, "manager");
         this.fileReader = Objects.requireNonNull(fileReader, "fileReader");
         this.ownedReader = owned ? (ExecutorService) fileReader : null;
+    }
+
+    private static Supplier<Optional<JdtServerManager>> fixed(JdtServerManager manager) {
+        Optional<JdtServerManager> one = Optional.of(Objects.requireNonNull(manager, "manager"));
+        return () -> one;
     }
 
     /** Releases the owned executor, if any; an injected one is not this class's to release. */
@@ -125,13 +161,20 @@ public final class LspUsageProvider implements UsageProvider, AutoCloseable {
      */
     @Override
     public CompletableFuture<Optional<Usage>> declaration(String symbol) {
-        return fallback.declaration(symbol).thenCompose(candidate -> {
+        Optional<JdtServerManager> current = manager.get(); // once per query, never captured
+        if (current.isEmpty()) {
+            LOG.log(Level.DEBUG, "declaration of ''{0}'' stays with the fallback: no language server"
+                    + " for this worktree", symbol);
+            return fallbackDeclaration(symbol);
+        }
+        JdtServerManager server = current.get();
+        return fallbackDeclaration(symbol).thenCompose(candidate -> {
             if (candidate.isEmpty()) {
                 return CompletableFuture.completedFuture(candidate);
             }
             return queryPosition(symbol, candidate.get())
                     .thenCompose(position -> position
-                            .map(p -> resolvedDeclaration(symbol, candidate, p))
+                            .map(p -> resolvedDeclaration(symbol, candidate, p, server))
                             .orElseGet(() -> unchangedDeclaration(symbol, candidate, "no queryable position")));
         });
     }
@@ -143,8 +186,16 @@ public final class LspUsageProvider implements UsageProvider, AutoCloseable {
      */
     @Override
     public CompletableFuture<UsagesAnswer> usagesAnswer(String symbol) {
+        Optional<JdtServerManager> current = manager.get(); // once per query, never captured
+        if (current.isEmpty()) {
+            LOG.log(Level.DEBUG, "references of ''{0}'' not asked: no language server for this worktree",
+                    symbol);
+            return fallback.usagesAnswer(symbol);
+        }
+        JdtServerManager server = current.get();
         CompletableFuture<UsagesAnswer> floor = fallback.usagesAnswer(symbol);
-        CompletableFuture<Optional<Usage>> candidate = fallback.declaration(symbol);
+        // Shared with declaration(): one fallback declaration scan per peek.
+        CompletableFuture<Optional<Usage>> candidate = fallbackDeclaration(symbol);
         return floor.thenCompose(answer -> candidate.thenCompose(lexical -> {
             if (lexical.isEmpty()) {
                 return CompletableFuture.completedFuture(answer); // no position to query at
@@ -160,7 +211,7 @@ public final class LspUsageProvider implements UsageProvider, AutoCloseable {
                             + " be verified against the file", symbol);
                     return CompletableFuture.completedFuture(answer);
                 }
-                return resolvedUsages(symbol, answer, position.get());
+                return resolvedUsages(symbol, answer, position.get(), server);
             });
         }));
     }
@@ -171,18 +222,32 @@ public final class LspUsageProvider implements UsageProvider, AutoCloseable {
         return usagesAnswer(symbol).thenApply(UsagesAnswer::usages);
     }
 
+    /** The fallback's declaration of {@code symbol}, scanned once per declaration/usages pair. */
+    private CompletableFuture<Optional<Usage>> fallbackDeclaration(String symbol) {
+        DeclarationMemo memo = declarationMemo.get();
+        if (memo != null && Objects.equals(memo.symbol(), symbol)
+                && declarationMemo.compareAndSet(memo, null)) {
+            return memo.answer();
+        }
+        CompletableFuture<Optional<Usage>> answer = fallback.declaration(symbol);
+        declarationMemo.set(new DeclarationMemo(symbol, answer));
+        return answer;
+    }
+
     // ------------------------------------------------------------ definition
 
     private CompletableFuture<Optional<Usage>> resolvedDeclaration(String symbol,
                                                                   Optional<Usage> candidate,
-                                                                  QueryPosition position) {
-        return onReader(() -> manager.definition(position.file(), position.lspLine(), position.character()))
+                                                                  QueryPosition position,
+                                                                  JdtServerManager server) {
+        return onReader(() -> server.definition(position.file(), position.lspLine(), position.character()))
                 .thenCompose(query -> {
                     if (query.isEmpty()) {
-                        return unchangedDeclaration(symbol, candidate, manager.hint());
+                        return unchangedDeclaration(symbol, candidate, server.hint());
                     }
                     return query.get()
-                            .thenApply(locations -> uniqueInWorktree(locations))
+                            // containment canonicalises (file I/O): on fileReader, never the client's reader
+                            .thenApplyAsync(this::uniqueInWorktree, fileReader)
                             .thenCompose(location -> location
                                     .map(one -> reCentred(symbol, candidate, one))
                                     .orElseGet(() -> unchangedDeclaration(symbol, candidate, missReason(symbol))))
@@ -211,6 +276,11 @@ public final class LspUsageProvider implements UsageProvider, AutoCloseable {
         if (file == null) {
             return unchangedDeclaration(symbol, candidate, "unparseable definition uri");
         }
+        // The same root form that accepted the file relativizes it: never a ../ path.
+        Path relative = relativeInWorktree(file);
+        if (relative == null) {
+            return unchangedDeclaration(symbol, candidate, "definition outside the worktree");
+        }
         int lspLine = definition.line();
         return readLine(file, lspLine).thenApply(text -> {
             if (text == null) {
@@ -225,7 +295,7 @@ public final class LspUsageProvider implements UsageProvider, AutoCloseable {
                 return candidate;
             }
             return Optional.of(new Usage(
-                    root.relativize(file).toString(),
+                    relative.toString(),
                     lspLine + 1, // LSP 0-based → seam 1-based (§7: the only place the +1 lives)
                     text.strip(),
                     Provenance.RESOLVED,
@@ -238,22 +308,22 @@ public final class LspUsageProvider implements UsageProvider, AutoCloseable {
             return Optional.empty();
         }
         JdtServerManager.Location location = locations.get(0);
-        Path path = uriToPath(location.uri());
-        return path != null && path.startsWith(root) ? Optional.of(location) : Optional.empty();
+        return relativeInWorktree(uriToPath(location.uri())) != null ? Optional.of(location) : Optional.empty();
     }
 
     // ------------------------------------------------------------- references
 
     private CompletableFuture<UsagesAnswer> resolvedUsages(String symbol, UsagesAnswer floor,
-                                                          QueryPosition position) {
-        return onReader(() -> manager.references(position.file(), position.lspLine(), position.character()))
+                                                          QueryPosition position, JdtServerManager server) {
+        return onReader(() -> server.references(position.file(), position.lspLine(), position.character()))
                 .thenCompose(query -> {
                     if (query.isEmpty()) {
-                        LOG.log(Level.DEBUG, "references of ''{0}'' not asked: {1}", symbol, manager.hint());
+                        LOG.log(Level.DEBUG, "references of ''{0}'' not asked: {1}", symbol, server.hint());
                         return CompletableFuture.completedFuture(floor);
                     }
                     return query.get()
-                            .thenApply(locations -> upgraded(floor, locations))
+                            // containment canonicalises (file I/O): on fileReader, never the client's reader
+                            .thenApplyAsync(locations -> upgraded(floor, locations), fileReader)
                             .exceptionally(error -> {
                                 LOG.log(Level.DEBUG, "references of ''{0}'' failed: {1}",
                                         symbol, String.valueOf(error));
@@ -266,9 +336,9 @@ public final class LspUsageProvider implements UsageProvider, AutoCloseable {
     private UsagesAnswer upgraded(UsagesAnswer floor, List<JdtServerManager.Location> locations) {
         Set<RowKey> confirmed = new HashSet<>();
         for (JdtServerManager.Location location : locations) {
-            Path path = uriToPath(location.uri());
-            if (path == null || !path.startsWith(root)) continue;
-            confirmed.add(new RowKey(root.relativize(path).normalize(), location.line() + 1));
+            Path relative = relativeInWorktree(uriToPath(location.uri()));
+            if (relative == null) continue;
+            confirmed.add(new RowKey(relative, location.line() + 1));
         }
         List<Usage> rows = new ArrayList<>(floor.usages().size());
         boolean upgradedAny = false;
@@ -379,6 +449,28 @@ public final class LspUsageProvider implements UsageProvider, AutoCloseable {
             return Path.of(URI.create(Objects.requireNonNull(uri, "uri"))).toAbsolutePath().normalize();
         } catch (RuntimeException e) {
             return null;
+        }
+    }
+
+    /**
+     * The worktree-relative form of a server path, or null when it is outside the
+     * worktree in both its lexical and its symlink-resolved form. The lexical check
+     * (no I/O) runs first; only a miss canonicalises. The one containment and
+     * relativization rule, so the two always agree.
+     */
+    private Path relativeInWorktree(Path path) {
+        if (path == null) return null;
+        if (path.startsWith(root)) return root.relativize(path).normalize();
+        Path real = canonical(path);
+        return real.startsWith(realRoot) ? realRoot.relativize(real).normalize() : null;
+    }
+
+    /** Symlinks resolved; a path that cannot be resolved (e.g. missing) keeps its normalized form. */
+    private static Path canonical(Path path) {
+        try {
+            return path.toRealPath();
+        } catch (IOException | RuntimeException e) {
+            return path.toAbsolutePath().normalize();
         }
     }
 

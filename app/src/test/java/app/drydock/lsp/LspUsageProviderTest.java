@@ -13,6 +13,7 @@ import app.drydock.state.json.JsonValue.JsonNumber;
 import app.drydock.state.json.JsonValue.JsonObject;
 import app.drydock.state.json.JsonValue.JsonString;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -32,6 +33,9 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -424,6 +428,237 @@ class LspUsageProviderTest {
         assertEquals(List.of(
                 new Usage("src/Use.java", USE_LINE, CARRIED_USE_LINE, Provenance.RESOLVED, false),
                 usage("src/Other.java", 5, "clamp(0);", Provenance.MEASURED)), usages.get());
+    }
+
+    // ------------------------------------------------- symlink-safe containment
+
+    /** A symlink to the worktree; the test is skipped where links cannot be made. */
+    private Path linkToRoot() {
+        Path link = tempDir.resolve("linkwt");
+        try {
+            return Files.createSymbolicLink(link, root);
+        } catch (IOException | UnsupportedOperationException | SecurityException e) {
+            Assumptions.abort("symbolic links unavailable: " + e);
+            throw new AssertionError(e); // unreachable
+        }
+    }
+
+    @Test
+    void aSymlinkedRootAcceptsRealPathDefinitions() throws Exception {
+        driveToIndexed();
+        Path link = linkToRoot();
+        LspUsageProvider provider = new LspUsageProvider(fallback(Optional.of(candidate())), link, manager,
+                Runnable::run);
+
+        CompletableFuture<Optional<Usage>> answer = provider.declaration("clamp");
+        // The server answers under the real (target) form, not the link form.
+        client.respondTo("textDocument/definition", new JsonArray(List.of(
+                location(declFile().toRealPath().toUri().toString(), DECL_LSP_LINE, 4))));
+
+        assertEquals(Optional.of(new Usage("src/Decl.java", DECL_LINE, "int clamp(int w) {",
+                Provenance.RESOLVED, true)), answer.get(), "worktree-relative, never a ../ path");
+    }
+
+    @Test
+    void aSymlinkedRootUpgradesRealPathReferences() throws Exception {
+        driveToIndexed();
+        Path link = linkToRoot();
+        List<Usage> rows = List.of(
+                usage("src/Use.java", USE_LINE, CARRIED_USE_LINE, Provenance.MEASURED),
+                usage("src/Other.java", 5, "clamp(0);", Provenance.MEASURED));
+        LspUsageProvider provider = new LspUsageProvider(fallback(Optional.of(candidate()), rows), link,
+                manager, Runnable::run);
+
+        CompletableFuture<UsagesAnswer> answer = provider.usagesAnswer("clamp");
+        client.respondTo("textDocument/references", new JsonArray(List.of(
+                location(useFile().toRealPath().toUri().toString(), USE_LSP_LINE, USE_COLUMN))));
+
+        assertEquals(List.of(
+                new Usage("src/Use.java", USE_LINE, CARRIED_USE_LINE, Provenance.RESOLVED, false),
+                usage("src/Other.java", 5, "clamp(0);", Provenance.MEASURED)), answer.get().usages());
+    }
+
+    @Test
+    void aLinkFormUriUnderARealRootIsAccepted() throws Exception {
+        driveToIndexed();
+        Path link = linkToRoot();
+        LspUsageProvider provider = provider(fallback(Optional.of(candidate())));
+
+        CompletableFuture<Optional<Usage>> answer = provider.declaration("clamp");
+        client.respondTo("textDocument/definition", new JsonArray(List.of(
+                location(link.resolve("src/Decl.java").toUri().toString(), DECL_LSP_LINE, 4))));
+
+        assertEquals(Optional.of(new Usage("src/Decl.java", DECL_LINE, "int clamp(int w) {",
+                Provenance.RESOLVED, true)), answer.get());
+    }
+
+    @Test
+    void aPathOutsideTheRootInBothFormsIsAMiss() throws Exception {
+        // A real, readable sibling that shares the root's name as a prefix.
+        Path sibling = Files.createDirectories(tempDir.resolve("wt-sibling/src"));
+        Files.write(sibling.resolve("Decl.java"), Files.readAllLines(declFile()));
+        assertEquals(Optional.of(candidate()), declarationAfter(new JsonArray(List.of(
+                location(sibling.resolve("Decl.java").toUri().toString(), DECL_LSP_LINE, 4)))));
+        assertEquals(Optional.of(candidate()), declarationAfter(new JsonArray(List.of(
+                location(sibling.resolve("Decl.java").toRealPath().toUri().toString(), DECL_LSP_LINE, 4)))));
+    }
+
+    @Test
+    void canonicalisationRunsOnTheFileReaderExecutor() throws Exception {
+        driveToIndexed();
+        AtomicInteger tasks = new AtomicInteger();
+        Executor counting = task -> {
+            tasks.incrementAndGet();
+            task.run();
+        };
+        LspUsageProvider provider = new LspUsageProvider(fallback(Optional.of(candidate()),
+                usage("src/Use.java", USE_LINE, CARRIED_USE_LINE, Provenance.MEASURED)), root, manager, counting);
+
+        CompletableFuture<UsagesAnswer> answer = provider.usagesAnswer("clamp");
+        int beforeAnswer = tasks.get();
+        client.respondTo("textDocument/references",
+                new JsonArray(List.of(location(useUri(), USE_LSP_LINE, USE_COLUMN))));
+        answer.get();
+
+        assertTrue(tasks.get() > beforeAnswer,
+                "the location containment (file I/O) hops to fileReader, never the client's reader");
+    }
+
+    // ------------------------------------------------------ declaration memo
+
+    /** A fallback counting its declaration scans (and the symbols scanned) and usagesAnswer calls. */
+    private static final class CountingFallback implements UsageProvider {
+        final List<String> declarationScans = new CopyOnWriteArrayList<>();
+        final AtomicInteger usagesAnswers = new AtomicInteger();
+        private final Supplier<CompletableFuture<Optional<Usage>>> declaration;
+        private final List<Usage> rows;
+
+        CountingFallback(Supplier<CompletableFuture<Optional<Usage>>> declaration, List<Usage> rows) {
+            this.declaration = declaration;
+            this.rows = rows;
+        }
+
+        @Override public CompletableFuture<Optional<Usage>> declaration(String symbol) {
+            declarationScans.add(symbol);
+            return declaration.get();
+        }
+
+        @Override public CompletableFuture<List<Usage>> usages(String symbol) {
+            return CompletableFuture.completedFuture(rows);
+        }
+
+        @Override public CompletableFuture<UsagesAnswer> usagesAnswer(String symbol) {
+            usagesAnswers.incrementAndGet();
+            return CompletableFuture.completedFuture(new UsagesAnswer(rows, Status.ANSWERED));
+        }
+    }
+
+    private static CountingFallback countingFallback() {
+        return new CountingFallback(() -> CompletableFuture.completedFuture(Optional.of(candidate())),
+                List.of(candidate()));
+    }
+
+    @Test
+    void oneFallbackDeclarationScanPerPeek() throws Exception {
+        CountingFallback fallback = countingFallback();
+        LspUsageProvider provider = provider(fallback);
+
+        assertEquals(Optional.of(candidate()), provider.declaration("clamp").get());
+        assertEquals(List.of(candidate()), provider.usagesAnswer("clamp").get().usages());
+
+        assertEquals(List.of("clamp"), fallback.declarationScans, "one declaration scan per peek");
+        assertEquals(1, fallback.usagesAnswers.get());
+    }
+
+    @Test
+    void aDifferentSymbolRescansAndNeverGetsAnotherSymbolsDeclaration() throws Exception {
+        CountingFallback fallback = countingFallback();
+        LspUsageProvider provider = provider(fallback);
+
+        provider.declaration("a").get();
+        provider.usagesAnswer("b").get();
+        assertEquals(List.of("a", "b"), fallback.declarationScans, "b never takes a's declaration");
+        provider.usagesAnswer("a").get();
+        assertEquals(List.of("a", "b", "a"), fallback.declarationScans, "a replaced slot rescans");
+        // Take-once: a consumed slot is not served twice.
+        provider.declaration("c").get();
+        provider.usagesAnswer("c").get();
+        provider.usagesAnswer("c").get();
+        assertEquals(List.of("a", "b", "a", "c", "c"), fallback.declarationScans);
+    }
+
+    @Test
+    void aFailedFallbackDeclarationPropagatesAsToday() {
+        Supplier<CompletableFuture<Optional<Usage>>> failing =
+                () -> CompletableFuture.failedFuture(new IllegalStateException("scan failed"));
+        CountingFallback shared = new CountingFallback(failing, List.of(candidate()));
+        LspUsageProvider provider = provider(shared);
+        CompletableFuture<Optional<Usage>> declaration = provider.declaration("clamp");
+        CompletableFuture<UsagesAnswer> sharedUsages = provider.usagesAnswer("clamp");
+
+        // The same composition with no shared scan: the outcome must not differ.
+        CompletableFuture<UsagesAnswer> freshUsages =
+                provider(new CountingFallback(failing, List.of(candidate()))).usagesAnswer("clamp");
+
+        assertTrue(declaration.isCompletedExceptionally());
+        assertEquals(freshUsages.isCompletedExceptionally(), sharedUsages.isCompletedExceptionally());
+        assertEquals(List.of("clamp"), shared.declarationScans, "the failed scan is shared, not repeated");
+    }
+
+    // ------------------------------------------------ per-query manager lookup
+
+    @Test
+    void aRetiredManagerIsNotUsedByTheNextQuery() throws Exception {
+        driveToIndexed();
+        FakeClient[] secondClient = new FakeClient[1];
+        JdtServerManager second = new JdtServerManager(root,
+                new JdtServerManager.LaunchConfig(tempDir.resolve("jdt"), null),
+                javaHome -> "21.0.1",
+                (command, workingDirectory) -> new FakeProcess(),
+                (process, settings, listener) -> {
+                    secondClient[0] = new FakeClient();
+                    secondClient[0].server = listener;
+                    return secondClient[0];
+                },
+                time, Files.createDirectories(tempDir.resolve("lsp2")));
+        try {
+            assertTrue(second.definition(useFile(), 0, 0).isEmpty());
+            secondClient[0].respondTo("initialize", JsonNull.INSTANCE);
+            secondClient[0].notifyServer("language/status", obj("type", str("ServiceReady")));
+            secondClient[0].notifyServer("language/progressReport", obj(
+                    "taskType", str("Importing Gradle project"), "id", str("s1"), "status", str("Started")));
+            secondClient[0].notifyServer("language/progressReport", obj(
+                    "taskType", str("Importing Gradle project"), "id", str("s1"), "status", str("Completed")));
+            assertEquals(JdtServerManager.Readiness.INDEXED, second.state());
+            FakeClient firstClient = client;
+
+            List<Usage> rows = List.of(usage("src/Use.java", USE_LINE, CARRIED_USE_LINE, Provenance.MEASURED));
+            AtomicInteger lookups = new AtomicInteger();
+            List<Optional<JdtServerManager>> answers = List.of(Optional.of(manager), Optional.of(second),
+                    Optional.empty());
+            LspUsageProvider provider = new LspUsageProvider(fallback(Optional.of(candidate()), rows), root,
+                    () -> answers.get(Math.min(lookups.getAndIncrement(), answers.size() - 1)), Runnable::run);
+
+            CompletableFuture<UsagesAnswer> one = provider.usagesAnswer("clamp");
+            firstClient.respondTo("textDocument/references", new JsonArray(List.of()));
+            one.get();
+            CompletableFuture<UsagesAnswer> two = provider.usagesAnswer("clamp");
+            secondClient[0].respondTo("textDocument/references", new JsonArray(List.of()));
+            two.get();
+            assertEquals(1, firstClient.asked("textDocument/references").size(), "the retired one is not asked");
+            assertEquals(1, secondClient[0].asked("textDocument/references").size());
+
+            // An empty lookup (tier off): the exact fallback answer, and no request anywhere.
+            UsagesAnswer off = provider.usagesAnswer("clamp").get();
+            assertEquals(new UsagesAnswer(rows, Status.ANSWERED), off);
+            assertEquals(Optional.of(candidate()), provider.declaration("clamp").get());
+            assertEquals(1, firstClient.asked("textDocument/references").size());
+            assertEquals(1, secondClient[0].asked("textDocument/references").size());
+            assertTrue(secondClient[0].asked("textDocument/definition").isEmpty());
+            assertEquals(3 + 1, lookups.get(), "one lookup per query");
+        } finally {
+            second.close();
+        }
     }
 
     // ------------------------------------------------------------- fixtures
