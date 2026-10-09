@@ -16,6 +16,7 @@ import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
 
 import java.io.IOException;
+import java.time.Duration;
 import java.time.Instant;
 import java.io.InputStream;
 import java.net.InetAddress;
@@ -213,6 +214,14 @@ public final class McpServer implements AutoCloseable {
         return getClass().getSimpleName();
     }
 
+    /**
+     * One rejected-call row per this interval (see {@code recordRejectedToolCall}):
+     * the row is written from UNauthenticated request content, so a local
+     * process without a token can issue calls at HTTP-request rate and a row
+     * per request would flood the activity panel.
+     */
+    private static final Duration REJECTED_ROW_INTERVAL = Duration.ofSeconds(10);
+
     private final class McpHandler implements HttpHandler {
 
         @Override
@@ -289,17 +298,16 @@ public final class McpServer implements AutoCloseable {
                 return;
             }
 
-            Optional<ManagedSessionId> caller = resolveCaller(exchange);
-            if (caller.isEmpty()) {
-                sendEmpty(exchange, 401);
-                return;
-            }
-
+            // The body is read before the token resolves, because a rejected
+            // call is worth a row naming it -- see recordRejectedToolCall.
             String body = readBody(exchange.getRequestBody());
             JsonValue parsed;
             try {
                 parsed = JsonParser.parse(body);
             } catch (JsonParseException e) {
+                // There is nothing the activity panel can show -- no call to
+                // name -- so the one trace an unparseable request gets is here.
+                LOG.log(Level.WARNING, "Could not parse an MCP request: " + e.getMessage());
                 sendJson(exchange, 200, errorResponse(JsonValue.JsonNull.INSTANCE, -32700, "Parse error"));
                 return;
             }
@@ -322,6 +330,13 @@ public final class McpServer implements AutoCloseable {
             String method = request.get("method") instanceof JsonString s ? s.value() : null;
             JsonValue params = request.get("params");
 
+            Optional<ManagedSessionId> caller = resolveCaller(exchange);
+            if (caller.isEmpty()) {
+                recordRejectedToolCall(method, params);
+                sendEmpty(exchange, 401);
+                return;
+            }
+
             sendJson(exchange, 200, dispatch(caller.get(), method, params, id));
         }
 
@@ -333,6 +348,51 @@ public final class McpServer implements AutoCloseable {
                 case "tools/call" -> toolsCall(caller, params, id);
                 default -> errorResponse(id, -32601, "Method not found: " + method);
             };
+        }
+
+        /**
+         * One rejected-call row per this interval. The row is written from
+         * UNauthenticated request content: a local process without a token
+         * can issue tools/call at HTTP-request rate, and a row per request
+         * would flood the activity panel, drowning the genuine session rows
+         * it exists to surface. The throttle bounds that flood; the count of
+         * suppressed rows is not tracked -- the panel shows the shape of the
+         * rejection, not its volume.
+         */
+        private volatile long lastRejectedRowNanos;
+
+        /**
+         * A tools/call refused at the door still leaves a trace: the activity
+         * panel is the wiring made visible, and a 401 that recorded nothing
+         * read as "nothing happened", when what happened is that nothing CAN
+         * -- the token named a session that has ended, or resolved to nothing.
+         * Exactly the first thing to check when a reviewer sits silent.
+         * Handshake methods (initialize, tools/list) stay out: they are
+         * housekeeping both sides make without the model asking anything.
+         *
+         * <p>The tool name comes from unauthenticated request content and is
+         * stored into a row the panel renders as a Label, so it goes through
+         * the same {@link #oneLine} sanitization a call's arguments get.</p>
+         */
+        private void recordRejectedToolCall(String method, JsonValue params) {
+            if (!"tools/call".equals(method)
+                    || !(params instanceof JsonObject args)
+                    || !(args.get("name") instanceof JsonString name)) {
+                return;
+            }
+            long now = System.nanoTime();
+            if (now - lastRejectedRowNanos < REJECTED_ROW_INTERVAL.toNanos()) {
+                return; // throttled -- see REJECTED_ROW_INTERVAL
+            }
+            lastRejectedRowNanos = now;
+            String tool = oneLine(name.value());
+            try {
+                activityLog.record(new McpActivityLog.Entry(Instant.now(), directionOf(tool),
+                        tool, "rejected: no valid session token -- the session may have ended",
+                        scopeIdOf(args.get("arguments")), 0, true));
+            } catch (RuntimeException e) {
+                LOG.log(Level.FINE, "Could not log the rejected MCP call for " + tool, e);
+            }
         }
 
         private JsonValue toolsCall(ManagedSessionId caller, JsonValue params, JsonValue id) {
@@ -354,15 +414,19 @@ public final class McpServer implements AutoCloseable {
                 // work: logging it as a row in the Review activity panel would
                 // be noise about something the model never asked for.
                 if (!"session_reclaim".equals(name)) {
-                    logActivity(name, arguments, toolResult, false);
+                    logActivity(name, arguments, summarize(arguments),
+                            bytesOf(JsonWriter.write(toolResult)), false);
                 }
                 return successResponse(id, toolCallResult(toolResult, false));
             } catch (McpToolException e) {
                 // A tool failure is not a transport failure: it comes back as a
                 // 200 JSON-RPC result with isError: true, so the agent can read
                 // and act on the message rather than the transport swallowing it.
+                // The row says WHAT the tool refused with -- on a failed call
+                // the refusal is the payload; the request args were already
+                // visible to whoever sent them.
                 if (!"session_reclaim".equals(name)) {
-                    logActivity(name, arguments, new JsonString(e.getMessage()), true);
+                    logActivity(name, arguments, oneLine(e.getMessage()), bytesOf(e.getMessage()), true);
                 }
                 return successResponse(id, toolCallResult(new JsonString(e.getMessage()), true));
             }
@@ -373,20 +437,26 @@ public final class McpServer implements AutoCloseable {
          * Never allowed to affect the call: a logging failure is not a tool
          * failure, and the agent must get its answer either way.
          */
-        private void logActivity(String tool, JsonValue arguments, JsonValue result, boolean failed) {
+        private void logActivity(String tool, JsonValue arguments, String detail, int responseBytes,
+                                 boolean failed) {
             try {
-                int bytes = JsonWriter.write(result)
-                        .getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
-                Optional<String> scopeId = arguments instanceof JsonObject args
-                        && args.get("scopeId") instanceof JsonString scope
-                        ? Optional.of(scope.value())
-                        : Optional.empty();
-                activityLog.record(new McpActivityLog.Entry(Instant.now(),
-                        directionOf(tool),
-                        tool, McpServer.summarize(arguments), scopeId, bytes, failed));
+                activityLog.record(new McpActivityLog.Entry(Instant.now(), directionOf(tool),
+                        tool, detail, scopeIdOf(arguments), responseBytes, failed));
             } catch (RuntimeException e) {
                 LOG.log(Level.FINE, "Could not log MCP activity for " + tool, e);
             }
+        }
+
+        /** The {@code scopeId} argument of a tool call's arguments, when it names one. */
+        private static Optional<String> scopeIdOf(JsonValue arguments) {
+            return arguments instanceof JsonObject args
+                    && args.get("scopeId") instanceof JsonString scope
+                    ? Optional.of(scope.value())
+                    : Optional.empty();
+        }
+
+        private static int bytesOf(String text) {
+            return text.getBytes(StandardCharsets.UTF_8).length;
         }
 
         /**
@@ -515,26 +585,31 @@ public final class McpServer implements AutoCloseable {
                 : McpActivityLog.Direction.OUTBOUND;
     }
 
+    /** A one-line detail for the panel: the arguments, bounded and Label-safe. */
+    static String summarize(JsonValue arguments) {
+        return arguments == null ? "" : oneLine(JsonWriter.write(arguments));
+    }
+
     /**
-     * A one-line detail for the panel: the arguments, bounded and stripped of
-     * anything that can lie in a Label.
+     * One line of anything a panel row shows: the arguments of a call in
+     * {@link #summarize}, or a failed call's refusal message. Bounded, and
+     * stripped of anything that can lie in a Label.
      *
      * <p>Order matters. The whitespace collapse runs FIRST: Java's {@code \s}
      * is ASCII-only, so it flattens {@link JsonWriter}'s own pretty-print
-     * newlines and indents and nothing else. Only then are the invisible and
-     * control categories replaced -- sanitizing first would replace those
-     * structural newlines too and turn every row into "{&#xFFFD; ...".
+     * newlines and indents -- and a multi-line tool refusal, which the agent
+     * read across several lines -- into one row's line. Only then are the
+     * invisible and control categories replaced: sanitizing first would
+     * replace those structural newlines too and turn every row into
+     * "{&#xFFFD; ...".
      *
      * <p>{@code JsonWriter} escapes only {@code c < 0x20}, so U+007F, the C1
      * block, the bidi overrides and the tag block all arrive here verbatim.
      * The panel renders this as a {@code Label}, on failed calls as well as
      * successful ones, so this is the boundary that has to remove them.
      */
-    static String summarize(JsonValue arguments) {
-        if (arguments == null) {
-            return "";
-        }
-        String collapsed = JsonWriter.write(arguments).replaceAll("\\s+", " ");
+    static String oneLine(String text) {
+        String collapsed = text.replaceAll("\\s+", " ");
         StringBuilder clean = new StringBuilder(collapsed.length());
         collapsed.codePoints().forEach(cp -> clean.appendCodePoint(isUnrenderable(cp) ? '�' : cp));
         return truncateByCodePoints(clean.toString(), 160);

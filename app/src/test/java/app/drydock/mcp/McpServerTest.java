@@ -19,6 +19,7 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -400,6 +401,81 @@ class McpServerTest {
                 {"jsonrpc":"2.0","id":8,"method":"tools/list","params":{}}""");
 
         assertEquals(401, response.statusCode());
+    }
+
+    // ---- the activity log, for the Review panel ----
+
+    @Test
+    void aToolCallRejectedForItsTokenLeavesARow() throws Exception {
+        // The panel is the first thing to read when a reviewer is not doing
+        // what is expected. A 401 that recorded nothing read as "nothing
+        // happened", when what happened is that nothing CAN -- the token
+        // named a session that has ended, or resolved to nothing.
+        HttpResponse<String> response = post("""
+                {"jsonrpc":"2.0","id":60,"method":"tools/call",
+                 "params":{"name":"review_scope","arguments":{"scopeId":"sc"}}}""",
+                "bogus-token", null);
+
+        assertEquals(401, response.statusCode());
+        List<McpActivityLog.Entry> entries = server.activityLog().entries();
+        assertEquals(1, entries.size());
+        McpActivityLog.Entry entry = entries.getFirst();
+        assertEquals("review_scope", entry.tool());
+        assertTrue(entry.failed());
+        assertEquals(Optional.of("sc"), entry.scopeId());
+        assertEquals(McpActivityLog.Direction.OUTBOUND, entry.direction());
+        assertTrue(entry.detail().contains("token"), entry.detail());
+    }
+
+    @Test
+    void aToolCallWithNoTokenAtAllLeavesTheSameRow() throws Exception {
+        HttpResponse<String> response = post("""
+                {"jsonrpc":"2.0","id":61,"method":"tools/call",
+                 "params":{"name":"review_state","arguments":{}}}""",
+                null, null);
+
+        assertEquals(401, response.statusCode());
+        assertEquals("review_state", server.activityLog().entries().getFirst().tool());
+    }
+
+    @Test
+    void aRejectedHandshakeLeavesNoRow() throws Exception {
+        // initialize and tools/list are housekeeping both sides make without
+        // the model asking anything; only the model's calls count as rows.
+        HttpResponse<String> response = post("""
+                {"jsonrpc":"2.0","id":62,"method":"tools/list","params":{}}""",
+                "bogus-token", null);
+
+        assertEquals(401, response.statusCode());
+        assertTrue(server.activityLog().entries().isEmpty());
+    }
+
+    @Test
+    void aFailedToolCallShowsItsRefusalAndNotTheArguments() throws Exception {
+        HttpResponse<String> response = post("""
+                {"jsonrpc":"2.0","id":63,"method":"tools/call",
+                 "params":{"name":"worktree_create","arguments":{}}}""");
+
+        assertEquals(200, response.statusCode());
+        McpActivityLog.Entry entry = server.activityLog().entries().getFirst();
+        assertTrue(entry.failed());
+        assertTrue(entry.detail().contains("branch"),
+                "the refusal is what a failed row is about, not the request: " + entry.detail());
+    }
+
+    @Test
+    void aSuccessfulToolCallStillShowsItsArguments() throws Exception {
+        context.repositories.add(new McpSessionContext.RepoSummary("drydock", Path.of("/repos/drydock"),
+                Optional.of("feat/mcp"), Optional.of(false), Optional.of(0), Optional.of(0), false));
+
+        HttpResponse<String> response = post("""
+                {"jsonrpc":"2.0","id":64,"method":"tools/call",
+                 "params":{"name":"repos_list","arguments":{}}}""");
+
+        assertEquals(200, response.statusCode());
+        McpActivityLog.Entry entry = server.activityLog().entries().getFirst();
+        assertFalse(entry.failed());
+        assertEquals("{}", entry.detail().strip(), "the arguments, as the row's detail");
     }
 
     @Test
