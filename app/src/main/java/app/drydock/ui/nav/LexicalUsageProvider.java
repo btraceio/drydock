@@ -68,4 +68,14 @@ public final class LexicalUsageProvider implements UsageProvider {
                         .toList())
                 .orElse(List.of()));
     }
+
+    /**
+     * The lexical tier always answers -- it is the floor every higher
+     * tier composes over (spec §7). An empty list means "no occurrences
+     * found", never "could not look": the answer is always ANSWERED.
+     */
+    @Override
+    public CompletableFuture<UsagesAnswer> usagesAnswer(String symbol) {
+        return usages(symbol).thenApply(rows -> new UsagesAnswer(rows, UsagesAnswer.Status.ANSWERED));
+    }
 }

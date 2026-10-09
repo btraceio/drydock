@@ -2,15 +2,18 @@ package app.drydock.ui.nav;
 
 import app.drydock.review.Provenance;
 import app.drydock.review.UsageProvider;
+import app.drydock.review.UsageProvider.UsagesAnswer;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * The name-matching {@link UsageProvider}: every answer is MEASURED, and a
@@ -49,6 +52,17 @@ class LexicalUsageProviderTest {
     }
 
     @Test
+    void anEmptyLexicalAnswerIsAnsweredNotUnavailable() throws Exception {
+        LexicalUsageProvider provider = new LexicalUsageProvider(
+                symbol -> CompletableFuture.completedFuture(Optional.empty()));
+
+        UsagesAnswer answer = provider.usagesAnswer("clamp").get();
+
+        assertEquals(UsagesAnswer.Status.ANSWERED, answer.status());
+        assertEquals(List.of(), answer.usages());
+    }
+
+    @Test
     void usagesAreThePeeksOccurrences() throws Exception {
         LexicalUsageProvider provider = new LexicalUsageProvider(symbol -> peekOf(symbol, true));
 
@@ -58,6 +72,61 @@ class LexicalUsageProviderTest {
                         new UsageProvider.Usage("ui/Sidebar.java", 40, "sizing.clamp(width);",
                                 Provenance.MEASURED, false)),
                 provider.usages("clamp").get());
+    }
+
+    @Test
+    void theLexicalAnswerCarriesTheSameRowsAsUsages() throws Exception {
+        LexicalUsageProvider provider = new LexicalUsageProvider(symbol -> peekOf(symbol, true));
+
+        UsagesAnswer answer = provider.usagesAnswer("clamp").get();
+
+        assertEquals(UsagesAnswer.Status.ANSWERED, answer.status());
+        assertEquals(provider.usages("clamp").get(), answer.usages());
+    }
+
+    @Test
+    void aProviderWithoutItsOwnAnswerDefaultWrapsUsagesAsAnswered() throws Exception {
+        UsageProvider bare = new UsageProvider() {
+            @Override
+            public CompletableFuture<Optional<Usage>> declaration(String symbol) {
+                return CompletableFuture.completedFuture(Optional.empty());
+            }
+
+            @Override
+            public CompletableFuture<List<Usage>> usages(String symbol) {
+                return CompletableFuture.completedFuture(List.of(
+                        new Usage("ui/Size.java", 12, "double clamp(double w) {",
+                                Provenance.MEASURED, false)));
+            }
+        };
+
+        UsagesAnswer answer = bare.usagesAnswer("clamp").get();
+
+        assertEquals(UsagesAnswer.Status.ANSWERED, answer.status());
+        assertEquals(bare.usages("clamp").get(), answer.usages());
+    }
+
+    @Test
+    void unavailableAndInapplicableAnswersAreConstructibleWithoutRows() {
+        assertEquals(UsagesAnswer.Status.UNAVAILABLE,
+                new UsagesAnswer(List.of(), UsagesAnswer.Status.UNAVAILABLE).status());
+        assertEquals(UsagesAnswer.Status.INAPPLICABLE,
+                new UsagesAnswer(List.of(), UsagesAnswer.Status.INAPPLICABLE).status());
+    }
+
+    @Test
+    void answerRowsAreImmutable() {
+        List<UsageProvider.Usage> rows = new ArrayList<>();
+        rows.add(new UsageProvider.Usage("ui/Size.java", 12, "double clamp(double w) {",
+                Provenance.MEASURED, false));
+
+        UsagesAnswer answer = new UsagesAnswer(rows, UsagesAnswer.Status.ANSWERED);
+        rows.clear();
+
+        assertEquals(1, answer.usages().size());
+        assertThrows(UnsupportedOperationException.class, () -> answer.usages().add(
+                new UsageProvider.Usage("ui/Sidebar.java", 40, "sizing.clamp(width);",
+                        Provenance.MEASURED, false)));
     }
 
     private static CompletableFuture<Optional<SymbolPeek>> peekOf(String symbol, boolean resolved) {
