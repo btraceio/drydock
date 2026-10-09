@@ -5,6 +5,8 @@ import app.drydock.process.ProcessRunner;
 import app.drydock.process.ProcessTimeoutException;
 
 import java.io.IOException;
+import java.lang.System.Logger;
+import java.lang.System.Logger.Level;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -12,9 +14,11 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -43,6 +47,8 @@ import java.util.concurrent.Executors;
  */
 public final class WorktreeService implements AutoCloseable {
 
+    private static final Logger LOG = System.getLogger(WorktreeService.class.getName());
+
     /** List/remove are quick local operations; a hung git must not park futures forever. */
     private static final Duration PROCESS_TIMEOUT = Duration.ofSeconds(15);
 
@@ -58,6 +64,25 @@ public final class WorktreeService implements AutoCloseable {
     private final GitExecutableLocator locator;
     private final ExecutorService executor;
     private final boolean ownsExecutor;
+
+    /**
+     * Told after a worktree removal <em>actually succeeded</em> (spec
+     * docs/superpowers/specs/2026-10-08-lsp-tier3-usage-resolution.md, §5:
+     * the worktree's ~/.drydock/lsp/&lt;slug&gt; cache is deleted when the
+     * worktree is deleted). Fires on this service's background executor
+     * thread -- never the FX thread -- with the {@link #canonical(Path)
+     * canonical} form of the removed path, and never on any failed
+     * removal: a listener must not be able to observe a worktree that is
+     * still on disk, and a refusal must not be mistaken for a removal.
+     */
+    @FunctionalInterface
+    public interface RemovalListener {
+
+        /** Called only after the worktree is gone (removed, or already gone when asked). */
+        void worktreeRemoved(Path repositoryRoot, Path worktreePath);
+    }
+
+    private final List<RemovalListener> removalListeners = new CopyOnWriteArrayList<>();
 
     /**
      * One worktree of a repository as reported by
@@ -121,6 +146,33 @@ public final class WorktreeService implements AutoCloseable {
         this.locator = locator;
         this.executor = executor;
         this.ownsExecutor = ownsExecutor;
+    }
+
+    /**
+     * Registers a listener told after every successful worktree removal
+     * ({@link #remove}/{@link #removeForced}); see {@link RemovalListener}.
+     * No unsubscribe: a listener lives for the owning component's lifetime
+     * (MainWorkspace, here, shares the application's).
+     */
+    public void addRemovalListener(RemovalListener listener) {
+        removalListeners.add(Objects.requireNonNull(listener, "listener"));
+    }
+
+    /**
+     * Runs on this service's executor thread, strictly after the removal
+     * succeeded. A listener that throws must not turn that success into a
+     * failed future (the worktree IS gone), so each listener is isolated
+     * and its failure logged, never propagated.
+     */
+    private void notifyWorktreeRemoved(Path repositoryRoot, Path worktreePath) {
+        Path removed = canonical(worktreePath);
+        for (RemovalListener listener : removalListeners) {
+            try {
+                listener.worktreeRemoved(repositoryRoot, removed);
+            } catch (RuntimeException e) {
+                LOG.log(Level.WARNING, "a worktree-removal listener failed for " + removed, e);
+            }
+        }
     }
 
     /**
@@ -237,6 +289,7 @@ public final class WorktreeService implements AutoCloseable {
     public CompletableFuture<Void> remove(Path repositoryRoot, Path worktreePath, Optional<String> branch) {
         return CompletableFuture.supplyAsync(() -> {
             removeBlocking(repositoryRoot, worktreePath, branch, false);
+            notifyWorktreeRemoved(repositoryRoot, worktreePath);
             return null;
         }, executor);
     }
@@ -250,6 +303,7 @@ public final class WorktreeService implements AutoCloseable {
     public CompletableFuture<Void> removeForced(Path repositoryRoot, Path worktreePath, Optional<String> branch) {
         return CompletableFuture.supplyAsync(() -> {
             removeBlocking(repositoryRoot, worktreePath, branch, true);
+            notifyWorktreeRemoved(repositoryRoot, worktreePath);
             return null;
         }, executor);
     }
@@ -770,19 +824,22 @@ public final class WorktreeService implements AutoCloseable {
     }
 
     /**
-     * The real (symlink-resolved) form of {@code p}, used by {@link #samePath}
-     * to match a worktree against {@code git worktree list --porcelain}. When
-     * the path exists, {@link Path#toRealPath} resolves symlinks directly; when
-     * it does not (a {@code prunable} worktree whose directory was removed
-     * outside git), {@code toRealPath} throws and the longest existing prefix
-     * is resolved instead, appending the rest verbatim. This matters on macOS,
-     * where the temp directory lives under {@code /var}, a symlink to
+     * The real (symlink-resolved) form of {@code p}, the canonical key a
+     * removed worktree is reported under and a per-worktree owner (e.g.
+     * MainWorkspace's language-server registry) keys its worktrees by:
+     * macOS's temp directory lives under {@code /var}, a symlink to
      * {@code /private/var}, while git records the resolved
-     * {@code /private/var/...} form -- without it, a prunable worktree would
-     * not match its list entry, be mistaken for one that was already removed,
-     * and have its prune skipped, leaving the branch undeletable.
+     * {@code /private/var/...} form, so raw absolute paths would not match.
+     * When the path exists, {@link Path#toRealPath} resolves symlinks
+     * directly; when it does not (a {@code prunable} worktree whose
+     * directory was removed outside git), {@code toRealPath} throws and the
+     * longest existing prefix is resolved instead, appending the rest
+     * verbatim. This matters on macOS for the same reason in both users:
+     * without it, a prunable worktree would not match its list entry, be
+     * mistaken for one that was already removed, and have its prune
+     * skipped, leaving the branch undeletable.
      */
-    private static Path canonical(Path p) {
+    public static Path canonical(Path p) {
         try {
             return p.toRealPath();
         } catch (IOException e) {

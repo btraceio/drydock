@@ -39,6 +39,8 @@ import app.drydock.git.GitTarget;
 import app.drydock.git.WorktreeService;
 import app.drydock.github.GitHubReviewRequest.Event;
 import app.drydock.github.GitHubReviewService;
+import app.drydock.lsp.JdtServerManager;
+import app.drydock.lsp.LspUsageProvider;
 import app.drydock.mcp.McpActivityLog;
 import app.drydock.mcp.McpSessionContext.HandoffDraft;
 import app.drydock.mcp.McpSessionContext.RenameKind;
@@ -59,6 +61,7 @@ import app.drydock.review.ReviewInstructions;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.PendingQuestions;
 import app.drydock.review.ReviewScopeRegistry;
+import app.drydock.review.UsageProvider;
 import app.drydock.review.tour.TourRecord;
 import app.drydock.review.tour.TourStep;
 import app.drydock.review.tour.TourStore;
@@ -74,6 +77,7 @@ import app.drydock.ui.review.SessionReviewView;
 import app.drydock.ui.model.WorkspaceViewModel;
 import app.drydock.ui.nav.ExplorerTrailStore;
 import app.drydock.ui.nav.SymbolPeek;
+import app.drydock.ui.nav.SymbolPeekService;
 import app.drydock.terminal.TerminalFactory;
 import app.drydock.terminal.api.TerminalHostView;
 import app.drydock.terminal.api.TerminalRuntime;
@@ -135,9 +139,12 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
 import java.util.function.DoubleSupplier;
 import java.util.function.Consumer;
@@ -300,8 +307,13 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     private final StackPane centerStack;
     private final MenuButton newTabButton = new MenuButton("＋");
 
-    /** The one {@link ReviewHost}, shared by every session tab's Review sub-tab. */
-    private final ReviewHost reviewHost = new ReviewHost();
+    /**
+     * The per-worktree JDT language-server registry (usage-resolution tier 3,
+     * spec docs/superpowers/specs/2026-10-08-lsp-tier3-usage-resolution.md,
+     * §§3/5/8): off by default, lazy per local worktree, closed on
+     * tab/worktree/config/app close; see {@link LanguageServerRegistry}.
+     */
+    private final LanguageServerRegistry languageServers = new LanguageServerRegistry();
 
     /** Open-repository badge colors: one palette slot per project, freed when its last tab closes. */
     private final ProjectTabGroup projectTabGroup = new ProjectTabGroup();
@@ -532,6 +544,13 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 ghCliService, worktreeService, openTabs::get, this::repositoryFor,
                 this::publishSessions, this::noteSessionDeleted);
 
+        // §5: a worktree the sidebar actually removed takes its language
+        // server AND its persistent ~/.drydock/lsp/<slug> cache with it. The
+        // listener fires on WorktreeService's executor thread, off the FX
+        // thread, and never for a removal that failed.
+        worktreeService.addRemovalListener((repositoryRoot, removed) ->
+                languageServers.removeAndDeleteCache(removed));
+
         getStyleClass().add("main-pane");
 
         tabPane.getStyleClass().add("session-tabs");
@@ -622,8 +641,14 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
     /** Re-reads the Explorer's user preferences after the settings modal closes. */
     public void refreshExplorerPreferences() {
-        UserConfig.loadAsync().thenAccept(config ->
-                skimDefaultCache.set(config.openChangedFilesInSkim()));
+        UserConfig.loadAsync().thenAccept(config -> {
+            skimDefaultCache.set(config.openChangedFilesInSkim());
+            // §3: a language-server config change retires every live manager
+            // so the next eligible peek lazily starts one under the new paths.
+            // Runs on UserConfig's executor, not the FX thread -- retiring
+            // closes, and a close blocks up to its shutdown grace.
+            languageServers.updateConfig(config.languageServer());
+        });
     }
 
     /**
@@ -633,6 +658,19 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      */
     public void closeReviewServices() {
         prCheckoutService.close();
+    }
+
+    /**
+     * Closes every JDT language server this workspace owns and stops the
+     * tier from handing out new ones (§5, the app-stop path; DrydockApplication
+     * registers this in its exception-isolated closes). Idempotent, and
+     * exception-isolated per manager -- one failed close never skips the
+     * rest. Blocking (each close is already bounded: ~2 s shutdown grace
+     * plus the process close), bounded overall by the small number of live
+     * worktrees.
+     */
+    public void closeLanguageServers() {
+        languageServers.closeAll();
     }
 
     /**
@@ -2105,6 +2143,19 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     private final class ReviewHost implements SessionReviewView.Host {
 
         /**
+         * This board's worktree root, empty for a remote-only review (§8:
+         * no local checkout means no language server -- the existing
+         * no-checkout reason paths answer, and nothing is spawned). Captured
+         * per board at view creation because the Host factory's signature
+         * carries no scope; the root is what keys the worktree's manager.
+         */
+        private final Optional<Path> reviewRoot;
+
+        private ReviewHost(Optional<Path> reviewRoot) {
+            this.reviewRoot = reviewRoot;
+        }
+
+        /**
          * Scope ids with a {@code gh} availability check in flight for
          * Submit. Guards the busy modal against a second Submit click while
          * the first is still checking -- without it, a fast double-click
@@ -2683,6 +2734,24 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                     .filter(id -> openTabs.containsKey(id) && !openTabs.get(id).isRemote())
                     .map(id -> new ReviewNavigation(scope.diffRoot(), searchService, explorerTrailStore,
                             id.value().toString()));
+        }
+
+        /**
+         * The tier-3 composition at the seam's single construction site
+         * (§7): T5b's default builds the lexical floor, and this override
+         * wraps it upgrade-only when this board's worktree has a local
+         * checkout and the user configured a language server. Either gate
+         * closed returns the lexical provider untouched -- the same
+         * instance, byte-identical to the pre-tier behaviour (§3: the tier
+         * is off until configured) -- and no manager exists until this
+         * factory is first asked for it (§5: never at worktree open).
+         * Called on the FX thread; the provider it returns answers
+         * asynchronously, off it.
+         */
+        @Override
+        public UsageProvider usageProvider(SymbolPeekService peeks, Map<Path, Set<Integer>> changedLines) {
+            UsageProvider lexical = SessionReviewView.Host.super.usageProvider(peeks, changedLines);
+            return MainWorkspace.this.languageServers.provider(lexical, reviewRoot);
         }
 
         /** The Explorer's peek question ({@link SymbolPeek#askPrompt}), sent to the scope's own session. */
@@ -5107,6 +5176,11 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         if (!shuttingDown && restoringSessionIds.remove(openTab.sessionId())) {
             persistOpenSessionIds();
         }
+        // §5: this tab's worktree loses its (starting or running) language
+        // server. A second session on the same checkout re-creates it lazily
+        // on its next eligible peek, warm from the kept -data cache. Off the
+        // FX thread -- a manager close blocks up to its shutdown grace.
+        openTab.worktreeRoot().ifPresent(languageServers::closeForAsync);
         return openTab.disposeNativeResources();
     }
 
@@ -5138,6 +5212,19 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * one-element holder, since the runtime requires the callback up front,
      * before the {@link OpenSessionTab} it needs to call back into can exist.
      */
+    /**
+     * The local checkout root a tab's review operates on (usage-resolution
+     * tier 3, §§5/8): the session's search root for a local repository,
+     * empty for a remote-only one (no checkout to search, no language server
+     * to host). An unknown repository is treated as local, exactly like the
+     * Explorer gating at this tab's creation site.
+     */
+    private static Optional<Path> reviewRootOf(Optional<Repository> repository, Path searchRoot) {
+        return repository.map(Repository::isRemote).orElse(false)
+                ? Optional.empty()
+                : Optional.of(searchRoot);
+    }
+
     private OpenSessionTab createOpenSessionTab(ManagedSessionId sessionId, String displayName, String agentName,
                                                  AgentKind agentKind, boolean unsupportedAgent,
                                                  Optional<Repository> repository, Path searchRoot) {
@@ -5181,6 +5268,10 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         // instead (spec: SSH remote repositories; there is no local
         // checkout to root a local shell in).
         openTab.setShellWorkingDirectory(searchRoot.toString());
+        // The tab's local checkout root: the worktree its review reads (and
+        // whose language server tab close releases, §5); empty for a
+        // remote-only tab, which has no checkout to serve.
+        openTab.setWorktreeRoot(reviewRootOf(repository, searchRoot));
         repository.filter(Repository::isRemote).ifPresent(repo -> {
             openTab.setShellCommand(SshCommandBuilder.interactiveSessionCommand(repo.remote(),
                     "exec \"${SHELL:-sh}\" -l"));
@@ -5220,7 +5311,11 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         // here: the board shows its own "no scope yet" placeholder until
         // something calls showScopes.
         openTab.setReviewViewFactory(() -> {
-            SessionReviewView view = new SessionReviewView(reviewHost, diffService, activityLog);
+            // One ReviewHost per board, capturing this tab's worktree root:
+            // the Host factory's signature carries no scope, and the root is
+            // what keys the worktree's language server (tier 3, §7).
+            SessionReviewView view = new SessionReviewView(new ReviewHost(reviewRootOf(repository, searchRoot)),
+                    diffService, activityLog);
             // The chip the human picks is persisted per session -- through
             // the state store's single writer, never a load-then-save here.
             // Read back by resolveReviewScopes when a later gesture names no
@@ -5302,5 +5397,202 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             });
         }
         return openTab;
+    }
+
+    /**
+     * The per-worktree JDT language-server registry this workspace owns
+     * (usage-resolution tier 3, spec
+     * docs/superpowers/specs/2026-10-08-lsp-tier3-usage-resolution.md,
+     * §§3/5/8): at most one {@link JdtServerManager} per local worktree,
+     * keyed by the canonical ({@link WorktreeService#canonical(Path)}) root,
+     * created lazily -- never at worktree open, only when the review's
+     * usage-provider factory ({@link ReviewHost#usageProvider}) is first
+     * asked for a configured worktree; the manager's own lazy start does
+     * everything else, including the §3 validation.
+     *
+     * <p><strong>Off by default</strong> (§3): with no {@code jdtHome}
+     * configured, every {@link #provider} call returns the lexical floor
+     * unchanged -- the same instance, so the unconfigured path is
+     * byte-identical to tier 2. A config change ({@link #updateConfig})
+     * closes and removes every manager so the next eligible query lazily
+     * starts one under the new paths. Tab close ({@link #closeForAsync})
+     * releases that worktree's starting/running server; actual worktree
+     * removal ({@link #removeAndDeleteCache}) also deletes only that
+     * worktree's persistent ~/.drydock/lsp/&lt;slug&gt; cache; and
+     * {@link #closeAll} is the idempotent app-stop path. Every close is
+     * exception-isolated per manager (one failure never skips the rest).
+     * The blocking paths ({@link #updateConfig}, {@link #closeFor},
+     * {@link #removeAndDeleteCache}, {@link #closeAll}) must never run on
+     * the FX thread -- each close blocks up to its ~2 s shutdown grace
+     * plus the process close; {@link #provider} (FX thread) and
+     * {@link #closeForAsync} (FX thread) are the only FX-thread entries.</p>
+     */
+    static final class LanguageServerRegistry {
+
+        private final Map<Path, JdtServerManager> managers = new ConcurrentHashMap<>();
+        /** Where the tier-3 wrappers read files; released by {@link #closeAll} (lifecycle symmetry). */
+        private final ExecutorService fileReader = Executors.newVirtualThreadPerTaskExecutor();
+        /**
+         * Raw-to-{@link WorktreeService#canonical(Path)} key memo, so the FX-thread
+         * entries below pay one resolved stat per worktree per run rather than
+         * one per peek. The single surviving filesystem touch is the same
+         * bounded, warmed-by-construction kind {@code TerminalThemes.configFileFor}'s
+         * call sites carry (AGENTS.md "Blocking work is async" allows no less,
+         * and no more): an existing worktree's {@code toRealPath} is one call,
+         * and the alternative -- an unresolved key -- would not match the form
+         * git reports the removed worktree under, silently skipping the §5
+         * cache deletion on a symlinked root (macOS's /var).
+         */
+        private final Map<Path, Path> canonicalKeys = new ConcurrentHashMap<>();
+        private final BiFunction<Path, UserConfig.LanguageServer, JdtServerManager> managerFactory;
+        private final BiConsumer<Path, UserConfig.LanguageServer> cacheDeleter;
+        private volatile UserConfig.LanguageServer config =
+                new UserConfig.LanguageServer(Optional.empty(), Optional.empty());
+        private volatile boolean closed;
+
+        /** Production: real managers, the ProcessRunner java probe, ~/.drydock/lsp caches. */
+        LanguageServerRegistry() {
+            this(LanguageServerRegistry::productionManager, LanguageServerRegistry::deleteCacheFor);
+        }
+
+        /** Test seam: canned managers and recorded cache deletions; nothing ever launches. */
+        LanguageServerRegistry(BiFunction<Path, UserConfig.LanguageServer, JdtServerManager> managerFactory,
+                               BiConsumer<Path, UserConfig.LanguageServer> cacheDeleter) {
+            this.managerFactory = managerFactory;
+            this.cacheDeleter = cacheDeleter;
+        }
+
+        /** The manager this workspace would run for {@code root} under {@code config}. */
+        private static JdtServerManager productionManager(Path root, UserConfig.LanguageServer config) {
+            return new JdtServerManager(root,
+                    new JdtServerManager.LaunchConfig(config.jdtHome().orElseThrow(),
+                            config.javaHome().orElse(null)),
+                    JdtServerManager.processRunnerJavaProbe());
+        }
+
+        /**
+         * Deletes {@code root}'s persistent ~/.drydock/lsp/&lt;slug&gt; cache
+         * (§4: kept across closes, deleted only on worktree removal). A
+         * throwaway manager carries the slug knowledge: construction is
+         * cheap and validates nothing, so an unconfigured tier (no
+         * {@code jdtHome}) still deletes its cache.
+         */
+        private static void deleteCacheFor(Path root, UserConfig.LanguageServer config) {
+            UserConfig.LanguageServer effective = config.jdtHome().isPresent() ? config
+                    : new UserConfig.LanguageServer(Optional.of(root), Optional.empty());
+            try (JdtServerManager throwaway = productionManager(root, effective)) {
+                throwaway.deleteCache();
+            } catch (RuntimeException e) {
+                LOG.log(Level.WARNING, "could not delete the language server cache of " + root, e);
+            }
+        }
+
+        /**
+         * Caches the asynchronously loaded config; a change retires every
+         * live manager (§3) so the next eligible query starts fresh under
+         * the new paths. Runs on UserConfig's executor, never the FX thread.
+         */
+        void updateConfig(UserConfig.LanguageServer next) {
+            if (closed || next.equals(config)) {
+                return;
+            }
+            config = next;
+            closeEach(drain());
+        }
+
+        /**
+         * The usage-provider factory's body (§§3/5/7): the lexical floor
+         * when tier 3 is gated off -- no checkout, no configuration, or the
+         * registry closed; the same instance, byte-identical to the
+         * default -- otherwise the floor wrapped upgrade-only over this
+         * worktree's lazily created manager. Called on the FX thread; the
+         * provider it returns answers asynchronously, off it.
+         */
+        UsageProvider provider(UsageProvider lexical, Optional<Path> worktreeRoot) {
+            if (closed || worktreeRoot.isEmpty() || config.jdtHome().isEmpty()) {
+                return lexical;
+            }
+            Path root = key(worktreeRoot.get());
+            JdtServerManager manager = managers.computeIfAbsent(root, key -> managerFactory.apply(key, config));
+            return new LspUsageProvider(lexical, root, manager, fileReader);
+        }
+
+        /**
+         * FX-thread entry for tab close (§5): pays nothing when the worktree
+         * has no manager, otherwise schedules the blocking close off the FX
+         * thread (a manager close blocks up to its shutdown grace).
+         */
+        void closeForAsync(Path root) {
+            if (managers.containsKey(key(root))) {
+                Thread.ofVirtual().name("lsp-tab-close").start(() -> closeFor(root));
+            }
+        }
+
+        /** Closes (cancelling a starting one) and removes the worktree's manager; blocking. */
+        void closeFor(Path root) {
+            JdtServerManager manager = managers.remove(key(root));
+            if (manager != null) {
+                closeQuietly(manager);
+            }
+        }
+
+        /**
+         * Worktree removal (§5): close and remove the worktree's manager and
+         * delete its persistent cache -- and delete the cache even when no
+         * manager ever existed, since the cache outlives every manager
+         * (§4: kept between runs). Blocking; runs on WorktreeService's
+         * executor.
+         */
+        void removeAndDeleteCache(Path root) {
+            Path normalized = key(root);
+            JdtServerManager manager = managers.remove(normalized);
+            if (manager != null) {
+                closeQuietly(manager);
+            }
+            cacheDeleter.accept(normalized, config);
+        }
+
+        /** The idempotent stop path (§5): closes every manager and ends the tier. */
+        void closeAll() {
+            closed = true;
+            closeEach(drain());
+            fileReader.shutdown();
+        }
+
+        /** The live-manager count; the laziness oracle. */
+        int size() {
+            return managers.size();
+        }
+
+        /** The registry key of {@code root}: its canonical form, memoized (see {@link #canonicalKeys}). */
+        private Path key(Path root) {
+            return canonicalKeys.computeIfAbsent(root.toAbsolutePath().normalize(),
+                    WorktreeService::canonical);
+        }
+
+        private List<JdtServerManager> drain() {
+            List<JdtServerManager> toClose = new ArrayList<>();
+            for (Path key : List.copyOf(managers.keySet())) {
+                JdtServerManager manager = managers.remove(key);
+                if (manager != null) {
+                    toClose.add(manager);
+                }
+            }
+            return toClose;
+        }
+
+        private static void closeEach(List<JdtServerManager> toClose) {
+            for (JdtServerManager manager : toClose) {
+                closeQuietly(manager);
+            }
+        }
+
+        private static void closeQuietly(JdtServerManager manager) {
+            try {
+                manager.close();
+            } catch (RuntimeException e) {
+                LOG.log(Level.WARNING, "a JDT language server close failed", e);
+            }
+        }
     }
 }

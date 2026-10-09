@@ -72,7 +72,17 @@ network calls.
 
 All external process spawns (`git`, `gh`, `claude`, `open`, …) use the shared
 `app.drydock.process.ProcessRunner` — never a hand-rolled `ProcessBuilder` +
-stream-drain copy in a service.
+stream-drain copy in a service. **One sanctioned exception:** a language
+server is the single long-lived child, hosted by
+`app.drydock.lsp.LspServerProcess` — `ProcessRunner`'s contract is
+run-to-completion (`waitFor(timeout)` + `destroyForcibly()`), which would
+kill a server by construction. The host keeps every other rule: argument
+list only, never a shell; pipes, never a PTY (terminal semantics corrupt
+the framed LSP transport); one framed stdout reader plus one DEBUG stderr
+drainer; no process lifetime timeout; protocol `shutdown` then `exit`
+before a bounded (2 s) `destroyForcibly()` only if graceful shutdown
+fails. Every one-shot probe the LSP tier needs (`java -version`) still
+goes through `ProcessRunner`.
 
 - Every spawn has a timeout (short for status/query commands, long for
   clone-scale work). On expiry or interrupt: `destroyForcibly()`, join the

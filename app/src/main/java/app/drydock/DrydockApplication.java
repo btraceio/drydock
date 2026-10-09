@@ -1244,6 +1244,9 @@ public final class DrydockApplication extends Application {
         }
         if (mainWorkspace != null) {
             closeQuietly("Review services", mainWorkspace::closeReviewServices);
+            // §5: the per-worktree JDT language servers, through the same
+            // isolated close so one failed close never skips the rest.
+            closeQuietly("JDT language servers", mainWorkspace::closeLanguageServers);
         }
         closeQuietly("UserConfig saves", UserConfig::flushPendingSaves);
         if (gitHubService != null) {
