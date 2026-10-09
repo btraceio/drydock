@@ -21,13 +21,24 @@ import java.nio.file.StandardOpenOption;
 /**
  * JSON-file-backed {@link ApplicationStateRepository} (plan section 17).
  *
- * <p>Default location: {@code ~/Library/Application Support/ClaudeProjectManager/state.json}
+ * <p>Default location: per launch path, via {@code StateDirectory} -- {@code
+ * ~/Library/Application Support/ClaudeProjectManager/install-<id>/state.json},
+ * where <id> names the location this instance's code runs from; two
+ * instances running side by side never write (or read) each other's state
  * (plan sections 6.6, 17). Writes are atomic: the new state is written to
  * a temporary file in the same directory, fsynced, the previous state
  * file (if any) is copied to a {@code .bak} sibling, and then the
  * temporary file is atomically renamed over the real state file. A crash
  * at any point before the final rename leaves the real state file
  * untouched.</p>
+ *
+ * <p>An install's pre-per-install state remains in the shared directory the
+ * app used before instances were named for themselves ({@code
+ * ~/Library/Application Support/ClaudeProjectManager/state.json}); it is
+ * that old install's archive, and current code reads an install's state
+ * only through its own directory. The shared path therefore has no accessor
+ * here: an unused constant would be an invitation to reintroduce the
+ * shared-directory write path this split removed.</p>
  *
  * <p>{@link #load()} never throws for a missing, truncated, or malformed
  * state file: it logs a warning, backs up the offending file next to
@@ -42,19 +53,6 @@ public final class JsonApplicationStateRepository implements ApplicationStateRep
 
     public JsonApplicationStateRepository(Path stateFile) {
         this.stateFile = stateFile.toAbsolutePath().normalize();
-    }
-
-    /**
-     * The default state file location (plan sections 6.6 / 17): {@code
-     * ~/Library/Application Support/ClaudeProjectManager/state.json}.
-     */
-    public static Path defaultStateFile() {
-        String home = System.getProperty("user.home");
-        return Path.of(home, "Library", "Application Support", "ClaudeProjectManager", "state.json");
-    }
-
-    public static JsonApplicationStateRepository atDefaultLocation() {
-        return new JsonApplicationStateRepository(defaultStateFile());
     }
 
     public Path stateFile() {

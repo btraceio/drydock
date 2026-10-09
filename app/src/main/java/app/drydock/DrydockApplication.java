@@ -32,6 +32,7 @@ import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.review.tour.TourStore;
 import app.drydock.search.SessionSearchService;
 import app.drydock.state.JsonApplicationStateRepository;
+import app.drydock.state.StateDirectory;
 import app.drydock.ui.AppShell;
 import app.drydock.ui.GitHubCloneModal;
 import app.drydock.ui.MainWorkspace;
@@ -76,6 +77,7 @@ import java.awt.event.InputEvent;
 import java.awt.image.BufferedImage;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
+import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -166,6 +168,8 @@ public final class DrydockApplication extends Application {
     /** Shared by the MCP server (writer) and the Review activity panel (reader). */
     private McpActivityLog mcpActivityLog;
     private McpServer mcpServer;
+    /** The instance lock's channel; closed last on shutdown. Null when never locked (refused startup). */
+    private FileChannel stateDirLock;
     private boolean shutdownConfirmed;
 
     @Override
@@ -201,22 +205,93 @@ public final class DrydockApplication extends Application {
         }
     }
 
+    /**
+     * This instance's state repository: the diagnostic override when one is
+     * set (a throwaway file for automated visual verification, per the {@code
+     * app.drydock.diag.*} section in {@code app/build.gradle.kts}); otherwise
+     * this install's own state directory, resolved from where this instance's
+     * code runs from and never shared with, or read from, another instance's
+     * directory ({@code StateDirectory}).
+     */
+    private static JsonApplicationStateRepository resolveStateRepository() {
+        String diagStateFile = System.getProperty("app.drydock.diag.stateFile");
+        if (diagStateFile != null) {
+            JsonApplicationStateRepository diag = new JsonApplicationStateRepository(Path.of(diagStateFile));
+            System.out.println("[diag] state file: " + diag.stateFile());
+            return diag;
+        }
+        return new JsonApplicationStateRepository(StateDirectory.defaultStateFile(DrydockApplication.class));
+    }
+
+    /**
+     * A second launch of its own install, refused before any service or file
+     * besides the lock itself is touched: one instance owns the state
+     * directory's files. Says where the other instance lives, because the
+     * reader cannot otherwise see it (a background terminal or another
+     * desktop).
+     *
+     * <p>The ordering this claims lives in {@link #startOnFxThread}: it
+     * resolves the repository before taking the lock. That is safe because
+     * {@link JsonApplicationStateRepository}'s constructor does no
+     * filesystem work (it only normalizes the path), so the first touch of
+     * the state directory is the lock itself.</p>
+     */
+    private static void refuseSecondInstance(Path stateDirectory) {
+        LOG.log(Level.WARNING, "Another Drydock instance holds the state directory "
+                + stateDirectory + "; refusing to start a second one");
+        Alert alert = new Alert(Alert.AlertType.INFORMATION);
+        alert.setTitle(WINDOW_TITLE);
+        alert.setHeaderText("Drydock is already running for this install");
+        alert.setContentText("Another instance holds this install's state directory ("
+                + stateDirectory + "). One instance runs per install; close that one to start a new one here.");
+        try {
+            alert.showAndWait();
+        } catch (RuntimeException alertFailure) {
+            // Toolkit too broken to show UI; the log line above is all we can do.
+            LOG.log(Level.WARNING, "Could not show the alert", alertFailure);
+        }
+        Platform.exit();
+    }
+
     private void startOnFxThread(Stage primaryStage) {
         // Set the macOS dock icon here (on the FX thread, toolkit already up) --
         // doing AWT/Taskbar work before Glass initializes risks an NSApplication
         // main-thread conflict. The app name is set far earlier, in Main.
         DockIcon.applyDockIcon();
 
-        // Diagnostic override (see the app.drydock.diag.* section in
-        // app/build.gradle.kts): lets automated visual verification run
-        // against a throwaway state file instead of the user's real
-        // ~/Library/Application Support state.
-        String diagStateFile = System.getProperty("app.drydock.diag.stateFile");
-        JsonApplicationStateRepository stateRepository = diagStateFile != null
-                ? new JsonApplicationStateRepository(Path.of(diagStateFile))
-                : JsonApplicationStateRepository.atDefaultLocation();
-        if (diagStateFile != null) {
-            System.out.println("[diag] state file: " + stateRepository.stateFile());
+        JsonApplicationStateRepository stateRepository = resolveStateRepository();
+        // Per install, one running instance: a second launch of the same
+        // install would otherwise race this one's state writes and MCP token
+        // purges -- the shared-state-directory defect one level down. A
+        // different install (a built image next to a kept-running working
+        // install) resolves to its own directory and its own lock, so it runs
+        // freely beside this one.
+        stateDirLock = null;
+        // Per install, one running instance: a second launch of the same
+        // install would otherwise race this one's state writes and MCP token
+        // purges -- the shared-state-directory defect one level down. A
+        // different install (a built image next to a kept-running working
+        // install) resolves to its own directory and its own lock, so it runs
+        // freely beside this one. The outcome is kept tri-state: an I/O
+        // failure (read-only dir, full disk, a filesystem without advisory
+        // locks) is NOT a second instance -- telling the user to "close that
+        // one" would name a window that does not exist.
+        StateDirectory.InstanceLock lock =
+                StateDirectory.tryLockInstance(stateRepository.stateFile().getParent());
+        if (lock instanceof StateDirectory.InstanceLock.Held held) {
+            stateDirLock = held.channel();
+        } else if (lock instanceof StateDirectory.InstanceLock.Failed failed) {
+            LOG.log(Level.WARNING, "Could not lock the state directory; refusing to start",
+                    failed.cause());
+            UiErrors.showUnexpected(WINDOW_TITLE, failed.cause(),
+                    "Drydock could not lock its state directory ("
+                            + stateRepository.stateFile().getParent()
+                            + "). Check the directory's permissions and disk space, then start again.");
+            Platform.exit();
+            return;
+        } else {
+            refuseSecondInstance(stateRepository.stateFile().getParent());
+            return;
         }
 
         gitStatusService = new GitStatusService();
@@ -1252,6 +1327,12 @@ public final class DrydockApplication extends Application {
         }
         if (gitHubReviewService != null) {
             closeQuietly("GitHubReviewService", gitHubReviewService::close);
+        }
+        // Last, so every service outlived the instance: closing it releases
+        // the state directory to a later launch of this install.
+        if (stateDirLock != null) {
+            closeQuietly("state directory instance lock", () -> StateDirectory.releaseInstance(stateDirLock));
+            stateDirLock = null;
         }
     }
 
