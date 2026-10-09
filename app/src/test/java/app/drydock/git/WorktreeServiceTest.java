@@ -240,6 +240,32 @@ class WorktreeServiceTest {
     }
 
     @Test
+    void uncommittedChangesListsWhatARemoveWouldDiscard(@TempDir Path repoDir, @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/list").get();
+
+        assertTrue(service.uncommittedChanges(worktree).get().isEmpty(), "a fresh worktree is clean");
+
+        // One modified tracked file, one staged addition, one untracked file --
+        // the three shapes the confirm dialog has to show before a forced
+        // delete discards them.
+        Files.writeString(worktree.resolve("README.md"), "changed\n");
+        Files.writeString(worktree.resolve("staged.txt"), "staged\n");
+        runGit(worktree, "add", "staged.txt");
+        Files.writeString(worktree.resolve("untracked.txt"), "untracked\n");
+
+        List<String> changes = service.uncommittedChanges(worktree).get();
+        assertEquals(3, changes.size());
+        // The FIRST line (README.md, an unstaged modification) must keep its
+        // leading status-column space: a whole-output strip() used to corrupt
+        // exactly that line into "M README.md", which parses as a staged change.
+        assertTrue(changes.get(0).startsWith(" M README.md"), changes.get(0));
+        assertTrue(changes.stream().anyMatch(line -> line.endsWith("staged.txt") && line.startsWith("A ")));
+        assertTrue(changes.stream().anyMatch(line -> line.endsWith("untracked.txt") && line.startsWith("??")));
+    }
+
+    @Test
     void forcedRemoveDeletesADirtyWorktreeAndItsBranch(@TempDir Path repoDir, @TempDir Path worktreeParent)
             throws Exception {
         Path repo = initCommittedRepo(repoDir);

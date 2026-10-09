@@ -67,14 +67,15 @@ class MergeFinishBranchDriftTest {
             assertEquals(MergeFinishDecision.BranchDeletePlan.KEEP_MOVED, plan);
 
             List<ManagedSessionId> deleted = new ArrayList<>();
-            WorktreeSessionCleanup cleanup = new WorktreeSessionCleanup(service::remove, id -> {
+            WorktreeSessionCleanup cleanup = new WorktreeSessionCleanup(
+                    (root, wt, branch, force) -> service.remove(root, wt, branch), id -> {
                 deleted.add(id);
                 return CompletableFuture.completedFuture(null);
             });
             ManagedSessionId sessionId = ManagedSessionId.newId();
 
             MergeFinishDecision.CleanupOutcome outcome =
-                    cleanup.run(sessionId, repo, worktree, "feat/x", plan).get();
+                    cleanup.run(sessionId, repo, worktree, "feat/x", plan, false).get();
 
             assertTrue(outcome.worktreeRemoved(), "the worktree removal is still safe and must still happen");
             assertEquals(MergeFinishDecision.BranchResult.KEPT_MOVED, outcome.branch());

@@ -47,13 +47,13 @@ class WorktreeSessionCleanupTest {
     @Test
     void aCleanRunRemovesTheWorktreeDeletesTheBranchAndClosesTheSession() throws Exception {
         List<Optional<String>> requested = new ArrayList<>();
-        WorktreeSessionCleanup subject = cleanup((repo, worktree, branch) -> {
+        WorktreeSessionCleanup subject = cleanup((repo, worktree, branch, force) -> {
             requested.add(branch);
             return CompletableFuture.completedFuture(null);
         });
 
         MergeFinishDecision.CleanupOutcome outcome =
-                subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH).get();
+                subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH, false).get();
 
         assertEquals(List.of(Optional.of("feat/x")), requested);
         assertTrue(outcome.worktreeRemoved());
@@ -65,13 +65,13 @@ class WorktreeSessionCleanupTest {
     @Test
     void aBranchWeDoNotOwnIsNeverPassedToGit() throws Exception {
         List<Optional<String>> requested = new ArrayList<>();
-        WorktreeSessionCleanup subject = cleanup((repo, worktree, branch) -> {
+        WorktreeSessionCleanup subject = cleanup((repo, worktree, branch, force) -> {
             requested.add(branch);
             return CompletableFuture.completedFuture(null);
         });
 
         MergeFinishDecision.CleanupOutcome outcome =
-                subject.run(sessionId, REPO, WORKTREE, "feat/x", KEEP_NOT_OURS_PLAN).get();
+                subject.run(sessionId, REPO, WORKTREE, "feat/x", KEEP_NOT_OURS_PLAN, false).get();
 
         assertEquals(List.of(Optional.<String>empty()), requested);
         assertEquals(MergeFinishDecision.BranchResult.KEPT_NOT_OURS, outcome.branch());
@@ -80,11 +80,11 @@ class WorktreeSessionCleanupTest {
 
     @Test
     void aFailedBranchDeletionStillClosesTheSession() throws Exception {
-        WorktreeSessionCleanup subject = cleanup((repo, worktree, branch) ->
+        WorktreeSessionCleanup subject = cleanup((repo, worktree, branch, force) ->
                 CompletableFuture.failedFuture(new BranchNotDeletedException("feat/x", 1, "checked out")));
 
         MergeFinishDecision.CleanupOutcome outcome =
-                subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH).get();
+                subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH, false).get();
 
         assertTrue(outcome.worktreeRemoved());
         assertEquals(MergeFinishDecision.BranchResult.DELETE_FAILED, outcome.branch());
@@ -94,11 +94,11 @@ class WorktreeSessionCleanupTest {
 
     @Test
     void aSurvivingWorktreeKeepsTheSessionOpen() throws Exception {
-        WorktreeSessionCleanup subject = cleanup((repo, worktree, branch) ->
+        WorktreeSessionCleanup subject = cleanup((repo, worktree, branch, force) ->
                 CompletableFuture.failedFuture(new WorktreeNotCleanException(WORKTREE)));
 
         MergeFinishDecision.CleanupOutcome outcome =
-                subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH).get();
+                subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH, false).get();
 
         assertFalse(outcome.worktreeRemoved());
         assertEquals(MergeFinishDecision.BranchResult.NOT_ATTEMPTED, outcome.branch());
@@ -110,11 +110,11 @@ class WorktreeSessionCleanupTest {
     @Test
     void aFailedSessionDeletionIsReflectedInTheOutcome() throws Exception {
         WorktreeSessionCleanup subject = new WorktreeSessionCleanup(
-                (repo, worktree, branch) -> CompletableFuture.completedFuture(null),
+                (repo, worktree, branch, force) -> CompletableFuture.completedFuture(null),
                 id -> CompletableFuture.failedFuture(new IllegalStateException("state file locked")));
 
         MergeFinishDecision.CleanupOutcome outcome =
-                subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH).get();
+                subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH, false).get();
 
         // The worktree and branch are gone -- this is a genuine partial
         // success, not a reason to retry the destructive half -- but
@@ -128,11 +128,11 @@ class WorktreeSessionCleanupTest {
 
     @Test
     void aLockedWorktreeIsReportedWithGitsOwnLockReason() throws Exception {
-        WorktreeSessionCleanup subject = cleanup((repo, worktree, branch) ->
+        WorktreeSessionCleanup subject = cleanup((repo, worktree, branch, force) ->
                 CompletableFuture.failedFuture(new WorktreeLockedException(WORKTREE, Optional.of("initializing"))));
 
         MergeFinishDecision.CleanupOutcome outcome =
-                subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH).get();
+                subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH, false).get();
 
         assertFalse(outcome.worktreeRemoved());
         assertEquals(MergeFinishDecision.BranchResult.NOT_ATTEMPTED, outcome.branch());
@@ -146,13 +146,13 @@ class WorktreeSessionCleanupTest {
         // reach `git branch -D` as Optional.empty(), so the branch (and the commit
         // that moved it) survives the worktree removal.
         List<Optional<String>> requested = new ArrayList<>();
-        WorktreeSessionCleanup subject = cleanup((repo, worktree, branch) -> {
+        WorktreeSessionCleanup subject = cleanup((repo, worktree, branch, force) -> {
             requested.add(branch);
             return CompletableFuture.completedFuture(null);
         });
 
         MergeFinishDecision.CleanupOutcome outcome =
-                subject.run(sessionId, REPO, WORKTREE, "feat/x", KEEP_MOVED_PLAN).get();
+                subject.run(sessionId, REPO, WORKTREE, "feat/x", KEEP_MOVED_PLAN, false).get();
 
         assertEquals(List.of(Optional.<String>empty()), requested);
         assertTrue(outcome.worktreeRemoved());
@@ -163,13 +163,13 @@ class WorktreeSessionCleanupTest {
     @Test
     void aBlankBranchNameIsNeverReportedAsDeleted() throws Exception {
         List<Optional<String>> requested = new ArrayList<>();
-        WorktreeSessionCleanup subject = cleanup((repo, worktree, branch) -> {
+        WorktreeSessionCleanup subject = cleanup((repo, worktree, branch, force) -> {
             requested.add(branch);
             return CompletableFuture.completedFuture(null);
         });
 
         MergeFinishDecision.CleanupOutcome outcome =
-                subject.run(sessionId, REPO, WORKTREE, "", DELETE_BRANCH).get();
+                subject.run(sessionId, REPO, WORKTREE, "", DELETE_BRANCH, false).get();
 
         assertEquals(List.of(Optional.<String>empty()), requested);
         assertEquals(MergeFinishDecision.BranchResult.KEPT_NOT_OURS, outcome.branch());
@@ -177,13 +177,27 @@ class WorktreeSessionCleanupTest {
     }
 
     @Test
+    void theForceFlagReachesTheRemovalUnchanged() throws Exception {
+        List<Boolean> requested = new ArrayList<>();
+        WorktreeSessionCleanup subject = cleanup((repo, worktree, branch, force) -> {
+            requested.add(force);
+            return CompletableFuture.completedFuture(null);
+        });
+
+        subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH, true).get();
+        subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH, false).get();
+
+        assertEquals(List.of(true, false), requested);
+    }
+
+    @Test
     void aCollaboratorThatThrowsSynchronouslyStillYieldsACleanupOutcome() throws Exception {
-        WorktreeSessionCleanup subject = cleanup((repo, worktree, branch) -> {
+        WorktreeSessionCleanup subject = cleanup((repo, worktree, branch, force) -> {
             throw new RejectedExecutionException("executor already shut down");
         });
 
         MergeFinishDecision.CleanupOutcome outcome =
-                subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH).get();
+                subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH, false).get();
 
         assertFalse(outcome.worktreeRemoved());
         assertEquals(MergeFinishDecision.BranchResult.NOT_ATTEMPTED, outcome.branch());
@@ -194,13 +208,13 @@ class WorktreeSessionCleanupTest {
     @Test
     void aSessionDeletionThatThrowsSynchronouslyStillYieldsACleanupOutcome() throws Exception {
         WorktreeSessionCleanup subject = new WorktreeSessionCleanup(
-                (repo, worktree, branch) -> CompletableFuture.completedFuture(null),
+                (repo, worktree, branch, force) -> CompletableFuture.completedFuture(null),
                 id -> {
                     throw new IllegalStateException("toolkit has stopped");
                 });
 
         MergeFinishDecision.CleanupOutcome outcome =
-                subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH).get();
+                subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH, false).get();
 
         assertTrue(outcome.worktreeRemoved());
         assertFalse(outcome.sessionDeleted());

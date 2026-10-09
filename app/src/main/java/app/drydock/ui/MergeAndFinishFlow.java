@@ -230,7 +230,7 @@ final class MergeAndFinishFlow {
         BranchDeleteGate.plan(sessionManager.mayDeleteBranchOf(worktreeRoot), target.branchTipOid(),
                         () -> worktreeService.inspectMergeTarget(repositoryRoot, branch))
                 .thenCompose(plan -> attempt(() ->
-                        cleanup.run(sessionId, repositoryRoot, worktreeRoot, branch, plan)))
+                        cleanup.run(sessionId, repositoryRoot, worktreeRoot, branch, plan, false)))
                 .whenComplete((outcome, ex) -> Platform.runLater(() -> {
                     if (ex != null) {
                         // The merge landed; only the cleanup call failed to

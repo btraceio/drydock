@@ -38,9 +38,14 @@ final class WorktreeSessionCleanup {
 
     private static final Logger LOG = System.getLogger(WorktreeSessionCleanup.class.getName());
 
-    /** Matches {@code WorktreeService::remove}. */
+    /**
+     * Matches {@code WorktreeService.remove}/{@code removeForced}: {@code
+     * force} selects the destructive variant that discards uncommitted work
+     * (and overrides a lock, with the doubled --force). Only reached with
+     * {@code force=true} after the user has confirmed the discard in the UI.
+     */
     interface WorktreeRemoval {
-        CompletableFuture<Void> remove(Path repositoryRoot, Path worktree, Optional<String> branch);
+        CompletableFuture<Void> remove(Path repositoryRoot, Path worktree, Optional<String> branch, boolean force);
     }
 
     /** Matches {@code SessionManager::deleteSession}. */
@@ -68,10 +73,18 @@ final class WorktreeSessionCleanup {
      *             two "keep" reasons get different copy, and one of them is
      *             the only warning the user gets that a commit is not in the
      *             base branch.
+     * @param force remove with {@code --force --force}, discarding any
+     *              uncommitted work in the worktree. {@code false} lets git
+     *              refuse a dirty worktree (reported as "kept: it has
+     *              uncommitted changes"). The confirmation-then-act sequence
+     *              is not atomic by itself: the caller (the UI) re-probes the
+     *              worktree immediately before the forced removal and refuses
+     *              when unshown changes appeared, so {@code true} only ever
+     *              discards changes the user saw or fewer.
      */
     CompletableFuture<MergeFinishDecision.CleanupOutcome> run(ManagedSessionId sessionId, Path repositoryRoot,
                                                               Path worktreeRoot, String branch,
-                                                              MergeFinishDecision.BranchDeletePlan plan) {
+                                                              MergeFinishDecision.BranchDeletePlan plan, boolean force) {
         // A blank branch name is never ours to pass to `git branch -D`
         // (WorktreeService.removeBlocking silently skips it), so treating it
         // as deletable here would report BranchResult.DELETED for a branch
@@ -83,7 +96,7 @@ final class WorktreeSessionCleanup {
                         : plan;
         boolean deleteBranch = effective == MergeFinishDecision.BranchDeletePlan.DELETE;
         Optional<String> branchToDelete = deleteBranch ? Optional.of(branch) : Optional.empty();
-        return attempt(() -> removal.remove(repositoryRoot, worktreeRoot, branchToDelete))
+        return attempt(() -> removal.remove(repositoryRoot, worktreeRoot, branchToDelete, force))
                 .handle((ignored, failure) -> classify(failure, effective))
                 .thenCompose(partial -> partial.worktreeRemoved()
                         ? closeSession(sessionId, partial)

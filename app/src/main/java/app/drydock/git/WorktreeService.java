@@ -254,6 +254,48 @@ public final class WorktreeService implements AutoCloseable {
         }, executor);
     }
 
+    /**
+     * The worktree's uncommitted changes, one {@code git status --porcelain}
+     * line each (for example {@code " M src/App.java"}, {@code "?? notes.txt"}),
+     * in git's own order. This is exactly the probe {@link #remove} and
+     * {@link #isWorktreeClean} answer, so what the caller shows the user before
+     * a confirmed forced delete is what git would refuse over -- including the
+     * {@code --ignore-submodules=dirty} line: dirty submodule <em>content</em>
+     * never blocks a remove, so it must not appear as work the delete would
+     * discard, while a changed submodule <em>commit</em> still does.
+     *
+     * <p>The future completes exceptionally (a {@link GitCommandFailedException}
+     * wrapped per {@link CompletableFuture} convention) on any failure: a
+     * caller that cannot list the changes must not render an empty list as
+     * "these changes will be discarded". An empty list means the worktree is
+     * clean.</p>
+     */
+    public CompletableFuture<List<String>> uncommittedChanges(Path worktree) {
+        return CompletableFuture.supplyAsync(() -> uncommittedChangesBlocking(worktree), executor);
+    }
+
+    /** Synchronous form of {@link #uncommittedChanges}, package-private for tests. */
+    List<String> uncommittedChangesBlocking(Path worktree) {
+        Path git = locator.locate()
+                .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
+        List<String> command = statusCommand(git, worktree);
+        ProcessResult result = run(command);
+        if (result.exitCode() != 0) {
+            throw new GitCommandFailedException(command, result.exitCode(), ProcessRunner.excerpt(result.stderr()));
+        }
+        // Lines are split first and only the trailing newline is stripped:
+        // a whole-output strip() would eat the FIRST line's leading status
+        // column (" M README.md" -- an unstaged modification -- degrading to
+        // "M README.md", which parses as staged) while every other line kept
+        // its column.
+        if (result.stdout().isBlank()) {
+            return List.of();
+        }
+        return result.stdout().stripTrailing().lines()
+                .map(line -> line.endsWith("\r") ? line.substring(0, line.length() - 1) : line)
+                .toList();
+    }
+
     /** Synchronous form of {@link #remove}/{@link #removeForced}, package-private for tests. */
     void removeBlocking(Path repositoryRoot, Path worktreePath, Optional<String> branch, boolean force) {
         Path git = locator.locate()

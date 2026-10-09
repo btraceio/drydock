@@ -22,9 +22,11 @@ import java.util.Optional;
  * modal the user dismisses, and involves Claude only when the merge stops on
  * conflicts, in which case it hands the conflicts off and polls. Delete is
  * the same destructive sequence without the merge, also reported per step
- * ({@code WorktreeSessionCleanup}). Only "create pull request" is a blind
- * hand-off to Claude in the session's terminal, since {@code gh pr create}
- * needs the user's own gh auth:
+ * ({@code WorktreeSessionCleanup}). A worktree holding uncommitted changes
+ * is not refused outright: the changes are listed in a confirm dialog and a
+ * confirmed delete runs the removal forced. Only "create pull request" is a
+ * blind hand-off to Claude in the session's terminal, since {@code gh pr
+ * create} needs the user's own gh auth:
  *
  * <ul>
  *   <li>{@code NONE}: Merge into base -- which merges AND finishes the

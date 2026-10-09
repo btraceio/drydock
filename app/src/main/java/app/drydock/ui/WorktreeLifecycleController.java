@@ -14,8 +14,11 @@ import app.drydock.git.WorktreeService;
 import javafx.animation.PauseTransition;
 import javafx.application.Platform;
 import javafx.geometry.Pos;
+import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.scene.control.ProgressIndicator;
+import javafx.scene.control.ScrollPane;
+import javafx.scene.layout.HBox;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
 import javafx.util.Duration;
@@ -107,7 +110,11 @@ final class WorktreeLifecycleController {
         this.repositoryFor = repositoryFor;
         this.onSessionsChanged = onSessionsChanged;
         this.onSessionDeleted = onSessionDeleted;
-        this.cleanup = new WorktreeSessionCleanup(worktreeService::remove, sessionManager::deleteSession);
+        this.cleanup = new WorktreeSessionCleanup(
+                (root, worktree, branchToDelete, force) -> force
+                        ? worktreeService.removeForced(root, worktree, branchToDelete)
+                        : worktreeService.remove(root, worktree, branchToDelete),
+                sessionManager::deleteSession);
     }
 
     void setModalLayer(ModalLayer modalLayer) {
@@ -415,6 +422,17 @@ final class WorktreeLifecycleController {
                 });
     }
 
+    /**
+     * Deletes the worktree (and the branch, when it is ours) and closes the
+     * session. A worktree with uncommitted changes is not deleted silently
+     * and not refused either: the changes are listed in a confirm dialog
+     * (read-only {@code git status --porcelain}, the same probe
+     * {@code git worktree remove} would refuse over), and only an explicit
+     * confirmation runs the removal with {@code --force --force}. The
+     * pre-check defaults to "clean" on failure -- the authoritative refusal
+     * then still comes from git itself in {@link WorktreeSessionCleanup},
+     * whose kept-worktree report this flow renders below.
+     */
     private void handoffDelete(ManagedSessionId sessionId, Path worktreeRoot, String branch) {
         OpenSessionTab tab = openTab.apply(sessionId);
         if (tab == null) {
@@ -425,14 +443,163 @@ final class WorktreeLifecycleController {
             return;
         }
         tab.showHandoffRunning("Removing worktree…");
-        // The same destructive sequence merge-and-finish runs: a worktree that
-        // survived keeps its session open, and a deleteSession that failed is
-        // reported instead of being assumed to have worked. The branch plan is
-        // forRequestedDelete, not the merge flow's forBranchDelete -- this
-        // delete is what the user asked for outright, so a branch tip that
-        // moved is not a reason to refuse it.
-        cleanup.run(sessionId, repository.root(), worktreeRoot, branch,
-                        MergeFinishDecision.forRequestedDelete(sessionManager.mayDeleteBranchOf(worktreeRoot)))
+        record Probe(boolean clean, List<String> changes) { }
+        AsyncCalls.attempt(() -> worktreeService.isWorktreeClean(worktreeRoot))
+                .exceptionally(ex -> true) // failed probe defaults clean; git asks again authoritatively
+                .thenCompose(clean -> clean
+                        ? CompletableFuture.completedFuture(new Probe(true, List.of()))
+                        : AsyncCalls.attempt(() -> worktreeService.uncommittedChanges(worktreeRoot))
+                                // Listing the changes is presentation only: on failure the
+                                // dialog below shows no list, and the non-forced removal
+                                // still refuses over the dirt it actually finds.
+                                .exceptionally(ex -> List.<String>of())
+                                .thenApply(changes -> new Probe(false, changes)))
+                .whenComplete((probe, ex) -> Platform.runLater(() -> {
+                    if (ex != null || probe == null) {
+                        restoreFinishIfOpen(openTab.apply(sessionId));
+                        UiErrors.show("Could not remove the worktree", ex);
+                        return;
+                    }
+                    if (probe.clean()) {
+                        runDelete(sessionId, repository.root(), worktreeRoot, branch, false, List.of());
+                    } else {
+                        confirmDeleteDespiteChanges(sessionId, repository, worktreeRoot, branch, probe.changes());
+                    }
+                }));
+    }
+
+    /**
+     * The confirm dialog for deleting a worktree that holds uncommitted
+     * changes: the porcelain lines are the changes about to be discarded, and
+     * only the explicit confirm reaches the destructive sequence -- forced,
+     * since a plain remove would refuse over exactly this dirt. Cancel (Esc,
+     * the backdrop, or the button) restores the Finish ▸ button and leaves
+     * everything as it was.
+     */
+    private void confirmDeleteDespiteChanges(ManagedSessionId sessionId, Repository repository,
+                                             Path worktreeRoot, String branch, List<String> changes) {
+        OpenSessionTab tab = openTab.apply(sessionId);
+        if (tab == null) {
+            return; // the tab (and with it the session's UI) closed mid-probe
+        }
+        // The banner above said "Removing worktree…"; nothing is being removed
+        // while a dialog is asking. Put the Finish ▸ button back -- a confirmed
+        // confirm re-shows the banner.
+        tab.restoreFinishButton();
+        if (modalLayer == null) {
+            // A destructive click must never dead-end silently: the Finish
+            // button was just restored, so without an error the user reads
+            // the delete as abandoned-by-design rather than refused.
+            UiErrors.show("Could not remove the worktree", "The worktree was kept",
+                    "The confirmation dialog could not be shown (no modal layer); nothing was deleted.");
+            return;
+        }
+
+        Label headline = new Label("\"" + (branch.isBlank() ? worktreeRoot.getFileName().toString() : branch)
+                + "\" has uncommitted changes");
+        headline.getStyleClass().add("merge-flow-headline-error");
+        headline.setWrapText(true);
+
+        Label lead = new Label("Deleting the worktree discards these changes permanently:");
+        lead.getStyleClass().add("merge-flow-detail");
+        lead.setWrapText(true);
+
+        // The list is capped: `git status --porcelain` is unbounded (a build
+        // artifact directory can produce thousands of ?? lines) and one styled
+        // Label per line on the FX thread can freeze the UI. Overflow is
+        // counted, never silently dropped -- the "… and N more" label names it.
+        final int maxShown = 100;
+        VBox changeList = new VBox(2);
+        int shown = Math.min(changes.size(), maxShown);
+        for (String line : changes.subList(0, shown)) {
+            Label entry = new Label(line.strip());
+            entry.getStyleClass().add("finish-file-path");
+            changeList.getChildren().add(entry);
+        }
+        if (changes.size() > maxShown) {
+            Label more = new Label("… and " + (changes.size() - maxShown) + " more changes");
+            more.getStyleClass().add("merge-flow-detail");
+            changeList.getChildren().add(more);
+        }
+        ScrollPane changeScroll = new ScrollPane(changeList);
+        changeScroll.getStyleClass().add("finish-summary");
+        changeScroll.setFitToWidth(true);
+        changeScroll.setMaxHeight(180);
+        changeScroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
+
+        Label warning = new Label("These changes exist nowhere else -- once deleted, they cannot be recovered.");
+        warning.getStyleClass().add("merge-flow-detail");
+        warning.setWrapText(true);
+
+        Button cancel = new Button("Cancel");
+        cancel.getStyleClass().add("worktree-cancel-button");
+        cancel.setCancelButton(true);
+        cancel.setOnAction(e -> modalLayer.close());
+        Button delete = new Button("Delete worktree");
+        delete.getStyleClass().add("worktree-create-button");
+        delete.setDefaultButton(true);
+        delete.setOnAction(e -> {
+            modalLayer.close();
+            runDelete(sessionId, repository.root(), worktreeRoot, branch, true, changes);
+        });
+        HBox actions = new HBox(8, cancel, delete);
+        actions.setAlignment(Pos.CENTER_RIGHT);
+
+        VBox modal = new VBox(12, headline, lead, changeScroll, warning, actions);
+        modal.getStyleClass().add("modal");
+        modal.setMaxWidth(460);
+        modal.setMaxHeight(Region.USE_PREF_SIZE);
+        modalLayer.show(modal);
+    }
+
+    /**
+     * The one destructive sequence for a user-requested delete, run at most
+     * once per click: {@link WorktreeSessionCleanup} with the branch plan the
+     * user's outright request earns. {@code force} is set only from the
+     * confirmed dialog above; {@code confirmedChanges} is the snapshot the
+     * user confirmed -- see the re-probe guard below.
+     */
+    private void runDelete(ManagedSessionId sessionId, Path repositoryRoot, Path worktreeRoot, String branch,
+                           boolean force, List<String> confirmedChanges) {
+        if (force) {
+            // The confirmation is against a snapshot taken while the dialog was
+            // up; a still-live session process or a build can have written more
+            // since. Changes the user never saw are not theirs to discard:
+            // re-probe and refuse when anything new appeared (lines that
+            // disappeared are fine -- there is less to lose than was shown).
+            AsyncCalls.attempt(() -> worktreeService.uncommittedChanges(worktreeRoot))
+                    .whenComplete((current, probeFailure) -> Platform.runLater(() -> {
+                        if (probeFailure != null) {
+                            // Cannot prove the discard is only what was shown:
+                            // treat the delete as refused rather than force ahead.
+                            restoreFinishIfOpen(openTab.apply(sessionId));
+                            UiErrors.show("Could not remove the worktree", "The worktree was kept",
+                                    "Its uncommitted changes could not be re-checked before the delete ("
+                                            + UiErrors.message(probeFailure) + ").");
+                            return;
+                        }
+                        List<String> unseen = current.stream()
+                                .filter(line -> !confirmedChanges.contains(line))
+                                .toList();
+                        if (!unseen.isEmpty()) {
+                            restoreFinishIfOpen(openTab.apply(sessionId));
+                            UiErrors.show("Could not remove the worktree", "The worktree was kept",
+                                    unseen.size() + " new uncommitted change(s) appeared since you confirmed"
+                                            + " the delete; they were never shown to you. Review them and delete again.");
+                            return;
+                        }
+                        runConfirmedDelete(sessionId, repositoryRoot, worktreeRoot, branch, true);
+                    }));
+            return;
+        }
+        runConfirmedDelete(sessionId, repositoryRoot, worktreeRoot, branch, false);
+    }
+
+    private void runConfirmedDelete(ManagedSessionId sessionId, Path repositoryRoot, Path worktreeRoot, String branch,
+                                    boolean force) {
+        cleanup.run(sessionId, repositoryRoot, worktreeRoot, branch,
+                        MergeFinishDecision.forRequestedDelete(sessionManager.mayDeleteBranchOf(worktreeRoot)),
+                        force)
                 .whenComplete((outcome, ex) -> Platform.runLater(() -> {
                     // Re-resolve rather than reuse the captured tab: ⌘W during
                     // `git worktree remove` disposes it, and header updates on a
