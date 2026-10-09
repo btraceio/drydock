@@ -18,6 +18,8 @@ import javafx.stage.DirectoryChooser;
 
 import java.io.File;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
@@ -59,19 +61,54 @@ public final class SettingsModal extends VBox {
         CompletableFuture<Boolean> loadOpenChangedFilesInSkim();
 
         CompletableFuture<Void> saveOpenChangedFilesInSkim(boolean value);
+
+        /**
+         * The jdt.ls directory (exact Java references, tier 3), or empty
+         * when tier 3 is not configured. Loaded off the FX thread like the
+         * worktrees directory.
+         */
+        CompletableFuture<Optional<Path>> loadLanguageServerDirectory();
+
+        /**
+         * Validates and saves the jdt.ls directory. Completes with {@link
+         * LanguageServerOutcome.Refused} for a validation refusal -- shown
+         * INLINE by the row, never an error dialog (spec section 3: the
+         * refusal is quiet; nothing about a missing server is an error the
+         * reviewer has to dismiss) -- and exceptionally for an I/O failure.
+         */
+        CompletableFuture<LanguageServerOutcome> saveLanguageServerDirectory(Optional<Path> directory);
+    }
+
+    /**
+     * The outcome of committing the language-server directory: saved, or
+     * refused with the reason the row shows inline. A view-side twin of the
+     * config-side result so this class stays a pure view -- the application
+     * wiring maps between them.
+     */
+    public sealed interface LanguageServerOutcome {
+
+        LanguageServerOutcome SAVED = new Saved();
+
+        record Saved() implements LanguageServerOutcome {
+        }
+
+        record Refused(String reason) implements LanguageServerOutcome {
+        }
     }
 
     private static final double MODAL_WIDTH = 520;
 
     /**
-     * Flushes a pending worktrees-directory edit, wired by {@link
-     * #worktreesRow} and invoked by {@code ModalLayer}'s {@code onClosed}
-     * callback (see {@link #flushPendingEdit}) so a typed value is
+     * Flushes pending text-field edits -- today the worktrees directory and
+     * the language-server directory, each row registering its own commit.
+     * Wired by those rows and invoked by {@code ModalLayer}'s {@code
+     * onClosed} callback (see {@link #flushPendingEdit}) so a typed value is
      * committed no matter which of Done/×/Esc/backdrop-click closes the
      * modal -- only Done and × happen to move focus off the field first.
-     * A no-op until {@link #worktreesRow} runs.
+     * Empty until the rows run. Each row's commit is idempotent, so running
+     * it after that row already committed via focus loss is harmless.
      */
-    private Runnable pendingWorktreesFlush = () -> { };
+    private final List<Runnable> pendingEditFlushes = new ArrayList<>();
 
     public SettingsModal(Settings settings, Runnable onClose) {
         getStyleClass().add("modal");
@@ -111,20 +148,22 @@ public final class SettingsModal extends VBox {
                 worktreesRow(settings),
                 sectionTitle("Explorer"),
                 skimRow(settings),
+                sectionTitle("Language server"),
+                languageServerRow(settings),
                 footer);
     }
 
     /**
-     * Commits a pending worktrees-directory edit, if any. Meant to be
-     * passed as {@code ModalLayer}'s {@code onClosed} callback: Esc and a
-     * backdrop click hide the modal without ever moving focus off the text
-     * field, so the field's own focus-lost commit never fires and a typed
-     * path would otherwise be silently discarded. Idempotent -- see
-     * {@link #worktreesRow}'s {@code commit} -- so calling this after Done
+     * Commits a pending edit in any text-field row, if one is pending.
+     * Meant to be passed as {@code ModalLayer}'s {@code onClosed} callback:
+     * Esc and a backdrop click hide the modal without ever moving focus
+     * off the text fields, so a field's own focus-lost commit never fires
+     * and a typed path would otherwise be silently discarded. Idempotent
+     * per row -- see the rows' {@code commit} -- so calling this after Done
      * or × (which already committed via focus loss) is harmless.
      */
     public void flushPendingEdit() {
-        pendingWorktreesFlush.run();
+        pendingEditFlushes.forEach(Runnable::run);
     }
 
     private static Label sectionTitle(String text) {
@@ -296,7 +335,7 @@ public final class SettingsModal extends VBox {
                         }
                     }));
         };
-        pendingWorktreesFlush = commit;
+        pendingEditFlushes.add(commit);
 
         field.setOnAction(e -> commit.run());
         field.focusedProperty().addListener((obs, had, has) -> {
@@ -370,5 +409,125 @@ public final class SettingsModal extends VBox {
             });
         }));
         return new VBox(4, box, hint);
+    }
+
+    /**
+     * The "jdt.ls directory" row (spec section 3): async-loaded like the
+     * worktrees directory, but the commit VALIDATES before it saves, so it
+     * needs visible progress ("Validating…", shown synchronously at commit
+     * -- house rule: the click visibly does something before the result
+     * arrives) and inline outcome text. Every outcome lands inline in the
+     * status label -- including a validation refusal, which is never an
+     * {@code UiErrors} dialog (spec: nothing about a missing server is an
+     * error the reviewer has to dismiss) -- and every completion path,
+     * success, refusal, and failure alike, re-enables the controls: no
+     * stranded spinner. {@code javaHome} deliberately has no row here; it
+     * stays hand-editable in config.json and the save preserves it.
+     */
+    private Region languageServerRow(Settings settings) {
+        TextField field = new TextField();
+        // worktree-field/worktree-cancel-button for the same reasons as
+        // worktreesRow (a dark-modal input and its secondary action);
+        // language-server-* are lookup hooks for the row's own tests, since
+        // both rows would otherwise share every style class.
+        field.getStyleClass().addAll("worktree-field", "language-server-field");
+        field.setPromptText("Loading…");
+        field.setDisable(true);
+        Button browse = new Button("Browse…");
+        browse.getStyleClass().addAll("worktree-cancel-button", "language-server-browse");
+        browse.setDisable(true);
+
+        Label hint = new Label("Optional. The unpacked jdt.ls directory (config_mac and plugins/), "
+                + "for exact Java references. The JDK it runs under (javaHome) is set by "
+                + "editing ~/.drydock/config.json.");
+        hint.getStyleClass().add("settings-hint");
+        hint.setWrapText(true);
+
+        // The inline outcome text: "Validating…" while the save is in flight,
+        // then the refusal reason, a quiet "Saved.", or a failure message.
+        Label status = new Label("");
+        status.getStyleClass().addAll("settings-hint", "language-server-status");
+
+        // Same shape as worktreesRow: the text last committed (or loaded), so
+        // a close raced against the load commits nothing, and a re-entered
+        // commit has something stable to compare against.
+        String[] lastCommitted = {""};
+        boolean[] committing = {false};
+
+        settings.loadLanguageServerDirectory().whenComplete((directory, failure) -> Platform.runLater(() -> {
+            field.setDisable(false);
+            browse.setDisable(false);
+            field.setPromptText("Not configured — exact references stay lexical");
+            if (failure == null) {
+                String text = directory.map(Path::toString).orElse("");
+                field.setText(text);
+                lastCommitted[0] = text;
+            } else {
+                // Inline, not a dialog, and the row stays usable: the user can
+                // still type a path and retry the save.
+                status.getStyleClass().setAll("worktree-error", "language-server-status");
+                status.setText("Could not read the settings file: " + UiErrors.message(failure));
+            }
+        }));
+
+        Runnable commit = () -> {
+            String text = field.getText() == null ? "" : field.getText().strip();
+            if (committing[0] || text.equals(lastCommitted[0])) {
+                return; // a no-op close or a re-entered focus-loss: no progress to clear
+            }
+            Optional<Path> directory = text.isEmpty() ? Optional.empty() : Optional.of(Path.of(text));
+            committing[0] = true;
+            field.setDisable(true);
+            browse.setDisable(true);
+            // Synchronously, so the commit visibly does something the moment
+            // it fires; cleared or replaced on every completion below.
+            status.getStyleClass().setAll("settings-hint", "language-server-status");
+            status.setText("Validating…");
+            settings.saveLanguageServerDirectory(directory).whenComplete((outcome, failure) ->
+                    Platform.runLater(() -> {
+                        // Success, refusal, and failure all re-enable the row:
+                        // nothing here may leave the controls disabled.
+                        committing[0] = false;
+                        field.setDisable(false);
+                        browse.setDisable(false);
+                        if (failure != null) {
+                            status.getStyleClass().setAll("worktree-error", "language-server-status");
+                            status.setText("Could not save the language server path: "
+                                    + UiErrors.message(failure));
+                        } else if (outcome instanceof LanguageServerOutcome.Refused refused) {
+                            // Inline, never a dialog: the refusal names what was
+                            // wrong with the directory so the user can fix it here.
+                            status.getStyleClass().setAll("worktree-error", "language-server-status");
+                            status.setText(refused.reason());
+                        } else {
+                            status.getStyleClass().setAll("settings-hint", "language-server-status");
+                            status.setText("Saved.");
+                            lastCommitted[0] = text;
+                        }
+                    }));
+        };
+        pendingEditFlushes.add(commit);
+
+        field.setOnAction(e -> commit.run());
+        field.focusedProperty().addListener((obs, had, has) -> {
+            if (!has) {
+                commit.run();
+            }
+        });
+
+        browse.setOnAction(e -> {
+            DirectoryChooser chooser = new DirectoryChooser();
+            chooser.setTitle("Choose the jdt.ls directory");
+            File chosen = chooser.showDialog(getScene() == null ? null : getScene().getWindow());
+            if (chosen != null) {
+                field.setText(chosen.getAbsolutePath());
+                commit.run();
+            }
+        });
+
+        HBox control = new HBox(8, field, browse);
+        control.setAlignment(Pos.CENTER_LEFT);
+        HBox.setHgrow(field, Priority.ALWAYS);
+        return new VBox(4, labelled("jdt.ls directory", control), hint, status);
     }
 }

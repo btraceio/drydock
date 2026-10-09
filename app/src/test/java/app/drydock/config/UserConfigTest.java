@@ -15,6 +15,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -157,10 +161,245 @@ class UserConfigTest {
 
         // The read-modify-write the settings modal must do.
         UserConfig existing = UserConfig.load(configFile);
-        UserConfig.save(new UserConfig(Optional.of(dir), existing.openChangedFilesInSkim()), configFile);
+        UserConfig.save(new UserConfig(Optional.of(dir), existing.openChangedFilesInSkim(),
+                existing.languageServer()), configFile);
         UserConfig reloaded = UserConfig.load(configFile);
         assertEquals(Optional.of(dir), reloaded.worktreesDirectory());
         assertFalse(reloaded.openChangedFilesInSkim(), "…and the skim preference is still off");
+    }
+
+    // ---- languageServer component ----
+
+    @Test
+    void languageServerRoundTripsJdtHomeAndJavaHome(@TempDir Path dir) throws Exception {
+        Path configFile = dir.resolve("config.json");
+        UserConfig.LanguageServer server = new UserConfig.LanguageServer(
+                Optional.of(dir.resolve("jdt.ls")), Optional.of(dir.resolve("jdk")));
+
+        UserConfig.save(new UserConfig(Optional.empty(), true, server), configFile);
+
+        UserConfig.LanguageServer loaded = UserConfig.load(configFile).languageServer();
+        assertEquals(Optional.of(dir.resolve("jdt.ls").toAbsolutePath().normalize()), loaded.jdtHome());
+        assertEquals(Optional.of(dir.resolve("jdk").toAbsolutePath().normalize()), loaded.javaHome());
+    }
+
+    @Test
+    void languageServerRoundTripsJdtHomeOnly(@TempDir Path dir) throws Exception {
+        Path configFile = dir.resolve("config.json");
+
+        UserConfig.save(new UserConfig(Optional.empty(), true,
+                new UserConfig.LanguageServer(Optional.of(dir.resolve("jdt.ls")), Optional.empty())),
+                configFile);
+
+        UserConfig.LanguageServer loaded = UserConfig.load(configFile).languageServer();
+        assertEquals(Optional.of(dir.resolve("jdt.ls").toAbsolutePath().normalize()), loaded.jdtHome());
+        assertTrue(loaded.javaHome().isEmpty(), "an absent javaHome stays absent, not null-in-JSON");
+    }
+
+    @Test
+    void languageServerDefaultsToUnconfiguredWhenTheFileHasNoComponent(@TempDir Path dir) throws Exception {
+        Path configFile = dir.resolve("config.json");
+        Files.writeString(configFile, "{\"worktreesDirectory\":\"/tmp/wt\"}");
+
+        UserConfig.LanguageServer loaded = UserConfig.load(configFile).languageServer();
+
+        assertTrue(loaded.jdtHome().isEmpty());
+        assertTrue(loaded.javaHome().isEmpty());
+        assertEquals(UserConfig.LanguageServer.empty(), loaded);
+    }
+
+    @Test
+    void anUnconfiguredLanguageServerIsClearedRatherThanWrittenAsAnEmptyObject(@TempDir Path dir) throws Exception {
+        Path configFile = dir.resolve("config.json");
+        Files.writeString(configFile, "{\"languageServer\":{\"jdtHome\":\"/old\"}}");
+
+        UserConfig.save(new UserConfig(Optional.empty(), true, UserConfig.LanguageServer.empty()), configFile);
+
+        String written = Files.readString(configFile);
+        assertFalse(JsonParser.parse(written) instanceof JsonObject root && root.has("languageServer"),
+                "no key must be left behind for an unconfigured tier: " + written);
+    }
+
+    @Test
+    void savePreservesUnknownMembersInsideTheLanguageServerObject(@TempDir Path dir) throws Exception {
+        Path configFile = dir.resolve("config.json");
+        Files.writeString(configFile, "{\"somethingElse\":42,\"languageServer\":"
+                + "{\"jdtHome\":\"/old\",\"futureKey\":\"keep\"}}");
+
+        UserConfig.save(new UserConfig(Optional.empty(), true, new UserConfig.LanguageServer(
+                Optional.of(dir.resolve("jdt.ls")), Optional.empty())), configFile);
+
+        String written = Files.readString(configFile);
+        JsonObject root = assertInstanceOf(JsonObject.class, JsonParser.parse(written), written);
+        assertEquals(new JsonNumber("42"), root.get("somethingElse"), written);
+        JsonObject server = assertInstanceOf(JsonObject.class, root.get("languageServer"), written);
+        assertEquals(new JsonString("keep"), server.get("futureKey"),
+                "the hand-editable object keeps members this build does not know about: " + written);
+        assertEquals(new JsonString(dir.resolve("jdt.ls").toString()), server.get("jdtHome"), written);
+        assertFalse(server.has("javaHome"), written);
+    }
+
+    @Test
+    void aMalformedLanguageServerIsSkippedNotAConfigFileFailure(@TempDir Path dir) throws Exception {
+        // Each shape must leave the OTHER settings intact: a malformed
+        // component may never take the whole file down with it.
+        Path configFile = dir.resolve("config.json");
+        Files.writeString(configFile, "{\"worktreesDirectory\":\"" + dir.resolve("wt")
+                + "\",\"languageServer\":\"/not/an/object\"}");
+        assertEquals(Optional.of(dir.resolve("wt").toAbsolutePath().normalize()),
+                UserConfig.load(configFile).worktreesDirectory());
+        assertEquals(UserConfig.LanguageServer.empty(), UserConfig.load(configFile).languageServer());
+
+        Files.writeString(configFile, "{\"worktreesDirectory\":\"" + dir.resolve("wt")
+                + "\",\"languageServer\":{\"jdtHome\":42}}");
+        assertEquals(Optional.of(dir.resolve("wt").toAbsolutePath().normalize()),
+                UserConfig.load(configFile).worktreesDirectory());
+        assertEquals(UserConfig.LanguageServer.empty(), UserConfig.load(configFile).languageServer(),
+                "a non-string jdtHome member is skipped, not a failure");
+
+        // A string that cannot be a path at all (an embedded NUL) is skipped
+        // the same way instead of surfacing InvalidPathException.
+        Files.writeString(configFile, "{\"languageServer\":{\"jdtHome\":\"\\u0000\"}}");
+        assertEquals(UserConfig.LanguageServer.empty(), UserConfig.load(configFile).languageServer());
+    }
+
+    // ---- saveLanguageServerAsync (validated save) ----
+
+    /** A jdt.ls layout validation accepts: config_mac plus exactly one launcher jar. */
+    private static Path fakeJdtLsHome(Path dir) throws Exception {
+        Path home = dir.resolve("jdt.ls");
+        Files.createDirectories(home.resolve("plugins"));
+        Files.writeString(home.resolve("config_mac"), "");
+        Files.writeString(home.resolve("plugins", "org.eclipse.equinox.launcher_1.6.900.jar"), "");
+        return home;
+    }
+
+    @Test
+    @ResourceLock(Resources.SYSTEM_PROPERTIES)
+    void aRefusedValidationLeavesThePriorFileByteUnchanged(@TempDir Path dir) throws Exception {
+        String originalUserHome = System.getProperty("user.home");
+        System.setProperty("user.home", dir.toString());
+        try {
+            Path jdtHome = fakeJdtLsHome(dir);
+            UserConfig prior = new UserConfig(Optional.of(dir.resolve("wt")), false,
+                    new UserConfig.LanguageServer(Optional.of(jdtHome), Optional.of(dir.resolve("jdk"))));
+            UserConfig.save(prior, UserConfig.defaultConfigFile());
+            String before = Files.readString(UserConfig.defaultConfigFile());
+
+            // No config_mac: refused before the probe is ever consulted, and
+            // the injected probe proves no real java runs either way.
+            Path notAJdtHome = dir.resolve("elsewhere");
+            Files.createDirectories(notAJdtHome);
+            AtomicInteger probes = new AtomicInteger();
+            UserConfig.LanguageServerSaveResult result = UserConfig.saveLanguageServerAsync(
+                    Optional.of(notAJdtHome), home -> {
+                        probes.incrementAndGet();
+                        return "21.0.2";
+                    }).get();
+
+            assertInstanceOf(UserConfig.LanguageServerSaveResult.Refused.class, result);
+            assertTrue(((UserConfig.LanguageServerSaveResult.Refused) result).reason().contains("config_mac"));
+            assertEquals(0, probes.get(), "a missing config_mac is refused without probing java");
+            assertEquals(before, Files.readString(UserConfig.defaultConfigFile()),
+                    "a refused save must not touch the file at all");
+        } finally {
+            UserConfig.flushPendingSaves();
+            System.setProperty("user.home", originalUserHome);
+        }
+    }
+
+    @Test
+    @ResourceLock(Resources.SYSTEM_PROPERTIES)
+    void anOldJavaRefusesTheSaveButAValidOnePersistsAndPreservesTheRest(@TempDir Path dir) throws Exception {
+        String originalUserHome = System.getProperty("user.home");
+        System.setProperty("user.home", dir.toString());
+        try {
+            Path jdtHome = fakeJdtLsHome(dir);
+            UserConfig prior = new UserConfig(Optional.of(dir.resolve("wt")), false,
+                    new UserConfig.LanguageServer(Optional.empty(), Optional.of(dir.resolve("jdk"))));
+            UserConfig.save(prior, UserConfig.defaultConfigFile());
+            String before = Files.readString(UserConfig.defaultConfigFile());
+
+            UserConfig.LanguageServerSaveResult old = UserConfig.saveLanguageServerAsync(
+                    Optional.of(jdtHome), home -> "1.8.0_392").get();
+            assertInstanceOf(UserConfig.LanguageServerSaveResult.Refused.class, old);
+            assertTrue(((UserConfig.LanguageServerSaveResult.Refused) old).reason().contains("17"));
+            assertEquals(before, Files.readString(UserConfig.defaultConfigFile()),
+                    "the java version refusal leaves the prior file untouched");
+
+            UserConfig.LanguageServerSaveResult valid = UserConfig.saveLanguageServerAsync(
+                    Optional.of(jdtHome), home -> "17.0.9").get();
+            assertInstanceOf(UserConfig.LanguageServerSaveResult.Saved.class, valid);
+
+            UserConfig reloaded = UserConfig.load(UserConfig.defaultConfigFile());
+            assertEquals(Optional.of(jdtHome.toAbsolutePath().normalize()),
+                    reloaded.languageServer().jdtHome());
+            assertEquals(Optional.of(dir.resolve("jdk").toAbsolutePath().normalize()),
+                    reloaded.languageServer().javaHome(),
+                    "the hand-edited javaHome round-trips through the row's save");
+            assertEquals(Optional.of(dir.resolve("wt").toAbsolutePath().normalize()),
+                    reloaded.worktreesDirectory(), "…and so does every other component");
+            assertFalse(reloaded.openChangedFilesInSkim());
+        } finally {
+            UserConfig.flushPendingSaves();
+            System.setProperty("user.home", originalUserHome);
+        }
+    }
+
+    @Test
+    @ResourceLock(Resources.SYSTEM_PROPERTIES)
+    void anEmptyJdtHomeDisablesTheTierWithoutValidation(@TempDir Path dir) throws Exception {
+        String originalUserHome = System.getProperty("user.home");
+        System.setProperty("user.home", dir.toString());
+        try {
+            UserConfig.save(new UserConfig(Optional.empty(), true, new UserConfig.LanguageServer(
+                    Optional.of(dir.resolve("configured")), Optional.empty())),
+                    UserConfig.defaultConfigFile());
+
+            // A path that does not even exist: would be refused if validated,
+            // but clearing the setting has nothing to validate.
+            UserConfig.LanguageServerSaveResult result = UserConfig.saveLanguageServerAsync(
+                    Optional.empty(), home -> "21.0.2").get();
+
+            assertInstanceOf(UserConfig.LanguageServerSaveResult.Saved.class, result);
+            assertTrue(UserConfig.load(UserConfig.defaultConfigFile()).languageServer().jdtHome().isEmpty(),
+                    "the tier is off again");
+        } finally {
+            UserConfig.flushPendingSaves();
+            System.setProperty("user.home", originalUserHome);
+        }
+    }
+
+    @Test
+    @ResourceLock(Resources.SYSTEM_PROPERTIES)
+    void aValidatedSaveIsFifoOrderedAgainstLoads(@TempDir Path dir) throws Exception {
+        // Same invariant as loadAsyncObservesAPreviouslyQueuedSave: the
+        // validated save runs on the SAME single-thread executor as every
+        // load, so a load queued while its (slow, probe-running) save is still
+        // in flight can never observe the pre-save value.
+        String originalUserHome = System.getProperty("user.home");
+        System.setProperty("user.home", dir.toString());
+        try {
+            Path jdtHome = fakeJdtLsHome(dir);
+            CountDownLatch probeRunning = new CountDownLatch(1);
+            CompletableFuture<UserConfig.LanguageServerSaveResult> save =
+                    UserConfig.saveLanguageServerAsync(Optional.of(jdtHome), home -> {
+                        probeRunning.countDown();
+                        return "21.0.2";
+                    });
+            assertTrue(probeRunning.await(10, TimeUnit.SECONDS),
+                    "the save (and its probe) must be running before the load is queued");
+
+            CompletableFuture<UserConfig> loaded = UserConfig.loadAsync();
+
+            assertInstanceOf(UserConfig.LanguageServerSaveResult.Saved.class, save.get(10, TimeUnit.SECONDS));
+            assertEquals(Optional.of(jdtHome.toAbsolutePath().normalize()),
+                    loaded.get(10, TimeUnit.SECONDS).languageServer().jdtHome(),
+                    "the queued load must land after the save, never before it");
+        } finally {
+            UserConfig.flushPendingSaves();
+            System.setProperty("user.home", originalUserHome);
+        }
     }
 
     // ---- saveAsync / flushPendingSaves ----

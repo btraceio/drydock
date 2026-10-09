@@ -75,6 +75,22 @@ class SettingsModalSkimRowTest extends FxTest {
                 saved.set(value);
                 return CompletableFuture.completedFuture(null);
             }
+
+            // The language-server row is not this test's subject; the
+            // interface is implemented anonymously here (no defaults), so
+            // the new callbacks get no-op fakes matching how this Settings
+            // is built. A load that never lands keeps that row disabled,
+            // which also proves the skim row below is unaffected by it.
+            @Override
+            public CompletableFuture<Optional<Path>> loadLanguageServerDirectory() {
+                return new CompletableFuture<>();
+            }
+
+            @Override
+            public CompletableFuture<SettingsModal.LanguageServerOutcome> saveLanguageServerDirectory(
+                    Optional<Path> directory) {
+                return CompletableFuture.completedFuture(SettingsModal.LanguageServerOutcome.SAVED);
+            }
         }, () -> { });
         Scene scene = new Scene(new StackPane(modal), 600, 700);
         scene.getStylesheets().addAll(

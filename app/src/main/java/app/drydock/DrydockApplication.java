@@ -20,6 +20,7 @@ import app.drydock.git.WorktreeService;
 import app.drydock.github.GitHubReviewService;
 import app.drydock.github.GitHubService;
 import app.drydock.launcher.DockIcon;
+import app.drydock.lsp.JdtServerManager;
 import app.drydock.mcp.McpConfigWriter;
 import app.drydock.mcp.McpActivityLog;
 import app.drydock.mcp.McpServer;
@@ -356,9 +357,13 @@ public final class DrydockApplication extends Application {
                 @Override
                 public CompletableFuture<Void> saveWorktreesDirectory(Optional<Path> directory) {
                     // Read-modify-write in one executor task: a record
-                    // built from one new value would reset the others.
+                    // built from one new value would reset the others. The
+                    // three-argument constructor (not the two-argument
+                    // convenience form) is what preserves the language-server
+                    // component across every other setting's save.
                     return UserConfig.updateAsync(existing ->
-                            new UserConfig(directory, existing.openChangedFilesInSkim()));
+                            new UserConfig(directory, existing.openChangedFilesInSkim(),
+                                    existing.languageServer()));
                 }
 
                 @Override
@@ -368,8 +373,35 @@ public final class DrydockApplication extends Application {
 
                 @Override
                 public CompletableFuture<Void> saveOpenChangedFilesInSkim(boolean value) {
+                    // Same preservation as saveWorktreesDirectory: the
+                    // language-server component must round-trip through
+                    // every save of any other setting.
                     return UserConfig.updateAsync(existing ->
-                            new UserConfig(existing.worktreesDirectory(), value));
+                            new UserConfig(existing.worktreesDirectory(), value,
+                                    existing.languageServer()));
+                }
+
+                @Override
+                public CompletableFuture<Optional<Path>> loadLanguageServerDirectory() {
+                    // Only jdtHome is surfaced; javaHome stays hand-editable
+                    // in config.json and is preserved by the save below.
+                    return UserConfig.loadAsync()
+                            .thenApply(config -> config.languageServer().jdtHome());
+                }
+
+                @Override
+                public CompletableFuture<SettingsModal.LanguageServerOutcome> saveLanguageServerDirectory(
+                        Optional<Path> directory) {
+                    // Validation (paths, the launcher glob, the Java 17+
+                    // probe) runs inside UserConfig.saveLanguageServerAsync on
+                    // the config executor; the probe is the ProcessRunner one
+                    // in production and injectable there, so no UI-thread
+                    // blocking and no test ever runs a real java.
+                    return UserConfig.saveLanguageServerAsync(directory,
+                                    JdtServerManager.processRunnerJavaProbe())
+                            .thenApply(result -> result instanceof UserConfig.LanguageServerSaveResult.Refused refused
+                                    ? new SettingsModal.LanguageServerOutcome.Refused(refused.reason())
+                                    : SettingsModal.LanguageServerOutcome.SAVED);
                 }
             }, appShell.modalLayer()::close);
             // onClosed, not just the Done/× onClose above: Esc and a
