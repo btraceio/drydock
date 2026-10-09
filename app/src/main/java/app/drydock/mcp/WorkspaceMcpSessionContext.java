@@ -577,8 +577,41 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     // ---- worktree_create / session_start ------------------------------------
 
     @Override
-    public Set<String> remoteNames(ManagedSessionId caller) throws McpToolException {
+    public RepoHandle callerRepository(ManagedSessionId caller) throws McpToolException {
         Repository repository = requireRepository(caller);
+        return new RepoHandle(repository.displayName(), repository.root(), repository.isRemote());
+    }
+
+    /**
+     * Resolves a live {@code Repository} for a handle the router holds: by
+     * exact display name, with the recorded root as a second witness. Both
+     * must match, so a repository renamed or re-registered mid-call fails the
+     * call instead of acting on the wrong checkout.
+     */
+    private Repository repositoryFor(RepoHandle repo) throws McpToolException {
+        return repositoryCatalog.get().stream()
+                .filter(candidate -> candidate.displayName().equals(repo.name())
+                        && candidate.root().equals(repo.root()))
+                .findFirst()
+                .orElseThrow(() -> new McpToolException("Repository '" + repo.name()
+                        + "' is no longer registered in Drydock."));
+    }
+
+    @Override
+    public Optional<RepoHandle> repositoryByName(String name) {
+        if (name == null || name.isBlank()) {
+            return Optional.empty();
+        }
+        return repositoryCatalog.get().stream()
+                .filter(repository -> repository.displayName().equals(name))
+                .findFirst()
+                .map(repository -> new RepoHandle(repository.displayName(), repository.root(),
+                        repository.isRemote()));
+    }
+
+    @Override
+    public Set<String> remoteNames(RepoHandle repo) throws McpToolException {
+        Repository repository = repositoryFor(repo);
         return Set.copyOf(join(gitStatusService.listBranches(repository.root()), JOIN_TIMEOUT_SECONDS).remotes());
     }
 
@@ -602,8 +635,8 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
      * reason.</p>
      */
     @Override
-    public List<Path> realWorktreesOf(ManagedSessionId caller) throws McpToolException {
-        Repository repository = requireRepository(caller);
+    public List<Path> realWorktreesOf(RepoHandle repo) throws McpToolException {
+        Repository repository = repositoryFor(repo);
         List<Worktree> worktrees = join(worktreeService.list(repository.root()), JOIN_TIMEOUT_SECONDS);
         List<Path> real = new ArrayList<>();
         for (Worktree worktree : worktrees) {
@@ -618,11 +651,12 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     }
 
     @Override
-    public Path createWorktree(ManagedSessionId caller, String branch, Optional<String> startPoint)
+    public Path createWorktree(RepoHandle repo, String branch, Optional<String> startPoint)
             throws McpToolException {
-        Repository repository = requireRepository(caller);
+        Repository repository = repositoryFor(repo);
         if (repository.isRemote()) {
-            throw new McpToolException("This session's repository is remote; Drydock cannot create worktrees in it.");
+            throw new McpToolException("Repository '" + repo.name()
+                    + "' is remote; Drydock cannot create worktrees in it.");
         }
         Path home = Path.of(System.getProperty("user.home"));
         Path directory = WorktreeNaming.defaultDirectory(home, userConfig.get().worktreesDirectory(),
@@ -632,11 +666,12 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     }
 
     @Override
-    public ExistingBranchWorktree createWorktreeOnExistingBranch(ManagedSessionId caller, String branch)
+    public ExistingBranchWorktree createWorktreeOnExistingBranch(RepoHandle repo, String branch)
             throws McpToolException {
-        Repository repository = requireRepository(caller);
+        Repository repository = repositoryFor(repo);
         if (repository.isRemote()) {
-            throw new McpToolException("This session's repository is remote; Drydock cannot create worktrees in it.");
+            throw new McpToolException("Repository '" + repo.name()
+                    + "' is remote; Drydock cannot create worktrees in it.");
         }
 
         // One deadline across the catalog load and the add, as the join

@@ -200,12 +200,40 @@ public interface McpSessionContext {
     /** Every managed session, across the whole workspace. */
     List<SessionSummary> sessions() throws McpToolException;
 
-    /** Configured remote names of the caller's repository, for branch-name validation. */
-    Set<String> remoteNames(ManagedSessionId caller) throws McpToolException;
+    /**
+     * A registered repository an MCP call may act on.
+     *
+     * <p>Resolved by name (the name {@code repos_list} reports) or as the
+     * caller's own repository; every worktree method below is keyed on one of
+     * these, so {@code worktree_create} and {@code session_start} can address
+     * another registered repository by passing its name. The root is carried
+     * for implementations that re-resolve the live {@code Repository} from
+     * their catalog, and {@code remote} so a router can refuse a remote
+     * repository before reaching git at all.</p>
+     */
+    record RepoHandle(String name, Path root, boolean remote) {
+    }
 
     /**
-     * Worktrees of the caller's repository, as real paths, <em>excluding the
-     * main checkout</em>. Implementations must resolve symlinks: {@code git
+     * The calling session's repository. Throws when the session has ended --
+     * the same condition {@link #repositoryRoot} reports as empty.
+     */
+    RepoHandle callerRepository(ManagedSessionId caller) throws McpToolException;
+
+    /**
+     * The registered repository whose name is {@code name}, as {@code
+     * repos_list} reports it; empty when no repository answers to that name.
+     * An exact match: the caller has just read the name from {@code
+     * repos_list}, so guessing is not a path worth supporting.
+     */
+    Optional<RepoHandle> repositoryByName(String name);
+
+    /** Configured remote names of {@code repo}, for branch-name validation. */
+    Set<String> remoteNames(RepoHandle repo) throws McpToolException;
+
+    /**
+     * Worktrees of {@code repo}, as real paths, <em>excluding the main
+     * checkout</em>. Implementations must resolve symlinks: {@code git
      * worktree list} reports realpaths, so a lexical comparison both wrongly
      * rejects honest symlinked paths and wrongly accepts a swapped symlink.
      *
@@ -216,10 +244,10 @@ public interface McpSessionContext {
      * it as a worktree session over the main checkout -- a state no
      * human-driven path can produce.</p>
      */
-    List<Path> realWorktreesOf(ManagedSessionId caller) throws McpToolException;
+    List<Path> realWorktreesOf(RepoHandle repo) throws McpToolException;
 
-    /** Creates a worktree for {@code branch} in the caller's repository, naming the directory itself. */
-    Path createWorktree(ManagedSessionId caller, String branch, Optional<String> startPoint)
+    /** Creates a worktree for {@code branch} in {@code repo}, naming the directory itself. */
+    Path createWorktree(RepoHandle repo, String branch, Optional<String> startPoint)
             throws McpToolException;
 
     /**
@@ -235,8 +263,8 @@ public interface McpSessionContext {
     record ExistingBranchWorktree(Path path, String branch, Optional<String> tracking) { }
 
     /**
-     * Opens a worktree on a branch that already exists, local or
-     * remote-tracking; the directory is named the same way
+     * Opens a worktree on a branch that already exists in {@code repo}, local
+     * or remote-tracking; the directory is named the same way
      * {@link #createWorktree} names one.
      *
      * <p>{@code branch} is a lookup key, not a name being created, so the
@@ -245,7 +273,7 @@ public interface McpSessionContext {
      * Implementations refuse a branch checked out elsewhere, and refuse
      * adopting a remote ref whose derived local name could not be minted.</p>
      */
-    ExistingBranchWorktree createWorktreeOnExistingBranch(ManagedSessionId caller, String branch)
+    ExistingBranchWorktree createWorktreeOnExistingBranch(RepoHandle repo, String branch)
             throws McpToolException;
 
     /** Opens a session tab in {@code worktree}; returns the new session's id. */

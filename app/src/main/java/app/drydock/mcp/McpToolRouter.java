@@ -80,6 +80,18 @@ import java.util.stream.Stream;
  * never reach git, and a forbidden session must learn nothing from probing
  * arguments -- so pushing them into the context would mean every
  * implementation had to repeat them.</p>
+ *
+ * <p>Trust model, stated where it is decided: every live session's token can
+ * act on EVERY registered repository, not just its own -- {@code
+ * worktree_create} and {@code session_start} take a {@code repo} name (see
+ * {@link #resolveTarget}) and can drive git in any registered repository.
+ * This widening from per-session confinement is deliberate: an agent asked to
+ * work across repositories must be able to target the other one by name,
+ * and the tokens are loopback-bound per hosted session. A confused or
+ * prompt-injected agent can therefore still drive git in repositories its
+ * own session has nothing to do with; scoping that per repository (an allow
+ * flag per registration) is the designed-in next step if that ever matters
+ * in practice.</p>
  */
 public final class McpToolRouter {
 
@@ -259,24 +271,32 @@ public final class McpToolRouter {
                                         + "for re-reading the hunk.")),
                         "scopeId", "assessments"),
                 descriptor("worktree_create",
-                        "Creates a worktree in the caller's repository: a new branch by default, or a "
+                        "Creates a worktree in a repository: a new branch by default, or a "
                                 + "checkout of a branch that already exists when 'existing' is true. An existing "
-                                + "branch must not be checked out in another worktree.",
+                                + "branch must not be checked out in another worktree. Pass repo to work in "
+                                + "another registered repository; omit it for this session's own.",
                         JsonObject.empty()
                                 .put("branch", schemaString("Branch name. With existing=true, names a branch that "
                                         + "already exists -- local, or remote-tracking, which is adopted as a local "
                                         + "tracking branch."))
+                                .put("repo", schemaString("Name of the registered repository to create the "
+                                        + "worktree in, as repos_list reports it. Omit for this session's own "
+                                        + "repository. Remote repositories cannot host worktrees."))
                                 .put("existing", schemaBoolean("Check out an existing branch instead of creating one. "
                                         + "Defaults to false. Cannot be combined with start_point."))
                                 .put("start_point", schemaString("Optional start point (commit-ish) for the new "
                                         + "branch. Only valid when existing is false.")),
                         "branch"),
                 descriptor("session_start",
-                        "Starts a new managed session in a worktree of the caller's repository. The "
-                                + "started session may not itself start further sessions.",
+                        "Starts a new managed session in a worktree. The "
+                                + "started session may not itself start further sessions. Pass repo to open it "
+                                + "in another registered repository; omit it for this session's own.",
                         JsonObject.empty()
-                                .put("worktree_path", schemaString("Path of the worktree to open the session in; "
-                                        + "must be a worktree of the caller's repository."))
+                                .put("worktree_path", schemaString("Path of the worktree to open the session in."))
+                                .put("repo", schemaString("Name of the registered repository the worktree belongs "
+                                        + "to, as repos_list reports it. Omit for this session's own repository. "
+                                        + "The path must be a worktree of that repository -- e.g. one just created "
+                                        + "with worktree_create."))
                                 .put("prompt", schemaString("Optional prompt to seed the new session with.")),
                         "worktree_path"),
                 descriptor("session_rename",
@@ -1061,6 +1081,11 @@ public final class McpToolRouter {
         }
 
         JsonObject args = asObject(arguments);
+        McpSessionContext.RepoHandle target = resolveTarget(caller, args);
+        if (target.remote()) {
+            throw new McpToolException("Repository '" + target.name() + "' is remote; Drydock cannot create "
+                    + "worktrees in it.");
+        }
         String branch = requiredStringArg(args, "branch");
         Optional<String> startPoint = optionalStringArg(args, "start_point");
         boolean existing = strictBooleanArg(args, "existing", false);
@@ -1077,7 +1102,7 @@ public final class McpToolRouter {
             // exists. What guards that path is the catalog -- only refs git
             // itself listed reach git -- plus a check on the derived local
             // name, which these rules would never see.
-            BranchNames.validate(branch, context.remoteNames(caller));
+            BranchNames.validate(branch, context.remoteNames(target));
         }
 
         try {
@@ -1089,7 +1114,7 @@ public final class McpToolRouter {
         try {
             if (existing) {
                 McpSessionContext.ExistingBranchWorktree adopted =
-                        context.createWorktreeOnExistingBranch(caller, branch);
+                        context.createWorktreeOnExistingBranch(target, branch);
                 return JsonObject.empty()
                         .put("path", new JsonString(adopted.path().toString()))
                         // The RESOLVED local name, unlike the create path's
@@ -1098,7 +1123,7 @@ public final class McpToolRouter {
                         .put("branch", new JsonString(adopted.branch()))
                         .put("tracking", optionalString(adopted.tracking()));
             }
-            Path path = context.createWorktree(caller, branch, startPoint);
+            Path path = context.createWorktree(target, branch, startPoint);
             return JsonObject.empty()
                     .put("path", new JsonString(path.toString()))
                     .put("branch", new JsonString(branch));
@@ -1124,10 +1149,15 @@ public final class McpToolRouter {
         }
 
         JsonObject args = asObject(arguments);
+        McpSessionContext.RepoHandle target = resolveTarget(caller, args);
         String rawPath = requiredStringArg(args, "worktree_path");
         Optional<String> prompt = optionalStringArg(args, "prompt");
         if (prompt.isPresent()) {
             PromptSafety.validate(prompt.get());
+        }
+        if (target.remote()) {
+            throw new McpToolException("Repository '" + target.name() + "' is remote; its worktrees live on "
+                    + "the remote host and Drydock cannot open sessions in them.");
         }
 
         Path resolved;
@@ -1140,9 +1170,9 @@ public final class McpToolRouter {
             throw new McpToolException("Worktree path '" + rawPath + "' does not exist.");
         }
 
-        List<Path> worktrees = context.realWorktreesOf(caller);
+        List<Path> worktrees = context.realWorktreesOf(target);
         if (!worktrees.contains(resolved)) {
-            throw new McpToolException(notAWorktreeMessage(caller, resolved));
+            throw new McpToolException(notAWorktreeMessage(target, resolved));
         }
 
         try {
@@ -1165,21 +1195,55 @@ public final class McpToolRouter {
     }
 
     /**
+     * The repository a worktree or session call acts on: the caller's own
+     * unless the call names another registered repository by the name {@code
+     * repos_list} reports. Unknown and blank are refused, not guessed.
+     *
+     * <p>A name whose registered root IS the caller's own repository resolves
+     * to the caller's own handle, not the catalog's registration. The two
+     * handles carry different metadata, and downstream re-resolution (by
+     * name and root) would otherwise give one repository two identities
+     * depending on whether the caller passed {@code repo} -- most visibly
+     * when a repository is renamed mid-session: the default path reads the
+     * live repository, the named path would refuse the old name. Passing any
+     * registered name of your own repository therefore works, and the
+     * unknown-name error points at omitting {@code repo} entirely, which
+     * addresses the session's own repository regardless of naming.</p>
+     */
+    private McpSessionContext.RepoHandle resolveTarget(ManagedSessionId caller, JsonObject args)
+            throws McpToolException {
+        Optional<String> repoName = optionalStringArg(args, "repo");
+        if (repoName.isEmpty()) {
+            return context.callerRepository(caller);
+        }
+        McpSessionContext.RepoHandle named = context.repositoryByName(repoName.get())
+                .orElseThrow(() -> new McpToolException(
+                        "No repository named '" + repoName.get() + "' is registered in Drydock; "
+                                + "repos_list lists the names that can be used here. If this call targets "
+                                + "your own session's repository, omit the 'repo' argument -- it is then "
+                                + "addressed regardless of the name it is registered under."));
+        McpSessionContext.RepoHandle own = context.callerRepository(caller);
+        // Same repository under a drifted or abbreviated name: one handle, not two.
+        if (realPathOrSelf(named.root()).equals(realPathOrSelf(own.root()))) {
+            return own;
+        }
+        return named;
+    }
+
+    /**
      * The repository's own main checkout is not among {@code realWorktreesOf}
      * (see its contract), so it lands here like any other non-member. It gets
      * its own sentence because "not a worktree" is baffling for the path the
-     * caller's own session is running in: what is refused is starting a second
-     * {@code claude} in the tree the human is working in.
+     * session is running in: what is refused is starting a second
+     * {@code claude} in a tree the human is working in.
      */
-    private String notAWorktreeMessage(ManagedSessionId caller, Path resolved) {
-        boolean mainCheckout = context.repositoryRoot(caller)
-                .map(root -> realPathOrSelf(root).equals(resolved))
-                .orElse(false);
-        if (mainCheckout) {
-            return "'" + resolved + "' is this repository's main checkout, not one of its worktrees; "
-                    + "create a worktree with worktree_create and start the session there.";
+    private String notAWorktreeMessage(McpSessionContext.RepoHandle target, Path resolved) {
+        if (realPathOrSelf(target.root()).equals(resolved)) {
+            return "'" + resolved + "' is the main checkout of '" + target.name()
+                    + "', not one of its worktrees; create a worktree with worktree_create and start the "
+                    + "session there.";
         }
-        return "'" + resolved + "' is not a worktree of this session's repository.";
+        return "'" + resolved + "' is not a worktree of repository '" + target.name() + "'.";
     }
 
     private static Path realPathOrSelf(Path path) {

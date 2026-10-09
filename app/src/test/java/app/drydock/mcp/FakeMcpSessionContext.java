@@ -39,9 +39,21 @@ final class FakeMcpSessionContext implements McpSessionContext {
     final List<RepoSummary> repositories = new ArrayList<>();
     final List<SessionSummary> sessions = new ArrayList<>();
     final List<Path> worktrees = new ArrayList<>();
+
+    /**
+     * Worktrees per NAMED repository, for the cross-repo path: {@link
+     * #realWorktreesOf} returns {@link #worktrees} for the caller's own
+     * repository and this map for any other name. The display name the caller
+     * repo is registered under.
+     */
+    final Map<String, List<Path>> worktreesByRepo = new HashMap<>();
+    String callerRepoName = "drydock";
     final Set<String> remotes = new LinkedHashSet<>(Set.of("origin"));
     final Map<String, String> excerpts = new HashMap<>();
     final Map<String, Path> createdWorktrees = new HashMap<>();
+
+    /** Names of the repositories worktrees were created in, in call order. */
+    final List<String> createdWorktreeRepos = new ArrayList<>();
     final List<Path> startedSessions = new ArrayList<>();
     final List<String> startedPrompts = new ArrayList<>();
 
@@ -262,23 +274,52 @@ final class FakeMcpSessionContext implements McpSessionContext {
         return List.copyOf(sessions);
     }
 
+    /**
+     * The caller repo's handle, derived from {@link #repositoryRoot} and
+     * {@link #callerRepoName}. Tests register other repositories by adding
+     * {@link RepoSummary} entries to {@link #repositories}; {@link
+     * #repositoryByName} resolves those by name.
+     */
+    private McpSessionContext.RepoHandle callerHandle() throws McpToolException {
+        Path root = repositoryRoot.orElseThrow(() ->
+                new McpToolException("Session has ended; its repository is no longer available."));
+        return new McpSessionContext.RepoHandle(callerRepoName, root, false);
+    }
+
     @Override
-    public Set<String> remoteNames(ManagedSessionId caller) {
+    public McpSessionContext.RepoHandle callerRepository(ManagedSessionId caller) throws McpToolException {
+        return callerHandle();
+    }
+
+    @Override
+    public Optional<McpSessionContext.RepoHandle> repositoryByName(String name) {
+        return repositories.stream()
+                .filter(repo -> repo.name().equals(name))
+                .findFirst()
+                .map(repo -> new McpSessionContext.RepoHandle(repo.name(), repo.path(), repo.remote()));
+    }
+
+    @Override
+    public Set<String> remoteNames(McpSessionContext.RepoHandle repo) {
         return Set.copyOf(remotes);
     }
 
     @Override
-    public List<Path> realWorktreesOf(ManagedSessionId caller) {
-        return List.copyOf(worktrees);
+    public List<Path> realWorktreesOf(McpSessionContext.RepoHandle repo) {
+        if (repo.name().equals(callerRepoName)) {
+            return List.copyOf(worktrees);
+        }
+        return List.copyOf(worktreesByRepo.getOrDefault(repo.name(), List.of()));
     }
 
     @Override
-    public Path createWorktree(ManagedSessionId caller, String branch, Optional<String> startPoint)
+    public Path createWorktree(McpSessionContext.RepoHandle repo, String branch, Optional<String> startPoint)
             throws McpToolException {
         if (failure != null) {
             throw failure;
         }
-        Path root = repositoryRoot.orElseThrow();
+        createdWorktreeRepos.add(repo.name());
+        Path root = repo.root();
         Path created = root.resolveSibling("wt-" + branch.replace('/', '-'));
         createdWorktrees.put(branch, created);
         return created;
@@ -294,12 +335,13 @@ final class FakeMcpSessionContext implements McpSessionContext {
     final List<String> adoptedBranches = new ArrayList<>();
 
     @Override
-    public ExistingBranchWorktree createWorktreeOnExistingBranch(ManagedSessionId caller, String branch)
+    public ExistingBranchWorktree createWorktreeOnExistingBranch(McpSessionContext.RepoHandle repo, String branch)
             throws McpToolException {
         if (adoptFailure != null) {
             throw adoptFailure;
         }
         adoptedBranches.add(branch);
+        createdWorktreeRepos.add(repo.name());
         return adopted;
     }
 

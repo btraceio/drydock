@@ -9,6 +9,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Optional;
 
 import static app.drydock.mcp.JsonPeek.args;
@@ -110,6 +111,82 @@ class McpToolRouterSessionStartTest {
                 () -> router.call(caller, "session_start", args("worktree_path", "/tmp/no\u0000pe")));
 
         assertTrue(failure.getMessage().contains("does not exist"), failure.getMessage());
+        assertTrue(context.startedSessions.isEmpty());
+    }
+
+    /** The repo argument re-points the membership test at another registered repository. */
+    @Test
+    void opensATabInAWorktreeOfAnotherRegisteredRepository(@TempDir Path base) throws Exception {
+        Path otherRoot = Files.createDirectories(base.resolve("other-repo")).toRealPath();
+        Path otherWorktree = Files.createDirectories(base.resolve("other-wt")).toRealPath();
+        context.repositories.add(new McpSessionContext.RepoSummary("other-repo", otherRoot,
+                Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), false));
+        context.worktreesByRepo.put("other-repo", List.of(otherWorktree));
+
+        JsonValue result = router.call(caller, "session_start",
+                args("worktree_path", otherWorktree.toString(), "repo", "other-repo"));
+
+        assertEquals(otherWorktree, context.startedSessions.get(0));
+        assertTrue(str(result, "session_id").length() > 0);
+    }
+
+    /**
+     * Naming a repository makes the membership test target THAT repository: a
+     * path that is a worktree of the caller's own repository is not one of the
+     * named repository's, and must be refused by name.
+     */
+    @Test
+    void sessionStartWithARepositoryRefusesAPathOfADifferentRepository() throws Exception {
+        context.repositories.add(new McpSessionContext.RepoSummary("other-repo",
+                Path.of("/repos/other"), Optional.empty(), Optional.empty(), Optional.empty(),
+                Optional.empty(), false));
+
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> router.call(caller, "session_start",
+                        args("worktree_path", sibling.toString(), "repo", "other-repo")));
+
+        assertTrue(failure.getMessage().contains("other-repo"), failure.getMessage());
+        assertTrue(context.startedSessions.isEmpty(), "no session may be started");
+    }
+
+    /** The named repository's main checkout is refused under its own name. */
+    @Test
+    void sessionStartWithARepositoryRefusesThatRepositorysMainCheckout(@TempDir Path base) throws Exception {
+        Path otherRoot = Files.createDirectories(base.resolve("other-repo")).toRealPath();
+        context.repositories.add(new McpSessionContext.RepoSummary("other-repo", otherRoot,
+                Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), false));
+
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> router.call(caller, "session_start",
+                        args("worktree_path", otherRoot.toString(), "repo", "other-repo")));
+
+        assertTrue(failure.getMessage().contains("main checkout"), failure.getMessage());
+        assertTrue(failure.getMessage().contains("other-repo"), failure.getMessage());
+        assertTrue(context.startedSessions.isEmpty());
+    }
+
+    @Test
+    void sessionStartRefusesAnUnknownRepository() {
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> router.call(caller, "session_start",
+                        args("worktree_path", sibling.toString(), "repo", "ghost")));
+
+        assertTrue(failure.getMessage().contains("ghost"), failure.getMessage());
+        assertTrue(context.startedSessions.isEmpty());
+    }
+
+    /** A remote repository's worktrees live on the host; refused before git is asked for its worktree list. */
+    @Test
+    void sessionStartRefusesARemoteRepository(@TempDir Path base) throws Exception {
+        Path remotePath = Files.createDirectories(base.resolve("remote-repo")).toRealPath();
+        context.repositories.add(new McpSessionContext.RepoSummary("far-away", remotePath,
+                Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), true));
+
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> router.call(caller, "session_start",
+                        args("worktree_path", remotePath.toString(), "repo", "far-away")));
+
+        assertTrue(failure.getMessage().contains("remote"), failure.getMessage());
         assertTrue(context.startedSessions.isEmpty());
     }
 

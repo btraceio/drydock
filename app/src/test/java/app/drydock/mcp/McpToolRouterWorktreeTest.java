@@ -189,6 +189,47 @@ class McpToolRouterWorktreeTest {
     }
 
     /**
+     * The repo argument re-points the call at a registered repository: the
+     * fake records which repository each creation landed in.
+     */
+    @Test
+    void worktreeCreateTargetsANamedRepository() throws Exception {
+        context.repositories.add(new McpSessionContext.RepoSummary("other-repo",
+                Path.of("/repos/other"), Optional.empty(), Optional.empty(), Optional.empty(),
+                Optional.empty(), false));
+
+        router.call(caller, "worktree_create", args("branch", "feat/cross", "repo", "other-repo"));
+
+        assertEquals(List.of("other-repo"), context.createdWorktreeRepos);
+        assertEquals("/repos/wt-feat-cross", context.createdWorktrees.get("feat/cross").toString());
+    }
+
+    /** An unknown name is refused before git runs, pointing at repos_list. */
+    @Test
+    void worktreeCreateRefusesAnUnknownRepository() {
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> router.call(caller, "worktree_create", args("branch", "feat/x", "repo", "ghost")));
+
+        assertTrue(failure.getMessage().contains("ghost"), failure.getMessage());
+        assertTrue(failure.getMessage().contains("repos_list"), failure.getMessage());
+        assertTrue(context.createdWorktrees.isEmpty(), "git must not have been called");
+    }
+
+    /** A remote repository cannot host a worktree; refused before the branch is even validated. */
+    @Test
+    void worktreeCreateRefusesARemoteRepository() {
+        context.repositories.add(new McpSessionContext.RepoSummary("far-away",
+                Path.of("/ssh/host/repo"), Optional.empty(), Optional.empty(), Optional.empty(),
+                Optional.empty(), true));
+
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> router.call(caller, "worktree_create", args("branch", "origin/bad", "repo", "far-away")));
+
+        assertTrue(failure.getMessage().contains("remote"), failure.getMessage());
+        assertTrue(context.createdWorktrees.isEmpty(), "git must not have been called");
+    }
+
+    /**
      * The failure the explicit flag exists to prevent. Some clients stringify
      * every argument; coerced to false, this would create a brand-new branch
      * off the caller's HEAD with none of the branch's commits and report it

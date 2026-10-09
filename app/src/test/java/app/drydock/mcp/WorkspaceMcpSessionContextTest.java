@@ -105,7 +105,7 @@ class WorkspaceMcpSessionContextTest {
         deleteRecursively(recorded);
         Files.createSymbolicLink(recorded, decoy);
 
-        List<Path> resolved = contextFor(repo).realWorktreesOf(caller(repo));
+        List<Path> resolved = contextFor(repo).realWorktreesOf(callerHandle(repo));
 
         assertTrue(resolved.contains(decoy),
                 "the swapped link must be reported as its target: " + resolved);
@@ -119,7 +119,7 @@ class WorkspaceMcpSessionContextTest {
         Path repo = initCommittedRepo(repoDir);
         Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/honest").get();
 
-        List<Path> resolved = contextFor(repo).realWorktreesOf(caller(repo));
+        List<Path> resolved = contextFor(repo).realWorktreesOf(callerHandle(repo));
 
         assertTrue(resolved.contains(worktree.toRealPath()), String.valueOf(resolved));
     }
@@ -137,7 +137,7 @@ class WorkspaceMcpSessionContextTest {
         Path repo = initCommittedRepo(repoDir);
         Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/real").get();
 
-        List<Path> resolved = contextFor(repo).realWorktreesOf(caller(repo));
+        List<Path> resolved = contextFor(repo).realWorktreesOf(callerHandle(repo));
 
         assertFalse(resolved.contains(repo.toRealPath()),
                 "the main checkout must not be offered as a worktree: " + resolved);
@@ -152,7 +152,7 @@ class WorkspaceMcpSessionContextTest {
         Path realWorktree = worktree.toRealPath();
         deleteRecursively(worktree);
 
-        List<Path> resolved = contextFor(repo).realWorktreesOf(caller(repo));
+        List<Path> resolved = contextFor(repo).realWorktreesOf(callerHandle(repo));
 
         assertFalse(resolved.contains(realWorktree), String.valueOf(resolved));
         assertFalse(resolved.contains(worktree), String.valueOf(resolved));
@@ -405,7 +405,7 @@ class WorkspaceMcpSessionContextTest {
         WorkspaceMcpSessionContext context = contextFor(repo);
         try {
             McpToolException failure = assertThrows(McpToolException.class,
-                    () -> context.createWorktree(caller(repo), "feat/x", Optional.empty()));
+                    () -> context.createWorktree(callerHandle(repo), "feat/x", Optional.empty()));
 
             assertFalse(failure instanceof McpWorktreeMayExistException, failure.getMessage());
             // Pin that it failed for the reason under test, not on the way in.
@@ -430,7 +430,7 @@ class WorkspaceMcpSessionContextTest {
         userConfig = worktreesIn(worktrees);
 
         ExistingBranchWorktree created =
-                contextFor(repo).createWorktreeOnExistingBranch(caller(repo), "feat/login");
+                contextFor(repo).createWorktreeOnExistingBranch(callerHandle(repo), "feat/login");
 
         assertEquals("feat/login", created.branch());
         assertEquals(Optional.empty(), created.tracking());
@@ -453,7 +453,7 @@ class WorkspaceMcpSessionContextTest {
         userConfig = worktreesIn(tmp.resolve("worktrees"));
 
         ExistingBranchWorktree created =
-                contextFor(clone).createWorktreeOnExistingBranch(caller(clone), "origin/feat/login");
+                contextFor(clone).createWorktreeOnExistingBranch(callerHandle(clone), "origin/feat/login");
 
         assertEquals("feat/login", created.branch());
         assertEquals(Optional.of("origin/feat/login"), created.tracking());
@@ -469,7 +469,7 @@ class WorkspaceMcpSessionContextTest {
 
         // "main" is checked out in the main checkout itself.
         McpToolException failure = assertThrows(McpToolException.class,
-                () -> contextFor(repo).createWorktreeOnExistingBranch(caller(repo), "main"));
+                () -> contextFor(repo).createWorktreeOnExistingBranch(callerHandle(repo), "main"));
 
         assertEquals("'main' is already checked out in the worktree at " + repo.toRealPath() + ".",
                 failure.getMessage());
@@ -482,7 +482,7 @@ class WorkspaceMcpSessionContextTest {
         userConfig = worktreesIn(worktrees);
 
         McpToolException failure = assertThrows(McpToolException.class,
-                () -> contextFor(repo).createWorktreeOnExistingBranch(caller(repo), "feat/nope"));
+                () -> contextFor(repo).createWorktreeOnExistingBranch(callerHandle(repo), "feat/nope"));
 
         assertEquals("No branch named 'feat/nope' in this repository; omit existing to create it.",
                 failure.getMessage());
@@ -504,7 +504,7 @@ class WorkspaceMcpSessionContextTest {
         userConfig = worktreesIn(tmp.resolve("worktrees"));
 
         McpToolException failure = assertThrows(McpToolException.class,
-                () -> contextFor(clone).createWorktreeOnExistingBranch(caller(clone), "origin/origin/main"));
+                () -> contextFor(clone).createWorktreeOnExistingBranch(callerHandle(clone), "origin/origin/main"));
 
         assertEquals("Checking out 'origin/origin/main' would create the local branch 'origin/main', "
                 + "which shadows the remote 'origin'.", failure.getMessage());
@@ -519,9 +519,9 @@ class WorkspaceMcpSessionContextTest {
         WorkspaceMcpSessionContext context = contextWith(repo, List.of(repository));
 
         McpToolException failure = assertThrows(McpToolException.class,
-                () -> context.createWorktreeOnExistingBranch(caller(repo), "main"));
+                () -> context.createWorktreeOnExistingBranch(callerHandle(repo), "main"));
 
-        assertEquals("This session's repository is remote; Drydock cannot create worktrees in it.",
+        assertEquals("Repository 'remote-repo' is remote; Drydock cannot create worktrees in it.",
                 failure.getMessage());
     }
 
@@ -587,6 +587,12 @@ class WorkspaceMcpSessionContextTest {
             session = sessionIn(repository, root.toRealPath());
         }
         return session.id();
+    }
+
+    /** A handle for the caller's repository, as the router resolves one without a {@code repo} argument. */
+    private McpSessionContext.RepoHandle callerHandle(Path root) throws IOException {
+        caller(root);
+        return new McpSessionContext.RepoHandle(repository.displayName(), repository.root(), false);
     }
 
     private static ManagedAgentSession sessionIn(Repository owner, Path workingDirectory) {
