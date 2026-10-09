@@ -31,7 +31,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * places it appears: the session tab header and the sidebar session row.
  *
  * <p>Built headlessly the same way as {@code OpenSessionTabReviewSubTabTest}:
- * a real {@link Stage} via {@link ApplicationTest}, no-op terminal fakes for
+ * a real {@link Stage} via {@link FxTest}, no-op terminal fakes for
  * the native side (construction never calls into them), and every Control
  * built on the FX thread inside {@code interact}.</p>
  */
