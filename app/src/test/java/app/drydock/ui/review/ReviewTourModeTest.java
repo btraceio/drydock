@@ -2,12 +2,14 @@ package app.drydock.ui.review;
 
 import app.drydock.domain.SessionActivity;
 import app.drydock.git.UnifiedDiff;
+import app.drydock.mcp.McpActivityLog;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.review.tour.StepProgress;
 import app.drydock.review.tour.TourFingerprint;
 import app.drydock.review.tour.TourRecord;
 import app.drydock.testing.FxSync;
 import javafx.scene.Node;
+import javafx.scene.control.Label;
 import javafx.scene.input.KeyCode;
 import org.junit.jupiter.api.Test;
 
@@ -255,6 +257,12 @@ class ReviewTourModeTest extends ReviewTourFixture {
         assertTrue(lookup("Open diff review").tryQuery().isPresent(), "Open diff review");
     }
 
+    /** Whether some label in the board currently shows a line containing {@code fragment}. */
+    private boolean showsOnStepPanel(String fragment) {
+        return ReviewDiagFxThread.call(() -> lookup(node -> node instanceof Label label
+                        && label.getText().contains(fragment)).tryQuery().isPresent());
+    }
+
     /** Drops the scope's tour; with no run pending the board falls back to the hunk diff. */
     private void withoutTour() {
         interact(() -> {
@@ -285,6 +293,105 @@ class ReviewTourModeTest extends ReviewTourFixture {
             assertEquals(1, host.reviewRuns.size(), "the outline's Run review asked the host");
             assertTrue(lookup("Building tour…").tryQuery().isPresent(), "the outline says the tour is coming");
             assertEquals(SessionReviewView.ReviewMode.TOUR, ReviewDiagFxThread.call(view::diagMode));
+        } finally {
+            host.reviewers.clear();
+        }
+    }
+
+    /**
+     * The wait is never silent: under "Building tour…" a live line says how
+     * long the ask has been out, what the agent is doing, and the drydock
+     * calls it has made for this scope -- whether or not the MCP panel is
+     * open. A reviewer staring at an unchanging "Building tour…" and a 0-call
+     * panel is exactly how a review whose ask never landed burns 15 minutes.
+     */
+    @Test
+    void theBuildingTourWaitShowsItsProgress() {
+        host.reviewers.add("claude");
+        try {
+            withoutTourInTourMode();
+            clickOn("Run review");
+            FxSync.waitForFxEvents();
+            String progress = ReviewDiagFxThread.call(view::diagTourPendingProgress);
+            // Anchored on the state and call-count, not the clock: a one-second
+            // tick between the click and this read must not fail the assertion.
+            assertTrue(progress.contains("agent idle · no drydock calls yet"), progress);
+            assertTrue(showsOnStepPanel("No drydock calls yet"),
+                    "the step panel says the same thing the line does");
+
+            // The agent's first call moves the line; one made for another
+            // scope does not.
+            interact(() -> {
+                activityLog.record(new McpActivityLog.Entry(Instant.now(), McpActivityLog.Direction.INBOUND,
+                        "review_scope", "{\"scopeId\":\"x\"}", Optional.of(scope.id()), 12, false));
+                view.diagRefreshTourPendingProgress();
+            });
+            FxSync.waitForFxEvents();
+            progress = ReviewDiagFxThread.call(view::diagTourPendingProgress);
+            assertTrue(progress.contains("1 drydock call"), progress);
+            assertTrue(progress.contains("last review_scope"), progress);
+            assertFalse(progress.contains("review_comments"), progress);
+            interact(() -> activityLog.record(new McpActivityLog.Entry(Instant.now(),
+                    McpActivityLog.Direction.OUTBOUND, "review_comments", "[]",
+                    Optional.of("other-scope"), 4, false)));
+            interact(view::diagRefreshTourPendingProgress);
+            FxSync.waitForFxEvents();
+            progress = ReviewDiagFxThread.call(view::diagTourPendingProgress);
+            assertTrue(progress.contains("1 drydock call"), progress);
+
+            // And a failed call -- the tour's own validation list, say -- is
+            // progress too, the same row the panel shows as failed.
+            interact(() -> {
+                activityLog.record(new McpActivityLog.Entry(Instant.now(), McpActivityLog.Direction.INBOUND,
+                        "review_tour", "{\"scopeId\":\"x\"}", Optional.of(scope.id()), 40, true));
+                view.diagRefreshTourPendingProgress();
+            });
+            FxSync.waitForFxEvents();
+            progress = ReviewDiagFxThread.call(view::diagTourPendingProgress);
+            assertTrue(progress.contains("2 drydock calls"), progress);
+        } finally {
+            host.reviewers.clear();
+        }
+    }
+
+    @Test
+    void theWaitsProgressLineRetiresWhenTheTourArrives() {
+        host.reviewers.add("claude");
+        try {
+            withoutTourInTourMode();
+            clickOn("Run review");
+            FxSync.waitForFxEvents();
+            assertTrue(lookup(".tour-pending-progress").tryQuery().isPresent());
+            interact(() -> {
+                host.tours.put(TourRecord.fresh(tour(scope.id(), host.diff), host.diff));
+                view.refreshReviewState();
+            });
+            FxSync.waitForFxEvents();
+            assertFalse(lookup(".tour-pending-progress").tryQuery().isPresent(),
+                    "no elapsed count can outlive the wait it counted");
+            interact(view::diagRefreshTourPendingProgress);
+            FxSync.waitForFxEvents();
+            assertFalse(lookup(".tour-pending-progress").tryQuery().isPresent(),
+                    "the stopped ticker's next tick would write nothing");
+        } finally {
+            host.reviewers.clear();
+        }
+    }
+
+    @Test
+    void theStepPanelsBuildingMessageCountsTheCallsWhenThereAreAny() {
+        host.reviewers.add("claude");
+        try {
+            withoutTourInTourMode();
+            clickOn("Run review");
+            FxSync.waitForFxEvents();
+            interact(() -> activityLog.record(new McpActivityLog.Entry(Instant.now(),
+                    McpActivityLog.Direction.INBOUND, "review_scope", "{}",
+                    Optional.of(scope.id()), 12, false)));
+            interact(view::refreshReviewState);
+            FxSync.waitForFxEvents();
+            assertFalse(showsOnStepPanel("No drydock calls yet"),
+                    "with calls on record the message points at the panel below");
         } finally {
             host.reviewers.clear();
         }

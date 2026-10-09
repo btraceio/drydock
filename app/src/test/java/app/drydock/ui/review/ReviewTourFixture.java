@@ -3,6 +3,7 @@ package app.drydock.ui.review;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
+import app.drydock.mcp.McpActivityLog;
 import app.drydock.review.HunkDigest;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
@@ -53,6 +54,8 @@ abstract class ReviewTourFixture extends FxTest {
 
     final ReviewScopeRegistry registry = new ReviewScopeRegistry();
     private final DiffService diffService = new DiffService();
+    /** The MCP traffic the board's tour wait reports; the tests write into this same instance. */
+    final McpActivityLog activityLog = new McpActivityLog();
     FakeReviewHost host;
     SessionReviewView view;
     ReviewScope scope;
@@ -66,7 +69,7 @@ abstract class ReviewTourFixture extends FxTest {
             throw new UncheckedIOException(e);
         }
         host.diff = fixtureDiff();
-        view = new SessionReviewView(host, diffService, null);
+        view = new SessionReviewView(host, diffService, activityLog);
         Scene scene = new Scene(view, 1400, 900);
         scene.getStylesheets().addAll(
                 getClass().getResource("/app/drydock/ui/app.css").toExternalForm(),

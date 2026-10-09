@@ -53,6 +53,8 @@ final class TourOutline extends VBox {
     private Runnable onAcknowledge = () -> { };
     private boolean collapsed;
     private boolean narrow;
+    /** The wait's live progress line; null when the outline is not building a tour. */
+    private Label pendingProgress;
 
     TourOutline() {
         getStyleClass().add("tour-outline");
@@ -124,6 +126,7 @@ final class TourOutline extends VBox {
         message.getChildren().clear();
         rows.getChildren().clear();
         collapsedStep.setText("");
+        pendingProgress = null;
         for (Row row : newRows) {
             Button button = UiFormats.literal(new Button(glyph(row.state()) + row.number() + ". " + row.title()));
             button.getStyleClass().add("tour-outline-row");
@@ -172,6 +175,7 @@ final class TourOutline extends VBox {
         rows.getChildren().clear();
         collapsedStep.setText("");
         message.getChildren().clear();
+        pendingProgress = null;
         Label label = new Label(text);
         label.setWrapText(true);
         message.getChildren().add(label);
@@ -189,17 +193,33 @@ final class TourOutline extends VBox {
         message.getChildren().clear();
         Label label = new Label(text);
         label.setWrapText(true);
+        pendingProgress = new Label("");
+        pendingProgress.setWrapText(true);
+        pendingProgress.getStyleClass().add("tour-pending-progress");
         Button diffButton = UiFormats.literal(new Button("Open diff review"));
         diffButton.setOnAction(event -> openDiffReview.run());
         Button cancelButton = UiFormats.literal(new Button("Cancel"));
         cancelButton.setOnAction(event -> cancel.run());
-        message.getChildren().addAll(label, diffButton, cancelButton);
+        message.getChildren().addAll(label, pendingProgress, diffButton, cancelButton);
+    }
+
+    /**
+     * The wait's live progress line: how long the ask has been out, whether
+     * the agent is working, and the drydock calls it made -- {@code
+     * TourController} composes it; this only shows the line. Inert when the
+     * outline is not showing a pending build.
+     */
+    void setPendingProgress(String progress) {
+        if (pendingProgress != null) {
+            pendingProgress.setText(progress);
+        }
     }
 
     void showFailure(String text, Runnable retry, Runnable openDiffReview) {
         rows.getChildren().clear();
         collapsedStep.setText("");
         message.getChildren().clear();
+        pendingProgress = null;
         Label label = new Label(text);
         label.setWrapText(true);
         Button retryButton = new Button("Retry");

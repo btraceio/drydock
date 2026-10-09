@@ -3754,6 +3754,13 @@
     -fx-font-size: 11px;
 }
 
+/* The "Building tour…" wait's live progress line: elapsed, the agent's
+ * state, and its drydock calls so far. */
+.tour-outline .tour-pending-progress {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 11px;
+}
+
 /* A navigation outcome over the diff column ("Looking for foo…"): the
  * Explorer's toast, kept to a readable line length. */
 .review-nav-notice {

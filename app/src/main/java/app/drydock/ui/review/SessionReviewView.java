@@ -759,7 +759,8 @@ public final class SessionReviewView extends BorderPane {
         this.diffColumn = new ReviewDiffColumn(diffService, host::openInExplorer);
         this.margin = new ReviewFindingsMargin(new MarginHost());
         this.verdictBar = new ReviewVerdictBar(new VerdictHost());
-        this.tourController = new TourController(host, new TourViewAdapter(), diffColumn, SECTION_GRAPH_EXECUTOR);
+        this.tourController = new TourController(host, new TourViewAdapter(), diffColumn, SECTION_GRAPH_EXECUTOR,
+                activityLog);
         this.outline = tourController.outline();
         this.stepPanel = tourController.stepPanel();
         getStyleClass().addAll("review-destination", "session-review");
@@ -3662,6 +3663,16 @@ public final class SessionReviewView extends BorderPane {
     /** Test-only: whether the tour wait timer is running. */
     boolean diagTourWaitRunning() {
         return tourController.waitRunning();
+    }
+
+    /** Test-only: the "Building tour…" progress line's current text. Call on the FX thread. */
+    String diagTourPendingProgress() {
+        return tourController.pendingProgress();
+    }
+
+    /** Test-only: the wait's progress line recomposed now, as the once-a-second ticker would. */
+    void diagRefreshTourPendingProgress() {
+        tourController.updatePendingProgress();
     }
 
     /** Test-only: the "Building tour…" wait running out, without waiting 15 minutes. */

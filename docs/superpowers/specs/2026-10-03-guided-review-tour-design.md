@@ -353,9 +353,11 @@ Triage is a field on the finding, so it stays in the annotation store.
 
 **Starting a tour.** The existing **Run review** -- one human click, typed
 through `ReviewInstructions`, in a subagent where the harness has them --
-asks for findings and a tour. Review shows "Building tour…" with the MCP
-activity log. Failure clears to an error with **Retry** and **Open diff
-review**.
+asks for findings and a tour. Review shows "Building tour…" with a live
+progress line — how long the ask has been out, the agent's reported
+activity, and the drydock calls it has made for the scope so far, ticking
+once a second — and with the MCP activity log open. Failure clears to an
+error with **Retry** and **Open diff review**.
 
 **Refreshing and regenerating.** With a tour on screen the top bar offers two
 buttons. **Refresh tour** asks only for the stale steps and the uncovered

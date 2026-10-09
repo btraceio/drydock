@@ -7,6 +7,7 @@ import app.drydock.testing.FxTest;
 import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
+import javafx.scene.control.Label;
 import javafx.scene.control.ToggleButton;
 import javafx.scene.text.Text;
 import javafx.stage.Stage;
@@ -135,6 +136,39 @@ class TourOutlineTest extends FxTest {
         clickOn("Open diff review");
         FxSync.waitForFxEvents();
         assertEquals(List.of("retry", "diff"), calls);
+    }
+
+    @Test
+    void thePendingWaitCarriesALiveProgressLine() {
+        interact(() -> {
+            outline.showPending("Building tour…", () -> calls.add("diff"), () -> calls.add("cancel"));
+            outline.setPendingProgress("0:04 · agent busy · no drydock calls yet");
+        });
+        Label progress = lookup(".tour-pending-progress").queryAs(Label.class);
+        assertEquals("0:04 · agent busy · no drydock calls yet", progress.getText());
+        assertTrue(lookup("Open diff review").tryQuery().isPresent(), "the wait's way out stays");
+        clickOn("Cancel");
+        FxSync.waitForFxEvents();
+        assertEquals(List.of("cancel"), calls);
+    }
+
+    @Test
+    void aProgressLineIsInertWithoutAPendingBuild() {
+        interact(() -> outline.setPendingProgress("0:01 · agent busy · no drydock calls yet"));
+        assertTrue(lookup(".tour-pending-progress").queryAll().isEmpty());
+    }
+
+    @Test
+    void aMessageRetiresThePendingProgressLine() {
+        interact(() -> {
+            outline.showPending("Building tour…", () -> { }, () -> { });
+            outline.setPendingProgress("0:04 · agent busy");
+        });
+        assertTrue(lookup(".tour-pending-progress").tryQuery().isPresent());
+        interact(() -> outline.showMessage("No tour arrived.", Optional.empty(), () -> { }));
+        assertFalse(lookup(".tour-pending-progress").tryQuery().isPresent());
+        interact(() -> outline.setPendingProgress("a stale count"));
+        assertFalse(lookup(".tour-pending-progress").tryQuery().isPresent(), "inert after the wait");
     }
 
     @Test

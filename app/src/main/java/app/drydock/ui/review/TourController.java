@@ -2,6 +2,7 @@ package app.drydock.ui.review;
 
 import app.drydock.domain.SessionActivity;
 import app.drydock.git.UnifiedDiff;
+import app.drydock.mcp.McpActivityLog;
 import app.drydock.review.ChangeGraph;
 import app.drydock.review.OutOfDiffFanIn;
 import app.drydock.review.ReviewAnnotation;
@@ -31,7 +32,9 @@ import app.drydock.ui.nav.NavigationTrail;
 import app.drydock.ui.nav.SymbolPeekService;
 
 import javafx.animation.Animation;
+import javafx.animation.KeyFrame;
 import javafx.animation.PauseTransition;
+import javafx.animation.Timeline;
 import javafx.application.Platform;
 import javafx.scene.input.KeyEvent;
 import javafx.util.Duration;
@@ -159,6 +162,15 @@ final class TourController {
     private final ReviewDiffColumn diffColumn;
     private final Executor impactExecutor;
 
+    /**
+     * The MCP traffic log, for the "Building tour…" progress line: the calls
+     * the agent makes for this scope while the tour is being written are the
+     * only live signal of that writing, and the wait shows them whether or
+     * not the reader has the panel open. Absent when no server runs (tests,
+     * a bare board); the line then just never counts a call.
+     */
+    private final Optional<McpActivityLog> activityLog;
+
     private final TourRefreshDispatch tourRefreshDispatch = new TourRefreshDispatch();
     /** The review diff each scope's tour was last checked against; see {@link #migrateTour}. */
     private final Map<String, UnifiedDiff> tourCheckedDiffByScope = new HashMap<>();
@@ -181,6 +193,19 @@ final class TourController {
      * not claim a tour is coming for it.
      */
     private Optional<String> tourPendingScopeId = Optional.empty();
+
+    /** When the pending ask went out; {@link #pendingProgressText} measures against it. */
+    private long waitStartedNanos;
+
+    /**
+     * The wait's progress line, recomposed once a second while it runs -- the
+     * only thing on the board that moves while the agent writes a tour it has
+     * not posted yet. An Animation.INDEFINITE transition, held to the
+     * lifecycle rule: stopped in {@link #endTourWait}, which every end of the
+     * wait runs through, and in {@link #close}.
+     */
+    private final Timeline pendingTicker = new Timeline(new KeyFrame(Duration.seconds(1),
+            event -> updatePendingProgress()));
 
     /** Why the last Run review produced no tour, for the scope it ran on. */
     private record TourFailure(String scopeId, String message) {
@@ -274,17 +299,23 @@ final class TourController {
      * @param impactExecutor where every step's impact is measured -- the
      *                       view's graph executor, never the FX thread
      */
-    TourController(SessionReviewView.Host host, View view, ReviewDiffColumn diffColumn, Executor impactExecutor) {
+    TourController(SessionReviewView.Host host, View view, ReviewDiffColumn diffColumn, Executor impactExecutor,
+                   McpActivityLog activityLog) {
         this.host = host;
         this.view = view;
         this.diffColumn = diffColumn;
         this.impactExecutor = impactExecutor;
+        this.activityLog = Optional.ofNullable(activityLog);
         outline.setOnSelected(this::selectStep);
         outline.setOnAcknowledge(() -> {
             filesWithoutChangesAcknowledged = true;
             render();
         });
         tourWait.setOnFinished(event -> onTourWaitExpired());
+        // Timeline's cycle count is 1, not indefinite: set it here, where the
+        // stop paths below are also written down, so the ticker's lifecycle
+        // reads in one place.
+        pendingTicker.setCycleCount(Animation.INDEFINITE);
         diffColumn.setOnClaimSelected(this::selectClaim);
     }
 
@@ -301,10 +332,11 @@ final class TourController {
         return stepHost;
     }
 
-    /** Stops the wait and the risk queue; background completions after this do nothing. */
+    /** Stops the wait, the progress ticker and the risk queue; background completions after this do nothing. */
     void close() {
         closed = true;
         tourWait.stop();
+        pendingTicker.stop();
         riskQueue.close();
     }
 
@@ -401,7 +433,9 @@ final class TourController {
     void startWaiting(String scopeId) {
         tourFailure = Optional.empty();
         tourPendingScopeId = Optional.of(scopeId);
+        waitStartedNanos = System.nanoTime();
         tourWait.playFromStart();
+        pendingTicker.playFromStart();
         openMcpPanelForTour();
     }
 
@@ -437,6 +471,7 @@ final class TourController {
     private void endTourWait() {
         tourPendingScopeId = Optional.empty();
         tourWait.stop();
+        pendingTicker.stop();
         if (mcpOpenedForTour) {
             mcpOpenedForTour = false;
             view.hideMcpPanel();
@@ -448,6 +483,78 @@ final class TourController {
         if (view.showMcpPanel()) {
             mcpOpenedForTour = true;
         }
+    }
+
+    /** The scope id the pending wait is for; empty when it has ended. */
+    private String pendingScopeId() {
+        return tourPendingScopeId.orElse(null);
+    }
+
+    /** The wait's live line, recomposed once a second by {@link #pendingTicker} and on every render. */
+    void updatePendingProgress() {
+        if (closed || !view.touring() || !pending()) {
+            return;
+        }
+        outline.setPendingProgress(pendingProgressText());
+    }
+
+    /** This scope's drydock calls the agent has made so far, oldest first, failures included. */
+    private List<McpActivityLog.Entry> callsOf(String scopeId) {
+        if (scopeId == null) {
+            return List.of();
+        }
+        return activityLog.map(McpActivityLog::entries).orElse(List.of()).stream()
+                .filter(entry -> entry.scopeId().filter(scopeId::equals).isPresent())
+                .toList();
+    }
+
+    /**
+     * What "Building tour…" says under its title: how long the ask has been
+     * out, what the agent is doing, and the drydock calls it made so far.
+     *
+     * <p>Elapsed and call count are the progress a silent agent leaves no
+     * other trace of: an agent may read a large change locally for minutes
+     * before its first drydock call, and an ask that never landed looks
+     * identical to one being worked on until the clock and the activity
+     * state say which is happening. Composed from the log each time, so it
+     * never disagrees with the panel's own rows.
+     *
+     * <p>Counted from the log's held entries, which match the panel's rows
+     * exactly; a session that overflowed the ring would undercount while
+     * saying nothing about it, rather than invent a total over a window the
+     * reader cannot see.</p>
+     */
+    private String pendingProgressText() {
+        String scopeId = pendingScopeId();
+        if (scopeId == null) {
+            return "";
+        }
+        long elapsedSeconds = Math.max(0, (System.nanoTime() - waitStartedNanos) / 1_000_000_000L);
+        StringBuilder progress = new StringBuilder(clock(elapsedSeconds));
+        switch (view.scopeById(scopeId).map(host::agentActivity).orElse(SessionActivity.UNKNOWN)) {
+            case BUSY -> progress.append(" · agent busy");
+            case IDLE -> progress.append(" · agent idle");
+            case NEEDS_ATTENTION -> progress.append(" · agent needs attention");
+            case UNKNOWN -> {
+            }
+        }
+        List<McpActivityLog.Entry> calls = callsOf(scopeId);
+        if (calls.isEmpty()) {
+            progress.append(" · no drydock calls yet");
+        } else {
+            McpActivityLog.Entry last = calls.getLast();
+            progress.append(" · ").append(calls.size())
+                    .append(calls.size() == 1 ? " drydock call" : " drydock calls")
+                    .append(" · last ").append(last.tool()).append(" ")
+                    .append(clock((System.currentTimeMillis() - last.at().toEpochMilli()) / 1000))
+                    .append(" ago");
+        }
+        return progress.toString();
+    }
+
+    /** A duration of whole seconds, as m:ss. */
+    private static String clock(long seconds) {
+        return "%d:%02d".formatted(Math.max(0, seconds) / 60, Math.abs(seconds) % 60);
     }
 
     // ---- rendering -----------------------------------------------------------
@@ -465,7 +572,11 @@ final class TourController {
             Optional<TourFailure> failure = failureForSelection();
             if (pending()) {
                 outline.showPending("Building tour…", view::openDiffReview, this::cancelWait);
-                stepPanel.showMessage("The agent is writing the tour. Its MCP calls show below.");
+                outline.setPendingProgress(pendingProgressText());
+                stepPanel.showMessage(callsOf(pendingScopeId()).isEmpty()
+                        ? "The agent is writing the tour. No drydock calls yet -- it may be reading the change "
+                                + "first; they will show below as they land."
+                        : "The agent is writing the tour. Its MCP calls show below.");
             } else if (failure.isPresent()) {
                 outline.showFailure(failure.get().message(), view::runReview, view::openDiffReview);
                 stepPanel.showMessage("No tour to show. Retry, or review the hunk diff.");
@@ -1347,6 +1458,11 @@ final class TourController {
     /** The step the tour is on, or null. */
     String currentStepId() {
         return currentStepId;
+    }
+
+    /** Test-only: the "Building tour…" progress line's current composition. */
+    String pendingProgress() {
+        return pendingProgressText();
     }
 
     // ---- collaborators ---------------------------------------------------------
