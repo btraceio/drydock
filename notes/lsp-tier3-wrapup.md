@@ -30,7 +30,10 @@ file line (the carried line text is strip()ed — wrong-token hazard),
 with a whole-word guard on every definition acceptance; "server
 answered" for the headline = a RESOLVED row exists.
 
-## Next step
-User says commit → split into single-purpose signed commits (client
-trio / seam+provider / config+UI / peek surfaces / ownership+AGENTS),
-refresh the tour-spec §6.3 cross-check, then done the investigation.
+## Status: DONE (2026-10-09)
+Committed in six single-purpose signed commits (each boundary verified
+by stash-keep-index compile+test): 37c4a0b4 transport trio, 5dfac23d
+seam+provider, 971f17d5 config+settings row, 58a22e21 peek surfaces,
+7fa096e0 ownership+AGENTS carve-out, 3ddb653e docs sync. The cairn
+investigation is frozen (status done). Post-commit gate: all lsp +
+wiring test sets green on HEAD.
