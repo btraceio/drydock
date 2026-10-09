@@ -22,8 +22,10 @@ import javafx.scene.control.Label;
 import javafx.scene.control.ListCell;
 import javafx.scene.control.ListView;
 import javafx.scene.control.TextField;
+import javafx.scene.control.TextInputControl;
 import javafx.scene.control.Tooltip;
 import javafx.scene.input.KeyEvent;
+import javafx.scene.input.KeyCode;
 import javafx.scene.input.MouseEvent;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
@@ -386,6 +388,19 @@ final class ReviewDiffColumn extends BorderPane {
         // does not reopen Tab-key traversal into the list.
         list.addEventFilter(MouseEvent.MOUSE_PRESSED, e -> list.requestFocus());
         list.setCellFactory(view -> new DiffCell());
+        // ⌘C: the gutter selection's other use (the reader asked for it when
+        // the range composer made drag-selecting a range natural). The
+        // event's dispatch path reaches this filter from every text input
+        // inside the list too -- the composer's draft field is one -- so a
+        // copy aimed at the draft copies the DRAFT, not the lines.
+        list.addEventFilter(KeyEvent.KEY_PRESSED, event -> {
+            if (event.getCode() == KeyCode.C && event.isShortcutDown()
+                    && !(event.getTarget() instanceof TextInputControl)) {
+                if (copySelection()) {
+                    event.consume();
+                }
+            }
+        });
         // Long lines wrap; the column never scrolls sideways. See
         // viewportWidth for what this replaces.
         list.skinProperty().addListener((obs, old, skin) -> bindViewportWidth());
@@ -712,6 +727,62 @@ final class ReviewDiffColumn extends BorderPane {
      */
     private long renderGeneration;
 
+    // ---- copy (⌘C): the selected lines' text -------------------------------
+
+    /** Shows a transient note over the column when lines were copied ("Copied 3 lines"). */
+    private java.util.function.IntConsumer onLinesCopied = lines -> { };
+
+    void setOnLinesCopied(java.util.function.IntConsumer handler) {
+        onLinesCopied = handler == null ? lines -> { } : handler;
+    }
+
+    /**
+     * Copies the gutter selection's lines onto the system clipboard: each
+     * selected row's own text (a deleted line copies what was removed, an
+     * added/context one copies the new text), in visual order, joined with
+     * newlines. Also the one place a double-click's one-line copy routes
+     * through, so both gestures never drift apart in what they produce.
+     *
+     * <p>Returns whether anything was copied: with no selection the key must
+     * fall through (to nothing, there is nothing to copy), and a copied
+     * note that lies is no better than a silent failure.</p>
+     */
+    boolean copySelection() {
+        if (selectedKeys.isEmpty()) {
+            return false;
+        }
+        // In ROW order, not the selection set's: lines copied out of order
+        // would read like scrambled code (a Set<String> has no diff order).
+        List<UnifiedDiff.Line> lines = rows.stream()
+                .filter(row -> row instanceof ReviewDiffRow.Line line
+                        && selectedKeys.contains(line.file() + " " + line.lineKey()))
+                .map(row -> ((ReviewDiffRow.Line) row).line())
+                .toList();
+        if (lines.isEmpty()) {
+            return false;
+        }
+        StringBuilder text = new StringBuilder();
+        for (UnifiedDiff.Line line : lines) {
+            if (!text.isEmpty()) {
+                text.append('\n');
+            }
+            text.append(line.text().stripTrailing());
+        }
+        javafx.scene.input.ClipboardContent content = new javafx.scene.input.ClipboardContent();
+        content.putString(text.toString());
+        javafx.scene.input.Clipboard.getSystemClipboard().setContent(content);
+        onLinesCopied.accept(lines.size());
+        return true;
+    }
+
+    /** A double-click on a row's text copies just that row's line. */
+    private void copyOneLine(ReviewDiffRow.Line row) {
+        javafx.scene.input.ClipboardContent content = new javafx.scene.input.ClipboardContent();
+        content.putString(row.line().text().stripTrailing());
+        javafx.scene.input.Clipboard.getSystemClipboard().setContent(content);
+        onLinesCopied.accept(1);
+    }
+
     // ---- find (⌘F): text search over the rendered diff ---------------------
     /**
      * The walk's targets as {@code "<file> <lineKey>"} keys, in diff order:
@@ -908,6 +979,17 @@ final class ReviewDiffColumn extends BorderPane {
     /** Diagnostic/test-only: the gutter keys currently painted selected. */
     Set<String> diagSelectedKeys() {
         return Set.copyOf(selectedKeys);
+    }
+
+    /** Diagnostic/test-only: copies one line through the double-click path. */
+    void diagCopyLine(String file, String key) {
+        for (ReviewDiffRow row : rows) {
+            if (row instanceof ReviewDiffRow.Line line && line.file().equals(file)
+                    && line.lineKey().equals(key)) {
+                copyOneLine(line);
+                return;
+            }
+        }
     }
 
     /**
@@ -1864,6 +1946,15 @@ final class ReviewDiffColumn extends BorderPane {
         });
 
         TextFlow source = highlighted(row.file(), line.text());
+        // A double-click ON THE TEXT copies the line (the gutter double-click
+        // stays the composer's, so aiming at a line number never also
+        // mutates the clipboard).
+        source.addEventHandler(javafx.scene.input.MouseEvent.MOUSE_CLICKED, event -> {
+            if (event.getClickCount() == 2) {
+                copyOneLine(row);
+                event.consume();
+            }
+        });
         // Hgrow, now that a row is exactly as wide as the viewport rather
         // than as wide as the widest line in the whole diff. That is what
         // makes the TextFlow wrap a long line instead of running off the

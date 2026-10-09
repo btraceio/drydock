@@ -851,6 +851,10 @@ public final class SessionReviewView extends BorderPane {
         this.host = host;
         this.sections = new SectionStates(host);
         this.diffColumn = new ReviewDiffColumn(diffService, host::openInExplorer);
+        // ⌘C / double-click copies report where the clipboard got them from:
+        // a copied line looks like nothing happened the first time it's used.
+        this.diffColumn.setOnLinesCopied(lines -> notice("Copied " + lines
+                + (lines == 1 ? " line" : " lines")));
         this.margin = new ReviewFindingsMargin(new MarginHost());
         this.verdictBar = new ReviewVerdictBar(new VerdictHost());
         this.tourController = new TourController(host, new TourViewAdapter(), diffColumn, SECTION_GRAPH_EXECUTOR,
