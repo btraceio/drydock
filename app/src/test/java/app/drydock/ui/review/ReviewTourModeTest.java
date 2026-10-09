@@ -354,6 +354,54 @@ class ReviewTourModeTest extends ReviewTourFixture {
         }
     }
 
+    /**
+     * The wait auto-opens the app-wide MCP console (the wiring made visible
+     * while the agent builds) and closes it again when the tour arrives --
+     * through the same host seam; the console itself lives at the workspace
+     * now (see MainWorkspace#toggleMcpConsole).
+     */
+    @Test
+    void theWaitAutoOpensTheConsoleAndItsArrivalClosesIt() {
+        host.reviewers.add("claude");
+        try {
+            withoutTourInTourMode();
+            host.consoleAutoOpens = true;
+            clickOn("Run review");
+            FxSync.waitForFxEvents();
+            assertEquals(1, host.consoleOpenedCount, "the run's wait opened the console");
+
+            interact(() -> {
+                host.tours.put(TourRecord.fresh(tour(scope.id(), host.diff), host.diff));
+                view.refreshReviewState();
+            });
+            FxSync.waitForFxEvents();
+            assertEquals(1, host.consoleClosedCount, "the tour arriving closed what the wait opened");
+        } finally {
+            host.reviewers.clear();
+        }
+    }
+
+    /** A console the READER opened is not the wait's to close. */
+    @Test
+    void aWaitThatOpenedNoConsoleClosesNothing() {
+        host.reviewers.add("claude");
+        try {
+            withoutTourInTourMode();
+            clickOn("Run review");
+            FxSync.waitForFxEvents();
+            assertEquals(0, host.consoleOpenedCount, "the fake console was off; nothing was asked to open");
+
+            interact(() -> {
+                host.tours.put(TourRecord.fresh(tour(scope.id(), host.diff), host.diff));
+                view.refreshReviewState();
+            });
+            FxSync.waitForFxEvents();
+            assertEquals(0, host.consoleClosedCount, "no close of what was never opened");
+        } finally {
+            host.reviewers.clear();
+        }
+    }
+
     @Test
     void theWaitsProgressLineRetiresWhenTheTourArrives() {
         host.reviewers.add("claude");

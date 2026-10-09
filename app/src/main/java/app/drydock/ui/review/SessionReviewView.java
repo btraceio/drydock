@@ -318,6 +318,22 @@ public final class SessionReviewView extends BorderPane {
         void overrideSeverity(ReviewScope scope, ReviewAnnotation finding, Severity severity);
 
         /**
+         * Opens the app-wide MCP console if one exists and it is closed;
+         * true when it was opened, so the tour wait may close it again.
+         * Default false: a host with no console (no server running) never
+         * opens one.
+         */
+        default boolean showMcpConsole() {
+            return false;
+        }
+
+        /**
+         * Hides the MCP console, but only when this board's wait was what
+         * opened it (the host tracks that ownership); default, nothing.
+         */
+        default void hideMcpConsole() { }
+
+        /**
          * Hands open findings to the scope's bound session, under {@code
          * subject} (the file they are on) as the prompt's heading.
          * False when there is no session to hand them to (or nothing to
@@ -494,8 +510,6 @@ public final class SessionReviewView extends BorderPane {
     private DoubleSupplier stepPanelWidthSource;
     private DoubleConsumer onStepPanelWidthChanged = width -> { };
 
-    /** The MCP activity panel; absent when no server is running (tests, headless). */
-    private final Optional<ReviewMcpActivityPanel> mcpPanel;
 
     /**
      * What each scope's diff attempt produced, keyed by scope id. A scope
@@ -824,7 +838,6 @@ public final class SessionReviewView extends BorderPane {
      *                    work with no agent at all, so the panel is optional
      */
     public SessionReviewView(Host host, DiffService diffService, McpActivityLog activityLog) {
-        this.mcpPanel = ReviewMcpActivityPanel.createIfAvailable(activityLog);
         this.host = host;
         this.sections = new SectionStates(host);
         this.diffColumn = new ReviewDiffColumn(diffService, host::openInExplorer);
@@ -963,15 +976,10 @@ public final class SessionReviewView extends BorderPane {
         VBox.setVgrow(columns, Priority.ALWAYS);
 
         VBox centre = new VBox(header, columns);
-        mcpPanel.ifPresent(panel -> {
-            panel.setVisible(false);
-            panel.setManaged(false);
-            centre.getChildren().add(panel);
-        });
         // The key hints sit just above the verdict bar, in tour mode only.
         centre.getChildren().add(keyStrip);
-        // The verdict bar goes last, so even with the activity panel open it
-        // is still the bottom-most thing and still always present.
+        // The verdict bar goes last, so it is still the bottom-most thing and
+        // still always present.
         centre.getChildren().add(verdictBar);
         // The trail goes below even the verdict bar, in both modes, as the
         // Explorer's does below its viewer.
@@ -1263,7 +1271,6 @@ public final class SessionReviewView extends BorderPane {
             margin.setFindings(List.of());
             showFileOnBar(null, Optional.empty(), false);
             verdictBar.showProgress(0, 0);
-            mcpPanel.ifPresent(panel -> panel.setScope(null));
             return;
         }
         // A verdict (or a diff change) lands as a tour write; the risk queue
@@ -1282,8 +1289,6 @@ public final class SessionReviewView extends BorderPane {
         diffColumn.setCursorFile(mode == ReviewMode.DIFF ? currentFile().orElse(null) : null);
         diffColumn.refreshPins();
         diffColumn.setLinks(linksByHunk());
-        mcpPanel.filter(Node::isVisible)
-                .ifPresent(panel -> panel.setScope(scope.get()));
         renderVerdictBar(scope.get());
         applyMode();
     }
@@ -2320,7 +2325,6 @@ public final class SessionReviewView extends BorderPane {
         show(verdictBar, false);
         keyStrip.setTourShown(false);
         show(itemHeader, false);
-        mcpPanel.ifPresent(panel -> show(panel, false));
     }
 
     /** Undoes {@link #applyEmptySurface}; the responsive rules take it from here. */
@@ -2716,21 +2720,6 @@ public final class SessionReviewView extends BorderPane {
         diffColumn.setDensity(newDensity);
     }
 
-    /** {@code \}: shows or hides the MCP activity panel; a hidden panel listens to nothing. */
-    private void toggleMcpPanel() {
-        mcpPanel.ifPresent(panel -> {
-            boolean show = !panel.isVisible();
-            panel.setVisible(show);
-            panel.setManaged(show);
-            if (show) {
-                panel.setScope(selectedScope().orElse(null));
-                panel.attach();
-            } else {
-                panel.detach();
-            }
-        });
-    }
-
     /**
      * Review's keyboard table (spec §5). Keys are suppressed while a text
      * input has focus, and every one of them has a visible control too --
@@ -2809,12 +2798,6 @@ public final class SessionReviewView extends BorderPane {
                 setMarginCollapsed(!(mode == ReviewMode.TOUR ? stepPanel.collapsed() : margin.collapsed()));
                 yield true;
             }
-            case BACK_SLASH -> {
-                // The reader now owns the panel; the tour wait must not close it.
-                tourController.readerOwnsMcpPanel();
-                toggleMcpPanel();
-                yield true;
-            }
             // [ and ] step the file cursor; n finds the next unread hunk.
             case OPEN_BRACKET -> { moveFile(-1); yield true; }
             case CLOSE_BRACKET -> { moveFile(1); yield true; }
@@ -2869,10 +2852,6 @@ public final class SessionReviewView extends BorderPane {
             diffColumn.closeComposer();
             return true;
         }
-        if (mcpPanel.filter(Node::isVisible).isPresent()) {
-            toggleMcpPanel();
-            return true;
-        }
         return false;
     }
 
@@ -2888,28 +2867,16 @@ public final class SessionReviewView extends BorderPane {
     }
 
     /**
-     * Releases what this view holds that would otherwise outlive it.
-     *
-     * <p>The MCP activity panel's live-log subscription is the one that
-     * matters: {@link ReviewMcpActivityPanel#attach} registers a listener on
-     * {@link McpActivityLog}, which is app-lifetime and keeps
-     * its listeners in a {@code CopyOnWriteArrayList} -- so an un-detached
-     * panel keeps this whole view (diff column included) reachable, and
-     * running a pointless FX-thread {@code refresh()} on every MCP call for
-     * every closed session's board that was ever opened with the panel
-     * showing, for the rest of the process's life. {@code detach()} is a
-     * no-op if the panel was never attached (never opened, or already
-     * hidden), so this is always safe to call.</p>
-     *
-     * <p>Call before dropping the last reference to this view -- see {@code
-     * OpenSessionTab.disposeNativeResources}.</p>
+     * Releases this view's timers so nothing keeps it reachable after its
+     * tab is closed (see {@code OpenSessionTab.disposeNativeResources}). The
+     * MCP console lives at the workspace level now, so there is no per-view
+     * log subscription here to detach.
      */
     public void close() {
         closed = true;
         tourController.close();
         navNoticeTimer.stop();
         regenerateTimer.stop();
-        mcpPanel.ifPresent(ReviewMcpActivityPanel::detach);
     }
 
     // ---- tour mode ----------------------------------------------------------
@@ -3546,18 +3513,12 @@ public final class SessionReviewView extends BorderPane {
 
         @Override
         public boolean showMcpPanel() {
-            if (mcpPanel.isPresent() && !mcpPanel.get().isVisible()) {
-                toggleMcpPanel();
-                return true;
-            }
-            return false;
+            return host.showMcpConsole();
         }
 
         @Override
         public void hideMcpPanel() {
-            if (mcpPanel.filter(Node::isVisible).isPresent()) {
-                toggleMcpPanel();
-            }
+            host.hideMcpConsole();
         }
     }
     // ---- diagnostics --------------------------------------------------------

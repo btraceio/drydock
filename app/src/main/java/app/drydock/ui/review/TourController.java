@@ -443,11 +443,6 @@ final class TourController {
         tourFailure = Optional.of(new TourFailure(scopeId, message));
     }
 
-    /** The reader opened or closed the MCP panel; the tour wait must not close it. */
-    void readerOwnsMcpPanel() {
-        mcpOpenedForTour = false;
-    }
-
     boolean waitRunning() {
         return tourWait.getStatus() == Animation.Status.RUNNING;
     }

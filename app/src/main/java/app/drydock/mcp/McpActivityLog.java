@@ -10,9 +10,10 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Consumer;
 
 /**
- * A bounded ring buffer of MCP traffic, for the Review destination's
- * activity panel (spec §4.7): the wiring made visible, and the thing you
- * read first when a reviewer is not doing what you expected.
+ * A bounded ring buffer of MCP traffic, for the app-wide MCP console
+ * (every session tab's bottom pane) and the tour wait's progress line: the
+ * wiring made visible, and the thing you read first when an agent is not
+ * doing what you expected.
  *
  * <p>Bounded on purpose. A long review can make thousands of calls, and a
  * panel that keeps them all would be an unbounded leak behind a UI nobody

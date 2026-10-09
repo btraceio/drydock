@@ -43,6 +43,7 @@ public final class ShortcutsOverlay {
                     {"Session search", "⌘K"},
                     {"Toggle theme", "⌘⇧L"},
                     {"Settings", "⌘,"},
+                    {"MCP console (collapsed by default)", "⌘⇧M"},
                     {"Cancel / close", "Esc"},
             }),
             new Section("IN REVIEW", new String[][] {
@@ -68,7 +69,6 @@ public final class ShortcutsOverlay {
                     {"Collapse the findings margin / step panel", "m"},
                     {"Findings from the whole review (hunk diff)", "⇧F"},
                     {"Show or hide the key-hints strip (tour)", "h"},
-                    {"MCP activity log", "\\"},
             }),
             new Section("IN THE NEW-WORKTREE MODAL", new String[][] {
                     {"Switch new / existing branch", "⌘E"},

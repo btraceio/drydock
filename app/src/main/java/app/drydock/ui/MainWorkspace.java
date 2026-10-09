@@ -291,6 +291,10 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     private final DiffService diffService;
     /** The MCP traffic log a session's Review sub-tab's {@code \} panel renders; null when no server is running. */
     private final McpActivityLog activityLog;
+    /** The app-wide MCP console; null when no server is running (tests, headless). */
+    private McpConsolePanel mcpConsole;
+    /** Whether the console's current expansion was requested by a tour wait, not the reader. */
+    private boolean consoleRequestedByTour;
     private final ChangedLineService changedLineService;
     private final AnnotationStore annotationStore;
     private final TourStore tourStore;
@@ -554,6 +558,14 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 languageServers.removeAndDeleteCache(removed));
 
         getStyleClass().add("main-pane");
+        // The MCP console is a COMMON pane, not review's: it lives under
+        // every tab and every sub-tab, collapsed by default, toggled with
+        // ⌘⇧M anywhere. The tour wait's auto-open goes through the review
+        // Host seam and opens this same panel (see ReviewHost.showMcpConsole).
+        mcpConsole = McpConsolePanel.createIfAvailable(activityLog);
+        if (mcpConsole != null) {
+            setBottom(mcpConsole);
+        }
 
         tabPane.getStyleClass().add("session-tabs");
         tabPane.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE); // tabs carry their own close button
@@ -1937,7 +1949,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * ought to reach.
      */
     private static final Set<KeyCode> REPLAYABLE_OFF_REVIEW_SUBTREE = Set.of(
-            KeyCode.D, KeyCode.C, KeyCode.M, KeyCode.BACK_SLASH,
+            KeyCode.D, KeyCode.C, KeyCode.M,
             KeyCode.OPEN_BRACKET, KeyCode.CLOSE_BRACKET, KeyCode.N, KeyCode.A, KeyCode.R,
             KeyCode.U, KeyCode.F, KeyCode.V, KeyCode.DIGIT1, KeyCode.DIGIT2, KeyCode.DIGIT3,
             KeyCode.DIGIT4, KeyCode.B, KeyCode.PERIOD, KeyCode.COMMA, KeyCode.H);
@@ -1981,6 +1993,29 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                     return true;
                 })
                 .orElse(false);
+    }
+
+    /**
+     * ⌘⇧M anywhere: the MCP console's toggle. The reader's own gesture ends
+     * any tour wait's claim on the console's visibility, so a wait that ends
+     * later cannot close a console the reader is reading.
+     */
+    public void toggleMcpConsole() {
+        if (mcpConsole == null) {
+            return;
+        }
+        consoleRequestedByTour = false;
+        mcpConsole.toggle();
+    }
+
+    /** Esc's lowest unwind: a console a tour wait opened closes before the tab does. */
+    public boolean closeMcpConsoleIfOpen() {
+        if (mcpConsole == null || !mcpConsole.isExpanded()) {
+            return false;
+        }
+        mcpConsole.setExpanded(false);
+        consoleRequestedByTour = false;
+        return true;
     }
 
     /**
@@ -2159,6 +2194,30 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
         private ReviewHost(Optional<Path> reviewRoot) {
             this.reviewRoot = reviewRoot;
+        }
+
+        /**
+         * The board's tour wait wants the console visible (the wiring made
+         * visible while the agent builds). Opens the WORKSPACE console when
+         * it is closed and records that the wait, not the reader, did it.
+         */
+        @Override
+        public boolean showMcpConsole() {
+            if (mcpConsole == null || mcpConsole.isExpanded()) {
+                return false;
+            }
+            mcpConsole.setExpanded(true);
+            consoleRequestedByTour = true;
+            return true;
+        }
+
+        /** Ends a tour wait's claim: closes the console only if the wait opened it. */
+        @Override
+        public void hideMcpConsole() {
+            if (consoleRequestedByTour && mcpConsole != null && mcpConsole.isExpanded()) {
+                consoleRequestedByTour = false;
+                mcpConsole.setExpanded(false);
+            }
         }
 
         /**

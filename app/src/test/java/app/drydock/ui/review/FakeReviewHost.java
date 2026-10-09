@@ -44,6 +44,13 @@ final class FakeReviewHost implements SessionReviewView.Host {
 
     final List<String> handedOffPrompts = new ArrayList<>();
 
+    /** Whether {@link #showMcpConsole} succeeds (the console "exists"); the counters follow. */
+    boolean consoleAutoOpens;
+    int consoleOpenedCount;
+    int consoleClosedCount;
+    /** Whether the console's open was the tour wait's doing (the ownership the real host keeps). */
+    private boolean consoleOwnedByTour;
+
     /** Every automatic recheck asked for, as {@code fromBase->toBase}. */
     final List<String> recheckDispatches = new ArrayList<>();
 
@@ -291,6 +298,29 @@ final class FakeReviewHost implements SessionReviewView.Host {
      * through {@code sendToBoundSession}'s own boolean.
      */
     boolean sessionBound = true;
+
+    @Override
+    public boolean showMcpConsole() {
+        if (!consoleAutoOpens) {
+            return false;
+        }
+        consoleOpenedCount++;
+        consoleOwnedByTour = true;
+        return true;
+    }
+
+    /** Models the reader's own ⌘⇧M while a wait is running: the wait's close must not follow. */
+    void consoleReaderToggled() {
+        consoleOwnedByTour = false;
+    }
+
+    @Override
+    public void hideMcpConsole() {
+        if (consoleOwnedByTour) {
+            consoleOwnedByTour = false;
+            consoleClosedCount++;
+        }
+    }
 
     @Override
     public boolean askAgentToFix(ReviewScope scope, String subject, List<ReviewAnnotation> findings) {

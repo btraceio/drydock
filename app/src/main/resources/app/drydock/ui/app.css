@@ -2724,6 +2724,8 @@
     -fx-padding: 2 8 2 8;
     -fx-cursor: hand;
 }
+/* Same quiet affordance, github.com and github.dev: the file links ride
+ * beside ⤢ in the first hunk header, and the breadcrumb's trailing group. */
 .review-hunk-explorer:hover {
     -fx-text-fill: -drydock-text;
     -fx-background-color: -drydock-hover;
@@ -4098,71 +4100,76 @@
 .review-lens-line:hover { -fx-background-color: -drydock-hover; }
 .review-lens-line:focused { -fx-border-color: -drydock-accent; }
 
-.review-mcp-panel {
+.mcp-console {
     -fx-background-color: -drydock-code-bg;
     -fx-border-color: -drydock-border transparent transparent transparent;
     -fx-border-width: 1 0 0 0;
 }
-.review-mcp-header {
-    -fx-padding: 6 12 6 12;
+.mcp-console-strip {
+    -fx-padding: 3 12 3 12;
     -fx-border-color: transparent transparent -drydock-border transparent;
     -fx-border-width: 0 0 1 0;
 }
-.review-mcp-header-label {
+.mcp-console-title {
     -fx-text-fill: -drydock-mcp;
     -fx-font-size: 10px;
     -fx-font-weight: 700;
     -fx-font-family: "JetBrains Mono", "Menlo", monospace;
 }
-.review-mcp-budget-label {
+.mcp-console-budget-label {
     -fx-text-fill: -drydock-text-faint;
     -fx-font-size: 10px;
     -fx-font-family: "JetBrains Mono", "Menlo", monospace;
 }
-.review-mcp-budget {
+.mcp-console-key-hint {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 9.5px;
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.mcp-console-budget {
     -fx-background-color: -drydock-border;
     -fx-background-radius: 6px;
     -fx-min-width: 120px;  -fx-max-width: 120px;
     -fx-min-height: 4px;   -fx-max-height: 4px;
 }
-.review-mcp-budget-fill {
+.mcp-console-budget-fill {
     -fx-background-color: -drydock-mcp;
     -fx-background-radius: 6px;
     -fx-min-height: 4px;   -fx-max-height: 4px;
 }
-.review-mcp-list, .review-mcp-list .viewport {
+.mcp-console-list, .mcp-console-list .viewport {
     -fx-background-color: -drydock-code-bg;
 }
-.review-mcp-list .list-cell {
+.mcp-console-list .list-cell {
     -fx-background-color: transparent;
     -fx-padding: 2 10 2 10;
 }
-.review-mcp-list .list-cell:filled:selected {
+.mcp-console-list .list-cell:filled:selected {
     -fx-background-color: -drydock-active-bg;
 }
-.review-mcp-list .list-cell.failed .review-mcp-tool {
+.mcp-console-list .list-cell.failed .mcp-console-tool {
     -fx-text-fill: -drydock-blocking;
 }
-.review-mcp-time {
+.mcp-console-time {
     -fx-text-fill: -drydock-text-faint;
     -fx-font-size: 10px;
     -fx-font-family: "JetBrains Mono", "Menlo", monospace;
 }
-.review-mcp-direction {
+.mcp-console-direction {
     -fx-text-fill: -drydock-mcp;
     -fx-font-size: 10px;
 }
-.review-mcp-tool {
+.mcp-console-tool {
     -fx-text-fill: -drydock-code-type;
     -fx-font-size: 10.5px;
     -fx-font-family: "JetBrains Mono", "Menlo", monospace;
 }
-.review-mcp-detail {
+.mcp-console-detail {
     -fx-text-fill: -drydock-text-faint;
     -fx-font-size: 10px;
     -fx-font-family: "JetBrains Mono", "Menlo", monospace;
 }
-.review-mcp-payload {
+.mcp-console-payload {
     -fx-background-color: -drydock-input-bg;
     -fx-text-fill: -drydock-code-text;
     -fx-font-size: 10.5px;
@@ -4170,7 +4177,7 @@
     -fx-border-color: transparent transparent transparent -drydock-border;
     -fx-border-width: 0 0 0 1;
 }
-.review-mcp-payload .content { -fx-background-color: -drydock-input-bg; }
+.mcp-console-payload .content { -fx-background-color: -drydock-input-bg; }
 
 /* --- Explorer: trail bar (delta part 1) ------------------------------- */
 .explorer-trail-bar {
