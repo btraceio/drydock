@@ -3860,9 +3860,9 @@ public final class SessionReviewView extends BorderPane {
         return tourController.waitRunning();
     }
 
-    /** Test-only: the "Building tour…" progress line's current text. Call on the FX thread. */
+    /** Test-only: the "Building tour…" progress values, composed to one line for assertions. */
     String diagTourPendingProgress() {
-        return tourController.pendingProgress();
+        return tourController.pendingProgressDiagText();
     }
 
     /** Test-only: the wait's progress line recomposed now, as the once-a-second ticker would. */

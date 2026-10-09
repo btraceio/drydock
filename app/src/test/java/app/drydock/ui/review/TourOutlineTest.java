@@ -1,5 +1,6 @@
 package app.drydock.ui.review;
 
+import app.drydock.domain.SessionActivity;
 import app.drydock.review.tour.CheckProgress;
 import app.drydock.review.tour.StepProgress;
 import app.drydock.testing.FxSync;
@@ -9,6 +10,8 @@ import javafx.scene.Scene;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.scene.control.ToggleButton;
+import javafx.scene.layout.HBox;
+import javafx.scene.layout.VBox;
 import javafx.scene.text.Text;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.Test;
@@ -142,19 +145,47 @@ class TourOutlineTest extends FxTest {
     void thePendingWaitCarriesALiveProgressLine() {
         interact(() -> {
             outline.showPending("Building tour…", () -> calls.add("diff"), () -> calls.add("cancel"));
-            outline.setPendingProgress("0:04 · agent busy · no drydock calls yet");
+            outline.setPendingProgress(new TourOutline.PendingProgress(4, SessionActivity.BUSY, 0,
+                    Optional.empty(), 0));
         });
-        Label progress = lookup(".tour-pending-progress").queryAs(Label.class);
-        assertEquals("0:04 · agent busy · no drydock calls yet", progress.getText());
+        Label elapsed = lookup(".tour-pending-value").queryAllAs(Label.class).stream().findFirst().orElseThrow();
+        assertEquals("0:04", elapsed.getText(), "elapsed is the first fixed row's value");
+        assertTrue(lookup(".tour-pending-spinner").queryAll().size() == 1,
+                "the wait's working-state indicator is there");
         assertTrue(lookup("Open diff review").tryQuery().isPresent(), "the wait's way out stays");
         clickOn("Cancel");
         FxSync.waitForFxEvents();
         assertEquals(List.of("cancel"), calls);
     }
 
+    /** A value that has not arrived yet is a dash, never stale text from a previous wait. */
+    @Test
+    void thePendingRowsShowADashWhereThereIsNothingYet() {
+        interact(() -> {
+            outline.showPending("Building tour…", () -> { }, () -> { });
+            outline.setPendingProgress(new TourOutline.PendingProgress(60, SessionActivity.UNKNOWN, 2,
+                    Optional.of("review_scope"), 7));
+        });
+        VBox block = lookup(".tour-pending-progress").queryAs(VBox.class);
+        List<Label> values = new ArrayList<>();
+        for (Node rowNode : block.getChildren()) {
+            if (rowNode instanceof HBox row) {
+                Node last = row.getChildren().getLast();
+                assertTrue(last instanceof Label);
+                values.add((Label) last);
+            }
+        }
+        assertEquals(4, values.size());
+        assertEquals("1:00", values.get(0).getText());
+        assertEquals("—", values.get(1).getText(), "no activity means a dash, not made-up state");
+        assertEquals("2", values.get(2).getText());
+        assertEquals("review_scope · 0:07 ago", values.get(3).getText());
+    }
+
     @Test
     void aProgressLineIsInertWithoutAPendingBuild() {
-        interact(() -> outline.setPendingProgress("0:01 · agent busy · no drydock calls yet"));
+        interact(() -> outline.setPendingProgress(new TourOutline.PendingProgress(1, SessionActivity.BUSY, 0,
+                Optional.empty(), 0)));
         assertTrue(lookup(".tour-pending-progress").queryAll().isEmpty());
     }
 
@@ -162,12 +193,14 @@ class TourOutlineTest extends FxTest {
     void aMessageRetiresThePendingProgressLine() {
         interact(() -> {
             outline.showPending("Building tour…", () -> { }, () -> { });
-            outline.setPendingProgress("0:04 · agent busy");
+            outline.setPendingProgress(new TourOutline.PendingProgress(4, SessionActivity.BUSY, 0,
+                    Optional.empty(), 0));
         });
         assertTrue(lookup(".tour-pending-progress").tryQuery().isPresent());
         interact(() -> outline.showMessage("No tour arrived.", Optional.empty(), () -> { }));
         assertFalse(lookup(".tour-pending-progress").tryQuery().isPresent());
-        interact(() -> outline.setPendingProgress("a stale count"));
+        interact(() -> outline.setPendingProgress(new TourOutline.PendingProgress(5, SessionActivity.BUSY, 9,
+                Optional.of("review_scope"), 1)));
         assertFalse(lookup(".tour-pending-progress").tryQuery().isPresent(), "inert after the wait");
     }
 

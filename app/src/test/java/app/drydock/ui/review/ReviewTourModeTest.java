@@ -315,7 +315,7 @@ class ReviewTourModeTest extends ReviewTourFixture {
             String progress = ReviewDiagFxThread.call(view::diagTourPendingProgress);
             // Anchored on the state and call-count, not the clock: a one-second
             // tick between the click and this read must not fail the assertion.
-            assertTrue(progress.contains("agent idle · no drydock calls yet"), progress);
+            assertTrue(progress.contains("agent idle · no drydock calls"), progress);
             assertTrue(showsOnStepPanel("No drydock calls yet"),
                     "the step panel says the same thing the line does");
 

@@ -3831,9 +3831,28 @@
 
 /* The "Building tour…" wait's live progress line: elapsed, the agent's
  * state, and its drydock calls so far. */
-.tour-outline .tour-pending-progress {
+.tour-outline .tour-pending-progress .tour-pending-name {
     -fx-text-fill: -drydock-text-dim;
-    -fx-font-size: 11px;
+}
+
+/* The wait's live block: fixed rows, values right-aligned, so each second's
+ * update replaces text in place and nothing reflows. */
+.tour-outline .tour-pending-progress {
+    -fx-padding: 2 0 2 0;
+}
+
+.tour-outline .tour-pending-progress .tour-pending-value,
+.tour-outline .tour-pending-progress .tour-pending-name {
+    -fx-font-size: 10.5px;
+}
+
+.tour-outline .tour-pending-progress .tour-pending-value {
+    -fx-text-fill: -drydock-text;
+}
+
+.tour-outline .tour-pending-title {
+    -fx-font-size: 12px;
+    -fx-font-weight: bold;
 }
 
 /* A navigation outcome over the diff column ("Looking for foo…"): the
