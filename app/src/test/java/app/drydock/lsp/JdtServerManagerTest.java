@@ -31,8 +31,10 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 import java.util.stream.Stream;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -120,6 +122,8 @@ class JdtServerManagerTest {
         final CompletableFuture<Integer> exit = new CompletableFuture<>();
         final AtomicInteger closeCount = new AtomicInteger();
         final List<String> events;
+        /** False models a process whose exit signal arrives only later ({@link #exitLate}). */
+        volatile boolean exitOnClose = true;
 
         FakeProcess(List<String> command, List<String> events) {
             this.command = command;
@@ -146,11 +150,18 @@ class JdtServerManagerTest {
         public void close() {
             closeCount.incrementAndGet();
             events.add("process-close");
-            exit.complete(0); // the real process's exit signal fires on close, too
+            if (exitOnClose) {
+                exit.complete(0); // the real process's exit signal fires on close, too
+            }
         }
 
         void crash() {
             exit.complete(1);
+        }
+
+        /** The exit signal of a process released earlier, arriving late. */
+        void exitLate(int code) {
+            exit.complete(code);
         }
     }
 
@@ -167,6 +178,10 @@ class JdtServerManagerTest {
         final List<String> events;
         JdtServerManager.ServerNotifications server;
         JsonObject settings;
+        /** When set, {@link #notification} records the call and then throws it (a closed client). */
+        volatile RuntimeException notificationFailure;
+        /** Runs inside {@link #notification}, after recording, with the method name. */
+        volatile Consumer<String> notificationHook = method -> { };
 
         FakeClient(List<String> events) {
             this.events = events;
@@ -187,6 +202,11 @@ class JdtServerManagerTest {
         public void notification(String method, JsonValue params) {
             notifications.add(new Sent(method, params));
             events.add("notify:" + method);
+            notificationHook.accept(method);
+            RuntimeException failure = notificationFailure;
+            if (failure != null) {
+                throw failure;
+            }
         }
 
         @Override
@@ -204,6 +224,14 @@ class JdtServerManagerTest {
                     .filter(a -> a.method().equals(method) && !a.response().isDone())
                     .findFirst()
                     .ifPresentOrElse(a -> a.response().complete(result), () -> fail("no pending " + method));
+        }
+
+        void failPending(String method, Throwable failure) {
+            requests.stream()
+                    .filter(a -> a.method().equals(method) && !a.response().isDone())
+                    .findFirst()
+                    .ifPresentOrElse(a -> a.response().completeExceptionally(failure),
+                            () -> fail("no pending " + method));
         }
 
         List<Asked> asked(String method) {
@@ -811,6 +839,235 @@ class JdtServerManagerTest {
             assertNotEquals(names.get(0), names.get(1), "the stable hash must separate same-named roots");
         }
         other.close();
+    }
+
+    // ------------------------------------------------------- run ownership
+
+    /** Run A indexed, then idle-stopped with its exit signal held back; B started and indexed. */
+    private FakeProcess idleStopRunAThenIndexRunB() {
+        harness.newManager(null);
+        driveToIndexed();
+        FakeProcess runA = harness.processes.get(0);
+        runA.exitOnClose = false;
+        harness.time.advanceMillis(JdtServerManager.IDLE_STOP_MILLIS);
+        assertEquals(JdtServerManager.Readiness.STOPPED, manager().state());
+        assertFalse(runA.exit.isDone(), "run A's exit is still to come");
+        driveToIndexed(); // run B
+        assertEquals(2, harness.processes.size());
+        return runA;
+    }
+
+    @Test
+    void aDetachedRunsLateExitLeavesTheNewRunServing() {
+        FakeProcess runA = idleStopRunAThenIndexRunB();
+        FakeProcess runB = harness.processes.get(1);
+        FakeClient clientB = harness.clients.get(1);
+        runA.exitLate(0);
+        assertEquals(JdtServerManager.Readiness.INDEXED, manager().state());
+        assertEquals(0, runB.closeCount.get(), "a stale exit never closes the newer run's process");
+        assertEquals(0, clientB.closeCount.get(), "a stale exit never closes the newer run's client");
+        assertTrue(manager().references(srcFile(), 5, 3).isPresent(), "run B still serves");
+        assertEquals(1, clientB.asked("textDocument/references").size());
+        assertTrue(harness.clients.get(0).asked("textDocument/references").isEmpty());
+    }
+
+    @Test
+    void aLateExitDoesNotSwallowTheNextRealCrash() {
+        FakeProcess runA = idleStopRunAThenIndexRunB();
+        harness.processes.get(1).crash();
+        assertEquals(JdtServerManager.Readiness.DOWN, manager().state(), "B's crash is a crash");
+        runA.exitLate(0);
+        assertEquals(JdtServerManager.Readiness.DOWN, manager().state());
+        // The crash clock is B's: one restart after the backoff, no more.
+        harness.time.advanceMillis(JdtServerManager.CRASH_BACKOFF_MILLIS);
+        query();
+        assertEquals(3, harness.processes.size());
+        query();
+        assertEquals(3, harness.processes.size());
+    }
+
+    @Test
+    void aDetachedRunsLateNotificationCannotAdvanceOrReleaseTheNewRun() {
+        harness.newManager(null);
+        driveToIndexed();
+        FakeClient clientA = harness.clients.get(0);
+        harness.time.advanceMillis(JdtServerManager.IDLE_STOP_MILLIS);
+        assertEquals(JdtServerManager.Readiness.STOPPED, manager().state());
+        query(); // run B: STARTING, initialize pending
+        FakeClient clientB = harness.client();
+        assertEquals(JdtServerManager.Readiness.STARTING, manager().state());
+        // A's ServiceReady is not B's: answering B's initialize alone must not reach READY.
+        clientA.notifyServer("language/status", obj("type", str("ServiceReady")));
+        respondInitialize();
+        assertEquals(JdtServerManager.Readiness.STARTING, manager().state());
+        serviceReady();
+        assertEquals(JdtServerManager.Readiness.READY, manager().state());
+        importStarted("b1");
+        assertEquals(JdtServerManager.Readiness.INDEXING, manager().state());
+        // A's late import error can neither end B's import nor release B.
+        clientA.notifyServer("language/progressReport",
+                obj("taskType", str("Importing Gradle project"), "id", str("b1"), "status", str("Error"),
+                        "message", str("stale")));
+        assertEquals(JdtServerManager.Readiness.INDEXING, manager().state());
+        assertTrue(clientB.asked("shutdown").isEmpty(), "B is never released by A's notification");
+        assertEquals(0, clientB.closeCount.get());
+    }
+
+    @Test
+    void aStaleInitializeFailureAfterACrashKeepsTheCrashState() {
+        harness.newManager(null);
+        query(); // STARTING, initialize pending
+        FakeClient clientA = harness.client();
+        harness.process().crash();
+        assertEquals(JdtServerManager.Readiness.DOWN, manager().state());
+        clientA.failPending("initialize", new IOException("closed"));
+        assertEquals(JdtServerManager.Readiness.DOWN, manager().state(), "not NOT_STARTED");
+        query(); // inside the backoff: no restart
+        assertEquals(1, harness.processes.size());
+        // A second crash inside the disable window stays DISABLED likewise.
+        harness.time.advanceMillis(JdtServerManager.CRASH_BACKOFF_MILLIS);
+        query();
+        assertEquals(2, harness.processes.size());
+        FakeClient clientB = harness.client();
+        harness.process().crash();
+        assertEquals(JdtServerManager.Readiness.DISABLED, manager().state());
+        clientB.failPending("initialize", new IOException("closed"));
+        assertEquals(JdtServerManager.Readiness.DISABLED, manager().state());
+        harness.time.advanceMillis(JdtServerManager.CRASH_BACKOFF_MILLIS);
+        query();
+        assertEquals(2, harness.processes.size());
+    }
+
+    @Test
+    void aStaleInitializeSuccessCannotAdvanceTheNewRun() {
+        harness.newManager(null);
+        query(); // run A: STARTING, initialize pending
+        FakeClient clientA = harness.client();
+        harness.process().exitOnClose = false;
+        harness.time.advanceMillis(JdtServerManager.IDLE_STOP_MILLIS); // idle-detach A, no query since
+        assertEquals(JdtServerManager.Readiness.STOPPED, manager().state());
+        query(); // run B: STARTING, initialize pending
+        FakeClient clientB = harness.client();
+        assertEquals(2, harness.clients.size());
+        clientA.respondTo("initialize", JsonNull.INSTANCE); // A's late success
+        serviceReady(); // through B
+        assertEquals(JdtServerManager.Readiness.STARTING, manager().state(),
+                "B's own initialize is still unanswered");
+        assertTrue(clientB.sent("initialized").isEmpty(), "A's response never handshakes B");
+        assertTrue(clientA.sent("initialized").isEmpty(), "a detached run is never handshaken");
+        respondInitialize(); // B's own
+        assertEquals(JdtServerManager.Readiness.READY, manager().state());
+        assertEquals(1, clientB.sent("initialized").size());
+    }
+
+    @Test
+    void initializedIsSentOnceOnTheIssuingClient() {
+        harness.newManager(null);
+        driveToIndexed();
+        assertEquals(1, harness.client().sent("initialized").size());
+    }
+
+    @Test
+    void aClosedClientDuringInitializedDoesNotEscape() {
+        harness.newManager(null);
+        query();
+        harness.client().notificationFailure = new IllegalStateException("client is closed");
+        assertDoesNotThrow(this::respondInitialize);
+        assertEquals(1, harness.client().sent("initialized").size(), "the send was attempted");
+        harness.client().notificationFailure = null;
+        serviceReady();
+        assertEquals(JdtServerManager.Readiness.READY, manager().state());
+    }
+
+    @Test
+    void aCurrentRunsInitializeFailureReleasesOnlyItselfAndRetries() {
+        harness.newManager(null);
+        query();
+        harness.client().failPending("initialize", new IOException("server died"));
+        assertEquals(JdtServerManager.Readiness.NOT_STARTED, manager().state());
+        assertEquals(1, harness.client().closeCount.get());
+        assertEquals(1, harness.process().closeCount.get());
+        query();
+        assertEquals(2, harness.processes.size());
+        assertEquals(JdtServerManager.Readiness.STARTING, manager().state());
+    }
+
+    @Test
+    void closedClientDuringSyncFallsThroughToLowerTiers() throws IOException {
+        harness.newManager(null);
+        driveToIndexed();
+        Path file = srcFile();
+        Files.createDirectories(file.getParent());
+        Files.writeString(file, "class Foo {}\n");
+        harness.client().notificationFailure = new IllegalStateException("client is closed");
+        Optional<CompletableFuture<List<JdtServerManager.Location>>> result =
+                assertDoesNotThrow(() -> manager().references(file, 0, 0));
+        assertTrue(result.isEmpty(), "a closed client falls through to the lower tiers");
+        assertTrue(harness.client().asked("textDocument/references").isEmpty());
+        // The failed sync was not recorded: the next query opens the document again.
+        harness.client().notificationFailure = null;
+        assertTrue(manager().references(file, 0, 0).isPresent());
+        assertEquals(2, harness.client().sent("textDocument/didOpen").size());
+        assertEquals(1, harness.client().asked("textDocument/references").size());
+    }
+
+    @Test
+    void closeSurvivesAFailingExitNotification() {
+        harness.newManager(null);
+        driveToIndexed();
+        harness.client().notificationFailure = new IllegalStateException("client is closed");
+        assertDoesNotThrow(() -> manager().close());
+        assertEquals(1, harness.client().closeCount.get());
+        assertEquals(1, harness.process().closeCount.get());
+        assertEquals(JdtServerManager.Readiness.CLOSED, manager().state());
+    }
+
+    @Test
+    void theInitializedSendHappensOutsideTheManagerLock() {
+        harness.newManager(null);
+        query();
+        AtomicInteger probed = new AtomicInteger();
+        harness.client().notificationHook = method -> {
+            if (!"initialized".equals(method)) {
+                return;
+            }
+            CompletableFuture<JdtServerManager.Readiness> other =
+                    CompletableFuture.supplyAsync(() -> manager().state());
+            try {
+                other.get(2, TimeUnit.SECONDS); // a held manager lock would time out here
+                probed.incrementAndGet();
+            } catch (Exception e) {
+                fail("the manager lock is held across the initialized send: " + e);
+            }
+        };
+        respondInitialize();
+        assertEquals(1, probed.get());
+    }
+
+    // ------------------------------------------------------ static cache helpers
+
+    @Test
+    void staticCacheHelpersMatchTheManagersDataDir() throws IOException {
+        harness.newManager(null);
+        query(); // the start creates the -data dir
+        Path dataDir = onlyDataDir();
+        assertEquals(dataDir, JdtServerManager.dataDirFor(harness.root, harness.dataRoot));
+        String launch = String.join(" ", harness.process().command);
+        assertTrue(launch.contains("-data " + dataDir), launch);
+        manager().close();
+        Files.createDirectories(dataDir.resolve("nested"));
+        Files.writeString(dataDir.resolve("nested/state.bin"), "x");
+        JdtServerManager.deleteCacheDir(dataDir);
+        assertFalse(Files.exists(dataDir), "deleteCacheDir removes the populated tree");
+        assertDoesNotThrow(() -> JdtServerManager.deleteCacheDir(dataDir)); // idempotent
+        Path defaultDir = JdtServerManager.dataDirFor(harness.root, null);
+        assertTrue(defaultDir.startsWith(Path.of(System.getProperty("user.home"), ".drydock", "lsp")),
+                defaultDir.toString());
+        assertEquals(dataDir.getFileName(), defaultDir.getFileName());
+        Path sibling = tempDir.resolve("wt2/repo");
+        assertNotEquals(JdtServerManager.dataDirFor(harness.root, harness.dataRoot),
+                JdtServerManager.dataDirFor(sibling, harness.dataRoot),
+                "same-named roots under different parents get different dirs");
     }
 
     // --------------------------------------------------------- production probe

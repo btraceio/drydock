@@ -200,7 +200,15 @@ public final class JdtServerManager implements AutoCloseable {
     private ClientConnection client;
     private String invalidMessage, notIndexedReason;
     private Instant lastQueryAt, lastCrashAt;
-    private boolean initializeResponded, serviceReadySeen, expectingExit, closedFlag;
+    private boolean initializeResponded, serviceReadySeen, closedFlag;
+    /**
+     * The current server run's tag, guarded by {@link #lock}: bumped when a start begins,
+     * on every detach (idle stop, graceful release, initialize failure, close) and when a
+     * crash of the current run is accepted. Every run-originated callback (exit, initialize
+     * response, notification) carries the tag it was registered with and is a no-op unless
+     * it still equals this value, so a detached run can never touch a newer one.
+     */
+    private long generation;
     private Scheduler.Timer idleTimer, noTaskTimer, capTimer;
 
     private record SyncedDocument(long mtimeMillis, int version) { }
@@ -238,9 +246,7 @@ public final class JdtServerManager implements AutoCloseable {
         this.clientFactory = Objects.requireNonNull(clientFactory, "clientFactory");
         this.ownedScheduler = scheduler == null ? new RealScheduler() : null;
         this.scheduler = scheduler == null ? ownedScheduler : scheduler;
-        this.dataDir = (dataRoot == null
-                ? Path.of(System.getProperty("user.home"), ".drydock", "lsp") : dataRoot)
-                .resolve(worktreeSlug(this.root));
+        this.dataDir = dataDirFor(this.root, dataRoot);
     }
 
     // --------------------------------------------------------------- query API
@@ -306,11 +312,11 @@ public final class JdtServerManager implements AutoCloseable {
         }
         if (attemptStart) scheduler.execute(this::attemptStart);
         if (serve == null) return Optional.empty();
-        syncIfStale(normalized, serve);
-        try {
+        try { // a crash or close can race the query between the check and the sync or the write
+            syncIfStale(normalized, serve);
             return Optional.of(trackQuery(serve.request(method,
                     queryParameters(normalized, line, character, references))));
-        } catch (RuntimeException e) { // a crash raced the query between check and write
+        } catch (RuntimeException e) { // e.g. IllegalStateException from a client closed since the check
             LOG.log(Level.DEBUG, "tier-3 query ''{0}'' could not be sent: {1}", method, e.toString());
             return Optional.empty();
         }
@@ -333,11 +339,13 @@ public final class JdtServerManager implements AutoCloseable {
     // ------------------------------------------------------------- start path
 
     private void attemptStart() {
+        final long run;
         synchronized (lock) {
             if (closedFlag || (state != Readiness.NOT_STARTED && state != Readiness.STOPPED
                     && state != Readiness.DOWN)) return;
             state = Readiness.STARTING;
             resetRunStateLocked();
+            run = ++generation;
         }
         ValidationResult validation = validate(config, javaProbe);
         if (validation instanceof ValidationResult.Invalid invalid) {
@@ -362,31 +370,34 @@ public final class JdtServerManager implements AutoCloseable {
         }
         ClientConnection connected;
         try {
-            connected = clientFactory.connect(spawned, javaSettings(), this::onNotification);
+            connected = clientFactory.connect(spawned, javaSettings(),
+                    (method, params) -> onNotification(run, method, params));
         } catch (IOException e) {
             closeQuietly(spawned);
             retryableStartFailure("language server client failed to connect: " + e);
             return;
         }
         synchronized (lock) {
-            if (closedFlag) { // closed during startup: cancel it, do not wait for it
+            if (closedFlag || run != generation) { // closed or superseded during startup: cancel it
                 closeQuietly(connected);
                 closeQuietly(spawned);
                 return;
             }
             this.process = spawned;
             this.client = connected;
-            spawned.exitFuture().whenComplete((code, error) -> scheduler.execute(this::handleProcessExit));
+            spawned.exitFuture().whenComplete((code, error) -> scheduler.execute(() -> handleProcessExit(run)));
             rescheduleIdleTimerLocked();
         }
         CompletableFuture<JsonValue> initialized = connected.request("initialize", initializeParams());
-        initialized.whenComplete((value, error) -> scheduler.execute(() -> onInitializeResponse(value, error)));
+        initialized.whenComplete((value, error) ->
+                scheduler.execute(() -> onInitializeResponse(run, connected, value, error)));
     }
 
-    private void onInitializeResponse(JsonValue value, Throwable error) {
+    // Tied to its run: a response from a detached/superseded run changes nothing (no state, no send).
+    private void onInitializeResponse(long run, ClientConnection from, JsonValue value, Throwable error) {
         Captured toRelease = null;
         synchronized (lock) {
-            if (closedFlag) return;
+            if (closedFlag || run != generation) return;
             if (error != null) { // the server is unusable: release it, let the next query retry
                 toRelease = detachServerLocked();
                 state = Readiness.NOT_STARTED;
@@ -403,20 +414,21 @@ public final class JdtServerManager implements AutoCloseable {
                     root, String.valueOf(error));
             return;
         }
-        try { // the mandatory post-initialize handshake; jdt.ls holds progress until it arrives
-            if (client != null) client.notification("initialized", JsonObject.empty());
-        } catch (IOException e) {
+        try { // the mandatory post-initialize handshake, on the issuing client, outside the lock
+            from.notification("initialized", JsonObject.empty());
+        } catch (IOException | RuntimeException e) { // write failure, or a stop/crash closed it since
             LOG.log(Level.DEBUG, "could not send initialized for {0}: {1}", root, e.toString());
         }
     }
 
     // ------------------------------------------------------- notification path
-    // A late completion after NOT_INDEXED (or any terminal/stop state) is never accepted.
-    private void onNotification(String method, JsonValue params) {
+    // A late completion after NOT_INDEXED (or any terminal/stop state) is never accepted, and
+    // neither is a notification from a detached/superseded run (its reader may outlive the detach).
+    private void onNotification(long run, String method, JsonValue params) {
         JsonObject p = params instanceof JsonObject o ? o : JsonObject.empty();
         boolean stopServer = false;
         synchronized (lock) {
-            if (closedFlag || (state != Readiness.STARTING && state != Readiness.READY
+            if (closedFlag || run != generation || (state != Readiness.STARTING && state != Readiness.READY
                     && state != Readiness.INDEXING)) return;
             if ("language/status".equals(method) && "ServiceReady".equals(string(p, "type"))) {
                 serviceReadySeen = true;
@@ -427,7 +439,7 @@ public final class JdtServerManager implements AutoCloseable {
                 dollarProgressLocked(p);
             }
         }
-        if (stopServer) gracefulRelease(); // NOT_INDEXED: tier off for this server, -data cache kept
+        if (stopServer) gracefulRelease(run); // NOT_INDEXED: tier off for this server, -data cache kept
     }
 
     // Returns whether the server should be released because NOT_INDEXED was just reached.
@@ -502,11 +514,13 @@ public final class JdtServerManager implements AutoCloseable {
 
     private void onImportCapTimeout() {
         boolean stopServer;
+        long run;
         synchronized (lock) {
+            run = generation;
             stopServer = state == Readiness.INDEXING
                     && notIndexedLocked("import did not complete within 10 minutes of the first started task");
         }
-        if (stopServer) gracefulRelease();
+        if (stopServer) gracefulRelease(run);
     }
 
     // Returns whether the server should be released; NOT_INDEXED is sticky for the session.
@@ -521,30 +535,30 @@ public final class JdtServerManager implements AutoCloseable {
         return true;
     }
 
-    // An unexpected process exit: crash policy (§5); an expected one (idle/close) is ignored.
-    private void handleProcessExit() {
+    // Only the CURRENT run's exit is a crash (§5). A detached run (idle stop, NOT_INDEXED release,
+    // failed initialize, close) was released on purpose by its detacher, which owns closing it;
+    // its late exit is stale and touches nothing -- never a newer run's client or process.
+    private void handleProcessExit(long run) {
         Captured captured;
         synchronized (lock) {
+            if (closedFlag || run != generation || process == null) return;
             captured = new Captured(client, process);
             client = null;
             process = null;
-            if (closedFlag || expectingExit) {
-                expectingExit = false;
-            } else { // an unexpected exit: crash policy (§5)
-                cancelAllTimersLocked();
-                failInFlightLocked();
-                Instant now = scheduler.now();
-                if (lastCrashAt != null
-                        && Duration.between(lastCrashAt, now).toMillis() < CRASH_DISABLE_WINDOW_MILLIS) {
-                    state = Readiness.DISABLED;
-                    LOG.log(Level.WARNING, "second jdt.ls crash within 5 min for {0}; tier 3 disabled"
-                            + " for this worktree session", root);
-                } else {
-                    state = Readiness.DOWN;
-                    lastCrashAt = now;
-                    LOG.log(Level.WARNING, "jdt.ls for {0} exited unexpectedly; it restarts once, 30 s"
-                            + " from now", root);
-                }
+            generation++; // the crashed run's later callbacks (initialize failure, notifications) are stale
+            cancelAllTimersLocked();
+            failInFlightLocked();
+            Instant now = scheduler.now();
+            if (lastCrashAt != null
+                    && Duration.between(lastCrashAt, now).toMillis() < CRASH_DISABLE_WINDOW_MILLIS) {
+                state = Readiness.DISABLED;
+                LOG.log(Level.WARNING, "second jdt.ls crash within 5 min for {0}; tier 3 disabled"
+                        + " for this worktree session", root);
+            } else {
+                state = Readiness.DOWN;
+                lastCrashAt = now;
+                LOG.log(Level.WARNING, "jdt.ls for {0} exited unexpectedly; it restarts once, 30 s"
+                        + " from now", root);
             }
         }
         closeQuietly(captured.client());
@@ -580,12 +594,14 @@ public final class JdtServerManager implements AutoCloseable {
                 && Duration.between(lastCrashAt, scheduler.now()).toMillis() >= CRASH_BACKOFF_MILLIS;
     }
 
-    // Detaches the live server under the lock; its exit is expected (an intentional stop, not a crash).
+    // Detaches the live server under the lock (an intentional stop, not a crash); the caller owns
+    // closing the captured pair. Bumping the run tag makes the detached run's later exit,
+    // initialize response and notifications stale, so none of them can touch a newer run.
     private Captured detachServerLocked() {
         Captured captured = new Captured(client, process);
         client = null;
         process = null;
-        expectingExit = captured.process() != null;
+        generation++;
         return captured;
     }
 
@@ -600,16 +616,20 @@ public final class JdtServerManager implements AutoCloseable {
             } catch (Exception e) { LOG.log(Level.DEBUG, "shutdown request unanswered: {0}", e.toString()); }
             try {
                 c.notification("exit", null);
-            } catch (IOException e) { LOG.log(Level.DEBUG, "exit notification failed: {0}", e.toString()); }
+            } catch (IOException | RuntimeException e) { // e.g. the reader closed the client on EOF
+                LOG.log(Level.DEBUG, "exit notification failed: {0}", e.toString());
+            }
         }
         closeQuietly(c);
         closeQuietly(p);
     }
 
-    // Releases the live server with the protocol shutdown sequence, off the caller's thread.
-    private void gracefulRelease() {
+    // Releases run {@code run}'s server with the protocol shutdown sequence, off the caller's
+    // thread; a no-op when that run was already detached or superseded.
+    private void gracefulRelease(long run) {
         Captured captured;
         synchronized (lock) {
+            if (run != generation) return;
             captured = detachServerLocked();
         }
         if (captured.client() == null && captured.process() == null) return;
@@ -711,6 +731,26 @@ public final class JdtServerManager implements AutoCloseable {
     /** Removes this worktree's ~/.drydock/lsp/<slug> directory (T5's worktree-removal
      *  callback); idempotent; logs (never throws) when the tree cannot be removed. */
     public void deleteCache() {
+        deleteCacheDir(dataDir);
+    }
+
+    /**
+     * The jdt.ls -data directory a manager for {@code worktreeRoot} uses: {@code dataRoot}
+     * ({@code null} = ~/.drydock/lsp, resolved at call time) / the readable-basename-plus-stable-hash
+     * slug of the normalized absolute root. Pure: touches no filesystem. The single slug calculation,
+     * shared with the constructor so the two can never drift.
+     */
+    public static Path dataDirFor(Path worktreeRoot, Path dataRoot) {
+        Path normalized = Objects.requireNonNull(worktreeRoot, "worktreeRoot").toAbsolutePath().normalize();
+        Path base = dataRoot == null ? Path.of(System.getProperty("user.home"), ".drydock", "lsp") : dataRoot;
+        return base.resolve(worktreeSlug(normalized));
+    }
+
+    /**
+     * Removes the given cache directory tree (see {@link #dataDirFor}); idempotent; logs (never
+     * throws) on IO failure. Needs no manager, so the worktree-removal path builds none.
+     */
+    public static void deleteCacheDir(Path dataDir) {
         if (!Files.exists(dataDir)) return;
         try (Stream<Path> paths = Files.walk(dataDir)) {
             for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) {
