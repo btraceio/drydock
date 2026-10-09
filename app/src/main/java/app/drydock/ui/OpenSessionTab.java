@@ -316,9 +316,12 @@ final class OpenSessionTab {
         // Keyboard-ownership indicator: the placeholder gains JavaFX focus
         // whenever its native terminal takes the AppKit first responder
         // (see TerminalBridge.focus()); reflect that on the matching
-        // sub-tab button so "where do my keys go" is always visible.
+        // sub-tab button so "where do my keys go" is always visible. A
+        // terminal-only session's shell is named by the Terminal sub-tab
+        // (the agent sub-tab is hidden), so that is the button to light.
+        ToggleButton shellKeysButton = terminalOnlySession() ? terminalSubTabButton : claudeSubTabButton;
         placeholder.focusedProperty().addListener((obs, was, is) ->
-                claudeSubTabButton.pseudoClassStateChanged(KEYS, is));
+                shellKeysButton.pseudoClassStateChanged(KEYS, is));
 
         // The Terminal sub-tab's own chrome: a stripe of terminal tabs + a
         // `+` button, living in terminalContainer's bottom (above the main
@@ -351,6 +354,16 @@ final class OpenSessionTab {
         });
         tabRepoLabel.setVisible(repository.isPresent());
         tabRepoLabel.setManaged(repository.isPresent());
+        // A terminal-only session has no agent sub-tab: its only native
+        // surface IS the shell, and the Terminal sub-tab shows it (see
+        // showSubTab). The tab opens on that, not on a second terminal pair
+        // of sub-tabs labelled alike.
+        if (terminalOnlySession()) {
+            claudeSubTabButton.setVisible(false);
+            claudeSubTabButton.setManaged(false);
+            activeSubTab = SubTab.TERMINAL;
+            terminalSubTabButton.setSelected(true);
+        }
     }
 
     ManagedSessionId sessionId() {
@@ -405,7 +418,14 @@ final class OpenSessionTab {
 
         terminalSubTabButton.getStyleClass().add("session-subtab");
         terminalSubTabButton.setFocusTraversable(false);
-        terminalSubTabButton.setTooltip(new Tooltip("Terminal (⌘2)"));
+        if (terminalOnlySession()) {
+            // The session has no agent surface: this sub-tab is its shell
+            // (until extras are spawned), so the tooltip says what ⌘2 lands
+            // on without implying there are two terminals to choose from.
+            terminalSubTabButton.setTooltip(new Tooltip("Terminal (⌘2) — this session's shell"));
+        } else {
+            terminalSubTabButton.setTooltip(new Tooltip("Terminal (⌘2)"));
+        }
         terminalSubTabButton.setOnAction(e -> showSubTab(SubTab.TERMINAL));
 
         explorerSubTabButton.getStyleClass().add("session-subtab");
@@ -619,6 +639,19 @@ final class OpenSessionTab {
     }
 
     /**
+     * Whether this session HAS no agent surface of its own: a terminal-only
+     * session (kind {@link AgentKind#TERMINAL}) runs the user's shell, whose
+     * surface is routed through the same trio as the agent's would be. Its
+     * agent sub-tab is not shown at all -- the Terminal sub-tab, the Explorer
+     * and Review are the whole bar -- and the Terminal sub-tab shows THE
+     * SESSION'S OWN shell whenever no extra terminals have been spawned,
+     * so the old bar's "Terminal" over "Terminal" pair cannot happen.
+     */
+    private boolean terminalOnlySession() {
+        return agentKind == AgentKind.TERMINAL;
+    }
+
+    /**
      * Switches between the native-surface sub-tabs (Claude, Terminal) and
      * the scene-graph ones (Explorer, Review). The native views overlay the
      * scene, so showing Explorer or Review must both swap the center node AND
@@ -630,6 +663,13 @@ final class OpenSessionTab {
      * first switch.
      */
     void showSubTab(SubTab subTab) {
+        // A terminal-only tab has no AI sub-tab; a shortcut that names it
+        // (⌘1, the terminal's own CLAUDE_SUB_TAB binding) lands on the
+        // Terminal sub-tab instead, which for this tab is the same surface
+        // (see terminalOnlySession) -- the shell IS the session.
+        if (subTab == SubTab.CLAUDE && terminalOnlySession()) {
+            subTab = SubTab.TERMINAL;
+        }
         selectSubTabButton(subTab);
         if (subTab == activeSubTab) {
             // Already showing -- but still reclaim key routing: the user may
@@ -691,6 +731,14 @@ final class OpenSessionTab {
         }
         // CLAUDE or TERMINAL: show the corresponding native surface, hide the other.
         if (subTab == SubTab.TERMINAL) {
+            if (terminalOnlySession() && terminals.isEmpty()) {
+                // No extra terminals have been spawned, so the Terminal
+                // sub-tab shows THE SESSION'S OWN shell -- the trio whose
+                // sub-tab button is hidden above. Spawning extras (⌘T / the
+                // stripe's +) is always available on top of it.
+                showSessionShell();
+                return;
+            }
             if (terminals.isEmpty() && !spawnTerminal()) {
                 // Terminal creation unavailable/failed: undo the button selection, stay put.
                 selectSubTabButton(activeSubTab);
@@ -704,7 +752,21 @@ final class OpenSessionTab {
             return;
         }
         // CLAUDE
-        activeSubTab = subTab;
+        showSessionShell();
+    }
+
+    /**
+     * Shows the SESSION'S OWN native surface (the agent's for an agent
+     * session, the user's shell for a terminal-only one): center back to the
+     * placeholder, that bridge active, every ephemeral terminal's bridge
+     * inactive, and native geometry recomputed after the layout pass (see the
+     * CLAUDE note in showSubTab). {@code activeSubTab} is who the sub-tab bar
+     * and the refocus helpers must see: CLAUDE for an agent's surface,
+     * TERMINAL for a terminal-only session's shell.
+     */
+    private void showSessionShell() {
+        activeSubTab = terminalOnlySession() ? SubTab.TERMINAL : SubTab.CLAUDE;
+        selectSubTabButton(activeSubTab);
         content.setCenter(placeholder);
         bridge.setTerminalSubTabActive(true);
         for (TerminalPane p : terminals) {
@@ -723,7 +785,9 @@ final class OpenSessionTab {
      */
     void updateGeometryNow() {
         TerminalBridge active = (activeSubTab == SubTab.TERMINAL)
-                ? (activePane() != null ? activePane().bridge : null) : bridge;
+                ? (activePane() != null ? activePane().bridge
+                        : terminalOnlySession() ? bridge : null)
+                : bridge;
         if (active != null) {
             active.updateGeometry();
         }
@@ -770,6 +834,12 @@ final class OpenSessionTab {
             TerminalPane p = activePane();
             if (p != null) {
                 p.bridge.focus();
+            } else if (terminalOnlySession()) {
+                // No ephemeral terminal yet: the Terminal sub-tab is showing
+                // the session's own shell (see showSubTab's terminal-only
+                // branch), so "reclaim the keyboard" means that shell, not
+                // nothing.
+                bridge.focus();
             }
         }
     }
@@ -1451,6 +1521,23 @@ final class OpenSessionTab {
     /** The Review sub-tab button's current text, badge included when set. */
     String diagReviewButtonText() {
         return reviewSubTabButton.getText();
+    }
+
+    /** Diagnostic/test-only: whether the agent sub-tab button is on the bar at all. */
+    boolean agentSubTabVisible() {
+        return claudeSubTabButton.isVisible() && claudeSubTabButton.isManaged();
+    }
+
+    /** Diagnostic/test-only: the sub-tab bar's button texts, in bar order. */
+    List<String> diagSubTabBarButtons() {
+        List<String> texts = new ArrayList<>();
+        for (ToggleButton button : List.of(claudeSubTabButton, terminalSubTabButton, explorerSubTabButton,
+                reviewSubTabButton)) {
+            if (button.isManaged()) {
+                texts.add(button.getText());
+            }
+        }
+        return texts;
     }
 
     /** Whether the tab header's ⇅ SSH badge is shown: visible AND taking layout space. */
