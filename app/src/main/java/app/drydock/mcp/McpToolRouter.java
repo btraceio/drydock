@@ -224,8 +224,11 @@ public final class McpToolRouter {
                                         + "lines; hides nothing)|risk, prompt (answerable from what the "
                                         + "tour explains or from code the reviewer can see -- never from "
                                         + "outside knowledge the tour has not taught), choices?[{text, at?{file, "
-                                        + "line}}] (2-4, not for risk), answer? (0-based, not for risk), explanation, "
-                                        + "alternates[{...same, no alternates}]}], "
+                                        + "line}}] (exactly 2-4, not for risk), answer? (0-based, not for risk), "
+                                        + "explanation, and alternates: at least one ALTERNATE CHECK, the same "
+                                        + "object minus id (a different id), minus alternates: {id, kind, "
+                                        + "prompt, explanation, choices?, answer?} -- the alternate needs its "
+                                        + "own prompt/explanation/choices/answer, omitting them is rejected}], "
                                         + "diagram?{caption, stages: up to 4 monospace text stages, "
                                         + "each continuing the drawing above it, revealed one per "
                                         + "click -- draw with spaces, never tabs (a tab stops "
@@ -783,7 +786,11 @@ public final class McpToolRouter {
         try {
             steps = TourCodec.stepsFromAgent(arrayArgument(args, "steps"));
         } catch (TourCodec.InvalidTour e) {
-            throw new McpToolException("review_tour rejected, nothing stored: " + e.getMessage());
+            // Every fault at once, one per line -- the same shape the
+            // validation rejections below report -- so one resubmission can
+            // fix all of them instead of one field at a time.
+            throw new McpToolException("review_tour rejected, nothing stored:\n- "
+                    + String.join("\n- ", e.problems()));
         }
         checkTourText(steps);
         boolean onlySteps = optionalBooleanArg(args, "onlySteps", false);

@@ -34,8 +34,23 @@ public final class TourCodec {
     static final int MAX_PATH = 1024;
 
     public static final class InvalidTour extends Exception {
+        private final List<String> problems;
+
+        /** One decode fault. */
         public InvalidTour(String message) {
             super(message);
+            this.problems = List.of(message);
+        }
+
+        /** Every fault of a whole {@code steps} array, one line each. */
+        public InvalidTour(List<String> problems) {
+            super(String.join("\n", problems));
+            this.problems = List.copyOf(problems);
+        }
+
+        /** The individual faults, for a caller that formats them one per line. */
+        public List<String> problems() {
+            return problems;
         }
     }
 
@@ -51,9 +66,24 @@ public final class TourCodec {
         if (array.elements().size() > TourValidator.MAX_STEPS) {
             throw new InvalidTour("steps: a tour has at most " + TourValidator.MAX_STEPS + " steps");
         }
+        // Every step's first decode fault, not just the earliest one. A
+        // rejection costs the agent a whole resubmission; a message naming
+        // one field of one step made it re-post (and re-read) the entire
+        // tour once per missing field -- the shape behind "18 calls before
+        // the tour landed". One problem per step still, per path, and
+        // nothing decoded unless the array is entirely clean, so the
+        // "nothing is stored" contract keeps meaning "nothing partial".
+        List<String> problems = new ArrayList<>();
         List<TourStep> steps = new ArrayList<>();
         for (int i = 0; i < array.elements().size(); i++) {
-            steps.add(stepFromJson(array.elements().get(i), "steps[" + i + "]"));
+            try {
+                steps.add(stepFromJson(array.elements().get(i), "steps[" + i + "]"));
+            } catch (InvalidTour e) {
+                problems.addAll(e.problems());
+            }
+        }
+        if (!problems.isEmpty()) {
+            throw new InvalidTour(problems);
         }
         return scattered(steps);
     }

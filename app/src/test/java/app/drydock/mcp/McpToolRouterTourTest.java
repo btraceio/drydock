@@ -115,6 +115,24 @@ class McpToolRouterTourTest extends McpRouterFixture {
         assertTrue(error.getMessage().contains("steps[0].checks[0].answer"), error.getMessage());
     }
 
+    /**
+     * A decode fault in one step no longer hides the faults of its siblings:
+     * the rejection names every step's first fault, one per line, so one
+     * resubmission fixes all of them instead of re-posting the whole tour
+     * once per field (18 calls before one landed, observed live).
+     */
+    @Test
+    void twoStepsWithDifferentFaultsAreBothNamed() {
+        String brokenOne = step("s1", "src/Widget.java", "n1", "n5", "c1")
+                .replace("\"answer\":0", "\"answer\":\"0\"");
+        McpToolException error = assertThrows(McpToolException.class, () -> router.call(callerId(), "review_tour",
+                tourArgs(brokenOne, step("s2", "src/WidgetUser.java", "n1", "n6", "c2")
+                        .replace("\"prompt\":\"What happens?\"", "\"promt\":\"What happens?\""))));
+        assertTrue(error.getMessage().contains("steps[0].checks[0].answer"), error.getMessage());
+        assertTrue(error.getMessage().contains("steps[1].checks[0].prompt"), error.getMessage());
+        assertTrue(context.tourOf(scopeId()).isEmpty(), "nothing stored");
+    }
+
     @Test
     void anImpactNoteOnALineThatDoesNotExistIsRejected() {
         context.excerptAnswer = Optional.empty();

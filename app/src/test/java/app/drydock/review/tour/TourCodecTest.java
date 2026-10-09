@@ -168,6 +168,28 @@ class TourCodecTest {
         assertTrue(error.getMessage().contains("steps[0].anchors[0].note"), error.getMessage());
     }
 
+    /**
+     * One step's decode fault does not hide the next step's: the thrown
+     * {@code InvalidTour} carries every fault, one per step, so the router's
+     * rejection can name them all and one resubmission fixes them at once.
+     */
+    @Test
+    void faultsInEveryStepAreReportedTogether() {
+        String brokenOne = """
+                {"id":"s1","title":"T","narrative":"Why.",
+                 "anchors":[{"file":"src/A.java","startKey":"n1"}],
+                 "checks":[{"id":"c1","kind":"predict","promt":"What happens?",
+                            "choices":[{"text":"a"},{"text":"b"}],"answer":0,
+                            "explanation":"It returns.",
+                            "alternates":[{"id":"c1b","kind":"risk","prompt":"Risk?","explanation":"E."}]}]}""";
+        TourCodec.InvalidTour error = assertThrows(TourCodec.InvalidTour.class,
+                () -> TourCodec.stepsFromAgent(JsonParser.parse("[" + brokenOne
+                        + "," + brokenOne.replace("\"s1\"", "\"s2\"") + "]")));
+        assertTrue(error.getMessage().contains("steps[0].checks[0].prompt"), error.getMessage());
+        assertTrue(error.getMessage().contains("steps[1].checks[0].prompt"), error.getMessage());
+        assertEquals(2, error.problems().size());
+    }
+
     @Test
     void aNonIntegerAnswerIsRejectedNamingItsPath() {
         TourCodec.InvalidTour error = assertThrows(TourCodec.InvalidTour.class,
