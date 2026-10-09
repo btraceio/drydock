@@ -1075,7 +1075,12 @@ public final class DrydockApplication extends Application {
                     event.consume();
                 } else if (!inTextInput && mainWorkspace.unwindReviewOverlay()) {
                     // The review board had something open (the symbol lens,
-                    // the MCP panel); that closes first and the board stays.
+                    // the gutter composer); that closes first and the board
+                    // stays.
+                    event.consume();
+                } else if (!inTextInput && mainWorkspace.closeMcpConsoleIfOpen()) {
+                    // Then the app-wide MCP console -- the bottom pane now,
+                    // not review's panel -- before Esc means "change tab".
                     event.consume();
                 } else if (!inTextInput) {
                     mainWorkspace.showPicker();
@@ -1105,6 +1110,14 @@ public final class DrydockApplication extends Application {
                 // (SettingsModal's class Javadoc).
                 if (!appShell.modalLayer().isShowingModal()) {
                     appShell.toggleTheme();
+                }
+                event.consume();
+            } else if (cmd && event.isShiftDown() && event.getCode() == KeyCode.M) {
+                // The MCP console (the app-wide bottom pane): toggles from
+                // anywhere, review or explorer or terminal; the console itself
+                // is the same visibility the tour wait's auto-open drives.
+                if (!appShell.modalLayer().isShowingModal()) {
+                    mainWorkspace.toggleMcpConsole();
                 }
                 event.consume();
             } else if (cmd && event.getCode() == KeyCode.F) {
@@ -1575,6 +1588,23 @@ public final class DrydockApplication extends Application {
                 case "subtab" -> {
                     mainWorkspace.diagShowSubTab(arg);
                     System.out.println("[diag] subtab " + arg.strip());
+                }
+                // ⌘F over the review board exactly as the global shortcut
+                // chain dispatches it, then a typed query through the field's
+                // own text property -- the exact path a reader's typing
+                // takes -- so a blanking repro can be scripted with shots.
+                case "findopen" -> {
+                    boolean opened = mainWorkspace.openReviewFind();
+                    System.out.println("[diag] findopen -> " + opened
+                            + ", focus owner: " + describeFocusOwner());
+                }
+                case "findtext" -> {
+                    String read = mainWorkspace.diagFindText(arg);
+                    System.out.println("[diag] findtext -> " + read);
+                }
+                case "findstate" -> {
+                    System.out.println("[diag] findstate -> " + mainWorkspace.diagFindState());
+                    System.out.println("[diag] findlist -> " + mainWorkspace.diagFindListState());
                 }
                 case "rename" -> {
                     mainWorkspace.diagStartRename();

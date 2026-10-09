@@ -22,8 +22,10 @@ import javafx.scene.control.Label;
 import javafx.scene.control.ListCell;
 import javafx.scene.control.ListView;
 import javafx.scene.control.TextField;
+import javafx.scene.control.TextInputControl;
 import javafx.scene.control.Tooltip;
 import javafx.scene.input.KeyEvent;
+import javafx.scene.input.KeyCode;
 import javafx.scene.input.MouseEvent;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
@@ -386,6 +388,19 @@ final class ReviewDiffColumn extends BorderPane {
         // does not reopen Tab-key traversal into the list.
         list.addEventFilter(MouseEvent.MOUSE_PRESSED, e -> list.requestFocus());
         list.setCellFactory(view -> new DiffCell());
+        // ⌘C: the gutter selection's other use (the reader asked for it when
+        // the range composer made drag-selecting a range natural). The
+        // event's dispatch path reaches this filter from every text input
+        // inside the list too -- the composer's draft field is one -- so a
+        // copy aimed at the draft copies the DRAFT, not the lines.
+        list.addEventFilter(KeyEvent.KEY_PRESSED, event -> {
+            if (event.getCode() == KeyCode.C && event.isShortcutDown()
+                    && !(event.getTarget() instanceof TextInputControl)) {
+                if (copySelection()) {
+                    event.consume();
+                }
+            }
+        });
         // Long lines wrap; the column never scrolls sideways. See
         // viewportWidth for what this replaces.
         list.skinProperty().addListener((obs, old, skin) -> bindViewportWidth());
@@ -712,6 +727,62 @@ final class ReviewDiffColumn extends BorderPane {
      */
     private long renderGeneration;
 
+    // ---- copy (⌘C): the selected lines' text -------------------------------
+
+    /** Shows a transient note over the column when lines were copied ("Copied 3 lines"). */
+    private java.util.function.IntConsumer onLinesCopied = lines -> { };
+
+    void setOnLinesCopied(java.util.function.IntConsumer handler) {
+        onLinesCopied = handler == null ? lines -> { } : handler;
+    }
+
+    /**
+     * Copies the gutter selection's lines onto the system clipboard: each
+     * selected row's own text (a deleted line copies what was removed, an
+     * added/context one copies the new text), in visual order, joined with
+     * newlines. Also the one place a double-click's one-line copy routes
+     * through, so both gestures never drift apart in what they produce.
+     *
+     * <p>Returns whether anything was copied: with no selection the key must
+     * fall through (to nothing, there is nothing to copy), and a copied
+     * note that lies is no better than a silent failure.</p>
+     */
+    boolean copySelection() {
+        if (selectedKeys.isEmpty()) {
+            return false;
+        }
+        // In ROW order, not the selection set's: lines copied out of order
+        // would read like scrambled code (a Set<String> has no diff order).
+        List<UnifiedDiff.Line> lines = rows.stream()
+                .filter(row -> row instanceof ReviewDiffRow.Line line
+                        && selectedKeys.contains(line.file() + " " + line.lineKey()))
+                .map(row -> ((ReviewDiffRow.Line) row).line())
+                .toList();
+        if (lines.isEmpty()) {
+            return false;
+        }
+        StringBuilder text = new StringBuilder();
+        for (UnifiedDiff.Line line : lines) {
+            if (!text.isEmpty()) {
+                text.append('\n');
+            }
+            text.append(line.text().stripTrailing());
+        }
+        javafx.scene.input.ClipboardContent content = new javafx.scene.input.ClipboardContent();
+        content.putString(text.toString());
+        javafx.scene.input.Clipboard.getSystemClipboard().setContent(content);
+        onLinesCopied.accept(lines.size());
+        return true;
+    }
+
+    /** A double-click on a row's text copies just that row's line. */
+    private void copyOneLine(ReviewDiffRow.Line row) {
+        javafx.scene.input.ClipboardContent content = new javafx.scene.input.ClipboardContent();
+        content.putString(row.line().text().stripTrailing());
+        javafx.scene.input.Clipboard.getSystemClipboard().setContent(content);
+        onLinesCopied.accept(1);
+    }
+
     // ---- find (⌘F): text search over the rendered diff ---------------------
     /**
      * The walk's targets as {@code "<file> <lineKey>"} keys, in diff order:
@@ -769,10 +840,25 @@ final class ReviewDiffColumn extends BorderPane {
      * {@link #renderGeneration}) is what makes this cheap even though it
      * still touches the whole {@link #rows} list.
      */
+    /**
+     * Forces every visible cell to rebuild its graphic against the current
+     * {@link #renderGeneration}.
+     *
+     * <p>{@link ListView#refresh()} is the whole of it: it re-populates the
+     * visible cells in place (their {@code updateItem} runs again, and the
+     * cache keyed on {@link #renderGeneration} then rebuilds what changed),
+     * without touching {@link #rows} at all. The first version swapped the
+     * items list to empty and back, and that double setAll left the
+     * VirtualFlow's paint layer out of sync with the scene graph: after a
+     * find keystroke rebuilt the rows, thirteen live cells with correctly
+     * sized graphics sat inside the viewport while the card painted nothing
+     * but background (captured on film via the diag driver: 13 cells,
+     * y=44..268, zero non-background pixels). A single-pulse detouch of
+     * every cell also broke live press gestures -- see
+     * {@link DiffCell#updateItem} -- so the refresh is the fix for both.</p>
+     */
     private void refreshRender() {
-        List<ReviewDiffRow> current = List.copyOf(rows);
-        rows.setAll(List.of());
-        rows.setAll(current);
+        list.refresh();
     }
 
     // ---- gutter range selection ---------------------------------------------
@@ -910,6 +996,99 @@ final class ReviewDiffColumn extends BorderPane {
         return Set.copyOf(selectedKeys);
     }
 
+    /** Diagnostic/test-only: copies one line through the double-click path. */
+    void diagCopyLine(String file, String key) {
+        for (ReviewDiffRow row : rows) {
+            if (row instanceof ReviewDiffRow.Line line && line.file().equals(file)
+                    && line.lineKey().equals(key)) {
+                copyOneLine(line);
+                return;
+            }
+        }
+    }
+
+    /** Diagnostic-only: scrolls the diff list a few rows, for scripted repaint probes. */
+    void diagScrollListBy(int rows_) {
+        list.scrollTo(rows_);
+    }
+
+    /** Diagnostic-only: types into the find field via its text property; returns the text it now has. */
+    String diagFindText(String text) {
+        findField.setText(text);
+        return findField.getText() == null ? "" : findField.getText();
+    }
+
+    /**
+     * Diagnostic-only: the find walk's state and the list's own render
+     * state, for a scripted repro of a reported blanking -- typed text,
+     * open flag, match count, cursor, and how many rows the list carries.
+     */
+    String diagFindState() {
+        return "findOpen=" + findOpen + " query='" + (findField.getText() == null ? "" : findField.getText())
+                + "' matches=" + findMatchKeys.size() + " cursor=" + findCursor
+                + " renderedRows=" + rows.size()
+                + " hits=" + findHitKeys.size() + " currentKey=" + findCurrentKey;
+    }
+
+    /**
+     * Diagnostic-only: the list's real layout numbers (its own size, the
+     * viewport's, the scroll position, how many cells VirtualFlow keeps and
+     * the first cell's geometry) -- the numbers a blank render must be
+     * explainable from.
+     */
+    String diagListLayoutState() {
+        javafx.scene.Node viewport = list.lookup(".virtual-flow");
+        StringBuilder out = new StringBuilder();
+        out.append("listW=").append((int) list.getWidth()).append(" listH=").append((int) list.getHeight())
+                .append(" items=").append(list.getItems().size())
+                .append(" flow=").append(viewport == null ? "none" : viewport.getClass().getSimpleName())
+                .append(" flowW=").append(viewport == null ? -1 : (int) viewport.getBoundsInParent().getWidth())
+                .append(" flowH=").append(viewport == null ? -1 : (int) viewport.getBoundsInParent().getHeight());
+        int cells = 0;
+        int firstIndex = -1;
+        String firstBounds = "-";
+        String firstGraphic = "-";
+        StringBuilder cellYs = new StringBuilder();
+        for (javafx.scene.Node node : list.lookupAll(".list-cell")) {
+            if (node instanceof javafx.scene.control.ListCell<?> cell && !cell.isEmpty()) {
+                cells++;
+                if (cellYs.length() < 120) {
+                    cellYs.append(" i=").append(cell.getIndex())
+                            .append(" y=").append((int) cellY(cell))
+                            .append(" vis=").append(cell.isVisible());
+                    if (firstIndex < 0) {
+                        firstIndex = cell.getIndex();
+                        firstBounds = (int) cell.getWidth() + "x" + (int) cell.getHeight();
+                        firstGraphic = cell.getGraphic() == null ? "none"
+                                : (int) cell.getGraphic().getBoundsInParent().getWidth() + "x"
+                                        + (int) cell.getGraphic().getBoundsInParent().getHeight();
+                    }
+                }
+            }
+        }
+        out.append(" cells=").append(cells).append(" firstIndex=").append(firstIndex)
+                .append(" firstBounds=").append(firstBounds).append(" firstGraphic=").append(firstGraphic)
+                .append(" ys [").append(cellYs).append(" ]");
+        return out.toString();
+    }
+
+    /** The cell's Y in the flow's space (the clip that can hide it). */
+    private static double cellY(javafx.scene.control.ListCell<?> cell) {
+        javafx.scene.Node flow = cell.getParent();
+        int steps = 0;
+        while (flow != null && !flow.getStyleClass().contains("virtual-flow") && steps < 5) {
+            flow = flow.getParent();
+            steps++;
+        }
+        if (flow == null) {
+            return cell.getBoundsInParent().getMinY();
+        }
+        return cell.localToScene(cell.getBoundsInLocal().getMinX(), cell.getBoundsInLocal().getMinY(), true).getY()
+                - flow.localToScene(0, 0, true).getY();
+    }
+
+
+
     /**
      * One key of the gutter selection -- {@code "<file> <lineKey>"}, the
      * same shape every key in this class already uses -- so {@link
@@ -975,6 +1154,15 @@ final class ReviewDiffColumn extends BorderPane {
         HBox bar = new HBox(6, findField, findCount, previous, next, close);
         bar.setAlignment(Pos.CENTER_LEFT);
         bar.getStyleClass().add("review-find-bar");
+        // The float's size is the bar's OWN preferred size, capped. Left to
+        // its defaults an HBox's max is unbounded, and a managed child of a
+        // StackPane is then stretched to the STACK's full size -- the bar's
+        // opaque .review-find-bar background painted over the whole diff, and
+        // ⌘F looked like the review had gone empty (the field sat mid-left of
+        // the giant bar, which is the position the first report described).
+        // Capped, the StackPane's TOP_RIGHT alignment pins the small bar in
+        // the corner it was designed for.
+        bar.setMaxSize(Region.USE_PREF_SIZE, Region.USE_PREF_SIZE);
         bar.setVisible(false);
         bar.setManaged(false);
         return bar;
@@ -1736,6 +1924,23 @@ final class ReviewDiffColumn extends BorderPane {
         explorer.setOnAction(e -> openInExplorer(header, explorer));
 
         List<Node> children = new ArrayList<>(List.of(file, range));
+        // The GitHub links ride the FIRST hunk header of a file: a file's
+        // later hunk headers would repeat two buttons that resolve to the
+        // same place every time.
+        if (header.hunkIndex() == 0 && gitHubLinks != null) {
+            Button github = new Button("GitHub");
+            github.getStyleClass().add("review-hunk-github");
+            github.setTooltip(new Tooltip("Open " + header.file() + " at line " + header.startLine()
+                    + " on github.com (HEAD)"));
+            github.setOnAction(e -> openOnGitHub(header, github));
+            Button vscode = new Button("vscode");
+            vscode.getStyleClass().add("review-hunk-github");
+            vscode.setTooltip(new Tooltip("Open " + header.file() + " at line " + header.startLine()
+                    + " in github.dev (the web editor)"));
+            vscode.setOnAction(e -> openOnGitHub(header, vscode));
+            children.add(github);
+            children.add(vscode);
+        }
         // untracked wins when both are somehow true: "never committed" is
         // the more important fact to surface, and the combination should
         // not be constructible anyway (an untracked file has nothing in the
@@ -1775,6 +1980,39 @@ final class ReviewDiffColumn extends BorderPane {
             button.setTooltip(new Tooltip("Open this scope's session first — the Explorer lives in it"));
             button.setDisable(true);
         }
+    }
+
+    /**
+     * Opens the hunk's file on github.com or in github.dev (the web editor),
+     * resolved from the scope's checkout per click. A checkout whose origin
+     * is not github.com — or with no checkout at all — disables the button
+     * with a tooltip saying so, the same honesty {@link #openInExplorer}
+     * renders; nothing invented is opened.
+     */
+    private void openOnGitHub(ReviewDiffRow.HunkHeader header, Button button) {
+        if (!gitHubLinks.open(displayedScope, header.file(), header.startLine(),
+                button.getText().equals("vscode"))) {
+            button.setTooltip(new Tooltip("This checkout has no github.com remote to link to"));
+            button.setDisable(true);
+        }
+    }
+
+    /**
+     * The hunk headers' GitHub links; null (tests, headless) means the
+     * buttons do not render at all. The column hands the link the SCOPE it
+     * is displaying -- the checkout a link resolves against is the column's
+     * knowledge, not the caller's.
+     */
+    interface GitHubLinks {
+        /** Opens {@code file} at 1-based {@code line}; false when there is no github.com remote. */
+        boolean open(ReviewScope scope, String file, int line, boolean vscode);
+    }
+
+    private GitHubLinks gitHubLinks;
+
+    /** Wires the GitHub link buttons; without one they do not render at all. */
+    void setGitHubLinks(GitHubLinks links) {
+        this.gitHubLinks = links;
     }
 
     private Region buildLine(ReviewDiffRow.Line row) {
@@ -1864,6 +2102,15 @@ final class ReviewDiffColumn extends BorderPane {
         });
 
         TextFlow source = highlighted(row.file(), line.text());
+        // A double-click ON THE TEXT copies the line (the gutter double-click
+        // stays the composer's, so aiming at a line number never also
+        // mutates the clipboard).
+        source.addEventHandler(javafx.scene.input.MouseEvent.MOUSE_CLICKED, event -> {
+            if (event.getClickCount() == 2) {
+                copyOneLine(row);
+                event.consume();
+            }
+        });
         // Hgrow, now that a row is exactly as wide as the viewport rather
         // than as wide as the widest line in the whole diff. That is what
         // makes the TextFlow wrap a long line instead of running off the

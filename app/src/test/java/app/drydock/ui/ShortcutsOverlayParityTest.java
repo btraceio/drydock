@@ -73,7 +73,9 @@ class ShortcutsOverlayParityTest {
                 .flatMap(keycap -> Arrays.stream(keycap.split(" / ")))
                 .collect(Collectors.toSet());
 
-        Set<String> bound = Set.of("d", "c", "m", "\\", "[", "]", "n", "a", "r", "u",
+        // The board no longer binds BACK_SLASH: the MCP console is app-wide
+        // now, and its toggle (⌘⇧M) is a GLOBAL shortcut, not a board key.
+        Set<String> bound = Set.of("d", "c", "m", "[", "]", "n", "a", "r", "u",
                 "⏎", "⇧F", "f", "⇧A", "⇧R", "v", "1", "2", "3", "4", "b", ".", ",", "⇧D", "h");
 
         assertEquals(bound, advertised,

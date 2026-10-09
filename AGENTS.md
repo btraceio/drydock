@@ -27,26 +27,6 @@ the repo carries only the distilled knowledge. Use it instead of re-deriving:
   kind, tags, applies_to, source — provenance back into the ~/.cairn trail).
 <!-- cairn:knowledgebase end -->
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 ## Blocking work is async, with progress indication
 
 Never run blocking operations on the JavaFX Application Thread. This covers

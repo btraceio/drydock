@@ -7,6 +7,7 @@ import javafx.scene.input.KeyCode;
 import javafx.scene.input.MouseButton;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.concurrent.TimeoutException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -120,6 +121,55 @@ class ReviewSettleActionsTest extends ReviewViewFixture {
         FxSync.waitForFxEvents();
 
         assertEquals(1, settledHunksOf(FILE_A));
+    }
+
+    /**
+     * The bar's Approve CLICK follows the cursor forward: after settling the
+     * current hunk the cursor lands on the file's next unread hunk, and once
+     * the file is fully decided, on the next unread hunk of the review. The
+     * bar's own settle used to stop at the settle and leave the reader
+     * staring at the hunk they had just cleared -- the label promised the
+     * advance, the cursor never did it.
+     */
+    @Test
+    void aBarApproveAdvancesTheCursorToTheNextUnreadHunk() {
+        assertEquals("src/guards.h#0", view.diagCursor().orElseThrow(), "the fixture starts at FILE_A hunk 0");
+
+        clickOn(".review-verdict-action.primary");
+        FxSync.waitForFxEvents();
+        assertEquals(1, settledHunksOf(FILE_A), "the click settled the first hunk");
+        assertEquals("src/guards.h#1", view.diagCursor().orElseThrow(),
+                "the cursor moved to the file's next unread hunk, like a does");
+
+        clickOn(".review-verdict-action.primary");
+        FxSync.waitForFxEvents();
+        assertEquals(2, settledHunksOf(FILE_A), "the file is fully settled");
+        assertEquals("src/guards.cpp#0", view.diagCursor().orElseThrow(),
+                "a fully decided file advances to the next unsettled hunk of the review");
+        assertEquals(0, settledHunksOf(FILE_B),
+                "the advance is a jump, not a settle -- the next hunk waits to be read");
+    }
+
+    /**
+     * The bar's Explain hands the file to the bound session as an
+     * explanation ask, and with no session bound it refuses VISIBLY rather
+     * than looking as though it asked.
+     */
+    @Test
+    void theExplainButtonAsksTheBoundSessionAndRefusesWithoutOne() {
+        host.sessionBound = true;
+        clickOn(".review-verdict-explain");
+        FxSync.waitForFxEvents();
+        assertEquals(List.of(FILE_A), host.handedOffExplains, "the ask names the file on the bar");
+
+        host.handedOffExplains.clear();
+        host.sessionBound = false;
+        interact(view::refreshReviewState);
+        clickOn(".review-verdict-explain");
+        FxSync.waitForFxEvents();
+        assertTrue(host.handedOffExplains.isEmpty(), "nothing was handed over");
+        assertTrue(lookup(".review-verdict-ask-refusal").queryAll().size() == 1,
+                "the refusal says so in the footer");
     }
 
     /**

@@ -315,7 +315,7 @@ class ReviewTourModeTest extends ReviewTourFixture {
             String progress = ReviewDiagFxThread.call(view::diagTourPendingProgress);
             // Anchored on the state and call-count, not the clock: a one-second
             // tick between the click and this read must not fail the assertion.
-            assertTrue(progress.contains("agent idle · no drydock calls yet"), progress);
+            assertTrue(progress.contains("agent idle · no drydock calls"), progress);
             assertTrue(showsOnStepPanel("No drydock calls yet"),
                     "the step panel says the same thing the line does");
 
@@ -349,6 +349,54 @@ class ReviewTourModeTest extends ReviewTourFixture {
             FxSync.waitForFxEvents();
             progress = ReviewDiagFxThread.call(view::diagTourPendingProgress);
             assertTrue(progress.contains("2 drydock calls"), progress);
+        } finally {
+            host.reviewers.clear();
+        }
+    }
+
+    /**
+     * The wait auto-opens the app-wide MCP console (the wiring made visible
+     * while the agent builds) and closes it again when the tour arrives --
+     * through the same host seam; the console itself lives at the workspace
+     * now (see MainWorkspace#toggleMcpConsole).
+     */
+    @Test
+    void theWaitAutoOpensTheConsoleAndItsArrivalClosesIt() {
+        host.reviewers.add("claude");
+        try {
+            withoutTourInTourMode();
+            host.consoleAutoOpens = true;
+            clickOn("Run review");
+            FxSync.waitForFxEvents();
+            assertEquals(1, host.consoleOpenedCount, "the run's wait opened the console");
+
+            interact(() -> {
+                host.tours.put(TourRecord.fresh(tour(scope.id(), host.diff), host.diff));
+                view.refreshReviewState();
+            });
+            FxSync.waitForFxEvents();
+            assertEquals(1, host.consoleClosedCount, "the tour arriving closed what the wait opened");
+        } finally {
+            host.reviewers.clear();
+        }
+    }
+
+    /** A console the READER opened is not the wait's to close. */
+    @Test
+    void aWaitThatOpenedNoConsoleClosesNothing() {
+        host.reviewers.add("claude");
+        try {
+            withoutTourInTourMode();
+            clickOn("Run review");
+            FxSync.waitForFxEvents();
+            assertEquals(0, host.consoleOpenedCount, "the fake console was off; nothing was asked to open");
+
+            interact(() -> {
+                host.tours.put(TourRecord.fresh(tour(scope.id(), host.diff), host.diff));
+                view.refreshReviewState();
+            });
+            FxSync.waitForFxEvents();
+            assertEquals(0, host.consoleClosedCount, "no close of what was never opened");
         } finally {
             host.reviewers.clear();
         }

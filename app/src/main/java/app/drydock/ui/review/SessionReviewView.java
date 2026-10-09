@@ -1,6 +1,7 @@
 package app.drydock.ui.review;
 
 import app.drydock.domain.SessionActivity;
+import app.drydock.github.GitHubLinkService;
 import app.drydock.git.DiffService;
 import app.drydock.git.ReviewBase;
 import app.drydock.git.UnifiedDiff;
@@ -318,6 +319,22 @@ public final class SessionReviewView extends BorderPane {
         void overrideSeverity(ReviewScope scope, ReviewAnnotation finding, Severity severity);
 
         /**
+         * Opens the app-wide MCP console if one exists and it is closed;
+         * true when it was opened, so the tour wait may close it again.
+         * Default false: a host with no console (no server running) never
+         * opens one.
+         */
+        default boolean showMcpConsole() {
+            return false;
+        }
+
+        /**
+         * Hides the MCP console, but only when this board's wait was what
+         * opened it (the host tracks that ownership); default, nothing.
+         */
+        default void hideMcpConsole() { }
+
+        /**
          * Hands open findings to the scope's bound session, under {@code
          * subject} (the file they are on) as the prompt's heading.
          * False when there is no session to hand them to (or nothing to
@@ -328,6 +345,16 @@ public final class SessionReviewView extends BorderPane {
          * three times.
          */
         boolean askAgentToFix(ReviewScope scope, String subject, List<ReviewAnnotation> findings);
+
+        /**
+         * Asks the scope's bound session to READ the file's change and
+         * explain it in its own conversation. False when there is no session
+         * to ask (the caller must say so, never pretend). Default false, so
+         * hosts that predate the ask stay valid.
+         */
+        default boolean askAgentToExplain(ReviewScope scope, String subject) {
+            return false;
+        }
 
         /**
          * The tour's "Send back to the author": hands confirmed blocking
@@ -494,8 +521,6 @@ public final class SessionReviewView extends BorderPane {
     private DoubleSupplier stepPanelWidthSource;
     private DoubleConsumer onStepPanelWidthChanged = width -> { };
 
-    /** The MCP activity panel; absent when no server is running (tests, headless). */
-    private final Optional<ReviewMcpActivityPanel> mcpPanel;
 
     /**
      * What each scope's diff attempt produced, keyed by scope id. A scope
@@ -819,15 +844,19 @@ public final class SessionReviewView extends BorderPane {
     private boolean userChoseMode;
 
     /**
-     * @param activityLog the MCP traffic log the {@code \} panel renders, or
+     * @param activityLog the MCP traffic log the tour wait's progress reads
+     *                    its drydock-call counts and its last-call line from, or
      *                    {@code null} when no server is running -- Review must
-     *                    work with no agent at all, so the panel is optional
+     *                    work with no agent at all
      */
     public SessionReviewView(Host host, DiffService diffService, McpActivityLog activityLog) {
-        this.mcpPanel = ReviewMcpActivityPanel.createIfAvailable(activityLog);
         this.host = host;
         this.sections = new SectionStates(host);
         this.diffColumn = new ReviewDiffColumn(diffService, host::openInExplorer);
+        // ⌘C / double-click copies report where the clipboard got them from:
+        // a copied line looks like nothing happened the first time it's used.
+        this.diffColumn.setOnLinesCopied(lines -> notice("Copied " + lines
+                + (lines == 1 ? " line" : " lines")));
         this.margin = new ReviewFindingsMargin(new MarginHost());
         this.verdictBar = new ReviewVerdictBar(new VerdictHost());
         this.tourController = new TourController(host, new TourViewAdapter(), diffColumn, SECTION_GRAPH_EXECUTOR,
@@ -963,15 +992,10 @@ public final class SessionReviewView extends BorderPane {
         VBox.setVgrow(columns, Priority.ALWAYS);
 
         VBox centre = new VBox(header, columns);
-        mcpPanel.ifPresent(panel -> {
-            panel.setVisible(false);
-            panel.setManaged(false);
-            centre.getChildren().add(panel);
-        });
         // The key hints sit just above the verdict bar, in tour mode only.
         centre.getChildren().add(keyStrip);
-        // The verdict bar goes last, so even with the activity panel open it
-        // is still the bottom-most thing and still always present.
+        // The verdict bar goes last, so it is still the bottom-most thing and
+        // still always present.
         centre.getChildren().add(verdictBar);
         // The trail goes below even the verdict bar, in both modes, as the
         // Explorer's does below its viewer.
@@ -1148,6 +1172,7 @@ public final class SessionReviewView extends BorderPane {
         tourController.resetForScope();
         userChoseMode = false;
         bindNavigation(scope);
+        probeGitHubLinks(scope);
         // The cursor is reset BEFORE the body is built, which the destination
         // did the other way round: a cached diff publishes Loaded
         // synchronously from inside bodyFor, and the diff-resolved handler
@@ -1263,7 +1288,6 @@ public final class SessionReviewView extends BorderPane {
             margin.setFindings(List.of());
             showFileOnBar(null, Optional.empty(), false);
             verdictBar.showProgress(0, 0);
-            mcpPanel.ifPresent(panel -> panel.setScope(null));
             return;
         }
         // A verdict (or a diff change) lands as a tour write; the risk queue
@@ -1282,8 +1306,6 @@ public final class SessionReviewView extends BorderPane {
         diffColumn.setCursorFile(mode == ReviewMode.DIFF ? currentFile().orElse(null) : null);
         diffColumn.refreshPins();
         diffColumn.setLinks(linksByHunk());
-        mcpPanel.filter(Node::isVisible)
-                .ifPresent(panel -> panel.setScope(scope.get()));
         renderVerdictBar(scope.get());
         applyMode();
     }
@@ -1847,23 +1869,16 @@ public final class SessionReviewView extends BorderPane {
         }
 
         /**
-         * The bar's Approve / Request changes: the next unread hunk of
-         * {@code file}. Remembered for {@code u} through {@link
-         * #rememberSettle}, as a key's settle is, so {@code u} after a click
-         * undoes the click, not the keyboard settle before it.
+         * The bar's Approve / Request changes settle exactly what {@code
+         * a}/{@code r} settle -- the bar's target IS the cursor file in the
+         * hunk diff -- and then advance the cursor the same way. The bar's
+         * version used to stop at the settle and leave the reader on the
+         * hunk they had just cleared, which the label "(next unread hunk)"
+         * promised and the cursor did not do. Both paths remember the settle
+         * inside {@link #rememberSettle}, shared, so they never drift apart.
          */
         private void settle(String file, ReviewVerdict.Decision decision) {
-            selectedScope().ifPresent(scope -> {
-                List<String> digests = digestsForAction(file, false);
-                if (!allRendered(digests)) {
-                    notice(HUNK_NOT_RENDERED);
-                    return;
-                }
-                Map<String, Optional<ReviewVerdict.Decision>> before = verdictsOf(scope, digests);
-                host.setVerdict(scope, digests, Optional.of(decision), blockedFor(scope, digests));
-                recordHunkOverrides(scope, digests, decision, before);
-                rememberSettle(scope, digests, decision, file);
-            });
+            verdictAction(decision, false);
         }
 
         @Override
@@ -1887,6 +1902,18 @@ public final class SessionReviewView extends BorderPane {
                                     .filter(ReviewAnnotation::counts)
                                     .filter(finding -> finding.file().equals(onBar.get()))
                                     .toList()))
+                    .orElse(false);
+        }
+
+        @Override
+        public boolean askAgentToExplain(ReviewVerdictBar.Target target) {
+            // Same never-pretend rule as askAgentToFix above: the boolean is
+            // the bar's only honesty, so it is returned untouched.
+            Optional<String> onBar = fileOnBar(target);
+            if (onBar.isEmpty()) {
+                return false;
+            }
+            return selectedScope().map(scope -> host.askAgentToExplain(scope, onBar.get()))
                     .orElse(false);
         }
 
@@ -2320,7 +2347,6 @@ public final class SessionReviewView extends BorderPane {
         show(verdictBar, false);
         keyStrip.setTourShown(false);
         show(itemHeader, false);
-        mcpPanel.ifPresent(panel -> show(panel, false));
     }
 
     /** Undoes {@link #applyEmptySurface}; the responsive rules take it from here. */
@@ -2716,21 +2742,6 @@ public final class SessionReviewView extends BorderPane {
         diffColumn.setDensity(newDensity);
     }
 
-    /** {@code \}: shows or hides the MCP activity panel; a hidden panel listens to nothing. */
-    private void toggleMcpPanel() {
-        mcpPanel.ifPresent(panel -> {
-            boolean show = !panel.isVisible();
-            panel.setVisible(show);
-            panel.setManaged(show);
-            if (show) {
-                panel.setScope(selectedScope().orElse(null));
-                panel.attach();
-            } else {
-                panel.detach();
-            }
-        });
-    }
-
     /**
      * Review's keyboard table (spec §5). Keys are suppressed while a text
      * input has focus, and every one of them has a visible control too --
@@ -2809,12 +2820,6 @@ public final class SessionReviewView extends BorderPane {
                 setMarginCollapsed(!(mode == ReviewMode.TOUR ? stepPanel.collapsed() : margin.collapsed()));
                 yield true;
             }
-            case BACK_SLASH -> {
-                // The reader now owns the panel; the tour wait must not close it.
-                tourController.readerOwnsMcpPanel();
-                toggleMcpPanel();
-                yield true;
-            }
             // [ and ] step the file cursor; n finds the next unread hunk.
             case OPEN_BRACKET -> { moveFile(-1); yield true; }
             case CLOSE_BRACKET -> { moveFile(1); yield true; }
@@ -2869,10 +2874,6 @@ public final class SessionReviewView extends BorderPane {
             diffColumn.closeComposer();
             return true;
         }
-        if (mcpPanel.filter(Node::isVisible).isPresent()) {
-            toggleMcpPanel();
-            return true;
-        }
         return false;
     }
 
@@ -2888,28 +2889,16 @@ public final class SessionReviewView extends BorderPane {
     }
 
     /**
-     * Releases what this view holds that would otherwise outlive it.
-     *
-     * <p>The MCP activity panel's live-log subscription is the one that
-     * matters: {@link ReviewMcpActivityPanel#attach} registers a listener on
-     * {@link McpActivityLog}, which is app-lifetime and keeps
-     * its listeners in a {@code CopyOnWriteArrayList} -- so an un-detached
-     * panel keeps this whole view (diff column included) reachable, and
-     * running a pointless FX-thread {@code refresh()} on every MCP call for
-     * every closed session's board that was ever opened with the panel
-     * showing, for the rest of the process's life. {@code detach()} is a
-     * no-op if the panel was never attached (never opened, or already
-     * hidden), so this is always safe to call.</p>
-     *
-     * <p>Call before dropping the last reference to this view -- see {@code
-     * OpenSessionTab.disposeNativeResources}.</p>
+     * Releases this view's timers so nothing keeps it reachable after its
+     * tab is closed (see {@code OpenSessionTab.disposeNativeResources}). The
+     * MCP console lives at the workspace level now, so there is no per-view
+     * log subscription here to detach.
      */
     public void close() {
         closed = true;
         tourController.close();
         navNoticeTimer.stop();
         regenerateTimer.stop();
-        mcpPanel.ifPresent(ReviewMcpActivityPanel::detach);
     }
 
     // ---- tour mode ----------------------------------------------------------
@@ -3181,6 +3170,61 @@ public final class SessionReviewView extends BorderPane {
     private void notice(String message) {
         showNotice(message);
         navNoticeTimer.playFromStart();
+    }
+
+    // ---- GitHub quick links -------------------------------------------------
+
+    /** The GitHub deep-link service; stateless, so one per board is one too many already. */
+    private final GitHubLinkService githubLinks = new GitHubLinkService();
+    /** Drops a stale probe's apply; a scope switch could otherwise re-enable another repo's links. */
+    private long githubLinkProbeToken;
+    /** The same staleness guard for a click's link resolution. */
+    private long githubOpenToken;
+
+    /**
+     * Asks once per scope whether its checkout's origin is github.com, and
+     * only then renders the hunk headers' GitHub / vscode buttons. An absent
+     * or non-GitHub remote leaves the off -- a dead pair of buttons on every
+     * hunk header is clutter, and a click that resolves nothing is a worse
+     * discovery path than no buttons at all.
+     */
+    private void probeGitHubLinks(ReviewScope scope) {
+        long token = ++githubLinkProbeToken;
+        if (!scope.diffable()) {
+            return;
+        }
+        githubLinks.remoteOf(scope.diffRoot()).thenAccept(remote -> Platform.runLater(() -> {
+            if (token != githubLinkProbeToken) {
+                return; // the scope moved on while git answered
+            }
+            diffColumn.setGitHubLinks(remote.isPresent() ? SessionReviewView.this::openOnGitHub : null);
+            diffColumn.refreshPins();
+        }));
+    }
+
+    /**
+     * The hunk header buttons' opener: resolves the file/line against the
+     * scope's checkout asynchronously (two quick git queries, per click, so
+     * the sha is always the commit the reader is on) and opens the browser.
+     * Reports a failed resolution the way every other navigation outcome
+     * does, over the column.
+     */
+    private boolean openOnGitHub(ReviewScope scope, String file, int line, boolean vscode) {
+        if (scope == null || !scope.diffable()) {
+            return false;
+        }
+        long token = ++githubOpenToken;
+        githubLinks.linkOf(scope.diffRoot(), file, line).thenAccept(link -> Platform.runLater(() -> {
+            if (token != githubOpenToken) {
+                return;
+            }
+            if (link.isEmpty()) {
+                notice("This checkout has no github.com remote to link to");
+                return;
+            }
+            githubLinks.openInBrowser(vscode ? link.get().vscodeUrl() : link.get().githubUrl());
+        }));
+        return true;
     }
 
     /** A progress line over the diff column; stays until {@link #clearNotice} or the next notice. */
@@ -3546,18 +3590,12 @@ public final class SessionReviewView extends BorderPane {
 
         @Override
         public boolean showMcpPanel() {
-            if (mcpPanel.isPresent() && !mcpPanel.get().isVisible()) {
-                toggleMcpPanel();
-                return true;
-            }
-            return false;
+            return host.showMcpConsole();
         }
 
         @Override
         public void hideMcpPanel() {
-            if (mcpPanel.filter(Node::isVisible).isPresent()) {
-                toggleMcpPanel();
-            }
+            host.hideMcpConsole();
         }
     }
     // ---- diagnostics --------------------------------------------------------
@@ -3650,6 +3688,24 @@ public final class SessionReviewView extends BorderPane {
     /** Diagnostic-only: the file the hunk diff's cursor is on, if any. */
     Optional<String> diagCurrentFile() {
         return ReviewDiagFxThread.call(this::currentFile);
+    }
+
+    /** Diagnostic-only: types into the find field through its own text property, the way typing does. */
+    public String diagFindText(String text) {
+        return ReviewDiagFxThread.call(() -> {
+            String typed = diffColumn.diagFindText(text);
+            return typed;
+        });
+    }
+
+    /** Diagnostic-only: the find bar's state, for a scripted blanking repro. */
+    public String diagFindState() {
+        return ReviewDiagFxThread.call(diffColumn::diagFindState);
+    }
+
+    /** Diagnostic-only: the diff list's layout numbers, for the same repro. */
+    public String diagFindListState() {
+        return ReviewDiagFxThread.call(diffColumn::diagListLayoutState);
     }
 
     /** Diagnostic-only: the cursor as {@code "<file>#<hunk>"}, or empty. */
@@ -3860,9 +3916,9 @@ public final class SessionReviewView extends BorderPane {
         return tourController.waitRunning();
     }
 
-    /** Test-only: the "Building tour…" progress line's current text. Call on the FX thread. */
+    /** Test-only: the "Building tour…" progress values, composed to one line for assertions. */
     String diagTourPendingProgress() {
-        return tourController.pendingProgress();
+        return tourController.pendingProgressDiagText();
     }
 
     /** Test-only: the wait's progress line recomposed now, as the once-a-second ticker would. */

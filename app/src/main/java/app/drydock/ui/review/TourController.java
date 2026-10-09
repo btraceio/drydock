@@ -443,11 +443,6 @@ final class TourController {
         tourFailure = Optional.of(new TourFailure(scopeId, message));
     }
 
-    /** The reader opened or closed the MCP panel; the tour wait must not close it. */
-    void readerOwnsMcpPanel() {
-        mcpOpenedForTour = false;
-    }
-
     boolean waitRunning() {
         return tourWait.getStatus() == Animation.Status.RUNNING;
     }
@@ -489,12 +484,12 @@ final class TourController {
         return tourPendingScopeId.orElse(null);
     }
 
-    /** The wait's live line, recomposed once a second by {@link #pendingTicker} and on every render. */
+    /** The wait's live values, recomposed once a second by {@link #pendingTicker} and on every render. */
     void updatePendingProgress() {
         if (closed || !view.touring() || !pending()) {
             return;
         }
-        outline.setPendingProgress(pendingProgressText());
+        outline.setPendingProgress(pendingProgress());
     }
 
     /** This scope's drydock calls the agent has made so far, oldest first, failures included. */
@@ -523,32 +518,38 @@ final class TourController {
      * saying nothing about it, rather than invent a total over a window the
      * reader cannot see.</p>
      */
-    private String pendingProgressText() {
+    /**
+     * What "Building tour…" shows under its title, as structured values the
+     * outline renders at fixed positions: how long the ask has been out,
+     * what the agent is doing, and the drydock calls it made so far.
+     *
+     * <p>Elapsed and call count are the progress a silent agent leaves no
+     * other trace of: an agent may read a large change locally for minutes
+     * before its first drydock call, and an ask that never landed looks
+     * identical to one being worked on until the clock and the activity
+     * state say which is happening. Composed from the log each time, so it
+     * never disagrees with the panel's own rows.
+     *
+     * <p>Counted from the log's held entries, which match the panel's rows
+     * exactly; a session that overflowed the ring would undercount while
+     * saying nothing about it, rather than invent a total over a window the
+     * reader cannot see.</p>
+     */
+    private TourOutline.PendingProgress pendingProgress() {
         String scopeId = pendingScopeId();
         if (scopeId == null) {
-            return "";
+            return new TourOutline.PendingProgress(0, SessionActivity.UNKNOWN, 0, Optional.empty(), 0);
         }
         long elapsedSeconds = Math.max(0, (System.nanoTime() - waitStartedNanos) / 1_000_000_000L);
-        StringBuilder progress = new StringBuilder(clock(elapsedSeconds));
-        switch (view.scopeById(scopeId).map(host::agentActivity).orElse(SessionActivity.UNKNOWN)) {
-            case BUSY -> progress.append(" · agent busy");
-            case IDLE -> progress.append(" · agent idle");
-            case NEEDS_ATTENTION -> progress.append(" · agent needs attention");
-            case UNKNOWN -> {
-            }
-        }
+        SessionActivity activity = view.scopeById(scopeId).map(host::agentActivity).orElse(SessionActivity.UNKNOWN);
         List<McpActivityLog.Entry> calls = callsOf(scopeId);
         if (calls.isEmpty()) {
-            progress.append(" · no drydock calls yet");
-        } else {
-            McpActivityLog.Entry last = calls.getLast();
-            progress.append(" · ").append(calls.size())
-                    .append(calls.size() == 1 ? " drydock call" : " drydock calls")
-                    .append(" · last ").append(last.tool()).append(" ")
-                    .append(clock((System.currentTimeMillis() - last.at().toEpochMilli()) / 1000))
-                    .append(" ago");
+            return new TourOutline.PendingProgress(elapsedSeconds, activity, 0, Optional.empty(), 0);
         }
-        return progress.toString();
+        McpActivityLog.Entry last = calls.getLast();
+        long secondsAgo = Math.max(0, (System.currentTimeMillis() - last.at().toEpochMilli()) / 1000);
+        return new TourOutline.PendingProgress(elapsedSeconds, activity, calls.size(),
+                Optional.of(last.tool()), secondsAgo);
     }
 
     /** A duration of whole seconds, as m:ss. */
@@ -571,7 +572,7 @@ final class TourController {
             Optional<TourFailure> failure = failureForSelection();
             if (pending()) {
                 outline.showPending("Building tour…", view::openDiffReview, this::cancelWait);
-                outline.setPendingProgress(pendingProgressText());
+                outline.setPendingProgress(pendingProgress());
                 stepPanel.showMessage(callsOf(pendingScopeId()).isEmpty()
                         ? "The agent is writing the tour. No drydock calls yet -- it may be reading the change "
                                 + "first; they will show below as they land."
@@ -1472,9 +1473,22 @@ final class TourController {
         return currentStepId;
     }
 
-    /** Test-only: the "Building tour…" progress line's current composition. */
-    String pendingProgress() {
-        return pendingProgressText();
+    /** Test-only: the "Building tour…" progress values, composed to one line for assertions. */
+    String pendingProgressDiagText() {
+        TourOutline.PendingProgress progress = pendingProgress();
+        String base = "elapsed " + clock(progress.elapsedSeconds()) + " · agent "
+                + switch (progress.activity()) {
+                    case BUSY -> "busy";
+                    case IDLE -> "idle";
+                    case NEEDS_ATTENTION -> "needs attention";
+                    case UNKNOWN -> "unknown";
+                };
+        return progress.lastTool()
+                .map(tool -> base + " · " + progress.callCount() + " drydock calls · last "
+                        + tool + " " + clock(progress.lastCallAgoSeconds()) + " ago")
+                .orElseGet(() -> progress.callCount() == 0
+                        ? base + " · no drydock calls"
+                        : base + " · " + progress.callCount() + " drydock calls · no last");
     }
 
     // ---- collaborators ---------------------------------------------------------
