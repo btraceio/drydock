@@ -9,6 +9,8 @@ import app.drydock.review.tour.ImpactNote;
 import app.drydock.review.tour.StepGate;
 import app.drydock.review.tour.StepImpact;
 import app.drydock.review.tour.StepProgress;
+import app.drydock.review.tour.TourDiagram;
+import app.drydock.review.tour.TourStep;
 import app.drydock.review.tour.TourAnchor;
 import app.drydock.review.tour.TourCheck;
 import app.drydock.ui.UiFormats;
@@ -51,6 +53,9 @@ final class StepPanel extends VBox {
     static final double MIN_WIDTH = NARROW_WIDTH;
     /** The widest, whatever the window: past this the lines of prose are longer than they are easy to read. */
     static final double MAX_WIDTH = 900;
+    /** How many of the current step's diagram stages are shown; resets with every {@link #show}. */
+    private int diagramRevealed = 1;
+
     /** Stands where the narrative would be while the step's PREDICT is still open. */
     static final String WITHHELD_NARRATIVE =
             "Read the surrounding code first. This step's added lines are hidden until you answer, "
@@ -76,8 +81,21 @@ final class StepPanel extends VBox {
         void selectStep(String stepId);
         /** "Ask the agent to refresh": a human's request, sent whatever the automatic gating says. */
         void requestRefresh();
-        /** Not sure's reply: appended to {@code finding}'s thread, the way the margin's Reply is. */
-        void postMessage(ReviewAnnotation finding, String body);
+
+        /**
+         * "Ask about this step": hands the step to the scope's agent
+         * (question and answer through the peek-ask machinery). False when
+         * no live session was asked -- the caller must say so, never look
+         * like it worked.
+         */
+        boolean askAboutStep(TourStep step);
+        /**
+         * Not sure's reply: appended to {@code finding}'s thread, the way the
+         * margin's Reply is, and handed to the scope's live session. False
+         * means no live session was asked; the message is in the thread
+         * either way.
+         */
+        boolean postMessage(ReviewAnnotation finding, String body);
     }
 
     /**
@@ -198,6 +216,7 @@ final class StepPanel extends VBox {
         overrideReason = Optional.empty();
         refreshButton = Optional.empty();
         content.getChildren().clear();
+        diagramRevealed = 1;
         Label header = new Label("Step " + view.number() + " of " + view.total() + " · " + view.step().title());
         header.getStyleClass().add("step-panel-header");
         if (TourMarks.predictPending(view.step(), view.progress())) {
@@ -215,16 +234,80 @@ final class StepPanel extends VBox {
                 content.getChildren().add(staleNotice(view.refreshDispatched()));
             }
             content.getChildren().add(checkSection(view));
+            content.getChildren().add(askStepRow(view));
             return;
         }
         Label narrative = new Label(view.step().narrative());
         narrative.setWrapText(true);
         narrative.getStyleClass().add("step-panel-narrative");
         content.getChildren().addAll(header, narrative, anchorChips(view));
+        view.step().diagram().ifPresent(diagram ->
+                content.getChildren().add(diagramSection(diagram)));
         if (view.progress().stale()) {
             content.getChildren().add(staleNotice(view.refreshDispatched()));
         }
         content.getChildren().add(checkSection(view));
+        content.getChildren().add(askStepRow(view));
+    }
+
+    /**
+     * The step's ask: a quiet button under the checks, not a banner -- the
+     * reader who wants the agent's word on the step knows where they are.
+     * Its hand-off reports honestly (the host's boolean), the same contract
+     * as the refresh ask beside it.
+     */
+    private HBox askStepRow(StepView view) {
+        Button ask = new Button("Ask the agent about this step");
+        ask.getStyleClass().add("step-refresh");
+        ask.setOnAction(event -> {
+            if (!host.askAboutStep(view.step())) {
+                showTransient("No live session to ask -- open the scope's session first");
+            }
+        });
+        HBox row = new HBox(ask);
+        row.getStyleClass().add("step-ask-row");
+        return row;
+    }
+
+    /**
+    /**
+     * The step's diagram, revealed one stage at a time. The first stage is
+     * visible from the start -- a drawing that shows nothing until a click
+     * looks broken, not withheld -- and a real Button reveals each next
+     * stage, mirroring how the PREDICT reveal holds back the answer until
+     * the reader has committed. The reveal count is reading state, not
+     * progress: it resets when the panel re-shows the step, unlike check
+     * answers which persist.
+     */
+    private VBox diagramSection(TourDiagram diagram) {
+        VBox box = new VBox(6);
+        box.getStyleClass().add("step-diagram");
+        if (!diagram.caption().isBlank()) {
+            Label caption = new Label(diagram.caption());
+            caption.getStyleClass().add("step-diagram-caption");
+            caption.setWrapText(true);
+            box.getChildren().add(caption);
+        }
+        Label drawing = new Label(diagram.visibleText(diagramRevealed));
+        drawing.getStyleClass().add("step-diagram-drawing");
+        box.getChildren().add(drawing);
+        if (diagramRevealed < diagram.stages().size()) {
+            Button reveal = new Button("Reveal stage " + (diagramRevealed + 1)
+                    + " of " + diagram.stages().size());
+            reveal.getStyleClass().add("step-diagram-reveal");
+            reveal.setOnAction(event -> {
+                diagramRevealed++;
+                drawing.setText(diagram.visibleText(diagramRevealed));
+                if (diagramRevealed >= diagram.stages().size()) {
+                    box.getChildren().remove(reveal);
+                } else {
+                    reveal.setText("Reveal stage " + (diagramRevealed + 1)
+                            + " of " + diagram.stages().size());
+                }
+            });
+            box.getChildren().add(reveal);
+        }
+        return box;
     }
 
     /**
@@ -342,17 +425,28 @@ final class StepPanel extends VBox {
         impactSection.getChildren().add(heading("Signature changed", Provenance.MEASURED));
         for (StepImpact.SignatureFlag flag : measured.signatureFlags()) {
             int count = flag.uneditedCallSites();
+            boolean tooCommon = measured.suppressedCallers().stream()
+                    .anyMatch(suppressed -> suppressed.symbol().equals(flag.symbol()));
             impactSection.getChildren().add(impactLabel(flag.symbol() + " in " + flag.file(), "step-impact-flag-name"));
             impactSection.getChildren().add(impactLabel("declaration changed · " + count
-                    + (count == 1 ? " call site was not edited" : " call sites were not edited"),
-                    "step-impact-flag"));
+                    + (count == 1 ? " call site was not edited" : " call sites were not edited")
+                    + (tooCommon ? " · too common to attribute" : ""),
+                    tooCommon ? "step-impact-flag-suppressed" : "step-impact-flag"));
         }
     }
 
     private void showCallers(StepImpact measured) {
         impactSection.getChildren().add(heading("Called from outside the change", null));
         impactSection.getChildren().add(impactLabel("occurrences, not resolved references", "step-impact-tag"));
-        if (measured.calledFromOutside().isEmpty()) {
+        for (StepImpact.Suppressed suppressed : measured.suppressedCallers()) {
+            // A count, not N rows: past the attribution cap the rows are
+            // links to unrelated files more often than not (the reason the
+            // cap exists), so the reviewer gets the number and the honesty
+            // tag, never a wall.
+            impactSection.getChildren().add(impactLabel(suppressed.symbol() + " · " + suppressed.occurrences()
+                    + " occurrences outside the change — too common to attribute", "step-impact-suppressed"));
+        }
+        if (measured.calledFromOutside().isEmpty() && measured.suppressedCallers().isEmpty()) {
             impactSection.getChildren().add(impactLabel("No callers outside the change", "step-impact-empty"));
             return;
         }
@@ -364,9 +458,14 @@ final class StepPanel extends VBox {
             impactSection.getChildren().add(impactLabel(file, "step-impact-file"));
             for (StepImpact.Caller caller : callers) {
                 String text = ":" + caller.line() + "  " + caller.text().strip()
+                        + (caller.bound() ? " · scoped" : "")
                         + (caller.inChangedFile() ? " · in a changed file" : "");
-                impactSection.getChildren().add(locationEntry(text, caller.file(), caller.line(),
-                        "step-impact-caller"));
+                Button entry = locationEntry(text, caller.file(), caller.line(),
+                        "step-impact-caller");
+                if (caller.bound()) {
+                    entry.getStyleClass().add(Provenance.SCOPED.styleClass());
+                }
+                impactSection.getChildren().add(entry);
             }
         });
     }
@@ -641,8 +740,10 @@ final class StepPanel extends VBox {
             send.setOnAction(event -> {
                 String body = reply.getText().strip();
                 reply.clear();
-                host.postMessage(finding, body);
-                showTransient("Asked in the finding's thread; it stays proposed until you decide.");
+                boolean asked = host.postMessage(finding, body);
+                showTransient(asked
+                        ? "Asked the agent in the finding's thread; it stays proposed until you decide."
+                        : "No running session — the message waits in the thread for the agent's next visit.");
             });
             HBox field = new HBox(6, reply, send);
             field.setAlignment(Pos.CENTER_LEFT);

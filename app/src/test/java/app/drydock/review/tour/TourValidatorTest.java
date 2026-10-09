@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.OptionalInt;
 
 import static app.drydock.review.tour.TourFixtures.SCOPE;
@@ -36,6 +37,45 @@ class TourValidatorTest {
     @Test
     void aTourCoveringEveryChangedRowIsValid() {
         assertEquals(List.of(), TourValidator.validate(coveringTour(diff), diff));
+    }
+
+    /** A diagram with its limits: readable in the panel, and a drawing that survives the font. */
+    @Test
+    void aWellFormedDiagramIsValid() {
+        TourStep withDiagram = new TourStep("s1", "Step s1", "Why s1 exists.",
+                List.of(new TourAnchor("src/A.java", "n1", "n22")), List.of(), List.of(predict("c1")),
+                Optional.of(new TourDiagram("The fan-in before the fix",
+                        List.of("  loadConfig()\n    ├─ parse()", "    └─ validate()"))));
+        TourStep otherFile = new TourStep("s2", "Step s2", "Why s2 exists.",
+                List.of(new TourAnchor("src/B.java", "o5", "o6")), List.of(), List.of(risk("c2")));
+        assertEquals(List.of(), TourValidator.validate(tour(diff, withDiagram, otherFile), diff));
+    }
+
+    @Test
+    void aDiagramOverItsLimitsIsRejectedWithTheStageNamed() {
+        String longLine = "x".repeat(TourValidator.MAX_DIAGRAM_LINE + 1);
+        TourStep over = new TourStep("s1", "Step s1", "Why s1 exists.",
+                List.of(new TourAnchor("src/A.java", "n1", "n22")), List.of(), List.of(predict("c1")),
+                Optional.of(new TourDiagram("caption",
+                        List.of(longLine, "\tindented", " ", "s4", "s5", "s6"))));
+        List<String> errors = TourValidator.validate(tour(diff, over), diff);
+
+        assertTrue(anyContains(errors, "stage 1: has a line longer than"), errors.toString());
+        assertTrue(anyContains(errors, "stage 2: uses tabs"), errors.toString());
+        assertTrue(anyContains(errors, "stage 3: is blank"), errors.toString());
+        assertTrue(anyContains(errors, "more than " + TourValidator.MAX_DIAGRAM_STAGES + " stages"),
+                errors.toString());
+        assertTrue(anyContains(errors, "s1 diagram"), "every diagram error names its step");
+    }
+
+    @Test
+    void aDiagramCaptionOverItsCapIsRejected() {
+        TourStep over = new TourStep("s1", "Step s1", "Why s1 exists.",
+                List.of(new TourAnchor("src/A.java", "n1", "n22")), List.of(), List.of(predict("c1")),
+                Optional.of(new TourDiagram("c".repeat(TourValidator.MAX_DIAGRAM_CAPTION + 1),
+                        List.of("drawing"))));
+        assertTrue(anyContains(TourValidator.validate(tour(diff, over), diff),
+                "caption is longer than"), "caption cap is enforced");
     }
 
     @Test

@@ -17,6 +17,7 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -210,6 +211,59 @@ class OutOfDiffFanInTest {
         assertFalse(files.contains("src/Guards.java"), "the changed file itself must be excluded");
     }
 
+    /**
+     * The scoped tier inside the scan: a caller whose receiver the parse
+     * tree ties to the changed declaration is bound; a same-named method on
+     * an unrelated class stays a name match, however real it is on its own.
+     * The changed declaration's site comes from the change graph, so the
+     * binding binds to THAT declaration -- the fan-in's own question.
+     */
+    @Test
+    void scanClassifiesJavaCallersThroughTheScopeBinder(@TempDir Path dir)
+            throws IOException, InterruptedException {
+        Path repo = Files.createDirectories(dir.resolve("repo"));
+        runGit(repo, "init", "-b", "main");
+        runGit(repo, "config", "user.name", "Test");
+        runGit(repo, "config", "user.email", "test@example.com");
+        Files.createDirectories(repo.resolve("src/a"));
+        // The changed file declares clamp (on an added line, so the graph
+        // records its site); the sibling classes give the scan one real
+        // reference and one same-named stranger.
+        Files.writeString(repo.resolve("src/a/Util.java"),
+                "package a;\nclass Util {\n  static int clamp(int v) { return v; }\n}\n",
+                StandardCharsets.UTF_8);
+        Files.writeString(repo.resolve("src/a/Real.java"),
+                "package a;\nimport a.Util;\nclass Real {\n  int run(int v) { return Util.clamp(v); }\n}\n",
+                StandardCharsets.UTF_8);
+        Files.writeString(repo.resolve("src/a/Other.java"),
+                "package a;\nclass Other {\n  void clamp() {} \n}\nclass Stranger {\n"
+                        + "  void go(Other other) { other.clamp(); }\n}\n",
+                StandardCharsets.UTF_8);
+        runGit(repo, "add", "-A");
+        runGit(repo, "commit", "-m", "initial commit");
+        // The hunk must place the declaration at its REAL new-line number
+        // (3, after the package and class lines): the graph's site is the
+        // binder's target, and a site off by two binds nothing -- correctly,
+        // which is exactly what the first draft of this test proved.
+        ChangeGraph graph = ChangeGraph.of(new UnifiedDiff(
+                List.of(file("src/a/Util.java",
+                        "package a;", "class Util {", "  static int clamp(int v) { return v; }"))));
+
+        OutOfDiffFanIn.Result result = OutOfDiffFanIn.scan(repo, graph, Set.of("src/a/Util.java"));
+
+        assertFalse(result.unavailable());
+        List<OutOfDiffFanIn.Occurrence> hits = result.bySymbol().get("clamp");
+        assertNotNull(hits, "the scan found the name");
+        List<OutOfDiffFanIn.Occurrence> real = hits.stream()
+                .filter(occurrence -> occurrence.file().equals("src/a/Real.java")).toList();
+        List<OutOfDiffFanIn.Occurrence> stranger = hits.stream()
+                .filter(occurrence -> occurrence.file().equals("src/a/Other.java")).toList();
+        assertTrue(real.stream().anyMatch(OutOfDiffFanIn.Occurrence::bound),
+                "Util.clamp is a real reference: " + real);
+        assertTrue(stranger.stream().noneMatch(OutOfDiffFanIn.Occurrence::bound),
+                "Other.clamp is a same-named stranger: " + stranger);
+    }
+
     @Test
     void scanReturnsUnavailableWhenGitCannotRun(@TempDir Path dir) throws IOException {
         Path notARepo = dir.resolve("does-not-exist");
@@ -327,6 +381,94 @@ class OutOfDiffFanInTest {
         assertFalse(result.unavailable());
         assertEquals(Set.of("FooBar"), result.bySymbol().keySet(),
                 "the caller names FooBar, not Foo: " + result.bySymbol());
+    }
+
+    // ---- classified(): self-declaring files, and too-common symbols --------
+
+    /**
+     * The defect this filter exists for: a changed declaration named like a
+     * common member. A file that declares its own {@code text} uses its own
+     * -- every occurrence of the symbol in that file is a false link to the
+     * change, so the file is dropped whole, while a file that only calls
+     * {@code text()} keeps its rows.
+     */
+    @Test
+    void aFileOutsideTheChangeThatDeclaresItsOwnSymbolIsDroppedWhole() {
+        OutOfDiffFanIn.Occurrence genuineUse = new OutOfDiffFanIn.Occurrence("src/Reader.java", 3,
+                "    System.out.println(holder.text());", false);
+        OutOfDiffFanIn.Result result = OutOfDiffFanIn.classified(Map.of("text", List.of(
+                genuineUse,
+                new OutOfDiffFanIn.Occurrence("src/Label.java", 7, "    private String text;", false),
+                new OutOfDiffFanIn.Occurrence("src/Label.java", 12, "    return text.trim();", false),
+                new OutOfDiffFanIn.Occurrence("src/Kotlin.kt", 2, "val text = compute()", false))));
+
+        assertEquals(Map.of("text", List.of(genuineUse)), result.bySymbol(),
+                "Label.java and Kotlin.kt declare their own text; Reader.java does not");
+        assertTrue(result.suppressedCounts().isEmpty());
+    }
+
+    /** A call, an instantiation and a qualified write are uses, never declarations. */
+    @Test
+    void plainUsesNeverReadAsDeclarations() {
+        assertFalse(OutOfDiffFanIn.looksLikeDeclaration("    holder.text();", "text"));
+        assertFalse(OutOfDiffFanIn.looksLikeDeclaration("    new JmpCtxScope();", "JmpCtxScope"));
+        // An anonymous class body opens a brace after the constructor -- the
+        // method pattern would match without the new-guard.
+        assertFalse(OutOfDiffFanIn.looksLikeDeclaration("    new JmpCtxScope() {", "JmpCtxScope"));
+        assertFalse(OutOfDiffFanIn.looksLikeDeclaration("    foo.text = x;", "text"));
+        assertFalse(OutOfDiffFanIn.looksLikeDeclaration("    return text();", "text"));
+        assertFalse(OutOfDiffFanIn.looksLikeDeclaration("    // text is declared elsewhere", "text"));
+    }
+
+    /** The declaration shapes that DO mark a file as self-declaring. */
+    @Test
+    void ownDeclarationsAreRecognizedAcrossTheirShapes() {
+        assertTrue(OutOfDiffFanIn.looksLikeDeclaration("    private String text;", "text"));
+        assertTrue(OutOfDiffFanIn.looksLikeDeclaration("    private final String text = \"\";", "text"));
+        assertTrue(OutOfDiffFanIn.looksLikeDeclaration("    var text = 5;", "text"));
+        assertTrue(OutOfDiffFanIn.looksLikeDeclaration("    String text() {", "text"));
+        assertTrue(OutOfDiffFanIn.looksLikeDeclaration("    @Override public int text() {", "text"));
+        assertTrue(OutOfDiffFanIn.looksLikeDeclaration("    void run() { go(); }", "run"));
+        assertTrue(OutOfDiffFanIn.looksLikeDeclaration("    fun text(): String {", "text"));
+        assertTrue(OutOfDiffFanIn.looksLikeDeclaration("    def text(self):", "text"));
+        assertTrue(OutOfDiffFanIn.looksLikeDeclaration("    class Text {", "Text"));
+        assertTrue(OutOfDiffFanIn.looksLikeDeclaration("    record Pair(int left) {", "Pair"));
+    }
+
+    /**
+     * An unedited call site in an EDITED file is where a signature change
+     * breaks: never dropped for self-declaring, even when that file also
+     * declares a symbol of the same name elsewhere.
+     */
+    @Test
+    void occurrencesInsideChangedFilesAreNeverDroppedAsSelfDeclaring() {
+        OutOfDiffFanIn.Occurrence use = new OutOfDiffFanIn.Occurrence("src/Guards.java", 30,
+                "    new JmpCtxScope();", true);
+        OutOfDiffFanIn.Occurrence ownDeclaration = new OutOfDiffFanIn.Occurrence("src/Guards.java", 9,
+                "    private JmpCtxScope own;", true);
+        OutOfDiffFanIn.Result result = OutOfDiffFanIn.classified(Map.of("JmpCtxScope", List.of(
+                use, ownDeclaration)));
+
+        assertEquals(Map.of("JmpCtxScope", List.of(use, ownDeclaration)), result.bySymbol(),
+                "inside a changed file the graph says what is declared, not this heuristic");
+    }
+
+    /**
+     * Past the attribution cap the rows are noise, not signal: the symbol
+     * leaves bySymbol and its count moves to suppressedCounts, where
+     * occurrences() still reports it so the signature flag survives.
+     */
+    @Test
+    void aSymbolTooCommonToListIsCountedNotListed() {
+        List<OutOfDiffFanIn.Occurrence> many = new ArrayList<>();
+        for (int i = 1; i <= OutOfDiffFanIn.MAX_ATTRIBUTABLE + 1; i++) {
+            many.add(new OutOfDiffFanIn.Occurrence("src/F" + i + ".java", 1, "    use(spindle);", false));
+        }
+        OutOfDiffFanIn.Result result = OutOfDiffFanIn.classified(Map.of("spindle", many));
+
+        assertEquals(Map.of(), result.bySymbol(), "a wall of rows is a count, not a list");
+        assertEquals(Map.of("spindle", OutOfDiffFanIn.MAX_ATTRIBUTABLE + 1), result.suppressedCounts());
+        assertEquals(OutOfDiffFanIn.MAX_ATTRIBUTABLE + 1, result.occurrences("spindle"));
     }
 
     private static Path initCommittedRepoWithFanIn(Path parent) throws IOException, InterruptedException {

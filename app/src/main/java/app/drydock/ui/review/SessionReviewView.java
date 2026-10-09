@@ -10,6 +10,7 @@ import app.drydock.review.ChangeGraph;
 import app.drydock.review.HunkIds;
 import app.drydock.review.OutOfDiffFanIn;
 import app.drydock.review.ReadingPath;
+import app.drydock.review.PendingQuestions;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.RecheckDispatch;
 import app.drydock.review.ReviewScope;
@@ -19,6 +20,7 @@ import app.drydock.review.SessionReviewScopes;
 import app.drydock.review.Severity;
 import app.drydock.review.Triage;
 import app.drydock.review.SubmitPlan;
+import app.drydock.review.UsageProvider;
 import app.drydock.review.tour.AnchorIndex;
 import app.drydock.review.tour.CheckProgress;
 import app.drydock.review.tour.HunkOverride;
@@ -30,7 +32,9 @@ import app.drydock.review.tour.TourMigration;
 import app.drydock.review.tour.TourRecord;
 import app.drydock.review.tour.TourStep;
 import app.drydock.ui.UiErrors;
+import app.drydock.ui.UiFormats;
 import app.drydock.ui.nav.ExplorerTrailStore;
+import app.drydock.ui.nav.LexicalUsageProvider;
 import app.drydock.ui.nav.NavigationTrail;
 import app.drydock.ui.nav.PeekLayer;
 import app.drydock.ui.nav.SearchRail;
@@ -272,8 +276,14 @@ public final class SessionReviewView extends BorderPane {
         /** Resolve / Reopen one finding. */
         void setResolved(ReviewScope scope, ReviewAnnotation finding, boolean resolved);
 
-        /** Appends a human message to a thread (Reply, and the ASK chips). */
-        void postMessage(ReviewScope scope, ReviewAnnotation finding, String body);
+        /**
+         * Appends a human message to a thread (Reply, and the ASK chips) and
+         * hands the question to the scope's live session. False means no
+         * live session: the message is still in the thread -- the agent
+         * reads it on its next review_comments/review_state -- but nobody
+         * was asked now.
+         */
+        boolean postMessage(ReviewScope scope, ReviewAnnotation finding, String body);
 
         /**
          * Records a comment the human wrote against a line or range, minted
@@ -363,6 +373,24 @@ public final class SessionReviewView extends BorderPane {
          */
         boolean runReview(ReviewScope scope);
 
+        /**
+         * Asks the scope's agent for the deeper second pass over the change
+         * ({@code ReviewInstructions.forDeepReview}) once every step of the
+         * tour is settled. False when the hand-off did not happen (no bound
+         * session), exactly like {@link #runReview}: the caller shows the
+         * refusal, never a click that looks like it worked.
+         */
+        boolean requestDeepReview(ReviewScope scope);
+
+        /**
+         * The step panel's "Ask about this step": mints a question id and
+         * sends the step ask to the scope's bound session; the answer
+         * returns through the peek-ask machinery (an answer card on this
+         * board). False when the hand-off did not happen (no bound
+         * session), exactly like {@link #runReview}.
+         */
+        boolean requestStepAsk(ReviewScope scope, TourStep step);
+
         /** {@code scope}'s guided tour with its progress, if the agent has posted one. */
         Optional<TourRecord> tour(ReviewScope scope);
 
@@ -385,6 +413,38 @@ public final class SessionReviewView extends BorderPane {
          * memory.
          */
         Optional<ReviewNavigation> navigation(ReviewScope scope);
+
+        /**
+         * The usage provider for this board's symbol peeks and callee
+         * resolution (usage-resolution design 2026-10-08, §7: the seam's
+         * single construction site). One factory so the review's two
+         * provider consumers -- the peek over the diff column and the step
+         * panel's callees -- share whatever tier the workspace composes
+         * behind it. The default is exactly the lexical construction the
+         * board built before the factory existed: a {@link
+         * LexicalUsageProvider} over {@code peeks}, marking occurrences
+         * against {@code changedLines}. A higher tier wraps that floor
+         * upgrade-only (§7), and neither consumer ever waits on it (§6:
+         * the lower tier's answer is already in the composed future).
+         *
+         * <p>Called on the FX thread; the provider it returns answers
+         * asynchronously, off it.</p>
+         */
+        default UsageProvider usageProvider(SymbolPeekService peeks, Map<Path, Set<Integer>> changedLines) {
+            return new LexicalUsageProvider(peeks, changedLines);
+        }
+
+        /**
+         * Whether the peek's quiet once-per-session "see Settings" hint
+         * applies: true only while usage-resolution tier 3 is known to be
+         * unconfigured, so a configured server (starting, indexing, invalid)
+         * is never told to go configure itself, and an inapplicable peek never
+         * claims the once-per-session hint. FX thread; must not block.
+         * Default: applies (the unwired behaviour).
+         */
+        default boolean languageServerHintApplies() {
+            return true;
+        }
 
         /**
          * A peek's {@code a}: asks the session bound to {@code scope} about
@@ -723,6 +783,17 @@ public final class SessionReviewView extends BorderPane {
      */
     private final Label navNotice = new Label();
     private final PauseTransition navNoticeTimer = new PauseTransition(Duration.seconds(2.6));
+
+    /** Answer cards kept on the column at once; the oldest drops off a longer stack. */
+    private static final int MAX_ASK_ANSWERS = 5;
+
+    /**
+     * Answers to peek questions ({@code a}), one card each, shown until
+     * dismissed: an answer is the payload the question existed for, so it
+     * must outlive the 2.6s notice and stay readable beside the code it is
+     * about -- unlike the notice, which only says where to look next.
+     */
+    private final VBox askAnswers = new VBox(6);
 
     /**
      * The session's trail: step changes, promoted peeks and search results
@@ -1673,8 +1744,15 @@ public final class SessionReviewView extends BorderPane {
         }
 
         @Override
-        public void postMessage(ReviewAnnotation finding, String body) {
-            selectedScope().ifPresent(scope -> host.postMessage(scope, finding, body));
+        public boolean postMessage(ReviewAnnotation finding, String body) {
+            boolean asked = selectedScope().map(scope -> host.postMessage(scope, finding, body))
+                    .orElse(false);
+            if (!asked) {
+                // The ASK chips promise an answer: when no session is live
+                // the promise must be broken out loud, not by silence.
+                notice("No running session to ask — the message waits in the finding's thread");
+            }
+            return asked;
         }
 
         @Override
@@ -1786,6 +1864,11 @@ public final class SessionReviewView extends BorderPane {
                 recordHunkOverrides(scope, digests, decision, before);
                 rememberSettle(scope, digests, decision, file);
             });
+        }
+
+        @Override
+        public boolean requestDeepReview() {
+            return selectedScope().map(host::requestDeepReview).orElse(false);
         }
 
         @Override
@@ -2114,8 +2197,8 @@ public final class SessionReviewView extends BorderPane {
                 SubmitPlan.untriagedCount(host.findings(scope)));
     }
 
-    /** {@code (file, lineKey)} to that line's text in {@code diff}; empty for a line the diff does not hold. */
-    private static BiFunction<String, String, Optional<String>> lineTextLookup(UnifiedDiff diff) {
+    /** {@code (file, lineKey)} to that line's text in {@code diff}; empty for a line the diff does not hold. Public for the workspace's fresh-head verification. */
+    public static BiFunction<String, String, Optional<String>> lineTextLookup(UnifiedDiff diff) {
         return (file, lineKey) -> {
             if (diff == null) {
                 return Optional.empty();
@@ -2148,7 +2231,8 @@ public final class SessionReviewView extends BorderPane {
      * SubmitPlan#of} refuse a comment whose start and end land in different
      * hunks.
      */
-    private static SubmitPlan.DiffIndex buildDiffIndex(UnifiedDiff diff) {
+    /** {@code (file, lineKey)} to position and hunk; public because the workspace's fresh-head verification builds one from the PR's current diff. */
+    public static SubmitPlan.DiffIndex buildDiffIndex(UnifiedDiff diff) {
         Map<String, Integer> positionOfKey = new HashMap<>();
         Map<String, Integer> hunkOfKey = new HashMap<>();
         int position = 0;
@@ -2765,8 +2849,16 @@ public final class SessionReviewView extends BorderPane {
      * Returns whether something was closed, so the scene filter knows
      * whether to keep unwinding.
      */
+    /** {@code ⌘F}: the source viewer's find bar, over the rendered rows. */
+    public void openFind() {
+        diffColumn.openFind();
+    }
+
     public boolean unwindOne() {
         if (peekLayer.popOne()) {
+            return true;
+        }
+        if (diffColumn.closeFind()) {
             return true;
         }
         if (diffColumn.lensOpen()) {
@@ -2883,12 +2975,22 @@ public final class SessionReviewView extends BorderPane {
         navNotice.setVisible(false);
         navNotice.setManaged(false);
         navNoticeTimer.setOnFinished(event -> clearNotice());
-        diffStack.getChildren().setAll(diffColumn, peekLayer, navNotice);
+        askAnswers.getStyleClass().add("ask-answers");
+        // Not pick-on-bounds: an answers stack wider than its cards must
+        // not fence the diff column's mouse off, the same rule the peek
+        // layer follows for its own pane.
+        askAnswers.setPickOnBounds(false);
+        askAnswers.setVisible(false);
+        askAnswers.setManaged(false);
+        diffStack.getChildren().setAll(diffColumn, peekLayer, navNotice, askAnswers);
+        StackPane.setAlignment(askAnswers, Pos.TOP_CENTER);
         peekLayer.setOnPromote(this::promotePeek);
         peekLayer.setOnAsk(this::askAboutPeek);
+        peekLayer.setOnOpenOccurrence(this::openOccurrencePeek);
         peekLayer.setOnStackFull(() -> notice("Peek stack is full — esc to unwind"));
         // Absent, not greyed, on a scope no session is bound to (delta hard rules).
         peekLayer.setAgentAvailable(() -> selectedScope().flatMap(ReviewScope::sessionId).isPresent());
+        peekLayer.setLanguageServerHintApplies(host::languageServerHintApplies);
         diffColumn.setSymbolClickHandler(this::peekAtSymbol);
         trailBar.setOnStep(direction -> navigateTrail(direction));
         trailBar.setOnGoTo(index -> trail.goTo(index).ifPresent(waypoint -> {
@@ -3051,7 +3153,13 @@ public final class SessionReviewView extends BorderPane {
             return false;
         }
         ReviewNavigation nav = navigation.get();
-        pushPeekWhenReady(new SymbolPeekService(nav.root(), nav.search()).peek(symbol, changedLinesOfReviewDiff()),
+        Map<Path, Set<Integer>> changed = changedLinesOfReviewDiff();
+        SymbolPeekService peeks = new SymbolPeekService(nav.root(), nav.search());
+        // The one provider construction site (§7): the board asks its host,
+        // so the peek and the step panel's callees share whatever tier the
+        // workspace composes. A location-only peek (no symbol to resolve)
+        // stays a plain file read; this path resolves a symbol.
+        pushPeekWhenReady(peeks.peek(symbol, changed, host.usageProvider(peeks, changed)),
                 "Looking for " + symbol + "…", "Nothing found for " + symbol, "Could not search for " + symbol);
         return true;
     }
@@ -3144,8 +3252,90 @@ public final class SessionReviewView extends BorderPane {
 
     private void askAboutPeek(SymbolPeek peek) {
         selectedScope().ifPresent(scope -> notice(host.askAgentAboutPeek(scope, peek)
-                ? "Asked the session about " + peek.symbol() + " — the answer is in the agent view"
+                ? "Asked the session about " + peek.symbol() + " — the answer will appear here"
                 : "No running session to ask about " + peek.symbol()));
+    }
+
+    /**
+     * An ask's answer, delivered by the workspace when the agent's {@code
+     * review_ask_answer} closes the question. Shown as a card over the
+     * diff column -- where the peek that asked sits -- and kept until
+     * dismissed; the question was asked HERE, so this is where the reader
+     * is waiting.
+     */
+    /**
+     * An ask whose session ended before answering, shown as the answer's
+     * honest absence: the reader asked, and no answer can come. Kept
+     * until dismissed like an answer, so the dead promise is seen rather
+     * than silently dropped -- but marked as a death, never styled like
+     * an answer.
+     */
+    public void showAskExpired(PendingQuestions.PendingAsk ask) {
+        Label title = new Label(ask.symbol() + " — asked " + UiFormats.relativeTime(ask.askedAt())
+                + " · no answer came");
+        title.getStyleClass().add("ask-answer-title");
+        Label body = new Label("The session ended before answering this question.");
+        body.getStyleClass().add("ask-answer-body");
+        body.getStyleClass().add("ask-expired");
+        body.setWrapText(true);
+        Button close = new Button("✕");
+        close.getStyleClass().add("ask-answer-close");
+        HBox header = new HBox(7, title, close);
+        header.setAlignment(Pos.CENTER_LEFT);
+        VBox card = new VBox(6, header, body);
+        card.getStyleClass().addAll("ask-answer-card", "ask-expired");
+        HBox.setHgrow(title, Priority.ALWAYS);
+        close.setOnAction(event -> {
+            askAnswers.getChildren().remove(card);
+            refreshAskAnswersVisibility();
+        });
+        askAnswers.getChildren().add(card);
+        if (askAnswers.getChildren().size() > MAX_ASK_ANSWERS) {
+            askAnswers.getChildren().removeFirst();
+        }
+        refreshAskAnswersVisibility();
+    }
+
+    public void showAskAnswer(PendingQuestions.AnsweredAsk answered) {
+        PendingQuestions.PendingAsk ask = answered.ask();
+        Label title = new Label(ask.symbol() + " — asked " + UiFormats.relativeTime(ask.askedAt()));
+        title.getStyleClass().add("ask-answer-title");
+        Label body = new Label(answered.answer());
+        body.getStyleClass().add("ask-answer-body");
+        body.setWrapText(true);
+        Button close = new Button("✕");
+        close.getStyleClass().add("ask-answer-close");
+        HBox header = new HBox(7, title, close);
+        header.setAlignment(Pos.CENTER_LEFT);
+        VBox card = new VBox(6, header, body);
+        card.getStyleClass().add("ask-answer-card");
+        HBox.setHgrow(title, Priority.ALWAYS);
+        close.setOnAction(event -> {
+            askAnswers.getChildren().remove(card);
+            refreshAskAnswersVisibility();
+        });
+        askAnswers.getChildren().add(card);
+        // A long stack scrolls rather than eating the column: the cards are
+        // appended bottom, the newest always visible.
+        if (askAnswers.getChildren().size() > MAX_ASK_ANSWERS) {
+            askAnswers.getChildren().removeFirst();
+        }
+        refreshAskAnswersVisibility();
+    }
+
+    private void refreshAskAnswersVisibility() {
+        boolean any = !askAnswers.getChildren().isEmpty();
+        askAnswers.setVisible(any);
+        askAnswers.setManaged(any);
+    }
+
+    /**
+     * A click on a usage row of a peek card: a peek AT the occurrence, in
+     * place -- the claiming location opens as another card on the stack,
+     * so the reader can compare and still unwind with one esc each.
+     */
+    private void openOccurrencePeek(SymbolPeek.Occurrence occurrence) {
+        openLocationPeek(occurrence.relativePath(), occurrence.line());
     }
 
     /** The Search tab's opener: in the column (with a waypoint) when it shows the file, else a location peek. */
@@ -3612,6 +3802,11 @@ public final class SessionReviewView extends BorderPane {
     /** Test-only: opens {@code peek} over the diff column as a resolved symbol click would. */
     public void diagPushPeek(SymbolPeek peek) {
         peekLayer.push(peek);
+    }
+
+    /** Diagnostic-only: peeks at {@code symbol} exactly as the diff column's symbol click would. */
+    public boolean diagPeekAtSymbol(String symbol) {
+        return peekAtSymbol(symbol);
     }
 
     /** Diagnostic-only: whether a peek card is open. Call on the FX thread. */

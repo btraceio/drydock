@@ -43,24 +43,42 @@ In `app.drydock.review`:
 ```
 ReviewTour(scopeId, diffFingerprint, List<TourStep> steps)
 TourStep(id, title, narrative, List<Anchor> anchors,
-         List<ImpactNote> impactNotes, List<TourCheck> checks)
+         List<ImpactNote> impactNotes, List<TourCheck> checks,
+         diagram?)                          // optional, ≤ 1 per step
 Anchor(file, startKey, endKey, note?)     // line keys: n<newLine> / o<oldLine>
 ImpactNote(file, line, text)              // provenance CLAIMED
 TourCheck(id, kind, prompt, choices, answerKey, explanation,
           List<TourCheck> alternates)     // kind ∈ {PREDICT, TRACE, RISK}
+TourDiagram(caption?, stages)            // monospace text, ≤ 4 stages
 ```
 
 - **Anchors are line-key ranges**, the same keys findings already use
   (`UnifiedDiff.Line#lineKey`). A range over post-image line numbers cannot
   address a hunk that only removes lines, or a deleted file; line keys can.
 - `narrative` is two to four sentences: why this part exists and what it
-  changes.
+  changes, written under the authoring rules below.
 - `note` (optional, ≤ 400 characters) is the one claim an anchored range
   supports. The diff column shows it under the range's last row (§5), so the
   explanation sits next to the code it is about. A tour with no notes is
   valid and renders from the narrative alone.
+- `diagram` (optional) is for structure easier drawn than said: one
+  monospace drawing per step, box-drawing characters and spaces (never
+  tabs -- a tab stops wherever the panel font says and the drawing arrives
+  crooked; lines ≤ 100 characters so they do not wrap). Its stages CONTINUE
+  the drawing top to bottom, each revealed by a click after the one above
+  it -- the same segmenting a withheld narrative applies, holding back the
+  conclusion until the reader has read what leads to it. The first stage is
+  visible from the start; the reveal is reading state, not progress: it
+  resets when the panel re-shows the step, unlike check answers which
+  persist. Most steps need no diagram; one that adds nothing is noise.
 - PREDICT and TRACE carry choices and an answer key that must be one of the
   choices. RISK carries neither. Every check carries at least one alternate.
+- **The correct answer's position carries no signal.** Whatever order the
+  agent drafts (its drafts put the right answer first, which teaches the
+  reader to stop reading the options), the agent boundary scatters it
+  deterministically from the check id and the key -- the key moves with its
+  choice, the store never re-scatters on load, so progress recorded against
+  these positions stays gradable.
 - **Which kind to pick** follows from what the reader can see. A PREDICT hides
   the step's added rows until it is answered (§5), so its question must be
   answerable from the removed and surrounding code -- "what will this do?",
@@ -69,6 +87,52 @@ TourCheck(id, kind, prompt, choices, answerKey, explanation,
   this in its prompt and in `review_tour`'s schema, and the validator enforces
   the floor of it: a PREDICT (or a PREDICT alternate) on a step whose anchors
   cover only added rows is rejected, since nothing is left to read.
+
+
+**Authoring rules (evidence-based).** A tour is studying material, and the
+instruction typed on Run review and refresh carries these rules, each
+grounded in the reading-science literature:
+
+- **Lead with the point, then only what bears on the decision.** The most
+  important message first, no history and no asides -- the plain-language
+  rule that readers scan for what they must know or do (CDC Clear
+  Communication; ODPHP Health Literacy Online,
+  <https://odphp.health.gov/healthliteracyonline/>), and Mayer's coherence
+  principle: interesting-but-irrelevant material costs comprehension
+  (Mayer, *Multimedia Learning*).
+- **Explain before the check asks.** The narrative or an anchor note
+  establishes the change's reasoning first; the PREDICT/TRACE then asks the
+  reviewer to apply it to the code. This is the worked-example effect:
+  studying a worked instance before solving the transfer problem beats
+  unguided problem solving for novices (Sweller & Cooper, 1985;
+  <https://doi.org/10.1207/s15516709cog1202_4> on load), and it is why the
+  grounding rule (§6) and this rule are two faces of one contract: the
+  check may ask only what the tour taught or the code shows.
+- **One concept per step, in one file's contiguous rows where possible.**
+  Splitting a step that carries two independent ideas is Mayer's segmenting
+  principle (learner-paced small segments) and Chandler & Sweller's
+  split-attention work: making a reader hold one file's state while
+  reading another is extraneous load (<https://doi.org/10.1111/j.2044-8279.1992.tb01017.x>).
+- **Plain active-voice sentences, one idea each, terms defined at first
+  use.** The health-literacy canon: short sentences, active voice, common
+  words, define the term where it first appears (CDC "Simply Put",
+  <https://www.cdc.gov/health-literacy/php/develop-materials/plain-language.html>).
+- **The reader is an expert in the language, new to the change.** Explain
+  the change, not the language: guidance that over-explains what an expert
+  already knows is the expertise reversal effect -- support that helps
+  novices actively harms experts (Kalyuga, Ayres, Chandler & Sweller,
+  <https://doi.org/10.1207/s15326985EP3801_4>). The flip side of the
+  plain-language rule: the domain's words are the reader's common words.
+
+**Rendering follows the same evidence.** The step panel wraps the narrative
+(no 80+ character lines -- WCAG 1.4.8 sets 80 glyphs as the AAA ceiling,
+<https://www.w3.org/WAI/WCAG21/Understanding/visual-presentation>), widens
+its leading (WCAG 1.4.12's line-height floor is 1.5,
+<https://www.w3.org/WAI/WCAG22/UNDERSTANDING/text-spacing.html>), keeps
+sentence case, and never fixes a text container's height -- a fixed height
+is what fails 1.4.12 when spacing grows. Staged reveals (a PREDICT hiding
+the added rows until answered) are the segmenting principle in the
+interface: the reader controls the pace.
 
 **Coverage invariant.** Every hunk of the scope's diff is covered by at least
 one anchor. An approval that skipped part of the change is exactly the rubber
@@ -218,15 +282,51 @@ because a removed row has no line in the post-image.
   location. It adds no waypoint, and `Esc` closes it. While a peek is open it
   owns `⏎` (open for real), `u` (usages), `a` (ask the agent) and `Esc`.
   Review's key filter, which today catches keys before its children
-  (`SessionReviewView.java:847`), yields these to the open peek.
+  (`SessionReviewView.java:847`), yields these to the open peek. `u`
+  **replaces** the code with the occurrence list -- one scroll region, never
+  the code's own scrollbar nested in a second one -- and every row is a real
+  button that jumps to the place claiming the usage: Review peeks at that
+  location in place (another card on the stack), the Explorer opens the
+  file at that line and collapses the stack onto the trail. `u` again brings
+  the code back. `a` asks the bound session about the peeked symbol, and
+  the ANSWER lands on this board: the prompt names a question id and asks
+  for one `review_ask_answer` tool call, which closes the question and
+  shows the text as a dismissible card over the diff column -- the reader
+  never has to leave the code they asked about. The id resolves through an
+  in-memory pending-question registry scoped to the asking session's
+  scopes, so another session's question is refused as unknown and stays
+  answerable by the session it was asked of. A question dies with its
+  session: the workspace's exit watcher expires it, a late answer is
+  refused as unknown, and the board that asked gets a death-notice card
+  rather than a silently stranded promise. The step panel carries the
+  same ask as a quiet button ("Ask the agent about this step"): the
+  prompt names the tour handle and step title, the agent reads the step
+  through `review_tour`, and the answer returns through the identical
+  machinery.
 - **Waypoints.** Step changes add one, labelled "Step N", and so do promoted
-  peeks and search results. `⌘[` and `⌘]` walk the trail in Review. That
-  needs a Review branch next to the Explorer's at
-  `DrydockApplication.java:1009`. While Review is focused, session-tab
-  switching with those keys is unavailable, as it already is in the
-  Explorer.
+  peeks and search results. The trail bar's `‹ ›` buttons walk it. `⌘[` and
+  `⌘]` do NOT: while Review is showing they keep their session-tab meaning
+  (walking a trail whose waypoints are the tour's steps read as the step
+  keys having been hijacked -- reported as a clash), and the Explorer keeps
+  its own trail-first claim on them only while the Explorer is showing.
 - `b` returns the column to the current step's first anchor. A "↩ back to
   step N" pill shows whenever the viewport is off the step's rows.
+- **⌘F finds in the diff.** A bar over the column's top-right corner
+  searches the rendered diff's own lines -- folded ones included, so a hit
+  inside a collapsed run still counts and the walk opens the fold when it
+  lands there -- case-insensitively, from two characters up. Enter /
+  shift-Enter step and wrap; every hit row is marked and the row the walk
+  is on carries the accent bar (signaling, not just scrolling); Esc closes
+  the bar and clears the marks. The key is Review's while its board is
+  showing and falls through everywhere else (the terminal's own ghostty
+  find keeps it inside its sub-tab).
+- **Every reveal opens what hid it.** A jump whose target row is missing is
+  indistinguishable from a dead button, so `revealLine` falls back before
+  giving up: a target inside a collapsed run opens that hunk's folds (a jump
+  is a navigation intent; `c` re-folds), a target past the row cap reaches
+  its hunk header, and a target the rendered diff does not carry returns
+  false so the caller says so over the column instead of silently doing
+  nothing.
 - `.` and `,` move to the next and previous anchor within a step -- the
   claims, when it makes them. With no check open to answer, `1`–`4` jump to
   that claim; a click on a callout makes it active without scrolling. A
@@ -277,6 +377,17 @@ Three kinds of evidence, each labelled with its provenance.
   changed file (`OutOfDiffFanIn.java:233-240`). It changes to drop only
   occurrences *on changed lines*. An unedited call site in an edited file is
   precisely where a signature change breaks.
+  Two de-noising rules keep the list readable where a common name would
+  otherwise swamp it with links to unrelated files. A file **outside the
+  change whose own occurrence lines look like a declaration of the symbol**
+  (its own field, method, type or local of that name -- a line-lexical
+  probe, no per-file parse) is dropped whole for that symbol: its
+  occurrences are uses of its own symbol, not callers of the change's.
+  And a symbol with more than `MAX_ATTRIBUTABLE` (50) surviving occurrences
+  is **counted, not listed**: its rows leave the caller list and show as
+  one line -- "N occurrences outside the change — too common to attribute" --
+  while the signature-changed flag keeps the real count, so suppressing a
+  list never silences the signal.
 - **Called from / calls, inside the change.** `ChangeGraph` edges. Each
   names the step that owns the other end ("→ `JmpCtxScope` · step 1").
 - **Calls, outside the change.** Identifiers on the step's changed lines
@@ -290,7 +401,12 @@ flagged: "declaration changed · N call sites were not edited". This is the
 data TRACE checks are built from.
 
 **Claimed: the agent's impact notes.** These are pinned on top. A note that
-describes a defect must be filed as a finding instead (§4).
+describes a defect must be filed as a finding instead (§4). Impact data
+and the agent's own usage searches are name matches, so a note must cite a
+location the agent **read and confirmed genuinely references the change's
+declaration** -- a same-named member in an unrelated file is a false link,
+not an impact. A step carries **at most 8 impact notes**; more is rejected
+by validation, the same all-or-nothing list as every other tour rule.
 
 **Behaviour.** Measured data is computed off the FX thread, once per scope,
 alongside the graph build. "Finding callers…" shows until the grep returns.
@@ -298,11 +414,59 @@ alongside the graph build. "Finding callers…" shows until the grep returns.
 failure, and no checkout each show as "callers unavailable: <reason>", never
 as an empty list.
 
+**A check's question is grounded.** Whatever its kind (PREDICT, TRACE,
+RISK), a question must be answerable from what the tour itself explains
+(its narratives and anchor notes) or from code the reviewer can see around
+it -- never from outside knowledge the tour has not taught (spec details,
+encodings, instruction sets, hardware behaviour). A question that tests the
+reader's background instead of the change stops the walk: teach it in the
+narrative first, or do not ask it. The instruction typed on Run review and
+refresh carries this rule alongside the kind-picking rule; validation
+enforces only what it can check structurally (a PREDICT must have something
+to read), the grounding itself is the agent's contract.
+
 **`UsageProvider` seam.** It answers usages, declaration and callees for a
-symbol at a file line. Each result carries provenance `MEASURED`, `CLAIMED`
-or `RESOLVED`. The lexical implementation ships here. A later LSP spec plugs
-in a resolving one, used only when a server for the language is running and
-indexed. The tour never waits on it.
+symbol at a file line. Each result carries provenance `MEASURED`, `CLAIMED`,
+`SCOPED` or `RESOLVED`. Three tiers ship in this order:
+
+- **Lexical (`MEASURED`)** -- the name-matching default: an occurrence of
+  the text, honest about being no more than that.
+- **Scoped (`SCOPED`)** -- tree-sitter parse-tree binding (the already
+  bundled grammars, no new dependency, no server lifecycle; Java and
+  Kotlin today, one walk per language and one shared resolution over the
+  walked drafts, each walk built from a probe that read the grammar's
+  real node shapes). Cross-language resolution works too: a Kotlin
+  caller binds a Java declaration through the import, the mixed-repo
+  reality. An occurrence binds when its receiver is
+  statically derivable -- no receiver or `this` with the member declared on
+  an enclosing class of the same file or reached through that class's
+  `extends` chain (capped, cycles refused), so a bare inherited call is as
+  real as a qualified one; a class-name receiver through an import or the
+  same package, followed up the same chain; a local/parameter/field's
+  declared type -- AND the resolved member is the declaration the peek is
+  centred on. A same-named member on an unrelated class is exactly the
+  false link this tier refuses. What it deliberately never claims:
+  interfaces, overloads, type inference, `java.lang` types -- those
+  occurrences stay lexical, and the peek says so ("N bound by scope · M
+  name matches", a `scoped` chip per bound row). When the lexical
+  candidate binds nothing but every resolved reference agrees on one
+  other declaration, the peek re-centres on it and marks the declaration
+  scope-bound. The out-of-diff fan-in runs the same classification over
+  its scan: each occurrence carries its tier, the step's caller rows say
+  which are scoped, and the agent's impact wire ({@code bound}) separates
+  real references from name matches -- the change graph's declaration
+  site is the binding target, so the same-name stranger is refused here
+  exactly as it is in the peek. Classification is budgeted (at most 200
+  occurrence files parsed per scan, one binder, models cached); beyond
+  the budget the occurrences stay unclassified, which is the honest
+  default, not a silently dropped flag.
+- **Resolved (`RESOLVED`)** -- a language server that has indexed the
+  code. Specified in [Tier 3: a language server behind the provenance
+  seam](2026-10-08-lsp-tier3-usage-resolution.md): opt-in by
+  configuration (never downloaded), one jdt.ls server per worktree,
+  upgrade-only composition over the tiers below, and a readiness state
+  machine (`INDEXED` or it does not answer) whose every failure path
+  lands on this tier list. The tour never waits on it.
 
 ## 7. Comments, verdicts, persistence
 
@@ -315,6 +479,38 @@ lines, which the whole-file view makes reachable. At Submit:
   with an excerpt.
 - The submit sheet shows which route each comment takes.
 - Sending to the author carries all of them.
+
+**The finished tour offers its second pass.** Once every step is settled,
+the verdict bar carries a "Deep review…" button: it hands the bound
+session a one-line, harness-agnostic ask -- use a review-loop tool if the
+agent has one (sphinx, a code-review command), else re-read the diff
+deeply -- that AMENDS this round rather than replacing it: settled
+findings are ground truth read through `review_state`, corrections go
+into the finding's own thread, and new findings land as proposals the
+reviewer triages. The amendments are walked through the findings
+margin's "proposed" filter: only what this round's reviewer has not
+triaged yet, so the delta is one walk, not a re-read of the whole
+margin. drydock never probes for a harness or runs one itself; it frames
+the ask and the agent's own tooling does the rest.
+
+**The submit sheet is a curate-then-post pass.** Confirmed findings post
+by default (the confirm IS the vouch; the card's toggle remains the
+explicit opt-out, and only the transition into confirmed promotes, so no
+redundant confirm can undo an exclusion). Every posting row can be
+reworded for the post (⌘⏎ saves, Esc drops the draft); an edited row is
+chipped "edited" because the board still shows the original and the
+difference must never be silent. Before the sheet opens, the PR's current
+head sha is compared with the checkout's HEAD: equal shas skip the check,
+a moved head re-anchors the whole plan against the PR's current diff --
+a finding a newer push displaced is refused against "the PR's current
+head", never folded into the body -- and an unanswered gh is said out
+loud ("checked against the diff as reviewed") rather than implied. A
+refusal carries its own per-finding escape hatch: "Post in the review
+body" moves the finding into the body as a path:line note, anchored and
+excerpted from the diff as REVIEWED -- the human decided the content
+belongs in the review, and the body is where it lands without a 422
+from GitHub or a comment silently placed on the moved diff's wrong
+line.
 
 **Verdicts are derived from steps, never written by them.** Step progress is
 stored on its own. The one stored verdict per hunk (`ReviewVerdict`, keyed by
@@ -383,7 +579,7 @@ path stay as computed input to the agent.
 | Tool | Change |
 |---|---|
 | `review_scope` | New `impact` include: measured callers and callees per changed symbol, and the signature-changed flags. `sections` and the reading path remain, as the suggested order. |
-| `review_tour` *(new)* | Submits the tour, or with `onlySteps` replaces stale steps and adds steps for uncovered hunks. Validation is all-or-nothing and lists concrete errors: a hunk not covered; an anchor key that is not a line of the diff; an impact note off-range; a `withheldBy` finding with no check on a step anchoring its lines; a withheld `BLOCKING` finding; a check without an alternate; an answer key not among the choices; a PREDICT on a step whose anchored rows are all added rows. |
+| `review_tour` *(new)* | Submits the tour, or with `onlySteps` replaces stale steps and adds steps for uncovered hunks. Validation is all-or-nothing and lists concrete errors: a hunk not covered; an anchor key that is not a line of the diff; an impact note off-range; more than 8 impact notes on a step; a `withheldBy` finding with no check on a step anchoring its lines; a withheld `BLOCKING` finding; a check without an alternate; an answer key not among the choices; a PREDICT on a step whose anchored rows are all added rows. |
 | `review_finding` | Agent findings land `PROPOSED`. Optional `withheldBy: checkId`. |
 | `review_check` *(new)* | The agent's verdict on a RISK answer: `holds`, `partly` or `doesNotHold`, with a reason. |
 | `review_state` | No longer reports `intents`. Tour progress; RISK answers awaiting a verdict, *with the answer text*; triage outcomes, including dismissal reasons. |

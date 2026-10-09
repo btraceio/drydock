@@ -318,6 +318,70 @@ class WorktreeServiceTest {
     }
 
     /**
+     * The removal listener (usage-resolution tier 3, spec §5: a deleted
+     * worktree's language-server cache is deleted with it) fires only after
+     * a removal actually succeeded: the listener must not be able to
+     * observe a worktree that is still on disk, so the fire itself carries
+     * the proof -- the path is checked at notification time, not after.
+     */
+    @Test
+    void removeFiresTheRemovalListenerOnlyAfterTheWorktreeIsGone(
+            @TempDir Path repoDir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/listened").get();
+        List<Path> told = new java.util.ArrayList<>();
+        List<Boolean> stillOnDiskWhenTold = new java.util.ArrayList<>();
+        service.addRemovalListener((repositoryRoot, removed) -> {
+            stillOnDiskWhenTold.add(Files.exists(removed));
+            told.add(removed);
+        });
+
+        service.remove(repo, worktree, Optional.of("feat/listened")).get();
+
+        assertEquals(1, told.size(), "one removal, one notification");
+        assertEquals(WorktreeService.canonical(worktree), told.get(0),
+                "the canonical form, the same key an owner maps the worktree by");
+        assertEquals(List.of(Boolean.FALSE), stillOnDiskWhenTold,
+                "the listener fires only after the worktree is actually removed");
+    }
+
+    /**
+     * The same discipline on the refused paths: a removal that failed --
+     * dirty here, and the main-checkout refusal and a failed branch delete
+     * beside it -- must never fire the listener, or an owner would clean up
+     * a worktree that is still on disk.
+     */
+    @Test
+    void aRemovalThatFailsNeverFiresTheListener(@TempDir Path repoDir, @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path dirty = gitStatusService.createWorktree(repo, worktreeParent.resolve("dirty"), "feat/kept-alive").get();
+        Files.writeString(dirty.resolve("uncommitted.txt"), "precious\n");
+        Path retained = gitStatusService.createWorktree(repo, worktreeParent.resolve("retained"), "feat/held-branch")
+                .get();
+        // A second worktree on the branch keeps `git branch -D` from
+        // succeeding, so the retained worktree's removal fails AFTER the
+        // worktree half would have gone: the far end of the ordering a
+        // naive "fire when the directory is gone" listener would miss.
+        runGit(repo, "worktree", "add", "--force", worktreeParent.resolve("second").toString(), "feat/held-branch");
+        List<Path> told = new java.util.ArrayList<>();
+        service.addRemovalListener((repositoryRoot, removed) -> told.add(removed));
+
+        assertThrows(CompletionException.class,
+                () -> service.remove(repo, dirty, Optional.of("feat/kept-alive")).join());
+        assertThrows(CompletionException.class,
+                () -> service.remove(repo, repo, Optional.of("main")).join());
+        assertThrows(CompletionException.class,
+                () -> service.remove(repo, retained, Optional.of("feat/held-branch")).join());
+
+        assertTrue(told.isEmpty(), "no failed removal may fire the listener");
+        assertTrue(Files.exists(dirty), "the dirty worktree is still on disk");
+        assertFalse(Files.exists(retained),
+                "the branch-delete failure fixture: the worktree half did succeed,"
+                + " so this is the case where a naive directory-exists listener would have fired");
+    }
+
+    /**
      * Pins the discriminator the force-fallback gate is built on: a
      * submodule only blocks a plain remove once it has been checked out
      * into the worktree, so a fresh worktree of a submodule-bearing

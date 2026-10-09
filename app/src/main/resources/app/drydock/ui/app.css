@@ -2766,6 +2766,47 @@
 .review-code-row.tour-claim-active.row-context {
     -fx-background-color: -drydock-accent-soft;
 }
+/* Find (⌘F) over the rendered rows: every hit reads as one faint block, the
+   row the walk is on gets the accent bar -- signaling where the matches
+   are, not just scrolling between them. Ordered after the row-add/row-del
+   fills so a hit replaces them: the find state is the louder signal. */
+.review-code-row.find-hit {
+    -fx-background-color: -drydock-accent-soft;
+}
+.review-code-row.find-hit-current {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-border-color: transparent transparent transparent -drydock-accent;
+    -fx-border-width: 0 0 0 3;
+}
+/* The find bar floats over the list's top-right corner. */
+.review-find-bar {
+    -fx-background-color: -drydock-sidebar;
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 8px;
+    -fx-background-radius: 8px;
+    -fx-padding: 4 7 4 7;
+    -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.55), 18, 0.2, 0, 6);
+}
+.review-find-field {
+    -fx-font-family: "JetBrains Mono", "Menlo", monospace;
+    -fx-font-size: 11px;
+    -fx-background-radius: 6px;
+    -fx-border-radius: 6px;
+}
+.review-find-count {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10px;
+    -fx-padding: 0 4 0 4;
+}
+.review-find-action {
+    -fx-background-color: transparent;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 10px;
+    -fx-padding: 2 6 2 6;
+    -fx-background-radius: 6px;
+    -fx-cursor: hand;
+}
+.review-find-action:hover { -fx-text-fill: -drydock-text; -fx-background-color: -drydock-hover; }
 .tour-claim-badge {
     -fx-background-color: -drydock-accent;
     -fx-background-radius: 10px;
@@ -3505,10 +3546,34 @@
     -fx-font-size: 13px;
     -fx-font-weight: 700;
 }
-.step-panel .step-panel-narrative {
+.step-panel .step-diagram {
+    -fx-background-color: -drydock-sidebar;
+    -fx-background-radius: 6;
+    -fx-border-radius: 6;
+    -fx-border-color: -drydock-border;
+    -fx-padding: 8 10 8 10;
+}
+.step-diagram-caption {
+    -fx-font-size: 11px;
+    -fx-text-fill: -drydock-text-dim;
+}
+.step-diagram-drawing {
+    -fx-font-family: monospace;
+    -fx-font-size: 11px;
+    -fx-text-fill: -drydock-text;
+}
+.step-diagram-reveal {
+    -fx-font-size: 11px;
+}
+.step-panel-narrative {
     -fx-text-fill: -drydock-text-dim;
     -fx-font-size: 12px;
-    -fx-line-spacing: 2px;
+    /* Additive leading: 4px on a ~14px natural line box lands near the
+       1.4-1.5 line-height readability floor (WCAG 1.4.12's floor is 1.5;
+       JavaFX has no user spacing override to be resilient to, but the
+       reading guidance holds). 2px read as cramped next to the panel's
+       10.5px mono rows. */
+    -fx-line-spacing: 4px;
 }
 .step-panel .step-panel-withheld {
     -fx-font-style: italic;
@@ -3678,6 +3743,16 @@
     -fx-text-fill: -drydock-deviation;
     -fx-font-size: 11px;
 }
+.step-panel .step-impact-flag-suppressed {
+    -fx-text-fill: -drydock-deviation;
+    -fx-font-size: 11px;
+    -fx-font-style: italic;
+}
+.step-panel .step-impact-suppressed {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 11px;
+    -fx-font-style: italic;
+}
 .step-panel .step-impact-pending, .step-panel .step-impact-empty {
     -fx-text-fill: -drydock-text-faint;
     -fx-font-size: 11px;
@@ -3800,6 +3875,63 @@
     -fx-font-weight: 600;
 }
 .review-submit-comments-block,
+.review-submit-edit-button {
+    -fx-background-color: transparent;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 10px;
+    -fx-padding: 1 6 1 6;
+    -fx-background-radius: 6px;
+    -fx-cursor: hand;
+}
+.review-submit-edit-button:hover { -fx-text-fill: -drydock-text; -fx-background-color: -drydock-hover; }
+.review-submit-edited-chip {
+    -fx-border-color: -drydock-border-strong;
+    -fx-border-radius: 9px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 9px;
+    -fx-padding: 0 6 0 6;
+}
+.ask-answers {
+    -fx-padding: 8 0 0 0;
+}
+.ask-answer-card {
+    -fx-background-color: -drydock-sidebar;
+    -fx-background-radius: 8;
+    -fx-border-radius: 8;
+    -fx-border-color: -drydock-border;
+    -fx-padding: 8 10 8 10;
+    -fx-max-width: 520;
+    -fx-effect: dropshadow(gaussian, rgba(0, 0, 0, 0.35), 8, 0.2, 0, 2);
+}
+.ask-answer-title {
+    -fx-font-size: 11px;
+    -fx-text-fill: -drydock-text-dim;
+}
+.ask-answer-body {
+    -fx-font-size: 12px;
+    -fx-text-fill: -drydock-text;
+}
+.ask-answer-card.ask-expired {
+    -fx-border-color: -drydock-border;
+    -fx-opacity: 0.85;
+}
+.ask-answer-body.ask-expired {
+    -fx-text-fill: -drydock-text-dim;
+}
+.ask-answer-close {
+    -fx-background-color: transparent;
+    -fx-border-color: transparent;
+    -fx-padding: 1 4 1 4;
+    -fx-font-size: 10px;
+}
+.review-submit-verification {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 11px;
+    -fx-padding: 2 0 2 0;
+}
+.review-submit-editor {
+    -fx-padding: 2 0 2 0;
+}
 .review-submit-refusals {
     -fx-spacing: 6;
 }
@@ -4160,7 +4292,15 @@
     -fx-font-size: 9px;
     -fx-padding: 0 0 4 0;
 }
-.peek-usage-row { -fx-padding: 2 0 2 0; }
+.peek-usage-row {
+    -fx-background-color: transparent;
+    -fx-background-radius: 6px;
+    -fx-padding: 2 4 2 4;
+    -fx-cursor: hand;
+    -fx-alignment: center-left;
+}
+.peek-usage-row:hover { -fx-background-color: -drydock-hover; }
+.peek-usage-row:focused { -fx-border-color: -drydock-accent; -fx-border-radius: 6px; }
 .peek-usage-row.untouched { -fx-opacity: 0.6; }
 .peek-usage-loc {
     -fx-text-fill: -drydock-text-dim;
@@ -4173,6 +4313,39 @@
     -fx-text-fill: -drydock-text-dim;
     -fx-font-size: 9.5px;
     -fx-padding: 0 6 0 6;
+}
+.peek-usage-chip-scoped {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-background-radius: 6;
+    -fx-padding: 1 5 1 5;
+    -fx-font-size: 10px;
+}
+/* A language server confirmed the row (usage-resolution design 2026-10-08,
+ * §7): the scoped chip's shape in the resolved tone -- one chip shape, the
+ * label says the tier. */
+.peek-usage-chip-resolved {
+    -fx-background-color: -drydock-resolved-soft;
+    -fx-background-radius: 6;
+    -fx-text-fill: -drydock-resolved;
+    -fx-padding: 1 5 1 5;
+    -fx-font-size: 10px;
+}
+/* The usages headline's server line (§7): counts by tier, under the title,
+ * faint so the headline stays the primary sentence. */
+.peek-usages-server {
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 10px;
+    -fx-padding: 0 0 2 0;
+}
+/* The one-per-session quiet hint (§§3, 8): faint on purpose -- a missing
+ * language server is never an error the reviewer must dismiss. */
+.peek-lsp-hint {
+    -fx-text-fill: -drydock-text-faint;
+    -fx-font-size: 10px;
+    -fx-padding: 2 11 6 11;
+}
+.step-panel .step-impact-entry.provenance-scoped {
+    -fx-border-color: -drydock-border;
 }
 .peek-usage-chip-diff {
     -fx-background-color: -drydock-running-soft;

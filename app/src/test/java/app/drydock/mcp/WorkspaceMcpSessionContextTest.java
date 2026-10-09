@@ -635,8 +635,12 @@ class WorkspaceMcpSessionContextTest {
                 (id, draft) -> CompletableFuture.failedFuture(
                         new UnsupportedOperationException("no workspace in this test")),
                 (id, draft) -> CompletableFuture.failedFuture(
-                        new UnsupportedOperationException("no workspace in this test")));
+                        new UnsupportedOperationException("no workspace in this test")),
+                pendingQuestions);
     }
+
+    private final app.drydock.review.PendingQuestions pendingQuestions =
+            new app.drydock.review.PendingQuestions(null);
 
     // ---- git helpers (mirrors WorktreeServiceTest) ---------------------------
 

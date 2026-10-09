@@ -4,12 +4,15 @@ import app.drydock.github.GitHubLineAnchor.Anchor;
 import app.drydock.github.GitHubLineAnchor.Side;
 import app.drydock.github.GitHubReviewRequest.Comment;
 import app.drydock.github.GitHubReviewRequest.Event;
+import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.SubmitPlan;
 
 import javafx.geometry.Pos;
 import javafx.scene.control.Button;
+import javafx.scene.control.CheckBox;
 import javafx.scene.control.Label;
+import javafx.scene.control.Tooltip;
 import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.ScrollPane;
 import javafx.scene.control.TextArea;
@@ -21,7 +24,10 @@ import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.function.BiConsumer;
 
@@ -71,6 +77,22 @@ public final class ReviewSubmitSheet extends VBox {
 
     private final SubmitPlan plan;
     private final Unverified unverified;
+    /**
+     * The human's rewordings for this submission, keyed by the finding's
+     * annotation key ({@code plan.posting()} aligns with the comments, in
+     * order; body notes carry their key). Empty until an edit commits, and
+     * visible in the row as an "edited" chip -- what posts may differ from
+     * what the board shows, and the difference must never be silent.
+     */
+    private final Map<ReviewAnnotation.Key, String> editedBodies = new LinkedHashMap<>();
+
+    /**
+     * Refused findings the human chose to post in the review body anyway:
+     * the content belongs in the review even though the moved diff can no
+     * longer place an inline anchor for it. Keyed like the edits, read at
+     * the submit click.
+     */
+    private final java.util.Set<ReviewAnnotation.Key> overriddenRefusals = new LinkedHashSet<>();
     private final BiConsumer<Event, String> onSubmit;
     private final Runnable onCancel;
 
@@ -86,6 +108,7 @@ public final class ReviewSubmitSheet extends VBox {
 
     private final Label errorLabel = new Label();
     private final Label unavailableLabel = new Label();
+    private final Label verificationNote = new Label();
 
     private final Button cancelButton = new Button("Cancel");
     private final Button submitButton = new Button("Submit review");
@@ -113,7 +136,12 @@ public final class ReviewSubmitSheet extends VBox {
         Label title = new Label("Submit review on #" + pr.number());
         title.getStyleClass().add("modal-title");
 
-        VBox content = new VBox(14, buildEventPicker(), buildSummaryField(), buildCommentsBlock());
+        verificationNote.getStyleClass().add("review-submit-verification");
+        verificationNote.setWrapText(true);
+        hide(verificationNote);
+
+        VBox content = new VBox(14, buildEventPicker(), buildSummaryField(), verificationNote,
+                buildCommentsBlock());
         buildBodyNotesBlock().ifPresent(content.getChildren()::add);
         buildUnverifiedBlock().ifPresent(content.getChildren()::add);
         buildRefusalsBlock().ifPresent(content.getChildren()::add);
@@ -141,6 +169,11 @@ public final class ReviewSubmitSheet extends VBox {
         cancelButton.setOnAction(e -> onCancel.run());
         submitButton.getStyleClass().addAll("review-verdict-action", "primary");
         submitButton.setOnAction(e -> submit());
+        // Enter submits from anywhere EXCEPT the summary itself (a TextArea
+        // consumes plain Enter as a newline, so the two never collide) --
+        // the last screen before an irreversible post should not need the
+        // mouse.
+        submitButton.setDefaultButton(true);
         Region footerSpacer = new Region();
         HBox.setHgrow(footerSpacer, Priority.ALWAYS);
         footer.getChildren().setAll(footerSpacer, cancelButton, submitButton);
@@ -199,9 +232,19 @@ public final class ReviewSubmitSheet extends VBox {
 
     private Region buildSummaryField() {
         summaryField.getStyleClass().add("review-composer-input");
-        summaryField.setPromptText("Leave a summary comment…");
+        summaryField.setPromptText("Leave a summary comment… ⌘⏎ submits");
         summaryField.setWrapText(true);
         summaryField.setPrefRowCount(4);
+        // Enter inside the composer is a newline; the submit gesture from
+        // inside it is ⌘⏎ -- the same contract the step panel's free-text
+        // answer uses, so every multi-line box on the board submits the
+        // same way.
+        summaryField.addEventFilter(javafx.scene.input.KeyEvent.KEY_PRESSED, event -> {
+            if (event.getCode() == javafx.scene.input.KeyCode.ENTER && event.isShortcutDown()) {
+                submit();
+                event.consume();
+            }
+        });
         // The disabled rule is live: every keystroke re-evaluates it against
         // whichever event is selected right now, not just the one at open.
         summaryField.textProperty().addListener((obs, old, text) -> updateSubmitEnabled());
@@ -224,15 +267,34 @@ public final class ReviewSubmitSheet extends VBox {
 
     // ---- what will (and will not) post -------------------------------------
 
-    /** Every comment the plan would post: {@code file:L40–48} (or a single line) plus its first line. */
+    /** The edits the sheet has collected; the caller folds them into the plan before posting. */
+    public Map<ReviewAnnotation.Key, String> editedBodies() {
+        return Map.copyOf(editedBodies);
+    }
+
+    /** The refusal keys whose boxes the human ticked: post them as body notes. */
+    public java.util.Set<ReviewAnnotation.Key> overriddenRefusals() {
+        return java.util.Set.copyOf(overriddenRefusals);
+    }
+
+    private String bodyFor(ReviewAnnotation.Key key, String original) {
+        return editedBodies.getOrDefault(key, original);
+    }
+
+    /**
+     * Every comment the plan would post: {@code file:L40–48} (or a single
+     * line) plus its first line -- and, when the human reworded it for the
+     * post, the edited text and an "edited" chip, because the posted body
+     * now differs from the finding the board still shows.
+     */
     private Region buildCommentsBlock() {
         Label header = new Label("Inline comments (" + plan.comments().size() + ")");
         header.getStyleClass().addAll("modal-hint", "review-submit-route-inline");
 
         VBox rows = new VBox(6);
         rows.getStyleClass().add("review-submit-comments");
-        for (Comment comment : plan.comments()) {
-            rows.getChildren().add(commentRow(comment));
+        for (int i = 0; i < plan.comments().size(); i++) {
+            rows.getChildren().add(commentRow(plan.comments().get(i), plan.posting().get(i)));
         }
 
         VBox block = new VBox(6, header, rows);
@@ -249,13 +311,8 @@ public final class ReviewSubmitSheet extends VBox {
         header.getStyleClass().addAll("modal-hint", "review-submit-route-body");
         VBox rows = new VBox(6);
         for (SubmitPlan.BodyNote note : plan.bodyNotes()) {
-            Label location = new Label(note.location());
-            location.getStyleClass().add("review-submit-note-location");
-            Label body = new Label(firstLine(note.body()));
-            body.getStyleClass().add("review-submit-comment-body");
-            HBox row = new HBox(8, location, body);
-            row.getStyleClass().add("review-submit-comment-row");
-            rows.getChildren().add(row);
+            rows.getChildren().add(editableRow(note.location(), note.key(), note.body(),
+                    "review-submit-note-location"));
         }
         VBox block = new VBox(6, header, rows);
         block.getStyleClass().add("review-submit-body-notes");
@@ -272,14 +329,79 @@ public final class ReviewSubmitSheet extends VBox {
         return Optional.of(new VBox(line));
     }
 
-    private static Region commentRow(Comment comment) {
-        Label location = new Label(locationOf(comment));
-        location.getStyleClass().add("review-submit-comment-location");
-        Label body = new Label(firstLine(comment.body()));
-        body.getStyleClass().add("review-submit-comment-body");
-        HBox row = new HBox(8, location, body);
+    /** One posting row: where, the text that will post, and the Edit that rewords it. */
+    private Region commentRow(Comment comment, ReviewAnnotation.Key key) {
+        return editableRow(locationOf(comment), key, comment.body(), "review-submit-comment-location");
+    }
+
+    /**
+     * A row whose text can be reworded for the post. The edit changes what
+     * is POSTED, not the stored finding -- the board keeps the original,
+     * so the row carries an "edited" chip to keep the difference from being
+     * silent. The editor is a multi-line composer: ⌘⏎ saves it, Esc drops
+     * the draft, the same gestures the summary uses.
+     */
+    private Region editableRow(String locationText, ReviewAnnotation.Key key, String originalBody,
+                               String locationStyleClass) {
+        HBox row = new HBox(8);
         row.getStyleClass().add("review-submit-comment-row");
+        Runnable[] holder = new Runnable[1];
+        Runnable refresh = () -> {
+            Label location = new Label(locationText);
+            location.getStyleClass().add(locationStyleClass);
+            Label body = new Label(firstLine(bodyFor(key, originalBody)));
+            body.getStyleClass().add("review-submit-comment-body");
+            HBox.setHgrow(body, Priority.ALWAYS);
+            body.setMaxWidth(Double.MAX_VALUE);
+            row.getChildren().setAll(location, body);
+            if (editedBodies.containsKey(key)) {
+                Label chip = new Label("edited");
+                chip.getStyleClass().add("review-submit-edited-chip");
+                row.getChildren().add(chip);
+            }
+            Button edit = new Button("Edit");
+            edit.getStyleClass().add("review-submit-edit-button");
+            edit.setOnAction(e -> row.getChildren().setAll(editor(row, key, originalBody, holder[0])));
+            row.getChildren().add(edit);
+        };
+        holder[0] = refresh;
+        refresh.run();
         return row;
+    }
+
+    /** The row's edit state: a multi-line draft with ⌘⏎ to save and Esc to drop. */
+    private Region editor(HBox row, ReviewAnnotation.Key key, String originalBody, Runnable refresh) {
+        TextArea draft = new TextArea(bodyFor(key, originalBody));
+        draft.getStyleClass().add("review-composer-input");
+        draft.setWrapText(true);
+        draft.setPrefRowCount(3);
+        Label hint = new Label("⌘⏎ saves · Esc cancels");
+        hint.getStyleClass().add("modal-hint");
+        draft.addEventFilter(javafx.scene.input.KeyEvent.KEY_PRESSED, event -> {
+            switch (event.getCode()) {
+                case ENTER -> {
+                    if (event.isShortcutDown()) {
+                        String text = draft.getText() == null ? "" : draft.getText().strip();
+                        if (!text.isEmpty()) {
+                            editedBodies.put(key, text);
+                        }
+                        refresh.run();
+                        event.consume();
+                    }
+                }
+                case ESCAPE -> {
+                    refresh.run();
+                    event.consume();
+                }
+                default -> { }
+            }
+        });
+        VBox editor = new VBox(4, draft, hint);
+        editor.getStyleClass().add("review-submit-editor");
+        // The draft takes the focus the click that opened it came from --
+        // typing is the whole point of the state.
+        javafx.application.Platform.runLater(draft::requestFocus);
+        return editor;
     }
 
     /**
@@ -331,7 +453,23 @@ public final class ReviewSubmitSheet extends VBox {
             Label reason = new Label(refusal.reason());
             reason.getStyleClass().add("review-submit-refusal");
             reason.setWrapText(true);
-            rows.getChildren().add(reason);
+            CheckBox postInBody = new CheckBox("Post in the review body");
+            postInBody.getStyleClass().add("review-submit-refusal-override");
+            postInBody.setTooltip(new Tooltip("Post this finding's content as a path:line note in the"
+                    + " review body, where the moved diff cannot misplace it and GitHub cannot 422 it"));
+            if (overriddenRefusals.contains(refusal.key())) {
+                postInBody.setSelected(true);
+            }
+            postInBody.selectedProperty().addListener((obs, was, now) -> {
+                if (now) {
+                    overriddenRefusals.add(refusal.key());
+                } else {
+                    overriddenRefusals.remove(refusal.key());
+                }
+            });
+            HBox row = new HBox(10, reason, postInBody);
+            row.setAlignment(Pos.CENTER_LEFT);
+            rows.getChildren().add(row);
         }
 
         VBox block = new VBox(6, header, rows);
@@ -371,6 +509,17 @@ public final class ReviewSubmitSheet extends VBox {
         // The footer's own disable just lifted; the submit button's private
         // disable state -- the live rule -- was never touched by showPosting,
         // so nothing further is owed to it here except making it visible again.
+    }
+
+    /**
+     * What the fresh-head verification found, shown above the routes: the
+     * human must know whether the anchors were checked against the diff as
+     * reviewed or against the pull request's current head before deciding
+     * to post.
+     */
+    public void showVerificationNote(String note) {
+        verificationNote.setText(note);
+        show(verificationNote);
     }
 
     /**

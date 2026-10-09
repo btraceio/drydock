@@ -83,6 +83,38 @@ class ReviewInstructionsTest {
         assertFalse(line.contains("\n"));
     }
 
+    /**
+     * A question the reviewer cannot answer from the tour or the visible
+     * code tests their background, not the change (hex opcodes, SP handling
+     * on some architecture) -- so both forms forbid it.
+     */
+    @Test
+    void bothFormsForbidQuestionsAssumingKnowledgeTheTourDidNotTeach() {
+        for (boolean subagents : new boolean[] {true, false}) {
+            String instruction = ReviewInstructions.forScope("rs_abc123", subagents);
+            assertTrue(instruction.contains("never from outside knowledge the tour has not taught"), instruction);
+        }
+        String refresh = ReviewInstructions.forTourRefresh("rs_abc123", List.of("s2"), 1);
+        assertTrue(refresh.contains("never from outside knowledge the tour has not taught"), refresh);
+    }
+
+    /**
+     * Name-match searches are not evidence: every impact note must cite a
+     * location the agent read and confirmed, and the count is capped so a
+     * swamped tour is rejected rather than merely noisy.
+     */
+    @Test
+    void bothFormsRequireVerifiedImpactNotesAndCapTheirCount() {
+        for (boolean subagents : new boolean[] {true, false}) {
+            String instruction = ReviewInstructions.forScope("rs_abc123", subagents);
+            assertTrue(instruction.contains("read the location you cite and confirm"), instruction);
+            assertTrue(instruction.contains("at most 8 impact notes"), instruction);
+        }
+        String refresh = ReviewInstructions.forTourRefresh("rs_abc123", List.of("s2"), 1);
+        assertTrue(refresh.contains("read the location you cite and confirm"), refresh);
+        assertTrue(refresh.contains("at most 8 impact notes"), refresh);
+    }
+
     @Test
     void aRiskCheckRequestNamesTheCheckAndTheToolInOneLine() {
         String line = ReviewInstructions.forRiskCheck("rs_abc123", "c7");
@@ -92,6 +124,70 @@ class ReviewInstructionsTest {
         assertTrue(line.contains("review_check"));
         assertTrue(line.contains("review_state"));
         assertFalse(line.contains("\n"));
+    }
+
+    /**
+     * The deep round's ask: names the scope, is harness-agnostic (sphinx,
+     * code-review, or a plain re-read), and above all AMENDS rather than
+     * replaces -- the settled round is ground truth to build on, not
+     * material to re-litigate wholesale.
+     */
+    @Test
+    void aDeepReviewRequestAmendsTheRoundInOneLine() {
+        String line = ReviewInstructions.forDeepReview("rs_abc123");
+
+        assertTrue(line.contains("rs_abc123"));
+        assertTrue(line.contains("AMEND"), line);
+        assertTrue(line.contains("never replace"), line);
+        assertTrue(line.contains("review_state"), "the agent must read what is settled first");
+        assertTrue(line.contains("review_finding"), "new findings land as proposals");
+        assertTrue(line.contains("sphinx, code-review"), "harness-agnostic, not sphinx-only");
+        assertFalse(line.contains("\n"));
+    }
+
+    /** The step ask: the tour's own ids, the reading tools, and the same one-call delivery as a peek. */
+    @Test
+    void aStepAskNamesTheStepTheReadingToolAndTheAnswerToolInOneLine() {
+        String line = ReviewInstructions.forStepAsk("ask-7", "rs_abc123", "The guard");
+
+        assertTrue(line.contains("ask-7"));
+        assertTrue(line.contains("rs_abc123"));
+        assertTrue(line.contains("The guard"));
+        assertTrue(line.contains("review_tour"), "the agent reads the step through the tour tools");
+        assertTrue(line.contains("review_ask_answer"));
+        assertFalse(line.contains("\n"));
+    }
+
+    @Test
+    void aFindingQuestionNamesTheScopeTheFindingAndTheAnswerToolInOneLine() {
+        String line = ReviewInstructions.forFindingQuestion("rs_abc123", "f_9");
+
+        assertTrue(line.contains("rs_abc123"));
+        assertTrue(line.contains("f_9"));
+        assertTrue(line.contains("review_comments"));
+        assertTrue(line.contains("review_answer"));
+        assertFalse(line.contains("\n"));
+    }
+
+    /**
+     * The tour is studying material; the reading-science rules must reach
+     * every form that asks for one. Each clause maps to a cited principle in
+     * the spec's "Authoring rules" section.
+     */
+    @Test
+    void everyFormTeachesByTheReadingScienceRules() {
+        for (boolean subagents : new boolean[] {true, false}) {
+            String instruction = ReviewInstructions.forScope("rs_abc123", subagents);
+            assertTrue(instruction.contains("lead each narrative with its single most important point"), instruction);
+            assertTrue(instruction.contains("BEFORE the check asks"), instruction);
+            assertTrue(instruction.contains("plain active-voice sentences"), instruction);
+            assertTrue(instruction.contains("one concept per step"), instruction);
+            assertTrue(instruction.contains("explain the change, not the language"), instruction);
+            assertFalse(instruction.contains("\n"));
+        }
+        String refresh = ReviewInstructions.forTourRefresh("rs_abc123", List.of("s2"), 1);
+        assertTrue(refresh.contains("one concept per step"), refresh);
+        assertFalse(refresh.contains("\n"));
     }
 
     @Test

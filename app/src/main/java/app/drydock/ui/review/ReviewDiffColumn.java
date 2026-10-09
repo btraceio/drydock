@@ -21,10 +21,13 @@ import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListCell;
 import javafx.scene.control.ListView;
+import javafx.scene.control.TextField;
 import javafx.scene.control.Tooltip;
+import javafx.scene.input.KeyEvent;
 import javafx.scene.input.MouseEvent;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
+import javafx.scene.layout.StackPane;
 import javafx.scene.layout.Priority;
 import javafx.scene.control.ScrollPane;
 import javafx.scene.layout.Region;
@@ -41,6 +44,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -386,7 +390,13 @@ final class ReviewDiffColumn extends BorderPane {
         // viewportWidth for what this replaces.
         list.skinProperty().addListener((obs, old, skin) -> bindViewportWidth());
         bindViewportWidth();
-        setCenter(list);
+        findBar = buildFindBar();
+        // The bar floats over the list's top-right corner: it is a mode the
+        // reader enters and leaves, not a permanent strip taking a row of the
+        // code away.
+        StackPane stack = new StackPane(list, findBar);
+        StackPane.setAlignment(findBar, Pos.TOP_RIGHT);
+        setCenter(stack);
 
         updateContextToggle();
     }
@@ -702,6 +712,23 @@ final class ReviewDiffColumn extends BorderPane {
      */
     private long renderGeneration;
 
+    // ---- find (⌘F): text search over the rendered diff ---------------------
+    /**
+     * The walk's targets as {@code "<file> <lineKey>"} keys, in diff order:
+     * keys, not row indices, because a match can sit inside a folded run
+     * (no row until the walk expands it) and a run opening above shifts
+     * every index -- while a line key is what everything else in this
+     * class already addresses rows by, and survives both.
+     */
+    private final List<String> findMatchKeys = new ArrayList<>();
+    private final Set<String> findHitKeys = new HashSet<>();
+    private String findCurrentKey;
+    private int findCursor = -1;
+    private boolean findOpen;
+    private final TextField findField = new TextField();
+    private final Label findCount = new Label("no matches");
+    private final HBox findBar;
+
     /** Re-renders the rows so pin markers pick up a changed finding set. */
     @FunctionalInterface
     interface StepMarkSource {
@@ -909,15 +936,275 @@ final class ReviewDiffColumn extends BorderPane {
         return selectionAnchorIndex();
     }
 
-    /** Scrolls to the row anchored at {@code lineKey} in {@code file} (card → line linkage). */
-    void revealLine(String file, String lineKey) {
+    // ---- find (⌘F) --------------------------------------------------------
+
+    /**
+     * The bar itself: a field, a count, the walk's two buttons, and a close.
+     * All of its keys are handled inside the field (Enter steps, shift-Enter
+     * steps back, Esc closes), so none of them reach the board's key filter
+     * or the app-wide chain while the reader is typing.
+     */
+    private HBox buildFindBar() {
+        findField.setPromptText("Find in the diff");
+        findField.setPrefColumnCount(16);
+        findField.getStyleClass().add("review-find-field");
+        findField.textProperty().addListener((obs, was, now) -> runFind());
+        findField.addEventFilter(KeyEvent.KEY_PRESSED, event -> {
+            switch (event.getCode()) {
+                case ENTER -> {
+                    stepFind(event.isShiftDown() ? -1 : 1);
+                    event.consume();
+                }
+                case ESCAPE -> {
+                    closeFind();
+                    event.consume();
+                }
+                default -> { }
+            }
+        });
+        Button previous = new Button("‹");
+        Button next = new Button("›");
+        Button close = new Button("✕");
+        for (Button button : List.of(previous, next, close)) {
+            button.getStyleClass().add("review-find-action");
+        }
+        previous.setOnAction(event -> stepFind(-1));
+        next.setOnAction(event -> stepFind(1));
+        close.setOnAction(event -> closeFind());
+        findCount.getStyleClass().add("review-find-count");
+        HBox bar = new HBox(6, findField, findCount, previous, next, close);
+        bar.setAlignment(Pos.CENTER_LEFT);
+        bar.getStyleClass().add("review-find-bar");
+        bar.setVisible(false);
+        bar.setManaged(false);
+        return bar;
+    }
+
+    /** {@code ⌘F}: opens the bar over the rendered rows and takes the focus. */
+    void openFind() {
+        if (!findOpen) {
+            findOpen = true;
+            findBar.setVisible(true);
+            findBar.setManaged(true);
+        }
+        // Not yet laid out on the first open: focus on the next pulse, the
+        // same reason {@code onShown} defers -- an immediate requestFocus
+        // against an unrendered node is dropped.
+        Platform.runLater(() -> {
+            findField.requestFocus();
+            findField.selectAll();
+        });
+        if (findField.getText() != null && !findField.getText().isBlank()) {
+            runFind();
+        }
+    }
+
+    boolean findOpen() {
+        return findOpen;
+    }
+
+    /**
+     * Esc from anywhere (the field's own filter, or the board's unwind chain
+     * when focus has drifted): closes the bar and clears every hit mark.
+     * False when there was nothing to close, so the chain can move on.
+     */
+    boolean closeFind() {
+        if (!findOpen) {
+            return false;
+        }
+        findOpen = false;
+        findBar.setVisible(false);
+        findBar.setManaged(false);
+        findMatchKeys.clear();
+        findHitKeys.clear();
+        findCurrentKey = null;
+        findCursor = -1;
+        findCount.setText("no matches");
+        renderGeneration++;
+        refreshRender();
+        list.requestFocus();
+        return true;
+    }
+
+    /**
+     * Recomputes the walk for the field's current text and lands on the
+     * first match, keeping the reader's position when the previous match
+     * still matches (typing more of the same word narrows in place, the way
+     * every find field a reader has used behaves).
+     *
+     * <p>The matches come from the rendered DIFF's lines, not the rendered
+     * rows: a line inside a folded run is text the reader asked to find,
+     * and pretending it does not exist because it is folded would answer
+     * "no matches" to a question the diff can answer. Landing on such a
+     * key goes through {@link #revealLine}, which opens the fold that hid
+     * it. A one-character query is noise (nearly every line matches some
+     * letter), so the walk starts at two. Cheap enough per keystroke: one
+     * pass over the diff's lines, and the repaint is visible cells only
+     * (see {@link #refreshRender}).</p>
+     */
+    private void runFind() {
+        String previous = findCurrentKey;
+        computeFind();
+        if (findMatchKeys.isEmpty()) {
+            findCursor = -1;
+            findCurrentKey = null;
+        } else {
+            findCursor = Math.max(0, previous == null ? -1 : findMatchKeys.indexOf(previous));
+            findCurrentKey = findMatchKeys.get(findCursor);
+            landOnFindCursor();
+        }
+        updateFindCount();
+        renderGeneration++;
+        refreshRender();
+    }
+
+    /**
+     * The rows' layout changed under the walk (a fold opened, a rebuild):
+     * recompute against what the diff still says, keeping the walk on the
+     * key it was on -- which is exactly why the walk is keyed, not indexed.
+     */
+    private void refreshFind() {
+        if (!findOpen) {
+            return;
+        }
+        String current = findCurrentKey;
+        computeFind();
+        findCursor = current == null ? -1 : findMatchKeys.indexOf(current);
+        if (findCursor < 0 && !findMatchKeys.isEmpty()) {
+            findCursor = 0;
+        }
+        findCurrentKey = findCursor >= 0 ? findMatchKeys.get(findCursor) : null;
+        updateFindCount();
+        renderGeneration++;
+        refreshRender();
+    }
+
+    private void stepFind(int direction) {
+        if (findMatchKeys.isEmpty()) {
+            return;
+        }
+        findCursor = Math.floorMod(findCursor + direction, findMatchKeys.size());
+        findCurrentKey = findMatchKeys.get(findCursor);
+        landOnFindCursor();
+        updateFindCount();
+        renderGeneration++;
+        refreshRender();
+    }
+
+    /** Marks and reveals the key the walk is on: scrolls to its row, opening the fold that hid it. */
+    private void landOnFindCursor() {
+        findCurrentKey = findMatchKeys.get(findCursor);
+        // The key's last space splits it: line keys carry no spaces, file
+        // paths may.
+        int split = findCurrentKey.lastIndexOf(' ');
+        revealLine(findCurrentKey.substring(0, split), findCurrentKey.substring(split + 1));
+    }
+
+    private void updateFindCount() {
+        findCount.setText(findMatchKeys.isEmpty()
+                ? "no matches"
+                : (findCursor + 1) + " / " + findMatchKeys.size());
+    }
+
+    /** The walk's keys for the field's text, from the rendered diff's own lines. */
+    private void computeFind() {
+        findMatchKeys.clear();
+        findHitKeys.clear();
+        findCurrentKey = null;
+        findCursor = -1;
+        String query = findField.getText() == null ? "" : findField.getText().strip();
+        if (query.length() < 2) {
+            return;
+        }
+        String needle = query.toLowerCase(Locale.ROOT);
+        UnifiedDiff rendered = renderedDiff();
+        if (rendered == null) {
+            return;
+        }
+        for (UnifiedDiff.FileDiff file : rendered.files()) {
+            for (UnifiedDiff.Hunk hunk : file.hunks()) {
+                for (UnifiedDiff.Line line : hunk.lines()) {
+                    if (line.text().toLowerCase(Locale.ROOT).contains(needle)) {
+                        String key = file.path() + " " + line.lineKey();
+                        findMatchKeys.add(key);
+                        findHitKeys.add(key);
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Scrolls to the row anchored at {@code lineKey} in {@code file} (card →
+     * line linkage), opening whatever hid it. A reveal that lands nowhere is
+     * indistinguishable from a dead button -- a jump to a location inside a
+     * folded run used to do nothing at all -- so a target the exact scan
+     * misses gets fallbacks: a line inside a collapsed run opens that hunk's
+     * folds first, a line past the row cap reaches its hunk header, and a
+     * line the rendered diff does not carry returns false for the caller to
+     * say so rather than stay silent.
+     */
+    boolean revealLine(String file, String lineKey) {
         for (int i = 0; i < rows.size(); i++) {
             if (rows.get(i) instanceof ReviewDiffRow.Line line
                     && line.file().equals(file) && line.lineKey().equals(lineKey)) {
                 list.scrollTo(Math.max(0, i - 3));
-                return;
+                return true;
             }
         }
+        return revealHidden(file, lineKey);
+    }
+
+    /**
+     * The fallbacks of {@link #revealLine}: find the hunk of the rendered
+     * diff whose lines carry {@code lineKey}, open every fold of that hunk
+     * (a jump is a navigation intent; the reader asked to land THERE, and
+     * {@code c} re-folds), and try the exact row again. Still missing (the
+     * row cap cut the hunk short) scrolls to the hunk's header. A key no
+     * hunk carries -- a file the column does not show, or a key from another
+     * diff -- is not this column's to reveal.
+     */
+    private boolean revealHidden(String file, String lineKey) {
+        UnifiedDiff rendered = renderedDiff();
+        if (rendered == null) {
+            return false;
+        }
+        for (UnifiedDiff.FileDiff fileDiff : rendered.files()) {
+            if (!fileDiff.path().equals(file)) {
+                continue;
+            }
+            for (int h = 0; h < fileDiff.hunks().size(); h++) {
+                boolean carries = fileDiff.hunks().get(h).lines().stream()
+                        .anyMatch(line -> line.lineKey().equals(lineKey));
+                if (!carries) {
+                    continue;
+                }
+                boolean openedAFold = false;
+                for (ReviewDiffRow row : rows) {
+                    if (row instanceof ReviewDiffRow.CollapsedRun run
+                            && run.file().equals(file) && run.hunkIndex() == h) {
+                        expandedRuns.add(run.key());
+                        openedAFold = true;
+                    }
+                }
+                if (openedAFold) {
+                    // Not rebuild(): that scrolls to the top, and the whole
+                    // point is to land on the target.
+                    rows.setAll(buildRows());
+                    refreshFind();
+                    for (int i = 0; i < rows.size(); i++) {
+                        if (rows.get(i) instanceof ReviewDiffRow.Line line
+                                && line.file().equals(file) && line.lineKey().equals(lineKey)) {
+                            list.scrollTo(Math.max(0, i - 3));
+                            return true;
+                        }
+                    }
+                }
+                return revealHunk(file, h);
+            }
+            return false;
+        }
+        return false;
     }
 
     /**
@@ -1182,6 +1469,7 @@ final class ReviewDiffColumn extends BorderPane {
 
     private void rebuild() {
         rows.setAll(buildRows());
+        refreshFind();
         // Re-anchored rather than dropped: a rebuild happens for reasons that
         // have nothing to do with the draft (a pin refresh, the context
         // toggle), and losing typed text to one of those is the kind of thing
@@ -1329,6 +1617,7 @@ final class ReviewDiffColumn extends BorderPane {
         // expanding a run is the one action whose whole point is to stay
         // where the reader already is.
         rows.setAll(buildRows());
+        refreshFind();
     }
 
     /**
@@ -1604,6 +1893,17 @@ final class ReviewDiffColumn extends BorderPane {
             case DEL -> "row-del";
             case CONTEXT -> "row-context";
         });
+        if (findOpen) {
+            // The find walk's signaling: every hit row reads as one, the
+            // row the walk is on reads as the one -- the reader has to see
+            // WHERE the matches are, not just be scrolled between them.
+            String key = row.file() + " " + row.lineKey();
+            if (key.equals(findCurrentKey)) {
+                box.getStyleClass().add("find-hit-current");
+            } else if (findHitKeys.contains(key)) {
+                box.getStyleClass().add("find-hit");
+            }
+        }
         Optional<StepMark> mark = stepMarks.markAt(row.file(), row.lineKey());
         if (mark.isPresent()) {
             StepMark m = mark.get();

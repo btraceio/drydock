@@ -50,11 +50,12 @@ class ShortcutsOverlayParityTest {
 
     /**
      * Rows in "IN REVIEW" that the board's key filter does not bind: {@code
-     * ⌘⏎} sends a free-text answer from the step panel's own text area.
+     * ⌘⏎} sends a free-text answer from the step panel's own text area, and
+     * {@code ⌘F} opens the find bar through the global shortcut chain.
      */
     private static final Set<String> NOT_THE_REVIEW_BOARDS_OWN_BINDING = Set.of(
             "⌘⏎",
-            "⌘[ / ⌘]", // trail navigation: bound in the global shortcut chain, as in the Explorer
+            "⌘F", // the find bar: bound in the global shortcut chain, not handleShortcut
             "⏎ / u / a" // an open peek's keys, which only exist while a peek is open
     );
 

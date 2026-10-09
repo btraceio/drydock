@@ -11,6 +11,7 @@ import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Severity;
 import app.drydock.review.Triage;
 import app.drydock.review.tour.TourRecord;
+import app.drydock.review.tour.TourStep;
 import app.drydock.review.tour.TourStore;
 import app.drydock.ui.nav.SymbolPeek;
 import javafx.scene.layout.Region;
@@ -241,9 +242,10 @@ final class FakeReviewHost implements SessionReviewView.Host {
     }
 
     @Override
-    public void postMessage(ReviewScope scope, ReviewAnnotation finding, String body) {
+    public boolean postMessage(ReviewScope scope, ReviewAnnotation finding, String body) {
         store.mutate(finding.key(), current -> current.withReply(
                 new ReviewAnnotation.Message("You", Instant.now(), body)));
+        return scope.sessionId().isPresent();
     }
 
     /** Written into the same store the real host uses, so the margin and pins pick it up. */
@@ -328,6 +330,9 @@ final class FakeReviewHost implements SessionReviewView.Host {
     /** Whether a reviewer is available at all; empty models "no reviewer configured". */
     final List<String> reviewers = new ArrayList<>();
     final List<String> reviewRuns = new ArrayList<>();
+    /** Deep-review dispatches seen, and what the next one answers. */
+    int deepReviewRequests;
+    boolean deepReviewHandoff = true;
 
     @Override
     public boolean runReview(ReviewScope scope) {
@@ -336,6 +341,22 @@ final class FakeReviewHost implements SessionReviewView.Host {
         }
         reviewRuns.add(scope.id());
         return true;
+    }
+
+    @Override
+    public boolean requestDeepReview(ReviewScope scope) {
+        deepReviewRequests++;
+        return deepReviewHandoff;
+    }
+
+    /** Step asks seen, and what the next one answers. */
+    int stepAskRequests;
+    boolean stepAskHandoff = true;
+
+    @Override
+    public boolean requestStepAsk(ReviewScope scope, TourStep step) {
+        stepAskRequests++;
+        return stepAskHandoff;
     }
 
     @Override

@@ -474,6 +474,16 @@ class OpenSessionTabReviewSubTabTest extends FxTest {
         }
 
         @Override
+        public boolean requestDeepReview(ReviewScope scope) {
+            return false;
+        }
+
+        @Override
+        public boolean requestStepAsk(ReviewScope scope, app.drydock.review.tour.TourStep step) {
+            return false;
+        }
+
+        @Override
         public Optional<Integer> openFindings(ReviewScope scope) {
             return Optional.empty();
         }
@@ -527,7 +537,8 @@ class OpenSessionTabReviewSubTabTest extends FxTest {
         }
 
         @Override
-        public void postMessage(ReviewScope scope, ReviewAnnotation finding, String body) {
+        public boolean postMessage(ReviewScope scope, ReviewAnnotation finding, String body) {
+            return false;
         }
 
         @Override

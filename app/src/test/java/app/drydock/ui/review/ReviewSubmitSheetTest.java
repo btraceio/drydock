@@ -14,6 +14,7 @@ import app.drydock.review.SubmitPlan;
 import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
+import javafx.scene.control.CheckBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.ToggleButton;
@@ -93,6 +94,119 @@ class ReviewSubmitSheetTest extends FxTest {
         assertTrue(submit.isDisabled(), "Request changes with a blank summary must disable Submit again");
     }
 
+    /**
+     * The composer is a multi-line box: plain Enter is a newline (and does
+     * NOT submit), ⌘⏎ submits from inside it -- the same contract as the
+     * step panel's free-text answer -- and Enter submits from anywhere
+     * outside it (the default button).
+     */
+    @Test
+    void theSummaryIsAMultiLineComposerWithCmdEnterToSubmit() {
+        TextArea summary = lookup(".review-composer-input").query();
+        interact(() -> {
+            summary.requestFocus();
+            summary.setText("First line");
+            summary.positionCaret(summary.getText().length());
+        });
+        press(javafx.scene.input.KeyCode.ENTER).release(javafx.scene.input.KeyCode.ENTER);
+        interact(() -> summary.appendText("second line"));
+        FxSync.waitForFxEvents();
+
+        assertEquals("First line\nsecond line", summary.getText(),
+                "plain Enter is a newline, not a submit");
+        assertTrue(submitted.isEmpty(), "Enter inside the composer must not submit");
+
+        // Shortcut down BEFORE Enter, or Enter's KEY_PRESSED carries no
+        // shortcut modifier -- the robot presses what it is given in order.
+        press(javafx.scene.input.KeyCode.SHORTCUT);
+        press(javafx.scene.input.KeyCode.ENTER).release(javafx.scene.input.KeyCode.ENTER);
+        release(javafx.scene.input.KeyCode.SHORTCUT);
+        FxSync.waitForFxEvents();
+
+        assertEquals(1, submitted.size(), "⌘⏎ submits from inside the composer");
+        assertEquals("First line\nsecond line", submitted.get(0)[1]);
+    }
+
+    /**
+     * The editable row: Edit opens a multi-line draft of the finding's
+     * body, ⌘⏎ commits it, the row then shows the reworded text with an
+     * "edited" chip -- what posts may differ from what the board shows,
+     * and the difference must never be silent -- and Esc drops the draft.
+     */
+    @Test
+    void aFindingCanBeRewordedForThePostAndTheRowSaysItWasEdited() {
+        ReviewAnnotation.Key key = new ReviewAnnotation.Key("scope-1", "finding-7");
+        Comment comment = new Comment("src/Foo.java", "this loop walks the whole list",
+                new Anchor(12, Side.RIGHT, OptionalInt.empty(), Optional.empty()));
+        rebuildSheet(new SubmitPlan(Event.COMMENT, List.of(comment), List.of(key), List.of(), List.of()));
+
+        assertTrue(queryLabels(".review-submit-edited-chip").isEmpty(), "nothing is edited yet");
+        clickOn("Edit");
+        FxSync.waitForFxEvents();
+        TextArea draft = lookup(".review-submit-editor .review-composer-input").query();
+        interact(() -> draft.setText("this loop walks the whole list — bounded by MAX"));
+        press(javafx.scene.input.KeyCode.SHORTCUT);
+        press(javafx.scene.input.KeyCode.ENTER).release(javafx.scene.input.KeyCode.ENTER);
+        release(javafx.scene.input.KeyCode.SHORTCUT);
+        FxSync.waitForFxEvents();
+
+        assertEquals("this loop walks the whole list — bounded by MAX",
+                sheet.editedBodies().get(key), "the edit is collected for the post");
+        assertEquals(List.of("edited"), queryLabels(".review-submit-edited-chip"),
+                "the row says what posts differs from the board");
+        assertTrue(queryLabels(".review-submit-comment-body").stream()
+                        .anyMatch(text -> text.startsWith("this loop walks the whole list — bounded by MAX")),
+                "the row shows the reworded text: " + queryLabels(".review-submit-comment-body"));
+
+        // Esc drops the draft without touching the committed edit.
+        clickOn("Edit");
+        FxSync.waitForFxEvents();
+        TextArea reopened = lookup(".review-submit-editor .review-composer-input").query();
+        interact(() -> reopened.setText("an abandoned draft"));
+        press(javafx.scene.input.KeyCode.ESCAPE).release(javafx.scene.input.KeyCode.ESCAPE);
+        FxSync.waitForFxEvents();
+        assertEquals("this loop walks the whole list — bounded by MAX",
+                sheet.editedBodies().get(key), "Esc drops the draft, not the committed edit");
+    }
+
+    /**
+     * The fresh-head note: the sheet must say whether the anchors were
+     * checked against the diff as reviewed or against the pull request's
+     * current head -- the human decides what to post on top of that fact.
+     */
+    @Test
+    void theFreshHeadVerificationNoteShowsAboveTheRoutes() {
+        interact(() -> sheet.showVerificationNote(
+                "The pull request has newer commits (def4567…) — every finding's anchor was re-verified."));
+        FxSync.waitForFxEvents();
+
+        List<String> notes = queryLabels(".review-submit-verification");
+        assertEquals(1, notes.size(), "exactly one note, where the routes begin");
+        assertTrue(notes.getFirst().contains("re-verified"), notes.getFirst());
+    }
+
+    /** A refused finding can be ticked into the review body; the sheet reports exactly the ticked keys. */
+    @Test
+    void aRefusalCanBeOverriddenIntoTheBody() {
+        ReviewAnnotation finding = ReviewAnnotation.human("rs_scope", "src/Foo.java", "n5", "n5",
+                new ReviewAnnotation.Message("You", java.time.Instant.EPOCH, "moved by the new push"));
+        rebuildSheet(SubmitPlan.of(List.of(finding), List.of(),
+                new SubmitPlan.DiffIndex(java.util.Map.of(), java.util.Map.of(), "the PR's current head")));
+        FxSync.waitForFxEvents();
+
+        CheckBox override = lookup(".review-submit-refusal-override").query();
+        interact(() -> override.setSelected(true));
+        FxSync.waitForFxEvents();
+
+        assertEquals(java.util.Set.of(finding.key()),
+                sheet.overriddenRefusals(),
+                "the ticked refusal is reported for the submit click");
+
+        interact(() -> override.setSelected(false));
+        assertEquals(java.util.Set.of(), sheet.overriddenRefusals(),
+                "unticking withdraws the override before the click");
+    }
+
     @Test
     void everyCommentAndRefusalIsListed() {
         Comment ranged = new Comment("src/Foo.java",
@@ -103,7 +217,10 @@ class ReviewSubmitSheetTest extends FxTest {
         SubmitPlan.Refusal refusal = new SubmitPlan.Refusal(
                 new ReviewAnnotation.Key("scope-1", "finding-3"),
                 "line o5 is not in this diff");
-        SubmitPlan plan = new SubmitPlan(Event.APPROVE, List.of(ranged, single), List.of(), List.of(refusal), List.of());
+        SubmitPlan plan = new SubmitPlan(Event.APPROVE, List.of(ranged, single),
+                List.of(new ReviewAnnotation.Key("scope-1", "finding-1"),
+                        new ReviewAnnotation.Key("scope-1", "finding-2")),
+                List.of(refusal), List.of());
 
         rebuildSheet(plan);
 
@@ -147,7 +264,8 @@ class ReviewSubmitSheetTest extends FxTest {
     void aCrossSideAnchorLabelsEachEndWithItsOwnSide() {
         Comment crossSide = new Comment("src/Foo.java", "selecting across the deletion",
                 new Anchor(48, Side.RIGHT, OptionalInt.of(120), Optional.of(Side.LEFT)));
-        SubmitPlan plan = new SubmitPlan(Event.APPROVE, List.of(crossSide), List.of(), List.of(), List.of());
+        SubmitPlan plan = new SubmitPlan(Event.APPROVE, List.of(crossSide),
+                List.of(new ReviewAnnotation.Key("scope-1", "finding-4")), List.of(), List.of());
 
         rebuildSheet(plan);
 
@@ -238,7 +356,8 @@ class ReviewSubmitSheetTest extends FxTest {
     void aRealPointerClickOnSubmitInvokesOnSubmitWithTheChosenEventAndSummary() {
         Comment comment = new Comment("src/Foo.java", "existing finding",
                 new Anchor(12, Side.RIGHT, OptionalInt.empty(), Optional.empty()));
-        SubmitPlan plan = new SubmitPlan(Event.COMMENT, List.of(comment), List.of(), List.of(), List.of());
+        SubmitPlan plan = new SubmitPlan(Event.COMMENT, List.of(comment),
+                List.of(new ReviewAnnotation.Key("scope-1", "finding-5")), List.of(), List.of());
         rebuildSheet(plan);
 
         clickOn(".review-composer-input");
@@ -264,7 +383,9 @@ class ReviewSubmitSheetTest extends FxTest {
         SubmitPlan.BodyNote note = new SubmitPlan.BodyNote(
                 new ReviewAnnotation.Key("scope-1", "finding-9"), "src/Foo.java", "500",
                 "callers.forEach(Caller::run);", "who else calls this?");
-        SubmitPlan plan = new SubmitPlan(Event.APPROVE, List.of(inline), List.of(), List.of(), List.of(note));
+        SubmitPlan plan = new SubmitPlan(Event.APPROVE, List.of(inline),
+                List.of(new ReviewAnnotation.Key("scope-1", "finding-8"),
+                        note.key()), List.of(), List.of(note));
 
         rebuildSheet(plan, new ReviewSubmitSheet.Unverified(2, 1, 3));
 

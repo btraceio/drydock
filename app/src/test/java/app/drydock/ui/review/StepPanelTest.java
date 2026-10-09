@@ -10,12 +10,14 @@ import app.drydock.review.tour.StepGate;
 import app.drydock.review.tour.StepProgress;
 import app.drydock.review.tour.TourAnchor;
 import app.drydock.review.tour.TourCheck;
+import app.drydock.review.tour.TourDiagram;
 import app.drydock.review.tour.TourStep;
 import app.drydock.testing.FxSync;
 import app.drydock.testing.FxTest;
 import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
+import javafx.scene.control.Label;
 import javafx.scene.text.Text;
 import app.drydock.review.tour.ImpactNote;
 import app.drydock.review.tour.StepImpact;
@@ -73,13 +75,26 @@ class StepPanelTest extends FxTest {
             @Override public void openLocation(String file, int line) { calls.add("open " + file + ":" + line); }
             @Override public void selectStep(String stepId) { calls.add("select " + stepId); }
             @Override public void requestRefresh() { calls.add("refresh"); }
-            @Override public void postMessage(ReviewAnnotation finding, String body) {
+            @Override public boolean askAboutStep(TourStep step) {
+                calls.add("ask step " + step.title());
+                return stepAskReachable.get();
+            }
+            @Override public boolean postMessage(ReviewAnnotation finding, String body) {
                 calls.add("message " + finding.id() + " " + body);
+                return agentReachable.get();
             }
         });
         stage.setScene(new Scene(panel, 336, 700));
         stage.show();
     }
+
+    /** Flipped by the test for the no-live-session case; the host asks only while it is true. */
+    private final java.util.concurrent.atomic.AtomicBoolean agentReachable =
+            new java.util.concurrent.atomic.AtomicBoolean(true);
+
+    /** What the step-ask host will answer; flipped by the refusal test. */
+    private final java.util.concurrent.atomic.AtomicBoolean stepAskReachable =
+            new java.util.concurrent.atomic.AtomicBoolean(true);
 
     @Test
     void choicesAreNumberedButtonsThatAnswerTheCheck() {
@@ -87,6 +102,79 @@ class StepPanelTest extends FxTest {
         clickOn("2  returns");
         FxSync.waitForFxEvents();
         assertEquals(List.of("answer c1 1"), calls);
+    }
+
+    /**
+     * The step's diagram: stage 1 visible from the start, a real Button
+     * revealing each next stage, and none left when the drawing is whole.
+     */
+    @Test
+    void aDiagramRevealsOneStageAtATime() {
+        TourStep step = new TourStep("s1", "Guard", "Why the guard exists.",
+                List.of(new TourAnchor("src/A.java", "n3", "n9")), List.of(), List.of(predict()),
+                Optional.of(new TourDiagram("Fan-in",
+                        List.of("a → b", "a → c", "a → d"))));
+        CheckProgress answered = new CheckProgress("c1", 1, CheckProgress.Status.PASSED, Optional.empty(),
+                Optional.empty(), Optional.empty());
+        interact(() -> panel.show(new StepView(step, 1, 3, new StepProgress("s1", List.of(),
+                Map.of("c1", answered), StepProgress.Decision.NONE, Optional.empty(), false))));
+        FxSync.waitForFxEvents();
+
+        Label drawing = lookup(".step-diagram-drawing").queryAs(Label.class);
+        assertEquals("a → b", drawing.getText(), "the first stage is visible from the start");
+        assertEquals("Fan-in", lookup(".step-diagram-caption").queryAs(Label.class).getText());
+
+        Button reveal = lookup(".step-diagram-reveal").queryAs(Button.class);
+        assertEquals("Reveal stage 2 of 3", displayed(reveal));
+        interact(reveal::fire);
+        FxSync.waitForFxEvents();
+        assertEquals("a → b\na → c", drawing.getText(), "stages continue the drawing, they are not separate pictures");
+
+        interact(reveal::fire);
+        FxSync.waitForFxEvents();
+        assertEquals("a → b\na → c\na → d", drawing.getText());
+        assertTrue(lookup(".step-diagram-reveal").queryAll().isEmpty(),
+                "nothing left to reveal: the button goes, the drawing stays");
+    }
+
+    /** One stage needs no reveal button -- the drawing is already whole. */
+    @Test
+    void aSingleStageDiagramHasNoRevealButton() {
+        TourStep step = new TourStep("s1", "Guard", "Why the guard exists.",
+                List.of(new TourAnchor("src/A.java", "n3", "n9")), List.of(), List.of(predict()),
+                Optional.of(new TourDiagram("Fan-in", List.of("a → b"))));
+        CheckProgress answered = new CheckProgress("c1", 1, CheckProgress.Status.PASSED, Optional.empty(),
+                Optional.empty(), Optional.empty());
+        interact(() -> panel.show(new StepView(step, 1, 3, new StepProgress("s1", List.of(),
+                Map.of("c1", answered), StepProgress.Decision.NONE, Optional.empty(), false))));
+
+        assertEquals("a → b", lookup(".step-diagram-drawing").queryAs(Label.class).getText());
+        assertTrue(lookup(".step-diagram-reveal").queryAll().isEmpty());
+    }
+
+    /** The step's ask is a real button that reports the hand-off honestly. */
+    @Test
+    void theStepAskButtonHandsTheStepToTheHost() {
+        interact(() -> panel.show(view(CheckProgress.fresh("c1"))));
+
+        interact(() -> lookup("Ask the agent about this step").queryAs(Button.class).fire());
+
+        assertEquals(List.of("ask step Guard"), calls);
+    }
+
+    /** A refused hand-off says so: a click that looks like it worked is the silent failure. */
+    @Test
+    void theStepAskSaysSoWhenNoSessionWasAsked() {
+        stepAskReachable.set(false);
+        interact(() -> panel.show(view(CheckProgress.fresh("c1"))));
+
+        interact(() -> lookup("Ask the agent about this step").queryAs(Button.class).fire());
+        FxSync.waitForFxEvents();
+
+        assertTrue(lookup(".step-panel-transient").queryAll().stream()
+                        .anyMatch(node -> ((javafx.scene.control.Label) node).getText()
+                                .contains("No live session")),
+                "a refused hand-off must say so, never look like it worked");
     }
 
     private static String displayed(Button button) {
@@ -114,7 +202,7 @@ class StepPanelTest extends FxTest {
     void anImpactEntryWithAnUnderscoreIsShownVerbatim() {
         interact(() -> panel.showImpact(new StepPanel.ImpactView(
                 List.of(new ImpactNote("src/snake_case.h", 1, "keep max_value in range")),
-                new StepImpact(List.of(), List.of(), List.of(), List.of(), Optional.empty()),
+                new StepImpact(List.of(), List.of(), List.of(), List.of(), List.of(), Optional.empty()),
                 Map.of(), false, Optional.empty(), true)));
         Button entry = lookup("src/snake_case.h:1 — keep max_value in range").queryAs(Button.class);
         assertFalse(entry.isMnemonicParsing());
@@ -401,5 +489,34 @@ class StepPanelTest extends FxTest {
 
         assertEquals(List.of("message f1 Is this reachable from the CLI?"), calls,
                 "posted to the thread, and no triage recorded");
+        Label transient_ = lookup(".step-panel-transient").query();
+        assertTrue(transient_.getText().contains("Asked the agent in the finding's thread"),
+                "the send says the agent was asked: " + transient_.getText());
+    }
+
+    /**
+     * The defect this guards: the send used to claim the agent had been
+     * asked whatever the truth was -- with no live session nobody was, and
+     * the reader waited for an answer that was never coming.
+     */
+    @Test
+    void whenNoSessionIsReachableTheSendSaysSoInsteadOfClaimingItAsked() {
+        agentReachable.set(false);
+        interact(() -> {
+            panel.show(view(CheckProgress.fresh("c1")));
+            panel.showTriage(List.of(proposal("f1")));
+        });
+        clickOn("Not sure");
+        FxSync.waitForFxEvents();
+        clickOn(".step-finding-reply").write("Why here and not in the caller?");
+        FxSync.waitForFxEvents();
+        clickOn("Send");
+        FxSync.waitForFxEvents();
+
+        assertEquals(List.of("message f1 Why here and not in the caller?"), calls,
+                "the message still lands in the thread; only the ask fails");
+        Label transient_ = lookup(".step-panel-transient").query();
+        assertTrue(transient_.getText().contains("No running session"), transient_.getText());
+        assertTrue(transient_.getText().contains("waits in the thread"), transient_.getText());
     }
 }

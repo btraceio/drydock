@@ -27,7 +27,6 @@ import app.drydock.review.tour.TourMigration;
 import app.drydock.review.tour.TourRecord;
 import app.drydock.review.tour.TourStep;
 import app.drydock.ui.UiErrors;
-import app.drydock.ui.nav.LexicalUsageProvider;
 import app.drydock.ui.nav.NavigationTrail;
 import app.drydock.ui.nav.SymbolPeekService;
 
@@ -254,7 +253,7 @@ final class TourController {
             new OutOfDiffFanIn.Result(Map.of(), Optional.empty());
 
     private static final StepImpact NO_IMPACT =
-            new StepImpact(List.of(), List.of(), List.of(), List.of(), Optional.empty());
+            new StepImpact(List.of(), List.of(), List.of(), List.of(), List.of(), Optional.empty());
 
     /**
      * Every step's measured impact, computed off the FX thread on the
@@ -695,7 +694,7 @@ final class TourController {
             Optional<String> failure = view.graphFailure(scopeId, diff.get());
             if (failure.isPresent()) {
                 // No graph is coming for this diff: say why, never "Finding callers…" for good.
-                StepImpact unparsed = new StepImpact(List.of(), List.of(), List.of(), List.of(),
+                StepImpact unparsed = new StepImpact(List.of(), List.of(), List.of(), List.of(), List.of(),
                         Optional.of("the change could not be parsed: " + failure.get()));
                 return new StepPanel.ImpactView(step.impactNotes(), unparsed, Map.of(), false, Optional.empty(),
                         true);
@@ -769,7 +768,7 @@ final class TourController {
                         }
                         LOG.log(Level.WARNING, "Could not measure the tour's impact for scope "
                                 + key.scopeId(), failure);
-                        StepImpact unmeasured = new StepImpact(List.of(), List.of(), List.of(), List.of(),
+                        StepImpact unmeasured = new StepImpact(List.of(), List.of(), List.of(), List.of(), List.of(),
                                 Optional.of("the impact could not be measured: " + UiErrors.message(failure)));
                         Map<String, StepImpact> computed = new HashMap<>();
                         Set<String> everyStep = new HashSet<>();
@@ -806,7 +805,15 @@ final class TourController {
             return;
         }
         ReviewNavigation nav = navigation.get();
-        UsageProvider provider = new LexicalUsageProvider(new SymbolPeekService(nav.root(), nav.search()),
+        // The ONE provider construction site (usage-resolution design
+        // 2026-10-08, §7): the host's factory, the same one the diff
+        // column's peeks go through, so the step panel's callees and the
+        // peeks share whatever tier the workspace composes. The default is
+        // exactly the lexical provider this method built itself before the
+        // factory existed; the resolution below never waits on a higher
+        // tier (§6) because the composed future already carries the
+        // lexical floor.
+        UsageProvider provider = host.usageProvider(new SymbolPeekService(nav.root(), nav.search()),
                 view.changedLinesOfReviewDiff());
         for (String name : wanted) {
             calleesResolving.add(name);
@@ -1333,7 +1340,12 @@ final class TourController {
     private void revealAnchor(TourStep step, int anchorIndex) {
         if (anchorIndex >= 0 && anchorIndex < step.anchors().size()) {
             TourAnchor anchor = step.anchors().get(anchorIndex);
-            diffColumn.revealLine(anchor.file(), anchor.startKey());
+            if (!diffColumn.revealLine(anchor.file(), anchor.startKey())) {
+                // A reveal that lands nowhere reads as a dead button; the
+                // honest outcome is to say where the line went.
+                view.notice("The step's anchor " + anchor.file() + " " + anchor.startKey()
+                        + " is not on screen — the diff is truncated past it");
+            }
         }
     }
 
@@ -1529,6 +1541,25 @@ final class TourController {
             overrideCurrentStep(reason);
         }
 
+        /**
+         * The step panel's ask: the question id's minting and the prompt's
+         * sending both live behind the view's host (the workspace owns the
+         * pending-question registry the answer will come back through), so
+         * this only reports the hand-off honestly.
+         */
+        @Override
+        public boolean askAboutStep(TourStep step) {
+            Optional<ReviewScope> scope = view.selectedScope();
+            if (scope.isEmpty()) {
+                return false;
+            }
+            boolean asked = host.requestStepAsk(scope.get(), step);
+            stepPanel.showTransient(asked
+                    ? "Asked -- the answer will appear here"
+                    : "No live session to ask -- open the scope's session first");
+            return asked;
+        }
+
         @Override
         public void requestRefresh() {
             Optional<ReviewScope> scope = view.selectedScope();
@@ -1546,11 +1577,12 @@ final class TourController {
         }
 
         @Override
-        public void postMessage(ReviewAnnotation finding, String body) {
-            view.selectedScope().ifPresent(scope -> {
-                host.postMessage(scope, finding, body);
+        public boolean postMessage(ReviewAnnotation finding, String body) {
+            return view.selectedScope().map(scope -> {
+                boolean asked = host.postMessage(scope, finding, body);
                 view.refreshReviewState();
-            });
+                return asked;
+            }).orElse(false);
         }
 
         @Override
@@ -1609,7 +1641,10 @@ final class TourController {
 
         @Override
         public void revealFinding(ReviewAnnotation finding) {
-            diffColumn.revealLine(finding.file(), finding.startKey());
+            if (!diffColumn.revealLine(finding.file(), finding.startKey())) {
+                view.notice("The finding's line " + finding.file() + " " + finding.startKey()
+                        + " is not on screen — the diff is truncated past it");
+            }
         }
 
         @Override

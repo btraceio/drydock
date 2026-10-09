@@ -1,5 +1,6 @@
 package app.drydock.ui.nav;
 
+import app.drydock.review.Provenance;
 import app.drydock.ui.code.SyntaxHighlighter;
 import javafx.geometry.Pos;
 import javafx.scene.Node;
@@ -48,15 +49,31 @@ public final class PeekLayer extends Pane {
     /** Usage rows shown before the list says how many more there are. */
     static final int MAX_USAGES_SHOWN = 30;
 
+    /** The usages list's own body cap: taller than the code's, because it is the only thing on show. */
+    private static final double USAGE_MAX_BODY_HEIGHT = 300;
+
+    /**
+     * Whether the one-per-session language-server hint has shown. One app
+     * run is one session (usage-resolution design 2026-10-08, §§3 and 8):
+     * the hint is quiet by contract -- never an error, never a dialog -- and
+     * saying it every peek would be the nagging the "quiet" is there to
+     * prevent. FX-thread-only state, like every render input here.
+     */
+    private static boolean languageServerHintShown;
+
     private final List<SymbolPeek> stack = new ArrayList<>();
     private final List<Region> cards = new ArrayList<>();
 
     private boolean usagesOpen;
     private Consumer<SymbolPeek> onPromote = peek -> { };
     private Consumer<SymbolPeek> onAsk = peek -> { };
+    /** A click on a usage row: the owner decides what jumping to that occurrence means. */
+    private Consumer<SymbolPeek.Occurrence> onOpenOccurrence = occurrence -> { };
     private Runnable onStackFull = () -> { };
     private Runnable onChanged = () -> { };
     private BooleanSupplier agentAvailable = () -> false;
+    /** Whether the language-server hint applies at all; see {@link #setLanguageServerHintApplies}. */
+    private BooleanSupplier languageServerHintApplies = () -> true;
 
     public PeekLayer() {
         getStyleClass().add("peek-layer");
@@ -78,6 +95,15 @@ public final class PeekLayer extends Pane {
         this.onAsk = handler == null ? peek -> { } : handler;
     }
 
+    /**
+     * A click on a usage row of the top card. The card itself does not
+     * guess what "going there" means: the Explorer opens the file, Review
+     * peeks at the location in place.
+     */
+    public void setOnOpenOccurrence(Consumer<SymbolPeek.Occurrence> handler) {
+        this.onOpenOccurrence = handler == null ? occurrence -> { } : handler;
+    }
+
     /** Called when a click would exceed {@link #MAX_DEPTH} (the "esc to unwind" toast). */
     public void setOnStackFull(Runnable handler) {
         this.onStackFull = handler == null ? () -> { } : handler;
@@ -96,6 +122,19 @@ public final class PeekLayer extends Pane {
      */
     public void setAgentAvailable(BooleanSupplier available) {
         this.agentAvailable = available == null ? () -> false : available;
+    }
+
+    /**
+     * Whether the once-per-session language-server hint applies: the owner
+     * answers true only while usage-resolution tier 3 is known to be
+     * unconfigured. A configured tier (starting, indexing, invalid, ...) is
+     * never told to go configure itself, and a peek the hint does not apply
+     * to never claims the once-per-session flag -- it stays available for a
+     * peek it does apply to. Evaluated on the FX thread at card build; must
+     * be cheap and non-blocking. Default: applies (unwired behaviour).
+     */
+    public void setLanguageServerHintApplies(BooleanSupplier applies) {
+        this.languageServerHintApplies = applies == null ? () -> true : applies;
     }
 
     public int depth() {
@@ -221,7 +260,7 @@ public final class PeekLayer extends Pane {
         header.setAlignment(Pos.CENTER_LEFT);
         header.getStyleClass().add("peek-header");
 
-        VBox body = new VBox(buildCode(peek, usagesOpen ? buildUsages(peek) : null));
+        VBox body = new VBox(buildCode(peek, usagesOpen));
         body.getStyleClass().add("peek-body");
 
         HBox footer = new HBox(10);
@@ -244,10 +283,84 @@ public final class PeekLayer extends Pane {
         VBox card = new VBox(header, body, footer);
         card.getStyleClass().add("peek-card");
         card.setPrefWidth(CARD_WIDTH);
+        maybeAddLanguageServerHint(card, peek);
         return card;
     }
 
-    private Node buildCode(SymbolPeek peek, Node usages) {
+    /**
+     * The one-per-session quiet footer hint (usage-resolution design
+     * 2026-10-08, §§3 and 8): on the FIRST tier-3-eligible peek of the app
+     * run -- a {@code .java} symbol peek, the only kind a JDT server could
+     * have answered -- when no occurrence resolved. A server that answered
+     * something shows its resolved rows instead; a non-Java peek is never
+     * eligible; a location-only peek has no occurrences to resolve; and the
+     * owner's {@link #setLanguageServerHintApplies applicability check}
+     * (tier 3 unconfigured) must hold. The once-per-session flag is claimed
+     * only when the hint is actually added. Never an error, never a dialog,
+     * never twice.
+     */
+    private void maybeAddLanguageServerHint(VBox card, SymbolPeek peek) {
+        if (languageServerHintShown || peek.occurrences().isEmpty()) {
+            return;
+        }
+        String fileName = peek.file().getFileName() == null ? "" : peek.file().getFileName().toString();
+        if (!fileName.endsWith(".java")) {
+            return;
+        }
+        boolean anyResolved = peek.occurrences().stream()
+                .anyMatch(occurrence -> occurrence.provenance() == Provenance.RESOLVED);
+        if (anyResolved) {
+            return;
+        }
+        if (!languageServerHintApplies.getAsBoolean()) {
+            return; // not applicable (tier 3 configured, or not yet known): the claim is kept
+        }
+        languageServerHintShown = true;
+        Label hint = new Label("Exact references need a language server — see Settings");
+        hint.getStyleClass().add("peek-lsp-hint");
+        hint.setWrapText(true);
+        card.getChildren().add(hint);
+    }
+
+    /** Test-only: the hint is once per app run, so a test session resets its session. */
+    static void resetLanguageServerHintForTest() {
+        languageServerHintShown = false;
+    }
+
+    private static Label scopedChip() {
+        Label chip = new Label("scoped");
+        chip.getStyleClass().add("peek-usage-chip-scoped");
+        return chip;
+    }
+
+    /**
+     * A language server confirmed this row (usage-resolution design
+     * 2026-10-08, §7): the scoped chip's shape in the resolved tone -- one
+     * chip shape, the label says the tier. Carries the provenance's own
+     * modifier class ({@code provenance-resolved}) beside the peek's, the
+     * same convention the step panel's resolved entries follow.
+     */
+    private static Label resolvedChip() {
+        Label chip = new Label("resolved");
+        chip.getStyleClass().addAll("peek-usage-chip-resolved", Provenance.RESOLVED.styleClass());
+        return chip;
+    }
+
+    private Node buildCode(SymbolPeek peek, boolean usages) {
+        if (usages) {
+            // The list REPLACES the code, it is not appended under it: the
+            // excerpt has its own virtualized scroll and a list below it
+            // needs a second one, so a card showing both scrolls twice --
+            // two nested vertical scrollbars, the bottom one stealing the
+            // wheel from the top. One body, one scrollbar.
+            javafx.scene.control.ScrollPane outer = new javafx.scene.control.ScrollPane(buildUsages(peek));
+            outer.setFitToWidth(true);
+            outer.getStyleClass().add("peek-scroll");
+            outer.setPrefHeight(USAGE_MAX_BODY_HEIGHT);
+            outer.setMinHeight(CARD_MAX_BODY_HEIGHT);
+            outer.setMaxHeight(USAGE_MAX_BODY_HEIGHT);
+            return outer;
+        }
         CodeArea area = new CodeArea();
         area.getStyleClass().addAll("code-area", "peek-code");
         area.setEditable(false);
@@ -276,31 +389,41 @@ public final class PeekLayer extends Pane {
         double codeHeight = Math.min(CARD_MAX_BODY_HEIGHT, 20 + peek.lines().size() * 17.0);
         scroll.setPrefHeight(codeHeight);
         scroll.setMinHeight(codeHeight);
-        if (usages == null) {
-            scroll.setMaxHeight(CARD_MAX_BODY_HEIGHT);
-            return scroll;
-        }
-        // The usage list lives INSIDE the card's bounded, scrollable body:
-        // a common identifier has hundreds of occurrences, and appending
-        // them under the body would grow the card off the top of the screen
-        // and take the footer's actions with it.
-        VBox stacked = new VBox(scroll, usages);
-        javafx.scene.control.ScrollPane outer = new javafx.scene.control.ScrollPane(stacked);
-        outer.setFitToWidth(true);
-        outer.getStyleClass().add("peek-scroll");
-        outer.setPrefHeight(CARD_MAX_BODY_HEIGHT);
-        outer.setMaxHeight(CARD_MAX_BODY_HEIGHT);
-        return outer;
+        scroll.setMaxHeight(CARD_MAX_BODY_HEIGHT);
+        return scroll;
     }
 
     private Node buildUsages(SymbolPeek peek) {
         VBox list = new VBox(2);
         list.getStyleClass().add("peek-usages");
-        Label heading = new Label("USAGES · " + peek.occurrences().size()
-                + " (lexical occurrences)"
+        long bound = peek.occurrences().stream().filter(SymbolPeek.Occurrence::bound).count();
+        int total = peek.occurrences().size();
+        // The counts the server line names (§7): from provenance, because
+        // that is the tier each row actually carries.
+        long resolved = peek.occurrences().stream()
+                .filter(occurrence -> occurrence.provenance() == Provenance.RESOLVED).count();
+        long scoped = peek.occurrences().stream()
+                .filter(occurrence -> occurrence.provenance() == Provenance.SCOPED).count();
+        String warrant = bound == 0
+                ? "lexical name matches"
+                : bound + " bound by scope · " + (total - bound)
+                        + (total - bound == 1 ? " name match" : " name matches");
+        Label heading = new Label("USAGES · " + total + " (" + warrant
+                + " — click a row to go there)"
                 + (peek.resolvedDeclaration() ? "" : " · no declaration found"));
         heading.getStyleClass().add("peek-usages-title");
+        heading.setWrapText(true);
         list.getChildren().add(heading);
+        if (resolved > 0) {
+            // The server line (§7): the only reliable "a server answered"
+            // signal is a row it confirmed -- the composed answer's status
+            // is always ANSWERED (the lexical floor), so a server that
+            // confirmed nothing keeps the ordinary headline.
+            Label server = new Label(resolved + " resolved · " + scoped + " scoped · "
+                    + (total - resolved - scoped) + " name matches");
+            server.getStyleClass().add("peek-usages-server");
+            list.getChildren().add(server);
+        }
         List<SymbolPeek.Occurrence> shown = peek.occurrences().size() > MAX_USAGES_SHOWN
                 ? peek.occurrences().subList(0, MAX_USAGES_SHOWN)
                 : peek.occurrences();
@@ -311,13 +434,29 @@ public final class PeekLayer extends Pane {
             where.setMaxWidth(Double.MAX_VALUE);
             Label chip = new Label(occurrence.inDiff() ? "in diff" : "not touched");
             chip.getStyleClass().add(occurrence.inDiff() ? "peek-usage-chip-diff" : "peek-usage-chip");
-            HBox row = new HBox(7, where, chip);
-            row.setAlignment(Pos.CENTER_LEFT);
-            row.getStyleClass().add("peek-usage-row");
-            if (!occurrence.inDiff()) {
-                row.getStyleClass().add("untouched");
+            // A bound row says so: it is a real reference, not a shared
+            // name, and the difference is exactly what the reader is
+            // scanning the list for. A RESOLVED row says the stronger thing
+            // instead -- one chip, the highest tier it earned.
+            List<Node> rowChildren = new ArrayList<>(List.of(where, chip));
+            if (occurrence.provenance() == Provenance.RESOLVED) {
+                rowChildren.add(resolvedChip());
+            } else if (occurrence.bound()) {
+                rowChildren.add(scopedChip());
             }
-            list.getChildren().add(row);
+            HBox row = new HBox(7, rowChildren.toArray(Node[]::new));
+            row.setAlignment(Pos.CENTER_LEFT);
+            // A real Button, not a labelled row: the row IS the navigation,
+            // so it must be focusable and answer Enter/Space like every
+            // other primary action in the workspace.
+            Button open = new Button();
+            open.setGraphic(row);
+            open.getStyleClass().addAll("peek-usage-row", "peek-usage-open");
+            if (!occurrence.inDiff()) {
+                open.getStyleClass().add("untouched");
+            }
+            open.setOnAction(event -> onOpenOccurrence.accept(occurrence));
+            list.getChildren().add(open);
         }
         if (shown.size() < peek.occurrences().size()) {
             // Said, not silently truncated: a capped list that does not say

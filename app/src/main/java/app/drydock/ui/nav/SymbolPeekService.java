@@ -1,6 +1,11 @@
 package app.drydock.ui.nav;
 
+import app.drydock.review.Provenance;
+import app.drydock.review.ScopeBinder;
 import app.drydock.review.SymbolWords;
+import app.drydock.review.UsageProvider;
+import app.drydock.review.UsageProvider.Usage;
+import app.drydock.review.UsageProvider.UsagesAnswer;
 import app.drydock.search.SessionSearchService;
 import app.drydock.search.SessionSearchService.FileMatches;
 import app.drydock.search.SessionSearchService.TextMatch;
@@ -11,9 +16,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -85,6 +92,95 @@ public final class SymbolPeekService {
     }
 
     /**
+     * The peek through a {@link UsageProvider} (usage-resolution design
+     * 2026-10-08, §§6–7): the provider's declaration answer centres the
+     * card, its usages answer is the occurrence list. With the lexical
+     * provider the card is exactly what {@link #peek(String, Map)} builds,
+     * because the composition is upgrade-only: a provider whose rows
+     * carry no {@link Provenance#RESOLVED} confirmation changes nothing,
+     * and one that does upgrades exactly those occurrences (the tier's
+     * per-occurrence path, MEASURED/SCOPED → RESOLVED, computed off the FX
+     * thread like every peek; §6). A provider declaration with {@code
+     * resolvedDeclaration} true re-centres the card the way the tier-2
+     * unanimous re-centre below does -- the peek shows what the reader
+     * asked about, named by what it actually is (§7).
+     *
+     * <p>The two provider queries can each be a real search, so they run
+     * on the provider's own futures and are combined on this service's
+     * executor; the caller never waits on the FX thread (§6).</p>
+     */
+    public CompletableFuture<Optional<SymbolPeek>> peek(String symbol, Map<Path, Set<Integer>> changedLines,
+                                                        UsageProvider provider) {
+        if (symbol == null || symbol.length() < MIN_SYMBOL_LENGTH) {
+            return CompletableFuture.completedFuture(Optional.empty());
+        }
+        Map<Path, Set<Integer>> changed = Map.copyOf(changedLines);
+        UsageProvider usages = Objects.requireNonNull(provider, "provider");
+        return usages.declaration(symbol)
+                .thenCombineAsync(usages.usagesAnswer(symbol),
+                        (declaration, answer) -> compose(symbol, declaration, answer, changed), resolveExecutor);
+    }
+
+    /**
+     * Maps the provider's answers back onto the peek card's shape, off the
+     * FX thread (§6): occurrences preserve the answer's text and order, the
+     * declaration becomes the card's centre, excerpt and changed-line
+     * marks are read exactly as the lexical path reads them.
+     */
+    private Optional<SymbolPeek> compose(String symbol, Optional<Usage> declaration, UsagesAnswer answer,
+                                        Map<Path, Set<Integer>> changed) {
+        List<SymbolPeek.Occurrence> occurrences = answer.usages().stream()
+                .map(row -> toOccurrence(row, changed))
+                .toList();
+        Usage centre;
+        if (declaration.isPresent()) {
+            centre = declaration.get();
+        } else if (occurrences.isEmpty()) {
+            return Optional.empty();
+        } else {
+            // Defensive only -- the floor's declaration and rows come from
+            // one peek -- but a provider that answered rows and no candidate
+            // still opens the card, on the first occurrence, the peek's own
+            // rule for "no declaration found".
+            Usage first = answer.usages().get(0);
+            centre = new Usage(first.file(), first.line(), first.text(), first.provenance(), false);
+        }
+        Path relativePath = Path.of(centre.file());
+        Path file = searchRoot.toAbsolutePath().normalize().resolve(relativePath).normalize();
+        List<String> excerpt = readExcerpt(file, centre.line());
+        if (excerpt.isEmpty()) {
+            excerpt = List.of(centre.text());
+        }
+        Set<Integer> changedInExcerpt = new java.util.LinkedHashSet<>();
+        Set<Integer> fileChanged = changed.getOrDefault(relativePath, Set.of());
+        for (int i = 0; i < excerpt.size(); i++) {
+            if (fileChanged.contains(centre.line() + i)) {
+                changedInExcerpt.add(centre.line() + i);
+            }
+        }
+        boolean scopeBound = centre.provenance() == Provenance.SCOPED;
+        boolean resolved = centre.provenance() == Provenance.RESOLVED;
+        String title = symbol + " · " + relativePath.getFileName()
+                + (centre.resolvedDeclaration()
+                        ? (scopeBound ? " · scope-bound declaration"
+                                : resolved ? " · resolved declaration" : "")
+                        : " · first occurrence");
+        return Optional.of(new SymbolPeek(symbol, title, file, relativePath, centre.line(),
+                excerpt, changedInExcerpt, occurrences, centre.resolvedDeclaration(), scopeBound));
+    }
+
+    /** One usages row back onto an occurrence, with the row's warrant (§7). */
+    private static SymbolPeek.Occurrence toOccurrence(Usage row, Map<Path, Set<Integer>> changed) {
+        Path relativePath = Path.of(row.file());
+        boolean inDiff = changed.getOrDefault(relativePath, Set.of()).contains(row.line());
+        // A RESOLVED row is as bound as a SCOPED one -- the warrant is
+        // stronger, not different, so the existing bound readers keep
+        // their meaning.
+        boolean bound = row.provenance() == Provenance.SCOPED || row.provenance() == Provenance.RESOLVED;
+        return new SymbolPeek.Occurrence(relativePath, row.line(), row.text(), inDiff, bound, row.provenance());
+    }
+
+    /**
      * A peek at a location rather than a symbol: the excerpt of {@code
      * relativePath} from {@code line}, for a waypoint or search result whose
      * file the diff column does not show. Read on a virtual thread -- the
@@ -112,6 +208,25 @@ public final class SymbolPeekService {
         }, resolveExecutor);
     }
 
+    /**
+     * The scope binder, one per service: its type index walks the repo
+     * once, and the file models it parses are reused across every peek.
+     * Lazy, so a repo with no bindable language never pays for it.
+     */
+    private ScopeBinder binder;
+
+    /** Bindable languages today: Java and Kotlin files carry walkable parse trees. */
+    static boolean bindable(String fileName) {
+        return fileName.endsWith(".java") || fileName.endsWith(".kt") || fileName.endsWith(".kts");
+    }
+
+    private ScopeBinder binder() {
+        if (binder == null) {
+            binder = new ScopeBinder(searchRoot);
+        }
+        return binder;
+    }
+
     private Optional<SymbolPeek> resolve(String symbol, List<FileMatches> files, Map<Path, Set<Integer>> changed) {
         List<Candidate> candidates = new ArrayList<>();
         // Compiled once per peek, not once per matching line: a common
@@ -130,16 +245,85 @@ public final class SymbolPeekService {
         if (candidates.isEmpty()) {
             return Optional.empty();
         }
-        List<SymbolPeek.Occurrence> occurrences = candidates.stream()
-                .map(c -> new SymbolPeek.Occurrence(c.relativePath, c.line, c.text,
-                        changed.getOrDefault(c.relativePath, Set.of()).contains(c.line)))
-                .toList();
-
         Candidate best = candidates.stream()
                 .max(Comparator.comparingInt((Candidate c) -> c.score)
                         .thenComparing(c -> -c.line))
                 .orElseThrow();
         boolean declaration = best.score > 0;
+
+        // The scoped tier (Java and Kotlin): occurrences the parse tree
+        // ties to THIS declaration are real references; a name the text
+        // shares with an unrelated member is the noise the lexical tier
+        // cannot help but find. Every failure path leaves the lexical
+        // answer exactly as it was.
+        Map<Path, Set<Integer>> boundByFile = new LinkedHashMap<>();
+        boolean declarationScopeBound = false;
+        List<Path> javaFiles = candidates.stream()
+                .map(c -> c.relativePath)
+                .filter(path -> bindable(path.getFileName().toString()))
+                .distinct()
+                .toList();
+        if (!javaFiles.isEmpty()) {
+            ScopeBinder binder = binder();
+            ScopeBinder.Declaration queried =
+                    new ScopeBinder.Declaration(best.relativePath, best.line);
+            Map<Path, ScopeBinder.Binding> bindings = new LinkedHashMap<>();
+            Map<ScopeBinder.Declaration, Integer> votes = new LinkedHashMap<>();
+            for (Path relative : javaFiles) {
+                ScopeBinder.Binding binding = binder.bind(symbol, Optional.of(queried), relative);
+                bindings.put(relative, binding);
+                binding.votes().forEach((found, count) ->
+                        votes.merge(found, count, Integer::sum));
+            }
+            boolean anyBound = bindings.values().stream().anyMatch(binding -> !binding.isEmpty());
+            if (!anyBound && votes.size() == 1) {
+                // The lexical candidate bound nothing, but every reference
+                // that resolved agrees on one other declaration: the
+                // candidate was a same-named member elsewhere, and the
+                // peek re-centres on what the code actually references.
+                // The re-bind is cheap -- the binder's file models are
+                // cached from the first pass.
+                ScopeBinder.Declaration agreed = votes.keySet().iterator().next();
+                for (Path relative : javaFiles) {
+                    bindings.put(relative, binder.bind(symbol, Optional.of(agreed), relative));
+                }
+                anyBound = bindings.values().stream().anyMatch(binding -> !binding.isEmpty());
+                if (anyBound) {
+                    Candidate at = candidates.stream()
+                            .filter(c -> c.relativePath.equals(agreed.relativePath())
+                                    && c.line == agreed.line())
+                            .findFirst().orElse(null);
+                    if (at != null) {
+                        best = at;
+                        declaration = true;
+                    }
+                    // When the agreed declaration is not among the search's
+                    // own hits (a declaration line outside the matched set),
+                    // the peek keeps its lexical centre and still shows the
+                    // bound occurrences -- the binding stands on its own.
+                }
+            }
+            // The centre the peek shows now: if bound occurrences resolve
+            // to exactly it, the binder -- not the scoring heuristic --
+            // confirmed the declaration.
+            Path centreFile = best.relativePath;
+            int centreLine = best.line;
+            declarationScopeBound = bindings.values().stream().anyMatch(binding ->
+                    binding.boundLines().values().stream()
+                            .anyMatch(d -> d.relativePath().equals(centreFile)
+                                    && d.line() == centreLine));
+            if (declarationScopeBound) {
+                declaration = true;
+                for (Map.Entry<Path, ScopeBinder.Binding> entry : bindings.entrySet()) {
+                    boundByFile.put(entry.getKey(), Set.copyOf(entry.getValue().boundLines().keySet()));
+                }
+            }
+        }
+        List<SymbolPeek.Occurrence> occurrences = candidates.stream()
+                .map(c -> new SymbolPeek.Occurrence(c.relativePath, c.line, c.text,
+                        changed.getOrDefault(c.relativePath, Set.of()).contains(c.line),
+                        boundByFile.getOrDefault(c.relativePath, Set.of()).contains(c.line)))
+                .toList();
 
         List<String> excerpt = readExcerpt(best.file, best.line);
         if (excerpt.isEmpty()) {
@@ -153,9 +337,10 @@ public final class SymbolPeekService {
             }
         }
         String title = symbol + " · " + best.relativePath.getFileName()
-                + (declaration ? "" : " · first occurrence");
+                + (declaration ? (declarationScopeBound ? " · scope-bound declaration" : "")
+                        : " · first occurrence");
         return Optional.of(new SymbolPeek(symbol, title, best.file, best.relativePath, best.line,
-                excerpt, changedInExcerpt, occurrences, declaration));
+                excerpt, changedInExcerpt, occurrences, declaration, declarationScopeBound));
     }
 
     private record Candidate(Path file, Path relativePath, int line, String text, int score) {

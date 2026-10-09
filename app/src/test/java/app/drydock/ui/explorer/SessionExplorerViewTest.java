@@ -294,6 +294,57 @@ class SessionExplorerViewTest extends FxTest {
     }
 
 
+    /**
+     * The usages mode's two defects, fixed: the list REPLACES the code (one
+     * scroll region, not the code's own scrollbar inside a second one), and
+     * each row is a real button that jumps to the place claiming the usage.
+     */
+    @Test
+    void usagesReplaceTheCodeAndARowOpensItsOccurrence() {
+        openFile("ui/Sidebar.java");
+        peek("clamp");
+        assertFalse(lookup(".peek-code").queryAll().isEmpty(), "sanity: the peeked code shows before u");
+
+        Button usagesToggle = lookup(".peek-action").<Button>queryAll().stream()
+                .filter(button -> button.getText().startsWith("u usages"))
+                .findFirst().orElseThrow();
+        interact(usagesToggle::fire);
+        waitForFxEvents();
+
+        assertTrue(lookup(".peek-usages").queryAll().size() >= 1, "the usages list is on show");
+        assertTrue(lookup(".peek-code").queryAll().isEmpty(),
+                "usages replace the code, so the card has ONE scroll region, not two nested ones");
+        List<String> rows = lookup(".peek-usage-row").<Button>queryAll().stream()
+                .map(SessionExplorerViewTest::rowText)
+                .toList();
+        assertTrue(rows.size() >= 2, "clamp occurs in both fixture files: " + rows);
+
+        Button sizeSetting = lookup(".peek-usage-row").<Button>queryAll().stream()
+                .filter(button -> rowText(button).contains("SizeSetting.java"))
+                .findFirst().orElseThrow();
+        interact(sizeSetting::fire);
+        waitForFxEvents();
+
+        Label toast = lookup(".explorer-toast").query();
+        assertTrue(toast.isVisible() && toast.getText().contains("SizeSetting.java"),
+                "the jump is a real navigation, said so: " + toast.getText());
+        assertEquals(0, onFx(() -> view.diagPeekDepth()),
+                "navigating collapsed the peek stack onto the trail");
+        assertEquals("SizeSetting.java", view.diagTrail().getLast(),
+                "the occurrence became a trail waypoint");
+    }
+
+    /** A usage row's visible text (its location label and chip), for assertions. */
+    private static String rowText(Button row) {
+        if (row.getGraphic() instanceof javafx.scene.layout.HBox box) {
+            return box.getChildren().stream()
+                    .filter(Label.class::isInstance)
+                    .map(node -> ((Label) node).getText())
+                    .collect(java.util.stream.Collectors.joining(" "));
+        }
+        return "";
+    }
+
     @Test
     void thePeekStackIsCappedAndSaysSo() {
         openFile("ui/Sidebar.java");

@@ -20,6 +20,7 @@ import app.drydock.git.WorktreeService;
 import app.drydock.github.GitHubReviewService;
 import app.drydock.github.GitHubService;
 import app.drydock.launcher.DockIcon;
+import app.drydock.lsp.JdtServerManager;
 import app.drydock.mcp.McpConfigWriter;
 import app.drydock.mcp.McpActivityLog;
 import app.drydock.mcp.McpServer;
@@ -431,9 +432,13 @@ public final class DrydockApplication extends Application {
                 @Override
                 public CompletableFuture<Void> saveWorktreesDirectory(Optional<Path> directory) {
                     // Read-modify-write in one executor task: a record
-                    // built from one new value would reset the others.
+                    // built from one new value would reset the others. The
+                    // three-argument constructor (not the two-argument
+                    // convenience form) is what preserves the language-server
+                    // component across every other setting's save.
                     return UserConfig.updateAsync(existing ->
-                            new UserConfig(directory, existing.openChangedFilesInSkim()));
+                            new UserConfig(directory, existing.openChangedFilesInSkim(),
+                                    existing.languageServer()));
                 }
 
                 @Override
@@ -443,8 +448,35 @@ public final class DrydockApplication extends Application {
 
                 @Override
                 public CompletableFuture<Void> saveOpenChangedFilesInSkim(boolean value) {
+                    // Same preservation as saveWorktreesDirectory: the
+                    // language-server component must round-trip through
+                    // every save of any other setting.
                     return UserConfig.updateAsync(existing ->
-                            new UserConfig(existing.worktreesDirectory(), value));
+                            new UserConfig(existing.worktreesDirectory(), value,
+                                    existing.languageServer()));
+                }
+
+                @Override
+                public CompletableFuture<Optional<Path>> loadLanguageServerDirectory() {
+                    // Only jdtHome is surfaced; javaHome stays hand-editable
+                    // in config.json and is preserved by the save below.
+                    return UserConfig.loadAsync()
+                            .thenApply(config -> config.languageServer().jdtHome());
+                }
+
+                @Override
+                public CompletableFuture<SettingsModal.LanguageServerOutcome> saveLanguageServerDirectory(
+                        Optional<Path> directory) {
+                    // Validation (paths, the launcher glob, the Java 17+
+                    // probe) runs inside UserConfig.saveLanguageServerAsync on
+                    // the config executor; the probe is the ProcessRunner one
+                    // in production and injectable there, so no UI-thread
+                    // blocking and no test ever runs a real java.
+                    return UserConfig.saveLanguageServerAsync(directory,
+                                    JdtServerManager.processRunnerJavaProbe())
+                            .thenApply(result -> result instanceof UserConfig.LanguageServerSaveResult.Refused refused
+                                    ? new SettingsModal.LanguageServerOutcome.Refused(refused.reason())
+                                    : SettingsModal.LanguageServerOutcome.SAVED);
                 }
             }, appShell.modalLayer()::close);
             // onClosed, not just the Done/× onClose above: Esc and a
@@ -1075,6 +1107,14 @@ public final class DrydockApplication extends Application {
                     appShell.toggleTheme();
                 }
                 event.consume();
+            } else if (cmd && event.getCode() == KeyCode.F) {
+                // Review's source viewer has a find bar; the terminal's own
+                // ⌘F lives inside its sub-tab (ghostty), and the Explorer
+                // has none yet, so this is Review's to claim while its
+                // board is showing -- and falls through when it is not.
+                if (mainWorkspace.openReviewFind()) {
+                    event.consume();
+                }
             } else if (cmd && event.isAltDown() && event.getCode() == KeyCode.CLOSE_BRACKET) {
                 // ⌥⌘] cycles terminals within the Terminal sub-tab. Checked
                 // before the plain ⌘] session-tab branch so the alt-modified
@@ -1089,13 +1129,17 @@ public final class DrydockApplication extends Application {
                 // (Explorer delta, part 1). They fall through to the session
                 // tabs at the trail's ends and everywhere else, so the older
                 // meaning is only shadowed while it would be ambiguous.
-                // The Review tour's trail likewise, with the same fall-through.
-                if (!mainWorkspace.navigateExplorerTrail(-1) && !mainWorkspace.navigateReviewTrail(-1)) {
+                // Review does NOT claim them: while its board is showing the
+                // session tabs keep the keys, because walking a trail whose
+                // waypoints are the tour's steps reads as the step keys
+                // having been hijacked (reported as a clash; the trail bar's
+                // ‹ › buttons still walk it).
+                if (!mainWorkspace.navigateExplorerTrail(-1)) {
                     mainWorkspace.selectPreviousSessionTab();
                 }
                 event.consume();
             } else if (cmd && event.getCode() == KeyCode.CLOSE_BRACKET) {
-                if (!mainWorkspace.navigateExplorerTrail(1) && !mainWorkspace.navigateReviewTrail(1)) {
+                if (!mainWorkspace.navigateExplorerTrail(1)) {
                     mainWorkspace.selectNextSessionTab();
                 }
                 event.consume();
@@ -1275,6 +1319,9 @@ public final class DrydockApplication extends Application {
         }
         if (mainWorkspace != null) {
             closeQuietly("Review services", mainWorkspace::closeReviewServices);
+            // §5: the per-worktree JDT language servers, through the same
+            // isolated close so one failed close never skips the rest.
+            closeQuietly("JDT language servers", mainWorkspace::closeLanguageServers);
         }
         closeQuietly("UserConfig saves", UserConfig::flushPendingSaves);
         if (gitHubService != null) {
@@ -1456,7 +1503,8 @@ public final class DrydockApplication extends Application {
                 mainWorkspace::renameSessionFromAgent,
                 mainWorkspace::reclaimConversationFromAgent,
                 mainWorkspace::writeHandoffFromAgent,
-                mainWorkspace::writeWorkflowHandoffFromAgent);
+                mainWorkspace::writeWorkflowHandoffFromAgent,
+                mainWorkspace.pendingQuestions());
         McpServer server = new McpServer(registry, new McpToolRouter(context, registry), mcpActivityLog);
         // Published before start() so a shutdown racing startup still reaches
         // it. Publication alone would not be enough -- a close() that wins the

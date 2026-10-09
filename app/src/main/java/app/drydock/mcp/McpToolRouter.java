@@ -11,6 +11,7 @@ import app.drydock.review.AnnotationStatus;
 import app.drydock.review.ChangeGraph;
 import app.drydock.review.OutOfDiffFanIn;
 import app.drydock.review.ReadingPath;
+import app.drydock.review.PendingQuestions;
 import app.drydock.review.RecheckAssessment;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewScope;
@@ -187,7 +188,12 @@ public final class McpToolRouter {
                                         + "\"sections\" returns drydock's computed grouping: "
                                         + "accept and name it, or regroup deliberately. "
                                         + "\"impact\" returns, per changed declaration, its callers "
-                                        + "outside the change (name matches, not resolved references) "
+                                        + "outside the change (each carries bound: true when scoped "
+                                        + "analysis tied it to THIS declaration -- a real reference -- "
+                                        + "and false for a name match, the honest default; a "
+                                        + "file that declares a symbol of its own with the same name is "
+                                        + "already dropped, and a symbol whose attributable occurrences "
+                                        + "are too many to list comes as tooCommonToAttribute, a count) "
                                         + "and whether its declaration changed while call sites were "
                                         + "not edited.")),
                         "scopeId"),
@@ -203,16 +209,28 @@ public final class McpToolRouter {
                                 + "their progress, and the merged tour is validated as a whole.",
                         JsonObject.empty()
                                 .put("scopeId", schemaString("Review scope handle."))
-                                .put("steps", schemaArray("Array of {id, title, narrative (<=1000 chars), "
+                                .put("steps", schemaArray("Array of {id, title, narrative (<=1000 chars: "
+                                        + "lead with the step's one main point, active voice, define terms at "
+                                        + "first use, and explain before the check asks), "
                                         + "anchors[{file, startKey, endKey?, note? (<=400 chars: the one claim this "
                                         + "range supports, shown under its last row)}], "
-                                        + "impactNotes?[{file, line, text}], "
+                                        + "impactNotes?[{file, line, text}] (at most 8 per step; name-match "
+                                        + "searches are not evidence -- read each location you cite and "
+                                        + "confirm it genuinely references the change's declaration before "
+                                        + "writing a note), "
                                         + "checks[{id, kind: predict (answerable from the removed and surrounding code: "
                                         + "the step's added lines stay hidden until it is answered, and a predict "
                                         + "on a step whose rows are all added is rejected)|trace (about the added "
-                                        + "lines; hides nothing)|risk, prompt, choices?[{text, at?{file, "
+                                        + "lines; hides nothing)|risk, prompt (answerable from what the "
+                                        + "tour explains or from code the reviewer can see -- never from "
+                                        + "outside knowledge the tour has not taught), choices?[{text, at?{file, "
                                         + "line}}] (2-4, not for risk), answer? (0-based, not for risk), explanation, "
-                                        + "alternates[{...same, no alternates}]}]}; at most 40 steps, 6 checks each."))
+                                        + "alternates[{...same, no alternates}]}], "
+                                        + "diagram?{caption, stages: up to 4 monospace text stages, "
+                                        + "each continuing the drawing above it, revealed one per "
+                                        + "click -- draw with spaces, never tabs (a tab stops "
+                                        + "wherever the panel font says), keep lines under 100 chars}"
+                                        + "]}; at most 40 steps, 6 checks each."))
                                 .put("onlySteps", schemaBoolean("Merge these steps into the stored tour instead "
                                         + "of replacing it: re-issue stale steps, add steps for uncovered hunks. "
                                         + "Needs a stored tour.")),
@@ -249,6 +267,15 @@ public final class McpToolRouter {
                                         + "question, deviation or nit."))
                                 .put("proposeResolve", schemaBoolean("Suggest that the human resolve it.")),
                         "scopeId", "findingId", "body"),
+                descriptor("review_ask_answer",
+                        "Answers a peek question the reviewer asked from the review board (the "
+                                + "prompt named a questionId). One call closes the question; the "
+                                + "reviewer reads the answer beside the code they asked about, not "
+                                + "in this conversation.",
+                        JsonObject.empty()
+                                .put("questionId", schemaString("The ask-N id the question's prompt named."))
+                                .put("answer", schemaString("The answer. Plain text.")),
+                        "questionId", "answer"),
                 descriptor("review_state",
                         "What the human has done so far on a scope: per-finding severity/resolution/threads, "
                                 + "tour progress, and whether the review was submitted. Read this before a "
@@ -346,6 +373,7 @@ public final class McpToolRouter {
             case "review_check" -> reviewCheck(caller, arguments);
             case "review_finding" -> reviewFinding(caller, arguments);
             case "review_answer" -> reviewAnswer(caller, arguments);
+            case "review_ask_answer" -> reviewAskAnswer(caller, arguments);
             case "review_state" -> reviewState(caller, arguments);
             case "review_recheck" -> reviewRecheck(caller, arguments);
             case "worktree_create" -> worktreeCreate(caller, arguments);
@@ -688,6 +716,27 @@ public final class McpToolRouter {
                 .put("id", new JsonString(updated.id()))
                 .put("scopeId", new JsonString(updated.scopeId()))
                 .put("messages", JsonNumber.of(updated.thread().size()));
+    }
+
+    /**
+     * {@code review_ask_answer}: closes a peek question and hands the
+     * answer to the board that asked it. Unknown, foreign and already-
+     * answered ids are one message, the same indistinguishability as
+     * {@code reviewScope} -- an agent must learn nothing from a refusal.
+     */
+    private JsonValue reviewAskAnswer(ManagedSessionId caller, JsonValue arguments) throws McpToolException {
+        requireLiveSession(caller);
+        JsonObject args = asObject(arguments);
+        String questionId = requiredStringArg(args, "questionId");
+        String answer = PromptSafety.checkInboundText(requiredStringArg(args, "answer"), "answer");
+
+        PendingQuestions.AnsweredAsk answered = context.answerAsk(questionId, caller, answer)
+                .orElseThrow(() -> new McpToolException("No pending question '" + questionId
+                        + "' for this session."));
+        return JsonObject.empty()
+                .put("questionId", new JsonString(questionId))
+                .put("symbol", new JsonString(answered.ask().symbol()))
+                .put("scopeId", new JsonString(answered.ask().scopeId()));
     }
 
     /**

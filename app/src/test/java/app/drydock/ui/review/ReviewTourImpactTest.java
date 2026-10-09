@@ -56,6 +56,10 @@ class ReviewTourImpactTest extends ReviewTourFixture {
             new OutOfDiffFanIn.Occurrence("src/main.cpp", 7, "  foo();", false),
             new OutOfDiffFanIn.Occurrence("src/other.cpp", 3, "return foo();", true))), Optional.empty());
 
+    private static final OutOfDiffFanIn.Result ONE_SUPPRESSED = new OutOfDiffFanIn.Result(
+            Map.of("bar", List.of(new OutOfDiffFanIn.Occurrence("src/main.cpp", 7, "  bar();", false))),
+            Map.of("foo", 312), Optional.empty());
+
     private void setFanIn(OutOfDiffFanIn.Result result) {
         interact(() -> view.diagSetFanIn(scope.id(), result));
         FxSync.waitForFxEvents();
@@ -153,6 +157,25 @@ class ReviewTourImpactTest extends ReviewTourFixture {
         waitForImpactText("→ foo · step 1");
     }
 
+    /**
+     * The swamping fix: a symbol whose occurrences are too many to attribute
+     * is one count line, never rows -- and its signature flag stays, with
+     * the count and the tag saying why there is nothing to click.
+     */
+    @Test
+    void aTooCommonSymbolIsOneCountLineNotARowPerOccurrence() throws TimeoutException {
+        setFanIn(ONE_SUPPRESSED);
+
+        waitForImpactText("foo · 312 occurrences outside the change — too common to attribute");
+        List<String> texts = impactTexts();
+        assertTrue(texts.contains("declaration changed · 312 call sites were not edited · too common to attribute"),
+                texts.toString());
+        assertTrue(texts.contains(":7  bar();"), "the suppressable symbol's callers are gone; bar's stay: " + texts);
+        assertTrue(ReviewDiagFxThread.call(() ->
+                view.diagStepPanel().lookupAll(".step-impact-suppressed").size() == 1),
+                "exactly one suppressed line, per suppressed symbol");
+    }
+
     @Test
     void clickingACallerOpensItsLocationInPlace() throws TimeoutException {
         setFanIn(TWO_CALLERS);
@@ -248,7 +271,10 @@ class ReviewTourImpactTest extends ReviewTourFixture {
         @Override public void reviewAnyway() { }
         @Override public void backToStep() { }
         @Override public void requestRefresh() { }
-        @Override public void postMessage(ReviewAnnotation finding, String body) { }
+    @Override public boolean askAboutStep(TourStep step) { return false; }
+        @Override public boolean postMessage(ReviewAnnotation finding, String body) {
+            return false;
+        }
 
         @Override
         public void openLocation(String file, int line) {
@@ -281,7 +307,7 @@ class ReviewTourImpactTest extends ReviewTourFixture {
     }
 
     private static StepImpact calleesOnly(List<String> callees) {
-        return new StepImpact(List.of(), List.of(), callees, List.of(), Optional.empty());
+        return new StepImpact(List.of(), List.of(), List.of(), callees, List.of(), Optional.empty());
     }
 
     @Test
@@ -327,6 +353,7 @@ class ReviewTourImpactTest extends ReviewTourFixture {
     void aStepThatDeclaresNothingShowsNoCallersButKeepsEdgesAndCallees() {
         StepPanel panel = detachedPanel(new RecordingHost());
         StepImpact measured = new StepImpact(List.of(),
+                List.of(),
                 List.of(new StepImpact.InChange("foo", StepImpact.Direction.CALLS, "s1", 1)),
                 List.of("alpha"), List.of(), Optional.empty());
         interact(() -> panel.showImpact(new StepPanel.ImpactView(List.of(), measured, Map.of(), true,

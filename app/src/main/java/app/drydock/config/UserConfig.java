@@ -1,5 +1,6 @@
 package app.drydock.config;
 
+import app.drydock.lsp.JdtServerManager;
 import app.drydock.state.json.JsonParseException;
 import app.drydock.state.json.JsonParser;
 import app.drydock.state.json.JsonValue;
@@ -16,6 +17,7 @@ import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.function.UnaryOperator;
 import java.util.concurrent.CompletableFuture;
@@ -32,23 +34,77 @@ import java.util.concurrent.atomic.AtomicReference;
  * and never expects a human to hand-edit). Deliberately tiny: {@code
  * worktreesDirectory} -- the directory new worktrees are created under, in
  * place of the {@code <home>/dev/wt} default (see {@link
- * app.drydock.git.WorktreeNaming}) -- and {@code openChangedFilesInSkim},
+ * app.drydock.git.WorktreeNaming}) -- {@code openChangedFilesInSkim},
  * whether a file already part of the current change opens folded to its
- * signatures.
+ * signatures, and {@code languageServer} (see {@link LanguageServer}), the
+ * opt-in tier-3 configuration.
  *
  * <p>{@link #load()} never throws for a missing or malformed config file:
  * it logs a warning for malformed input and falls back to {@link #empty()},
  * consistent with how {@code JsonApplicationStateRepository} treats a
- * corrupt state file.</p>
+ * corrupt state file. The same leniency applies field-by-field to the
+ * {@code languageServer} component: a malformed object decodes to
+ * "not configured" rather than failing the file (a user-editable file
+ * has no failure that justifies losing the other settings).</p>
  */
-public record UserConfig(Optional<Path> worktreesDirectory, boolean openChangedFilesInSkim) {
+public record UserConfig(Optional<Path> worktreesDirectory, boolean openChangedFilesInSkim,
+                         LanguageServer languageServer) {
+
+    /**
+     * The language-server component (spec
+     * docs/superpowers/specs/2026-10-08-lsp-tier3-usage-resolution.md,
+     * section 3): {@code jdtHome} is the unpacked jdt.ls directory (the one
+     * holding {@code plugins/} and {@code config_mac}), {@code javaHome} the
+     * optional JDK the server runs under (absent = the {@code java} on
+     * PATH). An absent {@code jdtHome} means tier 3 stays off -- nothing is
+     * downloaded, nothing starts. {@code javaHome} has no settings row; it
+     * is hand-editable in config.json and preserved by every update here.
+     */
+    public record LanguageServer(Optional<Path> jdtHome, Optional<Path> javaHome) {
+
+        public LanguageServer {
+            Objects.requireNonNull(jdtHome, "jdtHome");
+            Objects.requireNonNull(javaHome, "javaHome");
+        }
+
+        /** Not configured: tier 3 off, both paths absent. */
+        public static LanguageServer empty() {
+            return new LanguageServer(Optional.empty(), Optional.empty());
+        }
+    }
+
+    /**
+     * The outcome of a validated language-server save (see {@link
+     * #saveLanguageServerAsync}): written, or refused with the reason the
+     * settings row shows inline.
+     */
+    public sealed interface LanguageServerSaveResult {
+
+        record Saved() implements LanguageServerSaveResult {
+        }
+
+        /** The refusal reason, already a sentence (built by {@code JdtServerManager.validate}). */
+        record Refused(String reason) implements LanguageServerSaveResult {
+        }
+    }
 
     private static final Logger LOG = System.getLogger(UserConfig.class.getName());
+
+    /**
+     * The two-argument form unaffected callers keep: a config with the
+     * language server unset. NOT for read-modify-write updates -- a save
+     * built through it resets the language-server component; the setters
+     * that must preserve it (the application wiring) use the canonical
+     * three-argument constructor.
+     */
+    public UserConfig(Optional<Path> worktreesDirectory, boolean openChangedFilesInSkim) {
+        this(worktreesDirectory, openChangedFilesInSkim, LanguageServer.empty());
+    }
 
     public static UserConfig empty() {
         // Skim-by-default is the Explorer delta's design (part 2); the
         // setting exists to turn it off, not to opt into it.
-        return new UserConfig(Optional.empty(), true);
+        return new UserConfig(Optional.empty(), true, LanguageServer.empty());
     }
 
     /** {@code ~/.drydock/config.json}. */
@@ -109,7 +165,7 @@ public record UserConfig(Optional<Path> worktreesDirectory, boolean openChangedF
                     : Optional.empty();
             boolean openChangedFilesInSkim = !(root.get("openChangedFilesInSkim") instanceof JsonBoolean b)
                     || b.value();
-            return new UserConfig(worktreesDirectory, openChangedFilesInSkim);
+            return new UserConfig(worktreesDirectory, openChangedFilesInSkim, languageServer(root));
         } catch (IOException | JsonParseException | InvalidPathException e) {
             LOG.log(Level.WARNING, "Config file " + configFile + " is missing, unreadable, or malformed; "
                     + "ignoring it and using defaults", e);
@@ -151,6 +207,7 @@ public record UserConfig(Optional<Path> worktreesDirectory, boolean openChangedF
         config.worktreesDirectory().ifPresent(dir -> root.put("worktreesDirectory", new JsonString(dir.toString())));
         root.members().remove("openChangedFilesInSkim");
         root.put("openChangedFilesInSkim", new JsonBoolean(config.openChangedFilesInSkim()));
+        writeLanguageServer(root, config.languageServer());
 
         Files.createDirectories(parent);
         Path temp = Files.createTempFile(parent, "config", ".json.tmp");
@@ -161,6 +218,55 @@ public record UserConfig(Optional<Path> worktreesDirectory, boolean openChangedF
         } finally {
             Files.deleteIfExists(temp);
         }
+    }
+
+    /**
+     * Lenient decode of the {@code languageServer} component: absent, a
+     * non-object, or members that are not path-shaped strings all decode to
+     * {@link LanguageServer#empty()} rather than failing the file -- the
+     * same per-field leniency {@code worktreesDirectory} gets, taken one
+     * step further so a bad path cannot even discard the other members of
+     * the object.
+     */
+    private static LanguageServer languageServer(JsonObject root) {
+        if (!(root.get("languageServer") instanceof JsonObject server)) {
+            return LanguageServer.empty();
+        }
+        return new LanguageServer(pathMember(server, "jdtHome"), pathMember(server, "javaHome"));
+    }
+
+    private static Optional<Path> pathMember(JsonObject server, String key) {
+        if (!(server.get(key) instanceof JsonString s)) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(Path.of(s.value()).toAbsolutePath().normalize());
+        } catch (InvalidPathException e) {
+            LOG.log(Level.WARNING, "Config member languageServer.{0} is not a usable path; ignoring it", key);
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * Persists the {@code languageServer} component under a {@code
+     * "languageServer"} object, same preserve-unknown-members discipline as
+     * the root: an existing object's members this build does not know about
+     * survive, and a component with both paths absent removes the object
+     * entirely (an unconfigured tier leaves no key behind, matching how an
+     * empty worktreesDirectory is cleared rather than written as null).
+     */
+    private static void writeLanguageServer(JsonObject root, LanguageServer server) {
+        JsonObject object = root.get("languageServer") instanceof JsonObject existing
+                ? existing : JsonObject.empty();
+        root.members().remove("languageServer");
+        if (server.jdtHome().isEmpty() && server.javaHome().isEmpty()) {
+            return;
+        }
+        object.members().remove("jdtHome");
+        object.members().remove("javaHome");
+        server.jdtHome().ifPresent(path -> object.put("jdtHome", new JsonString(path.toString())));
+        server.javaHome().ifPresent(path -> object.put("javaHome", new JsonString(path.toString())));
+        root.put("languageServer", object);
     }
 
     /** Best-effort read of {@code configFile}'s existing top-level object, for {@link #save} to preserve unknown members. */
@@ -251,6 +357,56 @@ public record UserConfig(Optional<Path> worktreesDirectory, boolean openChangedF
             } catch (Throwable t) {
                 future.completeExceptionally(t);
                 throw t;
+            }
+        });
+        return future;
+    }
+
+    /**
+     * Validates and (only then) saves the {@code jdtHome} directory of the
+     * language-server component, as ONE task on {@link #SAVE_EXECUTOR} --
+     * the same single-thread FIFO ordering that makes {@link #updateAsync}
+     * atomic, so a validated save cannot interleave with any load or other
+     * save, and a load queued after it sees the validated value.
+     *
+     * <p>Validation (spec section 3, delegated to {@link
+     * JdtServerManager#validate}) is BLOCKING -- filesystem checks plus the
+     * Java probe, which runs {@code java -version} through ProcessRunner in
+     * production ({@code JdtServerManager.processRunnerJavaProbe()}) and is
+     * injected here so tests never run a real {@code java}. Never call this
+     * on the JavaFX application thread; it returns a future instead.</p>
+     *
+     * <p>An empty {@code jdtHome} disables tier 3 and saves without
+     * validation (there is nothing to validate); {@code javaHome} is carried
+     * over from the file untouched -- it has no settings row. A refusal
+     * completes with {@link LanguageServerSaveResult.Refused} and leaves the
+     * file byte-unchanged: no write happens at all, so the prior config
+     * survives intact. An I/O failure saving completes exceptionally.</p>
+     */
+    public static CompletableFuture<LanguageServerSaveResult> saveLanguageServerAsync(
+            Optional<Path> jdtHome, JdtServerManager.JavaProbe javaProbe) {
+        Objects.requireNonNull(javaProbe, "javaProbe");
+        CompletableFuture<LanguageServerSaveResult> future = new CompletableFuture<>();
+        SAVE_EXECUTOR.execute(() -> {
+            try {
+                UserConfig existing = load(defaultConfigFile());
+                LanguageServer next = new LanguageServer(
+                        jdtHome.map(path -> path.toAbsolutePath().normalize()),
+                        existing.languageServer().javaHome());
+                if (next.jdtHome().isPresent()) {
+                    JdtServerManager.ValidationResult validation = JdtServerManager.validate(
+                            new JdtServerManager.LaunchConfig(next.jdtHome().get(), next.javaHome().orElse(null)),
+                            javaProbe);
+                    if (validation instanceof JdtServerManager.ValidationResult.Invalid invalid) {
+                        future.complete(new LanguageServerSaveResult.Refused(invalid.message()));
+                        return; // refused: no write, the prior file stays byte-unchanged
+                    }
+                }
+                save(new UserConfig(existing.worktreesDirectory(), existing.openChangedFilesInSkim(), next),
+                        defaultConfigFile());
+                future.complete(new LanguageServerSaveResult.Saved());
+            } catch (IOException | RuntimeException e) {
+                future.completeExceptionally(e);
             }
         });
         return future;

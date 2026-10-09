@@ -1,5 +1,7 @@
 package app.drydock.review;
 
+import app.drydock.github.GitHubLineAnchor;
+import app.drydock.github.GitHubReviewRequest;
 import app.drydock.github.GitHubReviewRequest.Event;
 import org.junit.jupiter.api.Test;
 
@@ -7,8 +9,11 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -368,5 +373,93 @@ class SubmitPlanTest {
                   ````
                   List<T> *p = `a` + ```b```;
                   ````""", body);
+    }
+
+    /**
+     * The submit sheet's per-finding editing rewords through withBodies: a
+     * comment's and a body note's text replaced by the finding's key, the
+     * anchors, routes, refusals and preselected event carried over
+     * unchanged, and unknown keys ignored.
+     */
+    @Test
+    void withBodiesRewordsBothRoutesByKeyAndCarriesEverythingElseOver() {
+        ReviewAnnotation.Key inlineKey = new ReviewAnnotation.Key("rs", "f-inline");
+        ReviewAnnotation.Key noteKey = new ReviewAnnotation.Key("rs", "f-note");
+        GitHubReviewRequest.Comment comment = new GitHubReviewRequest.Comment("src/A.java", "original inline",
+                new GitHubLineAnchor.Anchor(12, GitHubLineAnchor.Side.RIGHT, OptionalInt.empty(), Optional.empty()));
+        SubmitPlan.BodyNote note = new SubmitPlan.BodyNote(noteKey, "src/B.java", "500", "excerpt", "original note");
+        SubmitPlan plan = new SubmitPlan(GitHubReviewRequest.Event.APPROVE, List.of(comment),
+                List.of(inlineKey, noteKey), List.of(), List.of(note));
+
+        SubmitPlan reworded = plan.withBodies(Map.of(inlineKey, "reworded inline", noteKey, "reworded note"));
+
+        assertEquals("reworded inline", reworded.comments().getFirst().body());
+        assertEquals(12, reworded.comments().getFirst().anchor().line());
+        assertEquals("reworded note", reworded.bodyNotes().getFirst().body());
+        assertEquals("excerpt", reworded.bodyNotes().getFirst().excerpt());
+        assertEquals(List.of(inlineKey, noteKey), reworded.posting());
+        assertEquals(GitHubReviewRequest.Event.APPROVE, reworded.preselected());
+
+        // An unknown key is ignored, and the empty map is the same plan.
+        assertEquals(plan, plan.withBodies(Map.of(new ReviewAnnotation.Key("rs", "nowhere"), "x")));
+    }
+
+    /**
+     * A named index makes the refusal say WHAT the line is not in: the
+     * fresh-head verification builds its index as "the PR's current head",
+     * so a finding a newer push displaced is refused against the code as it
+     * stands now, not against an unnamed "this diff".
+     */
+    @Test
+    void aNamedDiffIndexNamesTheDiffTheRefusalCheckedAgainst() {
+        ReviewAnnotation finding = finding("f9", "src/Foo.java", "n5", "n5");
+        SubmitPlan.DiffIndex named = new SubmitPlan.DiffIndex(Map.of(), Map.of(), "the PR's current head");
+
+        SubmitPlan plan = SubmitPlan.of(List.of(finding), List.of(), named);
+
+        assertEquals(1, plan.refusals().size());
+        assertTrue(plan.refusals().getFirst().reason().contains("not in the PR's current head"),
+                plan.refusals().getFirst().reason());
+    }
+
+    /**
+     * The override path: a refused finding moves into the review body as a
+     * path:line note -- the human decided the content belongs in the review
+     * even though the moved diff cannot place an inline anchor -- and the
+     * posting/comments invariant keeps holding.
+     */
+    @Test
+    void anOverriddenRefusalBecomesABodyNote() {
+        ReviewAnnotation finding = finding("f9", "src/Foo.java", "n5", "n5");
+        SubmitPlan plan = SubmitPlan.of(List.of(finding), List.of(),
+                new SubmitPlan.DiffIndex(Map.of(), Map.of(), "the PR's current head"));
+
+        assertEquals(1, plan.refusals().size());
+        SubmitPlan overridden = plan.withBodyFallback(List.of(new SubmitPlan.BodyNote(
+                finding.key(), "src/Foo.java", "line n5", "  the moved line", "body of f9")));
+
+        assertTrue(overridden.refusals().isEmpty(), "the override retires the refusal");
+        assertEquals(1, overridden.bodyNotes().size());
+        assertEquals(List.of(finding.key()), overridden.posting(),
+                "the moved key joins posting, after the comments' entries (there are none here)");
+        assertEquals("body of f9", overridden.bodyNotes().getFirst().body());
+    }
+
+    @Test
+    void noOverridesChangeNothing() {
+        ReviewAnnotation finding = finding("f9", "src/Foo.java", "n5", "n5");
+        SubmitPlan plan = SubmitPlan.of(List.of(finding), List.of(),
+                new SubmitPlan.DiffIndex(Map.of(), Map.of(), "the PR's current head"));
+
+        assertSame(plan, plan.withBodyFallback(List.of()));
+    }
+
+    @Test
+    void aMisalignedPlanIsRejectedAtConstruction() {
+        GitHubReviewRequest.Comment comment = new GitHubReviewRequest.Comment("src/A.java", "body",
+                new GitHubLineAnchor.Anchor(12, GitHubLineAnchor.Side.RIGHT, OptionalInt.empty(), Optional.empty()));
+        assertThrows(IllegalArgumentException.class,
+                () -> new SubmitPlan(GitHubReviewRequest.Event.APPROVE, List.of(comment), List.of(), List.of(), List.of()),
+                "posting must align with comments plus body notes -- the editing keys on it");
     }
 }

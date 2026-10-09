@@ -6,7 +6,14 @@ import java.util.Optional;
 
 /** One step of a tour: what it covers, why it exists, and what checks gate it. */
 public record TourStep(String id, String title, String narrative, List<TourAnchor> anchors,
-                       List<ImpactNote> impactNotes, List<TourCheck> checks) {
+                       List<ImpactNote> impactNotes, List<TourCheck> checks,
+                       Optional<TourDiagram> diagram) {
+
+    /** As the wire's older shape: a step without a diagram. */
+    public TourStep(String id, String title, String narrative, List<TourAnchor> anchors,
+                    List<ImpactNote> impactNotes, List<TourCheck> checks) {
+        this(id, title, narrative, anchors, impactNotes, checks, Optional.empty());
+    }
 
     public TourStep {
         Objects.requireNonNull(id, "id");
@@ -15,6 +22,7 @@ public record TourStep(String id, String title, String narrative, List<TourAncho
         anchors = List.copyOf(anchors);
         impactNotes = List.copyOf(impactNotes);
         checks = List.copyOf(checks);
+        diagram = Objects.requireNonNull(diagram, "diagram");
     }
 
     /** The top-level check with {@code checkId}, or the top-level check owning that alternate id. */

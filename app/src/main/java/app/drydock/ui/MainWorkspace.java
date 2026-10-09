@@ -27,6 +27,7 @@ import app.drydock.git.BranchCheckout;
 import app.drydock.git.ChangedLineService;
 import app.drydock.git.DiffScope;
 import app.drydock.git.DiffService;
+import app.drydock.git.UnifiedDiff;
 import app.drydock.git.GhCliService;
 import app.drydock.git.GitException;
 import app.drydock.git.PrCheckoutService;
@@ -38,6 +39,8 @@ import app.drydock.git.GitTarget;
 import app.drydock.git.WorktreeService;
 import app.drydock.github.GitHubReviewRequest.Event;
 import app.drydock.github.GitHubReviewService;
+import app.drydock.lsp.JdtServerManager;
+import app.drydock.lsp.LspUsageProvider;
 import app.drydock.mcp.McpActivityLog;
 import app.drydock.mcp.McpSessionContext.HandoffDraft;
 import app.drydock.mcp.McpSessionContext.RenameKind;
@@ -56,7 +59,9 @@ import app.drydock.review.Triage;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.ReviewInstructions;
 import app.drydock.review.ReviewScope;
+import app.drydock.review.PendingQuestions;
 import app.drydock.review.ReviewScopeRegistry;
+import app.drydock.review.UsageProvider;
 import app.drydock.review.tour.TourRecord;
 import app.drydock.review.tour.TourStep;
 import app.drydock.review.tour.TourStore;
@@ -72,6 +77,7 @@ import app.drydock.ui.review.SessionReviewView;
 import app.drydock.ui.model.WorkspaceViewModel;
 import app.drydock.ui.nav.ExplorerTrailStore;
 import app.drydock.ui.nav.SymbolPeek;
+import app.drydock.ui.nav.SymbolPeekService;
 import app.drydock.terminal.TerminalFactory;
 import app.drydock.terminal.api.TerminalHostView;
 import app.drydock.terminal.api.TerminalRuntime;
@@ -133,9 +139,12 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
 import java.util.function.DoubleSupplier;
 import java.util.function.Consumer;
@@ -298,14 +307,27 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     private final StackPane centerStack;
     private final MenuButton newTabButton = new MenuButton("＋");
 
-    /** The one {@link ReviewHost}, shared by every session tab's Review sub-tab. */
-    private final ReviewHost reviewHost = new ReviewHost();
+    /**
+     * The per-worktree JDT language-server registry (usage-resolution tier 3,
+     * spec docs/superpowers/specs/2026-10-08-lsp-tier3-usage-resolution.md,
+     * §§3/5/8): off by default, lazy per local worktree, closed on
+     * tab/worktree/config/app close; see {@link LanguageServerRegistry}.
+     */
+    private final LanguageServerRegistry languageServers = new LanguageServerRegistry();
 
     /** Open-repository badge colors: one palette slot per project, freed when its last tab closes. */
     private final ProjectTabGroup projectTabGroup = new ProjectTabGroup();
 
     private final PrCheckoutService prCheckoutService = new PrCheckoutService();
     private final ReviewScopeRegistry reviewScopeRegistry;
+
+    /**
+     * Peek questions this run has asked an agent and is waiting on; the
+     * answer arrives through {@code review_ask_answer} on the MCP thread
+     * and is delivered by {@link #deliverAskAnswer}'s FX hop.
+     */
+    private final PendingQuestions pendingQuestions =
+            new PendingQuestions(this::deliverAskAnswer);
     /** Resolves one checkout's scopes for its session's Review sub-tab (spec §3.2). */
     private final SessionReviewScopes sessionReviewScopes;
 
@@ -522,6 +544,15 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 ghCliService, worktreeService, openTabs::get, this::repositoryFor,
                 this::publishSessions, this::noteSessionDeleted);
 
+        // §5: a worktree the sidebar actually removed takes its language
+        // server AND its persistent ~/.drydock/lsp/<slug> cache with it. The
+        // listener fires on WorktreeService's executor thread, off the FX
+        // thread, and never for a removal that failed. It returns at once:
+        // the close and the cache delete run on their own virtual thread,
+        // so that executor (and the removal future) never waits on them.
+        worktreeService.addRemovalListener((repositoryRoot, removed) ->
+                languageServers.removeAndDeleteCache(removed));
+
         getStyleClass().add("main-pane");
 
         tabPane.getStyleClass().add("session-tabs");
@@ -612,8 +643,16 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
     /** Re-reads the Explorer's user preferences after the settings modal closes. */
     public void refreshExplorerPreferences() {
-        UserConfig.loadAsync().thenAccept(config ->
-                skimDefaultCache.set(config.openChangedFilesInSkim()));
+        UserConfig.loadAsync().thenAccept(config -> {
+            skimDefaultCache.set(config.openChangedFilesInSkim());
+            // §3: a language-server config change retires every live manager
+            // so the next eligible peek lazily starts one under the new paths.
+            // Runs on UserConfig's executor, not the FX thread, and never
+            // blocks it: the swap and drain happen here, the retired
+            // managers close on their own virtual threads (SAVE_EXECUTOR and
+            // UserConfig's executor never wait on a shutdown grace).
+            languageServers.updateConfig(config.languageServer());
+        });
     }
 
     /**
@@ -623,6 +662,21 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      */
     public void closeReviewServices() {
         prCheckoutService.close();
+    }
+
+    /**
+     * Closes every JDT language server this workspace owns and stops the
+     * tier from handing out new ones (§5, the app-stop path; DrydockApplication
+     * registers this in its exception-isolated closes). Idempotent, and
+     * exception-isolated per manager -- one failed close never skips the
+     * rest. The registry's one blocking path: the closes run in parallel,
+     * and the wait for them -- and for every earlier retirement still
+     * running -- is bounded by ONE overall
+     * {@link LanguageServerRegistry#CLOSE_ALL_DEADLINE_MILLIS} deadline
+     * (10 s), not one per manager. Runs from DrydockApplication's stop.
+     */
+    public void closeLanguageServers() {
+        languageServers.closeAll();
     }
 
     /**
@@ -1916,6 +1970,20 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     }
 
     /**
+     * {@code ⌘F} while the Review board is showing: opens its source
+     * viewer's find bar. False when Review is not showing, so the key can
+     * keep its meaning elsewhere (the terminal's own ghostty find).
+     */
+    public boolean openReviewFind() {
+        return showingReviewBoard()
+                .map(board -> {
+                    board.openFind();
+                    return true;
+                })
+                .orElse(false);
+    }
+
+    /**
      * Closes the topmost thing Review has open -- the symbol lens, then the
      * MCP panel -- and reports whether it closed anything. False means Esc
      * should move on and leave Review altogether.
@@ -1944,15 +2012,6 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      */
     public boolean navigateExplorerTrail(int direction) {
         return currentlySelected().map(open -> open.navigateExplorerTrail(direction)).orElse(false);
-    }
-
-    /**
-     * {@code ⌘[} / {@code ⌘]} while Review is showing: a step along the
-     * tour's trail, with the same fall-through to session tabs at its ends
-     * as {@link #navigateExplorerTrail}.
-     */
-    public boolean navigateReviewTrail(int direction) {
-        return currentlySelected().map(open -> open.navigateReviewTrail(direction)).orElse(false);
     }
 
     /**
@@ -1997,7 +2056,110 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     }
 
     /** A session's Review sub-tab's window onto the workspace. */
+    /**
+     * Confirming a finding promotes it onto the pull request by default:
+     * "confirmed" is the human vouching for it, and a vouched-for finding
+     * that silently drops out of the posted review was the recurring
+     * complaint -- every one had to be hand-toggled "Post to PR" after being
+     * confirmed, and the ones nobody toggled posted nothing. The explicit
+     * opt-out survives: the margin's toggle is enabled only on a finding
+     * that already {@linkplain ReviewAnnotation#counts() counts} (confirmed),
+     * so this default can never override an exclusion a human actually made
+     * -- only fill the silent default the other way. Pure and static so the
+     * rule is testable without a workspace.
+     */
+    static ReviewAnnotation confirmedForPosting(ReviewAnnotation current, Triage triage) {
+        ReviewAnnotation next = current.withTriage(triage);
+        // The TRANSITION into confirmed promotes; a redundant confirm of an
+        // already-confirmed finding must not, or a human's later exclusion
+        // (postToPr off, triage still confirmed) would be silently undone
+        // by any code path that re-ran the confirm.
+        if (triage != Triage.CONFIRMED || current.triage() == Triage.CONFIRMED || current.postToPr()) {
+            return next;
+        }
+        return next.withPostToPr(true);
+    }
+
+    /**
+     * What the fresh-head check decided before the submit sheet opens:
+     * whether the pull request still carries the head the review was read
+     * against. Pure and static so the decision is testable without a
+     * workspace; the note is what the sheet shows, already phrased for a
+     * human, empty when there is nothing to say.
+     */
+    record FreshHead(State state, String note) {
+        enum State { UNCHANGED, MOVED, UNCERTAIN }
+
+        static final FreshHead UNCHANGED = new FreshHead(State.UNCHANGED, "");
+
+        static FreshHead unchanged() {
+            return UNCHANGED;
+        }
+
+        static FreshHead moved(String remote) {
+            return new FreshHead(State.MOVED, "The pull request has newer commits ("
+                    + remote.substring(0, Math.min(8, remote.length())) + "…) — every finding's anchor was "
+                    + "re-verified against its current head; the ones a newer push displaced are listed as "
+                    + "not posting.");
+        }
+
+        static FreshHead uncertain(String why) {
+            return new FreshHead(State.UNCERTAIN, "Could not verify against the pull request's current head ("
+                    + why + ") — anchors were checked against the diff as reviewed.");
+        }
+    }
+
+    /**
+     * The classification behind the fresh-head check: equal shas mean the
+     * review and the pull request still describe the same code, and the
+     * whole verification is skipped; a moved head means the plan must be
+     * rebuilt against the PR's current diff; anything gh could not answer
+     * is UNCERTAIN -- the submit proceeds against the reviewed diff, with
+     * a note that says exactly that rather than implying a check that did
+     * not happen.
+     */
+    /**
+     * Posts the submit sheet's final wording into each edited finding's
+     * own thread, as a {@code You} reply prefixed "As posted to the PR":
+     * the board keeps the original (the "edited" chip's whole point), and
+     * the wording that actually reached GitHub is now where the reader
+     * and an agent's next round both find it. Static and pure over the
+     * store so the persistence rule is testable without a workspace; a
+     * post that failed runs this never -- a rejected post mutates
+     * nothing.
+     */
+    static void recordEditsInThreads(AnnotationStore store, Map<ReviewAnnotation.Key, String> editedBodies) {
+        for (Map.Entry<ReviewAnnotation.Key, String> edited : editedBodies.entrySet()) {
+            store.mutate(edited.getKey(), finding -> finding.withReply(
+                    new ReviewAnnotation.Message("You", Instant.now(),
+                            "As posted to the PR: " + edited.getValue())));
+        }
+    }
+
+    static FreshHead classifyFreshHead(String remoteHead, String localHead) {
+        if (remoteHead == null || remoteHead.isBlank()) {
+            return FreshHead.uncertain("gh did not answer");
+        }
+        if (remoteHead.equals(localHead)) {
+            return FreshHead.unchanged();
+        }
+        return FreshHead.moved(remoteHead);
+    }
+
     private final class ReviewHost implements SessionReviewView.Host {
+
+        /**
+         * This board's worktree root, empty for a remote-only review (§8:
+         * no local checkout means no language server -- the existing
+         * no-checkout reason paths answer, and nothing is spawned). Captured
+         * per board at view creation because the Host factory's signature
+         * carries no scope; the root is what keys the worktree's manager.
+         */
+        private final Optional<Path> reviewRoot;
+
+        private ReviewHost(Optional<Path> reviewRoot) {
+            this.reviewRoot = reviewRoot;
+        }
 
         /**
          * Scope ids with a {@code gh} availability check in flight for
@@ -2117,10 +2279,28 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                     resolved ? AnnotationStatus.RESOLVED : AnnotationStatus.OPEN));
         }
 
+        /**
+         * The message lands in the thread AND is handed to the scope's live
+         * session. The thread alone answers nobody: the agent only re-reads
+         * a scope when something sends it there, which is why "Not sure"
+         * and the ASK chips used to do nothing -- the message was stored and
+         * no one was asked (the defect this fixes).
+         */
         @Override
-        public void postMessage(ReviewScope scope, ReviewAnnotation finding, String body) {
+        public boolean postMessage(ReviewScope scope, ReviewAnnotation finding, String body) {
             annotationStore.mutate(finding.key(), current -> current.withReply(
                     new ReviewAnnotation.Message("You", Instant.now(), body)));
+            OpenSessionTab open = scope.sessionId().map(openTabs::get).orElse(null);
+            if (open == null || open.isProcessExited()) {
+                return false;
+            }
+            Handoff handoff = sendToBoundSession(scope,
+                    ReviewInstructions.forFindingQuestion(scope.id(), finding.id()));
+            LOG.log(Level.INFO, () -> "Asked the agent about finding " + finding.id() + " for scope "
+                    + scope.id() + " (" + handoffDescription(handoff) + ")");
+            // HELD counts as asked: the adoption delivers it and a drop is the
+            // bridge's WARNING log.
+            return handoff != Handoff.REFUSED;
         }
 
         /**
@@ -2219,11 +2399,13 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         public void setTriage(ReviewScope scope, ReviewAnnotation finding, Triage triage,
                               Optional<String> reason) {
             annotationStore.mutate(finding.key(), current -> {
-                ReviewAnnotation next = current.withTriage(triage);
+                ReviewAnnotation next = confirmedForPosting(current, triage);
                 return reason.map(r -> next.withReply(
                         new ReviewAnnotation.Message("You", Instant.now(), "Dismissed: " + r))).orElse(next);
             });
         }
+
+
 
         /**
          * A PR scope posts to GitHub and stays in Review -- reviewing
@@ -2279,7 +2461,11 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             // would answer the wrong question.
             boolean[] cancelled = {false};
             modalLayer.show(busyModal("Checking GitHub…"), () -> cancelled[0] = true);
-            gitHubReviewService.unavailableReason(scope.diffRoot()).whenComplete((reason, error) ->
+            gitHubReviewService.unavailableReason(scope.diffRoot())
+                    .thenCompose(reason -> reason.isPresent()
+                            ? CompletableFuture.completedFuture(PreOpenChecks.ghUnavailable(reason.get()))
+                            : verifyFreshHead(scope, pr))
+                    .whenComplete((checks, error) ->
                     Platform.runLater(() -> {
                         submitCheckInFlight.remove(scope.id());
                         if (cancelled[0]) {
@@ -2287,23 +2473,126 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                             // now would bury whatever they opened next.
                             return;
                         }
-                        openSubmitSheet(scope, pr, index, decisions, lineText, unverified,
-                                error != null ? Optional.of("Could not check gh: " + error.getMessage()) : reason);
+                        openSubmitSheet(scope, pr, index, decisions, lineText, unverified, checks,
+                                error != null ? Optional.of("Could not check gh: " + error.getMessage())
+                                        : Optional.empty());
                     }));
         }
 
+        /**
+         * The fresh-head check, off the FX thread, between the availability
+         * check and the sheet: the PR's current head sha against the
+         * checkout's HEAD and -- when they differ -- the PR's current diff,
+         * so the sheet's plan can be built against the code as it stands
+         * now. A scope with no checkout (the patch-only path) skips the
+         * check entirely: there is no local head to compare.
+         */
+        private CompletableFuture<PreOpenChecks> verifyFreshHead(ReviewScope scope, ReviewScope.PullRequestRef pr) {
+            if (scope.worktree().isEmpty()) {
+                return CompletableFuture.completedFuture(PreOpenChecks.fresh(FreshHead.unchanged(), null));
+            }
+            return CompletableFuture.supplyAsync(() -> {
+                String remote = gitHubReviewService.currentHeadSha(scope.diffRoot(), pr.number())
+                        .join()
+                        .orElse(null);
+                FreshHead classified = classifyFreshHead(remote, resolveRef(scope.worktree().orElseThrow(), "HEAD"));
+                if (classified.state() != FreshHead.State.MOVED) {
+                    return PreOpenChecks.fresh(classified, null);
+                }
+                String diffText = gitHubReviewService.pullRequestDiff(scope.diffRoot(), pr.number())
+                        .join()
+                        .orElse(null);
+                if (diffText == null) {
+                    return PreOpenChecks.fresh(
+                            FreshHead.uncertain("the pull request's current diff could not be read"), null);
+                }
+                return PreOpenChecks.fresh(classified, DiffService.parseUnified(diffText));
+            }, REVIEW_GIT_EXECUTOR);
+        }
+
+        /**
+         * What the pre-open checks decided: the reason gh is unusable (the
+         * sheet disables Submit over it), the fresh-head note to show (empty
+         * when there is nothing to say), and the PR's current diff when the
+         * head moved -- the plan is rebuilt against it, so an anchor a newer
+         * push displaced is refused with the fresh head named rather than
+         * posted onto code it no longer describes.
+         */
+        record PreOpenChecks(Optional<String> unavailable, String note, UnifiedDiff freshDiff) {
+
+            static PreOpenChecks ghUnavailable(String reason) {
+                return new PreOpenChecks(Optional.of(reason), "", null);
+            }
+
+            static PreOpenChecks fresh(FreshHead head, UnifiedDiff diff) {
+                return new PreOpenChecks(Optional.empty(), head.note(), diff);
+            }
+        }
         private void openSubmitSheet(ReviewScope scope, ReviewScope.PullRequestRef pr,
                                      SubmitPlan.DiffIndex index, List<ReviewVerdict.Decision> decisions,
                                      BiFunction<String, String, Optional<String>> lineText,
-                                     ReviewSubmitSheet.Unverified unverified,
-                                     Optional<String> unavailableReason) {
-            SubmitPlan plan = SubmitPlan.of(annotationStore.forScope(scope.id()), decisions, index, lineText);
+                                     ReviewSubmitSheet.Unverified unverified, PreOpenChecks checks,
+                                     Optional<String> checkError) {
+            // A moved PR head re-anchors the plan against the code as it
+            // stands now. Deliberately the REFUSAL variant of SubmitPlan.of
+            // (no lineText): a finding a newer push displaced is refused with
+            // the fresh head named in the reason, not folded into the review
+            // body -- posting a note about code that is no longer there is
+            // exactly the publish this verification exists to prevent, and
+            // the Not-posting block is where the human sees and decides.
+            SubmitPlan plan = checks.freshDiff() == null
+                    ? SubmitPlan.of(annotationStore.forScope(scope.id()), decisions, index, lineText)
+                    // The REFUSAL variant (no lineText): a displaced finding
+                    // is refused against the fresh head, never folded into
+                    // the review body -- see the openSubmitSheet javadoc.
+                    : SubmitPlan.of(annotationStore.forScope(scope.id()), decisions,
+                            freshIndex(checks.freshDiff()));
             ReviewSubmitSheet[] holder = new ReviewSubmitSheet[1];
             holder[0] = new ReviewSubmitSheet(plan, pr, unverified,
-                    (event, summary) -> postReview(scope, pr, plan, event, summary, holder[0]),
+                    (event, summary) -> postReview(scope, pr,
+                            finalPlan(holder[0], plan, scope, lineText), event, summary, holder[0]),
                     modalLayer::close);
+            if (!checks.note().isBlank()) {
+                holder[0].showVerificationNote(checks.note());
+            }
             modalLayer.show(holder[0]);
-            unavailableReason.ifPresent(holder[0]::showUnavailable);
+            checks.unavailable().ifPresent(holder[0]::showUnavailable);
+            checkError.ifPresent(holder[0]::showUnavailable);
+        }
+
+    /**
+     * The plan at submit time: the sheet's rewordings, plus the refused
+     * findings the human overrode into the review body -- built from the
+     * finding and the REVIEWED diff's line text (the anchor and its
+     * excerpt are the ones the review actually read, which is the point of
+     * an override: the content posts, on its own terms, not on the moved
+     * diff's).
+     */
+    private SubmitPlan finalPlan(ReviewSubmitSheet sheet, SubmitPlan plan, ReviewScope scope,
+                                 BiFunction<String, String, Optional<String>> lineText) {
+        SubmitPlan reworded = plan.withBodies(sheet.editedBodies());
+        java.util.Set<ReviewAnnotation.Key> overridden = sheet.overriddenRefusals();
+        if (overridden.isEmpty()) {
+            return reworded;
+        }
+        List<SubmitPlan.BodyNote> notes = new ArrayList<>();
+        for (ReviewAnnotation.Key key : overridden) {
+            annotationStore.forScope(scope.id()).stream()
+                    .filter(finding -> finding.key().equals(key))
+                    .findFirst()
+                    .ifPresent(finding -> notes.add(new SubmitPlan.BodyNote(key, finding.file(),
+                            SubmitPlan.lineLabel(finding.startKey(), finding.endKey()),
+                            lineText.apply(finding.file(), finding.startKey()).orElse(""),
+                            SubmitPlan.bodyOf(finding))));
+        }
+        return reworded.withBodyFallback(notes);
+    }
+
+        /** The PR's current diff as a comment index, named so a refusal says what it was checked against. */
+        private static SubmitPlan.DiffIndex freshIndex(UnifiedDiff freshDiff) {
+            SubmitPlan.DiffIndex reviewed = SessionReviewView.buildDiffIndex(freshDiff);
+            return new SubmitPlan.DiffIndex(reviewed.positionOfKey(), reviewed.hunkOfKey(),
+                    "the PR's current head");
         }
 
         /**
@@ -2329,6 +2618,18 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                                 for (ReviewAnnotation.Key key : plan.posting()) {
                                     annotationStore.mutate(key, finding -> finding.withPostToPr(false));
                                 }
+                                // The wording the PR actually got, into the
+                                // finding's own thread: the board's original
+                                // stays (the "edited" chip's whole point --
+                                // the difference is never silent), but the
+                                // final text is now where both the reader
+                                // and an agent's next round (review_comments)
+                                // see it -- a deep round amends what was
+                                // actually said, not what was drafted.
+                                // Only on Posted: a failed post mutates
+                                // nothing, the sheet stays as the human
+                                // left it.
+                                recordEditsInThreads(annotationStore, sheet.editedBodies());
                                 // Gated the same way reportPostFailure gates its
                                 // sheet.showError: if the human pressed Esc
                                 // mid-post, `sheet` is detached and whatever
@@ -2398,6 +2699,34 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
 
         @Override
+        public boolean requestStepAsk(ReviewScope scope, TourStep step) {
+            if (scope.sessionId().isEmpty()) {
+                return false;
+            }
+            OpenSessionTab open = scope.sessionId().map(openTabs::get).orElse(null);
+            if (open == null || open.isProcessExited()) {
+                return false;
+            }
+            PendingQuestions.PendingAsk ask = pendingQuestions.mint(scope.id(),
+                    "step " + step.title(), scope.sessionId().orElseThrow());
+            open.sendPrompt(ReviewInstructions.forStepAsk(ask.questionId(), scope.id(), step.title()));
+            return true;
+        }
+
+        @Override
+        public boolean requestDeepReview(ReviewScope scope) {
+            if (scope.sessionId().isEmpty()) {
+                return false;
+            }
+            Handoff handoff = sendToBoundSession(scope, ReviewInstructions.forDeepReview(scope.id()));
+            LOG.log(Level.INFO, () -> "Dispatched the deep review for scope " + scope.id()
+                    + " (" + handoffDescription(handoff) + ")");
+            // HELD counts as dispatched: the adoption delivers it and a drop
+            // is the bridge's WARNING log.
+            return handoff != Handoff.REFUSED;
+        }
+
+        @Override
         public Optional<TourRecord> tour(ReviewScope scope) {
             return tourStore.forScope(scope.id());
         }
@@ -2421,6 +2750,30 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                             id.value().toString()));
         }
 
+        /**
+         * The tier-3 composition at the seam's single construction site
+         * (§7): T5b's default builds the lexical floor, and this override
+         * wraps it upgrade-only when this board's worktree has a local
+         * checkout and the user configured a language server. Either gate
+         * closed returns the lexical provider untouched -- the same
+         * instance, byte-identical to the pre-tier behaviour (§3: the tier
+         * is off until configured) -- and no manager exists until this
+         * factory is first asked for it (§5: never at worktree open).
+         * Called on the FX thread; the provider it returns answers
+         * asynchronously, off it.
+         */
+        @Override
+        public UsageProvider usageProvider(SymbolPeekService peeks, Map<Path, Set<Integer>> changedLines) {
+            UsageProvider lexical = SessionReviewView.Host.super.usageProvider(peeks, changedLines);
+            return MainWorkspace.this.languageServers.provider(lexical, reviewRoot);
+        }
+
+        /** The peek's "see Settings" hint applies only while tier 3 is known to be unconfigured. */
+        @Override
+        public boolean languageServerHintApplies() {
+            return MainWorkspace.this.languageServers.hintApplies();
+        }
+
         /** The Explorer's peek question ({@link SymbolPeek#askPrompt}), sent to the scope's own session. */
         @Override
         public boolean askAgentAboutPeek(ReviewScope scope, SymbolPeek peek) {
@@ -2428,7 +2781,15 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             if (open == null || open.isProcessExited()) {
                 return false;
             }
-            open.sendPrompt(peek.askPrompt());
+            // One line: sendPrompt submits at the first newline, and the
+            // peek context plus the delivery instruction is the whole
+            // question. The minted id is the correlation -- the answer has
+            // to land back on THIS board, not in the agent's conversation.
+            // open != null above proves the session binding; the ask dies
+            // with exactly that session.
+            PendingQuestions.PendingAsk ask = pendingQuestions.mint(scope.id(), peek.symbol(),
+                    scope.sessionId().orElseThrow());
+            open.sendPrompt(peek.askPrompt() + " " + ReviewInstructions.forPeekAsk(ask.questionId()));
             return true;
         }
 
@@ -2754,6 +3115,56 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             case HELD -> "held for the tab's terminal to come up";
             case REFUSED -> "could not dispatch";
         };
+    }
+
+    /** The review-board question registry; wired into the MCP context so {@code review_ask_answer} can close questions. */
+    public PendingQuestions pendingQuestions() {
+        return pendingQuestions;
+    }
+
+    /**
+     * An ask whose session exited before answering. Delivered like an
+     * answer -- to the board that asked -- but as a death notice, so the
+     * reader is never left with a promise that quietly stopped being one.
+     */
+    private void deliverAskExpired(PendingQuestions.PendingAsk ask) {
+        Platform.runLater(() -> {
+            OpenSessionTab tab = reviewScopeRegistry.byId(ask.scopeId())
+                    .flatMap(scope -> scope.sessionId())
+                    .map(openTabs::get)
+                    .orElse(null);
+            SessionReviewView view = tab == null ? null : tab.reviewView().orElse(null);
+            if (view == null) {
+                LOG.log(Level.INFO, () -> "Expired ask " + ask.questionId()
+                        + " could not be shown: no review view for scope " + ask.scopeId());
+                return;
+            }
+            view.showAskExpired(ask);
+        });
+    }
+
+    /**
+     * An ask's answer, from the MCP thread: hop to FX and show it on the
+     * asking board. The scope may have lost its session or the view may
+     * never have been built (a board that cannot ask); both are logged,
+     * not silenced -- a delivered-but-lost answer is a lie the question's
+     * id made possible, and it must at least be findable in the log.
+     */
+    private void deliverAskAnswer(PendingQuestions.AnsweredAsk answered) {
+        Platform.runLater(() -> {
+            OpenSessionTab tab = reviewScopeRegistry.byId(answered.ask().scopeId())
+                    .flatMap(scope -> scope.sessionId())
+                    .map(openTabs::get)
+                    .orElse(null);
+            SessionReviewView view = tab == null ? null : tab.reviewView().orElse(null);
+            if (view == null) {
+                LOG.log(Level.INFO, () -> "Ask answer for " + answered.ask().questionId()
+                        + " could not be shown: no review view for scope "
+                        + answered.ask().scopeId());
+                return;
+            }
+            view.showAskAnswer(answered);
+        });
     }
 
     /**
@@ -4635,6 +5046,14 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 continue;
             }
             exitRecorded.add(sessionId);
+            // Every peek question asked of this session dies with it: no
+            // answer can come now, and a late one must be refused rather
+            // than resurrect a dead question.
+            for (PendingQuestions.PendingAsk ask : pendingQuestions.expireSession(sessionId)) {
+                LOG.log(Level.INFO, () -> "Ask " + ask.questionId() + " about " + ask.symbol()
+                        + " died with session " + sessionId);
+                deliverAskExpired(ask);
+            }
             // SPIKE: tmux persistence. For a tmux-backed surface, the ghostty
             // child is the tmux *client*; processExited means the client
             // detached or the tmux session died — NOT necessarily that the
@@ -4818,6 +5237,13 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         if (!shuttingDown && restoringSessionIds.remove(openTab.sessionId())) {
             persistOpenSessionIds();
         }
+        // §5: this tab's worktree loses its (starting or running) language
+        // server. A second session on the same checkout re-creates it lazily
+        // on its next eligible peek, warm from the kept -data cache. Off the
+        // FX thread -- a manager close blocks up to its shutdown grace.
+        // Other boards' providers look the manager up per query, so none
+        // keeps querying the closed one.
+        openTab.worktreeRoot().ifPresent(languageServers::closeForAsync);
         return openTab.disposeNativeResources();
     }
 
@@ -4838,6 +5264,19 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         pendingTabs.put(sessionId, placeholderTab);
         addAndSelect(placeholderTab);
         return placeholderTab;
+    }
+
+    /**
+     * The local checkout root a tab's review operates on (usage-resolution
+     * tier 3, §§5/8): the session's search root for a local repository,
+     * empty for a remote-only one (no checkout to search, no language server
+     * to host). An unknown repository is treated as local, exactly like the
+     * Explorer gating at this tab's creation site.
+     */
+    private static Optional<Path> reviewRootOf(Optional<Repository> repository, Path searchRoot) {
+        return repository.map(Repository::isRemote).orElse(false)
+                ? Optional.empty()
+                : Optional.of(searchRoot);
     }
 
     /**
@@ -4892,6 +5331,10 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         // instead (spec: SSH remote repositories; there is no local
         // checkout to root a local shell in).
         openTab.setShellWorkingDirectory(searchRoot.toString());
+        // The tab's local checkout root: the worktree its review reads (and
+        // whose language server tab close releases, §5); empty for a
+        // remote-only tab, which has no checkout to serve.
+        openTab.setWorktreeRoot(reviewRootOf(repository, searchRoot));
         repository.filter(Repository::isRemote).ifPresent(repo -> {
             openTab.setShellCommand(SshCommandBuilder.interactiveSessionCommand(repo.remote(),
                     "exec \"${SHELL:-sh}\" -l"));
@@ -4931,7 +5374,11 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         // here: the board shows its own "no scope yet" placeholder until
         // something calls showScopes.
         openTab.setReviewViewFactory(() -> {
-            SessionReviewView view = new SessionReviewView(reviewHost, diffService, activityLog);
+            // One ReviewHost per board, capturing this tab's worktree root:
+            // the Host factory's signature carries no scope, and the root is
+            // what keys the worktree's language server (tier 3, §7).
+            SessionReviewView view = new SessionReviewView(new ReviewHost(reviewRootOf(repository, searchRoot)),
+                    diffService, activityLog);
             // The chip the human picks is persisted per session -- through
             // the state store's single writer, never a load-then-save here.
             // Read back by resolveReviewScopes when a later gesture names no
@@ -4981,6 +5428,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 // The peek card's "ask the agent" is absent unless this tab's
                 // own process is alive to be asked (delta hard rules).
                 explorer.setAgentBridge(() -> !openTab.isProcessExited(), openTab::sendPrompt);
+                // The quiet "see Settings" peek hint only while tier 3 is known unconfigured.
+                explorer.setLanguageServerHintApplies(languageServers::hintApplies);
                 // Findings for the file being read, so skim rows carry their
                 // ◆ chip and the minimap its red ticks. Read live from the
                 // store rather than snapshotted: the reviewer writes findings
@@ -5013,5 +5462,365 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             });
         }
         return openTab;
+    }
+
+    /**
+     * The per-worktree JDT language-server registry this workspace owns
+     * (usage-resolution tier 3, spec
+     * docs/superpowers/specs/2026-10-08-lsp-tier3-usage-resolution.md,
+     * §§3/5/8): at most one {@link JdtServerManager} per local worktree,
+     * keyed by the canonical ({@link WorktreeService#canonical(Path)}) root,
+     * created lazily -- never at worktree open, only when the review's
+     * usage-provider factory ({@link ReviewHost#usageProvider}) is first
+     * asked for a configured worktree; the manager's own lazy start does
+     * everything else, including the §3 validation. The registry is the
+     * single owner of managers: the providers it hands out look the
+     * worktree's manager up once per query ({@link #managerFor}) and never
+     * capture one, so a manager retired by a tab close, a config change or a
+     * removal is never queried again -- the next eligible query lazily
+     * re-creates one under the current config.
+     *
+     * <p><strong>Off by default</strong> (§3): with no {@code jdtHome}
+     * configured, every {@link #provider} call returns the lexical floor
+     * unchanged -- the same instance, so the unconfigured path is
+     * byte-identical to tier 2. A config change ({@link #updateConfig})
+     * retires every manager so the next eligible query lazily starts one
+     * under the new paths. Tab close ({@link #closeForAsync}) releases that
+     * worktree's starting/running server; actual worktree removal
+     * ({@link #removeAndDeleteCache}) also deletes only that worktree's
+     * persistent ~/.drydock/lsp/&lt;slug&gt; cache; and {@link #closeAll} is
+     * the idempotent app-stop path. Every close is exception-isolated per
+     * manager (one failure never skips the rest).</p>
+     *
+     * <p>One {@link #lock} serializes config/closed writes, drains, removals
+     * and manager creation, so no manager is ever created under a config
+     * {@link #updateConfig} already replaced; it is never held across a
+     * blocking close. Every blocking close and cache walk runs on its own
+     * registered virtual thread ({@link #offThread}; N managers close in
+     * parallel), so the FX thread, UserConfig's single-thread executor and
+     * WorktreeService's executor never wait on one. The only blocking paths
+     * are {@link #closeFor} (synchronous by contract) and {@link #closeAll},
+     * which awaits every retirement still running -- earlier ones included --
+     * under ONE overall {@link #CLOSE_ALL_DEADLINE_MILLIS} deadline, not one
+     * per manager.</p>
+     */
+    static final class LanguageServerRegistry {
+
+        /**
+         * Overall bound on {@link #closeAll}'s wait: about one manager's worst
+         * close (~2 s shutdown grace + ~7 s client/process joins) plus slack,
+         * whatever the worktree count, since the closes run in parallel.
+         */
+        static final long CLOSE_ALL_DEADLINE_MILLIS = 10_000;
+
+        private final Map<Path, JdtServerManager> managers = new ConcurrentHashMap<>();
+        /** Where the tier-3 wrappers read files; released by {@link #closeAll} (lifecycle symmetry). */
+        private final ExecutorService fileReader = Executors.newVirtualThreadPerTaskExecutor();
+        /**
+         * Raw-to-{@link WorktreeService#canonical(Path)} key memo, so the FX-thread
+         * entries below pay one resolved stat per worktree per run rather than
+         * one per peek. The single surviving filesystem touch is the same
+         * bounded, warmed-by-construction kind {@code TerminalThemes.configFileFor}'s
+         * call sites carry (AGENTS.md "Blocking work is async" allows no less,
+         * and no more): an existing worktree's {@code toRealPath} is one call,
+         * and the alternative -- an unresolved key -- would not match the form
+         * git reports the removed worktree under, silently skipping the §5
+         * cache deletion on a symlinked root (macOS's /var).
+         */
+        private final Map<Path, Path> canonicalKeys = new ConcurrentHashMap<>();
+        private final BiFunction<Path, UserConfig.LanguageServer, JdtServerManager> managerFactory;
+        private final BiConsumer<Path, UserConfig.LanguageServer> cacheDeleter;
+        /**
+         * Serializes writes to {@link #config}, {@link #closed} and
+         * {@link #configLoaded}, every drain and removal, and every manager
+         * creation; never held across a blocking close, join or cache walk.
+         */
+        private final Object lock = new Object();
+        /** Every off-thread retirement still running; {@link #closeAll} awaits them all. */
+        private final Set<CompletableFuture<Void>> retiring = ConcurrentHashMap.newKeySet();
+        private volatile UserConfig.LanguageServer config =
+                new UserConfig.LanguageServer(Optional.empty(), Optional.empty());
+        private volatile boolean closed;
+        /**
+         * Whether a config was ever delivered by {@link #updateConfig}; written
+         * AFTER {@link #config}, so a true read here makes the loaded config
+         * visible. Until then "unconfigured" is unknown, not empty.
+         */
+        private volatile boolean configLoaded;
+
+        /** Production: real managers, the ProcessRunner java probe, ~/.drydock/lsp caches. */
+        LanguageServerRegistry() {
+            this(LanguageServerRegistry::productionManager, LanguageServerRegistry::deleteCacheFor);
+        }
+
+        /** Test seam: canned managers and recorded cache deletions; nothing ever launches. */
+        LanguageServerRegistry(BiFunction<Path, UserConfig.LanguageServer, JdtServerManager> managerFactory,
+                               BiConsumer<Path, UserConfig.LanguageServer> cacheDeleter) {
+            this.managerFactory = managerFactory;
+            this.cacheDeleter = cacheDeleter;
+        }
+
+        /** The manager this workspace would run for {@code root} under {@code config}. */
+        private static JdtServerManager productionManager(Path root, UserConfig.LanguageServer config) {
+            return new JdtServerManager(root,
+                    new JdtServerManager.LaunchConfig(config.jdtHome().orElseThrow(),
+                            config.javaHome().orElse(null)),
+                    JdtServerManager.processRunnerJavaProbe());
+        }
+
+        /**
+         * Deletes {@code root}'s persistent ~/.drydock/lsp/&lt;slug&gt; cache
+         * (§4: kept across closes, deleted only on worktree removal) straight
+         * from the path through {@link JdtServerManager}'s static helpers, so
+         * an unconfigured tier (no {@code jdtHome}) still deletes it and no
+         * manager or scheduler is built. The config is not needed.
+         */
+        private static void deleteCacheFor(Path root, UserConfig.LanguageServer config) {
+            try {
+                JdtServerManager.deleteCacheDir(JdtServerManager.dataDirFor(root, null));
+            } catch (RuntimeException e) {
+                LOG.log(Level.WARNING, "could not delete the language server cache of " + root, e);
+            }
+        }
+
+        /**
+         * Caches the asynchronously loaded config; a change retires every
+         * live manager (§3) so the next eligible query starts fresh under
+         * the new paths. Runs on UserConfig's single-thread executor: the
+         * swap and drain happen here, under {@link #lock} and in order with
+         * every other load, and return at once; the blocking closes run on
+         * registered virtual threads, so that executor never stalls. The
+         * future completes when the retired managers are closed (already
+         * complete when nothing was retired).
+         */
+        CompletableFuture<Void> updateConfig(UserConfig.LanguageServer next) {
+            List<JdtServerManager> retired = List.of();
+            synchronized (lock) {
+                if (!closed && !next.equals(config)) {
+                    config = next;
+                    retired = drainLocked();
+                }
+                configLoaded = true; // after config: a true read makes the loaded config visible
+            }
+            return closeEach(retired);
+        }
+
+        /**
+         * The usage-provider factory's body (§§3/5/7): the lexical floor
+         * when tier 3 is gated off -- no checkout, no configuration, or the
+         * registry closed; the same instance, byte-identical to the
+         * default -- otherwise the floor wrapped upgrade-only over this
+         * worktree's manager, which the provider looks up through
+         * {@link #managerFor} once per query (created eagerly here once, so
+         * the laziness oracle counts it; it starts nothing). Called on the
+         * FX thread; the provider it returns answers asynchronously, off it.
+         */
+        UsageProvider provider(UsageProvider lexical, Optional<Path> worktreeRoot) {
+            if (closed || worktreeRoot.isEmpty() || config.jdtHome().isEmpty()) {
+                return lexical;
+            }
+            Path root = key(worktreeRoot.get());
+            if (managerFor(root).isEmpty()) {
+                return lexical;
+            }
+            return new LspUsageProvider(lexical, root, () -> managerFor(root), fileReader);
+        }
+
+        /**
+         * The worktree's manager under the current config, created lazily;
+         * empty while the tier is gated off (closed or unconfigured). Holds
+         * {@link #lock} so no manager is ever created under a retired config.
+         * {@code root} is already a registry key.
+         */
+        Optional<JdtServerManager> managerFor(Path root) {
+            synchronized (lock) {
+                if (closed || config.jdtHome().isEmpty()) {
+                    return Optional.empty();
+                }
+                UserConfig.LanguageServer current = config;
+                return Optional.of(managers.computeIfAbsent(root, k -> managerFactory.apply(k, current)));
+            }
+        }
+
+        /**
+         * Whether the peek's once-per-session "see Settings" hint applies: a
+         * config was loaded, the tier is open, and no {@code jdtHome} is set.
+         * FX-safe: volatile reads only, no I/O; read order loaded, closed, config.
+         */
+        boolean hintApplies() {
+            return configLoaded && !closed && config.jdtHome().isEmpty();
+        }
+
+        /**
+         * FX-thread entry for tab close (§5): pays nothing when the worktree
+         * has no manager, otherwise detaches it now and closes it on a
+         * registered virtual thread (a manager close blocks up to its
+         * shutdown grace). Other tabs' providers on the same checkout look
+         * the manager up per query, so they re-create it on their next one.
+         */
+        void closeForAsync(Path root) {
+            Path normalized = key(root);
+            JdtServerManager manager;
+            synchronized (lock) {
+                manager = managers.remove(normalized);
+            }
+            if (manager != null) {
+                closeEach(List.of(manager));
+            }
+        }
+
+        /** Closes (cancelling a starting one) and removes the worktree's manager; blocking. */
+        void closeFor(Path root) {
+            Path normalized = key(root);
+            JdtServerManager manager;
+            synchronized (lock) {
+                manager = managers.remove(normalized);
+            }
+            if (manager != null) {
+                closeQuietly(manager);
+            }
+        }
+
+        /**
+         * Worktree removal (§5): detaches the worktree's manager now, then --
+         * on a registered virtual thread, close BEFORE delete so no live
+         * jdt.ls holds the -data dir while it goes -- closes it and deletes
+         * its persistent cache, the cache even when no manager ever existed
+         * (§4: it outlives every manager). Called on WorktreeService's
+         * executor, which never waits on either: the removal future
+         * completes with git. The returned future completes when both are done.
+         */
+        CompletableFuture<Void> removeAndDeleteCache(Path root) {
+            Path normalized = key(root);
+            JdtServerManager manager;
+            UserConfig.LanguageServer snapshot;
+            synchronized (lock) {
+                manager = managers.remove(normalized);
+                snapshot = config;
+            }
+            return offThread("lsp-worktree-removed", () -> {
+                if (manager != null) {
+                    closeQuietly(manager);
+                }
+                try {
+                    cacheDeleter.accept(normalized, snapshot);
+                } catch (RuntimeException e) {
+                    LOG.log(Level.WARNING, "could not delete the language server cache of " + normalized, e);
+                }
+            });
+        }
+
+        /**
+         * The idempotent stop path (§5): ends the tier, closes every manager
+         * in parallel, and awaits those closes AND every earlier retirement
+         * still running (config change, tab close, removal) under one overall
+         * {@link #CLOSE_ALL_DEADLINE_MILLIS} deadline. A close still running
+         * at the deadline is logged and left to finish (each is self-bounded);
+         * it is never interrupted. Blocking by design (app stop).
+         */
+        void closeAll() {
+            List<JdtServerManager> drained;
+            synchronized (lock) {
+                if (closed) {
+                    return;
+                }
+                closed = true;
+                drained = drainLocked();
+            }
+            closeEach(drained);
+            List<CompletableFuture<Void>> pending = List.copyOf(retiring);
+            try {
+                CompletableFuture.allOf(pending.toArray(CompletableFuture[]::new))
+                        .get(CLOSE_ALL_DEADLINE_MILLIS, TimeUnit.MILLISECONDS);
+            } catch (TimeoutException e) {
+                long unfinished = pending.stream().filter(future -> !future.isDone()).count();
+                LOG.log(Level.WARNING, unfinished + " of " + pending.size()
+                        + " JDT language server closes still running after " + CLOSE_ALL_DEADLINE_MILLIS
+                        + " ms; each is self-bounded and finishes in the background");
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                LOG.log(Level.WARNING, "interrupted while awaiting the JDT language server closes", e);
+            } catch (ExecutionException e) { // cannot happen: every retirement completes normally
+                LOG.log(Level.WARNING, "a JDT language server retirement failed", e);
+            } finally {
+                fileReader.shutdown();
+            }
+        }
+
+        /** The live-manager count; the laziness oracle. */
+        int size() {
+            return managers.size();
+        }
+
+        /** The registry key of {@code root}: its canonical form, memoized (see {@link #canonicalKeys}). */
+        private Path key(Path root) {
+            return canonicalKeys.computeIfAbsent(root.toAbsolutePath().normalize(),
+                    WorktreeService::canonical);
+        }
+
+        /** Removes every manager; the caller holds {@link #lock}. */
+        private List<JdtServerManager> drainLocked() {
+            List<JdtServerManager> toClose = new ArrayList<>();
+            for (Path key : List.copyOf(managers.keySet())) {
+                JdtServerManager manager = managers.remove(key);
+                if (manager != null) {
+                    toClose.add(manager);
+                }
+            }
+            return toClose;
+        }
+
+        /**
+         * Closes {@code toClose} in parallel, one registered virtual thread per
+         * manager, so N closes take about one close's time; nothing to close
+         * starts no thread. The future completes when every close ended.
+         */
+        private CompletableFuture<Void> closeEach(List<JdtServerManager> toClose) {
+            if (toClose.isEmpty()) {
+                return CompletableFuture.completedFuture(null);
+            }
+            CompletableFuture<?>[] closes = new CompletableFuture<?>[toClose.size()];
+            for (int i = 0; i < closes.length; i++) {
+                JdtServerManager manager = toClose.get(i);
+                closes[i] = offThread("lsp-close", () -> closeQuietly(manager));
+            }
+            return CompletableFuture.allOf(closes);
+        }
+
+        /**
+         * The registry's only way off the caller's thread: runs blocking
+         * close/delete work on its own virtual thread, registered in
+         * {@link #retiring} until it ends so {@link #closeAll} can await it.
+         * A failure is logged, never silent; the future always completes
+         * normally, and is never left registered.
+         */
+        private CompletableFuture<Void> offThread(String name, Runnable work) {
+            CompletableFuture<Void> done = new CompletableFuture<>();
+            retiring.add(done);
+            done.whenComplete((ignored, error) -> retiring.remove(done));
+            try {
+                Thread.ofVirtual().name(name).start(() -> {
+                    try {
+                        work.run();
+                    } catch (RuntimeException e) {
+                        LOG.log(Level.WARNING, "language server retirement failed (" + name + ")", e);
+                    } finally {
+                        done.complete(null);
+                    }
+                });
+            } catch (RuntimeException e) {
+                LOG.log(Level.WARNING, "could not start language server retirement (" + name + ")", e);
+                done.complete(null);
+            }
+            return done;
+        }
+
+        private static void closeQuietly(JdtServerManager manager) {
+            try {
+                manager.close();
+            } catch (RuntimeException e) {
+                LOG.log(Level.WARNING, "a JDT language server close failed", e);
+            }
+        }
     }
 }

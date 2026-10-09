@@ -1,5 +1,6 @@
 package app.drydock.ui.review;
 
+import app.drydock.review.ReviewVerdict;
 import app.drydock.testing.FxTest;
 import app.drydock.ui.TestStages;
 import javafx.scene.Scene;
@@ -35,6 +36,7 @@ class ReviewVerdictBarNavigationTest extends FxTest {
                 calls.add("changes");
             }
             @Override public boolean askAgentToFix(ReviewVerdictBar.Target target) { calls.add("ask"); return true; }
+            @Override public boolean requestDeepReview() { calls.add("deep"); return true; }
             @Override public void undo(ReviewVerdictBar.Target target) { calls.add("undo"); }
             @Override public void confirmStillGood(ReviewVerdictBar.Target target) { calls.add("confirm"); }
             @Override public void nextUnsettled() { calls.add("nextUnsettled"); }
@@ -92,6 +94,48 @@ class ReviewVerdictBarNavigationTest extends FxTest {
 
         interact(() -> bar.setTourMode(false));
         assertEquals("Previous file ([)", tooltipOf(".review-verdict-previous"));
+    }
+
+    /**
+     * The finished tour's one natural next ask: a deep review that amends
+     * the round. Offered only in tour mode and only when every step is
+     * settled -- before that there is no settled round to amend, and the
+     * hunk diff never shows it at all.
+     */
+    @Test
+    void theDeepReviewAskAppearsOnlyWhenTheWholeTourIsSettled() {
+        interact(() -> {
+            bar.setTourMode(true);
+            bar.update(target("3/3 · Guard"), Optional.of(ReviewVerdict.Decision.APPROVED), false);
+            bar.showProgress(3, 3);
+        });
+        assertTrue(lookup("Deep review…").tryQuery().isPresent(),
+                "every step settled: the deep round is the one ask left");
+
+        interact(() -> bar.showProgress(2, 3));
+        assertTrue(lookup("Deep review…").tryQuery().isEmpty(),
+                "steps left: no settled round to amend yet");
+
+        interact(() -> {
+            bar.setTourMode(false);
+            bar.update(target("src/Parser.java"), Optional.of(ReviewVerdict.Decision.APPROVED), false);
+            bar.showProgress(3, 3);
+        });
+        assertTrue(lookup("Deep review…").tryQuery().isEmpty(),
+                "the hunk diff has its own hand-off; the deep round is the tour's");
+    }
+
+    @Test
+    void aDeepReviewClickHandsOffToTheHost() {
+        interact(() -> {
+            bar.setTourMode(true);
+            bar.update(target("1/1 · Guard"), Optional.of(ReviewVerdict.Decision.APPROVED), false);
+            bar.showProgress(1, 1);
+        });
+
+        interact(() -> lookup("Deep review…").queryAs(Button.class).fire());
+
+        assertEquals(List.of("deep"), calls);
     }
 
     private String tooltipOf(String selector) {

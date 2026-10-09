@@ -34,6 +34,14 @@ final class ReviewVerdictBar extends VBox {
     /** What the bar needs from its host. All calls happen on the FX thread. */
     interface Host {
         /**
+         * "Deep review…" -- asks the scope's agent for a deeper second pass
+         * over the change once every step of the tour is settled. False when
+         * the hand-off did not happen (no bound session), exactly like
+         * {@link #askAgentToFix}: a click that hands nothing over must say so.
+         */
+        boolean requestDeepReview();
+
+        /**
          * {@code a} -- approves the next unread hunk of the target (in the
          * tour, passes the current step).
          */
@@ -112,6 +120,14 @@ final class ReviewVerdictBar extends VBox {
     private final Button approveButton = new Button();
     private final Button requestChangesButton = new Button();
     private final Button askAgentButton = new Button("Ask the agent to fix it");
+
+    /**
+     * The tour's second pass: offered only in tour mode, only when every
+     * step is settled -- a deep review before the reader has finished the
+     * first one has no settled round to amend, and after it this is the
+     * one ask the finished tour naturally raises (spec §4).
+     */
+    private final Button deepReviewButton = new Button("Deep review…");
     private final Button undoButton = new Button("change");
     private final Label settledLabel = new Label();
     /**
@@ -130,6 +146,12 @@ final class ReviewVerdictBar extends VBox {
      * refusals came to be measured at a width production never gives them.
      */
     static final String NOTHING_TO_SEND = "no open findings, or no session";
+
+    /** Why a "Deep review…" click handed nothing over: unlike {@link #askAgentToFix}, the only cause is a missing session. */
+    static final String NO_SESSION_TO_ASK = "no session to ask";
+
+    static final String NO_SESSION_TO_ASK_DETAIL =
+            "This scope has no bound session to hand the deep review to. Open the scope's session first.";
 
     static final String NOTHING_TO_SEND_DETAIL =
             "This file has no open finding to hand over, or this scope has no bound session to "
@@ -206,9 +228,18 @@ final class ReviewVerdictBar extends VBox {
         // bar, the title is context, so the actions keep their width and the
         // title yields. Its tooltip carries what the ellipsis takes.
         targetLabel.setMinWidth(0);
+        deepReviewButton.getStyleClass().add("review-verdict-action");
+        deepReviewButton.setTooltip(new Tooltip(
+                "Ask this session's agent for a deeper review that amends this round's findings"));
+        deepReviewButton.setOnAction(e -> {
+            if (host.requestDeepReview()) {
+                return;
+            }
+            showAskRefused(NO_SESSION_TO_ASK, NO_SESSION_TO_ASK_DETAIL);
+        });
         for (Button action : List.of(previousButton, nextButton, approveButton,
-                requestChangesButton, askAgentButton, undoButton, confirmStillGoodButton,
-                reReviewButton)) {
+                requestChangesButton, askAgentButton, deepReviewButton, undoButton,
+                confirmStillGoodButton, reReviewButton)) {
             action.setMinWidth(Region.USE_PREF_SIZE);
         }
         navHint.getStyleClass().add("review-verdict-hint");
@@ -568,8 +599,18 @@ final class ReviewVerdictBar extends VBox {
             settledLabel.setText(decision.get().label());
             settledLabel.getStyleClass().removeIf(styleClass -> styleClass.startsWith("decision-"));
             settledLabel.getStyleClass().add("decision-" + decision.get().wireName());
-            actionRow.getChildren().setAll(previousButton, nextButton, targetLabel,
-                    settledLabel, undoButton, actionSpacer, navHint);
+            // The finished tour's one natural next ask: a second, deeper
+            // pass that amends this round. Tour mode only, and only when
+            // every step is settled -- before that there is no settled
+            // round to amend, and the hunk diff has its own "Ask the agent
+            // to fix it" for hand-offs.
+            if (tourMode && totalHunks > 0 && settledHunks >= totalHunks) {
+                actionRow.getChildren().setAll(previousButton, nextButton, targetLabel,
+                        settledLabel, undoButton, deepReviewButton, actionSpacer, navHint);
+            } else {
+                actionRow.getChildren().setAll(previousButton, nextButton, targetLabel,
+                        settledLabel, undoButton, actionSpacer, navHint);
+            }
         } else {
             // Named after the unit it acts on (spec §9.6): this is the one
             // surface never dropped for width, unlike a separate label.

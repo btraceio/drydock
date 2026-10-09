@@ -39,6 +39,58 @@ public final class ReviewInstructions {
             + "rows are all added); ask about the added lines themselves with a trace check, which hides "
             + "nothing";
 
+    /**
+     * The grounding rule for every check question, shared by the first tour
+     * and a refresh. A question the reviewer cannot answer from the tour or
+     * the code in front of them tests their background, not the change --
+     * and a reader who cannot answer stops walking.
+     */
+    private static final String CHECK_GROUNDING = "a check's question, of any kind, must be answerable from "
+            + "what the tour itself explains (its narrative and anchor notes) or from code the reviewer can "
+            + "see around it -- never from outside knowledge the tour has not taught (spec details, encodings, "
+            + "instruction sets, hardware behaviour): teach it in the narrative first, or do not ask it";
+
+    /**
+     * How a tour teaches, shared by the first tour and a refresh. Each rule
+     * is the reading-science literature compressed to something an agent
+     * can hold while writing a step; the spec's "Authoring rules" section
+     * carries the citations (Mayer's coherence and segmenting; the
+     * worked-example effect; Chandler & Sweller on split attention; the
+     * CDC/ODPHP plain-language canon; the expertise reversal effect).
+     */
+    private static final String TEACHING = "write the tour as teaching material: lead each narrative with its "
+            + "single most important point, then only what bears on the decision -- no history, no asides; "
+            + "explain the change's reasoning in the narrative or an anchor note BEFORE the check asks the "
+            + "reviewer to apply it; plain active-voice sentences, one idea each, every unfamiliar term "
+            + "defined at first use; one concept per step, in one file's contiguous rows where possible -- "
+            + "split a step that carries two; and the reader is an expert in the language but new to this "
+            + "change: explain the change, not the language";
+
+    /**
+     * What an impact note must be, shared by the first tour and a refresh.
+     * Drydock's impact data and the agent's own usage searches are name
+     * matches; an unverified match is a link to an unrelated file more
+     * often than not, and the tour drowns in them.
+     */
+    private static final String IMPACT_NOTES = "impact data and any usage search of your own are name matches, "
+            + "not resolved references: before writing an impact note, read the location you cite and confirm "
+            + "it genuinely references the change's declaration -- a same-named field, method or local in an "
+            + "unrelated file is a false link, not an impact, and a step carries at most 8 impact notes";
+
+    /**
+     * When a step's structure is better drawn than said: one optional
+     * monospace diagram per step, its stages revealed in reading order.
+     * The constraint that is not obvious from the wire: stages CONTINUE
+     * the drawing, they are not separate pictures, so each stage is the
+     * lines that belong below what the reader has already seen.
+     */
+    private static final String DIAGRAM = "where a step's structure is easier drawn than said, attach one "
+            + "diagram: monospace box-drawing characters and spaces (never tabs -- a tab stops wherever "
+            + "the panel font says and the drawing arrives crooked), lines under 100 characters, and its "
+            + "stages continue the drawing top to bottom, each stage revealed after the one above it, "
+            + "holding back the conclusion the way a withheld narrative does; most steps need no diagram, "
+            + "one that adds nothing is noise";
+
     private ReviewInstructions() {
     }
 
@@ -48,7 +100,9 @@ public final class ReviewInstructions {
                 + ", call review_state first so already-settled findings are not re-flagged, "
                 + "then post review_finding and review_tour against that handle; review_tour is validated "
                 + "(every changed row in a step, each step at least one check with an alternate) and lists "
-                + "every problem if it is rejected, so fix them and post it again; " + ANCHOR_NOTES + "; " + CHECK_KINDS;
+                + "every problem if it is rejected, so fix them and post it again; " + ANCHOR_NOTES + "; "
+                + CHECK_KINDS + "; " + IMPACT_NOTES + "; " + CHECK_GROUNDING + "; " + TEACHING
+                + "; " + DIAGRAM;
         return supportsSubagents
                 ? "Dispatch a code-review subagent to review the changes in this worktree: it must "
                         + work + ". Report only its summary back here."
@@ -84,12 +138,84 @@ public final class ReviewInstructions {
     }
 
     /**
+     * What drydock asks when a reviewer posts a message into a finding's
+     * thread (spec §4, "Not sure"): the question itself stays in the thread
+     * -- {@code review_comments} carries the messages -- so the prompt
+     * carries only the ids, the same shape as {@link #forRiskCheck}. One
+     * line, for the same reason: it goes through {@code sendPrompt}, which
+     * submits at the first newline.
+     */
+    public static String forFindingQuestion(String scopeId, String findingId) {
+        Objects.requireNonNull(scopeId, "scopeId");
+        Objects.requireNonNull(findingId, "findingId");
+        return "For review handle " + scopeId + ", the reviewer asked a question in finding " + findingId
+                + "'s thread: call review_comments to read it, answer it with review_answer, and revise "
+                + "the finding if they have changed your mind";
+    }
+
+    /**
+     * What a peek's {@code a} asks: the peek context itself is the typed
+     * question, so this is only the delivery instruction, appended to it
+     * on the same line ({@code sendPrompt} submits at the first newline).
+     * One {@code review_ask_answer} call closes the question; the reviewer
+     * reads the answer beside the code, not in this conversation.
+     */
+    public static String forPeekAsk(String questionId) {
+        Objects.requireNonNull(questionId, "questionId");
+        return "Answer with ONE review_ask_answer call (questionId " + questionId
+                + ", answer: plain text, cite file:line from the peek when it matters) -- "
+                + "the reviewer reads it beside the code they asked about";
+    }
+
+    /**
+     * What the step panel's "Ask about this step" sends: the ids and the
+     * delivery instruction, one line ({@code sendPrompt} submits at the
+     * first newline). The agent reads the step itself through the tour
+     * tools; the answer lands on the board beside the step, the same
+     * delivery the peek's ask uses.
+     */
+    public static String forStepAsk(String questionId, String scopeId, String stepTitle) {
+        Objects.requireNonNull(questionId, "questionId");
+        Objects.requireNonNull(scopeId, "scopeId");
+        Objects.requireNonNull(stepTitle, "stepTitle");
+        return "The reviewer asked a question about the guided tour of handle " + scopeId
+                + ", step \"" + stepTitle + "\" (read it and its checks with review_tour): "
+                + "answer with ONE review_ask_answer call (questionId " + questionId
+                + ", answer: plain text, cite file:line from the step's anchors when it matters) -- "
+                + "the reviewer reads it beside the step they asked about";
+    }
+
+    /**
      * One line asking the agent to judge a reviewer's free-text answer.
      *
      * <p>Carries only the check id: the answer is the reviewer's own text and
      * reaches the agent through {@code review_state}, not typed into its
      * prompt.</p>
      */
+    /**
+     * What the verdict bar's "Deep review…" asks once every step of the
+     * tour is settled: a deeper second pass over the same change that
+     * AMENDS the tour round instead of replacing it. One line, for the
+     * same reason as {@link #forFindingQuestion}.
+     *
+     * <p>Harness-agnostic on purpose: drydock cannot know whether this
+     * session's agent has a review-loop tool (sphinx, a code-review
+     * command), so the prompt asks for the deeper pass and lets the agent
+     * use whatever it has -- including only its own re-reading. What is
+     * NOT optional is amending rather than replacing: the tour round's
+     * settled findings and the reviewer's triage are the ground the
+     * second pass builds on, not material to re-litigate wholesale.</p>
+     */
+    public static String forDeepReview(String scopeId) {
+        return "The reviewer finished the guided tour of handle " + scopeId + ": run a deeper "
+                + "review of the same change now -- a review-loop tool (sphinx, code-review) if "
+                + "you have one, otherwise a fresh deep re-read -- and AMEND the tour round, "
+                + "never replace it: read review_state first (settled findings are settled, "
+                + "and their threads are where you correct yourself), revise or withdraw what "
+                + "the second pass shows wrong through review_answer, and add new findings "
+                + "with review_finding -- they land as proposals the reviewer triages";
+    }
+
     public static String forRiskCheck(String scopeId, String checkId) {
         Objects.requireNonNull(scopeId, "scopeId");
         Objects.requireNonNull(checkId, "checkId");
@@ -119,6 +245,7 @@ public final class ReviewInstructions {
         return "For review handle " + scopeId + ", the diff changed under your tour: call review_scope and "
                 + "review_state, then call review_tour with onlySteps true to " + String.join(" and ", asks)
                 + "; the steps you do not send keep the reviewer's progress. For the steps you send, "
-                + ANCHOR_NOTES + "; " + CHECK_KINDS + ".";
+                + ANCHOR_NOTES + "; " + CHECK_KINDS + "; " + IMPACT_NOTES + "; " + CHECK_GROUNDING + "; "
+                + TEACHING + "; " + DIAGRAM + ".";
     }
 }

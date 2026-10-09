@@ -47,6 +47,7 @@ import java.lang.System.Logger;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BiConsumer;
@@ -171,6 +172,13 @@ final class OpenSessionTab {
     /** Supplies a fresh shell runtime+host whose wakeup drives the argument (that terminal's tickAndDraw). */
     private Function<Runnable, ShellTerminal> shellTerminalProvider = onWakeup -> null;
     private String shellWorkingDirectory = System.getProperty("user.home");
+    /**
+     * This tab's local checkout root (the session's worktree; spec
+     * docs/superpowers/specs/2026-10-08-lsp-tier3-usage-resolution.md, §5:
+     * tab close releases the worktree's language server). Empty for a
+     * remote-only tab, whose review has no checkout to serve.
+     */
+    private Optional<Path> worktreeRoot = Optional.empty();
     /** Full shell command for the shell sub-tab; empty = default local login shell in {@link #shellWorkingDirectory}. */
     private Optional<String> shellCommand = Optional.empty();
     /**
@@ -539,6 +547,22 @@ final class OpenSessionTab {
         this.shellWorkingDirectory = dir;
     }
 
+    /**
+     * Sets this tab's local checkout root (empty for a remote-only tab);
+     * {@link #worktreeRoot()} reads it back at tab close.
+     */
+    void setWorktreeRoot(Optional<Path> root) {
+        this.worktreeRoot = Objects.requireNonNull(root, "root");
+    }
+
+    /**
+     * The local checkout this tab's review reads, empty for a remote-only
+     * tab. MainWorkspace keys the worktree's language server off this value.
+     */
+    Optional<Path> worktreeRoot() {
+        return worktreeRoot;
+    }
+
     /** Overrides the shell sub-tab's command (remote repos: ssh into the host instead of a local shell). */
     void setShellCommand(String command) {
         this.shellCommand = Optional.of(command);
@@ -576,13 +600,6 @@ final class OpenSessionTab {
         return activeSubTab == SubTab.EXPLORER
                 && explorerView instanceof SessionExplorerView explorer
                 && explorer.navigateTrail(direction);
-    }
-
-    /** See {@code MainWorkspace.navigateReviewTrail}: only while Review is the active sub-tab. */
-    boolean navigateReviewTrail(int direction) {
-        return activeSubTab == SubTab.REVIEW
-                && reviewView != null
-                && reviewView.navigateTrail(direction);
     }
 
     /** Whether the session runs against a remote repository (no local checkout, no Explorer). */

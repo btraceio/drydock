@@ -125,6 +125,27 @@ class McpToolRouterTourTest extends McpRouterFixture {
         assertTrue(error.getMessage().contains("src/Other.java:4000"), error.getMessage());
     }
 
+    /**
+     * The swamping guard: an unbounded list of unverified name-match links
+     * drowns the step panel, so a step carries at most 8 impact notes.
+     */
+    @Test
+    void aStepWithMoreThanEightImpactNotesIsRejected() {
+        StringBuilder notes = new StringBuilder();
+        for (int i = 1; i <= 9; i++) {
+            if (i > 1) {
+                notes.append(',');
+            }
+            notes.append("{\"file\":\"src/Other.java\",\"line\":").append(i)
+                    .append(",\"text\":\"note ").append(i).append("\"}");
+        }
+        String noted = step("s1", "src/Widget.java", "n1", "n5", "c1")
+                .replace("\"checks\":", "\"impactNotes\":[" + notes + "],\"checks\":");
+        McpToolException error = assertThrows(McpToolException.class, () -> router.call(callerId(), "review_tour",
+                tourArgs(noted, step("s2", "src/WidgetUser.java", "n1", "n6", "c2"))));
+        assertTrue(error.getMessage().contains("more than 8 impact notes"), error.getMessage());
+    }
+
     @Test
     void reviewStateReportsTheTourAndWhetherItIsCurrent() throws Exception {
         router.call(callerId(), "review_tour", coveringArgs());

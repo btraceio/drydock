@@ -61,8 +61,12 @@ final class ReviewFindingsMargin extends VBox {
         /** Resolve / Reopen. */
         void setResolved(ReviewAnnotation finding, boolean resolved);
 
-        /** Reply, and the ASK chips, which post a question as the human. */
-        void postMessage(ReviewAnnotation finding, String body);
+        /**
+         * Reply, and the ASK chips, which post a question as the human.
+         * False means no live session was asked; the message is in the
+         * thread either way.
+         */
+        boolean postMessage(ReviewAnnotation finding, String body);
 
         /** {@code Apply patch} -- a human click, never an agent's doing. */
         void applyPatch(ReviewAnnotation finding);
@@ -91,7 +95,12 @@ final class ReviewFindingsMargin extends VBox {
     }
 
     /** {@code open} hides resolved findings; {@code all} widens to the whole review (F). */
-    enum Filter { OPEN, ALL }
+    /**
+     * OPEN hides resolved findings; ALL shows everything; PROPOSED shows
+     * only what this round's reviewer has not triaged yet -- the walk of a
+     * deep round's amendments, which arrive as proposals.
+     */
+    enum Filter { OPEN, ALL, PROPOSED }
 
     private final Host host;
 
@@ -99,6 +108,7 @@ final class ReviewFindingsMargin extends VBox {
     private final Label headerCount = new Label();
     private final Button allFilter = new Button("all");
     private final Button openFilter = new Button("open");
+    private final Button proposedFilter = new Button("proposed");
     private final VBox cards = new VBox();
     private final ScrollPane scroll = new ScrollPane(cards);
     private final Label collapsedCount = new Label();
@@ -156,8 +166,14 @@ final class ReviewFindingsMargin extends VBox {
         openFilter.getStyleClass().add("review-filter-button");
         openFilter.setTooltip(new Tooltip("Hide resolved findings"));
         openFilter.setOnAction(e -> setFilter(filter == Filter.OPEN ? Filter.ALL : Filter.OPEN));
+        proposedFilter.getStyleClass().add("review-filter-button");
+        proposedFilter.setTooltip(new Tooltip(
+                "Only this round's untriaged proposals -- the walk after a deep review adds findings"));
+        proposedFilter.setOnAction(e ->
+                setFilter(filter == Filter.PROPOSED ? Filter.OPEN : Filter.PROPOSED));
 
-        header.getChildren().setAll(title, headerCount, spacer, allFilter, openFilter, collapseButton);
+        header.getChildren().setAll(title, headerCount, spacer, allFilter, proposedFilter,
+                openFilter, collapseButton);
         header.setAlignment(Pos.CENTER_LEFT);
         header.getStyleClass().add("review-margin-header");
 
@@ -279,7 +295,11 @@ final class ReviewFindingsMargin extends VBox {
 
     private List<ReviewAnnotation> visible() {
         return findings.stream()
-                .filter(finding -> filter == Filter.ALL || isOpen(finding))
+                .filter(finding -> switch (filter) {
+                    case ALL -> true;
+                    case OPEN -> isOpen(finding);
+                    case PROPOSED -> finding.triage() == Triage.PROPOSED;
+                })
                 .sorted(Comparator.comparingInt(finding -> finding.effectiveSeverity().ordinal()))
                 .toList();
     }
@@ -332,6 +352,8 @@ final class ReviewFindingsMargin extends VBox {
         allFilter.pseudoClassStateChanged(javafx.css.PseudoClass.getPseudoClass("selected"), wholeReview);
         openFilter.pseudoClassStateChanged(javafx.css.PseudoClass.getPseudoClass("selected"),
                 filter == Filter.OPEN);
+        proposedFilter.pseudoClassStateChanged(javafx.css.PseudoClass.getPseudoClass("selected"),
+                filter == Filter.PROPOSED);
     }
 
     private void renderCollapsedStrip() {

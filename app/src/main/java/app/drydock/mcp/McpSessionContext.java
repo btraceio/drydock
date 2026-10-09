@@ -5,6 +5,7 @@ import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.Workflow;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.RecheckAssessment;
+import app.drydock.review.PendingQuestions;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewVerdict;
@@ -81,6 +82,15 @@ public interface McpSessionContext {
      * ids tells an agent nothing.
      */
     Optional<ReviewScope> reviewScope(String scopeId, ManagedSessionId caller);
+
+    /**
+     * Delivers the agent's answer to a peek question back to the review
+     * board that asked it ({@code review_ask_answer}). Empty, with nothing
+     * committed, when {@code questionId} names no pending question of this
+     * caller -- unknown, answered, or another session's are deliberately
+     * one answer, the same indistinguishability as {@link #reviewScope}.
+     */
+    Optional<PendingQuestions.AnsweredAsk> answerAsk(String questionId, ManagedSessionId caller, String answer);
 
     /**
      * The display name of the agent behind {@code caller}, for attributing

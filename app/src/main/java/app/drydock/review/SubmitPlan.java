@@ -27,6 +27,15 @@ public record SubmitPlan(Event preselected, List<Comment> comments, List<ReviewA
         posting = List.copyOf(posting);
         refusals = List.copyOf(refusals);
         bodyNotes = List.copyOf(bodyNotes);
+        // The invariant withBodies (and the sheet's per-finding editing)
+        // relies on: posting's first comments.size() entries name the
+        // findings the comments carry, in order, and the rest name the body
+        // notes. Made structural so a future builder cannot silently break
+        // the alignment the editing keys on.
+        if (posting.size() != comments.size() + bodyNotes.size()) {
+            throw new IllegalArgumentException("posting (" + posting.size() + ") must align with comments ("
+                    + comments.size() + ") plus body notes (" + bodyNotes.size() + ")");
+        }
     }
 
     /**
@@ -67,10 +76,17 @@ public record SubmitPlan(Event preselected, List<Comment> comments, List<ReviewA
      * {@code o}-key and an {@code n}-key live in different namespaces and
      * cannot be compared by their line numbers alone.
      */
-    public record DiffIndex(Map<String, Integer> positionOfKey, Map<String, Integer> hunkOfKey) {
+    public record DiffIndex(Map<String, Integer> positionOfKey, Map<String, Integer> hunkOfKey, String name) {
+
+        /** The diff a comment anchors to is by default just "this diff". */
+        public DiffIndex(Map<String, Integer> positionOfKey, Map<String, Integer> hunkOfKey) {
+            this(positionOfKey, hunkOfKey, "this diff");
+        }
+
         public DiffIndex {
             Objects.requireNonNull(positionOfKey, "positionOfKey");
             Objects.requireNonNull(hunkOfKey, "hunkOfKey");
+            Objects.requireNonNull(name, "name");
         }
 
         private String key(String file, String lineKey) {
@@ -164,8 +180,8 @@ public record SubmitPlan(Event preselected, List<Comment> comments, List<ReviewA
                 continue;
             }
             if (startPosition == null || endPosition == null) {
-                refusals.add(new Refusal(finding.key(), "line %s is not in this diff"
-                        .formatted(startPosition == null ? finding.startKey() : finding.endKey())));
+                refusals.add(new Refusal(finding.key(), "line %s is not in %s"
+                        .formatted(startPosition == null ? finding.startKey() : finding.endKey(), index.name())));
                 continue;
             }
 
@@ -288,12 +304,69 @@ public record SubmitPlan(Event preselected, List<Comment> comments, List<ReviewA
     }
 
     /** {@code n500} reads {@code 500}; a deleted {@code o5} reads {@code 5(-)}; a range joins both ends. */
-    private static String lineLabel(String startKey, String endKey) {
+    /** The path:line label a body note anchors with; public for the workspace's override path. */
+    public static String lineLabel(String startKey, String endKey) {
         return startKey.equals(endKey) ? labelOf(startKey) : labelOf(startKey) + "–" + labelOf(endKey);
     }
 
     private static String labelOf(String key) {
         return key.startsWith("o") ? key.substring(1) + "(-)" : key.substring(1);
+    }
+
+    /**
+     * The plan with every comment's and body note's text replaced by the
+     * human's edits: what the submit sheet's per-finding editing produces
+     * before the post. Keyed by the finding's annotation key (the sheet
+     * knows it from {@link #posting()}), applied to both routes -- an
+     * inline comment and a body note are the same finding wearing two
+     * transports. Everything else -- anchors, refusals, the preselected
+     * event -- is carried over unchanged: the edit rewords the finding, it
+     * does not re-decide it.
+     */
+    public SubmitPlan withBodies(Map<ReviewAnnotation.Key, String> editedBodies) {
+        if (editedBodies.isEmpty()) {
+            return this;
+        }
+        List<Comment> rewordedComments = new ArrayList<>();
+        List<BodyNote> rewordedNotes = new ArrayList<>();
+        for (int i = 0; i < comments.size(); i++) {
+            String replacement = editedBodies.get(posting.get(i));
+            rewordedComments.add(replacement == null ? comments.get(i)
+                    : new Comment(comments.get(i).path(), replacement, comments.get(i).anchor()));
+        }
+        for (BodyNote note : bodyNotes) {
+            String replacement = editedBodies.get(note.key());
+            rewordedNotes.add(replacement == null ? note
+                    : new BodyNote(note.key(), note.file(), note.lineLabel(), note.excerpt(), replacement));
+        }
+        return new SubmitPlan(preselected, rewordedComments, posting, refusals, rewordedNotes);
+    }
+
+    /**
+     * Moves overridden refusals into the review body as path:line notes --
+     * the same route a finding outside the GitHub diff already takes. The
+     * human decided the finding's content belongs in this review even
+     * though the moved diff can no longer place an inline anchor for it;
+     * the body is where it lands without either a 422 from GitHub or a
+     * comment silently attached to the wrong line.
+     *
+     * <p>The constructor invariant keeps holding: the moved keys append to
+     * {@code posting} in the same order their notes append to
+     * {@code bodyNotes}, after the comments' entries.</p>
+     */
+    public SubmitPlan withBodyFallback(List<BodyNote> overridden) {
+        if (overridden.isEmpty()) {
+            return this;
+        }
+        java.util.Set<ReviewAnnotation.Key> keys = overridden.stream()
+                .map(BodyNote::key).collect(java.util.stream.Collectors.toCollection(java.util.LinkedHashSet::new));
+        List<Refusal> kept = refusals.stream()
+                .filter(refusal -> !keys.contains(refusal.key())).toList();
+        List<BodyNote> notes = new ArrayList<>(bodyNotes);
+        notes.addAll(overridden);
+        List<ReviewAnnotation.Key> postingNow = new ArrayList<>(posting);
+        postingNow.addAll(keys);
+        return new SubmitPlan(preselected, comments, postingNow, kept, notes);
     }
 
     /** How many findings still wait for a human's confirm-or-dismiss: proposed and unresolved. */
@@ -304,7 +377,8 @@ public record SubmitPlan(Event preselected, List<Comment> comments, List<ReviewA
     }
 
     /** The last message the human wrote on this thread, falling back to the finding's own first message. */
-    private static String bodyOf(ReviewAnnotation finding) {
+    /** The thread's last human wording, falling back to its first message; public for the override path. */
+    public static String bodyOf(ReviewAnnotation finding) {
         List<ReviewAnnotation.Message> thread = finding.thread();
         for (int i = thread.size() - 1; i >= 0; i--) {
             ReviewAnnotation.Message message = thread.get(i);

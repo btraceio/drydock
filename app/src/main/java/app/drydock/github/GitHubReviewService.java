@@ -13,6 +13,7 @@ import app.drydock.state.json.JsonValue.JsonString;
 import app.drydock.state.json.JsonWriter;
 
 import java.io.File;
+import java.util.ArrayList;
 import java.io.IOException;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
@@ -200,6 +201,64 @@ public final class GitHubReviewService implements AutoCloseable {
      */
     public CompletableFuture<Optional<String>> unavailableReason(Path root) {
         return CompletableFuture.supplyAsync(() -> unavailableReasonBlocking(root), executor);
+    }
+
+    /** The PR's current head sha, or empty when gh cannot answer. */
+    public CompletableFuture<Optional<String>> currentHeadSha(Path root, int pr) {
+        return CompletableFuture.supplyAsync(() -> runGh(root,
+                        List.of("view", String.valueOf(pr), "--json", "headRefOid"), "head sha of PR " + pr)
+                .flatMap(GitHubReviewService::parseHeadRefOid), executor);
+    }
+
+    /** {@code {"headRefOid":"…"}} to that sha; empty on anything else gh might print. */
+    private static Optional<String> parseHeadRefOid(String stdout) {
+        try {
+            if (JsonParser.parse(stdout) instanceof JsonObject obj
+                    && obj.get("headRefOid") instanceof JsonString sha) {
+                return Optional.of(sha.value());
+            }
+        } catch (JsonParseException e) {
+            LOG.log(Level.DEBUG, "Unparseable gh pr view headRefOid answer: " + stdout, e);
+        }
+        return Optional.empty();
+    }
+
+    /** The PR's current unified diff, or empty when gh cannot answer. */
+    public CompletableFuture<Optional<String>> pullRequestDiff(Path root, int pr) {
+        return CompletableFuture.supplyAsync(() -> runGh(root,
+                List.of("diff", String.valueOf(pr)), "diff of PR " + pr));
+    }
+
+    /**
+     * One bounded gh run returning stdout, or empty on any failure -- these
+     * are probes a submit can proceed without, so a failure is an empty
+     * answer the caller words honestly, never an exception into the UI.
+     */
+    Optional<String> runGh(Path root, List<String> arguments, String what) {
+        Path gh = locate().orElse(null);
+        if (gh == null) {
+            return Optional.empty();
+        }
+        List<String> command = new ArrayList<>(List.of(gh.toString()));
+        command.addAll(arguments);
+        // --end-of-options: an integer PR number cannot start with -, but
+        // the rule every other spawn here follows costs nothing.
+        command.add("--end-of-options");
+        try {
+            ProcessResult result = ProcessRunner.run(command, root, PROCESS_TIMEOUT);
+            if (result.exitCode() != 0) {
+                LOG.log(Level.INFO, () -> "gh " + String.join(" ", arguments) + " exited " + result.exitCode()
+                        + ": " + ProcessRunner.excerpt(result.stderr()));
+                return Optional.empty();
+            }
+            return Optional.of(result.stdout());
+        } catch (IOException | ProcessTimeoutException | InterruptedException e) {
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            LOG.log(Level.INFO, () -> "gh " + String.join(" ", arguments) + " could not run: " + e.getMessage(), e);
+            return Optional.empty();
+        }
     }
 
     Optional<String> unavailableReasonBlocking(Path root) {

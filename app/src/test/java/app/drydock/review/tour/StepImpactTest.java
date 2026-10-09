@@ -87,6 +87,23 @@ class StepImpactTest {
         assertEquals(List.of(), impact.signatureFlags());
     }
 
+    /**
+     * A symbol too common to attribute is never a wall of caller rows: it
+     * arrives as a count, and the signature flag keeps that count, so the
+     * signal survives with the noise gone.
+     */
+    @Test
+    void aTooCommonSymbolIsACountNotRowsAndStillFlagsItsCount() {
+        OutOfDiffFanIn.Result fanIn = new OutOfDiffFanIn.Result(Map.of(),
+                Map.of("foo", 312), Optional.empty());
+
+        StepImpact impact = StepImpact.of(fooStep, tour, diff, graph, fanIn);
+
+        assertEquals(List.of(), impact.calledFromOutside(), "no rows for a suppressed symbol");
+        assertEquals(List.of(new StepImpact.Suppressed("foo", 312)), impact.suppressedCallers());
+        assertEquals(List.of(new StepImpact.SignatureFlag("foo", A, "n2", 312)), impact.signatureFlags());
+    }
+
     @Test
     void anUnavailableScanCarriesItsReasonInsteadOfAnEmptyAnswer() {
         OutOfDiffFanIn.Result fanIn = new OutOfDiffFanIn.Result(Map.of(),

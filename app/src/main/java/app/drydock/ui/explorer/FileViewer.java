@@ -326,6 +326,7 @@ final class FileViewer extends BorderPane {
 
         peekLayer.setOnStackFull(() -> flashToast("Peek stack is full — esc to unwind"));
         peekLayer.setOnPromote(this::promotePeek);
+        peekLayer.setOnOpenOccurrence(this::openPeekOccurrence);
 
         fileTabs.getSelectionModel().selectedItemProperty().addListener((obs, oldTab, newTab) -> {
             flushSession(oldTab);
@@ -683,6 +684,11 @@ final class FileViewer extends BorderPane {
         peekLayer.setAgentAvailable(available);
     }
 
+    /** See {@link PeekLayer#setLanguageServerHintApplies}: the hint is claimed only when it applies. */
+    void setLanguageServerHintApplies(java.util.function.BooleanSupplier applies) {
+        peekLayer.setLanguageServerHintApplies(applies);
+    }
+
     /** Handler for the peek card's {@code a}: hands the symbol and its occurrences to the bound session. */
     void setOnAskAgent(java.util.function.Consumer<SymbolPeek> handler) {
         peekLayer.setOnAsk(handler);
@@ -822,6 +828,21 @@ final class FileViewer extends BorderPane {
         peekLayer.clear();
         openFile(peek.file(), peek.relativePath(), OptionalInt.of(peek.startLine()), null);
         flashToast("Opened for real — the peek stack collapsed onto the trail");
+    }
+
+    /**
+     * A click on a usage row of a peek card: the Explorer's jump, which is
+     * the file itself at that line -- a real navigation, so the cards
+     * collapse onto the trail exactly as a promote does and the place the
+     * usage claims becomes a waypoint the reader can walk back through.
+     */
+    private void openPeekOccurrence(SymbolPeek.Occurrence occurrence) {
+        peekLayer.clear();
+        Path file = searchRoot == null
+                ? Path.of(occurrence.relativePath().toString())
+                : searchRoot.resolve(occurrence.relativePath()).normalize();
+        openFile(file, occurrence.relativePath(), OptionalInt.of(occurrence.line()), null);
+        flashToast("Opened " + occurrence.label() + " — the peek stack collapsed onto the trail");
     }
 
     /**

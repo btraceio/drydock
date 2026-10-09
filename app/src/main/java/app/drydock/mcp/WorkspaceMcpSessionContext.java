@@ -24,6 +24,7 @@ import app.drydock.git.WorktreeNotCleanException;
 import app.drydock.git.WorktreeService;
 import app.drydock.git.WorktreeService.Worktree;
 import app.drydock.review.AnnotationStore;
+import app.drydock.review.PendingQuestions;
 import app.drydock.review.RecheckAssessment;
 import app.drydock.git.DiffScope;
 import app.drydock.git.DiffService;
@@ -144,6 +145,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     /** Excerpts come from source files; anything this large is not one. */
     private static final long MAX_EXCERPT_FILE_BYTES = 4L * 1024 * 1024;
 
+    private final PendingQuestions pendingQuestions;
     private final Supplier<List<ManagedAgentSession>> sessionCatalog;
     private final Supplier<List<Repository>> repositoryCatalog;
     private final AnnotationStore annotationStore;
@@ -190,8 +192,10 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
                                       BiFunction<ManagedSessionId, HandoffDraft,
                                               CompletableFuture<HandoffBrief>> handoffWriter,
                                       BiFunction<ManagedSessionId, HandoffDraft,
-                                              CompletableFuture<Workflow>> workflowHandoffWriter) {
+                                              CompletableFuture<Workflow>> workflowHandoffWriter,
+                                      PendingQuestions pendingQuestions) {
         this.sessionCatalog = Objects.requireNonNull(sessionCatalog, "sessionCatalog");
+        this.pendingQuestions = Objects.requireNonNull(pendingQuestions, "pendingQuestions");
         this.repositoryCatalog = Objects.requireNonNull(repositoryCatalog, "repositoryCatalog");
         this.annotationStore = Objects.requireNonNull(annotationStore, "annotationStore");
         this.tourStore = Objects.requireNonNull(tourStore, "tourStore");
@@ -291,6 +295,16 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
             return Optional.empty();
         }
         return reviewScopeRegistry.byId(scopeId);
+    }
+
+    @Override
+    public Optional<PendingQuestions.AnsweredAsk> answerAsk(String questionId, ManagedSessionId caller,
+                                                          String answer) {
+        // The scope check rides with the registry's atomic answer, so a
+        // rejected ask is never committed: another session's question stays
+        // pending for the session it was asked of.
+        return pendingQuestions.answer(questionId,
+                ask -> reviewScopeRegistry.isAddressableBy(ask.scopeId(), caller), answer);
     }
 
     @Override
