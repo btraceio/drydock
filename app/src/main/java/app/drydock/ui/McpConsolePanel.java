@@ -73,7 +73,10 @@ public final class McpConsolePanel extends VBox {
         toggle.getStyleClass().addAll("panel-header-chevron-button", "mcp-console-toggle");
         toggle.setFocusTraversable(false);
         toggle.setTooltip(new Tooltip("Expand the MCP console (⌘⇧M)"));
-        toggle.setOnAction(e -> setExpanded(true));
+        // Toggle, not expand: the chevron is the only mouse affordance, and
+        // an expand-only action strands the reader with a 190px console no
+        // click can close (⌘⇧M still worked; the button did not).
+        toggle.setOnAction(e -> toggle());
 
         titleLabel.getStyleClass().add("mcp-console-title");
         budgetLabel.getStyleClass().add("mcp-console-budget-label");
@@ -153,6 +156,11 @@ public final class McpConsolePanel extends VBox {
     /** Diagnostic/test-only: how many rows the list is showing. */
     int diagRowCount() {
         return entries.getItems().size();
+    }
+
+    /** Diagnostic/test-only: fires the strip's chevron button. */
+    void fireToggle() {
+        toggle.fire();
     }
 
     private void refresh() {

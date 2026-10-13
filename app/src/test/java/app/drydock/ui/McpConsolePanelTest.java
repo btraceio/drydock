@@ -52,6 +52,23 @@ class McpConsolePanelTest extends FxTest {
         assertHeight(McpConsolePanel.COLLAPSED_HEIGHT);
     }
 
+    /**
+     * The strip's chevron button is the console's only mouse affordance, so
+     * it must toggle -- an expand-only action stranded the reader with an
+     * expanded console no click could close (⌘⇧M still worked; the button
+     * kept calling {@code setExpanded(true)} on an expanded console).
+     */
+    @Test
+    void theChevronButtonTogglesBothWays() {
+        interact(console::fireToggle);
+        FxSync.waitForFxEvents();
+        assertTrue(console.isExpanded(), "the button expands a collapsed console");
+
+        interact(console::fireToggle);
+        FxSync.waitForFxEvents();
+        assertFalse(console.isExpanded(), "the button collapses an expanded console");
+    }
+
     private void assertHeight(double expected) {
         assertEquals(expected, console.getPrefHeight());
     }
