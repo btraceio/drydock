@@ -213,8 +213,7 @@ jobs:
         shell: pwsh
         run: |
           Rename-Item build/image-windows "drydock-windows-x64"
-          Compress-Archive -Path build/drydock-windows-x64 \
-            -DestinationPath "drydock-windows-x64-$env:V.zip"
+          Compress-Archive -Path build/drydock-windows-x64 -DestinationPath "drydock-windows-x64-$env:V.zip"
       - name: Upload Windows image for the release job
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
