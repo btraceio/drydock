@@ -16,7 +16,7 @@ plugins {
 // The root group/version are kept in sync with app/build.gradle.kts by the
 // release workflow's prepare job.
 group = "io.btrace"
-version = "0.1.0"
+version = "0.2.0"
 
 // Alias for the plan's literal Gate 0B task name
 // (":terminal-ghostty:ffmSmokeTest") -- the project is still a single
