@@ -78,9 +78,9 @@ installing a JDK, Gradle, or the native toolchain:
 jbang drydock@btraceio/drydock
 ```
 
-Use the **catalog alias** (above), not the bare `io.btrace:drydock:0.1.0`
-Maven coordinate: the alias carries the required JDK version and JVM flags,
-which a plain coordinate cannot. If jbang launches on an older JVM — you'll see
+Use the **catalog alias** (above), not the bare release-jar URL: the alias
+carries the required JDK version and JVM flags, which a plain URL cannot. If
+jbang launches on an older JVM — you'll see
 `InvalidModuleDescriptorException: Unsupported major.minor version 68.0` while
 reading a JavaFX module — jbang could not provision JDK 26. Fix it with
 `jbang jdk install 26` (and `jbang version --update` if jbang is old), then
@@ -88,8 +88,10 @@ re-run with `jbang --fresh drydock@btraceio/drydock`.
 
 jbang provisions a **Temurin JDK 26** and JavaFX automatically. The app's classes
 and the required native libraries (`libghostty`, `libdrydockterminalhost`, for
-both Apple Silicon and Intel) ship inside the `io.btrace:drydock` Maven Central
-jar; on first launch they are extracted to `~/Library/Caches/drydock/native/`.
+both Apple Silicon and Intel) ship inside the release jar
+(`drydock-<version>.jar` attached to each GitHub Release, resolved through the
+catalog alias above); on first launch they are extracted to
+`~/Library/Caches/drydock/native/`.
 
 First launch downloads the JDK and dependencies, so it's slower than subsequent
 runs. A few warnings on startup are benign and can be ignored: `WARNING: Unknown
@@ -160,8 +162,9 @@ The runtime image layout and launcher details are documented in
 
 ## Releasing
 
-See [docs/RELEASING.md](docs/RELEASING.md) for how releases are staged to Maven
-Central and finalized.
+See [docs/RELEASING.md](docs/RELEASING.md) for how releases are cut: CI builds
+the macOS natives, the jbang jar and the Windows runtime image, and attaches
+the jar and the Windows image zip to the GitHub Release.
 
 ## Contributing
 

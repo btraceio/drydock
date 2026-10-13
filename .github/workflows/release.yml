@@ -10,7 +10,7 @@ on:
         required: true
         type: string
       dry_run:
-        description: 'Debug run: build+sign to mavenLocal, skip tag/push, Central publish, and GitHub release'
+        description: 'Debug run: build all artifacts (natives, jbang jar, Windows image), skip tag/push and GitHub release'
         required: false
         type: boolean
         default: false
@@ -68,10 +68,10 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           sed -i -E "s/^version = \".*\"/version = \"${V}\"/" app/build.gradle.kts
           sed -i -E "s/^version = \".*\"/version = \"${V}\"/" build.gradle.kts
-          sed -i -E "s|(\"script-ref\": \"io\.btrace:drydock:)[^\"]*(\")|\1${V}\2|" jbang-catalog.json
+          sed -i -E "s|(\"script-ref\": \")[^\"]*(\")|\1https://github.com/btraceio/drydock/releases/download/v${V}/drydock-${V}.jar\2|" jbang-catalog.json
           grep -q "version = \"${V}\"" app/build.gradle.kts || { echo "::error::version bump failed"; exit 1; }
           grep -q "version = \"${V}\"" build.gradle.kts || { echo "::error::root version bump failed"; exit 1; }
-          grep -q "io.btrace:drydock:${V}" jbang-catalog.json || { echo "::error::catalog bump failed"; exit 1; }
+          grep -q "releases/download/v${V}/drydock-${V}.jar" jbang-catalog.json || { echo "::error::catalog bump failed"; exit 1; }
           git add app/build.gradle.kts build.gradle.kts jbang-catalog.json
           git commit -m "Release v${V}"
           git tag -a "v${V}" -m "Release v${V}"
@@ -123,8 +123,14 @@ jobs:
             build/native/macos-${{ matrix.arch }}/libdrydockterminalhost.dylib
           if-no-files-found: error
 
-  stage-maven:
-    name: Stage to Maven Central
+  # Package the jbang launcher jar (natives-bundled, macOS-only natives) from
+  # the native artifacts. This used to live in the stage-maven job, which also
+  # published io.btrace:drydock to Maven Central; publication is gone -- the
+  # jar is attached to the GitHub release directly and jbang-catalog.json
+  # points at the release asset URL -- so the job is now build-only: no
+  # Sonatype/GPG secrets, no staging, no wait-for-Central poll.
+  jbang-jar:
+    name: Build jbang jar
     needs: [setup, prepare, native]
     if: ${{ always() && needs.setup.result == 'success' && needs.native.result == 'success' && (needs.prepare.result == 'success' || needs.prepare.result == 'skipped') }}
     runs-on: macos-14
@@ -151,75 +157,75 @@ jobs:
           java-version: |
             26
             17
-      - name: Stage to Central Portal
-        if: ${{ needs.setup.outputs.dry_run != 'true' }}
-        env:
-          # Reuse the existing org secrets; vanniktech reads them via these
-          # ORG_GRADLE_PROJECT_* Gradle-property env vars. SONATYPE_* must be a
-          # Central Portal token (central.sonatype.com/account), not legacy OSSRH.
-          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.SONATYPE_USERNAME }}
-          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.SONATYPE_PASSWORD }}
-          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.GPG_SIGNING_KEY }}
-          ORG_GRADLE_PROJECT_signingInMemoryKeyId: ${{ secrets.GPG_KEY_ID }}
-          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.GPG_SIGNING_PWD }}
+      - name: Build jbang jar
         run: |
-          ./gradlew :app:publishAllPublicationsToMavenCentralRepository \
+          ./gradlew :app:jbangJar \
             --no-daemon --stacktrace \
             -Pnatives.prebuilt=true \
             -Dorg.gradle.java.installations.fromEnv=JAVA_HOME_17_ARM64,JAVA_HOME_26_ARM64
-      - name: Dry run - build to mavenLocal
-        if: ${{ needs.setup.outputs.dry_run == 'true' }}
-        run: |
-          ./gradlew :app:publishToMavenLocal \
-            --no-daemon --stacktrace \
-            -Pnatives.prebuilt=true \
-            -Dorg.gradle.java.installations.fromEnv=JAVA_HOME_17_ARM64,JAVA_HOME_26_ARM64
-      - name: Upload jbangJar for the release job
+      - name: Upload jbang jar for the release job
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: drydock-jbang-jar
           path: app/build/libs/drydock-${{ needs.setup.outputs.version }}.jar
           if-no-files-found: error
-      - name: Staging complete
-        if: ${{ needs.setup.outputs.dry_run != 'true' }}
-        run: |
-          echo "Artifacts STAGED. Review and click Publish at:"
-          echo "  https://central.sonatype.com/publishing/deployments"
-      - name: Dry run complete
-        if: ${{ needs.setup.outputs.dry_run == 'true' }}
-        run: |
-          echo "DRY RUN complete. Built and signed to ~/.m2/repository."
-          echo "No tag pushed, nothing staged to Central, no GitHub release created."
 
-  wait-for-maven:
-    name: Wait for Maven Central
-    needs: [setup, stage-maven]
-    # stage-maven runs under `if: always()`, so this job must also use the
-    # explicit always()+result pattern; a plain implicit success() gate here
-    # gets skipped on push events downstream of an always() job.
-    if: ${{ always() && needs.stage-maven.result == 'success' && needs.setup.outputs.dry_run != 'true' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 35
+  # Build the Windows jlink runtime image natively on a Windows x64 runner and
+  # zip it with a top-level folder so unzipping does not splatter bin/ and
+  # runtime/ into the current directory. Mirrors the windows-runtime-image job
+  # in tests.yml (same runner requirements: JDK 26 toolchain for the app, JDK
+  # 17 for the Gradle daemon -- windows-latest has neither preinstalled).
+  windows-image:
+    name: Build Windows image (x64)
+    needs: [setup, prepare]
+    if: ${{ always() && needs.setup.result == 'success' && (needs.prepare.result == 'success' || needs.prepare.result == 'skipped') }}
+    runs-on: windows-latest
+    timeout-minutes: 30
     steps:
-      - name: Poll repo1 for the released POM
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.setup.outputs.dry_run == 'true' && github.ref || needs.setup.outputs.ref }}
+          submodules: false
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: 26
+          cache: gradle
+      # Gradle's own daemon runs on JDK 17 (gradle/gradle-daemon-jvm.properties
+      # toolchainVersion=17); windows-latest has no preinstalled 17 and no
+      # toolchain download URL is configured, so without this the build dies
+      # before the app ever compiles.
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Build the Windows runtime image
+        shell: bash
+        run: ./gradlew --no-daemon :app:windowsRuntimeImage
+      - name: Verify image layout
+        shell: bash
         run: |
-          V="${{ needs.setup.outputs.version }}"
-          URL="https://repo1.maven.org/maven2/io/btrace/drydock/${V}/drydock-${V}.pom"
-          echo "Waiting for ${URL}"
-          echo "Click Publish at https://central.sonatype.com/publishing/deployments"
-          for i in $(seq 1 60); do
-            CODE=$(curl -s -o /dev/null -w '%{http_code}' "$URL")
-            if [ "$CODE" = "200" ]; then echo "Available on Maven Central."; exit 0; fi
-            echo "Attempt ${i}/60: HTTP ${CODE} - waiting 30s..."
-            sleep 30
-          done
-          echo "::error::Timed out after 30 min. Release not finalized on Central."
-          exit 1
+          test -f build/image-windows/bin/drydock.bat
+          test -d build/image-windows/runtime/bin
+      - name: Zip the image (top-level drydock-windows-x64 folder)
+        env:
+          V: ${{ needs.setup.outputs.version }}
+        shell: pwsh
+        run: |
+          Rename-Item build/image-windows "drydock-windows-x64"
+          Compress-Archive -Path build/drydock-windows-x64 \
+            -DestinationPath "drydock-windows-x64-$env:V.zip"
+      - name: Upload Windows image for the release job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: drydock-windows-image
+          path: drydock-windows-x64-${{ needs.setup.outputs.version }}.zip
+          if-no-files-found: error
 
   create-github-release:
     name: Create GitHub Release
-    needs: [setup, wait-for-maven]
-    if: ${{ always() && needs.wait-for-maven.result == 'success' && needs.setup.outputs.dry_run != 'true' }}
+    needs: [setup, jbang-jar, windows-image]
+    if: ${{ always() && needs.jbang-jar.result == 'success' && needs.windows-image.result == 'success' && needs.setup.outputs.dry_run != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -229,20 +235,26 @@ jobs:
         with:
           name: drydock-jbang-jar
           path: dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: drydock-windows-image
+          path: dist
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           V="${{ needs.setup.outputs.version }}"
           JAR="dist/drydock-${V}.jar"
+          WINZIP="dist/drydock-windows-x64-${V}.zip"
           # Idempotent: if a release already exists for this tag (e.g. a manual
-          # placeholder, or a re-run), attach/refresh the jar instead of failing.
+          # placeholder, or a re-run), attach/refresh the assets instead of
+          # failing.
           if gh release view "v${V}" >/dev/null 2>&1; then
-            echo "Release v${V} already exists; uploading jbangJar (clobber)."
-            gh release upload "v${V}" "$JAR" --clobber
+            echo "Release v${V} already exists; uploading assets (clobber)."
+            gh release upload "v${V}" "$JAR" "$WINZIP" --clobber
           else
             gh release create "v${V}" \
               --title "Drydock v${V}" \
               --generate-notes \
-              "$JAR"
+              "$JAR" "$WINZIP"
           fi
