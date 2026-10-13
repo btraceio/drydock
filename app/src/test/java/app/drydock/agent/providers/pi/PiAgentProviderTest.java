@@ -133,11 +133,13 @@ class PiAgentProviderTest {
     }
 
     /**
-     * When both {@code node} and the {@code pi} script resolve, the launch
-     * invokes {@code node <pi-script>} directly, bypassing the script's
-     * {@code #!/usr/bin/env node} shebang so a bare inherited PATH (a
-     * Finder/Dock launch whose login-shell merge never landed) cannot make
-     * {@code env node} fail with "env: node: No such file or directory".
+     * When the pi file is a Node script and {@code node} resolves, the
+     * launch invokes {@code node <pi-script>} directly, bypassing the
+     * script's {@code #!/usr/bin/env node} shebang so a bare inherited PATH
+     * (a Finder/Dock launch whose login-shell merge never landed) cannot
+     * make {@code env node} fail with "env: node: No such file or
+     * directory". An empty file stands in for "no readable shebang" -- the
+     * historical assumption the prefix predates.
      */
     @Test
     void nodePrefixBypassesTheShebangWhenBothResolve(@TempDir Path dir) throws Exception {
@@ -156,6 +158,77 @@ class PiAgentProviderTest {
         assertTrue(nodeIdx >= 0 && piIdx > nodeIdx,
                 "node must precede the pi script (bypassing the shebang): " + command);
         assertTrue(command.endsWith("'" + fakePi + "'"), command);
+    }
+
+    /**
+     * A pi file shebanged for a shell -- the managed installer's
+     * {@code #!/bin/sh} launcher at {@code ~/.local/bin/pi} -- must never be
+     * handed to {@code node}: node parses the shell script as JavaScript and
+     * dies on its first line (observed 2026-10-13 against pi 1.2.0 -- every
+     * managed-install launch exited with {@code SyntaxError: Unexpected
+     * token 'case'}). The launcher must run directly; it puts pi's bundled
+     * node on PATH itself, so a bare inherited PATH costs nothing.
+     */
+    @Test
+    void aShellShebangedLauncherIsRunDirectlyEvenWhenNodeResolves(@TempDir Path dir) throws Exception {
+        Path fakeNode = Files.createFile(dir.resolve("node"));
+        Path fakePi = Files.createFile(dir.resolve("pi"));
+        Files.writeString(fakePi, "#!/bin/sh\ncase \"$0\" in\n esac\n");
+        Files.setPosixFilePermissions(fakePi, PosixFilePermissions.fromString("rwxr-xr-x"));
+        HostBinaryLocator nodeLocator = new HostBinaryLocator("node", List.of()) {
+            @Override protected Optional<Path> discover() { return Optional.of(fakeNode); }
+        };
+        PiAgentProvider p = new PiAgentProvider(new PiExecutableLocator(fakePi), nodeLocator, null);
+        p.init(new AgentContext(Path.of("/tmp"), Path.of("/tmp/activity"), ForkJoinPool.commonPool()));
+        String command = p.buildCreateCommand(
+                new CreateContext("S", "x", Path.of("/repo"), Optional.empty(), Optional.empty())).command();
+        assertFalse(command.contains("'" + fakeNode + "'"),
+                "a shell launcher must not be fed to node: " + command);
+        assertTrue(command.endsWith("'" + fakePi + "'"), command);
+    }
+
+    /**
+     * The real managed-install shape: the located pi path is a symlink to
+     * the shell launcher. The shebang must be read through the link -- a
+     * check on the link itself finds no file content and would wrongly keep
+     * the {@code node} prefix.
+     */
+    @Test
+    void aSymlinkToAShellLauncherIsRecognisedThroughTheLink(@TempDir Path dir) throws Exception {
+        Path fakeNode = Files.createFile(dir.resolve("node"));
+        Path launcher = Files.createFile(dir.resolve("real-pi"));
+        Files.writeString(launcher, "#!/bin/sh\nexec real-pi-bin\n");
+        Files.setPosixFilePermissions(launcher, PosixFilePermissions.fromString("rwxr-xr-x"));
+        Path fakePi = Files.createSymbolicLink(dir.resolve("pi"), launcher);
+        HostBinaryLocator nodeLocator = new HostBinaryLocator("node", List.of()) {
+            @Override protected Optional<Path> discover() { return Optional.of(fakeNode); }
+        };
+        PiAgentProvider p = new PiAgentProvider(new PiExecutableLocator(fakePi), nodeLocator, null);
+        p.init(new AgentContext(Path.of("/tmp"), Path.of("/tmp/activity"), ForkJoinPool.commonPool()));
+        String command = p.buildCreateCommand(
+                new CreateContext("S", "x", Path.of("/repo"), Optional.empty(), Optional.empty())).command();
+        assertFalse(command.contains("'" + fakeNode + "'"),
+                "the shell shebang must be seen through the symlink: " + command);
+    }
+
+    /** A genuine {@code #!/usr/bin/env node} script keeps the node prefix. */
+    @Test
+    void aNodeShebangedScriptKeepsTheNodePrefix(@TempDir Path dir) throws Exception {
+        Path fakeNode = Files.createFile(dir.resolve("node"));
+        Path fakePi = Files.createFile(dir.resolve("pi"));
+        Files.writeString(fakePi, "#!/usr/bin/env node\nimport {} from \"node:module\";\n");
+        Files.setPosixFilePermissions(fakePi, PosixFilePermissions.fromString("rwxr-xr-x"));
+        HostBinaryLocator nodeLocator = new HostBinaryLocator("node", List.of()) {
+            @Override protected Optional<Path> discover() { return Optional.of(fakeNode); }
+        };
+        PiAgentProvider p = new PiAgentProvider(new PiExecutableLocator(fakePi), nodeLocator, null);
+        p.init(new AgentContext(Path.of("/tmp"), Path.of("/tmp/activity"), ForkJoinPool.commonPool()));
+        String command = p.buildCreateCommand(
+                new CreateContext("S", "x", Path.of("/repo"), Optional.empty(), Optional.empty())).command();
+        int nodeIdx = command.indexOf("'" + fakeNode + "'");
+        int piIdx = command.indexOf("'" + fakePi + "'");
+        assertTrue(nodeIdx >= 0 && piIdx > nodeIdx,
+                "a node script keeps the shebang-bypassing prefix: " + command);
     }
 
     /**

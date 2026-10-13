@@ -22,6 +22,7 @@ import app.drydock.agent.providers.pi.internal.PiSessionStore;
 import app.drydock.agent.providers.pi.internal.PiVersionProbe;
 import app.drydock.agent.spi.AgentProvider;
 
+import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.lang.System.Logger;
@@ -192,20 +193,33 @@ public final class PiAgentProvider implements AgentProvider {
     }
 
     /**
-     * The token(s) that begin the {@code pi} command. When both {@code node}
-     * and the {@code pi} script resolve to absolute paths, the invocation is
-     * {@code node <pi-script>} -- bypassing the script's
-     * {@code #!/usr/bin/env node} shebang, so the launch does not need
-     * {@code node} on the inherited PATH. That is what keeps pi launching
-     * after a GUI/Finder start whose bare launchd PATH missed {@code node}
-     * (a slow login shell whose merge applied late, or one that never
-     * reported back): the shebang's {@code env node} would search the bare
-     * PATH and fail with {@code env: node: No such file or directory}, while
-     * an absolute {@code node} runs regardless.
+     * The token(s) that begin the {@code pi} command. When the resolved pi
+     * file is itself a Node script and {@code node} resolves to an absolute
+     * path, the invocation is {@code node <pi-script>} -- bypassing the
+     * script's {@code #!/usr/bin/env node} shebang, so the launch does not
+     * need {@code node} on the inherited PATH. That is what keeps pi
+     * launching after a GUI/Finder start whose bare launchd PATH missed
+     * {@code node} (a slow login shell whose merge applied late, or one that
+     * never reported back): the shebang's {@code env node} would search the
+     * bare PATH and fail with {@code env: node: No such file or directory},
+     * while an absolute {@code node} runs regardless.
      *
-     * <p>When either is unresolved, falls back to the {@code pi} path alone
-     * (or bare {@code "pi"}) and relies on the shebang plus a merged PATH --
-     * the original behaviour, correct once the login-shell merge has landed.
+     * <p>The prefix is valid only for a Node script. A file shebanged for a
+     * shell -- the managed installer's {@code #!/bin/sh} launcher at
+     * {@code ~/.local/bin/pi}, which validates the install, puts pi's
+     * bundled node on PATH and execs the release bin -- must be executed
+     * directly: handing it to {@code node} parses the shell script as
+     * JavaScript and dies on its first line, which took down every
+     * managed-install launch (observed 2026-10-13 against pi 1.2.0).
+     * Executing the file directly is correct for any shebang the kernel
+     * honours, and the launcher itself survives a bare PATH (it prepends
+     * pi's bundled node before exec), so dropping the prefix loses nothing
+     * there.
+     *
+     * <p>When the pi file is not a Node script, or either side is
+     * unresolved, falls back to the {@code pi} path alone (or bare
+     * {@code "pi"}) and relies on the shebang plus a merged PATH -- the
+     * original behaviour, correct once the login-shell merge has landed.
      * {@code node} is resolved by {@link HostBinaryLocator} against the live
      * (post-merge) PATH, so the node chosen is the user's shell node (Volta,
      * nvm) when the merge succeeded, and a fallback homebrew node only when
@@ -213,12 +227,59 @@ public final class PiAgentProvider implements AgentProvider {
      */
     private String piBinary() {
         Optional<Path> pi = locator.locate();
-        Optional<Path> node = nodeLocator.locate();
-        if (pi.isPresent() && node.isPresent()) {
-            return AgentCommands.shellQuote(node.get().toString())
-                    + " " + AgentCommands.shellQuote(pi.get().toString());
+        if (pi.isPresent() && isNodeScript(pi.get())) {
+            Optional<Path> node = nodeLocator.locate();
+            if (node.isPresent()) {
+                return AgentCommands.shellQuote(node.get().toString())
+                        + " " + AgentCommands.shellQuote(pi.get().toString());
+            }
         }
         return pi.map(p -> AgentCommands.shellQuote(p.toString())).orElse("pi");
+    }
+
+    /**
+     * Whether the resolved pi file is itself a Node script -- the only shape
+     * the {@code node <pi-script>} prefix is valid for. Follows symlinks to
+     * the real file and inspects the shebang: a Node interpreter (directly
+     * or via {@code env node}) keeps the prefix, a shell shebang drops it.
+     * A file with no readable shebang keeps the prefix -- the historical
+     * assumption before the managed installer's shell launcher existed.
+     */
+    private static boolean isNodeScript(Path pi) {
+        Path real;
+        try {
+            real = pi.toRealPath();
+        } catch (IOException e) {
+            real = pi;   // unreadable/broken link: keep the historical behaviour
+        }
+        String firstLine;
+        try (BufferedReader reader = Files.newBufferedReader(real)) {
+            firstLine = reader.readLine();
+        } catch (IOException e) {
+            return true;   // as above: cannot tell, keep the historical behaviour
+        }
+        if (firstLine == null || !firstLine.startsWith("#!")) {
+            return true;
+        }
+        String[] tokens = firstLine.substring(2).trim().split("\\s+");
+        if (tokens.length == 0 || tokens[0].isEmpty()) {
+            return true;   // bare "#!": cannot tell, keep the historical behaviour
+        }
+        String interpreter = baseName(tokens[0]);
+        if (interpreter.equals("node")) {
+            return true;
+        }
+        return interpreter.equals("env") && tokens.length > 1
+                && baseName(tokens[1]).equals("node");
+    }
+
+    /** The file name of an interpreter path, or "" for an empty/root token. */
+    private static String baseName(String token) {
+        if (token.isEmpty()) {
+            return "";
+        }
+        var name = Path.of(token).getFileName();
+        return name == null ? "" : name.toString();   // "/" has no file name
     }
 
     /**
