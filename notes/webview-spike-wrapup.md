@@ -20,7 +20,9 @@ framework), Windows WebView2 later.
   `fetchHighlighterDeps` — the esbuild npm package layout differs per platform
   (unix: `bin/esbuild`; win32-x64: `esbuild.exe` at the package root), and the
   lookup only walked `bin/`. Fixed in 732ea927 (search the whole package dir
-  for `esbuild`/`esbuild.exe`); re-run in flight.
+  for `esbuild`/`esbuild.exe`); the re-run is green: app:test 23m20s plus all
+  four Windows jobs (bootSpike 1m34s, gradleRunSmoke 1m16s, jeditermSpike
+  1m16s, windowsRuntimeImage 1m11s) — five of five checks pass on PR #31.
 - Interactive run: typing works (Glass does NOT steal keys from the WKWebView
   first responder — no event shim needed), ⌘-shortcuts reach the menu bar,
   focus hand-off acceptable.
