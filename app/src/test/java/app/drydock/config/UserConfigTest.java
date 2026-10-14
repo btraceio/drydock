@@ -162,7 +162,7 @@ class UserConfigTest {
         // The read-modify-write the settings modal must do.
         UserConfig existing = UserConfig.load(configFile);
         UserConfig.save(new UserConfig(Optional.of(dir), existing.openChangedFilesInSkim(),
-                existing.languageServer()), configFile);
+                existing.languageServer(), existing.toolPaths()), configFile);
         UserConfig reloaded = UserConfig.load(configFile);
         assertEquals(Optional.of(dir), reloaded.worktreesDirectory());
         assertFalse(reloaded.openChangedFilesInSkim(), "…and the skim preference is still off");

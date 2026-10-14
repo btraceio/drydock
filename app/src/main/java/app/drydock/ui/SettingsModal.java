@@ -1,6 +1,7 @@
 package app.drydock.ui;
 
 import app.drydock.domain.UiTheme;
+import app.drydock.tools.ExternalTool;
 import javafx.application.Platform;
 import javafx.geometry.Pos;
 import javafx.scene.control.Button;
@@ -151,7 +152,41 @@ public final class SettingsModal extends VBox {
                 skimRow(settings),
                 sectionTitle("Language server"),
                 languageServerRow(settings),
+                sectionTitle("Tools"),
+                toolsSection(),
                 footer);
+    }
+
+    /**
+     * The Tools section: one {@link ToolPathRow} per locatable executable.
+     * git and the agent CLIs are the first-class rows; node and ddtool are
+     * indirect dependencies (pi's {@code #!/usr/bin/env node} interpreter,
+     * claude's {@code apiKeyHelper}) and only matter when the agent CLI
+     * they serve runs. The rows load and save through
+     * {@link app.drydock.tools.ToolOverrideService} directly -- a stateless
+     * static service, read like {@link UiErrors} rather than the stateful
+     * stores this modal reaches through the {@link Settings} callbacks.
+     */
+    private Region toolsSection() {
+        VBox box = new VBox(10);
+        List<ExternalTool> primary = List.of(ExternalTool.GIT, ExternalTool.PI,
+                ExternalTool.CLAUDE, ExternalTool.CODEX);
+        List<ExternalTool> indirect = List.of(ExternalTool.NODE, ExternalTool.DDTOOL);
+        for (ExternalTool tool : primary) {
+            ToolPathRow row = new ToolPathRow(tool, null);
+            pendingEditFlushes.add(row::flushPendingEdit);
+            box.getChildren().add(row);
+        }
+        Label indirectCaption = new Label("Indirect dependencies -- only needed by the agent CLI above that uses them");
+        indirectCaption.getStyleClass().add("settings-hint");
+        indirectCaption.setWrapText(true);
+        box.getChildren().add(indirectCaption);
+        for (ExternalTool tool : indirect) {
+            ToolPathRow row = new ToolPathRow(tool, null);
+            pendingEditFlushes.add(row::flushPendingEdit);
+            box.getChildren().add(row);
+        }
+        return box;
     }
 
     /**

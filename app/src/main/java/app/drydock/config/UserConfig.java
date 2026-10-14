@@ -8,6 +8,7 @@ import app.drydock.state.json.JsonValue.JsonBoolean;
 import app.drydock.state.json.JsonValue.JsonObject;
 import app.drydock.state.json.JsonValue.JsonString;
 import app.drydock.state.json.JsonWriter;
+import app.drydock.tools.ToolLocator;
 
 import java.io.IOException;
 import java.lang.System.Logger;
@@ -17,6 +18,9 @@ import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.function.UnaryOperator;
@@ -31,13 +35,17 @@ import java.util.concurrent.atomic.AtomicReference;
 /**
  * User-editable settings read from {@code ~/.drydock/config.json}, separate
  * from the app's own {@code ApplicationState} (which the app writes itself
- * and never expects a human to hand-edit). Deliberately tiny: {@code
+ * and never expects a human to hand-edit). Deliberately small: {@code
  * worktreesDirectory} -- the directory new worktrees are created under, in
  * place of the {@code <home>/dev/wt} default (see {@link
  * app.drydock.git.WorktreeNaming}) -- {@code openChangedFilesInSkim},
  * whether a file already part of the current change opens folded to its
- * signatures, and {@code languageServer} (see {@link LanguageServer}), the
- * opt-in tier-3 configuration.
+ * signatures, {@code languageServer} (see {@link LanguageServer}), the
+ * opt-in tier-3 configuration, and {@code toolPaths}, per-tool executable
+ * overrides keyed by {@link app.drydock.tools.ExternalTool} config keys
+ * ("git", "pi", "claude", "codex", "node", "ddtool"), consulted by
+ * {@link app.drydock.tools.ToolLocator} when a tool is on neither the
+ * PATH nor a well-known install location.
  *
  * <p>{@link #load()} never throws for a missing or malformed config file:
  * it logs a warning for malformed input and falls back to {@link #empty()},
@@ -48,7 +56,14 @@ import java.util.concurrent.atomic.AtomicReference;
  * has no failure that justifies losing the other settings).</p>
  */
 public record UserConfig(Optional<Path> worktreesDirectory, boolean openChangedFilesInSkim,
-                         LanguageServer languageServer) {
+                         LanguageServer languageServer, Map<String, Path> toolPaths) {
+
+    public UserConfig {
+        Objects.requireNonNull(worktreesDirectory, "worktreesDirectory");
+        Objects.requireNonNull(languageServer, "languageServer");
+        Objects.requireNonNull(toolPaths, "toolPaths");
+        toolPaths = Map.copyOf(toolPaths);
+    }
 
     /**
      * The language-server component (spec
@@ -92,19 +107,51 @@ public record UserConfig(Optional<Path> worktreesDirectory, boolean openChangedF
 
     /**
      * The two-argument form unaffected callers keep: a config with the
-     * language server unset. NOT for read-modify-write updates -- a save
-     * built through it resets the language-server component; the setters
-     * that must preserve it (the application wiring) use the canonical
-     * three-argument constructor.
+     * language server unset and no tool overrides. NOT for read-modify-write
+     * updates -- a save built through it resets the language-server component
+     * and every tool override; the setters that must preserve them (the
+     * application wiring) use the canonical four-argument constructor.
      */
     public UserConfig(Optional<Path> worktreesDirectory, boolean openChangedFilesInSkim) {
-        this(worktreesDirectory, openChangedFilesInSkim, LanguageServer.empty());
+        this(worktreesDirectory, openChangedFilesInSkim, LanguageServer.empty(), Map.of());
+    }
+
+    /**
+     * The three-argument form the language-server tests keep: a config with
+     * no tool overrides. NOT for read-modify-write updates -- a save built
+     * through it resets every tool override; the setters that must preserve
+     * them use the canonical four-argument constructor.
+     */
+    public UserConfig(Optional<Path> worktreesDirectory, boolean openChangedFilesInSkim,
+                      LanguageServer languageServer) {
+        this(worktreesDirectory, openChangedFilesInSkim, languageServer, Map.of());
     }
 
     public static UserConfig empty() {
         // Skim-by-default is the Explorer delta's design (part 2); the
         // setting exists to turn it off, not to opt into it.
-        return new UserConfig(Optional.empty(), true, LanguageServer.empty());
+        return new UserConfig(Optional.empty(), true, LanguageServer.empty(), Map.of());
+    }
+
+    /** This tool's configured executable override, or empty when none is set. */
+    public Optional<Path> toolOverride(String configKey) {
+        return Optional.ofNullable(toolPaths.get(configKey));
+    }
+
+    /**
+     * A copy with one tool's override set or cleared. The read-modify-write
+     * primitive for the settings rows and the startup gate dialog; callers
+     * must go through {@link #updateAsync} so no other preference in the
+     * file is lost on the way.
+     */
+    public UserConfig withToolPath(String configKey, Optional<Path> path) {
+        Map<String, Path> next = new HashMap<>(toolPaths);
+        if (path.isPresent()) {
+            next.put(configKey, path.get());
+        } else {
+            next.remove(configKey);
+        }
+        return new UserConfig(worktreesDirectory, openChangedFilesInSkim, languageServer, next);
     }
 
     /** {@code ~/.drydock/config.json}. */
@@ -165,7 +212,8 @@ public record UserConfig(Optional<Path> worktreesDirectory, boolean openChangedF
                     : Optional.empty();
             boolean openChangedFilesInSkim = !(root.get("openChangedFilesInSkim") instanceof JsonBoolean b)
                     || b.value();
-            return new UserConfig(worktreesDirectory, openChangedFilesInSkim, languageServer(root));
+            return new UserConfig(worktreesDirectory, openChangedFilesInSkim, languageServer(root),
+                    toolPaths(root));
         } catch (IOException | JsonParseException | InvalidPathException e) {
             LOG.log(Level.WARNING, "Config file " + configFile + " is missing, unreadable, or malformed; "
                     + "ignoring it and using defaults", e);
@@ -208,6 +256,7 @@ public record UserConfig(Optional<Path> worktreesDirectory, boolean openChangedF
         root.members().remove("openChangedFilesInSkim");
         root.put("openChangedFilesInSkim", new JsonBoolean(config.openChangedFilesInSkim()));
         writeLanguageServer(root, config.languageServer());
+        writeToolPaths(root, config.toolPaths());
 
         Files.createDirectories(parent);
         Path temp = Files.createTempFile(parent, "config", ".json.tmp");
@@ -218,6 +267,58 @@ public record UserConfig(Optional<Path> worktreesDirectory, boolean openChangedF
         } finally {
             Files.deleteIfExists(temp);
         }
+        // The write may have changed a tool override: cached ToolLocator
+        // discoveries must re-read the tools map on their next locate().
+        ToolLocator.noteConfigChanged();
+    }
+
+    /**
+     * Lenient decode of the {@code tools} override map: absent or a
+     * non-object decodes to empty; an entry whose value is not a
+     * path-shaped string is skipped with a warning rather than failing the
+     * file. Unknown keys are kept as-is -- a newer build may override a
+     * tool this build has no enum constant for, and dropping it would be
+     * data loss.
+     */
+    private static Map<String, Path> toolPaths(JsonObject root) {
+        if (!(root.get("tools") instanceof JsonObject tools)) {
+            return Map.of();
+        }
+        Map<String, Path> overrides = new LinkedHashMap<>();
+        for (var member : tools.members().entrySet()) {
+            if (!(member.getValue() instanceof JsonString s)) {
+                LOG.log(Level.WARNING, "Config member tools.{0} is not a path string; ignoring it",
+                        member.getKey());
+                continue;
+            }
+            try {
+                overrides.put(member.getKey(), Path.of(s.value()).toAbsolutePath().normalize());
+            } catch (InvalidPathException e) {
+                LOG.log(Level.WARNING, "Config member tools.{0} is not a usable path; ignoring it",
+                        member.getKey());
+            }
+        }
+        return overrides;
+    }
+
+    /**
+     * Persists the {@code tools} override map under a {@code tools} object,
+     * same preserve-unknown-members discipline as the language-server
+     * component: the map is opaque ({@code String} keys, path values), so
+     * every entry this build holds is written back, including keys no
+     * {@link app.drydock.tools.ExternalTool} constant knows. An empty map
+     * removes the object entirely.
+     */
+    private static void writeToolPaths(JsonObject root, Map<String, Path> toolPaths) {
+        root.members().remove("tools");
+        if (toolPaths.isEmpty()) {
+            return;
+        }
+        JsonObject object = JsonObject.empty();
+        for (var entry : toolPaths.entrySet()) {
+            object.put(entry.getKey(), new JsonString(entry.getValue().toString()));
+        }
+        root.put("tools", object);
     }
 
     /**
@@ -402,8 +503,8 @@ public record UserConfig(Optional<Path> worktreesDirectory, boolean openChangedF
                         return; // refused: no write, the prior file stays byte-unchanged
                     }
                 }
-                save(new UserConfig(existing.worktreesDirectory(), existing.openChangedFilesInSkim(), next),
-                        defaultConfigFile());
+                save(new UserConfig(existing.worktreesDirectory(), existing.openChangedFilesInSkim(), next,
+                        existing.toolPaths()), defaultConfigFile());
                 future.complete(new LanguageServerSaveResult.Saved());
             } catch (IOException | RuntimeException e) {
                 future.completeExceptionally(e);
