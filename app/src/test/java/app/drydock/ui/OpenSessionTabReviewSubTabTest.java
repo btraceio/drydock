@@ -493,8 +493,8 @@ class OpenSessionTabReviewSubTabTest extends FxTest {
         }
 
         @Override
-        public boolean openInExplorer(ReviewScope scope, Path file, int line) {
-            return false;
+        public Optional<Path> reviewRoot() {
+            return Optional.empty();
         }
 
         @Override

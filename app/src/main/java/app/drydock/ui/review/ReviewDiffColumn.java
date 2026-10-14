@@ -76,14 +76,15 @@ final class ReviewDiffColumn extends BorderPane {
     /** Cap on rendered rows; the remainder is noted, never silently dropped. */
     private static final int MAX_RENDERED_ROWS = 4000;
 
-    /** Where {@code ⤢} goes: the Explorer, in the session bound to the scope being reviewed. */
+    /** Where {@code ⤢} goes: the embedded web code viewer in this review view. */
     @FunctionalInterface
-    interface ExplorerBridge {
+    interface CodeViewBridge {
         /**
-         * Opens {@code file} at a 1-based line in the Explorer of the session
-         * bound to {@code scope}. Returns false when there is nowhere to open
-         * it (no session, or its tab is not open), so the caller can say so
-         * rather than appear to do nothing.
+         * Opens {@code file} at a 1-based line in the review view's embedded
+         * code viewer. Returns false when there is nothing to read (no local
+         * checkout), so the caller can say so rather than appear to do
+         * nothing. The {@code scope} identifies the diff being viewed; the
+         * drawer is per-view, so implementations may not need it.
          */
         boolean openFileAtLine(ReviewScope scope, Path file, int line);
     }
@@ -114,7 +115,7 @@ final class ReviewDiffColumn extends BorderPane {
     }
 
     private final DiffService diffService;
-    private final ExplorerBridge explorerBridge;
+    private final CodeViewBridge codeViewBridge;
     private Predicate<String> symbolClickHandler = symbol -> false;
 
     private PinSource pinSource = new PinSource() {
@@ -206,11 +207,11 @@ final class ReviewDiffColumn extends BorderPane {
      * <p>Tracks {@link #scope} on the git-run path and {@code forScope} on
      * the supplied-diff path, so unlike {@code scope} it survives {@link
      * #showDiff}. Every reader that needs to answer "whose file is this?"
-     * about something already on screen -- {@link #openInExplorer(ReviewDiffRow.HunkHeader, Button)}
+     * about something already on screen -- {@link #openInCodeViewer(ReviewDiffRow.HunkHeader, Button)}
      * is the only one today -- must use this and not {@code scope}: a diff
      * that arrived through {@code showDiff} has no live scope at all, and a
      * reader keyed on {@code scope} silently does nothing there. That is
-     * exactly what the Explorer jump did once the session board began
+     * exactly what the code-viewer open did once the session board began
      * restoring cached diffs through {@code showDiff}.</p>
      */
     private ReviewScope displayedScope;
@@ -356,9 +357,9 @@ final class ReviewDiffColumn extends BorderPane {
      */
     private long requestToken;
 
-    ReviewDiffColumn(DiffService diffService, ExplorerBridge explorerBridge) {
+    ReviewDiffColumn(DiffService diffService, CodeViewBridge codeViewBridge) {
         this.diffService = diffService;
-        this.explorerBridge = explorerBridge;
+        this.codeViewBridge = codeViewBridge;
         getStyleClass().addAll("review-diff-column", ReviewDensity.COZY.styleClass());
 
         summaryLabel.getStyleClass().add("review-diff-summary");
@@ -1918,10 +1919,11 @@ final class ReviewDiffColumn extends BorderPane {
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
 
-        Button explorer = new Button("⤢ Explorer");
-        explorer.getStyleClass().add("review-hunk-explorer");
-        explorer.setTooltip(new Tooltip("Open " + header.file() + " in the Explorer at line " + header.startLine()));
-        explorer.setOnAction(e -> openInExplorer(header, explorer));
+        Button codeView = new Button("⤢ Code");
+        codeView.getStyleClass().add("review-hunk-explorer");
+        codeView.setTooltip(new Tooltip("Open " + header.file() + " at line " + header.startLine()
+                + " in the embedded code viewer"));
+        codeView.setOnAction(e -> openInCodeViewer(header, codeView));
 
         List<Node> children = new ArrayList<>(List.of(file, range));
         // The GitHub links ride the FIRST hunk header of a file: a file's
@@ -1952,7 +1954,7 @@ final class ReviewDiffColumn extends BorderPane {
             children.add(chip);
         }
         children.add(spacer);
-        children.add(explorer);
+        children.add(codeView);
 
         HBox row = new HBox(8, children.toArray(Node[]::new));
         row.setAlignment(Pos.CENTER_LEFT);
@@ -1967,17 +1969,17 @@ final class ReviewDiffColumn extends BorderPane {
     }
 
     /**
-     * The Explorer lives inside a session's tab, so a scope with no bound
-     * session (or whose tab is closed) has nowhere to open the file. Says so
-     * on the button rather than doing nothing when clicked.
+     * The code viewer reads the scope's checkout, so a remote-only review (or
+     * an unreadable file) has nothing to show. Says so on the button rather
+     * than doing nothing when clicked.
      */
-    private void openInExplorer(ReviewDiffRow.HunkHeader header, Button button) {
+    private void openInCodeViewer(ReviewDiffRow.HunkHeader header, Button button) {
         ReviewScope owner = displayedScope;
         if (owner == null) {
             return;
         }
-        if (!explorerBridge.openFileAtLine(owner, Path.of(header.file()), header.startLine())) {
-            button.setTooltip(new Tooltip("Open this scope's session first — the Explorer lives in it"));
+        if (!codeViewBridge.openFileAtLine(owner, Path.of(header.file()), header.startLine())) {
+            button.setTooltip(new Tooltip("No local checkout for this review — nothing to show"));
             button.setDisable(true);
         }
     }
@@ -1986,7 +1988,7 @@ final class ReviewDiffColumn extends BorderPane {
      * Opens the hunk's file on github.com or in github.dev (the web editor),
      * resolved from the scope's checkout per click. A checkout whose origin
      * is not github.com — or with no checkout at all — disables the button
-     * with a tooltip saying so, the same honesty {@link #openInExplorer}
+     * with a tooltip saying so, the same honesty {@link #openInCodeViewer}
      * renders; nothing invented is opened.
      */
     private void openOnGitHub(ReviewDiffRow.HunkHeader header, Button button) {
