@@ -16,6 +16,11 @@ framework), Windows WebView2 later.
   (`WebCodeDrawer.renderPageDir` on a real source file) rendered in a real
   WKWebView and reported `renderer:"shiki"` — the highlighter bundle loaded
   and rendered inside WebKit; the target-line scroll reported back (`moved`).
+- CI (PR #31, btraceio/drydock): the first run's four Windows jobs failed on
+  `fetchHighlighterDeps` — the esbuild npm package layout differs per platform
+  (unix: `bin/esbuild`; win32-x64: `esbuild.exe` at the package root), and the
+  lookup only walked `bin/`. Fixed in 732ea927 (search the whole package dir
+  for `esbuild`/`esbuild.exe`); re-run in flight.
 - Interactive run: typing works (Glass does NOT steal keys from the WKWebView
   first responder — no event shim needed), ⌘-shortcuts reach the menu bar,
   focus hand-off acceptable.
