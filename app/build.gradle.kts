@@ -159,8 +159,12 @@ tasks.register("fetchHighlighterDeps") {
         HighlighterPins.downloadVerified(esbuildUrl, esbuildSha, esbuildTarball)
         val esbuildDir = nodeModulesDir.resolve(tarballDirName(esbuildUrl))
         extract(esbuildTarball, esbuildDir)
-        // The binary ships non-executable from the tarball.
-        val binary = esbuildDir.resolve("bin").walk().firstOrNull { it.isFile }
+        // The binary ships non-executable from the tarball, and NOT in a
+        // fixed location: the unix packages put it at bin/esbuild, the
+        // Windows package at the package root as esbuild.exe.
+        val binary = esbuildDir.walk().firstOrNull {
+            it.isFile && (it.name == "esbuild" || it.name == "esbuild.exe")
+        }
         checkNotNull(binary) { "esbuild binary not found in $esbuildDir" }
         if (!binary.canExecute()) {
             binary.setExecutable(true)
@@ -183,7 +187,9 @@ tasks.register<Exec>("buildHighlighterBundle") {
     val nodeModules = highlighterWorkDir.map { it.dir("node_modules") }
     doFirst {
         val esbuildDir = nodeModules.get().asFile.resolve(tarballDirName(HighlighterPins.esbuild.getValue(HighlighterPins.hostKey).first))
-        val binary = esbuildDir.resolve("bin").walk().firstOrNull { it.isFile }
+        val binary = esbuildDir.walk().firstOrNull {
+            it.isFile && (it.name == "esbuild" || it.name == "esbuild.exe")
+        }
         checkNotNull(binary) { "esbuild binary missing; run './gradlew fetchHighlighterDeps'" }
         environment("NODE_PATH", nodeModules.get().asFile.absolutePath)
         commandLine(
