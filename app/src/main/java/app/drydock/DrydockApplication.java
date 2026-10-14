@@ -34,9 +34,13 @@ import app.drydock.review.tour.TourStore;
 import app.drydock.search.SessionSearchService;
 import app.drydock.state.JsonApplicationStateRepository;
 import app.drydock.state.StateDirectory;
+import app.drydock.tools.ExternalTool;
+import app.drydock.tools.StartupToolCheck;
+import app.drydock.tools.ToolLocator;
 import app.drydock.ui.AppShell;
 import app.drydock.ui.GitHubCloneModal;
 import app.drydock.ui.MainWorkspace;
+import app.drydock.ui.MissingToolsDialog;
 import app.drydock.ui.RemoteRepositoryModal;
 import app.drydock.ui.RepositorySidebar;
 import app.drydock.ui.SettingsModal;
@@ -87,6 +91,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Set;
+import java.util.stream.Collectors;
 import javax.imageio.ImageIO;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
@@ -254,6 +259,24 @@ public final class DrydockApplication extends Application {
         Platform.exit();
     }
 
+    /**
+     * Computes the missing tools and, when there are any, shows the
+     * fix-in-place gate dialog. True = proceed with startup (nothing was
+     * missing, or the dialog resolved everything); false = the user quit.
+     */
+    private static boolean runStartupToolGate() {
+        boolean requireHarness = System.getProperty("app.drydock.diag.command") == null;
+        StartupToolCheck.Result result = StartupToolCheck.check(
+                tool -> new ToolLocator(tool).locate().isPresent(), requireHarness);
+        if (result.satisfied()) {
+            return true;
+        }
+        LOG.log(Level.WARNING, "Startup gate: missing tools: {0}",
+                result.missing().stream().map(ExternalTool::displayName)
+                        .collect(Collectors.joining(", ")));
+        return MissingToolsDialog.showAndWait(result.missing(), requireHarness);
+    }
+
     private void startOnFxThread(Stage primaryStage) {
         // Set the macOS dock icon here (on the FX thread, toolkit already up) --
         // doing AWT/Taskbar work before Glass initializes risks an NSApplication
@@ -292,6 +315,22 @@ public final class DrydockApplication extends Application {
             return;
         } else {
             refuseSecondInstance(stateRepository.stateFile().getParent());
+            return;
+        }
+
+        // Startup gate, before any service is built: git and at least one
+        // agent harness must resolve, or every surface the app exists for
+        // would open broken. When something is missing the fix-in-place
+        // dialog offers typed paths and a file browser (persisted to
+        // config.json), re-checks live, and returns false only if the user
+        // quits. The check is a handful of cached-locator stat calls, run
+        // here on the FX thread like the AgentRegistry availability probe
+        // two lines below; the dialog's own re-checks run off the FX
+        // thread. With app.drydock.diag.command set the harness CLIs are
+        // not required (the diag command replaces the provider command),
+        // so a CI runner without claude still boots.
+        if (!runStartupToolGate()) {
+            Platform.exit();
             return;
         }
 
@@ -433,12 +472,13 @@ public final class DrydockApplication extends Application {
                 public CompletableFuture<Void> saveWorktreesDirectory(Optional<Path> directory) {
                     // Read-modify-write in one executor task: a record
                     // built from one new value would reset the others. The
-                    // three-argument constructor (not the two-argument
-                    // convenience form) is what preserves the language-server
-                    // component across every other setting's save.
+                    // four-argument constructor (not the convenience
+                    // forms) is what preserves the language-server
+                    // component and the tool overrides across every other
+                    // setting's save.
                     return UserConfig.updateAsync(existing ->
                             new UserConfig(directory, existing.openChangedFilesInSkim(),
-                                    existing.languageServer()));
+                                    existing.languageServer(), existing.toolPaths()));
                 }
 
                 @Override
@@ -449,11 +489,11 @@ public final class DrydockApplication extends Application {
                 @Override
                 public CompletableFuture<Void> saveOpenChangedFilesInSkim(boolean value) {
                     // Same preservation as saveWorktreesDirectory: the
-                    // language-server component must round-trip through
-                    // every save of any other setting.
+                    // language-server component and the tool overrides must
+                    // round-trip through every save of any other setting.
                     return UserConfig.updateAsync(existing ->
                             new UserConfig(existing.worktreesDirectory(), value,
-                                    existing.languageServer()));
+                                    existing.languageServer(), existing.toolPaths()));
                 }
 
                 @Override
