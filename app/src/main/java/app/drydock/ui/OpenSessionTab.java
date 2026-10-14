@@ -670,6 +670,14 @@ final class OpenSessionTab {
         if (subTab == SubTab.CLAUDE && terminalOnlySession()) {
             subTab = SubTab.TERMINAL;
         }
+        // The review drawer's web view is a native overlay: it may paint only
+        // while the Review sub-tab is showing. Every switch path funnels
+        // through here (the same-sub-tab early return below included), so
+        // this is the one sync point; a missed clause paints the overlay over
+        // the Explorer or the terminal.
+        if (reviewView != null) {
+            reviewView.setWebDrawerSubTabActive(subTab == SubTab.REVIEW);
+        }
         selectSubTabButton(subTab);
         if (subTab == activeSubTab) {
             // Already showing -- but still reclaim key routing: the user may
@@ -1793,6 +1801,11 @@ final class OpenSessionTab {
         bridge.setWorkspaceVisible(visible);
         for (TerminalPane p : terminals) {
             p.bridge.setWorkspaceVisible(visible);
+        }
+        // The review drawer's web view is a native overlay too: same verdict
+        // (selected tab, no modal) must gate it, or it paints over modals.
+        if (reviewView != null) {
+            reviewView.setWebDrawerWorkspaceVisible(visible);
         }
     }
 

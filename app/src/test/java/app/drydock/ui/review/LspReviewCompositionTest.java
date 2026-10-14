@@ -394,8 +394,8 @@ class LspReviewCompositionTest extends FxTest {
         }
 
         @Override
-        public boolean openInExplorer(ReviewScope scope, Path file, int line) {
-            return real.openInExplorer(scope, file, line);
+        public Optional<Path> reviewRoot() {
+            return real.reviewRoot();
         }
 
         @Override

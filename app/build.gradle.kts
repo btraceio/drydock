@@ -1,4 +1,7 @@
 import org.gradle.external.javadoc.StandardJavadocDocletOptions
+import java.io.File
+import java.net.URI
+import java.security.MessageDigest
 
 plugins {
     application
@@ -18,6 +21,195 @@ plugins {
 
 group = "io.btrace"
 version = "0.4.0"
+
+// ---------------------------------------------------------------------------
+// Syntax highlighter bundle (the review code-viewer's WKWebView page loads
+// it locally; see app/highlighter/shiki-wrapper.mjs). Built at Gradle time
+// from pinned npm tarballs -- checksum-verified, never "latest" -- with the
+// standalone esbuild binary (no node/npm toolchain needed). The bundle output
+// is a generated resource (classpath root, "/shiki.iife.js"); it is NOT
+// committed.
+// ---------------------------------------------------------------------------
+object HighlighterPins {
+    /** npm tarball URL -> expected sha256. Versions are exact pins; bumping one means updating its digest. */
+    val tarballs = listOf(
+        "https://registry.npmjs.org/@shikijs/core/-/core-4.5.0.tgz" to
+                "5c0a367dfa5d1bc785530e95dd99f5af597b6022d9305684efdc67c81f0b6e87",
+        "https://registry.npmjs.org/@shikijs/primitive/-/primitive-4.5.0.tgz" to
+                "3e4fc7f67cb30af8cd02a37c149a1fc558f3b32ef3d62408a3256ed0e526ce22",
+        "https://registry.npmjs.org/@shikijs/types/-/types-4.5.0.tgz" to
+                "76bcb2aa4a3d0d78e9ed3909c18930017d17d0640c16500bc6d11ab5ebd76494",
+        "https://registry.npmjs.org/@shikijs/vscode-textmate/-/vscode-textmate-10.0.2.tgz" to
+                "2164908fc8d7e4b891faa09953cf345f922ab9359d9c4757e97e2620e6207f34",
+        "https://registry.npmjs.org/@shikijs/engine-javascript/-/engine-javascript-4.5.0.tgz" to
+                "2fa3ce729738b8a99721b2e67f0b88e21c1c489ce8ff6b4186b8ab1ead431e3b",
+        "https://registry.npmjs.org/@shikijs/langs/-/langs-4.5.0.tgz" to
+                "39286b862cc8531c96cfaac7b7ba4227bd4284d7e2f376a06384cf0967eb116d",
+        "https://registry.npmjs.org/@shikijs/themes/-/themes-4.5.0.tgz" to
+                "0fa5568e9ababf92a4b36ec797df675f9621cb1a021f67db1183bc254c6bafb5",
+        "https://registry.npmjs.org/oniguruma-to-es/-/oniguruma-to-es-4.3.6.tgz" to
+                "9a5cfbc395d460bb3fec9797c5f4d2dec88303f81f222c261f60422740f6058f",
+        "https://registry.npmjs.org/oniguruma-parser/-/oniguruma-parser-0.12.2.tgz" to
+                "c36b254375a4b8c306d72bf3191cd5bff7a6b46d75d0fe4775f48eb68460d6b4",
+        "https://registry.npmjs.org/regex/-/regex-6.1.0.tgz" to
+                "0ae0b62eb4001fe41323c68de5b817bcaa6a8f4121303c3a642adc05b46dba91",
+        "https://registry.npmjs.org/regex-recursion/-/regex-recursion-6.0.2.tgz" to
+                "0099aee04c6e7f912ae29e2e900bc5b4c3f837836e632a9c358a7e714fca04e6",
+        "https://registry.npmjs.org/regex-utilities/-/regex-utilities-2.3.0.tgz" to
+                "b952edd3197f36694e1e3b72a0f3131c515b256789f98d13d193ee03b2f3ecf5",
+    )
+
+    /** esbuild platform binary package: host key -> (tarball URL, sha256). */
+    val esbuild = mapOf(
+        "macos-arm64" to ("https://registry.npmjs.org/@esbuild/darwin-arm64/-/darwin-arm64-0.28.2.tgz" to
+                "1980cde09749094452b20d36ff267585ccb3f72749c7bc97291cd9996ccf5a2a"),
+        "macos-x86_64" to ("https://registry.npmjs.org/@esbuild/darwin-x64/-/darwin-x64-0.28.2.tgz" to
+                "abb6a7a895aaf2cc0df36fecc3bf0042479ffec51a643a056d54e9109f27db55"),
+        "windows-x86_64" to ("https://registry.npmjs.org/@esbuild/win32-x64/-/win32-x64-0.28.2.tgz" to
+                "7286c3611b6f1f4c4d9ec90adcbc478407ff0d28ead96567f361d53e67613e19"),
+        "linux-x86_64" to ("https://registry.npmjs.org/@esbuild/linux-x64/-/linux-x64-0.28.2.tgz" to
+                "9573bb2233aab0f9ea7647d5cca9726113cc1768de61d66b17267f4db84488f6"),
+    )
+
+    /** The current host, keyed like {@code NativeLibraryLocator}'s arch dirs. */
+    val hostKey: String by lazy {
+        val os = System.getProperty("os.name", "").lowercase()
+        val arch = System.getProperty("os.arch", "")
+        val osKey = when {
+            os.contains("mac") || os.contains("darwin") -> "macos"
+            os.contains("windows") -> "windows"
+            else -> "linux"
+        }
+        val archKey = if (arch == "aarch64" || arch == "arm64") "arm64" else "x86_64"
+        "${osKey}-${archKey}"
+    }
+
+    /** sha256 of `file`; hex lowercase. */
+    fun sha256(file: File): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(file.readBytes())
+        return digest.joinToString("") { byte -> String.format("%02x", byte) }
+    }
+
+    /** Downloads `url` into `target` unless it is already there with the right checksum. */
+    fun downloadVerified(url: String, sha256: String, target: File) {
+        if (target.isFile && sha256(target) == sha256) {
+            return
+        }
+        target.parentFile.mkdirs()
+        val connection = URI.create(url).toURL().openConnection()
+        connection.setRequestProperty("Accept-Encoding", "identity")
+        connection.getInputStream().use { input ->
+            target.outputStream().use { output -> input.copyTo(output) }
+        }
+        val actual = sha256(target)
+        check(actual == sha256) {
+            "Checksum mismatch for $url: expected $sha256, got $actual -- refusing to build the highlighter bundle"
+        }
+    }
+}
+
+val highlighterWorkDir = layout.buildDirectory.dir("highlighter")
+val highlighterOutputDir = layout.buildDirectory.dir("generated/highlighter")
+
+// npm tarball names carry the version; derive the node_modules layout from
+// the URL (the segment after "/-/" is "<name>-<version>.tgz").
+fun tarballDirName(url: String): String {
+    val fileName = url.substringAfterLast("/-/")            // e.g. core-4.5.0.tgz
+    val pkgName = fileName.removeSuffix(".tgz").substringBeforeLast("-") // e.g. core
+    val scope = url.substringAfter("registry.npmjs.org/").substringBefore("/-/") // e.g. @shikijs/core
+    return if (scope.startsWith("@")) scope else pkgName
+}
+
+tasks.register("fetchHighlighterDeps") {
+    group = "build"
+    description = "Downloads the pinned Shiki + esbuild npm tarballs (checksum-verified) into build/highlighter."
+    val nodeModules = highlighterWorkDir.map { it.dir("node_modules") }
+    val downloads = highlighterWorkDir.map { it.dir("downloads") }
+    inputs.property("pins", HighlighterPins.tarballs.joinToString("\n") { (u, s) -> "$u $s" } +
+            HighlighterPins.esbuild.entries.joinToString("\n") { (k, v) -> "$k ${v.first} ${v.second}" })
+    outputs.dir(nodeModules)
+    doLast {
+        val nodeModulesDir = nodeModules.get().asFile
+        fun extract(tarball: File, dir: File) {
+            if (dir.resolve("package.json").isFile) {
+                return
+            }
+            copy {
+                from(tarTree(resources.gzip(tarball)))
+                into(dir)
+            }
+            // The npm tarball root is a single "package/" dir; flatten it.
+            val nested = dir.resolve("package")
+            if (nested.isDirectory) {
+                val staging = File(dir.parentFile, dir.name + "-extract")
+                nested.renameTo(staging)
+                dir.deleteRecursively()
+                staging.renameTo(dir)
+            }
+        }
+        for ((url, sha256) in HighlighterPins.tarballs) {
+            val tarball = downloads.get().asFile.resolve(url.substringAfterLast('/'))
+            HighlighterPins.downloadVerified(url, sha256, tarball)
+            extract(tarball, nodeModulesDir.resolve(tarballDirName(url)))
+        }
+        // The esbuild binary for THIS host only; CI release jobs on other
+        // hosts fetch their own.
+        val (esbuildUrl, esbuildSha) = HighlighterPins.esbuild.getValue(HighlighterPins.hostKey)
+        val esbuildTarball = downloads.get().asFile.resolve(esbuildUrl.substringAfterLast('/'))
+        HighlighterPins.downloadVerified(esbuildUrl, esbuildSha, esbuildTarball)
+        val esbuildDir = nodeModulesDir.resolve(tarballDirName(esbuildUrl))
+        extract(esbuildTarball, esbuildDir)
+        // The binary ships non-executable from the tarball, and NOT in a
+        // fixed location: the unix packages put it at bin/esbuild, the
+        // Windows package at the package root as esbuild.exe.
+        val binary = esbuildDir.walk().firstOrNull {
+            it.isFile && (it.name == "esbuild" || it.name == "esbuild.exe")
+        }
+        checkNotNull(binary) { "esbuild binary not found in $esbuildDir" }
+        if (!binary.canExecute()) {
+            binary.setExecutable(true)
+        }
+    }
+}
+
+val highlighterBundle = highlighterOutputDir.map { it.file("shiki.iife.js") }
+
+tasks.register<Exec>("buildHighlighterBundle") {
+    group = "build"
+    description = "Bundles the Shiki highlighter wrapper into one IIFE file (generated resource /shiki.iife.js)."
+    dependsOn("fetchHighlighterDeps")
+
+    inputs.file("${projectDir}/highlighter/shiki-wrapper.mjs")
+    inputs.file("${projectDir}/highlighter/hast-to-html-stub.mjs")
+    inputs.property("pins", HighlighterPins.esbuild.entries.joinToString("\n") { (k, v) -> "$k ${v.first} ${v.second}" })
+    outputs.file(highlighterBundle)
+
+    val nodeModules = highlighterWorkDir.map { it.dir("node_modules") }
+    doFirst {
+        val esbuildDir = nodeModules.get().asFile.resolve(tarballDirName(HighlighterPins.esbuild.getValue(HighlighterPins.hostKey).first))
+        val binary = esbuildDir.walk().firstOrNull {
+            it.isFile && (it.name == "esbuild" || it.name == "esbuild.exe")
+        }
+        checkNotNull(binary) { "esbuild binary missing; run './gradlew fetchHighlighterDeps'" }
+        environment("NODE_PATH", nodeModules.get().asFile.absolutePath)
+        commandLine(
+            binary.absolutePath,
+            "${projectDir}/highlighter/shiki-wrapper.mjs",
+            "--bundle", "--format=iife", "--minify", "--platform=browser",
+            "--alias:hast-util-to-html=${projectDir}/highlighter/hast-to-html-stub.mjs",
+            "--outfile=${highlighterBundle.get().asFile.absolutePath}",
+            "--log-level=warning",
+        )
+    }
+}
+
+// The bundle rides the jar as a classpath-root resource.
+sourceSets.main {
+    resources.srcDir(highlighterOutputDir)
+}
+val processResources = tasks.named("processResources") {
+    dependsOn("buildHighlighterBundle")
+}
 
 java {
     toolchain {
@@ -252,6 +444,7 @@ tasks.register<Jar>("jbangJar") {
 
     dependsOn(rootProject.tasks.named("buildGhosttyNative"))
     dependsOn(rootProject.tasks.named("buildNativeHost"))
+    dependsOn("buildHighlighterBundle")
     // With -Pnatives.prebuilt=true the two build tasks above are skipped; this
     // verifies the downloaded dylibs are present so the jar is never packaged
     // with missing natives.
@@ -262,7 +455,7 @@ tasks.register<Jar>("jbangJar") {
     val nativeDir = rootProject.layout.buildDirectory.dir("native")
     listOf("macos-arm64", "macos-x86_64").forEach { arch ->
         from(nativeDir.map { it.dir(arch) }) {
-            include("libghostty.dylib", "libdrydockterminalhost.dylib")
+            include("libghostty.dylib", "libdrydockterminalhost.dylib", "libdrydockwebviewhost.dylib")
             into("native/$arch")
         }
     }

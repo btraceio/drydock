@@ -47,12 +47,15 @@ import java.util.List;
  * <p>This class -- together with {@link DrydockTerminalHost}, {@link
  * DrydockTerminalHostBinding}, and {@link DrydockTerminalHostLibrary} -- is part of
  * the narrow native boundary (plan section 2.4/4.2). It is deliberately
- * package-private: only {@link DrydockTerminalHost} (this package's own public
- * entry point) may hold a {@link MemorySegment}; no code outside {@code
- * app.drydock.terminal.host}/{@code app.drydock.terminal.ghostty} may reference it,
- * per plan section 2.4.</p>
+ * {@code public} (Java has no cross-package friend visibility) but restricted
+ * by convention to the two native-boundary facades that attach a native view
+ * to the JavaFX window: {@link DrydockTerminalHost} (this package's own
+ * terminal entry point) and {@code app.drydock.webview.WebviewHost} (the
+ * WKWebView embedding). Those two -- and no other code anywhere -- may take
+ * the returned pointer; per plan section 2.4 no other package holds
+ * native-view pointers.</p>
  */
-final class JavaFxNativeView {
+public final class JavaFxNativeView {
 
     private JavaFxNativeView() {
     }
@@ -61,7 +64,8 @@ final class JavaFxNativeView {
      * Returns the {@code NSView*} of the application's main Glass window,
      * wrapped as a zero-length {@link MemorySegment} (callers must not
      * read/write through it directly -- it is an opaque native pointer,
-     * handed straight to {@link DrydockTerminalHost#create}).
+     * handed straight to a native host shim). Restricted by convention (see
+     * the class Javadoc) to the terminal-host and webview facades.
      *
      * <p>This must be called after the corresponding {@code javafx.stage.Stage}
      * has been shown ({@code Stage#show()}); before that, Glass has not yet
@@ -82,7 +86,7 @@ final class JavaFxNativeView {
      * (e.g. via {@code com.sun.javafx.stage.WindowHelper}, deliberately
      * avoided here -- see docs/native-integration.md).</p>
      */
-    static MemorySegment currentWindowNsView() {
+    public static MemorySegment currentWindowNsView() {
         List<Window> windows = Window.getWindows();
         if (windows.isEmpty()) {
             throw new IllegalStateException(
