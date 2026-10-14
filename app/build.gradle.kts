@@ -449,7 +449,7 @@ tasks.register<Jar>("jbangJar") {
     val nativeDir = rootProject.layout.buildDirectory.dir("native")
     listOf("macos-arm64", "macos-x86_64").forEach { arch ->
         from(nativeDir.map { it.dir(arch) }) {
-            include("libghostty.dylib", "libdrydockterminalhost.dylib")
+            include("libghostty.dylib", "libdrydockterminalhost.dylib", "libdrydockwebviewhost.dylib")
             into("native/$arch")
         }
     }
