@@ -40,7 +40,7 @@ public final class TerminalAgentProvider implements AgentProvider {
      * eagerly: this app's own process environment is not the shell's, and a
      * GUI launch may not carry {@code SHELL} at all.
      */
-    static final String SHELL_COMMAND = "${SHELL:-/bin/zsh}";
+    public static final String SHELL_COMMAND = "${SHELL:-/bin/zsh}";
 
     /** Public no-arg constructor required by {@link java.util.ServiceLoader}. */
     public TerminalAgentProvider() {
