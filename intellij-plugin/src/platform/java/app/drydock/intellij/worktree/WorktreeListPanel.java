@@ -15,7 +15,11 @@ import com.intellij.openapi.wm.ex.ToolWindowManagerListener;
 import com.intellij.ui.content.Content;
 import com.intellij.ui.content.ContentFactory;
 import com.intellij.ui.content.ContentManager;
-import com.intellij.util.ui.AsyncProcessIcon;
+import app.drydock.intellij.actions.SessionDialogs;
+import com.intellij.openapi.ui.Messages;
+import com.intellij.openapi.progress.ProgressIndicator;
+import com.intellij.openapi.progress.ProgressManager;
+import com.intellij.openapi.progress.Task;
 import org.jetbrains.annotations.NotNull;
 
 import javax.swing.BorderFactory;
@@ -100,7 +104,6 @@ public final class WorktreeListPanel extends JPanel {
     private final DefaultListModel<Row> listModel = new DefaultListModel<>();
     private final JList<Row> list = new JList<>(listModel);
     private final JPanel statusLine = new JPanel(new BorderLayout(8, 0));
-    private final AsyncProcessIcon progress = new AsyncProcessIcon("Loading worktrees");
     private final JLabel status = new JLabel("Loading worktrees…");
 
     /** True once the repository resolution completed (EDT). */
@@ -331,6 +334,19 @@ public final class WorktreeListPanel extends JPanel {
         open.setEnabled(!row.current());
         open.addActionListener(event -> openAsProject(row));
         popup.add(open);
+        // The direct path the milestone cut as manual-optional: a session
+        // for a worktree without opening it as a project first. The row's
+        // directory keys everything — the repository it registers under
+        // (the worktree's own, R7) and the terminal tab's cwd.
+        JMenuItem sessionHere = new JMenuItem("New Session Here…");
+        sessionHere.addActionListener(event ->
+                SessionDialogs.showNewSession(project, row.path()));
+        popup.add(sessionHere);
+        JMenuItem remove = new JMenuItem("Force Remove…");
+        // The main checkout is the repository itself — never removable.
+        remove.setEnabled(!row.worktree().mainCheckout());
+        remove.addActionListener(event -> forceRemove(row));
+        popup.add(remove);
         JMenuItem refresh = new JMenuItem("Refresh");
         refresh.addActionListener(event -> requestRefresh());
         popup.add(refresh);
@@ -356,6 +372,38 @@ public final class WorktreeListPanel extends JPanel {
             return;
         }
         WorktreeDialogs.openAsProject(row.path());
+    }
+
+    /**
+     * Force-removes a stale or unneeded worktree
+     * ({@code git worktree remove --force}) after an explicit confirmation.
+     * Only git refuses what it must (the main checkout is unreachable here —
+     * the action is disabled on its row — and the service refuses it again).
+     * Stale/prunable entries (a directory deleted on disk) are exactly what
+     * this exists for; they surface in the list as "stale".
+     */
+    private void forceRemove(Row row) {
+        int confirmed = Messages.showYesNoDialog(this,
+                "Force-remove the worktree at\n" + row.path() + "\n\nUncommitted changes in it are discarded.",
+                "Force Remove Worktree", Messages.getQuestionIcon());
+        if (confirmed != Messages.YES) {
+            return;
+        }
+        beginBusy("Removing " + row.path().getFileName() + "…");
+        worktrees.removeForced(repositoryRoot, row.path(), row.worktree().branch())
+                .whenComplete((removed, failure) -> ApplicationManager.getApplication().invokeLater(() -> {
+                    if (project.isDisposed()) {
+                        return;
+                    }
+                    if (failure != null) {
+                        endBusy("Could not remove the worktree: " + WorktreeErrors.visibleMessage(failure));
+                        Messages.showErrorDialog(this,
+                                WorktreeErrors.visibleMessage(failure), "Force Remove Worktree");
+                    } else {
+                        endBusy("Removed " + row.path().getFileName() + ".");
+                        requestRefresh();
+                    }
+                }, ModalityState.any()));
     }
 
     // ---- rendering ---------------------------------------------------------------
@@ -408,17 +456,18 @@ public final class WorktreeListPanel extends JPanel {
      * the stop path on every branch — no stranded indefinite animation.
      */
     private void beginBusy(String message) {
-        if (progress.getParent() != statusLine) {
-            statusLine.add(progress, BorderLayout.WEST);
-        }
+        // Text only — no spinner. The panel's EDT state machine starts and
+        // stops loads around this method; an animated icon here would be an
+        // indefinite animation whose lifecycle the panel does not own, and
+        // the placeholder text carries the same information (AGENTS.md UI
+        // lifecycle rule).
         status.setText(message);
         statusLine.revalidate();
         statusLine.repaint();
     }
 
-    /** Clears the busy icon (every completion path) and shows {@code message}. */
+    /** Clears the busy text (every completion path) and shows {@code message}. */
     private void endBusy(String message) {
-        statusLine.remove(progress);
         status.setText(message);
         statusLine.revalidate();
         statusLine.repaint();

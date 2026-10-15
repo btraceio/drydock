@@ -86,8 +86,14 @@ public final class ProjectRepositoryService {
                 .toList();
     }
 
-    private CompletableFuture<Repository> repositoryFor(Path directory) {
-        return initialization.thenApplyAsync(unused -> ensureRegistered(directory), executor);
+    /**
+     * The Repository a working directory belongs to (find-or-create on its
+     * canonical root). The project form above is this against the project
+     * root; this form serves callers that start sessions in a directory
+     * other than the open project's — a worktree listed by the panel.
+     */
+    public CompletableFuture<Repository> repositoryFor(Path workingDirectory) {
+        return initialization.thenApplyAsync(unused -> ensureRegistered(workingDirectory), executor);
     }
 
     private Repository ensureRegistered(Path directory) {

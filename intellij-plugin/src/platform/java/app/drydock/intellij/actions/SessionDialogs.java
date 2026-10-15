@@ -181,14 +181,25 @@ public final class SessionDialogs {
                     "Drydock");
             return;
         }
+        showNewSession(project, Path.of(project.getBasePath()));
+    }
+
+    /**
+     * Opens the new-session dialog for a session rooted at
+     * {@code workingDirectory} — the open project, or a worktree listed in
+     * the Drydock panel. The path decides everything the session is keyed
+     * on: the repository it registers under (its own canonical root, R7)
+     * and the terminal tab's working directory.
+     */
+    public static void showNewSession(Project project, Path workingDirectory) {
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         ProgressManager.getInstance().run(new Task.Backgroundable(project, "Preparing new Drydock session…", true) {
             @Override
             public void run(@NotNull ProgressIndicator indicator) {
-                NewSessionInput input = prepareNewSession(project, plugin);
+                NewSessionInput input = prepareNewSession(project, plugin, workingDirectory);
                 if (input != null) {
                     ApplicationManager.getApplication().invokeLater(
-                            () -> openNewSessionDialog(project, input), ModalityState.any());
+                            () -> openNewSessionDialog(project, input, workingDirectory), ModalityState.any());
                 }
             }
         });
@@ -201,11 +212,12 @@ public final class SessionDialogs {
      * resolution failed or timed out — the early returns of AC12.
      */
     @Nullable
-    private static NewSessionInput prepareNewSession(Project project, DrydockPluginService plugin) {
+    private static NewSessionInput prepareNewSession(Project project, DrydockPluginService plugin,
+            Path workingDirectory) {
         try {
             plugin.initialization().get(PREPARE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
             Repository repository = DrydockStartupActivity.repositories(project)
-                    .projectRepository(project).get(PREPARE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                    .repositoryFor(workingDirectory).get(PREPARE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
             if (repository == null) {
                 LOG.log(Level.WARNING,
                         "Project {0} has no Drydock repository; cannot offer a new session", project.getName());
@@ -229,7 +241,7 @@ public final class SessionDialogs {
     private record NewSessionInput(List<Agent> agents, Optional<AgentKind> defaultKind, String suggestedName) {
     }
 
-    private static void openNewSessionDialog(Project project, NewSessionInput input) {
+    private static void openNewSessionDialog(Project project, NewSessionInput input, Path workingDirectory) {
         if (input.agents().stream().noneMatch(Agent::isAvailable)) {
             // Mirrors the app tree's "No agent CLI found" alert: with no
             // agent at all (not even a shell) there is nothing to pick.
@@ -239,19 +251,21 @@ public final class SessionDialogs {
             Messages.showWarningDialog(project, "No agent CLI found. Searched: " + searched, "Drydock");
             return;
         }
-        new NewSessionDialog(project, input).show();
+        new NewSessionDialog(project, input, workingDirectory).show();
     }
 
     /** The new-session dialog: agent combo (availability in every row, AC6) + name field. */
     private static final class NewSessionDialog extends DialogWrapper {
 
         private final Project project;
+        private final Path workingDirectory;
         private final JComboBox<Agent> agentCombo;
         private final JTextField nameField;
 
-        NewSessionDialog(Project project, NewSessionInput input) {
+        NewSessionDialog(Project project, NewSessionInput input, Path workingDirectory) {
             super(project);
             this.project = project;
+            this.workingDirectory = workingDirectory;
             setTitle("New Drydock session");
             agentCombo = new JComboBox<>(input.agents().toArray(Agent[]::new));
             agentCombo.setRenderer(new AgentRowRenderer());
@@ -313,7 +327,7 @@ public final class SessionDialogs {
                 return; // doValidate explains; never close on invalid input
             }
             super.doOKAction();
-            launchNewSession(project, selected.kind(), displayName);
+            launchNewSession(project, workingDirectory, selected.kind(), displayName);
         }
     }
 
@@ -325,12 +339,11 @@ public final class SessionDialogs {
      * it, which clears the progress. A failure surfaces an error naming the
      * agent (AC11 UI half).
      */
-    private static void launchNewSession(Project project, AgentKind kind, String displayName) {
+    private static void launchNewSession(Project project, Path workingDirectory, AgentKind kind, String displayName) {
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         String agentName = AgentLabels.displayName(plugin.registry(), kind);
-        Path repoRoot = Path.of(Objects.requireNonNull(project.getBasePath(), "basePath"));
         CompletableFuture<ManagedAgentSession> launch =
-                DrydockStartupActivity.sessions(project).prepareSession(repoRoot, kind, displayName)
+                DrydockStartupActivity.sessions(project).prepareSession(workingDirectory, kind, displayName)
                         .thenCompose(session -> DrydockStartupActivity.sessions(project).launchSession(session));
         ProgressManager.getInstance().run(new Task.Backgroundable(project,
                 "Starting " + agentName + " session…", true) {
