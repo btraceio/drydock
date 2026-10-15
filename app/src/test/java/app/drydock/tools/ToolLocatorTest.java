@@ -1,6 +1,8 @@
 package app.drydock.tools;
 
 import app.drydock.config.UserConfig;
+import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -92,6 +94,9 @@ class ToolLocatorTest {
     }
 
     @Test
+    // Exercises the executable-bit check, which Windows cannot express:
+    // Files.isExecutable is true for almost any regular file on NTFS.
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void anOverrideThatIsNotAnExecutableFileIsSkipped() throws IOException {
         Path notExecutable = dir.resolve("claude-not-executable");
         Files.writeString(notExecutable, "text only");
@@ -117,6 +122,9 @@ class ToolLocatorTest {
     }
 
     @Test
+    // Exercises the executable-bit check, which Windows cannot express:
+    // Files.isExecutable is true for almost any regular file on NTFS.
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void overrideServiceRefusesANonExecutablePathWithoutWritingIt() throws Exception {
         Path notExecutable = dir.resolve("git-not-executable");
         Files.writeString(notExecutable, "text only");

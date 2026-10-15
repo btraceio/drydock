@@ -76,7 +76,7 @@ class SymbolPeekScopedIntegrationTest {
                 "exactly one occurrence is a real reference: the call through a typed receiver");
         SymbolPeek.Occurrence theCall = card.occurrences().stream()
                 .filter(SymbolPeek.Occurrence::bound).findFirst().orElseThrow();
-        assertEquals("src/a/Caller.java", theCall.relativePath().toString());
+        assertEquals(Path.of("src/a/Caller.java"), theCall.relativePath());
         assertEquals(4, theCall.line());
 
         assertTrue(card.resolvedDeclaration(),
@@ -100,6 +100,6 @@ class SymbolPeekScopedIntegrationTest {
         assertTrue(peek.orElseThrow().occurrences().stream().noneMatch(SymbolPeek.Occurrence::bound),
                 "no grammar, no binding claimed");
         assertTrue(peek.orElseThrow().occurrences().stream().anyMatch(occurrence ->
-                occurrence.relativePath().toString().equals("notes/readme.txt")));
+                occurrence.relativePath().equals(Path.of("notes/readme.txt"))));
     }
 }

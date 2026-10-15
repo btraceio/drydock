@@ -1,5 +1,7 @@
 package app.drydock.git;
 
+import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -49,6 +51,8 @@ class PrCheckoutServiceTest {
     }
 
     @Test
+    // assumes gh is installed on the runner; windows-latest does not ship it.
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void anOccupiedDirectoryIsRefusedRatherThanOverwritten(@TempDir Path dir) throws Exception {
         Path repo = initCommittedRepo(dir);
         Path occupied = Files.createDirectories(dir.resolve("taken"));

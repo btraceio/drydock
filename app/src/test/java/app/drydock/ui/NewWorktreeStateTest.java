@@ -29,6 +29,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class NewWorktreeStateTest {
 
     private static final Path OLIFER = TestPaths.abs("/src/olifer");
+    private static final Path GONE = TestPaths.abs("/gone");
+    private static final Path HELD = TestPaths.abs("/held");
 
     private static final BranchRef MAIN = BranchRef.local("main");
     private static final BranchRef REMOTE = BranchRef.remote("origin/feature/x");
@@ -258,14 +260,14 @@ class NewWorktreeStateTest {
     @Test
     void existingModeKeepsTodaysOccupancyWording() {
         BranchRef occupied = new BranchRef("main", false, Optional.of(OLIFER), false, false);
-        BranchRef stale = new BranchRef("ghost", false, Optional.of(Path.of("/gone")), true, false);
-        BranchRef locked = new BranchRef("held", false, Optional.of(Path.of("/held")), false, true);
-        BranchRef both = new BranchRef("both", false, Optional.of(Path.of("/held")), true, true);
+        BranchRef stale = new BranchRef("ghost", false, Optional.of(GONE), true, false);
+        BranchRef locked = new BranchRef("held", false, Optional.of(HELD), false, true);
+        BranchRef both = new BranchRef("both", false, Optional.of(HELD), true, true);
 
         assertEquals("Already checked out in " + OLIFER, existingMode(catalog(occupied), "main").hint());
-        assertEquals("Blocked by a stale worktree at /gone — run `git worktree prune` to release it.",
+        assertEquals("Blocked by a stale worktree at " + GONE + " — run `git worktree prune` to release it.",
                 existingMode(catalog(stale), "ghost").hint());
-        assertEquals("Blocked by a locked worktree at /held — run `git worktree unlock` to release it.",
+        assertEquals("Blocked by a locked worktree at " + HELD + " — run `git worktree unlock` to release it.",
                 existingMode(catalog(locked), "held").hint());
         // Locked wins: `git worktree prune` silently skips a locked worktree.
         assertTrue(existingMode(catalog(both), "both").hint().contains("git worktree unlock"));

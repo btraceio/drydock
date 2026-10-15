@@ -1,5 +1,6 @@
 package app.drydock.ui;
 
+import app.drydock.testing.TestPaths;
 import app.drydock.domain.UiTheme;
 import app.drydock.testing.FxSync;
 import app.drydock.testing.FxTest;
@@ -35,6 +36,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * completes by hand: no real config file, no real jdt.ls, no real java.
  */
 class SettingsModalLanguageServerRowTest extends FxTest {
+
+    private static final Path JDT_LS = TestPaths.abs("/opt/jdt.ls");
 
     private final CompletableFuture<Optional<Path>> load = new CompletableFuture<>();
     private final CompletableFuture<LanguageServerOutcome> save = new CompletableFuture<>();
@@ -127,11 +130,11 @@ class SettingsModalLanguageServerRowTest extends FxTest {
         assertEquals("Loading…", field.getPromptText());
         assertTrue(browse().isDisabled());
 
-        landLoad(Optional.of(Path.of("/opt/jdt.ls")));
+        landLoad(Optional.of(JDT_LS));
 
         assertFalse(field.isDisabled());
         assertFalse(browse().isDisabled());
-        assertEquals("/opt/jdt.ls", field.getText(), "the stored path is shown, not a default");
+        assertEquals(JDT_LS.toString(), field.getText(), "the stored path is shown, not a default");
         assertEquals("", status().getText(), "loading a value is not a reason to report anything");
         assertEquals(0, saveCalls.get(), "and not a reason to write it back either");
     }
@@ -152,7 +155,7 @@ class SettingsModalLanguageServerRowTest extends FxTest {
         landLoad(Optional.empty());
 
         interact(() -> {
-            field().setText("/opt/jdt.ls");
+            field().setText(JDT_LS.toString());
             field().getOnAction().handle(new ActionEvent());
         });
 
@@ -164,7 +167,7 @@ class SettingsModalLanguageServerRowTest extends FxTest {
         assertTrue(field().isDisabled());
         assertTrue(browse().isDisabled());
         assertEquals(1, saveCalls.get());
-        assertEquals(Optional.of(Path.of("/opt/jdt.ls")), lastSaved.get());
+        assertEquals(Optional.of(JDT_LS), lastSaved.get());
     }
 
     @Test
@@ -189,7 +192,7 @@ class SettingsModalLanguageServerRowTest extends FxTest {
     void aSuccessfulSaveLandsInlineAndDoesNotResaveTheCommittedText() {
         landLoad(Optional.of(Path.of("/opt/old")));
         interact(() -> {
-            field().setText("/opt/jdt.ls");
+            field().setText(JDT_LS.toString());
             field().getOnAction().handle(new ActionEvent());
         });
 
@@ -211,7 +214,7 @@ class SettingsModalLanguageServerRowTest extends FxTest {
     void aFailingSaveRestoresTheControlsAndNamesTheFailureInline() {
         landLoad(Optional.empty());
         interact(() -> {
-            field().setText("/opt/jdt.ls");
+            field().setText(JDT_LS.toString());
             field().getOnAction().handle(new ActionEvent());
         });
 

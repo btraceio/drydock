@@ -12,6 +12,8 @@ import app.drydock.git.GitStatusService;
 import app.drydock.git.NotAGitRepositoryException;
 import app.drydock.review.SessionReviewScopes;
 import app.drydock.state.ApplicationStateRepository;
+import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -123,6 +125,8 @@ class RepositoryManagerTest {
     }
 
     @Test
+    // uses POSIX permissions to fabricate an unwritable directory.
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void addRemoteRepositoryRegistersWithResolvedRootAndRejectsDuplicates() throws Exception {
         Path fake = fakeSsh("printf '/srv/app\\n'");
         try (GitStatusService remoteGitStatusService = new GitStatusService(new GitExecutableLocator(), fake.toString())) {

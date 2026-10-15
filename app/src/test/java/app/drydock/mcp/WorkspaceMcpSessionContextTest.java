@@ -22,6 +22,8 @@ import app.drydock.mcp.McpSessionContext.RenameKind;
 import app.drydock.mcp.McpSessionContext.RenameOutcome;
 import app.drydock.review.AnnotationStore;
 import app.drydock.review.tour.TourStore;
+import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -397,6 +399,8 @@ class WorkspaceMcpSessionContextTest {
      * exist and the charge must come back.
      */
     @Test
+    // uses POSIX permissions to fabricate an uncreatable worktree parent.
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void aWorktreeParentThatCannotBeCreatedIsAnOrdinaryFailure(@TempDir Path repoDir,
                                                                @TempDir Path worktreesParent) throws Exception {
         Path repo = initCommittedRepo(repoDir);

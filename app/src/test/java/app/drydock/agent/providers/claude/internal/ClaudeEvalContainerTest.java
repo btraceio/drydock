@@ -254,7 +254,7 @@ class ClaudeEvalContainerTest {
                     "lastUpdated": "2026-01-01T00:00:00.000Z"
                   }
                 }
-                """.formatted(fixtureHome, fixtureHome));
+                """.formatted(jsonPath(fixtureHome), jsonPath(fixtureHome)));
         Files.writeString(fixtureHome.resolve(".claude/settings.json"), """
                 {
                   "extraKnownMarketplaces": {
@@ -272,7 +272,7 @@ class ClaudeEvalContainerTest {
                     }
                   }
                 }
-                """.formatted(fixtureHome, fixtureHome, fixtureHome));
+                """.formatted(jsonPath(fixtureHome), jsonPath(fixtureHome), jsonPath(fixtureHome)));
         Files.createDirectories(fixtureHome.resolve("in-progress-market"));
 
         ClaudeEvalContainer c = new ClaudeEvalContainer(tmp, fixedToken("tok", Instant.now().plusSeconds(60)));
@@ -343,7 +343,7 @@ class ClaudeEvalContainerTest {
                   "outer": {"installLocation": "%s/outer-market"},
                   "gone": {"installLocation": "%s/deleted-market"}
                 }
-                """.formatted(fixtureHome, fixtureHome, fixtureHome));
+                """.formatted(jsonPath(fixtureHome), jsonPath(fixtureHome), jsonPath(fixtureHome)));
         Files.writeString(fixtureHome.resolve(".claude/settings.json"), """
                 {
                   "extraKnownMarketplaces": {
@@ -355,7 +355,7 @@ class ClaudeEvalContainerTest {
                     }
                   }
                 }
-                """.formatted(fixtureHome, fixtureHome));
+                """.formatted(jsonPath(fixtureHome), jsonPath(fixtureHome)));
         Files.createDirectories(fixtureHome.resolve("outer-market"));
         Files.createDirectories(fixtureHome.resolve("declared-market"));
 
@@ -382,5 +382,12 @@ class ClaudeEvalContainerTest {
         int count = 0, i = 0;
         while ((i = haystack.indexOf(needle, i)) >= 0) { count++; i += needle.length(); }
         return count;
+    }
+
+
+    /** A path interpolated into a JSON string literal: backslash must be doubled,
+     * otherwise on Windows \t, \r etc. inside the path become control characters. */
+    private static String jsonPath(Path p) {
+        return p.toString().replace("\\", "\\\\");
     }
 }

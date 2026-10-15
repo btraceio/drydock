@@ -1,5 +1,6 @@
 package app.drydock.git;
 
+import app.drydock.testing.TestPaths;
 import app.drydock.git.BranchCheckout.Outcome;
 import app.drydock.git.BranchNameRules.Clause;
 import org.junit.jupiter.api.Test;
@@ -22,7 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class BranchCheckoutTest {
 
-    private static final Path HOLDER = Path.of("/tmp/wt/held");
+    private static final Path HOLDER = TestPaths.abs("/tmp/wt/held");
 
     @Test
     void aFreeLocalBranchIsReadyWithNoTracking() {

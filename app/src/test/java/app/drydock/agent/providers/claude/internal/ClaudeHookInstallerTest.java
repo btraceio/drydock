@@ -225,7 +225,10 @@ class ClaudeHookInstallerTest {
         installer.install();
 
         String settings = Files.readString(installer.settingsFile());
-        assertTrue(settings.contains("'" + base.resolve("hooks").resolve("drydock-activity.sh") + "'"),
+        String quotedPath = "'" + base.resolve("hooks").resolve("drydock-activity.sh") + "'";
+        // The settings file is JSON: on Windows the path's backslashes are
+        // JSON-escaped (doubled) inside the string value.
+        assertTrue(settings.contains(quotedPath.replace("\\", "\\\\")),
                 "script path should be shell-single-quoted inside the JSON command: " + settings);
 
         // And the script itself still resolves its activity dir from $0.

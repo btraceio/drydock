@@ -2,6 +2,8 @@ package app.drydock.ui.explorer;
 
 import app.drydock.ui.explorer.FileEditSession.PollOutcome;
 import app.drydock.ui.explorer.FileEditSession.State;
+import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -990,6 +992,8 @@ class FileEditSessionTest {
      * a banner about a file that is still sitting there.
      */
     @Test
+    // fabricates a non-traversable directory with POSIX permissions.
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void aNonNoSuchFileStampFailureFallsThroughToTheWritesOwnError(@TempDir Path dir) throws Exception {
         Path locked = Files.createDirectory(dir.resolve("locked"));
         Path file = locked.resolve("a.txt");

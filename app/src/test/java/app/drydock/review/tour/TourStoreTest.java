@@ -1,5 +1,6 @@
 package app.drydock.review.tour;
 
+import app.drydock.testing.TestPaths;
 import app.drydock.git.UnifiedDiff;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;

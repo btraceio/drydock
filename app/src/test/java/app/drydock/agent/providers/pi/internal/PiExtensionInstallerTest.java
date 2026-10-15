@@ -59,6 +59,10 @@ class PiExtensionInstallerTest {
     }
 
     @Test
+    // the concurrent-install fixture deletes temp files concurrently (Windows
+    // denies deleting a file another handle has open) and the unwritable-
+    // directory fixture fabricates it with POSIX permissions.
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void concurrentInstallsAllSucceedAndAgreeOnTheContent(@TempDir Path state) throws Exception {
         PiExtensionInstaller installer = new PiExtensionInstaller(state);
         ExecutorService pool = Executors.newFixedThreadPool(8);
@@ -74,6 +78,10 @@ class PiExtensionInstallerTest {
     }
 
     @Test
+    // the concurrent-install fixture deletes temp files concurrently (Windows
+    // denies deleting a file another handle has open) and the unwritable-
+    // directory fixture fabricates it with POSIX permissions.
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void anUnwritableStateDirectoryThrowsRatherThanReturningAPathToNothing(@TempDir Path state) throws IOException {
         Path readOnly = Files.createDirectories(state.resolve("locked"));
         Files.setPosixFilePermissions(readOnly, PosixFilePermissions.fromString("r-xr-xr-x"));

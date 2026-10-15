@@ -1,5 +1,6 @@
 package app.drydock.agent.providers.codex;
 
+import app.drydock.testing.TestPaths;
 import app.drydock.agent.api.AgentContext;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.CreateContext;
@@ -78,7 +79,7 @@ class CodexAgentProviderTest {
 
     // ---- drydock's MCP tools, delivered on the command line ------------------
 
-    private static final Path TOKEN_FILE = Path.of("/state/mcp/s.token");
+    private static final Path TOKEN_FILE = TestPaths.abs("/state/mcp/s.token");
 
     private static final Optional<McpAccess> SOME_MCP = Optional.of(
             new McpAccess("http://127.0.0.1:51234/mcp", "tok-abc", Optional.of(TOKEN_FILE)));
@@ -116,7 +117,7 @@ class CodexAgentProviderTest {
 
         assertFalse(command.contains("tok-abc"), command);
         assertTrue(command.startsWith("env "), command);
-        assertTrue(command.contains("DRYDOCK_SESSION_TOKEN=\"$(cat '/state/mcp/s.token')\""), command);
+        assertTrue(command.contains("DRYDOCK_SESSION_TOKEN=\"$(cat '" + TOKEN_FILE + "')\""), command);
         assertFalse(command.contains("-c 'mcp_servers.drydock.http_headers"), command);
     }
 

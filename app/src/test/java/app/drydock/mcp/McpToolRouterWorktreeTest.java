@@ -1,5 +1,6 @@
 package app.drydock.mcp;
 
+import app.drydock.testing.TestPaths;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.mcp.McpSessionRegistry.Spawn;
 import app.drydock.state.json.JsonValue;
@@ -22,7 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class McpToolRouterWorktreeTest {
 
     private final ManagedSessionId caller = ManagedSessionId.newId();
-    private final Path repo = Path.of("/repos/drydock");
+    private final Path repo = TestPaths.abs("/repos/drydock");
     private FakeMcpSessionContext context;
     private McpSessionRegistry registry;
     private McpToolRouter router;
@@ -195,13 +196,14 @@ class McpToolRouterWorktreeTest {
     @Test
     void worktreeCreateTargetsANamedRepository() throws Exception {
         context.repositories.add(new McpSessionContext.RepoSummary("other-repo",
-                Path.of("/repos/other"), Optional.empty(), Optional.empty(), Optional.empty(),
+                TestPaths.abs("/repos/other"), Optional.empty(), Optional.empty(), Optional.empty(),
                 Optional.empty(), false));
 
         router.call(caller, "worktree_create", args("branch", "feat/cross", "repo", "other-repo"));
 
         assertEquals(List.of("other-repo"), context.createdWorktreeRepos);
-        assertEquals("/repos/wt-feat-cross", context.createdWorktrees.get("feat/cross").toString());
+        assertEquals(TestPaths.abs("/repos/other").resolveSibling("wt-feat-cross").toString(),
+                context.createdWorktrees.get("feat/cross").toString());
     }
 
     /** An unknown name is refused before git runs, pointing at repos_list. */
