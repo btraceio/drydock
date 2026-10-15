@@ -13,6 +13,8 @@ import app.drydock.domain.SessionStatus;
 import app.drydock.git.GitExecutableLocator;
 import app.drydock.git.GitStatusService;
 import app.drydock.handoff.HandoffStaleness;
+import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -344,6 +346,7 @@ class SessionHandoffServiceTest {
     }
 
     @Test
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void theSeedFileIsOwnerOnlyBecauseABriefCanQuoteAnything() throws Exception {
         service.handOffBlocking(outgoing, AgentKind.CODEX);
 

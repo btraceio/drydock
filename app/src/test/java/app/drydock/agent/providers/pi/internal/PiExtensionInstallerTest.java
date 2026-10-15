@@ -1,5 +1,7 @@
 package app.drydock.agent.providers.pi.internal;
 
+import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -20,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class PiExtensionInstallerTest {
 
     @Test
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void writesTheSourceOwnerOnlyInAnOwnerOnlyDirectory(@TempDir Path state) throws IOException {
         Path written = new PiExtensionInstaller(state).install();
 
@@ -45,6 +48,7 @@ class PiExtensionInstallerTest {
     }
 
     @Test
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void tightensADirectoryLeftLooseByAnEarlierRun(@TempDir Path state) throws IOException {
         Path dir = Files.createDirectories(state.resolve("pi"));
         Files.setPosixFilePermissions(dir, PosixFilePermissions.fromString("rwxr-xr-x"));

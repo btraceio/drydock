@@ -1,15 +1,12 @@
 package app.drydock.agent.providers.pi.internal;
 
+import app.drydock.io.OwnerOnly;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
-import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.nio.file.attribute.FileAttribute;
-import java.nio.file.attribute.PosixFilePermission;
-import java.nio.file.attribute.PosixFilePermissions;
 import java.util.Objects;
 import java.util.Set;
 
@@ -34,12 +31,6 @@ import java.util.Set;
  */
 public final class PiExtensionInstaller {
 
-    private static final FileAttribute<?> OWNER_ONLY =
-            PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------"));
-
-    private static final Set<PosixFilePermission> OWNER_ONLY_DIRECTORY =
-            PosixFilePermissions.fromString("rwx------");
-
     private static final String FILE_NAME = "drydock-mcp.ts";
 
     private final Path stateDirectory;
@@ -57,11 +48,9 @@ public final class PiExtensionInstaller {
     public Path install() throws IOException {
         Path directory = extensionFile().getParent();
         Files.createDirectories(directory.getParent());
-        try {
-            Files.createDirectory(directory, PosixFilePermissions.asFileAttribute(OWNER_ONLY_DIRECTORY));
-        } catch (FileAlreadyExistsException existing) {
-            Files.setPosixFilePermissions(directory, OWNER_ONLY_DIRECTORY);
-        }
+        // Owner-only creation and tightening degrade on filesystems without
+        // POSIX permissions (NTFS); see OwnerOnly for the Windows constraint.
+        OwnerOnly.createDirectories(directory);
         Path target = extensionFile();
         writeAtomically(target, PiExtensionSource.SOURCE);
         return target;
@@ -77,7 +66,7 @@ public final class PiExtensionInstaller {
         Path temp = target.resolveSibling(target.getFileName() + "." + ProcessHandle.current().pid()
                 + "." + Thread.currentThread().threadId() + ".tmp");
         Files.deleteIfExists(temp);
-        Files.createFile(temp, OWNER_ONLY);
+        OwnerOnly.createFile(temp);
         try {
             Files.writeString(temp, content, StandardCharsets.UTF_8);
             try {
