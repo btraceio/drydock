@@ -9,9 +9,43 @@
     <depends>com.intellij.modules.platform</depends>
     <depends>org.jetbrains.plugins.terminal</depends>
     <extensions defaultExtensionNs="com.intellij">
+        <!-- A plain (not @State) application service: persistence goes through
+             the core ApplicationStateStore single writer, so only the concrete
+             class is registered (no separate service interface exists). -->
+        <applicationService
+                serviceImplementation="app.drydock.intellij.DrydockPluginService"/>
         <toolWindow id="Drydock" anchor="right"
-                    factoryClass="app.drydock.intellij.DrydockToolWindowFactory"/>
-        <applicationConfigurable instance="app.drydock.intellij.DrydockConfigurable"
-                                 displayName="Drydock"/>
+                    factoryClass="app.drydock.intellij.toolwindow.SessionsToolWindowFactory"/>
+        <!-- ProjectRepositoryService and DrydockSessionService are plain
+             classes with constructor arguments the component container
+             cannot supply (the plugin's executor, the terminal launcher),
+             so instead of declarative projectService entries the startup
+             activity constructs exactly one instance per project, holds
+             them in the project's user data, and pre-warms the plugin init
+             and the project's repository with visible progress. -->
+        <postStartupActivity
+                implementation="app.drydock.intellij.startup.DrydockStartupActivity"/>
     </extensions>
+    <!-- The Drydock tool window's toolbar group. Later tasks (T14/T15)
+         append further <action> entries to it. -->
+    <actions>
+        <group id="Drydock.SessionToolbar">
+            <action id="Drydock.NewSession"
+                    class="app.drydock.intellij.actions.NewSessionAction"/>
+            <action id="Drydock.ResumeConversation"
+                    class="app.drydock.intellij.actions.ResumeConversationAction"/>
+            <action id="Drydock.NewWorktree"
+                    class="app.drydock.intellij.actions.NewWorktreeAction"/>
+            <action id="Drydock.CheckoutWorktree"
+                    class="app.drydock.intellij.actions.CheckoutWorktreeAction"/>
+        </group>
+    </actions>
+    <!-- The worktree list panel's Installer adds the "Worktrees" content
+         tab to the Drydock tool window the first time the window is shown;
+         a project-level listener is the one wiring that needs no edit to
+         the sessions tool window factory (T15). -->
+    <projectListeners>
+        <listener class="app.drydock.intellij.worktree.WorktreeListPanel$Installer"
+                  topic="com.intellij.openapi.wm.ex.ToolWindowManagerListener"/>
+    </projectListeners>
 </idea-plugin>
