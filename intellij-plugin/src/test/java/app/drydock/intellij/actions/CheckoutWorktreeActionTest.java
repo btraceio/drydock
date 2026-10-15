@@ -1,11 +1,9 @@
-package app.drydock.intellij.worktree;
+package app.drydock.intellij.actions;
 
 import app.drydock.git.BranchCatalog;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.WorktreeNaming;
 import app.drydock.git.WorktreeService;
-import app.drydock.git.WorktreeService.Worktree;
-import app.drydock.intellij.actions.CheckoutWorktreeAction;
 import app.drydock.intellij.actions.CheckoutWorktreeAction.CheckoutRequest;
 import app.drydock.intellij.actions.CheckoutWorktreeAction.PickerRow;
 
@@ -16,7 +14,6 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 
@@ -25,103 +22,22 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * The T15 pure seams, pinned without opening a dialog or the IDE — every
- * fixture is a real temporary git repository following the core {@code
- * WorktreeServiceTest} pattern, and every seam takes plain values (a
- * listing, a catalog), so there is nothing IDE-bound to instantiate. What
- * is pinned: the worktree list renders from {@link WorktreeService#list}
- * and keeps the distinct escapes apart (AC25 last sentence — locked reads
- * "locked: reason", a stale one reads "stale", the project's own checkout
- * is the one row without an Open action), and the checkout picker's choice
- * goes through {@link app.drydock.git.BranchCheckout#resolve} — a free
- * local branch, a remote-only branch that must mint its tracking local
- * name, an occupied branch, and unknown text each produce exactly the
- * verdict the git call depends on (AC24), while the rows render {@link
- * app.drydock.git.BranchCheckout#dropdownLabel} (why a blocked row cannot
- * be picked) and the directory default reuses T14's derivation.
+ * The T15 checkout-picker pure seams, relocated here from the deleted
+ * {@code WorktreeListPanelTest} (T16 absorbed that panel into the combined
+ * tool-window list; these tests drive {@link CheckoutWorktreeAction}, which
+ * is unchanged). Every fixture is a real temporary git repository
+ * following the core {@code WorktreeServiceTest} pattern, and every seam
+ * takes plain values (a catalog, typed text), so there is nothing IDE-bound
+ * to instantiate. What is pinned: the picker's choice goes through {@code
+ * BranchCheckout#resolve} — a free local branch, a remote-only branch that
+ * must mint its tracking local name, an occupied branch, and unknown text
+ * each produce exactly the verdict the git call depends on (AC24) — while
+ * the rows render {@code BranchCheckout#dropdownLabel} (why a blocked row
+ * cannot be picked) and the directory default reuses T14's derivation.
  */
-class WorktreeListPanelTest {
+class CheckoutWorktreeActionTest {
 
     private static final Path HOME = Path.of("/home/tester");
-
-    // ---- worktree list rendering (AC25) ----------------------------------------
-
-    @Test
-    void rowsComeFromTheWorktreeServiceListing(@TempDir Path repoDir, @TempDir Path worktreeParent)
-            throws Exception {
-        Path repo = initCommittedRepo(repoDir);
-        Path sidebar = worktreeParent.resolve("sidebar");
-        runGit(repo, "worktree", "add", sidebar.toString(), "-b", "feat/sidebar");
-        runGit(repo, "worktree", "lock", "--reason", "initializing", sidebar.toString());
-
-        List<Worktree> listing;
-        try (WorktreeService service = new WorktreeService()) {
-            listing = service.list(repo).get();
-        }
-
-        // The production panel passes the repository's canonicalized root
-        // (RepositoryCatalog.canonicalize), and git prints real paths —
-        // compare real-to-real, as the plugin does.
-        List<WorktreeListPanel.Row> rows = WorktreeListPanel.rowsOf(listing, repo.toRealPath());
-        assertEquals(2, rows.size());
-        // git lists the main checkout first; it is the project we are in,
-        // so it is the one row whose own Open action is disabled.
-        WorktreeListPanel.Row main = rows.get(0);
-        assertTrue(main.worktree().mainCheckout());
-        assertTrue(main.current());
-        assertTrue(main.detail().contains("main"));
-        assertTrue(main.detail().contains("main checkout"), main.detail());
-        assertFalse(rows.get(1).current());
-        // The branch and the lock reason — the escape git needs — both read.
-        WorktreeListPanel.Row locked = rows.get(1);
-        assertEquals(Optional.of("feat/sidebar"), locked.worktree().branch());
-        assertTrue(locked.detail().contains("feat/sidebar"), locked.detail());
-        assertTrue(locked.detail().contains("locked: initializing"), locked.detail());
-        assertEquals(sidebar.toRealPath(), locked.path().toRealPath());
-    }
-
-    @Test
-    void aStaleWorktreeIsMarkedApartFromALockedOne(@TempDir Path repoDir, @TempDir Path worktreeParent)
-            throws Exception {
-        Path repo = initCommittedRepo(repoDir);
-        Path stale = worktreeParent.resolve("stale");
-        runGit(repo, "worktree", "add", stale.toString(), "-b", "feat/stale");
-        // The directory leaves disk, but git still holds the branch — the
-        // prunable case, whose escape (`git worktree prune`) differs from a
-        // lock's and so must not read the same.
-        deleteRecursively(stale);
-
-        List<Worktree> listing;
-        try (WorktreeService service = new WorktreeService()) {
-            listing = service.list(repo).get();
-        }
-
-        List<WorktreeListPanel.Row> rows = WorktreeListPanel.rowsOf(listing, repo.toRealPath());
-        WorktreeListPanel.Row staleRow = rows.get(1);
-        assertTrue(staleRow.worktree().prunable());
-        assertTrue(staleRow.detail().contains("stale"), staleRow.detail());
-        assertFalse(staleRow.detail().contains("locked"), "stale must not read as locked: " + staleRow.detail());
-    }
-
-    @Test
-    void aDetachedWorktreeRowReadsDetachedNotBranchless(@TempDir Path repoDir, @TempDir Path worktreeParent)
-            throws Exception {
-        Path repo = initCommittedRepo(repoDir);
-        String head = runGitCapture(repo, "rev-parse", "HEAD").strip();
-        Path detached = worktreeParent.resolve("detached");
-        runGit(repo, "worktree", "add", "--detach", detached.toString(), head);
-
-        List<Worktree> listing;
-        try (WorktreeService service = new WorktreeService()) {
-            listing = service.list(repo).get();
-        }
-
-        WorktreeListPanel.Row row = WorktreeListPanel.rowsOf(listing, repo.toRealPath()).get(1);
-        assertTrue(row.worktree().detached());
-        assertTrue(row.detail().startsWith("detached"), row.detail());
-    }
-
-    // ---- picker resolution wiring (AC24) ---------------------------------------
 
     @Test
     void aFreeLocalBranchProducesTheRequestWithItsOwnName(@TempDir Path repoDir, @TempDir Path worktreeParent)
@@ -277,10 +193,6 @@ class WorktreeListPanelTest {
     }
 
     private static void runGit(Path repo, String... args) throws IOException, InterruptedException {
-        runGitCapture(repo, args);
-    }
-
-    private static String runGitCapture(Path repo, String... args) throws IOException, InterruptedException {
         List<String> command = new ArrayList<>(List.of("git", "-C", repo.toString()));
         command.addAll(List.of(args));
         Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
@@ -288,19 +200,6 @@ class WorktreeListPanelTest {
         int exit = process.waitFor();
         if (exit != 0) {
             throw new AssertionError("git " + List.of(args) + " failed (" + exit + "): " + output);
-        }
-        return output;
-    }
-
-    private static void deleteRecursively(Path directory) throws IOException {
-        try (var walk = Files.walk(directory)) {
-            walk.sorted(Comparator.reverseOrder()).forEach(path -> {
-                try {
-                    Files.delete(path);
-                } catch (IOException e) {
-                    throw new RuntimeException(e);
-                }
-            });
         }
     }
 }

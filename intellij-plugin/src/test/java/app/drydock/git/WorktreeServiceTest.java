@@ -538,6 +538,59 @@ class WorktreeServiceTest {
                 .contains("feat/already-gone-force"));
     }
 
+    /**
+     * Prune's contract (T16): a prunable entry's directory is already gone
+     * from disk, so pruning is a metadata-only clear — the branch the entry
+     * held outlives it and is kept (deleting a branch is a destructive act
+     * with no data left to confirm against, which is exactly why purge
+     * needs no confirmation dialog).
+     */
+    @Test
+    void pruneClearsStaleWorktreeMetadataButKeepsItsBranch(@TempDir Path repoDir, @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/prune").get();
+        // The directory leaves disk, but git still holds the branch and its
+        // administrative entry — the prunable case.
+        deleteRecursively(worktree);
+        WorktreeService.Worktree listed = service.list(repo).get().get(1);
+        assertTrue(listed.prunable(), "precondition: git reports the entry prunable");
+
+        service.prune(repo).get();
+
+        assertEquals(1, service.list(repo).get().size(), "the stale entry is gone; the main checkout remains");
+        assertTrue(runGitCapture(repo, "branch", "--list", "feat/prune").contains("feat/prune"),
+                "the branch outlives its worktree; pruning is metadata-only");
+    }
+
+    /**
+     * Prune never touches a working tree: live worktrees and the main
+     * checkout survive it untouched, on disk and in the listing.
+     */
+    @Test
+    void pruneLeavesLiveWorktreesAndTheMainCheckoutAlone(@TempDir Path repoDir, @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path live = gitStatusService.createWorktree(repo, worktreeParent.resolve("live"), "feat/live").get();
+        Path stale = gitStatusService.createWorktree(repo, worktreeParent.resolve("stale"), "feat/gone").get();
+        deleteRecursively(stale);
+
+        service.prune(repo).get();
+
+        List<WorktreeService.Worktree> listing = service.list(repo).get();
+        assertEquals(2, listing.size(), "main checkout + the live worktree; only the stale entry left");
+        assertTrue(listing.get(0).mainCheckout());
+        assertEquals(Optional.of("feat/live"), listing.get(1).branch());
+        assertTrue(Files.exists(live.resolve("README.md")), "the live worktree's files are untouched");
+    }
+
+    @Test
+    void pruneOnNonGitDirectoryThrowsNotAGitRepositoryException(@TempDir Path notARepo) {
+        CompletionException completion = assertThrows(CompletionException.class,
+                () -> service.prune(notARepo).join());
+        assertInstanceOf(NotAGitRepositoryException.class, completion.getCause());
+    }
+
     @Test
     void mergeRecordsARealMergeCommitOfTheRecordedTip(@TempDir Path repoDir, @TempDir Path worktreeParent)
             throws Exception {

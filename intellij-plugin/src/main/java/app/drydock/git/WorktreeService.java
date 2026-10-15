@@ -309,6 +309,39 @@ public final class WorktreeService implements AutoCloseable {
     }
 
     /**
+     * Clears the repository's stale worktree entries ({@code git worktree
+     * prune}): an entry is prunable when its directory is already gone from
+     * disk, so pruning touches git metadata only -- never a working tree,
+     * and never the main checkout. It takes no per-worktree argument
+     * because git's prune has no per-worktree form: it clears every
+     * prunable entry in one pass. The branches those entries held are kept
+     * -- they outlive their worktrees, and deleting one would be a
+     * destructive act with no data left to confirm against.
+     */
+    public CompletableFuture<Void> prune(Path repositoryRoot) {
+        return CompletableFuture.supplyAsync(() -> {
+            pruneBlocking(repositoryRoot);
+            return null;
+        }, executor);
+    }
+
+    /** Synchronous form of {@link #prune}, package-private for tests. */
+    void pruneBlocking(Path repositoryRoot) {
+        Path git = locator.locate()
+                .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
+        List<String> command = List.of(
+                git.toString(), "-C", repositoryRoot.toString(),
+                "worktree", "prune");
+        ProcessResult result = run(command);
+        if (result.exitCode() != 0) {
+            if (result.stderr().toLowerCase(Locale.ROOT).contains("not a git repository")) {
+                throw new NotAGitRepositoryException(repositoryRoot);
+            }
+            throw new GitCommandFailedException(command, result.exitCode(), ProcessRunner.excerpt(result.stderr()));
+        }
+    }
+
+    /**
      * The worktree's uncommitted changes, one {@code git status --porcelain}
      * line each (for example {@code " M src/App.java"}, {@code "?? notes.txt"}),
      * in git's own order. This is exactly the probe {@link #remove} and

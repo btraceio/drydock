@@ -36,7 +36,9 @@ import java.util.concurrent.CompletionException;
  * <p>The content starts as a "Loading sessions…" placeholder with visible
  * progress (AC12), and is replaced — on the EDT, only after the plugin init
  * and the project's repository resolution are warm — by the real {@link
- * SessionsPanel} (task T12). The failure path keeps the placeholder with the
+ * SessionsPanel} (task T12; T16 makes that panel the tool window's one
+ * combined tab — sessions, worktrees, and purgable stale entries in a
+ * single list). The failure path keeps the placeholder with the
  * error, the non-git early return keeps it with an explanation, and both
  * clear the spinner (the same AsyncProcessIcon removal is the stop path on
  * every completion branch).</p>
@@ -87,7 +89,7 @@ public final class SessionsToolWindowFactory implements ToolWindowFactory {
                 command -> ApplicationManager.getApplication().invokeLater(command, ModalityState.any()));
         DrydockSessionService sessions = DrydockStartupActivity.sessions(project);
         SessionsPanel panel = new SessionsPanel(
-                project, plugin.registry(), model, sessions, sessions.tabRegistry());
+                project, plugin.registry(), repository, model, sessions, sessions.tabRegistry());
         SessionLifecycleMonitor monitor = new SessionLifecycleMonitor(
                 project, sessions.tabRegistry(), plugin.watcher(), plugin.executor(),
                 id -> agentSessionIdOf(plugin.stateStore().state(), id));

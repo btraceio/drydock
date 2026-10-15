@@ -52,12 +52,4 @@
                     icon="AllIcons.Vcs.Branch"/>
         </group>
     </actions>
-    <!-- The worktree list panel's Installer adds the "Worktrees" content
-         tab to the Drydock tool window the first time the window is shown;
-         a project-level listener is the one wiring that needs no edit to
-         the sessions tool window factory (T15). -->
-    <projectListeners>
-        <listener class="app.drydock.intellij.worktree.WorktreeListPanel$Installer"
-                  topic="com.intellij.openapi.wm.ex.ToolWindowManagerListener"/>
-    </projectListeners>
 </idea-plugin>
