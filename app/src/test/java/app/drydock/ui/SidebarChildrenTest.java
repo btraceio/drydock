@@ -1,5 +1,6 @@
 package app.drydock.ui;
 
+import app.drydock.testing.TestPaths;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.domain.PrLink;
 import app.drydock.domain.AgentBinding;
@@ -26,14 +27,14 @@ import org.junit.jupiter.api.Test;
 class SidebarChildrenTest {
 
     private static final RepositoryId REPO = RepositoryId.newId();
-    private static final Path ROOT = Path.of("/repo");
+    private static final Path ROOT = TestPaths.abs("/repo");
 
     private static Worktree main() {
         return new Worktree(ROOT, Optional.of("main"), true, false, false, false, Optional.empty(), false);
     }
 
     private static Worktree wt(String branch, boolean detached, boolean prunable, boolean locked) {
-        return new Worktree(Path.of("/wt/" + (branch == null ? "x" : branch)),
+        return new Worktree(TestPaths.abs("/wt/" + (branch == null ? "x" : branch)),
                 Optional.ofNullable(branch), false, detached, prunable, locked, Optional.empty(), false);
     }
 
@@ -53,7 +54,7 @@ class SidebarChildrenTest {
 
     @Test
     void banding_putsLiveSessionsBeforeIdle() {
-        ManagedAgentSession live = session("live", Path.of("/wt/a"),
+        ManagedAgentSession live = session("live", TestPaths.abs("/wt/a"),
                 SessionStatus.RUNNING, Instant.ofEpochSecond(10));
         ManagedAgentSession idle = session("idle", null,
                 SessionStatus.INACTIVE, Instant.ofEpochSecond(20));
@@ -66,9 +67,9 @@ class SidebarChildrenTest {
 
     @Test
     void liveBand_sortsMostRecentFirst() {
-        ManagedAgentSession older = session("older", Path.of("/wt/a"),
+        ManagedAgentSession older = session("older", TestPaths.abs("/wt/a"),
                 SessionStatus.RUNNING, Instant.ofEpochSecond(10));
-        ManagedAgentSession newer = session("newer", Path.of("/wt/b"),
+        ManagedAgentSession newer = session("newer", TestPaths.abs("/wt/b"),
                 SessionStatus.RUNNING, Instant.ofEpochSecond(30));
         SidebarChildren result = SidebarChildren.classify(
                 List.of(main(), wt("a", false, false, false), wt("b", false, false, false)),
@@ -79,9 +80,9 @@ class SidebarChildrenTest {
 
     @Test
     void liveBand_pinsNeedsAttentionFirst() {
-        ManagedAgentSession fresh = session("fresh", Path.of("/wt/a"),
+        ManagedAgentSession fresh = session("fresh", TestPaths.abs("/wt/a"),
                 SessionStatus.RUNNING, Instant.ofEpochSecond(50));
-        ManagedAgentSession waiting = session("waiting", Path.of("/wt/b"),
+        ManagedAgentSession waiting = session("waiting", TestPaths.abs("/wt/b"),
                 SessionStatus.RUNNING, Instant.ofEpochSecond(10));
         Map<ManagedSessionId, SessionActivity> activity =
                 Map.of(waiting.id(), SessionActivity.NEEDS_ATTENTION);
@@ -125,7 +126,7 @@ class SidebarChildrenTest {
     void staleRule_mergedWithSession_neverStale_staysASession() {
         // A session-backed worktree is never stale, even if its branch is
         // merged -- the session owns the row.
-        ManagedAgentSession onMerged = session("onmerged", Path.of("/wt/merged"),
+        ManagedAgentSession onMerged = session("onmerged", TestPaths.abs("/wt/merged"),
                 SessionStatus.RUNNING, Instant.ofEpochSecond(10));
         SidebarChildren result = SidebarChildren.classify(
                 List.of(main(), wt("merged", false, false, false).withMerged(true)),
@@ -137,7 +138,7 @@ class SidebarChildrenTest {
 
     @Test
     void staleRule_prunableWithSession_neverStale_staysASession() {
-        ManagedAgentSession onStale = session("onstale", Path.of("/wt/gone"),
+        ManagedAgentSession onStale = session("onstale", TestPaths.abs("/wt/gone"),
                 SessionStatus.RUNNING, Instant.ofEpochSecond(10));
         SidebarChildren result = SidebarChildren.classify(
                 List.of(main(), wt("gone", false, true, false)),
@@ -163,7 +164,7 @@ class SidebarChildrenTest {
 
     @Test
     void lockedRule_lockedWithSession_staysASession() {
-        ManagedAgentSession onLocked = session("onlocked", Path.of("/wt/held"),
+        ManagedAgentSession onLocked = session("onlocked", TestPaths.abs("/wt/held"),
                 SessionStatus.RUNNING, Instant.ofEpochSecond(10));
         SidebarChildren result = SidebarChildren.classify(
                 List.of(main(), wt("held", false, false, true)),
@@ -195,7 +196,7 @@ class SidebarChildrenTest {
 
     @Test
     void counts_wtIncludesSessionBackedWorktrees_staleDisjoint() {
-        ManagedAgentSession onWt = session("onwt", Path.of("/wt/a"),
+        ManagedAgentSession onWt = session("onwt", TestPaths.abs("/wt/a"),
                 SessionStatus.INACTIVE, Instant.ofEpochSecond(10));
         SidebarChildren result = SidebarChildren.classify(
                 List.of(main(), wt("a", false, false, false),
@@ -217,7 +218,7 @@ class SidebarChildrenTest {
 
     @Test
     void orphanSession_whoseWorktreeDirIsGone_stillAppears() {
-        ManagedAgentSession orphan = session("orphan", Path.of("/wt/vanished"),
+        ManagedAgentSession orphan = session("orphan", TestPaths.abs("/wt/vanished"),
                 SessionStatus.INACTIVE, Instant.ofEpochSecond(10));
         SidebarChildren result = SidebarChildren.classify(
                 List.of(main()), List.of(orphan), noActivity());
@@ -244,7 +245,7 @@ class SidebarChildrenTest {
     void staleSessions_idleSession_isStale() {
         // An idle session on a live branch is stale by the idle arm -- the
         // "OR inactive" half of the definition.
-        ManagedAgentSession idle = session("idle", Path.of("/wt/a"),
+        ManagedAgentSession idle = session("idle", TestPaths.abs("/wt/a"),
                 SessionStatus.INACTIVE, Instant.ofEpochSecond(10));
         SidebarChildren result = SidebarChildren.classify(
                 List.of(main(), wt("a", false, false, false)),
@@ -255,7 +256,7 @@ class SidebarChildrenTest {
 
     @Test
     void staleSessions_exitedSession_isStale() {
-        ManagedAgentSession exited = session("exited", Path.of("/wt/a"),
+        ManagedAgentSession exited = session("exited", TestPaths.abs("/wt/a"),
                 SessionStatus.EXITED, Instant.ofEpochSecond(10));
         SidebarChildren result = SidebarChildren.classify(
                 List.of(main(), wt("a", false, false, false)),
@@ -270,7 +271,7 @@ class SidebarChildrenTest {
         // stale-by-branch even while running, so the bulk delete count
         // includes it -- exactly the row the old "· N stale" header count
         // missed because it only counted session-less worktrees.
-        ManagedAgentSession onMerged = session("onmerged", Path.of("/wt/merged"),
+        ManagedAgentSession onMerged = session("onmerged", TestPaths.abs("/wt/merged"),
                 SessionStatus.RUNNING, Instant.ofEpochSecond(10));
         SidebarChildren result = SidebarChildren.classify(
                 List.of(main(), wt("merged", false, false, false).withMerged(true)),
@@ -281,7 +282,7 @@ class SidebarChildrenTest {
 
     @Test
     void staleSessions_runningOnPrunable_isStale() {
-        ManagedAgentSession onPrunable = session("onprunable", Path.of("/wt/gone"),
+        ManagedAgentSession onPrunable = session("onprunable", TestPaths.abs("/wt/gone"),
                 SessionStatus.RUNNING, Instant.ofEpochSecond(10));
         SidebarChildren result = SidebarChildren.classify(
                 List.of(main(), wt("gone", false, true, false)),
@@ -292,7 +293,7 @@ class SidebarChildrenTest {
 
     @Test
     void staleSessions_runningOnDetached_isStale() {
-        ManagedAgentSession onDetached = session("ondetached", Path.of("/wt/x"),
+        ManagedAgentSession onDetached = session("ondetached", TestPaths.abs("/wt/x"),
                 SessionStatus.RUNNING, Instant.ofEpochSecond(10));
         SidebarChildren result = SidebarChildren.classify(
                 List.of(main(), wt(null, true, false, false)),
@@ -305,7 +306,7 @@ class SidebarChildrenTest {
     void staleSessions_runningOnLiveBranch_isNotStale() {
         // A running session on a live, non-merged, non-prunable, non-detached
         // branch is not stale by either arm.
-        ManagedAgentSession live = session("live", Path.of("/wt/a"),
+        ManagedAgentSession live = session("live", TestPaths.abs("/wt/a"),
                 SessionStatus.RUNNING, Instant.ofEpochSecond(10));
         SidebarChildren result = SidebarChildren.classify(
                 List.of(main(), wt("a", false, false, false)),
@@ -332,9 +333,9 @@ class SidebarChildrenTest {
     void staleSessions_lockedWorktree_isNotStaleByBranch() {
         // Locked precedes stale (mirrors bucket): a session on a locked+
         // merged worktree is not stale-by-branch. It is still stale if idle.
-        ManagedAgentSession running = session("running", Path.of("/wt/held"),
+        ManagedAgentSession running = session("running", TestPaths.abs("/wt/held"),
                 SessionStatus.RUNNING, Instant.ofEpochSecond(10));
-        ManagedAgentSession idle = session("idle", Path.of("/wt/held2"),
+        ManagedAgentSession idle = session("idle", TestPaths.abs("/wt/held2"),
                 SessionStatus.INACTIVE, Instant.ofEpochSecond(20));
         SidebarChildren result = SidebarChildren.classify(
                 List.of(main(), wt("held", false, false, true).withMerged(true),
@@ -351,7 +352,7 @@ class SidebarChildrenTest {
         // An orphan session whose worktree dir is gone is idle here, so it is
         // stale -- and there is no worktree to be stale-by-branch, so only the
         // idle arm applies.
-        ManagedAgentSession orphan = session("orphan", Path.of("/wt/vanished"),
+        ManagedAgentSession orphan = session("orphan", TestPaths.abs("/wt/vanished"),
                 SessionStatus.INACTIVE, Instant.ofEpochSecond(10));
         SidebarChildren result = SidebarChildren.classify(
                 List.of(main()), List.of(orphan), noActivity());
@@ -361,9 +362,9 @@ class SidebarChildrenTest {
 
     @Test
     void staleSessions_sortsMostRecentFirst() {
-        ManagedAgentSession older = session("older", Path.of("/wt/a"),
+        ManagedAgentSession older = session("older", TestPaths.abs("/wt/a"),
                 SessionStatus.INACTIVE, Instant.ofEpochSecond(10));
-        ManagedAgentSession newer = session("newer", Path.of("/wt/b"),
+        ManagedAgentSession newer = session("newer", TestPaths.abs("/wt/b"),
                 SessionStatus.INACTIVE, Instant.ofEpochSecond(30));
         SidebarChildren result = SidebarChildren.classify(
                 List.of(main(), wt("a", false, false, false), wt("b", false, false, false)),
@@ -379,9 +380,9 @@ class SidebarChildrenTest {
         // there is 1 stale (session-less) worktree AND 2 running sessions on
         // merged branches -- the old staleCount() was 1, the stale-session
         // set is 2.
-        ManagedAgentSession onMergedA = session("onmergedA", Path.of("/wt/mergedA"),
+        ManagedAgentSession onMergedA = session("onmergedA", TestPaths.abs("/wt/mergedA"),
                 SessionStatus.RUNNING, Instant.ofEpochSecond(10));
-        ManagedAgentSession onMergedB = session("onmergedB", Path.of("/wt/mergedB"),
+        ManagedAgentSession onMergedB = session("onmergedB", TestPaths.abs("/wt/mergedB"),
                 SessionStatus.RUNNING, Instant.ofEpochSecond(20));
         SidebarChildren result = SidebarChildren.classify(
                 List.of(main(),

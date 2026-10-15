@@ -1,5 +1,6 @@
 package app.drydock.state;
 
+import app.drydock.testing.TestPaths;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.domain.PrLink;
 import app.drydock.domain.AgentBinding;
@@ -159,7 +160,7 @@ class ApplicationStateCodecTest {
 
     @Test
     void repositoryWithoutRemoteMemberDecodesAsLocal() {
-        Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/x"), "x",
+        Repository repo = new Repository(RepositoryId.newId(), TestPaths.abs("/tmp/x"), "x",
                 Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT);
         ApplicationState state = new ApplicationState(List.of(repo), List.of(), List.of(), WorkspaceUiState.empty(), List.of());
         JsonValue json = ApplicationStateCodec.toJson(state);
@@ -176,7 +177,7 @@ class ApplicationStateCodecTest {
     void malformedRemoteMemberDecodesAsLocalNotCorrupt() {
         // Lenient like prState/theme: a bad "remote" must never cost the
         // user their whole state file.
-        Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/x"), "x",
+        Repository repo = new Repository(RepositoryId.newId(), TestPaths.abs("/tmp/x"), "x",
                 Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT);
         ApplicationState state = new ApplicationState(List.of(repo), List.of(), List.of(), WorkspaceUiState.empty(), List.of());
         JsonObject json = (JsonObject) ApplicationStateCodec.toJson(state);
@@ -223,7 +224,7 @@ class ApplicationStateCodecTest {
         ManagedAgentSession session = new ManagedAgentSession(
                 ManagedSessionId.newId(), RepositoryId.of(REPO_ID), "Session 1",
                 new AgentBinding(AgentKind.CODEX, Optional.of("id"), Optional.empty()),
-                new SessionWorkspace(Path.of("/tmp"), Optional.empty(), true),
+                new SessionWorkspace(TestPaths.abs("/tmp"), Optional.empty(), true),
                 SessionStatus.RUNNING, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
                 PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty());
         ApplicationState state = ApplicationState.empty().withSessions(List.of(session));
@@ -237,12 +238,12 @@ class ApplicationStateCodecTest {
         // Regression guard: if encode/decode flips or drops an explicit
         // false on branchCreatedHere, the whole suite must break.
         // A false value protects a pre-existing branch from deletion.
-        Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/repo"), "repo",
+        Repository repo = new Repository(RepositoryId.newId(), TestPaths.abs("/tmp/repo"), "repo",
                 Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT);
         ManagedAgentSession session = new ManagedAgentSession(
                 ManagedSessionId.newId(), repo.id(), "test session",
                 new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
-                new SessionWorkspace(Path.of("/tmp/repo/wd"), Optional.empty(), false),
+                new SessionWorkspace(TestPaths.abs("/tmp/repo/wd"), Optional.empty(), false),
                 SessionStatus.INACTIVE, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
                 PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty());
         ApplicationState state = new ApplicationState(List.of(repo), List.of(session), List.of(), WorkspaceUiState.empty(), List.of());
@@ -254,12 +255,12 @@ class ApplicationStateCodecTest {
 
     @Test
     void namePinnedSurvivesARoundTrip() {
-        Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/repo"), "repo",
+        Repository repo = new Repository(RepositoryId.newId(), TestPaths.abs("/tmp/repo"), "repo",
                 Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT);
         ManagedAgentSession pinned = new ManagedAgentSession(
                 ManagedSessionId.newId(), repo.id(), "test session",
                 new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
-                new SessionWorkspace(Path.of("/tmp/repo/wd"), Optional.empty(), true),
+                new SessionWorkspace(TestPaths.abs("/tmp/repo/wd"), Optional.empty(), true),
                 SessionStatus.INACTIVE, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
                 PrLink.of(PrState.NONE, Optional.empty()), true, Optional.empty());
         ApplicationState state = new ApplicationState(List.of(repo), List.of(pinned), List.of(), WorkspaceUiState.empty(), List.of());
@@ -295,12 +296,12 @@ class ApplicationStateCodecTest {
 
     @Test
     void evalModeRoundTrips() {
-        Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/repo"), "repo",
+        Repository repo = new Repository(RepositoryId.newId(), TestPaths.abs("/tmp/repo"), "repo",
                 Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT);
         ManagedAgentSession eval = new ManagedAgentSession(
                 ManagedSessionId.newId(), repo.id(), "eval session",
                 new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
-                new SessionWorkspace(Path.of("/tmp/repo/wd"), Optional.empty(), true),
+                new SessionWorkspace(TestPaths.abs("/tmp/repo/wd"), Optional.empty(), true),
                 SessionStatus.INACTIVE, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
                 PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty(), true);
         ApplicationState state = new ApplicationState(List.of(repo), List.of(eval), List.of(), WorkspaceUiState.empty(), List.of());
@@ -331,7 +332,7 @@ class ApplicationStateCodecTest {
 
     @Test
     void repositoryLastUsedAgentRoundTrips() {
-        Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/repo"), "repo",
+        Repository repo = new Repository(RepositoryId.newId(), TestPaths.abs("/tmp/repo"), "repo",
                 Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT)
                 .withSettings(RepositorySettings.DEFAULT.withLastUsedAgent(AgentKind.CODEX));
         ApplicationState state = ApplicationState.empty().withRepositories(List.of(repo));
@@ -344,7 +345,7 @@ class ApplicationStateCodecTest {
     @Test
     void repositoryWithoutLastUsedAgentDecodesEmpty() {
         // A repo whose settings object is empty (pre-migration) → empty lastUsedAgent.
-        Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/repo"), "repo",
+        Repository repo = new Repository(RepositoryId.newId(), TestPaths.abs("/tmp/repo"), "repo",
                 Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT);
         ApplicationState state = ApplicationState.empty().withRepositories(List.of(repo));
 
@@ -501,7 +502,7 @@ class ApplicationStateCodecTest {
         return new ManagedAgentSession(
                 ManagedSessionId.newId(), RepositoryId.of(REPO_ID), "Session 1",
                 new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
-                new SessionWorkspace(Path.of("/tmp"), Optional.empty(), true),
+                new SessionWorkspace(TestPaths.abs("/tmp"), Optional.empty(), true),
                 SessionStatus.RUNNING, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
                 PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty());
     }
@@ -854,7 +855,7 @@ class ApplicationStateCodecTest {
         ManagedAgentSession session = new ManagedAgentSession(ManagedSessionId.newId(),
                 RepositoryId.newId(), "test-session",
                 new AgentBinding(AgentKind.CLAUDE, java.util.Optional.empty(), java.util.Optional.empty()),
-                SessionWorkspace.inRepository(Path.of("/tmp/repo")),
+                SessionWorkspace.inRepository(TestPaths.abs("/tmp/repo")),
                 SessionStatus.INACTIVE, Instant.parse("2026-08-28T10:00:00Z"),
                 Instant.parse("2026-08-28T10:00:00Z"), java.util.Optional.empty(),
                 PrLink.none(), false, java.util.Optional.empty(), false,

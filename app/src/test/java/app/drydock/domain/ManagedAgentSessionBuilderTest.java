@@ -1,5 +1,6 @@
 package app.drydock.domain;
 
+import app.drydock.testing.TestPaths;
 import app.drydock.agent.api.AgentKind;
 import org.junit.jupiter.api.Test;
 
@@ -20,7 +21,7 @@ class ManagedAgentSessionBuilderTest {
         return new ManagedAgentSession.Builder(
                 ManagedSessionId.newId(), RepositoryId.newId(), "Session 1",
                 AgentBinding.unlaunched(AgentKind.CLAUDE),
-                new SessionWorkspace(Path.of("/tmp/wt"), Optional.of(Path.of("/tmp/wt")), true),
+                new SessionWorkspace(TestPaths.abs("/tmp/wt"), Optional.of(TestPaths.abs("/tmp/wt")), true),
                 Instant.parse("2026-08-12T10:15:30Z"))
                 .build();
     }
@@ -69,8 +70,8 @@ class ManagedAgentSessionBuilderTest {
         ManagedAgentSession created = session();
 
         assertEquals(AgentKind.CLAUDE, created.agentKind());
-        assertEquals(Path.of("/tmp/wt"), created.workingDirectory());
-        assertEquals(Optional.of(Path.of("/tmp/wt")), created.worktreeRoot());
+        assertEquals(TestPaths.abs("/tmp/wt"), created.workingDirectory());
+        assertEquals(Optional.of(TestPaths.abs("/tmp/wt")), created.worktreeRoot());
         assertEquals(true, created.branchCreatedHere());
     }
 

@@ -1,5 +1,6 @@
 package app.drydock.mcp;
 
+import app.drydock.testing.TestPaths;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.domain.PrLink;
 import app.drydock.domain.AgentBinding;
@@ -326,7 +327,7 @@ class WorkspaceMcpSessionContextTest {
     // submitted `git worktree add` and the router refunds anything that is not
     // McpWorktreeMayExistException.
 
-    private static final Path ADD_DIR = Path.of("/wt/drydock-feat-x");
+    private static final Path ADD_DIR = TestPaths.abs("/wt/drydock-feat-x");
 
     @Test
     void anAlreadyExpiredDeadlineMayHaveLeftAWorktreeBecauseTheAddWasSubmittedFirst() {

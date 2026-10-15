@@ -1,5 +1,6 @@
 package app.drydock.domain;
 
+import app.drydock.testing.TestPaths;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
@@ -18,7 +19,7 @@ class SshRemoteTest {
         Path root = remote.placeholderRoot();
         assertTrue(root.isAbsolute());
         assertEquals(root.normalize(), root);
-        assertEquals(Path.of("/.drydock-remote/user%40build.example.com/srv/repos/app"), root);
+        assertEquals(TestPaths.abs("/.drydock-remote/user%40build.example.com/srv/repos/app"), root);
         // Stable: same inputs, same root (dedupe key).
         assertEquals(root, new SshRemote("user@build.example.com", "/srv/repos/app").placeholderRoot());
     }
@@ -34,7 +35,7 @@ class SshRemoteTest {
     void placeholderRootEncodesHostPathSafely() {
         // A hostile host alias must not escape the /.drydock-remote subtree.
         Path root = new SshRemote("a/../../etc", "/x").placeholderRoot();
-        assertTrue(root.startsWith(Path.of("/.drydock-remote")), "got " + root);
+        assertTrue(root.startsWith(TestPaths.abs("/.drydock-remote")), "got " + root);
         assertEquals(root.normalize(), root);
     }
 
@@ -52,7 +53,7 @@ class SshRemoteTest {
 
     @Test
     void repositoryConvenienceConstructorIsLocal() {
-        Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/x"), "x",
+        Repository repo = new Repository(RepositoryId.newId(), TestPaths.abs("/tmp/x"), "x",
                 java.time.Instant.EPOCH, java.time.Instant.EPOCH, RepositorySettings.DEFAULT);
         assertFalse(repo.isRemote());
     }

@@ -1,5 +1,6 @@
 package app.drydock.ui;
 
+import app.drydock.testing.TestPaths;
 import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.RepositorySettings;
@@ -29,7 +30,7 @@ class ProjectTabGroupTest {
 
     private static final RepositorySettings SETTINGS = RepositorySettings.DEFAULT;
     private static final Instant NOW = Instant.now();
-    private static final Path ROOT = Path.of("/repo");
+    private static final Path ROOT = TestPaths.abs("/repo");
 
     private final Repository repoA = repo("a", UUID.randomUUID());
     private final Repository repoB = repo("b", UUID.randomUUID());

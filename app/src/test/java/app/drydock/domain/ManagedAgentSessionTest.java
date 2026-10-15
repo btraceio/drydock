@@ -1,5 +1,6 @@
 package app.drydock.domain;
 
+import app.drydock.testing.TestPaths;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.domain.PrLink;
 import app.drydock.domain.AgentBinding;
@@ -167,7 +168,7 @@ class ManagedAgentSessionTest {
         ManagedAgentSession session = new ManagedAgentSession(
                 ManagedSessionId.newId(), RepositoryId.newId(), "Session 1",
                 new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
-                new SessionWorkspace(Path.of("/tmp"), Optional.empty(), true),
+                new SessionWorkspace(TestPaths.abs("/tmp"), Optional.empty(), true),
                 SessionStatus.INACTIVE, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
                 PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty());
         assertEquals(AgentKind.CODEX, session.withAgentKind(AgentKind.CODEX).agentKind());

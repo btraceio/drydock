@@ -1,5 +1,6 @@
 package app.drydock.ui;
 
+import app.drydock.testing.TestPaths;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.Repository;
@@ -61,7 +62,7 @@ class OpenSessionTabSshBadgeTest extends FxTest {
     }
 
     private static Repository localRepo() {
-        return new Repository(RepositoryId.newId(), Path.of("/repo/app"), "app",
+        return new Repository(RepositoryId.newId(), TestPaths.abs("/repo/app"), "app",
                 Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT);
     }
 

@@ -19,6 +19,7 @@ import app.drydock.domain.SessionStatus;
 import app.drydock.mcp.McpSessionContext.RenameKind;
 import app.drydock.mcp.McpSessionContext.RenameOutcome;
 import app.drydock.state.ApplicationStateRepository;
+import app.drydock.testing.TestPaths;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -92,10 +93,10 @@ class SessionManagerTest {
 
     private SessionManager newManager(InMemoryStateRepository stateRepository) {
         backgroundExecutor = Executors.newVirtualThreadPerTaskExecutor();
-        AgentContext ctx = new AgentContext(Path.of("/tmp/drydock-test"), Path.of("/tmp/drydock-test/activity"),
+        AgentContext ctx = new AgentContext(TestPaths.abs("/tmp/drydock-test"), TestPaths.abs("/tmp/drydock-test/activity"),
                 backgroundExecutor);
         AgentRegistry registry = new AgentRegistry(
-                List.of(new ClaudeAgentProvider(new ClaudeExecutableLocator(Path.of("/nonexistent/claude")))), ctx);
+                List.of(new ClaudeAgentProvider(new ClaudeExecutableLocator(TestPaths.abs("/nonexistent/claude")))), ctx);
         return new SessionManager(stateRepository, registry, backgroundExecutor);
     }
 
@@ -105,7 +106,7 @@ class SessionManagerTest {
      * tests do not restate this 16-component record.
      */
     static ManagedAgentSession newSessionFixture() {
-        return sessionWith(Path.of("/tmp"), Optional.empty(), Optional.empty());
+        return sessionWith(TestPaths.abs("/tmp"), Optional.empty(), Optional.empty());
     }
 
     private static ManagedAgentSession sessionWith(Path workingDirectory, Optional<String> agentSessionId,
@@ -121,7 +122,7 @@ class SessionManagerTest {
 
     private Repository someRepository() {
         Instant now = Instant.now();
-        return new Repository(RepositoryId.newId(), Path.of("/tmp/drydock-test-repo"), "example repo", now, now,
+        return new Repository(RepositoryId.newId(), TestPaths.abs("/tmp/drydock-test-repo"), "example repo", now, now,
                 RepositorySettings.DEFAULT);
     }
 
@@ -149,7 +150,7 @@ class SessionManagerTest {
 
     @Test
     void seedClaimedIdsCollectsAssignedAgentSessionIds() {
-        ManagedAgentSession withId = sessionWith(Path.of("/tmp"), Optional.of("id-1"), Optional.empty())
+        ManagedAgentSession withId = sessionWith(TestPaths.abs("/tmp"), Optional.of("id-1"), Optional.empty())
                 .withAgentKind(AgentKind.CODEX);
         ApplicationState state = ApplicationState.empty().withSessions(List.of(withId));
         assertEquals(Set.of("id-1"), SessionManager.seedClaimedIds(state));
@@ -159,11 +160,11 @@ class SessionManagerTest {
 
     @Test
     void loadNormalizesStaleRunningAndStartingSessionsToInactive() {
-        ManagedAgentSession wasRunning = sessionWith(Path.of("/tmp"), Optional.empty(), Optional.empty())
+        ManagedAgentSession wasRunning = sessionWith(TestPaths.abs("/tmp"), Optional.empty(), Optional.empty())
                 .withStatus(SessionStatus.RUNNING);
-        ManagedAgentSession wasStarting = sessionWith(Path.of("/tmp"), Optional.empty(), Optional.empty())
+        ManagedAgentSession wasStarting = sessionWith(TestPaths.abs("/tmp"), Optional.empty(), Optional.empty())
                 .withStatus(SessionStatus.STARTING);
-        ManagedAgentSession wasExited = sessionWith(Path.of("/tmp"), Optional.empty(), Optional.empty())
+        ManagedAgentSession wasExited = sessionWith(TestPaths.abs("/tmp"), Optional.empty(), Optional.empty())
                 .withStatus(SessionStatus.EXITED);
 
         SessionManager manager = newManager(new InMemoryStateRepository(List.of(wasRunning, wasStarting, wasExited)));
@@ -530,7 +531,7 @@ class SessionManagerTest {
         SessionManager manager = newManager(new InMemoryStateRepository(List.of()));
         Repository repository = someRepository();
         ManagedAgentSession outgoing = manager
-                .prepareWorktreeSession(repository, "Rework the rail", Path.of("/repo/wt"), true,
+                .prepareWorktreeSession(repository, "Rework the rail", TestPaths.abs("/repo/wt"), true,
                         AgentKind.CLAUDE)
                 .withNamePinned(true);
 
@@ -539,8 +540,8 @@ class SessionManagerTest {
 
         assertEquals("Rework the rail", successor.displayName());
         assertTrue(successor.namePinned());
-        assertEquals(Optional.of(Path.of("/repo/wt")), successor.worktreeRoot());
-        assertEquals(Path.of("/repo/wt"), successor.workingDirectory());
+        assertEquals(Optional.of(TestPaths.abs("/repo/wt")), successor.worktreeRoot());
+        assertEquals(TestPaths.abs("/repo/wt"), successor.workingDirectory());
         assertEquals(AgentKind.CODEX, successor.agentKind());
         assertTrue(successor.branchCreatedHere());
     }
@@ -553,7 +554,7 @@ class SessionManagerTest {
         SessionManager manager = newManager(new InMemoryStateRepository(List.of()));
         Repository repository = someRepository();
         ManagedAgentSession outgoing = manager.prepareWorktreeSession(
-                repository, "Rework the rail", Path.of("/repo/wt"), false, AgentKind.CLAUDE);
+                repository, "Rework the rail", TestPaths.abs("/repo/wt"), false, AgentKind.CLAUDE);
 
         ManagedAgentSession successor =
                 manager.prepareSuccessorSession(repository, outgoing, AgentKind.CODEX);

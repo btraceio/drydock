@@ -96,25 +96,44 @@ class RepositorySidebarEmptyStateFxTest extends FxTest {
     }
 
     @AfterEach
-    void tearDown() throws IOException {
+    void tearDown() throws IOException, InterruptedException {
         gitStatusService.close();
         worktreeService.close();
         deleteTree(repoRoot);
     }
 
-    private static void deleteTree(Path root) throws IOException {
+    /**
+     * Deletes the throwaway repo. On Windows an in-flight child process
+     * whose working directory is inside the tree (an async {@code git
+     * status} outliving {@link GitStatusService#close()}, which shuts its
+     * executor down without awaiting) keeps the tree busy and denies
+     * deletion, so the walk retries briefly before giving up.
+     */
+    private static void deleteTree(Path root) throws IOException, InterruptedException {
         if (!Files.exists(root)) {
             return;
         }
-        try (var paths = Files.walk(root)) {
-            paths.sorted(Comparator.reverseOrder()).forEach(p -> {
-                try {
-                    Files.delete(p);
-                } catch (IOException e) {
-                    throw new RuntimeException(e);
+        IOException lastFailure = null;
+        for (int attempt = 0; attempt < 10; attempt++) {
+            try (var paths = Files.walk(root)) {
+                paths.sorted(Comparator.reverseOrder()).forEach(p -> {
+                    try {
+                        Files.delete(p);
+                    } catch (IOException e) {
+                        throw new RuntimeException(e);
+                    }
+                });
+                return;
+            } catch (RuntimeException locked) {
+                if (locked.getCause() instanceof IOException io) {
+                    lastFailure = io;
+                } else {
+                    throw locked;
                 }
-            });
+            }
+            Thread.sleep(100);
         }
+        throw lastFailure;
     }
 
     // ---- The transition matrix --------------------------------------------
