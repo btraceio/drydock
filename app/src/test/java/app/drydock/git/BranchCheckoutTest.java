@@ -156,7 +156,7 @@ class BranchCheckoutTest {
     @Test
     void dropdownLabelNamesWhyAnOccupiedBranchCannotBePicked() {
         assertEquals("feat/login  —  in use (" + HOLDER + ")", label(false, false));
-        assertEquals("feat/login  —  stale worktree (/tmp/wt/held)", label(true, false));
+        assertEquals("feat/login  —  stale worktree (" + HOLDER + ")", label(true, false));
         assertEquals("feat/login  —  locked worktree (/tmp/wt/held)", label(false, true));
         // Locked wins over prunable: `git worktree prune` silently skips a
         // locked worktree, so naming it stale would be advice that does nothing.

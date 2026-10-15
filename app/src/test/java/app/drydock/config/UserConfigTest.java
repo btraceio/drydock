@@ -247,13 +247,13 @@ class UserConfigTest {
         // Each shape must leave the OTHER settings intact: a malformed
         // component may never take the whole file down with it.
         Path configFile = dir.resolve("config.json");
-        Files.writeString(configFile, "{\"worktreesDirectory\":\"" + dir.resolve("wt")
+        Files.writeString(configFile, "{\"worktreesDirectory\":\"" + jsonEscape(dir.resolve("wt").toString())
                 + "\",\"languageServer\":\"/not/an/object\"}");
         assertEquals(Optional.of(dir.resolve("wt").toAbsolutePath().normalize()),
                 UserConfig.load(configFile).worktreesDirectory());
         assertEquals(UserConfig.LanguageServer.empty(), UserConfig.load(configFile).languageServer());
 
-        Files.writeString(configFile, "{\"worktreesDirectory\":\"" + dir.resolve("wt")
+        Files.writeString(configFile, "{\"worktreesDirectory\":\"" + jsonEscape(dir.resolve("wt").toString())
                 + "\",\"languageServer\":{\"jdtHome\":42}}");
         assertEquals(Optional.of(dir.resolve("wt").toAbsolutePath().normalize()),
                 UserConfig.load(configFile).worktreesDirectory());
