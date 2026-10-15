@@ -7,6 +7,8 @@ import app.drydock.agent.api.McpAccess;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.providers.claude.internal.ClaudeExecutableLocator;
 import app.drydock.domain.SshRemote;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -80,6 +82,9 @@ class ClaudeAgentProviderMcpFlagTest {
     }
 
     @Test
+    // The capability stub is a shebang shell script; Windows cannot
+    // execute it, so the flag never gets advertised there.
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void createCommandCarriesTheMcpConfigFlag(@TempDir Path dir) throws IOException {
         String command = provider(dir, true).buildCreateCommand(create(SOME_MCP)).command();
 
@@ -87,6 +92,9 @@ class ClaudeAgentProviderMcpFlagTest {
     }
 
     @Test
+    // The capability stub is a shebang shell script; Windows cannot
+    // execute it, so the flag never gets advertised there.
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void resumeCommandCarriesTheMcpConfigFlagToo(@TempDir Path dir) throws IOException {
         String command = provider(dir, true).buildResumeCommand(resume(SOME_MCP)).command();
 
@@ -120,6 +128,9 @@ class ClaudeAgentProviderMcpFlagTest {
     }
 
     @Test
+    // The capability stub is a shebang shell script; Windows cannot
+    // execute it, so the flag never gets advertised there.
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void aPathWithSpacesIsQuoted(@TempDir Path dir) throws IOException {
         Path spaced = SPACED;
         String command = provider(dir, true).buildCreateCommand(create(Optional.of(

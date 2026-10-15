@@ -148,7 +148,7 @@ class McpToolRouterWorktreeTest {
      */
     @Test
     void anAddThatMayHaveCreatedAWorktreeKeepsTheCharge() throws Exception {
-        context.failure = new McpWorktreeMayExistException(Path.of("/wt/feat-x"));
+        context.failure = new McpWorktreeMayExistException(TestPaths.abs("/wt/feat-x"));
         assertThrows(McpWorktreeMayExistException.class,
                 () -> router.call(caller, "worktree_create", args("branch", "feat/x")));
 
@@ -165,12 +165,12 @@ class McpToolRouterWorktreeTest {
     @Test
     void existingChecksOutTheBranchAndReportsTheResolvedLocalName() throws Exception {
         context.adopted = new McpSessionContext.ExistingBranchWorktree(
-                Path.of("/wt/drydock-login"), "feat/login", Optional.of("origin/feat/login"));
+                TestPaths.abs("/wt/drydock-login"), "feat/login", Optional.of("origin/feat/login"));
 
         JsonValue result = router.call(caller, "worktree_create",
                 argsWithFlag("existing", true, "branch", "origin/feat/login"));
 
-        assertEquals("/wt/drydock-login", str(result, "path"));
+        assertEquals(TestPaths.abs("/wt/drydock-login").toString(), str(result, "path"));
         // The resolved name, not the argument: they differ here, and it is the
         // name the agent has to hand to session_start.
         assertEquals("feat/login", str(result, "branch"));
@@ -181,7 +181,7 @@ class McpToolRouterWorktreeTest {
     @Test
     void adoptingALocalBranchReportsANullTracking() throws Exception {
         context.adopted = new McpSessionContext.ExistingBranchWorktree(
-                Path.of("/wt/drydock-login"), "feat/login", Optional.empty());
+                TestPaths.abs("/wt/drydock-login"), "feat/login", Optional.empty());
 
         JsonValue result = router.call(caller, "worktree_create",
                 argsWithFlag("existing", true, "branch", "feat/login"));

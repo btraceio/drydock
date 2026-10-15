@@ -40,7 +40,7 @@ class UserConfigTest {
     @Test
     void loadReadsTheConfiguredWorktreesDirectory(@TempDir Path dir) throws Exception {
         Path configFile = dir.resolve("config.json");
-        Files.writeString(configFile, "{\"worktreesDirectory\": \"" + dir.resolve("wt") + "\"}");
+        Files.writeString(configFile, "{\"worktreesDirectory\": \"" + jsonEscape(dir.resolve("wt").toString()) + "\"}");
 
         UserConfig config = UserConfig.load(configFile);
 
@@ -478,5 +478,11 @@ class UserConfigTest {
             UserConfig.flushPendingSaves();
             System.setProperty("user.home", originalUserHome);
         }
+    }
+
+
+    /** A path interpolated into a JSON string literal: backslash must be doubled. */
+    private static String jsonEscape(String raw) {
+        return raw.replace("\\", "\\\\");
     }
 }

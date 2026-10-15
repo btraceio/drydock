@@ -100,6 +100,7 @@ class TourStoreTest {
 
     @Test
     void siblingOfSitsNextToTheStateFile() {
-        assertEquals(Path.of("/x/review-tours.json"), TourStore.siblingOf(Path.of("/x/state.json")));
+        assertEquals(TestPaths.abs("/x").resolve("review-tours.json"),
+                TourStore.siblingOf(TestPaths.abs("/x").resolve("state.json")));
     }
 }
