@@ -1,0 +1,359 @@
+package app.drydock.mcp;
+
+import app.drydock.domain.ManagedSessionId;
+import app.drydock.mcp.McpSessionRegistry.Spawn;
+import app.drydock.review.AnnotationStatus;
+import app.drydock.review.ReviewAnnotation;
+import app.drydock.state.json.JsonValue;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.nio.file.Path;
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+
+import static app.drydock.mcp.JsonPeek.array;
+import static app.drydock.mcp.JsonPeek.args;
+import static app.drydock.mcp.JsonPeek.bool;
+import static app.drydock.mcp.JsonPeek.noArgs;
+import static app.drydock.mcp.JsonPeek.num;
+import static app.drydock.mcp.JsonPeek.str;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class McpToolRouterReadTest {
+
+    private final ManagedSessionId caller = ManagedSessionId.newId();
+    private FakeMcpSessionContext context;
+    private McpSessionRegistry registry;
+    private McpToolRouter router;
+
+    @BeforeEach
+    void setUp() {
+        context = new FakeMcpSessionContext();
+        context.repositoryRoot = Optional.of(Path.of("/repos/drydock"));
+        context.worktreePath = Optional.of(Path.of("/repos/drydock"));
+        registry = new McpSessionRegistry();
+        registry.mint(caller, Spawn.ALLOWED);
+        context.grant(caller, SCOPE);
+        router = new McpToolRouter(context, registry);
+    }
+
+    /** The one review scope this caller may address; findings are keyed by it. */
+    private static final String SCOPE = "rs_test";
+
+    private ReviewAnnotation annotation(String file, String key, AnnotationStatus status) {
+        return annotation(SCOPE, file, key, status);
+    }
+
+    private static ReviewAnnotation annotation(String scopeId, String file, String key,
+                                               AnnotationStatus status) {
+        return ReviewAnnotation.human(scopeId, file, key, key,
+                        new ReviewAnnotation.Message("You", Instant.parse("2026-07-25T10:00:00Z"),
+                                "needs a null check"))
+                .withStatus(status);
+    }
+
+    @Test
+    void toolDescriptorsCoverEverySupportedTool() {
+        List<String> names = router.toolDescriptors().stream()
+                .map(descriptor -> str(descriptor, "name"))
+                .toList();
+
+        assertEquals(List.of("review_comments", "review_reply", "review_scope",
+                "review_tour", "review_check", "review_finding", "review_answer", "review_ask_answer",
+                "review_state", "review_recheck",
+                "worktree_create", "session_start", "session_rename", "session_handoff",
+                "repos_list", "sessions_list"), names);
+    }
+
+    @Test
+    void everyToolDescriptorCarriesADescriptionAndAnObjectSchema() {
+        for (JsonValue descriptor : router.toolDescriptors()) {
+            assertEquals("object", str(JsonPeek.field(descriptor, "inputSchema"), "type"),
+                    "missing inputSchema on " + str(descriptor, "name"));
+            assertTrue(str(descriptor, "description").length() > 0,
+                    "missing description on " + str(descriptor, "name"));
+        }
+    }
+
+    /**
+     * Runtime validation rejects a missing argument either way, but a schema
+     * without {@code required} never tells the model what it must send -- and a
+     * tool whose whole value is being called correctly first time cannot afford
+     * to leave that unsaid.
+     */
+    @Test
+    void toolDescriptorsDeclareTheirRequiredArguments() {
+        Map<String, List<String>> expected = Map.ofEntries(
+                Map.entry("review_comments", List.of()),
+                Map.entry("review_reply", List.of("id", "note")),
+                Map.entry("review_scope", List.of("scopeId")),
+                Map.entry("review_tour", List.of("scopeId", "steps")),
+                Map.entry("review_check", List.of("scopeId", "checkId", "verdict", "reason")),
+                Map.entry("review_finding", List.of("scopeId", "findings")),
+                Map.entry("review_answer", List.of("scopeId", "findingId", "body")),
+                Map.entry("review_ask_answer", List.of("questionId", "answer")),
+                Map.entry("review_state", List.of("scopeId")),
+                Map.entry("review_recheck", List.of("scopeId", "assessments")),
+                Map.entry("worktree_create", List.of("branch")),
+                Map.entry("session_start", List.of("worktree_path")),
+                Map.entry("session_rename", List.of("title")),
+                Map.entry("session_handoff", List.of("goal", "nextStep")),
+                Map.entry("repos_list", List.of()),
+                Map.entry("sessions_list", List.of()));
+
+        for (JsonValue descriptor : router.toolDescriptors()) {
+            String name = str(descriptor, "name");
+            JsonValue schema = JsonPeek.field(descriptor, "inputSchema");
+            List<String> required = JsonPeek.field(schema, "required") == null
+                    ? List.of()
+                    : array(schema, "required").stream()
+                            .map(value -> ((JsonValue.JsonString) value).value())
+                            .toList();
+
+            assertEquals(expected.get(name), required, "wrong required arguments on " + name);
+            for (String argument : required) {
+                assertTrue(JsonPeek.field(JsonPeek.field(schema, "properties"), argument) != null,
+                        name + " declares '" + argument + "' required but does not describe it");
+            }
+        }
+    }
+
+    /**
+     * An optional property is invisible to the required-arguments test above,
+     * and {@code McpServerTest}'s tools/list assertion only loops over tool
+     * names -- so nothing else here would notice {@code existing} going
+     * missing from the schema, and a model cannot emit a property that is not
+     * in it. The whole existing-branch path would be inert.
+     */
+    @Test
+    void worktreeCreateOffersTheExistingFlagAsABoolean() {
+        JsonValue worktreeCreate = router.toolDescriptors().stream()
+                .filter(descriptor -> str(descriptor, "name").equals("worktree_create"))
+                .findFirst()
+                .orElseThrow();
+
+        JsonValue properties = JsonPeek.field(JsonPeek.field(worktreeCreate, "inputSchema"), "properties");
+        JsonValue existing = JsonPeek.field(properties, "existing");
+
+        assertTrue(existing != null, "worktree_create must describe 'existing'");
+        assertEquals("boolean", str(existing, "type"));
+    }
+
+    /**
+     * A session whose {@code claude} has exited keeps its tab (so the human can
+     * read the final output), so its token outlives the process until the exit
+     * watcher notices. No tool may act in that window -- least of all the ones
+     * that spend money.
+     */
+    @Test
+    void everyToolRefusesASessionWhoseClaudeHasExited() {
+        context.sessionRunning = false;
+
+        for (String tool : List.of("review_comments", "review_reply", "worktree_create",
+                "session_start", "session_rename", "repos_list", "sessions_list")) {
+            McpToolException failure = assertThrows(McpToolException.class,
+                    () -> router.call(caller, tool, noArgs()), tool + " must be refused");
+            assertTrue(failure.getMessage().contains("Session has ended"),
+                    tool + ": " + failure.getMessage());
+        }
+    }
+
+    @Test
+    void reviewCommentsReportsOpenThreadsWithDecodedLines() throws Exception {
+        context.annotations.add(annotation("src/Main.java", "n42", AnnotationStatus.OPEN));
+        context.excerpts.put("src/Main.java:42", "  41: prev\n> 42: return cfg.value();\n  43: next");
+
+        JsonValue result = router.call(caller, "review_comments", noArgs());
+
+        List<JsonValue> comments = array(result, "comments");
+        assertEquals(1, comments.size());
+        assertEquals("src/Main.java", str(comments.get(0), "file"));
+        assertEquals(42, num(comments.get(0), "line"));
+        assertEquals(false, bool(comments.get(0), "deleted_line"));
+        assertEquals("OPEN", str(comments.get(0), "status"));
+        assertEquals("  41: prev\n> 42: return cfg.value();\n  43: next", str(comments.get(0), "excerpt"));
+        assertEquals("needs a null check", str(array(comments.get(0), "thread").get(0), "text"));
+        assertEquals("You", str(array(comments.get(0), "thread").get(0), "author"));
+    }
+
+    @Test
+    void reviewCommentsCarriesTheBaseBranchSoTheDiffIsReproducible() throws Exception {
+        context.baseBranch = Optional.of("develop");
+        context.annotations.add(annotation("src/Main.java", "n1", AnnotationStatus.OPEN));
+
+        JsonValue result = router.call(caller, "review_comments", noArgs());
+
+        assertEquals("develop", str(result, "base_branch"));
+    }
+
+    @Test
+    void anAbsentBaseBranchIsJsonNullNotAMissingField() throws Exception {
+        context.baseBranch = Optional.empty();
+        context.annotations.add(annotation("src/Main.java", "n1", AnnotationStatus.OPEN));
+
+        JsonValue result = router.call(caller, "review_comments", noArgs());
+
+        assertEquals(JsonValue.JsonNull.INSTANCE, JsonPeek.field(result, "base_branch"));
+    }
+
+    @Test
+    void aDeletedLineHasNoExcerptAndSaysHowToSeeIt() throws Exception {
+        context.annotations.add(annotation("src/Gone.java", "o17", AnnotationStatus.OPEN));
+
+        JsonValue result = router.call(caller, "review_comments", noArgs());
+
+        JsonValue comment = array(result, "comments").get(0);
+        assertEquals(17, num(comment, "line"));
+        assertEquals(true, bool(comment, "deleted_line"));
+        assertEquals(JsonValue.JsonNull.INSTANCE, JsonPeek.field(comment, "excerpt"));
+        assertTrue(str(comment, "hint").contains("git show"),
+                "a deleted line is not in the working tree; say how to see it: " + str(comment, "hint"));
+    }
+
+    @Test
+    void aMissingExcerptIsJsonNullNotAnError() throws Exception {
+        // The file may have been deleted, or the line may be past its end.
+        context.annotations.add(annotation("src/Main.java", "n999", AnnotationStatus.OPEN));
+
+        JsonValue result = router.call(caller, "review_comments", noArgs());
+
+        assertEquals(JsonValue.JsonNull.INSTANCE,
+                JsonPeek.field(array(result, "comments").get(0), "excerpt"));
+    }
+
+    @Test
+    void reviewCommentsIncludesSentButNotResolvedAddressedOrFixed() throws Exception {
+        context.annotations.add(annotation("a.java", "n1", AnnotationStatus.OPEN));
+        context.annotations.add(annotation("b.java", "n2", AnnotationStatus.SENT));
+        context.annotations.add(annotation("c.java", "n3", AnnotationStatus.RESOLVED));
+        context.annotations.add(annotation("d.java", "n4", AnnotationStatus.ADDRESSED));
+        context.annotations.add(annotation("e.java", "n5", AnnotationStatus.FIXED));
+
+        JsonValue result = router.call(caller, "review_comments", noArgs());
+
+        List<String> files = array(result, "comments").stream()
+                .map(comment -> str(comment, "file"))
+                .toList();
+        assertEquals(List.of("a.java", "b.java"), files);
+    }
+
+    @Test
+    void reviewCommentsFiltersByScopeWhenAsked() throws Exception {
+        context.grant(caller, "rs_other");
+        context.annotations.add(annotation("base.java", "n1", AnnotationStatus.OPEN));
+        context.annotations.add(annotation("rs_other", "w.java", "n1", AnnotationStatus.OPEN));
+
+        JsonValue result = router.call(caller, "review_comments", args("scopeId", "rs_other"));
+
+        List<JsonValue> comments = array(result, "comments");
+        assertEquals(1, comments.size());
+        assertEquals("w.java", str(comments.get(0), "file"));
+    }
+
+    /** A scope this session was never granted is not merely filtered out -- it is invisible. */
+    @Test
+    void reviewCommentsNeverLeaksAScopeTheSessionCannotAddress() throws Exception {
+        context.annotations.add(annotation("mine.java", "n1", AnnotationStatus.OPEN));
+        context.annotations.add(annotation("rs_forbidden", "theirs.java", "n1", AnnotationStatus.OPEN));
+
+        JsonValue result = router.call(caller, "review_comments", noArgs());
+
+        assertEquals(List.of("mine.java"), array(result, "comments").stream()
+                .map(comment -> str(comment, "file"))
+                .toList());
+    }
+
+    @Test
+    void reviewCommentsSkipsAnnotationsWithUndecodableKeysRatherThanFailingTheCall() throws Exception {
+        context.annotations.add(annotation("good.java", "n7", AnnotationStatus.OPEN));
+        context.annotations.add(annotation("bad.java", "zzz", AnnotationStatus.OPEN));
+
+        JsonValue result = router.call(caller, "review_comments", noArgs());
+
+        List<JsonValue> comments = array(result, "comments");
+        assertEquals(1, comments.size());
+        assertEquals("good.java", str(comments.get(0), "file"));
+    }
+
+    @Test
+    void reposListReportsLocalRepositoriesWithGitState() throws Exception {
+        context.repositories.add(new McpSessionContext.RepoSummary("drydock", Path.of("/repos/drydock"),
+                Optional.of("feat/mcp"), Optional.of(true), Optional.of(2), Optional.of(0), false));
+
+        JsonValue result = router.call(caller, "repos_list", noArgs());
+
+        JsonValue repo = array(result, "repositories").get(0);
+        assertEquals("drydock", str(repo, "name"));
+        assertEquals("feat/mcp", str(repo, "branch"));
+        assertEquals(true, bool(repo, "dirty"));
+        assertEquals(2, num(repo, "ahead"));
+        assertEquals(false, bool(repo, "remote"));
+    }
+
+    @Test
+    void reposListReportsRemoteRepositoriesWithoutGitState() throws Exception {
+        // Probing a remote target runs ssh with its own timeout, and
+        // GitStatusService has no cache; one tool call must not open N
+        // ssh connections.
+        context.repositories.add(new McpSessionContext.RepoSummary("far", Path.of("/srv/far"),
+                Optional.of("main"), Optional.empty(), Optional.empty(), Optional.empty(), true));
+
+        JsonValue result = router.call(caller, "repos_list", noArgs());
+
+        JsonValue repo = array(result, "repositories").get(0);
+        assertEquals(true, bool(repo, "remote"));
+        assertEquals(JsonValue.JsonNull.INSTANCE, JsonPeek.field(repo, "dirty"));
+        assertEquals(JsonValue.JsonNull.INSTANCE, JsonPeek.field(repo, "ahead"));
+    }
+
+    @Test
+    void anAbsentBranchIsJsonNullNotAMissingField() throws Exception {
+        context.repositories.add(new McpSessionContext.RepoSummary("detached", Path.of("/repos/detached"),
+                Optional.empty(), Optional.of(false), Optional.of(0), Optional.of(0), false));
+
+        JsonValue result = router.call(caller, "repos_list", noArgs());
+
+        assertEquals(JsonValue.JsonNull.INSTANCE,
+                JsonPeek.field(array(result, "repositories").get(0), "branch"));
+    }
+
+    @Test
+    void sessionsListFlagsTheCallersOwnSession() throws Exception {
+        ManagedSessionId other = ManagedSessionId.newId();
+        context.sessions.add(new McpSessionContext.SessionSummary(caller, "mine", "drydock",
+                Optional.of("feat/mcp"), Path.of("/repos/drydock"), "RUNNING", false));
+        context.sessions.add(new McpSessionContext.SessionSummary(other, "theirs", "consumer",
+                Optional.of("main"), Path.of("/repos/consumer"), "INACTIVE", false));
+
+        JsonValue result = router.call(caller, "sessions_list", noArgs());
+
+        List<JsonValue> sessions = array(result, "sessions");
+        assertEquals(true, bool(sessions.get(0), "is_caller"));
+        assertEquals(false, bool(sessions.get(1), "is_caller"));
+        assertEquals("RUNNING", str(sessions.get(0), "status"));
+    }
+
+    @Test
+    void anEndedSessionFailsWithSessionGoneNotANullPointer() {
+        context.repositoryRoot = Optional.empty();
+        context.worktreePath = Optional.empty();
+
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> router.call(caller, "review_comments", noArgs()));
+
+        assertTrue(failure.getMessage().toLowerCase().contains("session"), failure.getMessage());
+    }
+
+    @Test
+    void anUnknownToolNameIsRejected() {
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> router.call(caller, "rm_minus_rf", noArgs()));
+
+        assertTrue(failure.getMessage().contains("rm_minus_rf"), failure.getMessage());
+    }
+}

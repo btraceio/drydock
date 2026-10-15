@@ -1,0 +1,250 @@
+package app.drydock.review;
+
+import app.drydock.domain.ManagedSessionId;
+import app.drydock.git.GhCliService;
+import app.drydock.git.GitStatusService;
+import app.drydock.git.PrCheckoutService;
+import app.drydock.git.ReviewBase;
+
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.function.Function;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
+/**
+ * The scopes one checkout offers its session's Review sub-tab (spec §3.2):
+ * a local scope always, and a pull-request scope when the checkout's branch
+ * carries an open non-draft PR.
+ *
+ * <p><strong>Draft is a chip rule, not an identity rule.</strong> The caller
+ * hands over any open PR the checkout carries, draft included, because the
+ * local scope's {@code PullRequestRef} and its base come from it. Only the
+ * second chip is withheld for a draft. On a {@code pr-<n>} checkout the
+ * identity no longer hangs on it alone: with no PR handed over (a dropped
+ * draft, a failed or empty gh listing), {@link #forCheckout} derives the
+ * ref from the branch name, so the scope is still {@code (WORKTREE, repo,
+ * worktree, <n>)} -- never a PR-less sibling whose findings would be
+ * invisible from the other, silently. The PR's declared base still comes
+ * only from the PR, so drafts are still handed over.</p>
+ *
+ * <p><strong>The kinds are not a free choice.</strong> They are the ones the
+ * now-deleted cross-repo queue already minted for the same
+ * places -- {@code WORKING_TREE} for a main checkout, {@code WORKTREE} for a
+ * worktree (carrying its PR ref when it has one), {@code PR} for the pull
+ * request -- because scope identity is what every finding is keyed by.</p>
+ */
+public final class SessionReviewScopes {
+
+    /** What a session's Review sub-tab shows: one scope, or two to switch between. */
+    public record Scopes(ReviewScope local, Optional<ReviewScope> pullRequest) {
+        public Scopes {
+            Objects.requireNonNull(local, "local");
+            Objects.requireNonNull(pullRequest, "pullRequest");
+        }
+
+        /** The scope {@code choice} names, falling back to local when there is no PR. */
+        public ReviewScope forChoice(Choice choice) {
+            return choice == Choice.PULL_REQUEST ? pullRequest.orElse(local) : local;
+        }
+    }
+
+    /** The switcher's two chips. Persisted per session (see {@code WorkspaceUiState}). */
+    public enum Choice {
+        LOCAL,
+        PULL_REQUEST;
+
+        /** Lenient parse for persisted values; anything unrecognized is {@link #LOCAL}. */
+        public static Choice fromPersisted(String value) {
+            if (value == null) {
+                return LOCAL;
+            }
+            for (Choice choice : values()) {
+                if (choice.name().equalsIgnoreCase(value)) {
+                    return choice;
+                }
+            }
+            return LOCAL;
+        }
+    }
+
+    /**
+     * The open pull request a checkout on {@code branch} carries, if any --
+     * matched on the PR's own head branch, or on the {@code pr-<n>} name
+     * {@link PrCheckoutService} checks a PR out under.
+     *
+     * <p><strong>Drafts are returned, not dropped</strong>, and that is the
+     * whole reason this is a named, tested function rather than three lines
+     * inside its caller. The result feeds {@link #forCheckout}'s {@code
+     * PullRequestRef} (part of the local scope's identity) and its base.
+     * {@code forCheckout} backs a {@code pr-<n>} checkout's ref with the
+     * branch name when nothing is handed over, so a dropped draft no longer
+     * splits the identity -- but it would still lose the PR's URL and
+     * declared base, and the review base would silently fall back to the
+     * default branch. Reachable, not theoretical: a review-requested PR can
+     * be a draft, and drydock checks those out as {@code pr-<n>}.</p>
+     *
+     * <p>The draft gate lives in {@link #forCheckout}, and withholds the
+     * second chip only.</p>
+     */
+    public static Optional<GhCliService.OpenPullRequest> pullRequestCarriedBy(
+            List<GhCliService.OpenPullRequest> openPullRequests, Optional<String> branch) {
+        if (branch.isEmpty()) {
+            return Optional.empty();
+        }
+        String head = branch.get();
+        Optional<Integer> alias = PrCheckoutService.pullRequestNumberOf(head);
+        return openPullRequests.stream()
+                .filter(pullRequest -> pullRequest.headRefName().equals(head)
+                        || alias.filter(number -> number == pullRequest.number()).isPresent())
+                .findFirst();
+    }
+
+    private static final String NO_BRANCH = "(no branch)";
+    private static final String DETACHED = "(detached)";
+    private static final Logger LOG = Logger.getLogger(SessionReviewScopes.class.getName());
+
+    private final GitStatusService gitStatusService;
+    private final ReviewScopeRegistry registry;
+
+    public SessionReviewScopes(GitStatusService gitStatusService, ReviewScopeRegistry registry) {
+        this.gitStatusService = Objects.requireNonNull(gitStatusService, "gitStatusService");
+        this.registry = Objects.requireNonNull(registry, "registry");
+    }
+
+    /**
+     * Resolves a session's checkout the way the Review board does: the
+     * branch first, then the pull request it carries, then {@link
+     * #forCheckout}. Never blocks the caller.
+     *
+     * <p>{@code cachedBranch} is a hint (the UI's status cache), never the
+     * answer: when it has nothing, the branch is asked of git. On a {@code
+     * pr-<n>} checkout the branch decides the local scope's PR ref, and that
+     * ref is part of the scope's identity -- so an empty branch from a cold
+     * cache (a worktree created a moment ago, any reveal right after a
+     * restart) used to mint a second, PR-less local identity with head
+     * {@code "(no branch)"}, bound to the session and never revoked. A
+     * genuinely detached HEAD still resolves to no branch. A git failure is
+     * logged and degrades to no branch: a scope with the wrong identity is
+     * still better than a board that shows nothing.</p>
+     *
+     * @param pullRequestOf the caller's lookup of the open PR a branch
+     *                      carries; see {@link #pullRequestCarriedBy}
+     */
+    public CompletableFuture<Scopes> forSessionCheckout(Path repositoryRoot, Path checkoutRoot,
+            Optional<String> cachedBranch, Optional<ManagedSessionId> session,
+            Function<Optional<String>, CompletableFuture<Optional<GhCliService.OpenPullRequest>>> pullRequestOf) {
+        Optional<String> hint = cachedBranch.filter(name -> !name.isBlank());
+        CompletableFuture<Optional<String>> branch = hint.isPresent()
+                ? CompletableFuture.completedFuture(hint)
+                : gitStatusService.currentBranch(checkoutRoot).handle((name, failure) -> {
+                    if (failure != null) {
+                        LOG.log(Level.WARNING, "Could not read the branch of " + checkoutRoot
+                                + "; resolving its review scopes as if detached", failure);
+                        return Optional.<String>empty();
+                    }
+                    return name;
+                });
+        return branch.thenCompose(resolved -> pullRequestOf.apply(resolved)
+                .thenCompose(pullRequest -> forCheckout(repositoryRoot, checkoutRoot,
+                        resolved, session, pullRequest)));
+    }
+
+    /**
+     * The revision git should resolve for a scope's {@code head}. The head
+     * is a branch name, or {@link #NO_BRANCH} for a checkout with none --
+     * a label for display and the MCP wire, never a revision. Every such
+     * label (and the {@code "(detached)"} one the sidebar uses) reads as
+     * {@code HEAD}, which is what a local scope's diff compares anyway.
+     * Handed to {@code rev-parse} as-is, the label failed on every board
+     * render and left every verdict on the scope undatable.
+     */
+    public static String headRevision(String head) {
+        if (head == null || head.isBlank() || head.equals(NO_BRANCH) || head.equals(DETACHED)) {
+            return "HEAD";
+        }
+        return head;
+    }
+
+    /**
+     * Resolves {@code checkoutRoot}'s scopes. Never blocks the caller: the
+     * base measurement runs on the git service's own executor, and a git
+     * failure (no executable, unreadable checkout) degrades to {@link
+     * ReviewBase.Origin#DEFAULT_UNMEASURED} rather than failing the future:
+     * a missing base measurement is no reason to show the Review sub-tab
+     * nothing at all.
+     *
+     * @param pullRequest the open PR this checkout's branch carries, if any --
+     *                    resolved by the caller, which already holds the
+     *                    repository's listing. Drafts included: see the class
+     *                    note on why the draft gate belongs here and not there
+     */
+    public CompletableFuture<Scopes> forCheckout(Path repositoryRoot, Path checkoutRoot,
+                                                 Optional<String> branch,
+                                                 Optional<ManagedSessionId> session,
+                                                 Optional<GhCliService.OpenPullRequest> pullRequest) {
+        String head = branch.filter(name -> !name.isBlank()).orElse(NO_BRANCH);
+        Optional<ReviewScope.PullRequestRef> ref = pullRequest
+                .map(pr -> new ReviewScope.PullRequestRef(pr.number(), pr.url()));
+        boolean mainCheckout = checkoutRoot.toAbsolutePath().normalize()
+                .equals(repositoryRoot.toAbsolutePath().normalize());
+        ReviewScope.Kind localKind = mainCheckout
+                ? ReviewScope.Kind.WORKING_TREE : ReviewScope.Kind.WORKTREE;
+        // The local scope carries the PR ref only when the checkout's own
+        // branch IS the pr-<n> alias PrCheckoutService checks a PR out
+        // under -- never for an ordinary branch, and never for the main
+        // checkout. The wider rule flips this scope's identity the moment a
+        // PR is opened or merged on an ordinary branch, silently detaching
+        // every finding already recorded against the worktree from events
+        // that have nothing to do with it. The PR scope itself is
+        // unaffected: it always carries its ref.
+        //
+        // On the alias the branch alone names the PR, so the ref does not
+        // wait on the caller's listing: when gh failed (missing,
+        // unauthenticated, timing out) or listed no such PR, the ref is
+        // derived from the branch name. Identity is the PR number only (see
+        // ReviewScopeRegistry.Identity), so the URL-less ref mints the same
+        // id the PR flow mints with the PR in hand -- where an empty ref
+        // minted a second, PR-less local identity bound to the session.
+        Optional<Integer> alias = mainCheckout ? Optional.empty() : PrCheckoutService.pullRequestNumberOf(head);
+        Optional<ReviewScope.PullRequestRef> localRef = alias.isEmpty() ? Optional.empty()
+                : ref.or(() -> Optional.of(new ReviewScope.PullRequestRef(alias.get(), Optional.empty())));
+
+        return gitStatusService.defaultBranch(repositoryRoot)
+                .handle((defaultBranch, failure) -> failure == null ? defaultBranch : Optional.<String>empty())
+                .thenCompose(defaultBranch -> {
+                    String fallback = defaultBranch.orElse("main");
+                    return gitStatusService.reviewBase(checkoutRoot,
+                                    pullRequest.map(GhCliService.OpenPullRequest::baseRefName), fallback)
+                            .handle((base, failure) -> failure == null ? base
+                                    : new ReviewBase(fallback, ReviewBase.Origin.DEFAULT_UNMEASURED));
+                })
+                .thenApply(base -> {
+                    ReviewScope local = registry.mint(ReviewScopeRegistry.spec(
+                            localKind, repositoryRoot, Optional.of(checkoutRoot),
+                            base.ref(), head, localRef, session, Optional.of(base.origin())));
+                    // The PR scope diffs against the SAME resolved base as the
+                    // local scope -- reviewBase already privileges the PR's
+                    // declared base when one is supplied, and that resolution
+                    // (falling back to origin/<name> when there is no local
+                    // ref) is what makes the base a revision git can actually
+                    // name. Using the raw, unresolved baseRefName here would
+                    // let the PR chip's diff fail while the local chip's works.
+                    // The draft gate, and the ONLY thing it gates: a draft is
+                    // not yet something anyone is being asked to review, so it
+                    // gets no chip -- while the local scope's ref, its base and
+                    // therefore its identity are all left exactly as a
+                    // non-draft PR would leave them.
+                    Optional<ReviewScope> pr = pullRequest
+                            .filter(open -> !open.draft())
+                            .map(open -> registry.mint(ReviewScopeRegistry.spec(
+                                    ReviewScope.Kind.PR, repositoryRoot,
+                                    Optional.of(checkoutRoot), base.ref(), head, ref,
+                                    session, Optional.of(ReviewBase.Origin.PULL_REQUEST))));
+                    return new Scopes(local, pr);
+                });
+    }
+}

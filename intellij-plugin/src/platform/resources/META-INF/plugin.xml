@@ -1,0 +1,16 @@
+<idea-plugin>
+    <id>io.btrace.drydock</id>
+    <name>Drydock</name>
+    <vendor>Jaroslav Bachorik</vendor>
+    <description><![CDATA[
+        Feasibility probe of the Drydock review/agent-session concepts inside IntelliJ
+        (see docs/IntellijPluginFeasibility.md in the drydock repository).
+    ]]></description>
+    <depends>com.intellij.modules.platform</depends>
+    <extensions defaultExtensionNs="com.intellij">
+        <toolWindow id="Drydock" anchor="right"
+                    factoryClass="app.drydock.intellij.DrydockToolWindowFactory"/>
+        <applicationConfigurable instance="app.drydock.intellij.DrydockConfigurable"
+                                 displayName="Drydock"/>
+    </extensions>
+</idea-plugin>

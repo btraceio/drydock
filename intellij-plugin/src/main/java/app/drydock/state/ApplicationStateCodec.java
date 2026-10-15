@@ -1,0 +1,786 @@
+package app.drydock.state;
+
+import app.drydock.domain.AgentBinding;
+import app.drydock.domain.ApplicationState;
+import app.drydock.domain.HandoffBrief;
+import app.drydock.agent.api.AgentKind;
+import app.drydock.domain.ManagedAgentSession;
+import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.PrLink;
+import app.drydock.domain.PrState;
+import app.drydock.domain.Repository;
+import app.drydock.domain.RepositoryId;
+import app.drydock.domain.RepositorySettings;
+import app.drydock.domain.SessionStatus;
+import app.drydock.domain.SessionWorkspace;
+import app.drydock.domain.SshRemote;
+import app.drydock.domain.UiTheme;
+import app.drydock.domain.Workflow;
+import app.drydock.domain.WorkflowBrief;
+import app.drydock.domain.WorkflowId;
+import app.drydock.domain.WorkflowStatus;
+import app.drydock.domain.WorkspaceUiState;
+import app.drydock.review.SessionReviewScopes;
+import app.drydock.state.json.JsonValue;
+import app.drydock.state.json.JsonValue.JsonArray;
+import app.drydock.state.json.JsonValue.JsonBoolean;
+import app.drydock.state.json.JsonValue.JsonNumber;
+import app.drydock.state.json.JsonValue.JsonObject;
+import app.drydock.state.json.JsonValue.JsonString;
+
+import java.nio.file.Path;
+import java.time.DateTimeException;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+
+/**
+ * Converts between {@link ApplicationState} and its {@link JsonValue}
+ * representation.
+ *
+ * <p>Schema (schemaVersion 2):</p>
+ * <pre>{@code
+ * {
+ *   "schemaVersion": 2,
+ *   "repositories": [
+ *     {
+ *       "id": "<uuid>",
+ *       "root": "/absolute/normalized/path",
+ *       "displayName": "...",
+ *       "addedAt": "<ISO-8601 instant>",
+ *       "lastOpenedAt": "<ISO-8601 instant>",
+ *       "settings": {},
+ *       "remote": {"host": "...", "path": "..."} (optional)
+ *     }
+ *   ],
+ *   "sessions": [
+ *     {
+ *       "id": "<uuid>",
+ *       "repositoryId": "<uuid>",
+ *       "displayName": "...",
+ *       "agentKind": "claude" | "codex" | "pi",
+ *       "agentSessionId": "<string>" | null,
+ *       "agentSessionName": "<string>" | null,
+ *       "workingDirectory": "/absolute/normalized/path",
+ *       "worktreeRoot": "/absolute/normalized/path" | null,
+ *       "status": "INACTIVE" | "STARTING" | "RUNNING" | "EXITED" | "FAILED" | "MISSING_WORKING_DIRECTORY",
+ *       "createdAt": "<ISO-8601 instant>",
+ *       "lastOpenedAt": "<ISO-8601 instant>",
+ *       "lastExitCode": <int> | null,
+ *       "prState": "NONE" | "OPEN" | "MERGED",
+ *       "prNumber": <int> | null,
+ *       "branchCreatedHere": <boolean>,
+ *       "namePinned": <boolean>,
+ *       "forkedFrom": "<uuid>" | null,
+ *       "evalMode": <boolean>
+ *     }
+ *   ],
+ *   "handoffBriefs": [
+ *     {
+ *       "sessionId": "<uuid>",
+ *       "goal": "...",
+ *       "nextStep": "...",
+ *       "approach": "..." | null,
+ *       "decisions": "..." | null,
+ *       "ruledOut": "..." | null,
+ *       "corrections": "..." | null,
+ *       "writtenAt": "<ISO-8601 instant>",
+ *       "writtenAtCommit": "<sha>" | null,
+ *       "author": "AGENT" | "HUMAN"
+ *     }
+ *   ],
+ *   "ui": {
+ *     "selectedRepositoryId": "<uuid>" | null,
+ *     "sidebarWidth": 260.0,
+ *     "expandedRepositoryIds": ["<uuid>", ...],
+ *     "theme": "DARK" | "LIGHT",
+ *     "uiFontSize": 13.0,
+ *     "terminalFontSize": 13.0,
+ *     "openSessionIds": ["<uuid>", ...],
+ *     "selectedSessionId": "<uuid>" | null,
+ *     "reviewScopeChoices": {"<uuid>": "LOCAL" | "PULL_REQUEST", ...},
+ *     "reviewKeyHintsHidden": false,
+ *     "reviewStepPanelWidth": 0.0
+ *   }
+ * }
+ * }</pre>
+ *
+ * <p>Migration: schemaVersion 1 (Milestone 4, before {@code sessions}
+ * existed) is still accepted by {@link #fromJson}. A schemaVersion-1
+ * document has no {@code sessions} member at all; that is treated exactly
+ * like a schemaVersion-2 document that merely omits the (optional) {@code
+ * sessions} member -- it decodes to an empty session list rather than
+ * failing. No other field changed shape between version 1 and 2, so no
+ * further per-field migration is needed. The {@code prState}/{@code
+ * prNumber} members (worktree lifecycle) were added later within version 2:
+ * both decode leniently -- a document without them yields {@code NONE} /
+ * empty, so no version bump was needed. The {@code remote} member (SSH
+ * remote repositories) was added leniently within version 2, like
+ * {@code prState}: absent or malformed decodes to null (local repo), so no
+ * version bump was needed and downgrades stay non-destructive. The
+ * {@code branchCreatedHere} member was likewise added leniently within
+ * version 2: every session persisted before it existed did create its own
+ * branch, so an absent or malformed value decodes to {@code true}, not
+ * {@code false} -- the opposite default would silently stop drydock from
+ * deleting branches it is responsible for. The {@code agentKind} member was
+ * likewise added leniently within version 2: sessions persisted before
+ * multi-agent support existed have no {@code agentKind} and decode as
+ * {@link app.drydock.agent.api.AgentKind#CLAUDE}; an unrecognized value
+ * (e.g. from a dropped or renamed provider) is retained but forced to
+ * {@link SessionStatus#UNSUPPORTED_AGENT} rather than discarded or thrown.
+ * The repository {@code settings.lastUsedAgent} member was likewise added
+ * leniently within version 2: an absent or unrecognized value decodes to
+ * {@link app.drydock.domain.RepositorySettings#DEFAULT} (no preference)
+ * rather than throwing. The {@code namePinned} member was likewise added
+ * leniently within version 2: unlike {@code branchCreatedHere}, an absent or
+ * malformed value decodes to {@code false}, not {@code true} -- a session
+ * persisted before this member existed was never pinned, and an unreadable
+ * value must not silently lock a name a human never confirmed.
+ * The persisted id/name fields were renamed from {@code claudeSessionId}/
+ * {@code claudeSessionName} to {@code agentSessionId}/{@code
+ * agentSessionName}; {@link #fromJson} accepts both the new and legacy
+ * names for one migration window, while {@link #toJson} only ever writes
+ * the new names. {@link #toJson}
+ * always writes the current version. Any {@code schemaVersion} other than 1
+ * or 2 is treated as malformed input (throws {@link StateDecodeException}),
+ * consistent with how unknown versions were already rejected before this change.
+ * The {@code evalMode} member was likewise added leniently within version 2:
+ * an absent or malformed value decodes to {@code false} -- a session persisted
+ * before eval mode existed was never on the eval account, and an unreadable
+ * value must not silently route a session's traffic to it. No version bump
+ * was needed and downgrades stay non-destructive. The {@code handoffBriefs} array and the session {@code forkedFrom} member
+ * were likewise added leniently within version 2: an absent {@code
+ * handoffBriefs} decodes to an empty list, an absent or unparseable {@code
+ * forkedFrom} to empty (a session persisted before it existed was not a fork),
+ * and {@code author} defaults to {@code AGENT} because every brief written
+ * before that member existed came from {@code session_handoff}. A malformed
+ * <em>brief</em> entry is dropped rather than throwing -- unlike a malformed
+ * session, which still fails the decode: a session is the user's work, a brief
+ * is only a note about it, so one bad note must not cost the whole state file.
+ * The {@code openSessionIds} and {@code selectedSessionId} members
+ * (session tab restoration) were likewise added leniently within version 2:
+ * absent or malformed values decode to an empty list and no selection, so
+ * no version bump was needed and older builds simply reopen with no tabs.
+ * The {@code reviewScopeChoices} member (per-session Review sub-tab scope,
+ * see {@code SessionReviewScopes.Choice}) was likewise added leniently
+ * within version 2: an entry whose key is not a parseable {@code
+ * ManagedSessionId} names no session and is dropped, while an entry whose
+ * value is unrecognized still names a real session and decodes through
+ * {@code Choice.fromPersisted} (which maps it to {@code LOCAL}) rather than
+ * being dropped. An absent member decodes to an empty map, so no version
+ * bump was needed and older builds simply ignore it.
+ * The {@code reviewKeyHintsHidden} member (whether the tour's key-hints strip
+ * was hidden) is likewise lenient: absent or not a boolean decodes to
+ * {@code false}, hints shown. The {@code reviewStepPanelWidth} member (the width
+ * the reader dragged the tour's step panel to) is lenient the same way: absent,
+ * not a number, non-finite or not positive decodes to 0, the default width; the
+ * view clamps a stored value at the point of use rather than rewriting it here.
+ * No version bump was needed and downgrades stay non-destructive.</p>
+ */
+public final class ApplicationStateCodec {
+
+    public static final int SCHEMA_VERSION = 2;
+
+    /** Oldest schemaVersion {@link #fromJson} still accepts (plan section 17: migration support). */
+    private static final int MIN_SUPPORTED_SCHEMA_VERSION = 1;
+
+    private ApplicationStateCodec() {
+    }
+
+    public static JsonValue toJson(ApplicationState state) {
+        JsonObject root = JsonObject.empty();
+        root.put("schemaVersion", JsonNumber.of(SCHEMA_VERSION));
+
+        List<JsonValue> repositories = new ArrayList<>();
+        for (Repository repository : state.repositories()) {
+            repositories.add(repositoryToJson(repository));
+        }
+        root.put("repositories", new JsonArray(repositories));
+
+        List<JsonValue> sessions = new ArrayList<>();
+        for (ManagedAgentSession session : state.sessions()) {
+            sessions.add(sessionToJson(session));
+        }
+        root.put("sessions", new JsonArray(sessions));
+
+        root.put("ui", uiToJson(state.ui()));
+
+        List<JsonValue> workflows = new ArrayList<>();
+        for (Workflow workflow : state.workflows()) {
+            workflows.add(workflowToJson(workflow));
+        }
+        root.put("workflows", new JsonArray(workflows));
+
+        List<JsonValue> briefs = new ArrayList<>();
+        for (HandoffBrief brief : state.handoffBriefs()) {
+            briefs.add(handoffBriefToJson(brief));
+        }
+        root.put("handoffBriefs", new JsonArray(briefs));
+        return root;
+    }
+
+    private static JsonValue repositoryToJson(Repository repository) {
+        JsonObject obj = JsonObject.empty();
+        obj.put("id", new JsonString(repository.id().value().toString()));
+        obj.put("root", new JsonString(repository.root().toString()));
+        obj.put("displayName", new JsonString(repository.displayName()));
+        obj.put("addedAt", new JsonString(repository.addedAt().toString()));
+        obj.put("lastOpenedAt", new JsonString(repository.lastOpenedAt().toString()));
+        JsonObject settings = JsonObject.empty();
+        repository.settings().lastUsedAgent()
+                .ifPresent(a -> settings.put("lastUsedAgent", new JsonString(a.persistedName())));
+        obj.put("settings", settings);
+        if (repository.isRemote()) {
+            JsonObject remote = JsonObject.empty();
+            remote.put("host", new JsonString(repository.remote().host()));
+            remote.put("path", new JsonString(repository.remote().remotePath()));
+            obj.put("remote", remote);
+        }
+        return obj;
+    }
+
+    private static JsonValue sessionToJson(ManagedAgentSession session) {
+        JsonObject obj = JsonObject.empty();
+        obj.put("id", new JsonString(session.id().value().toString()));
+        obj.put("repositoryId", new JsonString(session.repositoryId().value().toString()));
+        obj.put("displayName", new JsonString(session.displayName()));
+        obj.put("agentKind", new JsonString(session.agentKind().persistedName()));
+        obj.put("agentSessionId", optionalStringToJson(session.agentSessionId()));
+        obj.put("agentSessionName", optionalStringToJson(session.agentSessionName()));
+        obj.put("workingDirectory", new JsonString(session.workingDirectory().toString()));
+        obj.put("worktreeRoot", session.worktreeRoot()
+                .<JsonValue>map(p -> new JsonString(p.toString()))
+                .orElse(JsonValue.JsonNull.INSTANCE));
+        obj.put("status", new JsonString(session.status().name()));
+        obj.put("createdAt", new JsonString(session.createdAt().toString()));
+        obj.put("lastOpenedAt", new JsonString(session.lastOpenedAt().toString()));
+        obj.put("lastExitCode", session.lastExitCode()
+                .<JsonValue>map(code -> JsonNumber.of((long) code))
+                .orElse(JsonValue.JsonNull.INSTANCE));
+        obj.put("prState", new JsonString(session.prState().name()));
+        obj.put("prNumber", session.prNumber()
+                .<JsonValue>map(number -> JsonNumber.of((long) number))
+                .orElse(JsonValue.JsonNull.INSTANCE));
+        obj.put("branchCreatedHere", new JsonBoolean(session.branchCreatedHere()));
+        obj.put("namePinned", new JsonBoolean(session.namePinned()));
+        obj.put("forkedFrom", session.forkedFrom()
+                .<JsonValue>map(parent -> new JsonString(parent.value().toString()))
+                .orElse(JsonValue.JsonNull.INSTANCE));
+        obj.put("evalMode", new JsonBoolean(session.evalMode()));
+        obj.put("workflowId", session.workflowId()
+                .<JsonValue>map(w -> new JsonString(w.value().toString()))
+                .orElse(JsonValue.JsonNull.INSTANCE));
+        return obj;
+    }
+
+    private static JsonValue handoffBriefToJson(HandoffBrief brief) {
+        JsonObject obj = JsonObject.empty();
+        obj.put("sessionId", new JsonString(brief.sessionId().value().toString()));
+        obj.put("goal", new JsonString(brief.goal()));
+        obj.put("nextStep", new JsonString(brief.nextStep()));
+        obj.put("approach", optionalStringToJson(brief.approach()));
+        obj.put("decisions", optionalStringToJson(brief.decisions()));
+        obj.put("ruledOut", optionalStringToJson(brief.ruledOut()));
+        obj.put("corrections", optionalStringToJson(brief.corrections()));
+        obj.put("writtenAt", new JsonString(brief.writtenAt().toString()));
+        obj.put("writtenAtCommit", optionalStringToJson(brief.writtenAtCommit()));
+        obj.put("author", new JsonString(brief.author().name()));
+        return obj;
+    }
+
+    private static JsonValue workflowToJson(Workflow workflow) {
+        JsonObject obj = JsonObject.empty();
+        obj.put("id", new JsonString(workflow.id().value().toString()));
+        obj.put("title", new JsonString(workflow.title()));
+        obj.put("status", new JsonString(workflow.status().name()));
+        obj.put("createdAt", new JsonString(workflow.createdAt().toString()));
+        obj.put("lastOpenedAt", new JsonString(workflow.lastOpenedAt().toString()));
+        obj.put("brief", workflow.brief()
+                .<JsonValue>map(ApplicationStateCodec::workflowBriefToJson)
+                .orElse(JsonValue.JsonNull.INSTANCE));
+        return obj;
+    }
+
+    private static JsonValue workflowBriefToJson(WorkflowBrief brief) {
+        JsonObject obj = JsonObject.empty();
+        obj.put("goal", new JsonString(brief.goal()));
+        obj.put("nextStep", new JsonString(brief.nextStep()));
+        obj.put("approach", optionalStringToJson(brief.approach()));
+        obj.put("decisions", optionalStringToJson(brief.decisions()));
+        obj.put("ruledOut", optionalStringToJson(brief.ruledOut()));
+        obj.put("corrections", optionalStringToJson(brief.corrections()));
+        obj.put("writtenAt", new JsonString(brief.writtenAt().toString()));
+        obj.put("author", new JsonString(brief.author().name()));
+        return obj;
+    }
+
+    private static JsonValue optionalStringToJson(Optional<String> value) {
+        return value.<JsonValue>map(JsonString::new).orElse(JsonValue.JsonNull.INSTANCE);
+    }
+
+    private static JsonValue uiToJson(WorkspaceUiState ui) {
+        JsonObject obj = JsonObject.empty();
+        JsonValue selectedRepo = ui.selectedRepositoryId()
+                .<JsonValue>map(id -> new JsonString(id.value().toString()))
+                .orElse(JsonValue.JsonNull.INSTANCE);
+        obj.put("selectedRepositoryId", selectedRepo);
+        obj.put("sidebarWidth", JsonNumber.of(ui.sidebarWidth()));
+
+        List<JsonValue> expanded = new ArrayList<>();
+        for (RepositoryId id : ui.expandedRepositoryIds()) {
+            expanded.add(new JsonString(id.value().toString()));
+        }
+        obj.put("expandedRepositoryIds", new JsonArray(expanded));
+        obj.put("theme", new JsonString(ui.theme().name()));
+        obj.put("uiFontSize", JsonNumber.of(ui.uiFontSize()));
+        obj.put("terminalFontSize", JsonNumber.of(ui.terminalFontSize()));
+
+        List<JsonValue> openSessions = new ArrayList<>();
+        for (ManagedSessionId id : ui.openSessionIds()) {
+            openSessions.add(new JsonString(id.value().toString()));
+        }
+        obj.put("openSessionIds", new JsonArray(openSessions));
+
+        JsonValue selectedSession = ui.selectedSessionId()
+                .<JsonValue>map(id -> new JsonString(id.value().toString()))
+                .orElse(JsonValue.JsonNull.INSTANCE);
+        obj.put("selectedSessionId", selectedSession);
+
+        JsonObject reviewScopeChoices = JsonObject.empty();
+        for (Map.Entry<ManagedSessionId, SessionReviewScopes.Choice> entry : ui.reviewScopeChoices().entrySet()) {
+            reviewScopeChoices.put(entry.getKey().value().toString(), new JsonString(entry.getValue().name()));
+        }
+        obj.put("reviewScopeChoices", reviewScopeChoices);
+        obj.put("reviewKeyHintsHidden", new JsonBoolean(ui.reviewKeyHintsHidden()));
+        obj.put("reviewStepPanelWidth", JsonNumber.of(ui.reviewStepPanelWidth()));
+        return obj;
+    }
+
+    public static ApplicationState fromJson(JsonValue value) {
+        JsonObject root = asObject(value, "root");
+        int schemaVersion = readSchemaVersion(root);
+        if (schemaVersion < MIN_SUPPORTED_SCHEMA_VERSION || schemaVersion > SCHEMA_VERSION) {
+            throw new StateDecodeException("Unsupported schemaVersion: " + schemaVersion);
+        }
+
+        List<Repository> repositories = new ArrayList<>();
+        for (JsonValue repoValue : asArray(root.get("repositories"), "repositories").elements()) {
+            repositories.add(repositoryFromJson(asObject(repoValue, "repositories[]")));
+        }
+
+        // schemaVersion 1 (Milestone 4) has no "sessions" member at all; that
+        // and a schemaVersion-2 document that simply omits it both decode to
+        // an empty list rather than failing (migration path, see class doc).
+        List<ManagedAgentSession> sessions = new ArrayList<>();
+        if (root.has("sessions")) {
+            for (JsonValue sessionValue : asArray(root.get("sessions"), "sessions").elements()) {
+                sessions.add(sessionFromJson(asObject(sessionValue, "sessions[]")));
+            }
+        }
+
+        WorkspaceUiState ui = root.has("ui")
+                ? uiFromJson(asObject(root.get("ui"), "ui"))
+                : WorkspaceUiState.empty();
+
+        List<Workflow> workflows = workflowsFromJson(root);
+
+        return new ApplicationState(repositories, sessions, workflows, ui, handoffBriefsFromJson(root));
+    }
+
+    /**
+     * Lenient, and unlike sessions it drops rather than throws. A session is
+     * the user's work and a malformed one is worth failing loudly over; a brief
+     * is a note about work, so one bad entry must not cost the whole state
+     * file. Absent member (state written before this feature) yields no briefs.
+     */
+    private static List<HandoffBrief> handoffBriefsFromJson(JsonObject root) {
+        if (!(root.get("handoffBriefs") instanceof JsonArray array)) {
+            return List.of();
+        }
+        List<HandoffBrief> briefs = new ArrayList<>();
+        for (JsonValue element : array.elements()) {
+            handoffBriefFromJson(element).ifPresent(briefs::add);
+        }
+        return List.copyOf(briefs);
+    }
+
+    private static Optional<HandoffBrief> handoffBriefFromJson(JsonValue element) {
+        if (!(element instanceof JsonObject obj)) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(new HandoffBrief(
+                    ManagedSessionId.of(requireString(obj, "sessionId")),
+                    requireString(obj, "goal"),
+                    requireString(obj, "nextStep"),
+                    optionalString(obj, "approach"),
+                    optionalString(obj, "decisions"),
+                    optionalString(obj, "ruledOut"),
+                    optionalString(obj, "corrections"),
+                    Instant.parse(requireString(obj, "writtenAt")),
+                    optionalString(obj, "writtenAtCommit"),
+                    handoffAuthorFromJson(obj)));
+        } catch (IllegalArgumentException | DateTimeException | StateDecodeException e) {
+            return Optional.empty();   // a bad brief costs a brief, never the state
+        }
+    }
+
+    /**
+     * Absent or unrecognized decodes to {@link HandoffBrief.Author#AGENT}:
+     * every brief written before this member existed came from
+     * {@code session_handoff}.
+     */
+    private static HandoffBrief.Author handoffAuthorFromJson(JsonObject obj) {
+        if (obj.get("author") instanceof JsonString s) {
+            for (HandoffBrief.Author author : HandoffBrief.Author.values()) {
+                if (author.name().equals(s.value())) {
+                    return author;
+                }
+            }
+        }
+        return HandoffBrief.Author.AGENT;
+    }
+
+    private static Repository repositoryFromJson(JsonObject obj) {
+        try {
+            RepositoryId id = RepositoryId.of(requireString(obj, "id"));
+            Path root = Path.of(requireString(obj, "root"));
+            String displayName = requireString(obj, "displayName");
+            Instant addedAt = Instant.parse(requireString(obj, "addedAt"));
+            Instant lastOpenedAt = Instant.parse(requireString(obj, "lastOpenedAt"));
+            return new Repository(id, root, displayName, addedAt, lastOpenedAt,
+                    settingsFromJson(obj), remoteFromJson(obj));
+        } catch (IllegalArgumentException | DateTimeException e) {
+            throw new StateDecodeException("Malformed repository entry: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Decodes the {@code "settings"} member's {@code lastUsedAgent}, added
+     * (leniently, within schemaVersion 2 — see class doc) so the UI can
+     * default a new session's agent picker to whichever agent was last used
+     * in this repository. Absent or unparseable decodes to {@link
+     * RepositorySettings#DEFAULT} rather than failing.
+     */
+    private static RepositorySettings settingsFromJson(JsonObject obj) {
+        if (obj.get("settings") instanceof JsonObject s && s.get("lastUsedAgent") instanceof JsonString la) {
+            return AgentKind.fromPersisted(la.value())
+                    .map(RepositorySettings.DEFAULT::withLastUsedAgent)
+                    .orElse(RepositorySettings.DEFAULT);
+        }
+        return RepositorySettings.DEFAULT;
+    }
+
+    /**
+     * Decodes the optional {@code "remote"} member added (leniently, within
+     * schemaVersion 2 — see class doc) for SSH remote repositories. Absent
+     * or malformed decodes to {@code null} (local repo) rather than
+     * failing: a bad value here must never make the whole state file look
+     * corrupt and cost the user every repository and session.
+     */
+    private static SshRemote remoteFromJson(JsonObject obj) {
+        if (!(obj.get("remote") instanceof JsonObject remote)) {
+            return null;
+        }
+        try {
+            return new SshRemote(requireString(remote, "host"), requireString(remote, "path"));
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    private static ManagedAgentSession sessionFromJson(JsonObject obj) {
+        try {
+            ManagedSessionId id = ManagedSessionId.of(requireString(obj, "id"));
+            RepositoryId repositoryId = RepositoryId.of(requireString(obj, "repositoryId"));
+            String displayName = requireString(obj, "displayName");
+            // Lenient-additive: sessions written before multi-agent support
+            // have no agentKind and are Claude. An UNRECOGNIZED value is
+            // retained but marked UNSUPPORTED_AGENT (a dropped/renamed
+            // provider must not nuke the session list).
+            String rawKind = obj.get("agentKind") instanceof JsonString ks ? ks.value() : null;
+            Optional<AgentKind> parsedKind = rawKind == null
+                    ? Optional.of(AgentKind.CLAUDE)
+                    : AgentKind.fromPersisted(rawKind);
+            AgentKind agentKind = parsedKind.orElse(AgentKind.CLAUDE);
+            // Accept both the new and legacy field names for one migration window.
+            Optional<String> agentSessionId = optionalString(obj, "agentSessionId")
+                    .or(() -> optionalString(obj, "claudeSessionId"));
+            Optional<String> agentSessionName = optionalString(obj, "agentSessionName")
+                    .or(() -> optionalString(obj, "claudeSessionName"));
+            Path workingDirectory = Path.of(requireString(obj, "workingDirectory"));
+            Optional<Path> worktreeRoot = optionalString(obj, "worktreeRoot").map(Path::of);
+            SessionStatus status = parsedKind.isEmpty()
+                    ? SessionStatus.UNSUPPORTED_AGENT
+                    : SessionStatus.valueOf(requireString(obj, "status"));
+            Instant createdAt = Instant.parse(requireString(obj, "createdAt"));
+            Instant lastOpenedAt = Instant.parse(requireString(obj, "lastOpenedAt"));
+            Optional<Integer> lastExitCode = obj.get("lastExitCode") instanceof JsonNumber n
+                    ? Optional.of(n.asInt())
+                    : Optional.empty();
+            // Lenient: documents written before the worktree lifecycle
+            // existed have neither member; they decode to NONE / empty.
+            PrState prState = obj.get("prState") instanceof JsonString s
+                    ? PrState.fromPersisted(s.value())
+                    : PrState.NONE;
+            Optional<Integer> prNumber = obj.get("prNumber") instanceof JsonNumber pn
+                    ? Optional.of(pn.asInt())
+                    : Optional.empty();
+            // Lenient, like prState/remote: every session persisted before
+            // this member existed did create its own branch, so an absent or
+            // malformed value decodes to true. No schema bump.
+            boolean branchCreatedHere = !(obj.get("branchCreatedHere") instanceof JsonBoolean b)
+                    || b.value();
+            // Lenient and added within schema version 2, no bump -- like
+            // branchCreatedHere, but defaulting the other way: a session
+            // persisted before this member existed was never pinned, and a
+            // malformed value must not silently lock a name.
+            boolean namePinned = obj.get("namePinned") instanceof JsonBoolean pinned && pinned.value();
+            // Lenient like namePinned: a session persisted before this member
+            // existed was not a fork, and an unparseable id must not discard
+            // the session -- lineage is informational, the session is not.
+            Optional<ManagedSessionId> forkedFrom = optionalString(obj, "forkedFrom")
+                    .flatMap(ApplicationStateCodec::parseSessionId);
+            // Lenient like namePinned: a session persisted before this member
+            // existed was not an eval session, and a malformed value must not
+            // silently put a session on the eval account.
+            boolean evalMode = obj.get("evalMode") instanceof JsonBoolean em && em.value();
+            // Lenient like forkedFrom: a session persisted before this member
+            // existed was not part of a workflow, and an unparseable id must
+            // not discard the session.
+            Optional<WorkflowId> workflowId = optionalString(obj, "workflowId")
+                    .flatMap(ApplicationStateCodec::parseWorkflowId);
+            // The persisted shape stays FLAT: grouping is a Java-side change,
+            // and schemaVersion must not move for it.
+            return new ManagedAgentSession(id, repositoryId, displayName,
+                    new AgentBinding(agentKind, agentSessionId, agentSessionName),
+                    new SessionWorkspace(workingDirectory, worktreeRoot, branchCreatedHere),
+                    status, createdAt, lastOpenedAt, lastExitCode,
+                    PrLink.fromPersisted(prState, prNumber), namePinned, forkedFrom, evalMode, workflowId);
+        } catch (IllegalArgumentException | DateTimeException e) {
+            throw new StateDecodeException("Malformed session entry: " + e.getMessage());
+        }
+    }
+
+    private static Optional<ManagedSessionId> parseSessionId(String value) {
+        try {
+            return Optional.of(ManagedSessionId.of(value));
+        } catch (IllegalArgumentException e) {
+            return Optional.empty();
+        }
+    }
+
+    private static Optional<WorkflowId> parseWorkflowId(String value) {
+        try {
+            return Optional.of(WorkflowId.of(value));
+        } catch (IllegalArgumentException e) {
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * Lenient, like {@link #handoffBriefsFromJson}: a missing or malformed
+     * {@code workflows} array yields an empty list rather than failing the
+     * whole state file. Absent member (state written before this feature)
+     * yields no workflows. No schema bump.
+     */
+    private static List<Workflow> workflowsFromJson(JsonObject root) {
+        if (!(root.get("workflows") instanceof JsonArray array)) {
+            return List.of();
+        }
+        List<Workflow> workflows = new ArrayList<>();
+        for (JsonValue element : array.elements()) {
+            workflowFromJson(element).ifPresent(workflows::add);
+        }
+        return List.copyOf(workflows);
+    }
+
+    private static Optional<Workflow> workflowFromJson(JsonValue element) {
+        if (!(element instanceof JsonObject obj)) {
+            return Optional.empty();
+        }
+        try {
+            WorkflowId id = WorkflowId.of(requireString(obj, "id"));
+            String title = requireString(obj, "title");
+            WorkflowStatus status = workflowStatusFromJson(obj);
+            Instant createdAt = Instant.parse(requireString(obj, "createdAt"));
+            Instant lastOpenedAt = Instant.parse(requireString(obj, "lastOpenedAt"));
+            Optional<WorkflowBrief> brief = workflowBriefFromJson(obj);
+            return Optional.of(new Workflow(id, title, status, createdAt, lastOpenedAt, brief));
+        } catch (IllegalArgumentException | DateTimeException | StateDecodeException e) {
+            return Optional.empty();   // a bad workflow costs a workflow, never the state
+        }
+    }
+
+    /** Absent or unrecognized decodes to {@link WorkflowStatus#OPEN}. */
+    private static WorkflowStatus workflowStatusFromJson(JsonObject obj) {
+        if (obj.get("status") instanceof JsonString s) {
+            for (WorkflowStatus status : WorkflowStatus.values()) {
+                if (status.name().equals(s.value())) {
+                    return status;
+                }
+            }
+        }
+        return WorkflowStatus.OPEN;
+    }
+
+    private static Optional<WorkflowBrief> workflowBriefFromJson(JsonObject obj) {
+        if (!(obj.get("brief") instanceof JsonObject briefObj)) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(new WorkflowBrief(
+                    requireString(briefObj, "goal"),
+                    requireString(briefObj, "nextStep"),
+                    optionalString(briefObj, "approach"),
+                    optionalString(briefObj, "decisions"),
+                    optionalString(briefObj, "ruledOut"),
+                    optionalString(briefObj, "corrections"),
+                    Instant.parse(requireString(briefObj, "writtenAt")),
+                    handoffAuthorFromJson(briefObj)));
+        } catch (IllegalArgumentException | DateTimeException | StateDecodeException e) {
+            return Optional.empty();
+        }
+    }
+
+    private static Optional<String> optionalString(JsonObject obj, String key) {
+        return obj.get(key) instanceof JsonString s ? Optional.of(s.value()) : Optional.empty();
+    }
+
+    private static WorkspaceUiState uiFromJson(JsonObject obj) {
+        // Cosmetic UI fields decode leniently (like prState/theme above): a
+        // malformed value here must never make the whole state file look
+        // corrupt and cost the user every repository and session.
+        Optional<RepositoryId> selected = Optional.empty();
+        if (obj.get("selectedRepositoryId") instanceof JsonString s) {
+            try {
+                selected = Optional.of(RepositoryId.of(s.value()));
+            } catch (IllegalArgumentException e) {
+                // Malformed id: fall back to "nothing selected".
+            }
+        }
+
+        double sidebarWidth = WorkspaceUiState.DEFAULT_SIDEBAR_WIDTH;
+        if (obj.get("sidebarWidth") instanceof JsonNumber n) {
+            sidebarWidth = n.asDouble();
+        }
+
+        Set<RepositoryId> expanded = new LinkedHashSet<>();
+        if (obj.get("expandedRepositoryIds") instanceof JsonArray arr) {
+            for (JsonValue element : arr.elements()) {
+                if (element instanceof JsonString s) {
+                    try {
+                        expanded.add(RepositoryId.of(s.value()));
+                    } catch (IllegalArgumentException e) {
+                        // Malformed entry: skip it, keep the rest collapsed/expanded as stored.
+                    }
+                }
+            }
+        }
+
+        // Absent in documents written before the theme existed; defaults to
+        // DARK (matches WorkspaceUiState.empty()) rather than failing.
+        UiTheme theme = obj.get("theme") instanceof JsonString s
+                ? UiTheme.fromPersisted(s.value())
+                : UiTheme.DARK;
+
+        // Cosmetic, so lenient like sidebarWidth: absent or non-numeric
+        // falls back to the design default. Deliberately NOT clamped here
+        // -- ThemeManager and TerminalThemes own their ranges at the point
+        // of application, so a hand-edited value is never silently rewritten.
+        double uiFontSize = obj.get("uiFontSize") instanceof JsonNumber n
+                ? n.asDouble()
+                : WorkspaceUiState.DEFAULT_UI_FONT_SIZE;
+        double terminalFontSize = obj.get("terminalFontSize") instanceof JsonNumber n
+                ? n.asDouble()
+                : WorkspaceUiState.DEFAULT_TERMINAL_FONT_SIZE;
+
+        // Cosmetic: absent in documents written before session-tab
+        // restoration existed; malformed ids are skipped rather than failing
+        // the whole state decode.
+        List<ManagedSessionId> openSessionIds = new ArrayList<>();
+        if (obj.get("openSessionIds") instanceof JsonArray arr) {
+            for (JsonValue element : arr.elements()) {
+                if (element instanceof JsonString s) {
+                    parseSessionId(s.value()).ifPresent(openSessionIds::add);
+                }
+            }
+        }
+
+        Optional<ManagedSessionId> selectedSessionId = Optional.empty();
+        if (obj.get("selectedSessionId") instanceof JsonString s) {
+            selectedSessionId = parseSessionId(s.value());
+        }
+
+        // Cosmetic, like openSessionIds above. An entry whose KEY is not a
+        // parseable ManagedSessionId names nothing and is dropped entirely;
+        // an entry whose VALUE is unrecognized still names a real session,
+        // so it is kept and decoded through Choice.fromPersisted (which
+        // maps it to LOCAL) rather than being dropped.
+        Map<ManagedSessionId, SessionReviewScopes.Choice> reviewScopeChoices = new LinkedHashMap<>();
+        if (obj.get("reviewScopeChoices") instanceof JsonObject choices) {
+            for (Map.Entry<String, JsonValue> entry : choices.members().entrySet()) {
+                Optional<ManagedSessionId> sessionId = parseSessionId(entry.getKey());
+                if (sessionId.isEmpty()) {
+                    continue;
+                }
+                String rawChoice = entry.getValue() instanceof JsonString cs ? cs.value() : null;
+                reviewScopeChoices.put(sessionId.get(), SessionReviewScopes.Choice.fromPersisted(rawChoice));
+            }
+        }
+
+        // Cosmetic and lenient: absent in documents written before the strip
+        // existed, and anything but a boolean means "shown".
+        boolean reviewKeyHintsHidden = obj.get("reviewKeyHintsHidden") instanceof JsonBoolean hidden
+                && hidden.value();
+
+        // Cosmetic and lenient too; 0 is "the default width". Clamping to what
+        // the window allows is the view's job, so a hand-edited value is never
+        // silently rewritten here.
+        double reviewStepPanelWidth = obj.get("reviewStepPanelWidth") instanceof JsonNumber width
+                && Double.isFinite(width.asDouble()) && width.asDouble() > 0
+                ? width.asDouble()
+                : 0;
+
+        return new WorkspaceUiState(selected, sidebarWidth, expanded, theme, uiFontSize, terminalFontSize,
+                openSessionIds, selectedSessionId, reviewScopeChoices, reviewKeyHintsHidden,
+                reviewStepPanelWidth);
+    }
+
+    private static int readSchemaVersion(JsonObject root) {
+        if (!(root.get("schemaVersion") instanceof JsonNumber n)) {
+            throw new StateDecodeException("Missing or non-numeric schemaVersion");
+        }
+        try {
+            return n.asInt();
+        } catch (NumberFormatException e) {
+            throw new StateDecodeException("Invalid schemaVersion: " + n.literal());
+        }
+    }
+
+    private static String requireString(JsonObject obj, String key) {
+        if (obj.get(key) instanceof JsonString s) {
+            return s.value();
+        }
+        throw new StateDecodeException("Missing or non-string field: " + key);
+    }
+
+    private static JsonObject asObject(JsonValue value, String what) {
+        if (value instanceof JsonObject obj) {
+            return obj;
+        }
+        throw new StateDecodeException("Expected a JSON object for " + what);
+    }
+
+    private static JsonArray asArray(JsonValue value, String what) {
+        if (value instanceof JsonArray arr) {
+            return arr;
+        }
+        throw new StateDecodeException("Expected a JSON array for " + what);
+    }
+}
