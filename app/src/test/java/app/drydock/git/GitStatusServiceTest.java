@@ -1,6 +1,8 @@
 package app.drydock.git;
 
 import app.drydock.process.ProcessRunner;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -587,6 +589,9 @@ class GitStatusServiceTest {
     // created on disk.
 
     @Test
+    // Unix-only mechanism: /bin/sleep semantics, or a POSIX read-only
+    // directory fabricating an uncreatable worktree parent.
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void aKilledProcessIsUnknownBecauseTheChildRanBeforeItDied() {
         GitCommandFailedException failure = assertThrows(GitCommandFailedException.class,
                 () -> GitStatusService.run(List.of("/bin/sleep", "30"),
@@ -597,6 +602,9 @@ class GitStatusServiceTest {
     }
 
     @Test
+    // Unix-only mechanism: /bin/sleep semantics, or a POSIX read-only
+    // directory fabricating an uncreatable worktree parent.
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void anInterruptedWaitIsUnknownBecauseTheChildWasAlreadyRunning() throws Exception {
         AtomicReference<GitCommandFailedException> caught = new AtomicReference<>();
         Thread worker = new Thread(() -> {
@@ -629,6 +637,9 @@ class GitStatusServiceTest {
     }
 
     @Test
+    // Unix-only mechanism: /bin/sleep semantics, or a POSIX read-only
+    // directory fabricating an uncreatable worktree parent.
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void anUncreatableWorktreeParentIsKnownFailedBecauseNothingWasSpawned(@TempDir Path tmp) throws Exception {
         Path repo = tmp.resolve("repo");
         Files.createDirectory(repo);

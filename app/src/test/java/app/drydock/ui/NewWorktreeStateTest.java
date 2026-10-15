@@ -1,5 +1,6 @@
 package app.drydock.ui;
 
+import app.drydock.testing.TestPaths;
 import app.drydock.git.BranchCatalog;
 import app.drydock.git.BranchCheckout;
 import app.drydock.git.BranchRef;
@@ -26,6 +27,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * button state depending on which segment is selected.</p>
  */
 class NewWorktreeStateTest {
+
+    private static final Path OLIFER = TestPaths.abs("/src/olifer");
 
     private static final BranchRef MAIN = BranchRef.local("main");
     private static final BranchRef REMOTE = BranchRef.remote("origin/feature/x");
@@ -137,12 +140,12 @@ class NewWorktreeStateTest {
      */
     @Test
     void aFailedRefreshKeepsTheOccupancyHintFromTheCatalogStillInHand() {
-        BranchRef occupied = new BranchRef("main", false, Optional.of(Path.of("/src/olifer")), false, false);
+        BranchRef occupied = new BranchRef("main", false, Optional.of(OLIFER), false, false);
 
         NewWorktreeState state = NewWorktreeState.derive(Mode.EXISTING, catalog(occupied), true, "main", null,
                 "", "/wt/x", false);
 
-        assertEquals("Already checked out in /src/olifer", state.hint());
+        assertEquals("Already checked out in " + OLIFER, state.hint());
     }
 
     @Test
@@ -171,11 +174,11 @@ class NewWorktreeStateTest {
 
     @Test
     void aNewNameCollidingWithAnOccupiedLocalBranchNamesItsHolderAndOffersNothing() {
-        BranchRef occupied = new BranchRef("main", false, Optional.of(Path.of("/src/olifer")), false, false);
+        BranchRef occupied = new BranchRef("main", false, Optional.of(OLIFER), false, false);
 
         NewWorktreeState state = newMode(catalog(occupied), "main");
 
-        assertEquals("main already exists — checked out in /src/olifer.", state.hint());
+        assertEquals("main already exists — checked out in " + OLIFER + ".", state.hint());
         assertTrue(state.createDisabled());
         // Occupied, not Ready: checking it out is exactly what cannot happen.
         assertEquals(Optional.empty(), state.switchOffer());
@@ -254,12 +257,12 @@ class NewWorktreeStateTest {
 
     @Test
     void existingModeKeepsTodaysOccupancyWording() {
-        BranchRef occupied = new BranchRef("main", false, Optional.of(Path.of("/src/olifer")), false, false);
+        BranchRef occupied = new BranchRef("main", false, Optional.of(OLIFER), false, false);
         BranchRef stale = new BranchRef("ghost", false, Optional.of(Path.of("/gone")), true, false);
         BranchRef locked = new BranchRef("held", false, Optional.of(Path.of("/held")), false, true);
         BranchRef both = new BranchRef("both", false, Optional.of(Path.of("/held")), true, true);
 
-        assertEquals("Already checked out in /src/olifer", existingMode(catalog(occupied), "main").hint());
+        assertEquals("Already checked out in " + OLIFER, existingMode(catalog(occupied), "main").hint());
         assertEquals("Blocked by a stale worktree at /gone — run `git worktree prune` to release it.",
                 existingMode(catalog(stale), "ghost").hint());
         assertEquals("Blocked by a locked worktree at /held — run `git worktree unlock` to release it.",
@@ -319,13 +322,13 @@ class NewWorktreeStateTest {
      */
     @Test
     void aFabricatedValueIsIgnoredBecauseTheCatalogDoesNotVouchForIt() {
-        BranchRef occupied = new BranchRef("main", false, Optional.of(Path.of("/src/olifer")), false, false);
+        BranchRef occupied = new BranchRef("main", false, Optional.of(OLIFER), false, false);
         BranchRef fabricated = BranchRef.local("main");
 
         NewWorktreeState state = NewWorktreeState.derive(Mode.EXISTING, catalog(occupied), false, "main",
                 fabricated, "", "/wt/x", false);
 
-        assertEquals("Already checked out in /src/olifer", state.hint());
+        assertEquals("Already checked out in " + OLIFER, state.hint());
         assertTrue(state.createDisabled());
     }
 
@@ -338,12 +341,12 @@ class NewWorktreeStateTest {
     @Test
     void aStaleValueFromBeforeAReloadDoesNotSurviveTheCatalogCheck() {
         BranchRef free = BranchRef.local("main");
-        BranchRef nowTaken = new BranchRef("main", false, Optional.of(Path.of("/src/olifer")), false, false);
+        BranchRef nowTaken = new BranchRef("main", false, Optional.of(OLIFER), false, false);
 
         NewWorktreeState state = NewWorktreeState.derive(Mode.EXISTING, catalog(nowTaken), false, "main",
                 free, "", "/wt/x", false);
 
-        assertEquals("Already checked out in /src/olifer", state.hint());
+        assertEquals("Already checked out in " + OLIFER, state.hint());
     }
 
     @Test
@@ -375,23 +378,23 @@ class NewWorktreeStateTest {
      */
     @Test
     void aBlankDirectoryBlocksCreateWithoutSwallowingTheOccupancyHint() {
-        BranchRef occupied = new BranchRef("main", false, Optional.of(Path.of("/src/olifer")), false, false);
+        BranchRef occupied = new BranchRef("main", false, Optional.of(OLIFER), false, false);
 
         NewWorktreeState state = NewWorktreeState.derive(Mode.EXISTING, catalog(occupied), false, "main", null,
                 "", "   ", false);
 
-        assertEquals("Already checked out in /src/olifer", state.hint());
+        assertEquals("Already checked out in " + OLIFER, state.hint());
         assertTrue(state.createDisabled());
     }
 
     @Test
     void aCreationInFlightBlocksCreateWithoutSwallowingTheHint() {
-        BranchRef occupied = new BranchRef("main", false, Optional.of(Path.of("/src/olifer")), false, false);
+        BranchRef occupied = new BranchRef("main", false, Optional.of(OLIFER), false, false);
 
         NewWorktreeState state = NewWorktreeState.derive(Mode.EXISTING, catalog(occupied), false, "main", null,
                 "", "/wt/x", true);
 
-        assertEquals("Already checked out in /src/olifer", state.hint());
+        assertEquals("Already checked out in " + OLIFER, state.hint());
         assertTrue(state.createDisabled());
         assertTrue(NewWorktreeState.derive(Mode.NEW, catalog(MAIN), false, "feat/new", null, "main",
                 "/wt/x", true).createDisabled());
@@ -407,7 +410,7 @@ class NewWorktreeStateTest {
         assertInstanceOf(BranchCheckout.Outcome.Unmintable.class,
                 existingMode(catalog(BranchRef.remote("origin/origin/main")), "origin/origin/main").outcome());
 
-        BranchRef occupied = new BranchRef("main", false, Optional.of(Path.of("/src/olifer")), false, false);
+        BranchRef occupied = new BranchRef("main", false, Optional.of(OLIFER), false, false);
         assertInstanceOf(BranchCheckout.Outcome.Occupied.class,
                 existingMode(catalog(occupied), "main").outcome());
     }

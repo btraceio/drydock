@@ -51,7 +51,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ApplicationStateCodecTest {
 
     private static final String REPO_ID = "11111111-2222-3333-4444-555555555555";
-    private static final String REPO_ROOT = TestPaths.abs("/tmp/repo").toString();
+    // JSON-escaped (backslash doubled): on Windows the raw path would put
+    // \t and \r into the JSON, where the parser reads them as control chars.
+    private static final String REPO_ROOT = TestPaths.abs("/tmp/repo").toString().replace("\\", "\\\\");
     private static final String SESSION_ID = "22222222-3333-4444-5555-666666666666";
     private static final String OTHER_ID = "99999999-8888-7777-6666-555555555555";
 
