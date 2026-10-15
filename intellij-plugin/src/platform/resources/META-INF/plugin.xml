@@ -31,13 +31,25 @@
     <actions>
         <group id="Drydock.SessionToolbar">
             <action id="Drydock.NewSession"
-                    class="app.drydock.intellij.actions.NewSessionAction"/>
+                    class="app.drydock.intellij.actions.NewSessionAction"
+                    text="New Session…"
+                    description="Start a new agent session in a terminal tab"
+                    icon="AllIcons.General.Add"/>
             <action id="Drydock.ResumeConversation"
-                    class="app.drydock.intellij.actions.ResumeConversationAction"/>
+                    class="app.drydock.intellij.actions.ResumeConversationAction"
+                    text="Resume Conversation…"
+                    description="Resume an on-disk agent conversation in a terminal tab"
+                    icon="AllIcons.Actions.Restart"/>
             <action id="Drydock.NewWorktree"
-                    class="app.drydock.intellij.actions.NewWorktreeAction"/>
+                    class="app.drydock.intellij.actions.NewWorktreeAction"
+                    text="New Worktree…"
+                    description="Create a worktree on a new branch"
+                    icon="AllIcons.Actions.NewFolder"/>
             <action id="Drydock.CheckoutWorktree"
-                    class="app.drydock.intellij.actions.CheckoutWorktreeAction"/>
+                    class="app.drydock.intellij.actions.CheckoutWorktreeAction"
+                    text="Check out branch in worktree…"
+                    description="Check out an existing branch in a new worktree"
+                    icon="AllIcons.Vcs.Branch"/>
         </group>
     </actions>
     <!-- The worktree list panel's Installer adds the "Worktrees" content

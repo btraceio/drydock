@@ -106,6 +106,10 @@ final class IntellijTerminalSessionLauncher implements TerminalSessionLauncher {
 
     IntellijTerminalSessionLauncher(Project project) {
         this.project = Objects.requireNonNull(project, "project");
+        // The restoration guard must be in place before the first launch: the
+        // duplicate a launch produces arrives with the tool window show that
+        // follows it (see TerminalTabGuard's contract note).
+        TerminalTabGuard.install(project, registry);
     }
 
     @Override

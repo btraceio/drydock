@@ -53,7 +53,7 @@ public final class SessionsToolWindowFactory implements ToolWindowFactory {
     @Override
     public void createToolWindowContent(@NotNull Project project, @NotNull ToolWindow toolWindow) {
         LoadingPlaceholder placeholder = new LoadingPlaceholder();
-        Content content = ContentFactory.getInstance().createContent(placeholder, "", false);
+        Content content = ContentFactory.getInstance().createContent(placeholder, "Sessions", false);
         toolWindow.getContentManager().addContent(content);
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         // whenCompleteAsync even when the warm-up is already done, so the
