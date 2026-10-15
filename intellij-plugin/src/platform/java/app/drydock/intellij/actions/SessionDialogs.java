@@ -1,0 +1,605 @@
+package app.drydock.intellij.actions;
+
+import app.drydock.agent.api.Agent;
+import app.drydock.agent.api.AgentKind;
+import app.drydock.agent.api.AgentRegistry;
+import app.drydock.agent.api.ConversationSource;
+import app.drydock.domain.ApplicationState;
+import app.drydock.domain.ManagedAgentSession;
+import app.drydock.domain.Repository;
+import app.drydock.domain.RepositoryId;
+import app.drydock.intellij.DrydockPluginService;
+import app.drydock.intellij.startup.DrydockStartupActivity;
+import app.drydock.ui.AgentLabels;
+
+import com.intellij.openapi.application.ApplicationManager;
+import com.intellij.openapi.application.ModalityState;
+import com.intellij.openapi.progress.ProgressIndicator;
+import com.intellij.openapi.progress.ProgressManager;
+import com.intellij.openapi.progress.Task;
+import com.intellij.openapi.project.Project;
+import com.intellij.openapi.ui.DialogWrapper;
+import com.intellij.openapi.ui.Messages;
+import com.intellij.openapi.ui.ValidationInfo;
+import com.intellij.ui.ScrollPaneFactory;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+import javax.swing.*;
+import java.awt.*;
+import java.lang.System.Logger;
+import java.lang.System.Logger.Level;
+import java.nio.file.Path;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.function.Consumer;
+import java.util.stream.Collectors;
+
+/**
+ * The Swing bodies of the two session dialogs (T13): the new-session picker
+ * (agent combo + name) and the resume-conversation picker (title / message
+ * count / last-modified, newest first). The actions in this package are
+ * thin: they forward to {@link #showNewSession} / {@link
+ * #showResumeConversation}.
+ *
+ * <p>Threading (AC7/AC12): every blocking input — the plugin init, the
+ * project's repository, the conversation scan ({@code
+ * ConversationSource.listConversations} reads the agent's on-disk
+ * transcripts), the session launch itself — runs inside a {@link
+ * Task.Backgroundable} on a background thread, shown the moment the user
+ * clicks and cleared on success, failure, and every early return (the
+ * startup activity's bounded-wait pattern). Swing is touched only on the
+ * EDT; the hops go through {@code invokeLater(..., ModalityState.any())}
+ * so a completion while a dialog is showing still lands.</p>
+ *
+ * <p>Pure seams: the default-agent resolution (AC8), the provider choice
+ * for the resume action (AC22), the newest-first ordering (AC20), and the
+ * row texts (AC6) are static helpers with no Swing or IDE dependency,
+ * pinned by {@code SessionDialogsTest} without opening a dialog.</p>
+ */
+public final class SessionDialogs {
+
+    private static final Logger LOG = System.getLogger(SessionDialogs.class.getName());
+
+    /** Bounded waits for preparation (mirrors the startup activity's pre-warm timeout). */
+    private static final long PREPARE_TIMEOUT_SECONDS = 30;
+
+    /** Bounded wait for a launch: tab creation plus command build, generously. */
+    private static final long LAUNCH_TIMEOUT_SECONDS = 60;
+
+    /** UTC, so the rendered time is deterministic across machines (and testable). */
+    private static final DateTimeFormatter LAST_MODIFIED_FORMAT =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm").withZone(ZoneOffset.UTC);
+
+    private SessionDialogs() { }
+
+    // ---- pure seams (no Swing, no IDE) ----------------------------------------
+
+    /**
+     * The pre-selected agent for a new session (AC8): the repository's
+     * last-used agent when it is still available, else the first available
+     * kind in {@link AgentKind#preferenceOrder()} (unchanged by Q3), else
+     * empty (no agent CLI at all).
+     */
+    static Optional<AgentKind> defaultAgent(AgentRegistry registry, Optional<AgentKind> repoLastUsed) {
+        return registry.resolveDefault(repoLastUsed);
+    }
+
+    /**
+     * The provider whose conversations the resume action lists (AC20 "for
+     * the chosen provider"): the repository's last-used agent when it
+     * exposes a {@link ConversationSource}, else the first kind in
+     * {@link AgentKind#preferenceOrder()} that does. Empty means no
+     * registered provider can list conversations, and the resume action
+     * stays disabled rather than erroring (AC22).
+     */
+    static Optional<AgentKind> chosenConversationKind(AgentRegistry registry, Optional<AgentKind> repoLastUsed) {
+        if (repoLastUsed.isPresent() && registry.conversations(repoLastUsed.get()).isPresent()) {
+            return repoLastUsed;
+        }
+        for (AgentKind kind : AgentKind.preferenceOrder()) {
+            if (registry.conversations(kind).isPresent()) {
+                return Optional.of(kind);
+            }
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * The conversations newest first (AC20): ordered by {@code lastModified}
+     * descending, {@code sessionId} breaking ties so the order is total and
+     * a test can pin it. Returns a copy; the given list is untouched.
+     */
+    static List<ConversationSource.Conversation> newestFirst(List<ConversationSource.Conversation> conversations) {
+        return conversations.stream()
+                .sorted(Comparator.comparing(ConversationSource.Conversation::lastModified)
+                        .thenComparing(ConversationSource.Conversation::sessionId)
+                        .reversed())
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * One combo row's text (AC6 UI half): the agent's display name, with
+     * the "where we looked" text appended to an unavailable provider so the
+     * row explains itself instead of failing on OK. Same vocabulary as the
+     * app tree's agent picker ("not found. Searched: …").
+     */
+    static String agentRowText(Agent agent) {
+        return agent.isAvailable()
+                ? agent.displayName()
+                : agent.displayName() + " — not found. Searched: " + agent.describeSearched();
+    }
+
+    /**
+     * One picker row's text (AC20): the conversation's title, message
+     * count, and last-modified time.
+     */
+    static String conversationRowText(ConversationSource.Conversation conversation) {
+        int count = conversation.messageCount();
+        return conversation.title()
+                + " · " + count + (count == 1 ? " message" : " messages")
+                + " · " + LAST_MODIFIED_FORMAT.format(conversation.lastModified());
+    }
+
+    /**
+     * The default suggestion for the new session's name, mirroring the app
+     * tree's {@code SessionManager.defaultDisplayName}: "Session N+1" where
+     * N is the number of sessions already recorded for the repository.
+     */
+    static String suggestedSessionName(long existingSessionsInRepository) {
+        return "Session " + (existingSessionsInRepository + 1);
+    }
+
+    /** Sessions of {@code repositoryId} in {@code state} — the count behind {@link #suggestedSessionName}. */
+    static long sessionCount(ApplicationState state, RepositoryId repositoryId) {
+        return state.sessions().stream()
+                .filter(session -> session.repositoryId().equals(repositoryId))
+                .count();
+    }
+
+    // ---- new session ----------------------------------------------------------
+
+    /**
+     * Opens the new-session dialog. Immediately visible progress (AC12):
+     * the dialog's inputs (registry, repository, suggested name) are
+     * prepared off the EDT inside a background task; the dialog opens on
+     * the EDT once they are ready, and every early return — timeout, init
+     * failure, non-directory project — ends the task, which clears it.
+     */
+    public static void showNewSession(Project project) {
+        if (project.getBasePath() == null) {
+            Messages.showInfoMessage(project,
+                    "This project has no directory, so Drydock cannot start a session in it.",
+                    "Drydock");
+            return;
+        }
+        DrydockPluginService plugin = DrydockPluginService.getInstance();
+        ProgressManager.getInstance().run(new Task.Backgroundable(project, "Preparing new Drydock session…", true) {
+            @Override
+            public void run(@NotNull ProgressIndicator indicator) {
+                NewSessionInput input = prepareNewSession(project, plugin);
+                if (input != null) {
+                    ApplicationManager.getApplication().invokeLater(
+                            () -> openNewSessionDialog(project, input), ModalityState.any());
+                }
+            }
+        });
+    }
+
+    /**
+     * Blocking, bounded preparation of the dialog's inputs on the calling
+     * background thread. Returns null (after logging, and the task's end
+     * clears the progress) when the plugin init or the repository
+     * resolution failed or timed out — the early returns of AC12.
+     */
+    @Nullable
+    private static NewSessionInput prepareNewSession(Project project, DrydockPluginService plugin) {
+        try {
+            plugin.initialization().get(PREPARE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            Repository repository = DrydockStartupActivity.repositories(project)
+                    .projectRepository(project).get(PREPARE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            if (repository == null) {
+                LOG.log(Level.WARNING,
+                        "Project {0} has no Drydock repository; cannot offer a new session", project.getName());
+                return null;
+            }
+            AgentRegistry registry = plugin.registry();
+            Optional<AgentKind> defaultKind = defaultAgent(registry, repository.settings().lastUsedAgent());
+            String suggestedName = suggestedSessionName(sessionCount(plugin.stateStore().state(), repository.id()));
+            return new NewSessionInput(registry.agents(), defaultKind, suggestedName);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        } catch (ExecutionException | TimeoutException e) {
+            LOG.log(Level.WARNING, "Could not prepare the new-session dialog: " + e);
+            ApplicationManager.getApplication().invokeLater(() -> Messages.showErrorDialog(project,
+                    "Drydock did not finish loading: " + e, "Drydock"), ModalityState.any());
+            return null;
+        }
+    }
+
+    private record NewSessionInput(List<Agent> agents, Optional<AgentKind> defaultKind, String suggestedName) {
+    }
+
+    private static void openNewSessionDialog(Project project, NewSessionInput input) {
+        if (input.agents().stream().noneMatch(Agent::isAvailable)) {
+            // Mirrors the app tree's "No agent CLI found" alert: with no
+            // agent at all (not even a shell) there is nothing to pick.
+            String searched = input.agents().stream()
+                    .map(agent -> agent.displayName() + ": " + agent.describeSearched())
+                    .collect(Collectors.joining("; "));
+            Messages.showWarningDialog(project, "No agent CLI found. Searched: " + searched, "Drydock");
+            return;
+        }
+        new NewSessionDialog(project, input).show();
+    }
+
+    /** The new-session dialog: agent combo (availability in every row, AC6) + name field. */
+    private static final class NewSessionDialog extends DialogWrapper {
+
+        private final Project project;
+        private final JComboBox<Agent> agentCombo;
+        private final JTextField nameField;
+
+        NewSessionDialog(Project project, NewSessionInput input) {
+            super(project);
+            this.project = project;
+            setTitle("New Drydock session");
+            agentCombo = new JComboBox<>(input.agents().toArray(Agent[]::new));
+            agentCombo.setRenderer(new AgentRowRenderer());
+            input.defaultKind().ifPresent(kind -> {
+                for (int i = 0; i < agentCombo.getItemCount(); i++) {
+                    if (agentCombo.getItemAt(i).kind() == kind) {
+                        agentCombo.setSelectedIndex(i);
+                        break;
+                    }
+                }
+            });
+            if (agentCombo.getSelectedIndex() < 0) {
+                agentCombo.setSelectedIndex(0);
+            }
+            nameField = new JTextField(input.suggestedName());
+            init();
+        }
+
+        @Override
+        protected @Nullable JComponent createCenterPanel() {
+            JPanel form = new JPanel(new GridLayout(0, 1, 0, 4));
+            form.add(new JLabel("Agent"));
+            form.add(agentCombo);
+            form.add(new JLabel("Session name"));
+            form.add(nameField);
+            JPanel panel = new JPanel(new BorderLayout());
+            panel.setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
+            panel.add(form, BorderLayout.NORTH);
+            panel.setPreferredSize(new Dimension(360, panel.getPreferredSize().height));
+            return panel;
+        }
+
+        /**
+         * An unavailable agent is refused here with its "where we looked"
+         * text (AC6/AC11): the row itself shows the same words, so the
+         * refusal never names a reason the dialog has not already shown.
+         */
+        @Override
+        protected @Nullable ValidationInfo doValidate() {
+            Agent selected = (Agent) agentCombo.getSelectedItem();
+            if (selected == null) {
+                return new ValidationInfo("Choose an agent", agentCombo);
+            }
+            if (!selected.isAvailable()) {
+                return new ValidationInfo(selected.displayName() + " was not found. Searched: "
+                        + selected.describeSearched(), agentCombo);
+            }
+            if (nameField.getText().trim().isEmpty()) {
+                return new ValidationInfo("Session name cannot be empty", nameField);
+            }
+            return null;
+        }
+
+        @Override
+        protected void doOKAction() {
+            Agent selected = (Agent) agentCombo.getSelectedItem();
+            String displayName = nameField.getText().trim();
+            if (selected == null || !selected.isAvailable() || displayName.isEmpty()) {
+                return; // doValidate explains; never close on invalid input
+            }
+            super.doOKAction();
+            launchNewSession(project, selected.kind(), displayName);
+        }
+    }
+
+    /**
+     * Launches a prepared new session with visible progress (AC12) and the
+     * prepare/launch split of {@code DrydockSessionService}: the future does
+     * the work on the plugin's executor, this background task only waits —
+     * bounded — and every path (success, failure, timeout, interrupt) ends
+     * it, which clears the progress. A failure surfaces an error naming the
+     * agent (AC11 UI half).
+     */
+    private static void launchNewSession(Project project, AgentKind kind, String displayName) {
+        DrydockPluginService plugin = DrydockPluginService.getInstance();
+        String agentName = AgentLabels.displayName(plugin.registry(), kind);
+        Path repoRoot = Path.of(Objects.requireNonNull(project.getBasePath(), "basePath"));
+        CompletableFuture<ManagedAgentSession> launch =
+                DrydockStartupActivity.sessions(project).prepareSession(repoRoot, kind, displayName)
+                        .thenCompose(session -> DrydockStartupActivity.sessions(project).launchSession(session));
+        ProgressManager.getInstance().run(new Task.Backgroundable(project,
+                "Starting " + agentName + " session…", true) {
+            @Override
+            public void run(@NotNull ProgressIndicator indicator) {
+                try {
+                    launch.get(LAUNCH_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } catch (ExecutionException e) {
+                    reportLaunchFailure(project, "start " + agentName + " session", e);
+                } catch (TimeoutException e) {
+                    LOG.log(Level.WARNING,
+                            "Session start did not complete within {0}s", LAUNCH_TIMEOUT_SECONDS);
+                }
+            }
+        });
+    }
+
+    // ---- resume conversation --------------------------------------------------
+
+    /**
+     * Whether the resume action can do anything: a repository must be
+     * resolved (non-git/no-directory projects cannot record a session) and
+     * {@link #chosenConversationKind} must find a provider with a
+     * conversation source — otherwise the action is disabled, never an
+     * error (AC22). Cheap by construction: only in-memory reads after the
+     * warm-up, safe from {@code update(AnActionEvent)} on the EDT.
+     */
+    static boolean resumeAvailable(Project project) {
+        if (project.getBasePath() == null) {
+            return false;
+        }
+        try {
+            DrydockPluginService plugin = DrydockPluginService.getInstance();
+            if (!plugin.initialization().isDone()) {
+                return false;
+            }
+            CompletableFuture<Void> warmup = DrydockStartupActivity.warmup(project);
+            if (!warmup.isDone() || warmup.isCompletedExceptionally()) {
+                return false;
+            }
+            Repository repository = DrydockStartupActivity.repositories(project)
+                    .projectRepository(project).getNow(null);
+            Optional<AgentKind> lastUsed = repository != null
+                    ? repository.settings().lastUsedAgent()
+                    : Optional.empty();
+            return chosenConversationKind(plugin.registry(), lastUsed).isPresent();
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    /**
+     * Opens the resume-conversation picker. Progress is visible from the
+     * click (AC12): the conversation scan — {@code listConversations} reads
+     * the agent's on-disk transcripts — runs off the EDT inside the
+     * background task (AC20), and the picker opens on the EDT with the
+     * result, newest first.
+     */
+    public static void showResumeConversation(Project project) {
+        if (project.getBasePath() == null) {
+            Messages.showInfoMessage(project,
+                    "This project has no directory, so there is nothing to resume here.",
+                    "Drydock");
+            return;
+        }
+        DrydockPluginService plugin = DrydockPluginService.getInstance();
+        ProgressManager.getInstance().run(new Task.Backgroundable(project,
+                "Listing conversations…", true) {
+            @Override
+            public void run(@NotNull ProgressIndicator indicator) {
+                prepareResume(project, plugin);
+            }
+        });
+    }
+
+    /**
+     * Blocking, bounded resume preparation on the calling background
+     * thread; the task's end clears the progress on every path.
+     */
+    private static void prepareResume(Project project, DrydockPluginService plugin) {
+        Repository repository;
+        try {
+            plugin.initialization().get(PREPARE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            repository = DrydockStartupActivity.repositories(project)
+                    .projectRepository(project).get(PREPARE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return;
+        } catch (ExecutionException | TimeoutException e) {
+            reportFailureOnEdt(project, "Drydock did not finish loading", e);
+            return;
+        }
+        if (repository == null) {
+            LOG.log(Level.WARNING,
+                    "Project {0} has no Drydock repository; cannot resume a conversation", project.getName());
+            return;
+        }
+        AgentRegistry registry = plugin.registry();
+        Optional<AgentKind> kind = chosenConversationKind(registry, repository.settings().lastUsedAgent());
+        if (kind.isEmpty()) {
+            // AC22: no provider can list conversations — disabled in update();
+            // reaching here means it changed since. Informational, not an error.
+            ApplicationManager.getApplication().invokeLater(() -> Messages.showInfoMessage(project,
+                    "No agent here can list conversations to resume.", "Drydock"), ModalityState.any());
+            return;
+        }
+        Optional<ConversationSource> source = registry.conversations(kind.get());
+        if (source.isEmpty()) {
+            return; // chosenConversationKind guarantees presence; belt and braces
+        }
+        String agentName = AgentLabels.displayName(registry, kind.get());
+        List<ConversationSource.Conversation> conversations;
+        try {
+            conversations = newestFirst(source.get().listConversations(repository.root()));
+        } catch (RuntimeException e) {
+            reportFailureOnEdt(project, "Could not list " + agentName + " conversations", e);
+            return;
+        }
+        ApplicationManager.getApplication().invokeLater(
+                () -> openResumePicker(project, repository, kind.get(), agentName, conversations),
+                ModalityState.any());
+    }
+
+    private static void openResumePicker(Project project, Repository repository, AgentKind kind, String agentName,
+            List<ConversationSource.Conversation> conversations) {
+        if (conversations.isEmpty()) {
+            // An empty catalog is a state, not a failure (AC22's spirit):
+            // inform, never a stack trace or a red icon.
+            Messages.showInfoMessage(project,
+                    "No " + agentName + " conversations were found in " + repository.root() + ".",
+                    "Drydock");
+            return;
+        }
+        new ResumePickerDialog(project, agentName, repository.root(), conversations,
+                picked -> launchResume(project, repository, kind, agentName, picked)).show();
+    }
+
+    /**
+     * The resume picker: one row per conversation with title, message
+     * count, and last-modified (AC20), newest first; OK enabled only with
+     * a selection. The picked conversation leaves through the
+     * constructor-supplied callback, so the dialog owns no launch
+     * knowledge.
+     */
+    private static final class ResumePickerDialog extends DialogWrapper {
+
+        private final Consumer<ConversationSource.Conversation> onPick;
+        private final Path root;
+        private final JList<ConversationSource.Conversation> list;
+
+        ResumePickerDialog(Project project, String agentName, Path root,
+                List<ConversationSource.Conversation> conversations,
+                Consumer<ConversationSource.Conversation> onPick) {
+            super(project);
+            this.onPick = Objects.requireNonNull(onPick, "onPick");
+            setTitle("Resume " + agentName + " conversation");
+            this.root = root;
+            list = new JList<>(conversations.toArray(ConversationSource.Conversation[]::new));
+            list.setCellRenderer(new ConversationRowRenderer());
+            list.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+            list.setVisibleRowCount(12);
+            if (!conversations.isEmpty()) {
+                list.setSelectedIndex(0);
+            }
+            list.addListSelectionListener(e -> setOKActionEnabled(list.getSelectedValue() != null));
+            init();
+            setOKActionEnabled(list.getSelectedValue() != null);
+        }
+
+        @Override
+        protected @Nullable JComponent createCenterPanel() {
+            JPanel panel = new JPanel(new BorderLayout(0, 8));
+            panel.setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
+            panel.add(new JLabel("Recent conversations in " + root + ":"), BorderLayout.NORTH);
+            panel.add(ScrollPaneFactory.createScrollPane(list), BorderLayout.CENTER);
+            panel.setPreferredSize(new Dimension(480, 320));
+            return panel;
+        }
+
+        @Override
+        protected void doOKAction() {
+            ConversationSource.Conversation picked = list.getSelectedValue();
+            if (picked == null) {
+                return;
+            }
+            super.doOKAction();
+            onPick.accept(picked);
+        }
+    }
+
+    /**
+     * Resumes the picked conversation with visible progress (AC12): the
+     * service adopts/records the managed session and opens the terminal tab
+     * on the plugin's executor (AC20's record/update + launch halves);
+     * this task only waits, bounded, and a failure surfaces an error naming
+     * the agent (AC11 UI half).
+     */
+    private static void launchResume(Project project, Repository repository, AgentKind kind, String agentName,
+            ConversationSource.Conversation picked) {
+        CompletableFuture<ManagedAgentSession> resume = DrydockStartupActivity.sessions(project)
+                .resumeConversation(repository, kind, picked, picked.title());
+        ProgressManager.getInstance().run(new Task.Backgroundable(project,
+                "Resuming " + agentName + " conversation…", true) {
+            @Override
+            public void run(@NotNull ProgressIndicator indicator) {
+                try {
+                    resume.get(LAUNCH_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } catch (ExecutionException e) {
+                    reportLaunchFailure(project, "resume " + agentName + " conversation", e);
+                } catch (TimeoutException e) {
+                    LOG.log(Level.WARNING,
+                            "Conversation resume did not complete within {0}s", LAUNCH_TIMEOUT_SECONDS);
+                }
+            }
+        });
+    }
+
+    // ---- shared Swing bits ------------------------------------------------------
+
+    /** Renders agent rows with {@link #agentRowText}; unavailable rows are grayed. */
+    private static final class AgentRowRenderer extends DefaultListCellRenderer {
+        @Override
+        public Component getListCellRendererComponent(JList<?> list, Object value, int index,
+                boolean isSelected, boolean cellHasFocus) {
+            Component rendered = super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus);
+            if (value instanceof Agent agent && rendered instanceof JLabel label) {
+                label.setText(agentRowText(agent));
+                label.setEnabled(agent.isAvailable());
+            }
+            return rendered;
+        }
+    }
+
+    /** Renders conversation rows with {@link #conversationRowText}. */
+    private static final class ConversationRowRenderer extends DefaultListCellRenderer {
+        @Override
+        public Component getListCellRendererComponent(JList<?> list, Object value, int index,
+                boolean isSelected, boolean cellHasFocus) {
+            Component rendered = super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus);
+            if (value instanceof ConversationSource.Conversation conversation && rendered instanceof JLabel label) {
+                label.setText(conversationRowText(conversation));
+            }
+            return rendered;
+        }
+    }
+
+    /** The launch/resume failure the user sees (AC11): names the action's agent, keeps the cause's own words. */
+    private static void reportLaunchFailure(Project project, String what, ExecutionException failure) {
+        Throwable cause = failure.getCause() != null ? failure.getCause() : failure;
+        LOG.log(Level.WARNING, "Could not " + what + ": " + cause);
+        ApplicationManager.getApplication().invokeLater(
+                () -> Messages.showErrorDialog(project,
+                        "Could not " + what + ": " + message(cause), "Drydock"),
+                ModalityState.any());
+    }
+
+    private static void reportFailureOnEdt(Project project, String title, Throwable failure) {
+        LOG.log(Level.WARNING, title + ": " + failure);
+        ApplicationManager.getApplication().invokeLater(
+                () -> Messages.showErrorDialog(project, title + ": " + message(failure), "Drydock"),
+                ModalityState.any());
+    }
+
+    private static String message(Throwable failure) {
+        String message = failure.getMessage();
+        return message != null && !message.isBlank() ? message : failure.toString();
+    }
+}
