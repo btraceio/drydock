@@ -1,5 +1,6 @@
 package app.drydock.intellij.actions;
 
+import com.intellij.icons.AllIcons;
 import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.project.Project;
@@ -20,7 +21,7 @@ import org.jetbrains.annotations.NotNull;
 public final class NewSessionAction extends AnAction {
 
     public NewSessionAction() {
-        super("New Session…", "Start a new agent session in a terminal tab", null);
+        super("New Session…", "Start a new agent session in a terminal tab", AllIcons.General.Add);
     }
 
     @Override

@@ -14,6 +14,7 @@ import app.drydock.intellij.worktree.WorktreeDialogs;
 import app.drydock.intellij.worktree.WorktreeErrors;
 import app.drydock.intellij.worktree.WorktreeListPanel;
 
+import com.intellij.icons.AllIcons;
 import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.application.ApplicationManager;
@@ -90,7 +91,7 @@ public final class CheckoutWorktreeAction extends AnAction {
     private static final long CHECKOUT_TIMEOUT_SECONDS = 60;
 
     public CheckoutWorktreeAction() {
-        super("Check out branch in worktree…", "Check out an existing branch in a new worktree", null);
+        super("Check out branch in worktree…", "Check out an existing branch in a new worktree", AllIcons.Vcs.Branch);
     }
 
     @Override

@@ -2,6 +2,7 @@ package app.drydock.intellij.actions;
 
 import app.drydock.intellij.worktree.WorktreeDialogs;
 
+import com.intellij.icons.AllIcons;
 import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.project.Project;
@@ -23,7 +24,7 @@ import org.jetbrains.annotations.NotNull;
 public final class NewWorktreeAction extends AnAction {
 
     public NewWorktreeAction() {
-        super("New Worktree…", "Create a worktree on a new branch", null);
+        super("New Worktree…", "Create a worktree on a new branch", AllIcons.Actions.NewFolder);
     }
 
     @Override

@@ -1,5 +1,6 @@
 package app.drydock.intellij.actions;
 
+import com.intellij.icons.AllIcons;
 import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.project.Project;
@@ -19,7 +20,7 @@ import org.jetbrains.annotations.NotNull;
 public final class ResumeConversationAction extends AnAction {
 
     public ResumeConversationAction() {
-        super("Resume Conversation…", "Resume an on-disk agent conversation in a terminal tab", null);
+        super("Resume Conversation…", "Resume an on-disk agent conversation in a terminal tab", AllIcons.Actions.Restart);
     }
 
     @Override
