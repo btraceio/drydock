@@ -573,15 +573,21 @@ public final class DrydockSessionService implements SessionEventSink {
 
     /**
      * Deletes a session's metadata: the activity watcher forgets its state
-     * (AC18) and the row leaves the persisted state. The agent's own on-disk
-     * transcript is never touched. The live tab (if any) is the tool window's
-     * concern; this only un-manages the session.
+     * (AC18), every live terminal tab registered for the session is closed
+     * (deleting a session in the panel takes its terminal with it — the tab's
+     * shell is the session's, and a tab left behind would host an orphaned
+     * agent), and the row leaves the persisted state. The agent's own on-disk
+     * transcript is never touched.
      */
     public CompletableFuture<Void> deleteSession(ManagedSessionId sessionId) {
         Objects.requireNonNull(sessionId, "sessionId");
         return initialization
                 .thenApplyAsync(unused -> requireSession(sessionId), executor)
                 .thenComposeAsync(session -> {
+                    // Registry snapshot on the service's executor; each
+                    // handle's close() hops to the EDT itself.
+                    launcher.tabRegistry().tabsFor(sessionId)
+                            .forEach(TerminalSessionLauncher.TerminalSessionTab::close);
                     CompletableFuture<Void> forgotten = session.agentSessionId()
                             .map(id -> watcher.get().forget(id))
                             .orElseGet(() -> CompletableFuture.completedFuture(null));

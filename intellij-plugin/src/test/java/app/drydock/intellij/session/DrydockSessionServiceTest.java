@@ -207,6 +207,8 @@ class DrydockSessionServiceTest {
             this.events = events;
         }
 
+        final SessionTabRegistry registry = new SessionTabRegistry();
+
         @Override public CompletableFuture<TerminalSessionLauncher.TerminalSessionTab> open(
                 ManagedSessionId sessionId, String tabName, Path workingDirectory, LaunchPlan plan) {
             events.add("open");
@@ -215,12 +217,23 @@ class DrydockSessionServiceTest {
                 @Override public ManagedSessionId sessionId() { return sessionId; }
                 @Override public Object tabKey() { return this; }
                 @Override public TerminalToolWindowTab tab() { return null; }
-                @Override public void close() { }
+                @Override public void close() { events.add("close:" + tabName); }
             };
             return CompletableFuture.completedFuture(tab);
         }
 
-        @Override public SessionTabRegistry tabRegistry() { return new SessionTabRegistry(); }
+        @Override public SessionTabRegistry tabRegistry() { return registry; }
+    }
+
+    /** A close-recording handle for a recorded launch, matching the fake tab's own recording. */
+    private static TerminalSessionLauncher.TerminalSessionTab openTabHandle(
+            Harness harness, FakeLauncher.Open open) {
+        return new TerminalSessionLauncher.TerminalSessionTab() {
+            @Override public ManagedSessionId sessionId() { return open.sessionId(); }
+            @Override public Object tabKey() { return this; }
+            @Override public TerminalToolWindowTab tab() { return null; }
+            @Override public void close() { harness.events.add("close:Bye"); }
+        };
     }
 
     /** Determinism: every submitted task runs inline on the submitting thread. */
@@ -668,8 +681,17 @@ class DrydockSessionServiceTest {
         Path stateFile = activityDir.resolve(agentSessionId);
         Files.writeString(stateFile, "busy");
 
+        // The live tab is registered as the real launcher registers it;
+        // deleting the session must close it (the user-facing rule: a
+        // deleted session takes its terminal with it).
+        harness.launcher.registry.register(harness.launcher.opens.stream()
+                .filter(open -> open.sessionId().equals(running.id()))
+                .map(open -> openTabHandle(harness, open))
+                .findFirst().orElseThrow());
+
         service.deleteSession(running.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
 
+        assertTrue(harness.events.contains("close:Bye"), "delete must close the session's terminal tab");
         assertTrue(Files.notExists(stateFile), "delete must make the watcher forget the activity state");
         assertTrue(harness.store.state().sessions().stream()
                 .noneMatch(session -> session.id().equals(running.id())));
