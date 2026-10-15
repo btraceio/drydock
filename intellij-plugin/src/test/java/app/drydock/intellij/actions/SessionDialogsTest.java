@@ -24,6 +24,7 @@ import app.drydock.domain.SessionWorkspace;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
@@ -277,6 +278,44 @@ class SessionDialogsTest {
     void suggestedNameCountsTheRepositorysExistingSessions() {
         assertEquals("Session 1", SessionDialogs.suggestedSessionName(0));
         assertEquals("Session 3", SessionDialogs.suggestedSessionName(2));
+    }
+
+    // ---- worktree-named suggestion (T17) ---------------------------------
+
+    @Test
+    void aSessionForAWorktreeIsSuggestedTheWorktreesOwnName() {
+        // The worktree's last path segment, not "Session N": a session
+        // opened from a worktree row names itself after the worktree.
+        assertEquals("address-pr-800",
+                SessionDialogs.suggestedSessionNameFor(Path.of("/repos/drydock"),
+                        Path.of("/repos/worktrees/address-pr-800"), 5));
+    }
+
+    @Test
+    void aSessionForTheProjectRootKeepsTheSessionNumbering() {
+        assertEquals("Session 6",
+                SessionDialogs.suggestedSessionNameFor(Path.of("/repos/drydock"),
+                        Path.of("/repos/drydock"), 5));
+    }
+
+    @Test
+    void aProjectRootSpelledThroughASymlinkIsStillTheProjectRoot(@TempDir Path projectRoot) throws IOException {
+        // The toRealPath discipline: on macOS the temp dir arrives in its
+        // /var spelling while the same directory is /private/var to git —
+        // both spellings must count as the project root (numbered), never
+        // as a worktree named after some path segment.
+        assertEquals("Session 1",
+                SessionDialogs.suggestedSessionNameFor(projectRoot.toRealPath(), projectRoot, 0));
+        assertEquals("Session 1",
+                SessionDialogs.suggestedSessionNameFor(projectRoot, projectRoot.toRealPath(), 0));
+    }
+
+    @Test
+    void aRootlessPathFallsBackToTheSessionNumbering() {
+        // "/" has no last segment to name a session after; the numbering
+        // is the only suggestion left.
+        assertEquals("Session 2",
+                SessionDialogs.suggestedSessionNameFor(Path.of("/repos/drydock"), Path.of("/"), 1));
     }
 
     @Test

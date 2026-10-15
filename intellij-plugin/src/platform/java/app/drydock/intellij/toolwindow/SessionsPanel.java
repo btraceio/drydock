@@ -62,8 +62,10 @@ import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
@@ -304,11 +306,23 @@ public final class SessionsPanel extends JPanel {
 
     /**
      * The combined list's rows from plain inputs (T16's grouping seam):
-     * the session rows under a "Sessions" header, every non-stale
-     * worktree — the main checkout included — under "Worktrees", and the
-     * stale (git-prunable) entries under "Purgable". A section header is
+     * the session rows under a "Sessions" header, every non-stale worktree
+     * — the main checkout included — under "Worktrees", and the stale
+     * (git-prunable) entries under "Purgable". A section header is
      * emitted only when the section has rows, so the list never carries
      * empty headers.
+     *
+     * <p>T17: a live worktree that already carries a session — any session,
+     * whatever its status — leaves the Worktrees section entirely, because
+     * its session row is that worktree's representation; deleting all of
+     * its sessions is what brings the worktree row back. The session's
+     * working directory is compared against the worktree's path as {@link
+     * WorktreeService#canonical} real paths (the T16 toRealPath discipline):
+     * a session recorded through one spelling of a symlinked directory must
+     * still match the row git lists under the other. Stale (prunable)
+     * entries are never excluded: their directories are gone, no session
+     * represents them, and hiding one would take away the Purgable
+     * section's only escape.</p>
      */
     public static List<Entry> entriesOf(List<SessionListModel.Row> sessions, List<Worktree> worktrees,
             Path currentProjectRoot) {
@@ -319,9 +333,17 @@ public final class SessionsPanel extends JPanel {
                 entries.add(Entry.session(session));
             }
         }
+        Set<Path> sessionDirectories = new HashSet<>();
+        for (SessionListModel.Row session : sessions) {
+            sessionDirectories.add(WorktreeService.canonical(session.session().workingDirectory()));
+        }
         List<WorktreeRow> live = new ArrayList<>();
         List<WorktreeRow> stale = new ArrayList<>();
         for (WorktreeRow row : rowsOf(worktrees, currentProjectRoot)) {
+            if (!row.worktree().prunable()
+                    && sessionDirectories.contains(WorktreeService.canonical(row.path()))) {
+                continue; // the session row is this worktree's representation
+            }
             (row.worktree().prunable() ? stale : live).add(row);
         }
         if (!live.isEmpty()) {
@@ -392,7 +414,7 @@ public final class SessionsPanel extends JPanel {
         } else {
             worktreeListing = List.copyOf(listing);
             adapter.worktreesChanged();
-            setStatus(summaryOf(model.rows().size(), worktreeListing));
+            setStatus(summaryOf(adapter.snapshot()));
         }
         if (worktreeRefreshPending) {
             worktreeRefreshPending = false; // the coalesced follow-up load
@@ -401,17 +423,23 @@ public final class SessionsPanel extends JPanel {
     }
 
     /** The quiet line under the toolbar once a load lands: counts, no noise. */
-    private static String summaryOf(int sessionCount, List<Worktree> worktrees) {
+    private static String summaryOf(List<Entry> entries) {
+        int sessions = 0;
+        int checkouts = 0;
         int stale = 0;
-        for (Worktree worktree : worktrees) {
-            if (worktree.prunable()) {
-                stale++;
+        for (Entry entry : entries) {
+            switch (entry.kind()) {
+                case SESSION -> sessions++;
+                case WORKTREE -> checkouts++;
+                case STALE -> stale++;
+                case SECTION -> {
+                    // Headers carry nothing the line counts.
+                }
             }
         }
         StringBuilder summary = new StringBuilder();
-        summary.append(sessionCount).append(sessionCount == 1 ? " session" : " sessions");
-        summary.append(" · ").append(worktrees.size() - stale)
-                .append(worktrees.size() - stale == 1 ? " checkout" : " checkouts");
+        summary.append(sessions).append(sessions == 1 ? " session" : " sessions");
+        summary.append(" · ").append(checkouts).append(checkouts == 1 ? " checkout" : " checkouts");
         if (stale > 0) {
             summary.append(" · ").append(stale).append(stale == 1 ? " stale worktree, purgable"
                     : " stale worktrees, purgable");
@@ -751,6 +779,11 @@ public final class SessionsPanel extends JPanel {
 
         void worktreesChanged() {
             rebuild();
+        }
+
+        /** The rows as last rebuilt — the status line counts what renders. */
+        List<Entry> snapshot() {
+            return rows;
         }
 
         private void rebuild() {

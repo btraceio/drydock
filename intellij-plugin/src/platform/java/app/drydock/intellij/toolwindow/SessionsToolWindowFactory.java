@@ -22,6 +22,7 @@ import org.jetbrains.annotations.NotNull;
 
 import javax.swing.BorderFactory;
 import javax.swing.JLabel;
+import javax.swing.JComponent;
 import javax.swing.JPanel;
 
 import java.awt.BorderLayout;
@@ -55,7 +56,7 @@ public final class SessionsToolWindowFactory implements ToolWindowFactory {
     @Override
     public void createToolWindowContent(@NotNull Project project, @NotNull ToolWindow toolWindow) {
         LoadingPlaceholder placeholder = new LoadingPlaceholder();
-        Content content = ContentFactory.getInstance().createContent(placeholder, "Sessions", false);
+        Content content = newContent(placeholder);
         toolWindow.getContentManager().addContent(content);
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         // whenCompleteAsync even when the warm-up is already done, so the
@@ -69,6 +70,27 @@ public final class SessionsToolWindowFactory implements ToolWindowFactory {
                 .whenCompleteAsync((repository, failure) -> ApplicationManager.getApplication().invokeLater(
                         () -> install(project, content, placeholder, repository, failure), ModalityState.any()),
                         plugin.executor());
+    }
+
+    /**
+     * The tool window's single content (T17): untitled and non-closeable.
+     * The platform's tab layout hides the content-tab strip for exactly
+     * one content whose title is empty and whose tab label carries no
+     * active icons (TabContentLayout's isToDrawTabs — the same rule that
+     * leaves the Project view strip-free), so the panel renders under the
+     * tool window's own "Drydock" title without a redundant inner header.
+     * The closeable flag is cleared because it is what a tab-action
+     * provider keys a close icon on; the pinned/closeable third parameter
+     * of the factory covers the pin. Deliberately NOT the registry key
+     * {@code debugger.new.tool.window.layout.dnd} (read as false by
+     * default, and global to every tool window anyway): its single-content
+     * mode additionally requires the internal SingleContentSupplier of the
+     * new debugger UI — the wrong tool for one strip-free tab.
+     */
+    static Content newContent(JComponent placeholder) {
+        Content content = ContentFactory.getInstance().createContent(placeholder, "", false);
+        content.setCloseable(false);
+        return content;
     }
 
     private void install(Project project, Content content, LoadingPlaceholder placeholder, Repository repository,

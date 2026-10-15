@@ -202,14 +202,132 @@ class SessionsPanelTest {
         assertFalse(staleRow.detail().contains("locked"), "stale must not read as locked: " + staleRow.detail());
     }
 
+    // ---- in-use worktrees hide from the Worktrees section (T17) ----------------
+
+    @Test
+    void aWorktreeWithASessionHidesFromTheWorktreesSectionRegardlessOfStatus(
+            @TempDir Path repoDir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path sidebar = worktreeParent.resolve("sidebar");
+        runGit(repo, "worktree", "add", sidebar.toString(), "-b", "feat/sidebar");
+        List<Worktree> listing;
+        try (WorktreeService worktrees = new WorktreeService()) {
+            listing = worktrees.list(repo).get();
+        }
+
+        // The session's row is the worktree's representation, whatever the
+        // session's status — a finished (INACTIVE) session still holds the
+        // row until the session record itself is deleted.
+        for (SessionStatus status : new SessionStatus[] {SessionStatus.RUNNING, SessionStatus.INACTIVE}) {
+            List<Entry> entries = SessionsPanel.entriesOf(
+                    List.of(sessionRow("sidebar work", sidebar.toRealPath(), status)),
+                    listing, repo.toRealPath());
+            assertEquals(List.of(Kind.SECTION, Kind.SESSION, Kind.SECTION, Kind.WORKTREE), kinds(entries),
+                    "status " + status);
+            assertTrue(entries.get(3).worktree().worktree().mainCheckout(),
+                    "only the main checkout stays under Worktrees; status " + status);
+            assertEquals("sidebar work", entries.get(1).session().session().displayName());
+        }
+    }
+
+    @Test
+    void aWorktreeWhoseSessionsAreAllDeletedIsListedAgain(
+            @TempDir Path repoDir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path sidebar = worktreeParent.resolve("sidebar");
+        runGit(repo, "worktree", "add", sidebar.toString(), "-b", "feat/sidebar");
+        List<Worktree> listing;
+        try (WorktreeService worktrees = new WorktreeService()) {
+            listing = worktrees.list(repo).get();
+        }
+
+        // Deleting the session removes its record, so no session works in
+        // the sidebar any more: the worktree row comes back (it is again
+        // the only thing that can open a session there).
+        List<Entry> entries = SessionsPanel.entriesOf(List.of(), listing, repo.toRealPath());
+        assertEquals(List.of(Kind.SECTION, Kind.WORKTREE, Kind.WORKTREE), kinds(entries));
+        assertTrue(entries.get(1).worktree().worktree().mainCheckout());
+        assertEquals(Optional.of("feat/sidebar"), entries.get(2).worktree().worktree().branch());
+    }
+
+    @Test
+    void aSessionInTheMainCheckoutHidesTheMainCheckoutRowToo(
+            @TempDir Path repoDir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path sidebar = worktreeParent.resolve("sidebar");
+        runGit(repo, "worktree", "add", sidebar.toString(), "-b", "feat/sidebar");
+        List<Worktree> listing;
+        try (WorktreeService worktrees = new WorktreeService()) {
+            listing = worktrees.list(repo).get();
+        }
+
+        // The rule is uniform: the session row represents the directory it
+        // works in, the main checkout included.
+        List<Entry> entries = SessionsPanel.entriesOf(
+                List.of(sessionRow("root work", repo.toRealPath(), SessionStatus.RUNNING)),
+                listing, repo.toRealPath());
+        assertEquals(List.of(Kind.SECTION, Kind.SESSION, Kind.SECTION, Kind.WORKTREE), kinds(entries));
+        assertEquals(Optional.of("feat/sidebar"), entries.get(3).worktree().worktree().branch());
+    }
+
+    @Test
+    void aSessionRecordedThroughASymlinkedSpellingStillHidesItsWorktree(
+            @TempDir Path repoDir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path sidebar = worktreeParent.resolve("sidebar");
+        runGit(repo, "worktree", "add", sidebar.toString(), "-b", "feat/sidebar");
+        List<Worktree> listing;
+        try (WorktreeService worktrees = new WorktreeService()) {
+            listing = worktrees.list(repo).get();
+        }
+
+        // The toRealPath discipline of the T16 tests: git may list the
+        // worktree under its real (symlink-resolved) path while the
+        // session was recorded through the other spelling (or vice versa
+        // on this host); canonical comparison must match them anyway.
+        List<Entry> entries = SessionsPanel.entriesOf(
+                List.of(sessionRow("sidebar work", sidebar, SessionStatus.RUNNING)),
+                listing, repo.toRealPath());
+        assertEquals(List.of(Kind.SECTION, Kind.SESSION, Kind.SECTION, Kind.WORKTREE), kinds(entries),
+                "the symlinked spelling must still hide the sidebar's row");
+        assertTrue(entries.get(3).worktree().worktree().mainCheckout());
+    }
+
+    @Test
+    void everySessionStillListsEvenWhenItsWorktreeRowIsHidden(
+            @TempDir Path repoDir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path sidebar = worktreeParent.resolve("sidebar");
+        runGit(repo, "worktree", "add", sidebar.toString(), "-b", "feat/sidebar");
+        List<Worktree> listing;
+        try (WorktreeService worktrees = new WorktreeService()) {
+            listing = worktrees.list(repo).get();
+        }
+
+        SessionListModel.Row one = sessionRow("one", sidebar.toRealPath(), SessionStatus.RUNNING);
+        SessionListModel.Row two = sessionRow("two", sidebar.toRealPath(), SessionStatus.INACTIVE);
+        List<Entry> entries = SessionsPanel.entriesOf(List.of(one, two), listing, repo.toRealPath());
+        // Both sessions list under Sessions — hiding the worktree row
+        // never hides the sessions themselves.
+        assertEquals(List.of(
+                Kind.SECTION, Kind.SESSION, Kind.SESSION,
+                Kind.SECTION, Kind.WORKTREE), kinds(entries));
+        assertEquals(one, entries.get(1).session());
+        assertEquals(two, entries.get(2).session());
+    }
+
     // ---- fixtures (core WorktreeServiceTest pattern) ---------------------------
 
     private static SessionListModel.Row sessionRow(String name) {
+        return sessionRow(name, Path.of("/repo/" + name), SessionStatus.RUNNING);
+    }
+
+    private static SessionListModel.Row sessionRow(String name, Path workingDirectory, SessionStatus status) {
         ManagedAgentSession session = new ManagedAgentSession.Builder(
                 ManagedSessionId.newId(), RepositoryId.newId(), name,
                 new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
-                SessionWorkspace.inRepository(Path.of("/repo/" + name)), T0.minusSeconds(60))
-                .status(SessionStatus.RUNNING)
+                SessionWorkspace.inRepository(workingDirectory), T0.minusSeconds(60))
+                .status(status)
                 .lastOpenedAt(T0)
                 .build();
         return new SessionListModel.Row(session, Optional.empty());

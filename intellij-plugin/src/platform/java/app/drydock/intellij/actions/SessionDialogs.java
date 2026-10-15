@@ -8,6 +8,7 @@ import app.drydock.domain.ApplicationState;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
+import app.drydock.git.WorktreeService;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.startup.DrydockStartupActivity;
 import app.drydock.ui.AgentLabels;
@@ -165,6 +166,27 @@ public final class SessionDialogs {
                 .count();
     }
 
+    /**
+     * The default suggestion for a new session rooted at {@code
+     * workingDirectory} (T17): the directory's own name — its last path
+     * segment, e.g. "address-pr-800" — when that is a worktree rather than
+     * the project itself, so a session opened from a worktree row names
+     * itself after the worktree; the project-root case keeps the {@code
+     * "Session N+1"} numbering of {@link #suggestedSessionName}. The two
+     * roots are compared as {@link WorktreeService#canonical} real paths
+     * (the toRealPath discipline of the panel's worktree rows): a root
+     * spelled through a symlink must still count as the project root, not
+     * as a worktree named after some path segment.
+     */
+    static String suggestedSessionNameFor(Path projectRoot, Path workingDirectory,
+            long existingSessionsInRepository) {
+        if (workingDirectory.getFileName() != null
+                && !WorktreeService.canonical(projectRoot).equals(WorktreeService.canonical(workingDirectory))) {
+            return workingDirectory.getFileName().toString();
+        }
+        return suggestedSessionName(existingSessionsInRepository);
+    }
+
     // ---- new session ----------------------------------------------------------
 
     /**
@@ -225,7 +247,15 @@ public final class SessionDialogs {
             }
             AgentRegistry registry = plugin.registry();
             Optional<AgentKind> defaultKind = defaultAgent(registry, repository.settings().lastUsedAgent());
-            String suggestedName = suggestedSessionName(sessionCount(plugin.stateStore().state(), repository.id()));
+            // A session opened from a worktree row names itself after the
+            // worktree (T17); only the project-root case keeps the
+            // numbering. The null guard is belt-and-braces: the project-root
+            // overload already refused a directory-less project, and the
+            // panel only calls this with a directory it resolved a
+            // repository in.
+            Path projectRoot = project.getBasePath() != null ? Path.of(project.getBasePath()) : workingDirectory;
+            String suggestedName = suggestedSessionNameFor(projectRoot, workingDirectory,
+                    sessionCount(plugin.stateStore().state(), repository.id()));
             return new NewSessionInput(registry.agents(), defaultKind, suggestedName);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
