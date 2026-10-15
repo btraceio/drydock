@@ -1,5 +1,6 @@
 package app.drydock.review.tour;
 
+import app.drydock.testing.TestPaths;
 import app.drydock.git.UnifiedDiff;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -99,6 +100,7 @@ class TourStoreTest {
 
     @Test
     void siblingOfSitsNextToTheStateFile() {
-        assertEquals(Path.of("/x/review-tours.json"), TourStore.siblingOf(Path.of("/x/state.json")));
+        assertEquals(TestPaths.abs("/x").resolve("review-tours.json"),
+                TourStore.siblingOf(TestPaths.abs("/x").resolve("state.json")));
     }
 }

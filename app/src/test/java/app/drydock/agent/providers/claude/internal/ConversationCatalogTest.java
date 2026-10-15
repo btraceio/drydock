@@ -1,5 +1,6 @@
 package app.drydock.agent.providers.claude.internal;
 
+import app.drydock.testing.TestPaths;
 import app.drydock.agent.providers.claude.internal.ConversationCatalog.Conversation;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -28,7 +29,10 @@ class ConversationCatalogTest {
     @Test
     void encodesTheWorkingDirectoryLikeClaudeDoes() {
         ConversationCatalog catalog = new ConversationCatalog(projectsRoot);
-        assertEquals(projectsRoot.resolve("-private-tmp-drydock-visual-repo"),
+        // claude's rule: absolute-normalized cwd string, every non-alphanumeric
+        // character replaced with '-'.
+        String expected = TestPaths.abs("/private/tmp/drydock-visual-repo").toString().replaceAll("[^A-Za-z0-9]", "-");
+        assertEquals(projectsRoot.resolve(expected),
                 catalog.projectDirFor(Path.of("/private/tmp/drydock-visual-repo")));
     }
 

@@ -1,5 +1,6 @@
 package app.drydock.domain;
 
+import app.drydock.testing.TestPaths;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
@@ -18,7 +19,11 @@ class SshRemoteTest {
         Path root = remote.placeholderRoot();
         assertTrue(root.isAbsolute());
         assertEquals(root.normalize(), root);
-        assertEquals(Path.of("/.drydock-remote/user%40build.example.com/srv/repos/app"), root);
+        // Contained in the .drydock-remote subtree anchored at the product's
+        // anchor (the user home's drive root -- see placeholderRoot's
+        // javadoc), and carrying the encoded host and the remote path.
+        assertTrue(root.startsWith(remoteRootPrefix()), "got " + root);
+        assertTrue(root.endsWith("srv/repos/app"), "got " + root);
         // Stable: same inputs, same root (dedupe key).
         assertEquals(root, new SshRemote("user@build.example.com", "/srv/repos/app").placeholderRoot());
     }
@@ -32,9 +37,9 @@ class SshRemoteTest {
 
     @Test
     void placeholderRootEncodesHostPathSafely() {
-        // A hostile host alias must not escape the /.drydock-remote subtree.
+        // A hostile host alias must not escape the .drydock-remote subtree.
         Path root = new SshRemote("a/../../etc", "/x").placeholderRoot();
-        assertTrue(root.startsWith(Path.of("/.drydock-remote")), "got " + root);
+        assertTrue(root.startsWith(remoteRootPrefix()), "got " + root);
         assertEquals(root.normalize(), root);
     }
 
@@ -52,7 +57,7 @@ class SshRemoteTest {
 
     @Test
     void repositoryConvenienceConstructorIsLocal() {
-        Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/x"), "x",
+        Repository repo = new Repository(RepositoryId.newId(), TestPaths.abs("/tmp/x"), "x",
                 java.time.Instant.EPOCH, java.time.Instant.EPOCH, RepositorySettings.DEFAULT);
         assertFalse(repo.isRemote());
     }
@@ -65,5 +70,10 @@ class SshRemoteTest {
         assertTrue(repo.isRemote());
         assertTrue(repo.withDisplayName("y").isRemote());
         assertTrue(repo.withLastOpenedAt(java.time.Instant.MAX).isRemote());
+    }
+
+    /** The product's .drydock-remote anchor: the user home's drive root. */
+    private static Path remoteRootPrefix() {
+        return Path.of(System.getProperty("user.home")).toAbsolutePath().getRoot().resolve(".drydock-remote");
     }
 }

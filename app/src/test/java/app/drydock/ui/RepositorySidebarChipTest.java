@@ -1,5 +1,6 @@
 package app.drydock.ui;
 
+import app.drydock.testing.TestPaths;
 import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.RepositorySettings;
@@ -37,7 +38,7 @@ class RepositorySidebarChipTest {
     }
 
     private static Repository localRepo(String name) {
-        return new Repository(RepositoryId.newId(), Path.of("/repo/" + name), name,
+        return new Repository(RepositoryId.newId(), TestPaths.abs("/repo/" + name), name,
                 Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT);
     }
 

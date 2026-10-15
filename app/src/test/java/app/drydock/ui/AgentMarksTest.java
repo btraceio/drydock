@@ -3,6 +3,7 @@ package app.drydock.ui;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
+import app.drydock.testing.TestPaths;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.AgentBinding;
 import app.drydock.domain.SessionWorkspace;
@@ -24,7 +25,7 @@ class AgentMarksTest {
     private static ManagedAgentSession session(AgentKind kind, SessionStatus status) {
         return new ManagedAgentSession(ManagedSessionId.newId(), RepositoryId.newId(), "s",
                 new AgentBinding(kind, Optional.empty(), Optional.empty()),
-                new SessionWorkspace(Path.of("/repo"), Optional.empty(), false),
+                new SessionWorkspace(TestPaths.abs("/repo"), Optional.empty(), false),
                 status, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
                 PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty());
     }

@@ -1,5 +1,6 @@
 package app.drydock.git;
 
+import app.drydock.testing.TestPaths;
 import app.drydock.git.BranchCheckout.Outcome;
 import app.drydock.git.BranchNameRules.Clause;
 import org.junit.jupiter.api.Test;
@@ -22,7 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class BranchCheckoutTest {
 
-    private static final Path HOLDER = Path.of("/tmp/wt/held");
+    private static final Path HOLDER = TestPaths.abs("/tmp/wt/held");
 
     @Test
     void aFreeLocalBranchIsReadyWithNoTracking() {
@@ -154,12 +155,12 @@ class BranchCheckoutTest {
 
     @Test
     void dropdownLabelNamesWhyAnOccupiedBranchCannotBePicked() {
-        assertEquals("feat/login  —  in use (/tmp/wt/held)", label(false, false));
-        assertEquals("feat/login  —  stale worktree (/tmp/wt/held)", label(true, false));
-        assertEquals("feat/login  —  locked worktree (/tmp/wt/held)", label(false, true));
+        assertEquals("feat/login  —  in use (" + HOLDER + ")", label(false, false));
+        assertEquals("feat/login  —  stale worktree (" + HOLDER + ")", label(true, false));
+        assertEquals("feat/login  —  locked worktree (" + HOLDER + ")", label(false, true));
         // Locked wins over prunable: `git worktree prune` silently skips a
         // locked worktree, so naming it stale would be advice that does nothing.
-        assertEquals("feat/login  —  locked worktree (/tmp/wt/held)", label(true, true));
+        assertEquals("feat/login  —  locked worktree (" + HOLDER + ")", label(true, true));
     }
 
     @Test

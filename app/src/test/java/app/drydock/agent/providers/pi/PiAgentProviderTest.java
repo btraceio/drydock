@@ -12,6 +12,8 @@ import app.drydock.agent.providers.HostBinaryLocator;
 import app.drydock.agent.providers.pi.internal.PiCapabilities;
 import app.drydock.agent.providers.pi.internal.PiExecutableLocator;
 import app.drydock.domain.SshRemote;
+import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -142,6 +144,10 @@ class PiAgentProviderTest {
      * historical assumption the prefix predates.
      */
     @Test
+    // several fixtures create symlinks and shebang launchers, which are
+    // unix mechanisms (symlink creation needs privileges on Windows, and
+    // shebang resolution does not exist there).
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void nodePrefixBypassesTheShebangWhenBothResolve(@TempDir Path dir) throws Exception {
         Path fakeNode = Files.createFile(dir.resolve("node"));
         Path fakePi = Files.createFile(dir.resolve("pi"));
@@ -170,6 +176,10 @@ class PiAgentProviderTest {
      * node on PATH itself, so a bare inherited PATH costs nothing.
      */
     @Test
+    // several fixtures create symlinks and shebang launchers, which are
+    // unix mechanisms (symlink creation needs privileges on Windows, and
+    // shebang resolution does not exist there).
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void aShellShebangedLauncherIsRunDirectlyEvenWhenNodeResolves(@TempDir Path dir) throws Exception {
         Path fakeNode = Files.createFile(dir.resolve("node"));
         Path fakePi = Files.createFile(dir.resolve("pi"));
@@ -194,6 +204,10 @@ class PiAgentProviderTest {
      * the {@code node} prefix.
      */
     @Test
+    // several fixtures create symlinks and shebang launchers, which are
+    // unix mechanisms (symlink creation needs privileges on Windows, and
+    // shebang resolution does not exist there).
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void aSymlinkToAShellLauncherIsRecognisedThroughTheLink(@TempDir Path dir) throws Exception {
         Path fakeNode = Files.createFile(dir.resolve("node"));
         Path launcher = Files.createFile(dir.resolve("real-pi"));
@@ -213,6 +227,10 @@ class PiAgentProviderTest {
 
     /** A genuine {@code #!/usr/bin/env node} script keeps the node prefix. */
     @Test
+    // several fixtures create symlinks and shebang launchers, which are
+    // unix mechanisms (symlink creation needs privileges on Windows, and
+    // shebang resolution does not exist there).
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void aNodeShebangedScriptKeepsTheNodePrefix(@TempDir Path dir) throws Exception {
         Path fakeNode = Files.createFile(dir.resolve("node"));
         Path fakePi = Files.createFile(dir.resolve("pi"));
@@ -237,6 +255,10 @@ class PiAgentProviderTest {
      * merged PATH -- rather than emitting a broken {@code node} reference.
      */
     @Test
+    // several fixtures create symlinks and shebang launchers, which are
+    // unix mechanisms (symlink creation needs privileges on Windows, and
+    // shebang resolution does not exist there).
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void piAloneWhenNodeUnresolved(@TempDir Path dir) throws Exception {
         Path fakePi = Files.createFile(dir.resolve("pi"));
         Files.setPosixFilePermissions(fakePi, PosixFilePermissions.fromString("rwxr-xr-x"));
@@ -320,6 +342,10 @@ class PiAgentProviderTest {
      * un-publish path via the capabilities slot.
      */
     @Test
+    // several fixtures create symlinks and shebang launchers, which are
+    // unix mechanisms (symlink creation needs privileges on Windows, and
+    // shebang resolution does not exist there).
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void aFailedWriteIsNotLatchedAndTheNextLaunchRetries(@TempDir Path parent) throws Exception {
         Path state = Files.createDirectories(parent.resolve("state"));
         Files.setPosixFilePermissions(state, PosixFilePermissions.fromString("r-xr-xr-x"));

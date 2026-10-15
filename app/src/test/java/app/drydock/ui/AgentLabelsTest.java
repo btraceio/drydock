@@ -1,5 +1,6 @@
 package app.drydock.ui;
 
+import app.drydock.testing.TestPaths;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.domain.PrLink;
 import app.drydock.domain.AgentBinding;
@@ -37,7 +38,7 @@ class AgentLabelsTest {
     private record StubProvider(AgentKind kind, String label) implements AgentProvider {
         @Override public String displayName() { return label; }
         @Override public void init(AgentContext ctx) { }
-        @Override public Optional<Path> locateExecutable() { return Optional.of(Path.of("/bin/" + kind.persistedName())); }
+        @Override public Optional<Path> locateExecutable() { return Optional.of(TestPaths.abs("/bin/" + kind.persistedName())); }
         @Override public String describeSearched() { return "PATH"; }
         @Override public AgentCapabilities probeCapabilities() { return new AgentCapabilities(true, true, "1"); }
         @Override public boolean supportsRemote() { return true; }
@@ -53,7 +54,7 @@ class AgentLabelsTest {
     private static AgentRegistry registry() {
         return new AgentRegistry(
                 List.of(new StubProvider(AgentKind.CLAUDE, "Claude"), new StubProvider(AgentKind.CODEX, "Codex")),
-                new AgentContext(Path.of("/tmp"), Path.of("/tmp/activity"), ForkJoinPool.commonPool()));
+                new AgentContext(TestPaths.abs("/tmp"), TestPaths.abs("/tmp/activity"), ForkJoinPool.commonPool()));
     }
 
     @Test
@@ -93,7 +94,7 @@ class AgentLabelsTest {
         return new ManagedAgentSession(
                 ManagedSessionId.newId(), RepositoryId.newId(), "work",
                 new AgentBinding(kind, Optional.empty(), Optional.empty()),
-                new SessionWorkspace(Path.of("/tmp"), Optional.empty(), false),
+                new SessionWorkspace(TestPaths.abs("/tmp"), Optional.empty(), false),
                 status, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
                 PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty());
     }

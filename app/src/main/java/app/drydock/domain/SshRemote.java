@@ -39,14 +39,21 @@ public record SshRemote(String host, String remotePath) {
     /**
      * The deterministic virtual local {@link Path} standing in for this
      * remote repo's {@code Repository.root}: unique per (host, remotePath),
-     * absolute, normalized, and under a {@code /.drydock-remote} prefix no
+     * absolute, normalized, and under a {@code .drydock-remote} prefix no
      * real checkout plausibly occupies. Percent-encoding the host keeps it
      * a single path element, so a hostile alias cannot escape the prefix.
      * The existing canonical-root duplicate detection then works unchanged
      * (nonexistent paths compare by normalized string).
+     *
+     * <p>Anchored at the user's drive root: a bare {@code "/.drydock-remote"}
+     * has no root on Windows (a drive-relative path), which the domain's
+     * absolute-path contract rejects. The user home's root keeps the anchor
+     * stable per machine regardless of the app's working directory, and on
+     * unix it is {@code /}, so the macOS spelling is unchanged.</p>
      */
     public Path placeholderRoot() {
         String encodedHost = URLEncoder.encode(host, StandardCharsets.UTF_8);
-        return Path.of("/.drydock-remote", encodedHost, remotePath.substring(1)).normalize();
+        Path anchor = Path.of(System.getProperty("user.home")).toAbsolutePath().getRoot();
+        return anchor.resolve(".drydock-remote").resolve(encodedHost).resolve(remotePath.substring(1)).normalize();
     }
 }

@@ -1,5 +1,6 @@
 package app.drydock.state;
 
+import app.drydock.testing.TestPaths;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.domain.PrLink;
 import app.drydock.domain.AgentBinding;
@@ -50,6 +51,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ApplicationStateCodecTest {
 
     private static final String REPO_ID = "11111111-2222-3333-4444-555555555555";
+    // JSON-escaped (backslash doubled): on Windows the raw path would put
+    // \t and \r into the JSON, where the parser reads them as control chars.
+    private static final String REPO_ROOT = TestPaths.abs("/tmp/repo").toString().replace("\\", "\\\\");
     private static final String SESSION_ID = "22222222-3333-4444-5555-666666666666";
     private static final String OTHER_ID = "99999999-8888-7777-6666-555555555555";
 
@@ -59,7 +63,7 @@ class ApplicationStateCodecTest {
               "repositories": [
                 {
                   "id": "%s",
-                  "root": "/tmp/repo",
+                  "root": "%s",
                   "displayName": "repo",
                   "addedAt": "2026-01-01T00:00:00Z",
                   "lastOpenedAt": "2026-01-02T00:00:00Z",
@@ -71,7 +75,7 @@ class ApplicationStateCodecTest {
                   "id": "22222222-3333-4444-5555-666666666666",
                   "repositoryId": "%s",
                   "displayName": "s",
-                  "workingDirectory": "/tmp/repo",
+                  "workingDirectory": "%s",
                   "status": "INACTIVE",
                   "createdAt": "2026-01-01T00:00:00Z",
                   "lastOpenedAt": "2026-01-02T00:00:00Z"
@@ -79,7 +83,7 @@ class ApplicationStateCodecTest {
               ],
               "ui": {"selectedRepositoryId": null, "sidebarWidth": 260.0, "expandedRepositoryIds": []}
             }
-            """.formatted(REPO_ID, REPO_ID);
+            """.formatted(REPO_ID, REPO_ROOT, REPO_ID, REPO_ROOT);
 
     private static String document(String uiJson) {
         return """
@@ -88,7 +92,7 @@ class ApplicationStateCodecTest {
                   "repositories": [
                     {
                       "id": "%s",
-                      "root": "/tmp/repo",
+                      "root": "%s",
                       "displayName": "repo",
                       "addedAt": "2026-01-01T00:00:00Z",
                       "lastOpenedAt": "2026-01-02T00:00:00Z",
@@ -98,7 +102,7 @@ class ApplicationStateCodecTest {
                   "sessions": [],
                   "ui": %s
                 }
-                """.formatted(REPO_ID, uiJson);
+                """.formatted(REPO_ID, REPO_ROOT, uiJson);
     }
 
     @Test
@@ -159,7 +163,7 @@ class ApplicationStateCodecTest {
 
     @Test
     void repositoryWithoutRemoteMemberDecodesAsLocal() {
-        Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/x"), "x",
+        Repository repo = new Repository(RepositoryId.newId(), TestPaths.abs("/tmp/x"), "x",
                 Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT);
         ApplicationState state = new ApplicationState(List.of(repo), List.of(), List.of(), WorkspaceUiState.empty(), List.of());
         JsonValue json = ApplicationStateCodec.toJson(state);
@@ -176,7 +180,7 @@ class ApplicationStateCodecTest {
     void malformedRemoteMemberDecodesAsLocalNotCorrupt() {
         // Lenient like prState/theme: a bad "remote" must never cost the
         // user their whole state file.
-        Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/x"), "x",
+        Repository repo = new Repository(RepositoryId.newId(), TestPaths.abs("/tmp/x"), "x",
                 Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT);
         ApplicationState state = new ApplicationState(List.of(repo), List.of(), List.of(), WorkspaceUiState.empty(), List.of());
         JsonObject json = (JsonObject) ApplicationStateCodec.toJson(state);
@@ -195,9 +199,9 @@ class ApplicationStateCodecTest {
         String json = """
                 {"schemaVersion":2,"repositories":[],"sessions":[
                   {"id":"22222222-3333-4444-5555-666666666666","repositoryId":"%s","displayName":"Session 1",
-                   "claudeSessionId":"abc","workingDirectory":"/tmp",
+                   "claudeSessionId":"abc","workingDirectory":"%s",
                    "status":"INACTIVE","createdAt":"2020-01-01T00:00:00Z","lastOpenedAt":"2020-01-01T00:00:00Z",
-                   "prState":"NONE","branchCreatedHere":true}]}""".formatted(REPO_ID);
+                   "prState":"NONE","branchCreatedHere":true}]}""".formatted(REPO_ID, REPO_ROOT);
         ApplicationState state = ApplicationStateCodec.fromJson(JsonParser.parse(json));
         ManagedAgentSession session = state.sessions().get(0);
         assertEquals(AgentKind.CLAUDE, session.agentKind());
@@ -209,9 +213,9 @@ class ApplicationStateCodecTest {
         String json = """
                 {"schemaVersion":2,"repositories":[],"sessions":[
                   {"id":"22222222-3333-4444-5555-666666666666","repositoryId":"%s","agentKind":"gemini","displayName":"Session 1",
-                   "workingDirectory":"/tmp","status":"INACTIVE",
+                   "workingDirectory":"%s","status":"INACTIVE",
                    "createdAt":"2020-01-01T00:00:00Z","lastOpenedAt":"2020-01-01T00:00:00Z",
-                   "prState":"NONE","branchCreatedHere":true}]}""".formatted(REPO_ID);
+                   "prState":"NONE","branchCreatedHere":true}]}""".formatted(REPO_ID, REPO_ROOT);
         ApplicationState state = ApplicationStateCodec.fromJson(JsonParser.parse(json));
         ManagedAgentSession session = state.sessions().get(0);
         assertEquals(SessionStatus.UNSUPPORTED_AGENT, session.status());
@@ -223,7 +227,7 @@ class ApplicationStateCodecTest {
         ManagedAgentSession session = new ManagedAgentSession(
                 ManagedSessionId.newId(), RepositoryId.of(REPO_ID), "Session 1",
                 new AgentBinding(AgentKind.CODEX, Optional.of("id"), Optional.empty()),
-                new SessionWorkspace(Path.of("/tmp"), Optional.empty(), true),
+                new SessionWorkspace(TestPaths.abs("/tmp"), Optional.empty(), true),
                 SessionStatus.RUNNING, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
                 PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty());
         ApplicationState state = ApplicationState.empty().withSessions(List.of(session));
@@ -237,12 +241,12 @@ class ApplicationStateCodecTest {
         // Regression guard: if encode/decode flips or drops an explicit
         // false on branchCreatedHere, the whole suite must break.
         // A false value protects a pre-existing branch from deletion.
-        Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/repo"), "repo",
+        Repository repo = new Repository(RepositoryId.newId(), TestPaths.abs("/tmp/repo"), "repo",
                 Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT);
         ManagedAgentSession session = new ManagedAgentSession(
                 ManagedSessionId.newId(), repo.id(), "test session",
                 new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
-                new SessionWorkspace(Path.of("/tmp/repo/wd"), Optional.empty(), false),
+                new SessionWorkspace(TestPaths.abs("/tmp/repo/wd"), Optional.empty(), false),
                 SessionStatus.INACTIVE, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
                 PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty());
         ApplicationState state = new ApplicationState(List.of(repo), List.of(session), List.of(), WorkspaceUiState.empty(), List.of());
@@ -254,12 +258,12 @@ class ApplicationStateCodecTest {
 
     @Test
     void namePinnedSurvivesARoundTrip() {
-        Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/repo"), "repo",
+        Repository repo = new Repository(RepositoryId.newId(), TestPaths.abs("/tmp/repo"), "repo",
                 Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT);
         ManagedAgentSession pinned = new ManagedAgentSession(
                 ManagedSessionId.newId(), repo.id(), "test session",
                 new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
-                new SessionWorkspace(Path.of("/tmp/repo/wd"), Optional.empty(), true),
+                new SessionWorkspace(TestPaths.abs("/tmp/repo/wd"), Optional.empty(), true),
                 SessionStatus.INACTIVE, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
                 PrLink.of(PrState.NONE, Optional.empty()), true, Optional.empty());
         ApplicationState state = new ApplicationState(List.of(repo), List.of(pinned), List.of(), WorkspaceUiState.empty(), List.of());
@@ -295,12 +299,12 @@ class ApplicationStateCodecTest {
 
     @Test
     void evalModeRoundTrips() {
-        Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/repo"), "repo",
+        Repository repo = new Repository(RepositoryId.newId(), TestPaths.abs("/tmp/repo"), "repo",
                 Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT);
         ManagedAgentSession eval = new ManagedAgentSession(
                 ManagedSessionId.newId(), repo.id(), "eval session",
                 new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
-                new SessionWorkspace(Path.of("/tmp/repo/wd"), Optional.empty(), true),
+                new SessionWorkspace(TestPaths.abs("/tmp/repo/wd"), Optional.empty(), true),
                 SessionStatus.INACTIVE, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
                 PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty(), true);
         ApplicationState state = new ApplicationState(List.of(repo), List.of(eval), List.of(), WorkspaceUiState.empty(), List.of());
@@ -331,7 +335,7 @@ class ApplicationStateCodecTest {
 
     @Test
     void repositoryLastUsedAgentRoundTrips() {
-        Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/repo"), "repo",
+        Repository repo = new Repository(RepositoryId.newId(), TestPaths.abs("/tmp/repo"), "repo",
                 Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT)
                 .withSettings(RepositorySettings.DEFAULT.withLastUsedAgent(AgentKind.CODEX));
         ApplicationState state = ApplicationState.empty().withRepositories(List.of(repo));
@@ -344,7 +348,7 @@ class ApplicationStateCodecTest {
     @Test
     void repositoryWithoutLastUsedAgentDecodesEmpty() {
         // A repo whose settings object is empty (pre-migration) → empty lastUsedAgent.
-        Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/repo"), "repo",
+        Repository repo = new Repository(RepositoryId.newId(), TestPaths.abs("/tmp/repo"), "repo",
                 Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT);
         ApplicationState state = ApplicationState.empty().withRepositories(List.of(repo));
 
@@ -367,7 +371,7 @@ class ApplicationStateCodecTest {
                   "repositories": [
                     {
                       "id": "%s",
-                      "root": "/tmp/repo",
+                      "root": "%s",
                       "displayName": "repo",
                       "addedAt": "2026-01-01T00:00:00Z",
                       "lastOpenedAt": "2026-01-02T00:00:00Z",
@@ -377,7 +381,7 @@ class ApplicationStateCodecTest {
                   "sessions": [%s],
                   "ui": {"selectedRepositoryId": null, "sidebarWidth": 260.0, "expandedRepositoryIds": []}
                 }
-                """.formatted(REPO_ID, sessionJson);
+                """.formatted(REPO_ID, REPO_ROOT, sessionJson);
     }
 
     private static final String VALID_SESSION = """
@@ -385,12 +389,12 @@ class ApplicationStateCodecTest {
               "id": "22222222-3333-4444-5555-666666666666",
               "repositoryId": "%s",
               "displayName": "s",
-              "workingDirectory": "/tmp/repo",
+              "workingDirectory": "%s",
               "status": "INACTIVE",
               "createdAt": "2026-01-01T00:00:00Z",
               "lastOpenedAt": "2026-01-02T00:00:00Z"
             }
-            """.formatted(REPO_ID);
+            """.formatted(REPO_ID, REPO_ROOT);
 
     @Test
     void sessionMissingIdThrowsStateDecodeException() {
@@ -501,7 +505,7 @@ class ApplicationStateCodecTest {
         return new ManagedAgentSession(
                 ManagedSessionId.newId(), RepositoryId.of(REPO_ID), "Session 1",
                 new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
-                new SessionWorkspace(Path.of("/tmp"), Optional.empty(), true),
+                new SessionWorkspace(TestPaths.abs("/tmp"), Optional.empty(), true),
                 SessionStatus.RUNNING, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
                 PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty());
     }
@@ -614,9 +618,9 @@ class ApplicationStateCodecTest {
         String badLineage = """
                 {"schemaVersion":2,"repositories":[],"sessions":[
                   {"id":"%s","repositoryId":"%s","displayName":"s","agentKind":"claude",
-                   "workingDirectory":"/tmp","status":"RUNNING",
+                   "workingDirectory":"%s","status":"RUNNING",
                    "createdAt":"2026-08-12T10:15:30Z","lastOpenedAt":"2026-08-12T10:15:30Z",
-                   "forkedFrom":"not-a-uuid"}],"ui":{}}""".formatted(OTHER_ID, REPO_ID);
+                   "forkedFrom":"not-a-uuid"}],"ui":{}}""".formatted(OTHER_ID, REPO_ID, REPO_ROOT);
 
         ApplicationState decoded = ApplicationStateCodec.fromJson(JsonParser.parse(badLineage));
 
@@ -854,7 +858,7 @@ class ApplicationStateCodecTest {
         ManagedAgentSession session = new ManagedAgentSession(ManagedSessionId.newId(),
                 RepositoryId.newId(), "test-session",
                 new AgentBinding(AgentKind.CLAUDE, java.util.Optional.empty(), java.util.Optional.empty()),
-                SessionWorkspace.inRepository(Path.of("/tmp/repo")),
+                SessionWorkspace.inRepository(TestPaths.abs("/tmp/repo")),
                 SessionStatus.INACTIVE, Instant.parse("2026-08-28T10:00:00Z"),
                 Instant.parse("2026-08-28T10:00:00Z"), java.util.Optional.empty(),
                 PrLink.none(), false, java.util.Optional.empty(), false,
@@ -891,13 +895,13 @@ class ApplicationStateCodecTest {
                 {"schemaVersion":2,"repositories":[],
                  "sessions":[{"id":"%s","repositoryId":"%s","displayName":"old-session",
                   "agentKind":"claude","agentSessionId":null,"agentSessionName":null,
-                  "workingDirectory":"/tmp/repo","worktreeRoot":null,"status":"INACTIVE",
+                  "workingDirectory":"%s","worktreeRoot":null,"status":"INACTIVE",
                   "createdAt":"2026-01-01T00:00:00Z","lastOpenedAt":"2026-01-01T00:00:00Z",
                   "lastExitCode":null,"prState":"NONE","prNumber":null,
                   "branchCreatedHere":false,"namePinned":false,"forkedFrom":null,"evalMode":false}],
                  "ui":{"selectedRepositoryId":null,"sidebarWidth":288.0,
                         "expandedRepositoryIds":[],"theme":"DARK"}}
-                """.formatted(SESSION_ID, REPO_ID));
+                """.formatted(SESSION_ID, REPO_ID, REPO_ROOT));
 
         ApplicationState decoded = ApplicationStateCodec.fromJson(json);
         assertEquals(1, decoded.sessions().size());

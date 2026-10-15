@@ -1,6 +1,8 @@
 package app.drydock.git;
 
 import app.drydock.domain.SshRemote;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -15,6 +17,12 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * FakeSsh writes a #!/bin/sh script and marks it executable with POSIX
+ * permissions -- both meaningless on Windows, where ssh also would not
+ * run a shebang-less script. Unix-only by design.
+ */
+@EnabledOnOs({OS.MAC, OS.LINUX})
 class GitStatusServiceRemoteTest {
 
     @TempDir

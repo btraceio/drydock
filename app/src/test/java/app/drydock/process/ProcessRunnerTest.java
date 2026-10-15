@@ -1,5 +1,7 @@
 package app.drydock.process;
 
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -12,6 +14,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Every scenario drives a unix binary (/bin/sh, /bin/cat, /bin/sleep); the
+ * process plumbing itself is OS-neutral but there is no portable harness
+ * for it on Windows (no cat/sh/sleep), so the run is unix-only by design.
+ */
+@EnabledOnOs({OS.MAC, OS.LINUX})
 class ProcessRunnerTest {
 
     @Test

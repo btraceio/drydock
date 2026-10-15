@@ -7,6 +7,8 @@ import app.drydock.state.json.JsonValue.JsonNull;
 import app.drydock.state.json.JsonValue.JsonNumber;
 import app.drydock.state.json.JsonValue.JsonObject;
 import app.drydock.state.json.JsonValue.JsonString;
+import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -1073,6 +1075,8 @@ class JdtServerManagerTest {
     // --------------------------------------------------------- production probe
 
     @Test
+    // uses POSIX permissions to fabricate an unwritable directory.
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void productionProbeParsesStderrAndPreservesFailureDetail() throws Exception {
         Path javaHome = Files.createDirectories(tempDir.resolve("jdk/bin")).getParent();
         Path java = javaHome.resolve("bin/java");

@@ -3,6 +3,7 @@ package app.drydock.ui;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 
+import app.drydock.testing.TestPaths;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.AgentBinding;
 import app.drydock.domain.SessionWorkspace;
@@ -29,13 +30,13 @@ import org.junit.jupiter.api.Test;
 class RepositorySidebarFacetTest {
 
     private static final RepositoryId REPO_ID = RepositoryId.newId();
-    private static final Repository REPO = new Repository(REPO_ID, Path.of("/repo"), "repo",
+    private static final Repository REPO = new Repository(REPO_ID, TestPaths.abs("/repo"), "repo",
             Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT);
 
     private static ManagedAgentSession session(AgentKind kind, SessionStatus status) {
         return new ManagedAgentSession(ManagedSessionId.newId(), REPO_ID, "s",
                 new AgentBinding(kind, Optional.empty(), Optional.empty()),
-                new SessionWorkspace(Path.of("/repo"), Optional.empty(), false),
+                new SessionWorkspace(TestPaths.abs("/repo"), Optional.empty(), false),
                 status, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
                 PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty());
     }
@@ -46,21 +47,21 @@ class RepositorySidebarFacetTest {
 
     private static SidebarNode unopenedNode() {
         return new SidebarNode.UnopenedWorktreeNode(
-                new Worktree(Path.of("/wt/a"), Optional.of("a"), false, false, false, false,
+                new Worktree(TestPaths.abs("/wt/a"), Optional.of("a"), false, false, false, false,
                         Optional.empty(), false),
                 REPO);
     }
 
     private static SidebarNode staleNode() {
         return new SidebarNode.StaleWorktreesNode(
-                List.of(new Worktree(Path.of("/wt/stale"), Optional.of("stale"), false, false, true,
+                List.of(new Worktree(TestPaths.abs("/wt/stale"), Optional.of("stale"), false, false, true,
                         false, Optional.empty(), false)),
                 REPO);
     }
 
     private static SidebarNode lockedNode() {
         return new SidebarNode.LockedWorktreesNode(
-                List.of(new Worktree(Path.of("/wt/locked"), Optional.of("locked"), false, false, false,
+                List.of(new Worktree(TestPaths.abs("/wt/locked"), Optional.of("locked"), false, false, false,
                         true, Optional.empty(), false)),
                 REPO);
     }

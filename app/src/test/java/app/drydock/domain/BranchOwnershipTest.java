@@ -1,5 +1,6 @@
 package app.drydock.domain;
 
+import app.drydock.testing.TestPaths;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.domain.PrLink;
 import app.drydock.domain.AgentBinding;
@@ -32,13 +33,13 @@ class BranchOwnershipTest {
 
     @Test
     void aBranchThisAppCreatedMayBeDeleted() {
-        Path worktree = Path.of("/wt/feature");
+        Path worktree = TestPaths.abs("/wt/feature");
         assertTrue(BranchOwnership.mayDeleteBranchOf(List.of(session(worktree, true)), worktree));
     }
 
     @Test
     void aPreExistingBranchCheckedOutHereMayNotBeDeleted() {
-        Path worktree = Path.of("/wt/feature");
+        Path worktree = TestPaths.abs("/wt/feature");
         assertFalse(BranchOwnership.mayDeleteBranchOf(List.of(session(worktree, false)), worktree));
     }
 
@@ -46,8 +47,8 @@ class BranchOwnershipTest {
     void aWorktreeWithNoSessionAtAllMayNotHaveItsBranchDeleted() {
         // Discovered on disk by the sidebar rescan: drydock never created it,
         // so it has no business force-deleting the branch.
-        assertFalse(BranchOwnership.mayDeleteBranchOf(List.of(), Path.of("/wt/discovered")));
+        assertFalse(BranchOwnership.mayDeleteBranchOf(List.of(), TestPaths.abs("/wt/discovered")));
         assertFalse(BranchOwnership.mayDeleteBranchOf(
-                List.of(session(Path.of("/wt/other"), true)), Path.of("/wt/discovered")));
+                List.of(session(TestPaths.abs("/wt/other"), true)), TestPaths.abs("/wt/discovered")));
     }
 }

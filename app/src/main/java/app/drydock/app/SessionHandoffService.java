@@ -1,5 +1,6 @@
 package app.drydock.app;
 
+import app.drydock.io.OwnerOnly;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.HandoffBrief;
 import app.drydock.domain.ManagedAgentSession;
@@ -20,10 +21,7 @@ import app.drydock.process.ProcessTimeoutException;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
-import java.nio.file.attribute.FileAttribute;
-import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Instant;
 import java.util.stream.Stream;
 import java.lang.System.Logger;
@@ -81,12 +79,6 @@ public final class SessionHandoffService {
 
     /** How long an unread seed file survives before {@link #sweepStaleSeeds} removes it. */
     private static final Duration SEED_RETENTION = Duration.ofDays(7);
-
-    private static final FileAttribute<?> OWNER_ONLY_FILE =
-            PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------"));
-
-    private static final FileAttribute<?> OWNER_ONLY_DIRECTORY =
-            PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------"));
 
     /**
      * Longest commit and changed-file lists the seed carries. The commit list
@@ -367,22 +359,17 @@ public final class SessionHandoffService {
      */
     private String seedPointer(String seed, String branch) {
         try {
-            Files.createDirectories(seedDirectory, OWNER_ONLY_DIRECTORY);
-        } catch (FileAlreadyExistsException existing) {
-            // Tighten a directory left by an earlier run (or by a version that
-            // inherited the umask) rather than trusting that it exists.
-            try {
-                Files.setPosixFilePermissions(seedDirectory, PosixFilePermissions.fromString("rwx------"));
-            } catch (IOException e) {
-                return undeliverableSeed(e);
-            }
+            // Owner-only creation and tightening degrade on filesystems
+            // without POSIX permissions (NTFS); see OwnerOnly for the
+            // Windows constraint.
+            OwnerOnly.createDirectories(seedDirectory);
         } catch (IOException e) {
             return undeliverableSeed(e);
         }
 
         try {
-            Path file = Files.createTempFile(seedDirectory, "handoff-" + WorktreeNaming.slug(branch) + "-",
-                    ".md", OWNER_ONLY_FILE);
+            Path file = Files.createTempFile(seedDirectory, "handoff-" + WorktreeNaming.slug(branch) + "-", ".md");
+            OwnerOnly.tightenFile(file);
             Files.writeString(file, seed, StandardCharsets.UTF_8);
             // Deliberately one line, with no tab or newline anywhere in it: it
             // has to survive being whitespace-collapsed and typed.

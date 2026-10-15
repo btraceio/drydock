@@ -163,7 +163,7 @@ class LspUsageProviderTest {
         client.respondTo("textDocument/definition",
                 new JsonArray(List.of(location(declUri(), DECL_LSP_LINE, 4))));
 
-        assertEquals(Optional.of(new Usage("src/Decl.java", DECL_LINE, "int clamp(int w) {",
+        assertEquals(Optional.of(new Usage(rel("src/Decl.java"), DECL_LINE, "int clamp(int w) {",
                 Provenance.RESOLVED, true)), answer.get());
     }
 
@@ -199,8 +199,8 @@ class LspUsageProviderTest {
     @Test
     void aNonJavaSymbolIsInapplicableAndNeverQueriesTheServer() throws Exception {
         driveToIndexed();
-        Usage kotlin = new Usage("src/Use.kt", 3, "fun clamp()", Provenance.MEASURED, false);
-        List<Usage> rows = List.of(usage("src/Use.kt", 3, "fun clamp()", Provenance.MEASURED));
+        Usage kotlin = new Usage(rel("src/Use.kt"), 3, "fun clamp()", Provenance.MEASURED, false);
+        List<Usage> rows = List.of(usage(rel("src/Use.kt"), 3, "fun clamp()", Provenance.MEASURED));
         LspUsageProvider provider = provider(fallback(Optional.of(kotlin), rows));
 
         assertEquals(Optional.of(kotlin), provider.declaration("clamp").get());
@@ -218,7 +218,7 @@ class LspUsageProviderTest {
         // Use2.java line 5: "        int clampNow = clamp(w);" — the first "clamp"
         // substring is inside "clampNow"; the whole word starts at column 23
         // (the carried, stripped text would say 15).
-        Usage candidate = new Usage("src/Use2.java", 5, "int clampNow = clamp(w);",
+        Usage candidate = new Usage(rel("src/Use2.java"), 5, "int clampNow = clamp(w);",
                 Provenance.MEASURED, false);
         LspUsageProvider provider = provider(fallback(Optional.of(candidate)));
 
@@ -230,7 +230,7 @@ class LspUsageProviderTest {
         assertEquals(23, ((JsonNumber) position.get("character")).asInt());
         client.respondTo("textDocument/definition",
                 new JsonArray(List.of(location(declUri(), DECL_LSP_LINE, 4))));
-        assertEquals(Optional.of(new Usage("src/Decl.java", DECL_LINE, "int clamp(int w) {",
+        assertEquals(Optional.of(new Usage(rel("src/Decl.java"), DECL_LINE, "int clamp(int w) {",
                 Provenance.RESOLVED, true)), answer.get());
     }
 
@@ -249,7 +249,7 @@ class LspUsageProviderTest {
         // src/Missing.java does not exist: the raw line is unreadable, the
         // definition may still be asked at the carried text's column 8 —
         // and the answer must then pass the whole-word guard.
-        Usage candidate = new Usage("src/Missing.java", 4, CARRIED_USE_LINE, Provenance.MEASURED, false);
+        Usage candidate = new Usage(rel("src/Missing.java"), 4, CARRIED_USE_LINE, Provenance.MEASURED, false);
         LspUsageProvider provider = provider(fallback(Optional.of(candidate)));
 
         CompletableFuture<Optional<Usage>> answer = provider.declaration("clamp");
@@ -260,7 +260,7 @@ class LspUsageProviderTest {
         assertEquals(8, ((JsonNumber) position.get("character")).asInt());
         client.respondTo("textDocument/definition",
                 new JsonArray(List.of(location(declUri(), DECL_LSP_LINE, 4))));
-        assertEquals(Optional.of(new Usage("src/Decl.java", DECL_LINE, "int clamp(int w) {",
+        assertEquals(Optional.of(new Usage(rel("src/Decl.java"), DECL_LINE, "int clamp(int w) {",
                 Provenance.RESOLVED, true)), answer.get());
     }
 
@@ -279,8 +279,8 @@ class LspUsageProviderTest {
         driveToIndexed();
         // The peek's line 5 no longer names the symbol on disk: no position,
         // no query, the fallback stands.
-        Usage stale = new Usage("src/Use.java", 5, CARRIED_USE_LINE, Provenance.MEASURED, false);
-        List<Usage> rows = List.of(usage("src/Use.java", 5, CARRIED_USE_LINE, Provenance.MEASURED));
+        Usage stale = new Usage(rel("src/Use.java"), 5, CARRIED_USE_LINE, Provenance.MEASURED, false);
+        List<Usage> rows = List.of(usage(rel("src/Use.java"), 5, CARRIED_USE_LINE, Provenance.MEASURED));
         LspUsageProvider provider = provider(fallback(Optional.of(stale), rows));
 
         assertEquals(Optional.of(stale), provider.declaration("clamp").get());
@@ -295,7 +295,7 @@ class LspUsageProviderTest {
     void referencesAreAskedAtTheDeclarationPositionWithIncludeDeclaration() throws Exception {
         driveToIndexed();
         LspUsageProvider provider = provider(fallback(Optional.of(candidate()),
-                usage("src/Use.java", USE_LINE, CARRIED_USE_LINE, Provenance.MEASURED)));
+                usage(rel("src/Use.java"), USE_LINE, CARRIED_USE_LINE, Provenance.MEASURED)));
 
         CompletableFuture<UsagesAnswer> answer = provider.usagesAnswer("clamp");
 
@@ -311,7 +311,7 @@ class LspUsageProviderTest {
 
         UsagesAnswer result = answer.get();
         assertEquals(Status.ANSWERED, result.status());
-        assertEquals(List.of(new Usage("src/Use.java", USE_LINE, CARRIED_USE_LINE,
+        assertEquals(List.of(new Usage(rel("src/Use.java"), USE_LINE, CARRIED_USE_LINE,
                 Provenance.RESOLVED, false)), result.usages());
     }
 
@@ -319,9 +319,9 @@ class LspUsageProviderTest {
     void confirmedRowsAreUpgradedAndUnmatchedRowsKeepProvenanceAndOrder() throws Exception {
         driveToIndexed();
         List<Usage> rows = List.of(
-                usage("src/Use.java", USE_LINE, CARRIED_USE_LINE, Provenance.MEASURED),
-                usage("src/Use.java", 13, "int u = clamp(v);", Provenance.SCOPED),
-                usage("src/Other.java", 5, "clamp(0);", Provenance.MEASURED));
+                usage(rel("src/Use.java"), USE_LINE, CARRIED_USE_LINE, Provenance.MEASURED),
+                usage(rel("src/Use.java"), 13, "int u = clamp(v);", Provenance.SCOPED),
+                usage(rel("src/Other.java"), 5, "clamp(0);", Provenance.MEASURED));
         LspUsageProvider provider = provider(fallback(Optional.of(candidate()), rows));
 
         CompletableFuture<UsagesAnswer> answer = provider.usagesAnswer("clamp");
@@ -334,17 +334,17 @@ class LspUsageProviderTest {
         UsagesAnswer result = answer.get();
         assertEquals(Status.ANSWERED, result.status());
         assertEquals(List.of(
-                new Usage("src/Use.java", USE_LINE, CARRIED_USE_LINE, Provenance.RESOLVED, false),
-                usage("src/Use.java", 13, "int u = clamp(v);", Provenance.SCOPED),
-                usage("src/Other.java", 5, "clamp(0);", Provenance.MEASURED)), result.usages());
+                new Usage(rel("src/Use.java"), USE_LINE, CARRIED_USE_LINE, Provenance.RESOLVED, false),
+                usage(rel("src/Use.java"), 13, "int u = clamp(v);", Provenance.SCOPED),
+                usage(rel("src/Other.java"), 5, "clamp(0);", Provenance.MEASURED)), result.usages());
     }
 
     @Test
     void aScopedRowIsUpgradedOnlyWhenTheServerConfirmsIt() throws Exception {
         driveToIndexed();
         List<Usage> rows = List.of(
-                usage("src/Use.java", USE_LINE, CARRIED_USE_LINE, Provenance.MEASURED),
-                usage("src/Use.java", 13, "int u = clamp(v);", Provenance.SCOPED));
+                usage(rel("src/Use.java"), USE_LINE, CARRIED_USE_LINE, Provenance.MEASURED),
+                usage(rel("src/Use.java"), 13, "int u = clamp(v);", Provenance.SCOPED));
         LspUsageProvider provider = provider(fallback(Optional.of(candidate()), rows));
 
         CompletableFuture<UsagesAnswer> answer = provider.usagesAnswer("clamp");
@@ -354,16 +354,16 @@ class LspUsageProviderTest {
 
         UsagesAnswer result = answer.get();
         assertEquals(List.of(
-                new Usage("src/Use.java", USE_LINE, CARRIED_USE_LINE, Provenance.RESOLVED, false),
-                new Usage("src/Use.java", 13, "int u = clamp(v);", Provenance.RESOLVED, false)),
+                new Usage(rel("src/Use.java"), USE_LINE, CARRIED_USE_LINE, Provenance.RESOLVED, false),
+                new Usage(rel("src/Use.java"), 13, "int u = clamp(v);", Provenance.RESOLVED, false)),
                 result.usages());
     }
 
     @Test
     void nullAndEmptyReferenceListsAreAnswersThatEraseNothing() throws Exception {
         List<Usage> rows = List.of(
-                usage("src/Use.java", USE_LINE, CARRIED_USE_LINE, Provenance.MEASURED),
-                usage("src/Other.java", 5, "clamp(0);", Provenance.MEASURED));
+                usage(rel("src/Use.java"), USE_LINE, CARRIED_USE_LINE, Provenance.MEASURED),
+                usage(rel("src/Other.java"), 5, "clamp(0);", Provenance.MEASURED));
         assertEquals(rows, rowsAfter(JsonNull.INSTANCE));
         assertEquals(rows, rowsAfter(new JsonArray(List.of())));
     }
@@ -372,7 +372,7 @@ class LspUsageProviderTest {
     void aFailingOrTimedOutReferencesQueryLeavesTheFallbackRowsAnswered() throws Exception {
         driveToIndexed();
         List<Usage> rows = List.of(
-                usage("src/Use.java", USE_LINE, CARRIED_USE_LINE, Provenance.MEASURED));
+                usage(rel("src/Use.java"), USE_LINE, CARRIED_USE_LINE, Provenance.MEASURED));
         LspUsageProvider provider = provider(fallback(Optional.of(candidate()), rows));
 
         CompletableFuture<UsagesAnswer> answer = provider.usagesAnswer("clamp");
@@ -386,8 +386,8 @@ class LspUsageProviderTest {
     @Test
     void anUnavailableManagerReturnsTheFallbackAnswerAnswered() throws Exception {
         List<Usage> rows = List.of(
-                usage("src/Use.java", USE_LINE, CARRIED_USE_LINE, Provenance.MEASURED),
-                usage("src/Other.java", 5, "clamp(0);", Provenance.SCOPED));
+                usage(rel("src/Use.java"), USE_LINE, CARRIED_USE_LINE, Provenance.MEASURED),
+                usage(rel("src/Other.java"), 5, "clamp(0);", Provenance.SCOPED));
         LspUsageProvider provider = provider(fallback(Optional.of(candidate()), rows));
 
         UsagesAnswer answer = provider.usagesAnswer("clamp").get();
@@ -402,8 +402,8 @@ class LspUsageProviderTest {
         driveToIndexed();
         // The raw line cannot be read (no such file): a references query has
         // no read-back line to guard it, so the position is never sent.
-        Usage candidate = new Usage("src/Missing.java", 4, CARRIED_USE_LINE, Provenance.MEASURED, false);
-        List<Usage> rows = List.of(usage("src/Missing.java", 4, CARRIED_USE_LINE, Provenance.MEASURED));
+        Usage candidate = new Usage(rel("src/Missing.java"), 4, CARRIED_USE_LINE, Provenance.MEASURED, false);
+        List<Usage> rows = List.of(usage(rel("src/Missing.java"), 4, CARRIED_USE_LINE, Provenance.MEASURED));
         LspUsageProvider provider = provider(fallback(Optional.of(candidate), rows));
 
         UsagesAnswer answer = provider.usagesAnswer("clamp").get();
@@ -417,8 +417,8 @@ class LspUsageProviderTest {
     void usagesDelegatesThroughTheComposedAnswer() throws Exception {
         driveToIndexed();
         List<Usage> rows = List.of(
-                usage("src/Use.java", USE_LINE, CARRIED_USE_LINE, Provenance.MEASURED),
-                usage("src/Other.java", 5, "clamp(0);", Provenance.MEASURED));
+                usage(rel("src/Use.java"), USE_LINE, CARRIED_USE_LINE, Provenance.MEASURED),
+                usage(rel("src/Other.java"), 5, "clamp(0);", Provenance.MEASURED));
         LspUsageProvider provider = provider(fallback(Optional.of(candidate()), rows));
 
         CompletableFuture<List<Usage>> usages = provider.usages("clamp");
@@ -426,8 +426,8 @@ class LspUsageProviderTest {
                 new JsonArray(List.of(location(useUri(), USE_LSP_LINE, USE_COLUMN))));
 
         assertEquals(List.of(
-                new Usage("src/Use.java", USE_LINE, CARRIED_USE_LINE, Provenance.RESOLVED, false),
-                usage("src/Other.java", 5, "clamp(0);", Provenance.MEASURED)), usages.get());
+                new Usage(rel("src/Use.java"), USE_LINE, CARRIED_USE_LINE, Provenance.RESOLVED, false),
+                usage(rel("src/Other.java"), 5, "clamp(0);", Provenance.MEASURED)), usages.get());
     }
 
     // ------------------------------------------------- symlink-safe containment
@@ -455,7 +455,7 @@ class LspUsageProviderTest {
         client.respondTo("textDocument/definition", new JsonArray(List.of(
                 location(declFile().toRealPath().toUri().toString(), DECL_LSP_LINE, 4))));
 
-        assertEquals(Optional.of(new Usage("src/Decl.java", DECL_LINE, "int clamp(int w) {",
+        assertEquals(Optional.of(new Usage(rel("src/Decl.java"), DECL_LINE, "int clamp(int w) {",
                 Provenance.RESOLVED, true)), answer.get(), "worktree-relative, never a ../ path");
     }
 
@@ -464,8 +464,8 @@ class LspUsageProviderTest {
         driveToIndexed();
         Path link = linkToRoot();
         List<Usage> rows = List.of(
-                usage("src/Use.java", USE_LINE, CARRIED_USE_LINE, Provenance.MEASURED),
-                usage("src/Other.java", 5, "clamp(0);", Provenance.MEASURED));
+                usage(rel("src/Use.java"), USE_LINE, CARRIED_USE_LINE, Provenance.MEASURED),
+                usage(rel("src/Other.java"), 5, "clamp(0);", Provenance.MEASURED));
         LspUsageProvider provider = new LspUsageProvider(fallback(Optional.of(candidate()), rows), link,
                 manager, Runnable::run);
 
@@ -474,8 +474,8 @@ class LspUsageProviderTest {
                 location(useFile().toRealPath().toUri().toString(), USE_LSP_LINE, USE_COLUMN))));
 
         assertEquals(List.of(
-                new Usage("src/Use.java", USE_LINE, CARRIED_USE_LINE, Provenance.RESOLVED, false),
-                usage("src/Other.java", 5, "clamp(0);", Provenance.MEASURED)), answer.get().usages());
+                new Usage(rel("src/Use.java"), USE_LINE, CARRIED_USE_LINE, Provenance.RESOLVED, false),
+                usage(rel("src/Other.java"), 5, "clamp(0);", Provenance.MEASURED)), answer.get().usages());
     }
 
     @Test
@@ -488,7 +488,7 @@ class LspUsageProviderTest {
         client.respondTo("textDocument/definition", new JsonArray(List.of(
                 location(link.resolve("src/Decl.java").toUri().toString(), DECL_LSP_LINE, 4))));
 
-        assertEquals(Optional.of(new Usage("src/Decl.java", DECL_LINE, "int clamp(int w) {",
+        assertEquals(Optional.of(new Usage(rel("src/Decl.java"), DECL_LINE, "int clamp(int w) {",
                 Provenance.RESOLVED, true)), answer.get());
     }
 
@@ -512,7 +512,7 @@ class LspUsageProviderTest {
             task.run();
         };
         LspUsageProvider provider = new LspUsageProvider(fallback(Optional.of(candidate()),
-                usage("src/Use.java", USE_LINE, CARRIED_USE_LINE, Provenance.MEASURED)), root, manager, counting);
+                usage(rel("src/Use.java"), USE_LINE, CARRIED_USE_LINE, Provenance.MEASURED)), root, manager, counting);
 
         CompletableFuture<UsagesAnswer> answer = provider.usagesAnswer("clamp");
         int beforeAnswer = tasks.get();
@@ -632,7 +632,7 @@ class LspUsageProviderTest {
             assertEquals(JdtServerManager.Readiness.INDEXED, second.state());
             FakeClient firstClient = client;
 
-            List<Usage> rows = List.of(usage("src/Use.java", USE_LINE, CARRIED_USE_LINE, Provenance.MEASURED));
+            List<Usage> rows = List.of(usage(rel("src/Use.java"), USE_LINE, CARRIED_USE_LINE, Provenance.MEASURED));
             AtomicInteger lookups = new AtomicInteger();
             List<Optional<JdtServerManager>> answers = List.of(Optional.of(manager), Optional.of(second),
                     Optional.empty());
@@ -789,11 +789,16 @@ class LspUsageProviderTest {
     }
 
     private static Usage candidate() {
-        return usage("src/Use.java", USE_LINE, CARRIED_USE_LINE, Provenance.MEASURED);
+        return usage(rel("src/Use.java"), USE_LINE, CARRIED_USE_LINE, Provenance.MEASURED);
     }
 
     private static Usage usage(String file, int line, String text, Provenance provenance) {
-        return new Usage(file, line, text, provenance, false);
+        return new Usage(rel(file), line, text, provenance, false);
+    }
+
+    /** The platform spelling of a worktree-relative test path (\ on Windows). */
+    private static String rel(String unixRelative) {
+        return Path.of(unixRelative).toString();
     }
 
     private Path useFile() { return root.resolve("src/Use.java"); }
@@ -812,8 +817,8 @@ class LspUsageProviderTest {
     private List<Usage> rowsAfter(JsonValue referencesAnswer) throws Exception {
         driveToIndexed();
         List<Usage> rows = List.of(
-                usage("src/Use.java", USE_LINE, CARRIED_USE_LINE, Provenance.MEASURED),
-                usage("src/Other.java", 5, "clamp(0);", Provenance.MEASURED));
+                usage(rel("src/Use.java"), USE_LINE, CARRIED_USE_LINE, Provenance.MEASURED),
+                usage(rel("src/Other.java"), 5, "clamp(0);", Provenance.MEASURED));
         LspUsageProvider provider = provider(fallback(Optional.of(candidate()), rows));
         CompletableFuture<UsagesAnswer> answer = provider.usagesAnswer("clamp");
         client.respondTo("textDocument/references", referencesAnswer);

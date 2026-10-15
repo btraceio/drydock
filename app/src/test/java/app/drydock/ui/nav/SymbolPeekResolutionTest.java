@@ -134,7 +134,7 @@ class SymbolPeekResolutionTest {
                 .get(5, TimeUnit.SECONDS);
 
         assertTrue(peek.isPresent());
-        assertEquals("src/Widget.java:4", peek.get().title());
+        assertEquals(relative + ":4", peek.get().title());
         assertEquals(4, peek.get().startLine());
         assertEquals(relative, peek.get().relativePath());
         assertEquals(List.of("    int size() {", "        return 4;", "    }"), peek.get().lines());
