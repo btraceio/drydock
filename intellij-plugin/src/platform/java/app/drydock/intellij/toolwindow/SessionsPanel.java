@@ -164,6 +164,13 @@ public final class SessionsPanel extends JPanel {
         this.sessions = sessions;
         this.tabs = tabs;
         this.repositoryRoot = repository.root();
+        // Worktree sessions register under the worktree's own repository
+        // (R7) but must still be visible here: the model's extra scope is
+        // this panel's live worktree listing, so a session started from a
+        // worktree row shows in this panel's Sessions section (and the
+        // worktree's row hides — entriesOf's rule — until its sessions are
+        // gone).
+        model.setScopePaths(() -> worktreeListing.stream().map(Worktree::path).toList());
         this.adapter = new CombinedAdapter();
         this.list = new JBList<>(adapter);
         list.setCellRenderer(new EntryRenderer());
@@ -413,6 +420,9 @@ public final class SessionsPanel extends JPanel {
             setStatus("Could not list worktrees: " + WorktreeErrors.visibleMessage(failure));
         } else {
             worktreeListing = List.copyOf(listing);
+            // The scope the model joins against just changed: rejoin before
+            // the adapter's entries read the (stale) rows.
+            model.requestRefresh();
             adapter.worktreesChanged();
             setStatus(summaryOf(adapter.snapshot()));
         }

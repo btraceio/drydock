@@ -293,6 +293,13 @@ class DrydockSessionServiceTest {
                 .findFirst().orElseThrow();
     }
 
+    /** The persisted session with {@code id}, or null when it is gone. */
+    private static ManagedAgentSession persistedOrNull(Harness harness, ManagedSessionId id) {
+        return harness.store.state().sessions().stream()
+                .filter(session -> session.id().equals(id))
+                .findFirst().orElse(null);
+    }
+
     /**
      * A session as a restart would have loaded it: already persisted, with
      * the given binding and status — the resume flow's input, without
@@ -630,7 +637,7 @@ class DrydockSessionServiceTest {
     // ---- lifecycle events -------------------------------------------------------
 
     @Test
-    void sessionExitedPersistsExitedOrInactiveByVariant(@TempDir Path base) throws Exception {
+    void sessionExitedPersistsExitedButDeletesOnTabClose(@TempDir Path base) throws Exception {
         Harness harness = harness(base);
         DrydockSessionService service = harness.service(new RecordingProvider(
                 AgentKind.PI, SessionIdStrategy.DISCOVERED, null, true, false, null, harness.events));
@@ -640,25 +647,26 @@ class DrydockSessionServiceTest {
         ManagedAgentSession closedWhileRunning = persistSession(harness, AgentKind.PI, "Closed early",
                 AgentBinding.unlaunched(AgentKind.PI), base, SessionStatus.RUNNING, createdAt);
 
-        // Natural exit -> EXITED; tab closed while running -> INACTIVE (AC13
-        // persistence half); both bump lastOpenedAt.
+        // Natural exit -> EXITED, resumable, lastOpenedAt bumped; the tab
+        // closed while running -> the session DELETES (the tab is the
+        // session's home; the inverse of deleteSession closing the tab).
         service.sessionExited(natural.id(), false);
         service.sessionExited(closedWhileRunning.id(), true);
 
         ManagedAgentSession exited = persisted(harness, natural.id());
-        ManagedAgentSession inactive = persisted(harness, closedWhileRunning.id());
         assertEquals(SessionStatus.EXITED, exited.status());
-        assertEquals(SessionStatus.INACTIVE, inactive.status());
         assertTrue(exited.lastOpenedAt().isAfter(createdAt));
-        assertTrue(inactive.lastOpenedAt().isAfter(createdAt));
+        assertTrue(persistedOrNull(harness, closedWhileRunning.id()) == null,
+                "a closed tab must delete the session");
 
-        // A later tabClosed variant after a natural exit must not rewrite
-        // the EXITED record (the monitor's ordering, guarded here too).
+        // A later tabClosed variant after a natural exit deletes that EXITED
+        // record too — its terminal home is gone either way.
         service.sessionExited(natural.id(), true);
-        assertEquals(SessionStatus.EXITED, persisted(harness, natural.id()).status());
+        assertTrue(persistedOrNull(harness, natural.id()) == null);
 
-        // A session deleted in the meantime is a no-op, never a throw.
+        // A session gone from the state is a no-op, never a throw.
         service.sessionExited(ManagedSessionId.newId(), false);
+        service.sessionExited(ManagedSessionId.newId(), true);
         harness.store.flush();
     }
 

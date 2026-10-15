@@ -41,6 +41,7 @@ class SessionListModelTest {
 
     private static final RepositoryId MAIN = RepositoryId.newId();
     private static final RepositoryId WORKTREE = RepositoryId.newId();
+    private static final RepositoryId OTHER = RepositoryId.newId();
 
     // ---- AC17: lifecycle-only when no activity can be known -----------------
 
@@ -59,7 +60,7 @@ class SessionListModelTest {
                 Optional.of("claude-1"), T0);
 
         List<SessionListModel.Row> rows = SessionListModel.join(
-                List.of(unlaunchedPi, discoveredPi, claude), MAIN, Map.of("claude-1", SessionActivity.BUSY));
+                List.of(unlaunchedPi, discoveredPi, claude), MAIN, List.of(), Map.of("claude-1", SessionActivity.BUSY));
 
         assertEquals(Optional.empty(), activityOf(rows, "pi-unlaunched"),
                 "a Pi session with no agent session id is lifecycle-only even with a busy state file present");
@@ -79,7 +80,7 @@ class SessionListModelTest {
                 Optional.of("claude-1"), T0);
 
         List<SessionListModel.Row> rows = SessionListModel.join(
-                List.of(claude), MAIN, Map.of("claude-1", SessionActivity.BUSY));
+                List.of(claude), MAIN, List.of(), Map.of("claude-1", SessionActivity.BUSY));
 
         assertEquals(Optional.of(SessionActivity.BUSY), activityOf(rows, "claude"));
         assertEquals("Running · busy", SessionDots.statusText(claude.status(), activityOf(rows, "claude")));
@@ -90,7 +91,7 @@ class SessionListModelTest {
         ManagedAgentSession exited = session(MAIN, AgentKind.CLAUDE, "exited", SessionStatus.EXITED,
                 Optional.of("claude-1"), T0);
         assertEquals(Optional.empty(), activityOf(
-                SessionListModel.join(List.of(exited), MAIN, Map.of("claude-1", SessionActivity.BUSY)), "exited"),
+                SessionListModel.join(List.of(exited), MAIN, List.of(), Map.of("claude-1", SessionActivity.BUSY)), "exited"),
                 "an EXITED session renders lifecycle-only even with a busy state file left behind");
     }
 
@@ -154,14 +155,33 @@ class SessionListModelTest {
                 Optional.empty(), T0);
 
         List<SessionListModel.Row> mainRows = SessionListModel.join(
-                List.of(mainSession, worktreeSession), MAIN, Map.of());
+                List.of(mainSession, worktreeSession), MAIN, List.of(), Map.of());
         assertEquals(List.of("main"), names(mainRows),
                 "a session registered under the worktree's repository does not appear in the main project's list");
 
         List<SessionListModel.Row> worktreeRows = SessionListModel.join(
-                List.of(mainSession, worktreeSession), WORKTREE, Map.of());
+                List.of(mainSession, worktreeSession), WORKTREE, List.of(), Map.of());
         assertEquals(List.of("worktree"), names(worktreeRows),
                 "the worktree project's own list shows its session");
+    }
+
+    @Test
+    void worktreeSessionsShowInTheStartingProjectWhenTheWorktreeIsInScope() {
+        ManagedAgentSession worktreeSession = session(WORKTREE, AgentKind.PI, "worktree", SessionStatus.RUNNING,
+                Optional.empty(), T0);
+        ManagedAgentSession elsewhereSession = session(OTHER, AgentKind.PI, "elsewhere", SessionStatus.RUNNING,
+                Optional.empty(), T0);
+        Path worktreePath = worktreeSession.workingDirectory();
+
+        List<SessionListModel.Row> rows = SessionListModel.join(
+                List.of(worktreeSession, elsewhereSession), MAIN, List.of(worktreePath), Map.of());
+        assertEquals(List.of("worktree"), names(rows),
+                "a session started from this project's worktree row shows in this project's list");
+
+        List<SessionListModel.Row> withoutScope = SessionListModel.join(
+                List.of(worktreeSession, elsewhereSession), MAIN, List.of(), Map.of());
+        assertEquals(List.of(), names(withoutScope),
+                "with the worktree out of scope the session is this project's no longer");
     }
 
     // ---- ordering -------------------------------------------------------------
@@ -176,7 +196,7 @@ class SessionListModelTest {
                 Optional.empty(), T0.plusSeconds(300));
 
         assertEquals(List.of("newest", "middle", "oldest"),
-                names(SessionListModel.join(List.of(oldest, newest, middle), MAIN, Map.of())));
+                names(SessionListModel.join(List.of(oldest, newest, middle), MAIN, List.of(), Map.of())));
 
         // Equal lastOpenedAt falls through to creation time: the order is
         // total, so identical data always rebuilds identically.
@@ -186,7 +206,7 @@ class SessionListModelTest {
         ManagedAgentSession createdEarlier = session(MAIN, AgentKind.PI, "created-earlier", SessionStatus.INACTIVE,
                 Optional.empty(), T0.plusSeconds(60));
         List<SessionListModel.Row> tie = SessionListModel.join(
-                List.of(createdEarlier, createdLater), MAIN, Map.of());
+                List.of(createdEarlier, createdLater), MAIN, List.of(), Map.of());
         assertEquals(2, tie.size());
         assertEquals("created-later", tie.get(0).session().displayName(),
                 "the session created later sorts first when lastOpenedAt ties");

@@ -424,31 +424,55 @@ public final class DrydockSessionService implements SessionEventSink {
     // ---- lifecycle events (the persistence half of SessionEventSink) ---------
 
     /**
-     * {@link SessionEventSink}: the session's tab went away. Persists EXITED
-     * for a natural exit, INACTIVE when the tab was closed while running
-     * (AC13's persistence half); bumps {@code lastOpenedAt} so the list
-     * keeps sorting by "when it was last open". {@code lastExitCode} stays
-     * empty — the terminal surface exposes no exit code (same decision as
-     * the app's close path).
+     * {@link SessionEventSink}: the session's tab went away. A natural exit
+     * persists EXITED (the row stays, resumable) and bumps
+     * {@code lastOpenedAt} so the list keeps sorting by "when it was last
+     * open"; {@code lastExitCode} stays empty — the terminal surface exposes
+     * no exit code (same decision as the app's close path).
+     *
+     * <p>A closed tab DELETES the session (watcher forgets, the row leaves
+     * the state): the terminal tab is the session's home, and without it the
+     * row would linger as a dead entry — the inverse of deleteSession's
+     * rule that a deleted session takes its terminal with it. Any registry
+     * handle still pointing at the (already closed) tab is dropped so no
+     * stale handle accumulates.</p>
      *
      * <p>Thread-safe from either dispatch context the monitor uses (its
      * polling executor, or the EDT for the content-removed variant): the
      * single writer serializes the transform and backgrounds the save. A
-     * session deleted in the meantime is a no-op, and an already-EXITED
-     * session is never rewritten to INACTIVE — the monitor guarantees that
-     * ordering, this is the belt-and-braces half.</p>
+     * session already gone is a no-op, and an already-EXITED session is
+     * never rewritten — the monitor guarantees that ordering, this is the
+     * belt-and-braces half.</p>
      */
     @Override
     public void sessionExited(ManagedSessionId id, boolean tabClosed) {
         Objects.requireNonNull(id, "id");
+        if (!tabClosed) {
+            stateStore.get().update(state -> {
+                ManagedAgentSession existing = findIn(state, id);
+                if (existing == null || existing.status() == SessionStatus.EXITED) {
+                    return state;
+                }
+                return withReplacedSession(state,
+                        existing.withStatus(SessionStatus.EXITED).withLastOpenedAt(Instant.now()));
+            });
+            return;
+        }
+        // The tab is gone; the session goes with it. Read-forget-remove
+        // under one update so the watcher never holds state for a session
+        // the state no longer knows.
         stateStore.get().update(state -> {
             ManagedAgentSession existing = findIn(state, id);
-            if (existing == null || existing.status() == SessionStatus.EXITED) {
-                return state;
+            if (existing != null) {
+                existing.agentSessionId().ifPresent(agentId -> watcher.get().forget(agentId));
             }
-            SessionStatus terminal = tabClosed ? SessionStatus.INACTIVE : SessionStatus.EXITED;
-            return withReplacedSession(state, existing.withStatus(terminal).withLastOpenedAt(Instant.now()));
+            return state.withSessions(state.sessions().stream()
+                    .filter(session -> !session.id().equals(id))
+                    .toList());
         });
+        for (TerminalSessionLauncher.TerminalSessionTab handle : launcher.tabRegistry().tabsFor(id)) {
+            launcher.tabRegistry().remove(handle.tabKey());
+        }
     }
 
     /**

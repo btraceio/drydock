@@ -5,12 +5,16 @@ import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionActivity;
 import app.drydock.domain.SessionStatusFacet;
+import app.drydock.git.WorktreeService;
 import app.drydock.intellij.terminal.SessionEventSink;
 
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
@@ -78,6 +82,15 @@ public final class SessionListModel implements SessionEventSink {
     private final Supplier<List<ManagedAgentSession>> sessions;
     private final Executor refreshExecutor;
 
+    /**
+     * Working directories (typically the project's worktrees, whose sessions
+     * register under the worktree's own repository, R7) whose sessions this
+     * list also shows: a session started on a worktree from this project's
+     * panel is represented HERE as well as in the worktree's own project.
+     * The panel keeps it live against its worktree listing.
+     */
+    private volatile Supplier<List<Path>> scopePaths = List::of;
+
     /** The last activity state per agent session id, as the watcher's poll reported it. */
     private final Map<String, SessionActivity> lastPoll = new ConcurrentHashMap<>();
 
@@ -93,6 +106,15 @@ public final class SessionListModel implements SessionEventSink {
         this.repositoryId = Objects.requireNonNull(repositoryId, "repositoryId");
         this.sessions = Objects.requireNonNull(sessions, "sessions");
         this.refreshExecutor = Objects.requireNonNull(refreshExecutor, "refreshExecutor");
+    }
+
+    /**
+     * Points the extra scope at the panel's live worktree listing (the
+     * constructor wiring order: the model exists before the panel that
+     * feeds it). Read on every refresh; never cached.
+     */
+    public void setScopePaths(Supplier<List<Path>> scopePaths) {
+        this.scopePaths = Objects.requireNonNull(scopePaths, "scopePaths");
     }
 
     /** The current rows; an immutable snapshot. */
@@ -133,7 +155,7 @@ public final class SessionListModel implements SessionEventSink {
      * panel only calls this on the EDT.
      */
     public void refreshNow() {
-        List<Row> updated = join(sessions.get(), repositoryId, lastPoll);
+        List<Row> updated = join(sessions.get(), repositoryId, scopePaths.get(), lastPoll);
         if (!updated.equals(rows)) {
             rows = updated;
             for (Listener listener : listeners) {
@@ -145,16 +167,24 @@ public final class SessionListModel implements SessionEventSink {
     // ---- the pure join ---------------------------------------------------------
 
     /**
-     * The rows for one repository: the sessions belonging to {@code
-     * repositoryId} (the {@code ProjectRepositoryService.sessionsFor}
-     * predicate — a worktree's session stays out of the main checkout's
-     * list, AC25), each joined with its activity, newest-opened first.
+     * The rows this project shows: the sessions of {@code repositoryId} plus
+     * the sessions whose working directory is one of {@code scopePaths} (a
+     * worktree's session registers under the worktree's own repository —
+     * R7, AC25 — but a session started from THIS project's panel must be
+     * visible here; the worktree row it replaces hides accordingly), each
+     * joined with its activity, newest-opened first. Paths compare in
+     * canonical form so a symlinked worktree matches its listing entry.
      */
     static List<Row> join(List<ManagedAgentSession> sessions, RepositoryId repositoryId,
-            Map<String, SessionActivity> activityByAgentSessionId) {
+            List<Path> scopePaths, Map<String, SessionActivity> activityByAgentSessionId) {
+        Set<Path> canonicalScope = new HashSet<>();
+        for (Path path : scopePaths) {
+            canonicalScope.add(WorktreeService.canonical(path));
+        }
         List<ManagedAgentSession> mine = new ArrayList<>();
         for (ManagedAgentSession session : sessions) {
-            if (session.repositoryId().equals(repositoryId)) {
+            if (session.repositoryId().equals(repositoryId)
+                    || canonicalScope.contains(WorktreeService.canonical(session.workingDirectory()))) {
                 mine.add(session);
             }
         }
