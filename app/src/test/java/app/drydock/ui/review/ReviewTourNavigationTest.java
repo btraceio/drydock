@@ -226,7 +226,7 @@ class ReviewTourNavigationTest extends ReviewTourFixture {
         assertTrue(ReviewDiagFxThread.call(() -> view.navigateTrail(-1)));
 
         Optional<String> notice = ReviewDiagFxThread.call(view::diagNotice);
-        assertTrue(notice.isPresent() && notice.get().contains("docs/elsewhere.md"),
+        assertTrue(notice.isPresent() && notice.get().contains(Path.of("docs/elsewhere.md").toString()),
                 "the move that opened nothing says why: " + notice);
     }
 
