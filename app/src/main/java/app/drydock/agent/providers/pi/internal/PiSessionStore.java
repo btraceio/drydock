@@ -66,18 +66,23 @@ public final class PiSessionStore implements CandidateSource {
      * literal string passed to it (e.g. on macOS {@code /tmp} resolves to
      * {@code /private/tmp}). So the path is canonicalized via {@link
      * Path#toRealPath} first (falling back to {@code toAbsolutePath().normalize()}
-     * if the path does not exist / cannot be resolved), then the leading
-     * {@code /} is dropped, remaining {@code /} replaced with {@code -}, and
-     * the result wrapped in {@code --}...{@code --}. Getting this wrong makes
-     * discovery silently find nothing.</p>
+     * if the path does not exist / cannot be resolved), then encoded the way
+     * pi's own session manager does it: strip the leading separator, replace
+     * every {@code /}, {@code \}, and {@code :} with {@code -}, and wrap the
+     * result in {@code --}...{@code --}. The colon replacement is a wire
+     * contract, not cosmetic -- pi's encoder (session-manager.js
+     * {@code getDefaultSessionDirPath}) replaces {@code /[/\\:]/} on every
+     * OS, and on Windows it is what keeps the drive letter's {@code :} out
+     * of the directory name (an illegal NTFS character -- without it every
+     * lookup lands in a directory that cannot exist and discovery silently
+     * finds nothing). Getting any of this wrong makes discovery silently
+     * find nothing.</p>
      */
     public static String encodeCwdDir(Path cwd) {
         Path real = canonicalize(cwd);
         String s = real.toString();
-        if (s.startsWith("/")) {
-            s = s.substring(1);
-        }
-        s = s.replace("/", "-");
+        s = s.replaceFirst("^[\\\\/]", "");
+        s = s.replace("/", "-").replace("\\", "-").replace(":", "-");
         return "--" + s + "--";
     }
 

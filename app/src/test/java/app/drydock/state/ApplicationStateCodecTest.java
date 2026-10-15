@@ -51,6 +51,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ApplicationStateCodecTest {
 
     private static final String REPO_ID = "11111111-2222-3333-4444-555555555555";
+    private static final String REPO_ROOT = TestPaths.abs("/tmp/repo").toString();
     private static final String SESSION_ID = "22222222-3333-4444-5555-666666666666";
     private static final String OTHER_ID = "99999999-8888-7777-6666-555555555555";
 
@@ -60,7 +61,7 @@ class ApplicationStateCodecTest {
               "repositories": [
                 {
                   "id": "%s",
-                  "root": "/tmp/repo",
+                  "root": "%s",
                   "displayName": "repo",
                   "addedAt": "2026-01-01T00:00:00Z",
                   "lastOpenedAt": "2026-01-02T00:00:00Z",
@@ -72,7 +73,7 @@ class ApplicationStateCodecTest {
                   "id": "22222222-3333-4444-5555-666666666666",
                   "repositoryId": "%s",
                   "displayName": "s",
-                  "workingDirectory": "/tmp/repo",
+                  "workingDirectory": "%s",
                   "status": "INACTIVE",
                   "createdAt": "2026-01-01T00:00:00Z",
                   "lastOpenedAt": "2026-01-02T00:00:00Z"
@@ -80,7 +81,7 @@ class ApplicationStateCodecTest {
               ],
               "ui": {"selectedRepositoryId": null, "sidebarWidth": 260.0, "expandedRepositoryIds": []}
             }
-            """.formatted(REPO_ID, REPO_ID);
+            """.formatted(REPO_ID, REPO_ROOT, REPO_ID, REPO_ROOT);
 
     private static String document(String uiJson) {
         return """
@@ -89,7 +90,7 @@ class ApplicationStateCodecTest {
                   "repositories": [
                     {
                       "id": "%s",
-                      "root": "/tmp/repo",
+                      "root": "%s",
                       "displayName": "repo",
                       "addedAt": "2026-01-01T00:00:00Z",
                       "lastOpenedAt": "2026-01-02T00:00:00Z",
@@ -99,7 +100,7 @@ class ApplicationStateCodecTest {
                   "sessions": [],
                   "ui": %s
                 }
-                """.formatted(REPO_ID, uiJson);
+                """.formatted(REPO_ID, REPO_ROOT, uiJson);
     }
 
     @Test
@@ -196,9 +197,9 @@ class ApplicationStateCodecTest {
         String json = """
                 {"schemaVersion":2,"repositories":[],"sessions":[
                   {"id":"22222222-3333-4444-5555-666666666666","repositoryId":"%s","displayName":"Session 1",
-                   "claudeSessionId":"abc","workingDirectory":"/tmp",
+                   "claudeSessionId":"abc","workingDirectory":"%s",
                    "status":"INACTIVE","createdAt":"2020-01-01T00:00:00Z","lastOpenedAt":"2020-01-01T00:00:00Z",
-                   "prState":"NONE","branchCreatedHere":true}]}""".formatted(REPO_ID);
+                   "prState":"NONE","branchCreatedHere":true}]}""".formatted(REPO_ID, REPO_ROOT);
         ApplicationState state = ApplicationStateCodec.fromJson(JsonParser.parse(json));
         ManagedAgentSession session = state.sessions().get(0);
         assertEquals(AgentKind.CLAUDE, session.agentKind());
@@ -210,9 +211,9 @@ class ApplicationStateCodecTest {
         String json = """
                 {"schemaVersion":2,"repositories":[],"sessions":[
                   {"id":"22222222-3333-4444-5555-666666666666","repositoryId":"%s","agentKind":"gemini","displayName":"Session 1",
-                   "workingDirectory":"/tmp","status":"INACTIVE",
+                   "workingDirectory":"%s","status":"INACTIVE",
                    "createdAt":"2020-01-01T00:00:00Z","lastOpenedAt":"2020-01-01T00:00:00Z",
-                   "prState":"NONE","branchCreatedHere":true}]}""".formatted(REPO_ID);
+                   "prState":"NONE","branchCreatedHere":true}]}""".formatted(REPO_ID, REPO_ROOT);
         ApplicationState state = ApplicationStateCodec.fromJson(JsonParser.parse(json));
         ManagedAgentSession session = state.sessions().get(0);
         assertEquals(SessionStatus.UNSUPPORTED_AGENT, session.status());
@@ -368,7 +369,7 @@ class ApplicationStateCodecTest {
                   "repositories": [
                     {
                       "id": "%s",
-                      "root": "/tmp/repo",
+                      "root": "%s",
                       "displayName": "repo",
                       "addedAt": "2026-01-01T00:00:00Z",
                       "lastOpenedAt": "2026-01-02T00:00:00Z",
@@ -378,7 +379,7 @@ class ApplicationStateCodecTest {
                   "sessions": [%s],
                   "ui": {"selectedRepositoryId": null, "sidebarWidth": 260.0, "expandedRepositoryIds": []}
                 }
-                """.formatted(REPO_ID, sessionJson);
+                """.formatted(REPO_ID, REPO_ROOT, sessionJson);
     }
 
     private static final String VALID_SESSION = """
@@ -386,12 +387,12 @@ class ApplicationStateCodecTest {
               "id": "22222222-3333-4444-5555-666666666666",
               "repositoryId": "%s",
               "displayName": "s",
-              "workingDirectory": "/tmp/repo",
+              "workingDirectory": "%s",
               "status": "INACTIVE",
               "createdAt": "2026-01-01T00:00:00Z",
               "lastOpenedAt": "2026-01-02T00:00:00Z"
             }
-            """.formatted(REPO_ID);
+            """.formatted(REPO_ID, REPO_ROOT);
 
     @Test
     void sessionMissingIdThrowsStateDecodeException() {
@@ -615,9 +616,9 @@ class ApplicationStateCodecTest {
         String badLineage = """
                 {"schemaVersion":2,"repositories":[],"sessions":[
                   {"id":"%s","repositoryId":"%s","displayName":"s","agentKind":"claude",
-                   "workingDirectory":"/tmp","status":"RUNNING",
+                   "workingDirectory":"%s","status":"RUNNING",
                    "createdAt":"2026-08-12T10:15:30Z","lastOpenedAt":"2026-08-12T10:15:30Z",
-                   "forkedFrom":"not-a-uuid"}],"ui":{}}""".formatted(OTHER_ID, REPO_ID);
+                   "forkedFrom":"not-a-uuid"}],"ui":{}}""".formatted(OTHER_ID, REPO_ID, REPO_ROOT);
 
         ApplicationState decoded = ApplicationStateCodec.fromJson(JsonParser.parse(badLineage));
 
@@ -892,13 +893,13 @@ class ApplicationStateCodecTest {
                 {"schemaVersion":2,"repositories":[],
                  "sessions":[{"id":"%s","repositoryId":"%s","displayName":"old-session",
                   "agentKind":"claude","agentSessionId":null,"agentSessionName":null,
-                  "workingDirectory":"/tmp/repo","worktreeRoot":null,"status":"INACTIVE",
+                  "workingDirectory":"%s","worktreeRoot":null,"status":"INACTIVE",
                   "createdAt":"2026-01-01T00:00:00Z","lastOpenedAt":"2026-01-01T00:00:00Z",
                   "lastExitCode":null,"prState":"NONE","prNumber":null,
                   "branchCreatedHere":false,"namePinned":false,"forkedFrom":null,"evalMode":false}],
                  "ui":{"selectedRepositoryId":null,"sidebarWidth":288.0,
                         "expandedRepositoryIds":[],"theme":"DARK"}}
-                """.formatted(SESSION_ID, REPO_ID));
+                """.formatted(SESSION_ID, REPO_ID, REPO_ROOT));
 
         ApplicationState decoded = ApplicationStateCodec.fromJson(json);
         assertEquals(1, decoded.sessions().size());

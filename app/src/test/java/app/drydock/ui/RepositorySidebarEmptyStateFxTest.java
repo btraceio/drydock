@@ -25,6 +25,7 @@ import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
+import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -118,6 +119,13 @@ class RepositorySidebarEmptyStateFxTest extends FxTest {
             try (var paths = Files.walk(root)) {
                 paths.sorted(Comparator.reverseOrder()).forEach(p -> {
                     try {
+                        // Git writes loose objects read-only; on Windows a
+                        // read-only attribute denies deletion outright, where
+                        // POSIX only needs write permission on the directory.
+                        File f = p.toFile();
+                        if (f.isFile() && !f.canWrite()) {
+                            f.setWritable(true);
+                        }
                         Files.delete(p);
                     } catch (IOException e) {
                         throw new RuntimeException(e);
