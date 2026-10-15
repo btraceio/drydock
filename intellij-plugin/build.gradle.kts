@@ -10,13 +10,18 @@
 //   main         = src/platform/java      plugin glue, compiles against the
 //                  src/platform/resources  platform; plugin.xml lives here
 //   test         = src/test/java          the extracted core suite (JUnit 5)
-//   platformTest = src/platform/test/java glue tests (JUnit Platform + the
-//                                            Vintage engine, needed for the
-//                                            JUnit3-style BasePlatformTestCase)
+//                                            + the platform glue tests
+//                                            (BasePlatformTestCase via the
+//                                            Vintage engine); the plugin
+//                                            configures this task as a
+//                                            platform test
 //
 // The probe's local-IDE compile hack (platformCompileOnly fileTree +
 // drydock.intellijHome) is gone: the IDE is resolved as a real dependency,
 // which is what brings buildPlugin/verifyPlugin/runIde with it.
+
+import org.jetbrains.intellij.platform.gradle.TestFrameworkType
+
 plugins {
     id("java")
     id("org.jetbrains.intellij.platform") version "2.19.0"
@@ -48,23 +53,19 @@ sourceSets {
         java.setSrcDirs(listOf("src/main/java"))
         resources.setSrcDirs(listOf("src/main/resources"))
     }
-    test {
-        // The core suite never sees the platform: its classpath is the core
-        // output + core's own dependencies + JUnit 5 — NOT main's output.
-        // Without this override `test` extends `main` by Gradle convention and
-        // would drag the whole resolved IDE onto the suite's classpath.
-        setCompileClasspath(sourceSets["core"].output + configurations["testCompileClasspath"])
-        setRuntimeClasspath(output + sourceSets["core"].output + configurations["testRuntimeClasspath"])
-    }
-    create("platformTest") {
-        java.setSrcDirs(listOf("src/platform/test/java"))
-        setCompileClasspath(
-            sourceSets["main"].output + sourceSets["core"].output + configurations["platformTestCompileClasspath"]
-        )
-        setRuntimeClasspath(
-            output + sourceSets["main"].output + sourceSets["core"].output + configurations["platformTestRuntimeClasspath"]
-        )
-    }
+    // `test` keeps the Gradle default: it extends `main` (the platform
+    // glue) and therefore sees core (via main's implementation), the glue
+    // classes, and the resolved IDE on its compile classpath. The platform
+    // glue tests (BasePlatformTestCase subclasses) live in the same source
+    // set as the core suite; the core suite still never touches platform
+    // APIs (enforced by the import grep + the pure coreCompileClasspath
+    // gates), it merely runs in a JVM that also has them available.
+    // An earlier design kept the glue tests in a separate `platformTest`
+    // source set driven by a custom testIde entry, but the platform plugin's
+    // runtime-fix wiring for such entries is Kotlin-internal to the plugin:
+    // a BasePlatformTestCase boot could not resolve the IDE's lib/modules
+    // descriptors (NPE creating the app MessageBus), and no external hook
+    // reaches it. The standard source set gets the full wiring for free.
 }
 
 // The headless core is packaged as its own jar: `main` compiles against it and
@@ -92,43 +93,6 @@ configurations {
     named("implementation") {
         extendsFrom(configurations["coreImplementation"])
     }
-    // Cut the default test→main wiring (see the sourceSets.test comment);
-    // core's dependencies (tree-sitter) are all the suite needs besides JUnit.
-    named("testImplementation") {
-        setExtendsFrom(listOf(configurations["coreImplementation"]))
-    }
-    named("testRuntimeOnly") {
-        setExtendsFrom(listOf())
-    }
-    // platformTest compiles against main + core + the platform. The platform
-    // JARS enter main's classpath as a compileOnly dependency (they are
-    // provided by the IDE at runtime); the standalone platformTest JVM has
-    // no IDE, so its runtime needs them too.
-    named("platformTestCompileOnly") {
-        extendsFrom(configurations["compileOnly"])
-    }
-    named("platformTestCompileClasspath") {
-        attributes {
-            intellijPlatformAttributes()
-        }
-    }
-    named("platformTestRuntimeClasspath") {
-        attributes {
-            intellijPlatformAttributes()
-        }
-    }
-    named("platformTestImplementation") {
-        extendsFrom(configurations["implementation"], configurations["coreImplementation"])
-    }
-    named("platformTestRuntimeOnly") {
-        extendsFrom(
-            configurations["implementation"],
-            configurations["compileOnly"],
-            configurations["runtimeOnly"],
-            configurations["coreImplementation"],
-            configurations["coreRuntimeOnly"],
-        )
-    }
 }
 
 dependencies {
@@ -152,24 +116,25 @@ dependencies {
 
     "implementation"(coreJarDependency)
 
-    // Core unit suite (junit-bom 5.11.4, as in the probe and the app build).
+    // Test suite: JUnit 5 (junit-bom 5.11.4, as in the probe and the app
+    // build) plus the Vintage engine so JUnit3-style BasePlatformTestCase
+    // tests run on the same task; junit:junit provides the junit.framework
+    // TestCase API those tests are compiled against (the IDE distribution
+    // ships no junit4 jar).
     "testImplementation"(platform("org.junit:junit-bom:5.11.4"))
     "testImplementation"("org.junit.jupiter:junit-jupiter")
+    "testImplementation"("junit:junit:4.13.2")
+    "testRuntimeOnly"("org.junit.vintage:junit-vintage-engine")
     "testRuntimeOnly"("org.junit.platform:junit-platform-launcher")
-
-    // Glue tests: JUnit Platform with the Vintage engine on the runtime
-    // classpath so JUnit3-style BasePlatformTestCase tests run on the same
-    // task; junit:junit provides the junit.framework.TestCase API those
-    // tests are compiled against (the IDE distribution ships no junit4 jar).
-    "platformTestImplementation"(platform("org.junit:junit-bom:5.11.4"))
-    "platformTestImplementation"("org.junit.jupiter:junit-jupiter")
-    "platformTestImplementation"("junit:junit:4.13.2")
-    "platformTestRuntimeOnly"("org.junit.vintage:junit-vintage-engine")
-    "platformTestRuntimeOnly"("org.junit.platform:junit-platform-launcher")
 
     intellijPlatform {
         intellijIdeaUltimate("2025.3.3") // build 253.31033.145, verified local IU
         bundledPlugin("org.jetbrains.plugins.terminal")
+        // testFramework declared in the dependencies block is what wires the
+        // standard `test` task: BasePlatformTestCase + the full test-runtime
+        // environment (sandbox dirs, idea.home.path, the platform classpath)
+        // without any custom testIde entry.
+        testFramework(TestFrameworkType.Platform)
     }
 }
 
@@ -189,17 +154,6 @@ tasks {
     named("buildSearchableOptions") {
         enabled = false
     }
-}
-
-// The IntelliJ Platform is resolved through variant attributes the platform
-// plugin sets on `main`'s classpath configurations (extracted IDE + filtered
-// plugin libraries); without them the IDE dependency resolves to a wrong
-// variant. Mirror them onto the platformTest classpath configurations.
-// (The plugin's own Attribute constants are internal, hence the literals.)
-fun AttributeContainer.intellijPlatformAttributes() {
-    attribute(Attribute.of("intellijPlatformExtracted", Boolean::class.javaObjectType), true)
-    attribute(Attribute.of("intellijPlatformCollected", Boolean::class.javaObjectType), true)
-    attribute(Attribute.of("intellijPlatformPluginLibrariesFiltered", Boolean::class.javaObjectType), true)
 }
 
 /**
@@ -245,62 +199,14 @@ tasks.withType<JavaCompile>().configureEach {
 }
 
 tasks.test {
-    val testSourceSet = sourceSets.getByName("test")
-
     // The IntelliJ Platform Gradle Plugin preconfigures the standard `test`
-    // task as a PLATFORM test (its TestCompanion applies TestIdeTask's
-    // configuration: sandbox classpath, instrumented test code, JBR launcher,
-    // and system properties like java.system.class.loader=PathClassLoader
-    // that a plain JVM cannot satisfy — with zero tests it even fails on the
-    // missing org.junit.runners.model.Statement). For this project `test` is
-    // the headless core suite, which must NOT see the platform (see the
-    // sourceSets.test note); the platform test task is `platformTest` below.
-    // Revert that takeover so the suite runs platform-free exactly as in the
-    // probe.
-    systemProperties.clear()
-    jvmArgumentProviders.clear()
-    classpath = testSourceSet.runtimeClasspath
-    testClassesDirs = testSourceSet.output.classesDirs
-    javaLauncher = javaToolchains.launcherFor(java.toolchain)
-    // Drop the plugin-added prerequisites (sandbox preparation, test-code
-    // instrumentation, platform initialization): the suite needs none of
-    // them, and its classpath carries its own build dependencies implicitly.
-    val platformTestPrerequisites = setOf("prepareTest", "instrumentTestCode", "initializeIntellijPlatformPlugin")
-    setDependsOn(
-        dependsOn.filterNot { dep ->
-            val name = when (dep) {
-                is Task -> dep.name
-                is TaskProvider<*> -> dep.name
-                is String -> dep
-                else -> null
-            }
-            name in platformTestPrerequisites
-        }
-    )
-
-    useJUnitPlatform()
-    withGitHostIsolation()
-}
-
-// The platform glue test task. It gets the full platform on its classpath
-// through the platformTest source set's configurations (which extend `main`'s
-// implementation configuration).
-//
-// NOTE for later tasks: this wiring compiles and runs plain JUnit tests
-// against the platform JARS, but it does not yet provide the full IntelliJ
-// test ENVIRONMENT a BasePlatformTestCase test needs (idea.home.path, sandbox
-// with the plugin installed, PathClassLoader). When the first such test lands
-// (T2's PluginProviderDiscoveryTest), the sanctioned upgrade path is the
-// plugin's `intellijPlatformTesting.testIde` container: registering a
-// `testIde` entry named "platformTest" creates a TestIdeTask with exactly
-// that environment wired (see IntelliJPlatformTestingExtension in the plugin
-// source); the junit/vintage deps would then move to that entry's test
-// dependencies configuration.
-tasks.register<Test>("platformTest") {
-    group = "verification"
-    description = "Runs the platform glue tests (JUnit 5 + Vintage for BasePlatformTestCase)."
-    testClassesDirs = sourceSets["platformTest"].output.classesDirs
-    classpath = sourceSets["platformTest"].runtimeClasspath
+    // task as a PLATFORM test (sandbox classpath, instrumented test code,
+    // JBR launcher, system properties like
+    // java.system.class.loader=PathClassLoader): BasePlatformTestCase
+    // subclasses in this source set need exactly that. An earlier design
+    // reverted the takeover so the core suite would run platform-free in a
+    // separate task; the suites are merged now (see the sourceSets comment)
+    // and the takeover stays.
     useJUnitPlatform()
     withGitHostIsolation()
 }

@@ -44,6 +44,23 @@ public final class AgentRegistry {
         return new AgentRegistry(discovered, ctx);
     }
 
+    /**
+     * Discovers providers via {@link ServiceLoader} restricted to {@code loader}.
+     * Under an IDE plugin the thread-context class loader is the application
+     * loader, which cannot see the plugin's own {@code META-INF/services}
+     * registrations, so plugin glue must pass its own class loader (e.g.
+     * {@code AgentRegistry.class.getClassLoader()}); {@link #create(AgentContext)}
+     * keeps the TCCL semantics for the standalone app. Call off the FX thread
+     * (probes executables).
+     */
+    public static AgentRegistry create(AgentContext ctx, ClassLoader loader) {
+        List<AgentProvider> discovered = new ArrayList<>();
+        for (AgentProvider provider : ServiceLoader.load(AgentProvider.class, loader)) {
+            discovered.add(provider);
+        }
+        return new AgentRegistry(discovered, ctx);
+    }
+
     /** For tests/callers that want to hand-pick providers instead of discovering them via {@link ServiceLoader}. */
     public AgentRegistry(List<AgentProvider> discovered, AgentContext ctx) {
         for (AgentProvider provider : discovered) {

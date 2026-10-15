@@ -5,6 +5,8 @@ import app.drydock.agent.spi.AgentProvider;
 import app.drydock.agent.providers.claude.internal.ClaudeExecutableLocator;
 import org.junit.jupiter.api.Test;
 
+import java.net.URL;
+import java.net.URLClassLoader;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
@@ -142,5 +144,22 @@ class AgentRegistryTest {
         AgentRegistry registry = new AgentRegistry(
                 List.of(new StubProvider(AgentKind.CLAUDE, true)), ctx());
         assertTrue(registry.idDiscovery(AgentKind.CLAUDE).isEmpty());
+    }
+
+    @Test
+    void createWithExplicitLoaderDiscoversTheRegisteredProviders() {
+        // The services file in the core resources registers all four providers,
+        // so discovery through the core class loader yields the full preference order.
+        AgentRegistry registry = AgentRegistry.create(ctx(), AgentRegistry.class.getClassLoader());
+        assertEquals(AgentKind.preferenceOrder(),
+                registry.agents().stream().map(Agent::kind).toList());
+    }
+
+    @Test
+    void createWithExplicitLoaderDiscoversNothingUnderALoaderWithoutRegistrations() {
+        // A loader whose delegation chain skips the core resources sees no services
+        // registrations: the loader argument, not the TCCL, drives discovery.
+        ClassLoader isolated = new URLClassLoader(new URL[0], null);
+        assertTrue(AgentRegistry.create(ctx(), isolated).agents().isEmpty());
     }
 }
