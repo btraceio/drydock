@@ -24,11 +24,9 @@ import app.drydock.domain.RepositoryId;
 import app.drydock.domain.RepositorySettings;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
-import app.drydock.intellij.terminal.SessionTabRegistry;
-import app.drydock.intellij.terminal.TerminalSessionLauncher;
+import app.drydock.intellij.agent.AgentConsoleHost;
 import app.drydock.state.JsonApplicationStateRepository;
 
-import com.intellij.terminal.frontend.toolwindow.TerminalToolWindowTab;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -168,6 +166,11 @@ class DrydockSessionServiceTest {
         final List<Instant> launchedAtsReceived = new CopyOnWriteArrayList<>();
         final List<Set<String>> claimedSetsReceived = new CopyOnWriteArrayList<>();
 
+        /** What {@link #resolve} hands back, and what it was asked. */
+        final Queue<String> lateCandidates = new ConcurrentLinkedQueue<>();
+        final List<Instant> createdAtsReceived = new CopyOnWriteArrayList<>();
+        final List<Set<String>> resolveClaimedSetsReceived = new CopyOnWriteArrayList<>();
+
         RecordingDiscovery(List<String> events) {
             this.events = events;
         }
@@ -193,47 +196,58 @@ class DrydockSessionServiceTest {
             // mirrors that so the claimed-set guard is actually exercised.
             return claimedIds.add(candidate) ? Optional.of(candidate) : Optional.empty();
         }
+
+        /**
+         * Mirrors {@code SnapshotClaimDiscovery.resolve}: it filters by the
+         * claimed set but, unlike {@code discover}, does NOT add to it — the
+         * caller claims. The fake keeps that asymmetry so the service's own
+         * claim is what the test exercises.
+         */
+        @Override public Optional<String> resolve(Path workingDirectory, Instant createdAt,
+                Set<String> claimedIds) {
+            events.add("resolve");
+            createdAtsReceived.add(createdAt);
+            resolveClaimedSetsReceived.add(claimedIds);
+            String candidate = lateCandidates.poll();
+            return candidate == null || claimedIds.contains(candidate)
+                    ? Optional.empty()
+                    : Optional.of(candidate);
+        }
     }
 
-    /** A launcher that never touches the IDE: records the open, hands back a stub tab. */
-    static final class FakeLauncher implements TerminalSessionLauncher {
+    /**
+     * An execution host that never touches the IDE: records what it was asked
+     * to start, stop and forget, and reports success without spawning.
+     */
+    static final class FakeConsoleHost implements AgentConsoleHost {
 
         private final List<String> events;
         final List<Open> opens = new CopyOnWriteArrayList<>();
+        final List<ManagedSessionId> stopped = new CopyOnWriteArrayList<>();
+        final List<ManagedSessionId> forgotten = new CopyOnWriteArrayList<>();
 
-        record Open(ManagedSessionId sessionId, String tabName, Path workingDirectory, LaunchPlan plan) { }
+        record Open(ManagedSessionId sessionId, Path workingDirectory, LaunchPlan plan) { }
 
-        FakeLauncher(List<String> events) {
+        FakeConsoleHost(List<String> events) {
             this.events = events;
         }
 
-        final SessionTabRegistry registry = new SessionTabRegistry();
-
-        @Override public CompletableFuture<TerminalSessionLauncher.TerminalSessionTab> open(
-                ManagedSessionId sessionId, String tabName, Path workingDirectory, LaunchPlan plan) {
+        @Override public CompletableFuture<Void> startConsole(
+                ManagedSessionId sessionId, Path workingDirectory, LaunchPlan plan) {
             events.add("open");
-            opens.add(new Open(sessionId, tabName, workingDirectory, plan));
-            TerminalSessionLauncher.TerminalSessionTab tab = new TerminalSessionLauncher.TerminalSessionTab() {
-                @Override public ManagedSessionId sessionId() { return sessionId; }
-                @Override public Object tabKey() { return this; }
-                @Override public TerminalToolWindowTab tab() { return null; }
-                @Override public void close() { events.add("close:" + tabName); }
-            };
-            return CompletableFuture.completedFuture(tab);
+            opens.add(new Open(sessionId, workingDirectory, plan));
+            return CompletableFuture.completedFuture(null);
         }
 
-        @Override public SessionTabRegistry tabRegistry() { return registry; }
-    }
+        @Override public void stopConsole(ManagedSessionId sessionId) {
+            events.add("stop");
+            stopped.add(sessionId);
+        }
 
-    /** A close-recording handle for a recorded launch, matching the fake tab's own recording. */
-    private static TerminalSessionLauncher.TerminalSessionTab openTabHandle(
-            Harness harness, FakeLauncher.Open open) {
-        return new TerminalSessionLauncher.TerminalSessionTab() {
-            @Override public ManagedSessionId sessionId() { return open.sessionId(); }
-            @Override public Object tabKey() { return this; }
-            @Override public TerminalToolWindowTab tab() { return null; }
-            @Override public void close() { harness.events.add("close:Bye"); }
-        };
+        @Override public void forgetConsole(ManagedSessionId sessionId) {
+            events.add("forget");
+            forgotten.add(sessionId);
+        }
     }
 
     /** Determinism: every submitted task runs inline on the submitting thread. */
@@ -256,7 +270,7 @@ class DrydockSessionServiceTest {
         final ApplicationStateStore store;
         final Repository repository;
         final List<String> events = new CopyOnWriteArrayList<>();
-        final FakeLauncher launcher = new FakeLauncher(events);
+        final FakeConsoleHost consoles = new FakeConsoleHost(events);
         final ExecutorService executor;
 
         private Harness(Path base, Repository repository, ExecutorService executor) {
@@ -274,7 +288,7 @@ class DrydockSessionServiceTest {
             Function<Path, CompletableFuture<RepositoryId>> resolver =
                     path -> CompletableFuture.completedFuture(repository.id());
             return new DrydockSessionService(CompletableFuture.completedFuture(null),
-                    () -> store, () -> registry, () -> watcher, resolver, launcher, executor);
+                    () -> store, () -> registry, () -> watcher, resolver, consoles, executor);
         }
     }
 
@@ -344,9 +358,12 @@ class DrydockSessionServiceTest {
         assertFalse(generated.isBlank(), "PRESET launches generate the id up front");
         // ...and it is persisted on the session only because the command used it.
         assertEquals(Optional.of(generated), persisted(harness, running.id()).agentSessionId());
-        assertEquals(1, harness.launcher.opens.size());
-        assertEquals("My session", harness.launcher.opens.get(0).tabName());
-        assertEquals(base.toAbsolutePath().normalize(), harness.launcher.opens.get(0).workingDirectory());
+        assertEquals(1, harness.consoles.opens.size());
+        // The host is handed the session id and a directory, never a title:
+        // the tab's label is derived from the catalog row, so an agent
+        // renaming itself mid-session needs no second source to update.
+        assertEquals(running.id(), harness.consoles.opens.get(0).sessionId());
+        assertEquals(base.toAbsolutePath().normalize(), harness.consoles.opens.get(0).workingDirectory());
         harness.store.flush();
     }
 
@@ -427,7 +444,7 @@ class DrydockSessionServiceTest {
         assertTrue(failure.getCause().getMessage().contains("CODEX"), failure.getCause().getMessage());
         assertTrue(failure.getCause().getMessage().contains("codex"), failure.getCause().getMessage());
         // No tab was opened and the failure is visible in the persisted state.
-        assertTrue(harness.launcher.opens.isEmpty());
+        assertTrue(harness.consoles.opens.isEmpty());
         assertFalse(harness.events.contains("open"));
         assertEquals(SessionStatus.FAILED, persisted(harness, prepared.id()).status());
         harness.store.flush();
@@ -462,8 +479,8 @@ class DrydockSessionServiceTest {
                 .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
 
         assertEquals(SessionStatus.RUNNING, running.status());
-        assertEquals(1, harness.launcher.opens.size());
-        assertEquals(TerminalAgentProvider.SHELL_COMMAND, harness.launcher.opens.get(0).plan().command());
+        assertEquals(1, harness.consoles.opens.size());
+        assertEquals(TerminalAgentProvider.SHELL_COMMAND, harness.consoles.opens.get(0).plan().command());
         // The terminal command never carries an id, so none is fabricated.
         assertEquals(Optional.empty(), persisted(harness, running.id()).agentSessionId());
         harness.store.flush();
@@ -494,8 +511,8 @@ class DrydockSessionServiceTest {
         assertEquals(base.toAbsolutePath().normalize(), ctx.workingDirectory());
         assertFalse(ctx.evalMode());
         assertTrue(ctx.remote().isEmpty() && ctx.mcp().isEmpty(), "MVP resumes carry no remote/mcp");
-        assertEquals(1, harness.launcher.opens.size());
-        String command = harness.launcher.opens.get(0).plan().command();
+        assertEquals(1, harness.consoles.opens.size());
+        String command = harness.consoles.opens.get(0).plan().command();
         assertEquals("fake --resume", command);
         assertFalse(command.contains("--continue"), "no-id resume must never use --continue: " + command);
         assertFalse(command.contains("--last"), "no-id resume must never use --last: " + command);
@@ -522,10 +539,10 @@ class DrydockSessionServiceTest {
         assertEquals(1, provider.resumeContexts.size());
         assertEquals(Optional.of("pi-conv-42"), provider.resumeContexts.get(0).agentSessionId());
         assertEquals(Optional.of("My name"), provider.resumeContexts.get(0).agentSessionName());
-        assertEquals(1, harness.launcher.opens.size());
+        assertEquals(1, harness.consoles.opens.size());
         // The persisted id is what the resume command carried (AC20).
-        assertTrue(harness.launcher.opens.get(0).plan().command().contains("pi-conv-42"),
-                harness.launcher.opens.get(0).plan().command());
+        assertTrue(harness.consoles.opens.get(0).plan().command().contains("pi-conv-42"),
+                harness.consoles.opens.get(0).plan().command());
         assertEquals(SessionStatus.RUNNING, persisted(harness, stored.id()).status());
         harness.store.flush();
     }
@@ -585,7 +602,7 @@ class DrydockSessionServiceTest {
         assertEquals(SessionStatus.MISSING_WORKING_DIRECTORY, persisted(harness, stored.id()).status());
         // Stopped: no provider was consulted, no tab was opened.
         assertTrue(provider.resumeContexts.isEmpty());
-        assertTrue(harness.launcher.opens.isEmpty());
+        assertTrue(harness.consoles.opens.isEmpty());
         harness.store.flush();
     }
 
@@ -605,7 +622,7 @@ class DrydockSessionServiceTest {
 
         assertEquals(SessionStatus.UNSUPPORTED_AGENT, resumed.status());
         assertTrue(provider.resumeContexts.isEmpty());
-        assertTrue(harness.launcher.opens.isEmpty());
+        assertTrue(harness.consoles.opens.isEmpty());
         harness.store.flush();
     }
 
@@ -629,7 +646,7 @@ class DrydockSessionServiceTest {
                 () -> resumed.get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
         assertTrue(failure.getCause() instanceof IllegalStateException, "got " + failure.getCause());
         assertTrue(failure.getCause().getMessage().contains("CLAUDE"), failure.getCause().getMessage());
-        assertTrue(harness.launcher.opens.isEmpty());
+        assertTrue(harness.consoles.opens.isEmpty());
         assertEquals(SessionStatus.FAILED, persisted(harness, stored.id()).status());
         harness.store.flush();
     }
@@ -637,36 +654,252 @@ class DrydockSessionServiceTest {
     // ---- lifecycle events -------------------------------------------------------
 
     @Test
-    void sessionExitedPersistsExitedButDeletesOnTabClose(@TempDir Path base) throws Exception {
+    void aTerminatedExecutionGoesIdleAndTheRowSurvives(@TempDir Path base) throws Exception {
         Harness harness = harness(base);
         DrydockSessionService service = harness.service(new RecordingProvider(
                 AgentKind.PI, SessionIdStrategy.DISCOVERED, null, true, false, null, harness.events));
         Instant createdAt = Instant.parse("2026-08-12T10:00:00Z");
         ManagedAgentSession natural = persistSession(harness, AgentKind.PI, "Ended itself",
                 AgentBinding.unlaunched(AgentKind.PI), base, SessionStatus.RUNNING, createdAt);
-        ManagedAgentSession closedWhileRunning = persistSession(harness, AgentKind.PI, "Closed early",
+        ManagedAgentSession stoppedByUs = persistSession(harness, AgentKind.PI, "Stopped",
                 AgentBinding.unlaunched(AgentKind.PI), base, SessionStatus.RUNNING, createdAt);
 
-        // Natural exit -> EXITED, resumable, lastOpenedAt bumped; the tab
-        // closed while running -> the session DELETES (the tab is the
-        // session's home; the inverse of deleteSession closing the tab).
-        service.sessionExited(natural.id(), false);
-        service.sessionExited(closedWhileRunning.id(), true);
+        // Natural exit -> EXITED; a stop drydock asked for -> INACTIVE.
+        // Neither removes the row: that is the whole correction to v2, where
+        // the tab going away took the durable session with it.
+        service.executionTerminated(natural.id(), false, 0);
+        service.executionTerminated(stoppedByUs.id(), true, null);
 
         ManagedAgentSession exited = persisted(harness, natural.id());
         assertEquals(SessionStatus.EXITED, exited.status());
         assertTrue(exited.lastOpenedAt().isAfter(createdAt));
-        assertTrue(persistedOrNull(harness, closedWhileRunning.id()) == null,
-                "a closed tab must delete the session");
+        assertEquals(Optional.of(0), exited.lastExitCode());
 
-        // A later tabClosed variant after a natural exit deletes that EXITED
-        // record too — its terminal home is gone either way.
-        service.sessionExited(natural.id(), true);
-        assertTrue(persistedOrNull(harness, natural.id()) == null);
+        ManagedAgentSession inactive = persisted(harness, stoppedByUs.id());
+        assertEquals(SessionStatus.INACTIVE, inactive.status());
+        assertTrue(inactive.lastExitCode().isEmpty(),
+                "no exit code was reported, so none must be invented");
 
-        // A session gone from the state is a no-op, never a throw.
-        service.sessionExited(ManagedSessionId.newId(), false);
-        service.sessionExited(ManagedSessionId.newId(), true);
+        // Idempotent: a second report of the same end is a no-op, not a
+        // rewrite (two listeners can see one termination).
+        service.executionTerminated(natural.id(), false, 7);
+        assertEquals(Optional.of(0), persisted(harness, natural.id()).lastExitCode());
+
+        // A session already forgotten is a no-op, never a throw and never a
+        // resurrection.
+        service.executionTerminated(ManagedSessionId.newId(), false, 0);
+        service.executionTerminated(ManagedSessionId.newId(), true, null);
+        harness.store.flush();
+    }
+
+    // ---- window close -----------------------------------------------------------
+
+    /**
+     * Window close marks the rows idle BEFORE stopping, because the
+     * terminated event it would otherwise rely on travels the closing
+     * project's message bus and does not arrive. A row left RUNNING with
+     * nothing running tells the reopened window that its stopped agent is
+     * running, and the startup RUNNING-sweep does not fix it — that runs once
+     * per IDE start, not per project open.
+     */
+    @Test
+    void closingTheWindowMarksRowsIdleBeforeStoppingThem(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        DrydockSessionService service = harness.service(new RecordingProvider(
+                AgentKind.PI, SessionIdStrategy.DISCOVERED, null, true, false, null, harness.events));
+        Instant createdAt = Instant.parse("2026-08-12T10:00:00Z");
+        ManagedAgentSession running = persistSession(harness, AgentKind.PI, "Live",
+                AgentBinding.unlaunched(AgentKind.PI), base, SessionStatus.RUNNING, createdAt);
+        ManagedAgentSession starting = persistSession(harness, AgentKind.PI, "Starting",
+                AgentBinding.unlaunched(AgentKind.PI), base, SessionStatus.STARTING, createdAt);
+        ManagedAgentSession alreadyIdle = persistSession(harness, AgentKind.PI, "Idle",
+                AgentBinding.unlaunched(AgentKind.PI), base, SessionStatus.EXITED, createdAt);
+
+        service.stopSessionsForClose(List.of(running.id(), starting.id(), alreadyIdle.id()));
+
+        assertEquals(SessionStatus.INACTIVE, persisted(harness, running.id()).status());
+        assertEquals(SessionStatus.INACTIVE, persisted(harness, starting.id()).status());
+        // An already-idle row keeps the status it had: EXITED records that the
+        // agent ended on its own, which a close must not overwrite.
+        assertEquals(SessionStatus.EXITED, persisted(harness, alreadyIdle.id()).status());
+        // The mark lands before the stop, so a bus that dies mid-close cannot
+        // lose it.
+        assertEquals(List.of("stop", "stop", "stop"), harness.events);
+        assertEquals(List.of(running.id(), starting.id(), alreadyIdle.id()), harness.consoles.stopped);
+        harness.store.flush();
+    }
+
+    @Test
+    void closingAWindowWithNoAgentsTouchesNothing(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        DrydockSessionService service = harness.service(new RecordingProvider(
+                AgentKind.PI, SessionIdStrategy.DISCOVERED, null, true, false, null, harness.events));
+
+        service.stopSessionsForClose(List.of());
+
+        assertTrue(harness.events.isEmpty());
+        harness.store.flush();
+    }
+
+    // ---- late id binding --------------------------------------------------------
+
+    /**
+     * The create-time poll has to give up while the agent may still not have
+     * written its session record (pi has taken ~42 s). Termination is the
+     * moment the record certainly exists, so that is where the id is bound —
+     * and a later resume then resumes that conversation by id instead of
+     * dropping the user into the provider's picker.
+     */
+    @Test
+    void stoppingADiscoveredSessionBindsTheAgentSessionIdItCouldNotDiscover(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingDiscovery discovery = new RecordingDiscovery(harness.events);
+        // No create-time candidate: discover() comes back empty, as it does
+        // when the agent has not written its record yet.
+        discovery.lateCandidates.add("pi-session-late");
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.PI, SessionIdStrategy.DISCOVERED, discovery, true, false, null, harness.events);
+        DrydockSessionService service = harness.service(provider);
+
+        ManagedAgentSession running = service.launchSession(
+                service.prepareSession(base, AgentKind.PI, "Late").get(TIMEOUT_SECONDS, TimeUnit.SECONDS))
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        assertTrue(persisted(harness, running.id()).agentSessionId().isEmpty(),
+                "discovery found nothing at create time");
+
+        service.executionTerminated(running.id(), true, null);
+
+        assertEquals(Optional.of("pi-session-late"), persisted(harness, running.id()).agentSessionId());
+        // Resolve is asked about the session's own creation time, which is
+        // what the record is matched against.
+        assertEquals(List.of(running.createdAt()), discovery.createdAtsReceived);
+        harness.store.flush();
+    }
+
+    @Test
+    void aBoundIdIsNeverReplacedByALaterResolve(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingDiscovery discovery = new RecordingDiscovery(harness.events);
+        discovery.candidates.add("pi-session-1");
+        // Would be bound if anything asked; nothing must.
+        discovery.lateCandidates.add("pi-session-WRONG");
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.PI, SessionIdStrategy.DISCOVERED, discovery, true, false, null, harness.events);
+        DrydockSessionService service = harness.service(provider);
+
+        ManagedAgentSession running = service.launchSession(
+                service.prepareSession(base, AgentKind.PI, "Early").get(TIMEOUT_SECONDS, TimeUnit.SECONDS))
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        assertEquals(Optional.of("pi-session-1"), persisted(harness, running.id()).agentSessionId());
+
+        service.executionTerminated(running.id(), false, 0);
+
+        // Rebinding a known id to a different conversation would resume the
+        // wrong transcript — which looks like success, and is worse than the
+        // picker.
+        assertEquals(Optional.of("pi-session-1"), persisted(harness, running.id()).agentSessionId());
+        assertTrue(discovery.createdAtsReceived.isEmpty(), "resolve must not even be asked");
+        harness.store.flush();
+    }
+
+    @Test
+    void aPresetSessionIsNeverLateBound(@TempDir Path base) throws Exception {
+        // Claude mints its own id up front; there is no store to resolve
+        // against, and asking would be meaningless.
+        Harness harness = harness(base);
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, false, null, harness.events);
+        DrydockSessionService service = harness.service(provider);
+        ManagedAgentSession running = service.launchSession(
+                service.prepareSession(base, AgentKind.CLAUDE, "Preset").get(TIMEOUT_SECONDS, TimeUnit.SECONDS))
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        service.executionTerminated(running.id(), true, null);
+
+        assertFalse(harness.events.contains("resolve"));
+        harness.store.flush();
+    }
+
+    /**
+     * An IDE killed outright never runs the termination binding, so resume
+     * tries once more before falling back to the picker — otherwise such a
+     * session would resume into the picker forever.
+     */
+    @Test
+    void resumeLateBindsBeforeFallingBackToThePicker(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingDiscovery discovery = new RecordingDiscovery(harness.events);
+        discovery.lateCandidates.add("pi-session-recovered");
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.PI, SessionIdStrategy.DISCOVERED, discovery, true, false, null, harness.events);
+        DrydockSessionService service = harness.service(provider);
+        // A row as an interrupted run leaves it: idle, no agent session id.
+        ManagedAgentSession idle = persistSession(harness, AgentKind.PI, "Recovered",
+                AgentBinding.unlaunched(AgentKind.PI), base, SessionStatus.INACTIVE,
+                Instant.parse("2026-08-12T10:00:00Z"));
+
+        service.resumeSession(idle.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(Optional.of("pi-session-recovered"), persisted(harness, idle.id()).agentSessionId());
+        // ...and the resume command targets it, rather than the picker.
+        assertEquals(1, provider.resumeContexts.size());
+        assertEquals(Optional.of("pi-session-recovered"), provider.resumeContexts.get(0).agentSessionId());
+        assertEquals(1, harness.consoles.opens.size());
+        assertTrue(harness.consoles.opens.get(0).plan().command().contains("pi-session-recovered"),
+                harness.consoles.opens.get(0).plan().command());
+        harness.store.flush();
+    }
+
+    // ---- starting fresh on an existing row --------------------------------------
+
+    /**
+     * A session the agent never recorded a conversation for has nothing to
+     * resume into, so the strip offers Start instead — which runs the
+     * provider's create command on the row that already exists, rather than
+     * minting a second row for the same worktree.
+     */
+    @Test
+    void startingFreshRunsTheCreateCommandOnTheExistingRow(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, true, null, harness.events);
+        DrydockSessionService service = harness.service(provider);
+        ManagedAgentSession idle = persistSession(harness, AgentKind.CLAUDE, "Nothing recorded",
+                AgentBinding.unlaunched(AgentKind.CLAUDE), base, SessionStatus.INACTIVE,
+                Instant.parse("2026-08-12T10:00:00Z"));
+        int rowsBefore = harness.store.state().sessions().size();
+
+        ManagedAgentSession started = service.startSession(idle.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(SessionStatus.RUNNING, started.status());
+        assertEquals(idle.id(), started.id(), "the row keeps its identity");
+        assertEquals(rowsBefore, harness.store.state().sessions().size(),
+                "starting fresh must not mint a second row for the same worktree");
+        // The CREATE command, not a resume: a fresh conversation is the point.
+        assertEquals(1, provider.createContexts.size());
+        assertTrue(provider.resumeContexts.isEmpty());
+        // ...and the new conversation's id is bound to the row.
+        assertEquals(Optional.of(provider.createContexts.get(0).sessionId()),
+                persisted(harness, idle.id()).agentSessionId());
+        harness.store.flush();
+    }
+
+    @Test
+    void startingFreshIsRefusedWhenThereIsAConversationToResume(@TempDir Path base) throws Exception {
+        // Starting fresh over a recorded conversation would strand it: the row
+        // is the only way back to it, so rebinding would lose it for good.
+        Harness harness = harness(base);
+        DrydockSessionService service = harness.service(new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, true, null, harness.events));
+        ManagedAgentSession withConversation = persistSession(harness, AgentKind.CLAUDE, "Has one",
+                AgentBinding.unlaunched(AgentKind.CLAUDE).withSessionId(Optional.of("claude-abc")),
+                base, SessionStatus.INACTIVE, Instant.parse("2026-08-12T10:00:00Z"));
+
+        assertThrows(ExecutionException.class, () ->
+                service.startSession(withConversation.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+        assertTrue(harness.consoles.opens.isEmpty(), "nothing is launched");
+        assertEquals(Optional.of("claude-abc"),
+                persisted(harness, withConversation.id()).agentSessionId());
         harness.store.flush();
     }
 
@@ -689,17 +922,12 @@ class DrydockSessionServiceTest {
         Path stateFile = activityDir.resolve(agentSessionId);
         Files.writeString(stateFile, "busy");
 
-        // The live tab is registered as the real launcher registers it;
-        // deleting the session must close it (the user-facing rule: a
-        // deleted session takes its terminal with it).
-        harness.launcher.registry.register(harness.launcher.opens.stream()
-                .filter(open -> open.sessionId().equals(running.id()))
-                .map(open -> openTabHandle(harness, open))
-                .findFirst().orElseThrow());
-
         service.deleteSession(running.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
 
-        assertTrue(harness.events.contains("close:Bye"), "delete must close the session's terminal tab");
+        // Forgetting a session takes its running agent with it: the row is
+        // gone, so nothing would ever show or stop that process again.
+        assertEquals(List.of(running.id()), harness.consoles.forgotten,
+                "forgetting a session must discard its execution");
         assertTrue(Files.notExists(stateFile), "delete must make the watcher forget the activity state");
         assertTrue(harness.store.state().sessions().stream()
                 .noneMatch(session -> session.id().equals(running.id())));

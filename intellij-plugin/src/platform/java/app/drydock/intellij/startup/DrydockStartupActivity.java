@@ -2,8 +2,9 @@ package app.drydock.intellij.startup;
 
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.project.ProjectRepositoryService;
+import app.drydock.intellij.agent.AgentExecutionListener;
+import app.drydock.intellij.agent.AgentExecutionService;
 import app.drydock.intellij.session.DrydockSessionService;
-import app.drydock.intellij.terminal.TerminalSessionLauncher;
 
 import com.intellij.openapi.progress.ProgressIndicator;
 import com.intellij.openapi.progress.ProgressManager;
@@ -27,11 +28,15 @@ import java.util.concurrent.TimeoutException;
  *
  * <p>{@code ProjectRepositoryService} and {@code DrydockSessionService}
  * cannot be registered as declarative {@code projectService} entries: their
- * constructors take the plugin service's executor and the terminal launcher,
- * which the component container cannot supply. This activity constructs
+ * constructors take the plugin service's executor and the window's execution
+ * host, which the component container cannot supply. This activity constructs
  * exactly one instance per project and holds it in the project's user data;
  * {@link #repositories(Project)} and {@link #sessions(Project)} are the
- * accessors the tool window (T12) and dialogs (T13) use.</p>
+ * accessors the dialogs and the console strip use.</p>
+ *
+ * <p>It starts nothing. Opening a project restores whatever console tabs the
+ * platform persisted, all of them in their Not-running state, and no agent
+ * runs until a human asks for one.</p>
  *
  * <p>Threading (AC7/AC12): every constructor here is cheap and EDT-safe
  * ({@link DrydockPluginService}'s own initialization runs on its executor);
@@ -69,7 +74,11 @@ public final class DrydockStartupActivity implements StartupActivity {
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         this.repositories = new ProjectRepositoryService(plugin, plugin.executor());
         this.sessions = new DrydockSessionService(
-                plugin, TerminalSessionLauncher.forProject(project), repositories, plugin.executor());
+                plugin, AgentExecutionService.getInstance(project), repositories, plugin.executor());
+        // The session service is the persistence half of the execution
+        // events: a terminated process has to reach the catalog whether or
+        // not any console tab is open to see it.
+        project.getMessageBus().connect(project).subscribe(AgentExecutionListener.TOPIC, this.sessions);
         // The repository resolution chains the plugin service's
         // initialization internally; composing explicitly keeps both halves
         // of the pre-warm visible in one future. A null repository (default

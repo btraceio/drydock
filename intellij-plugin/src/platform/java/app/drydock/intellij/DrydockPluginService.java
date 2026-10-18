@@ -5,6 +5,7 @@ import app.drydock.agent.api.Agent;
 import app.drydock.agent.api.AgentRegistry;
 import app.drydock.agent.api.AgentContext;
 import app.drydock.app.ApplicationStateStore;
+import app.drydock.intellij.agent.SessionActivityMonitor;
 import app.drydock.domain.ApplicationState;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.SessionStatus;
@@ -74,6 +75,7 @@ public final class DrydockPluginService implements Disposable {
     private volatile ApplicationStateStore stateStore;
     private volatile AgentRegistry registry;
     private volatile SessionActivityWatcher watcher;
+    private volatile SessionActivityMonitor activityMonitor;
     /** The thread initialization ran on; read by tests to prove init is off the EDT. */
     private volatile Thread initializationThread;
 
@@ -114,6 +116,16 @@ public final class DrydockPluginService implements Disposable {
         return requireInitialized(watcher, "activity watcher");
     }
 
+    /**
+     * The application-wide activity poller. Callers must await
+     * {@link #initialization()} first; it is started at the end of init,
+     * because a tick before the state store exists has nothing to join
+     * against.
+     */
+    public SessionActivityMonitor activityMonitor() {
+        return requireInitialized(activityMonitor, "activity monitor");
+    }
+
     Path baseDir() {
         return baseDir;
     }
@@ -133,6 +145,8 @@ public final class DrydockPluginService implements Disposable {
                 DrydockPluginService.class.getClassLoader());
         watcher = new SessionActivityWatcher(baseDir.resolve("activity"), executor);
         installActivityReporters();
+        activityMonitor = new SessionActivityMonitor(this::stateStore, this::watcher, executor);
+        activityMonitor.start();
     }
 
     private void installActivityReporters() {
@@ -189,6 +203,12 @@ public final class DrydockPluginService implements Disposable {
             Thread.currentThread().interrupt();
         } catch (ExecutionException | TimeoutException e) {
             LOG.log(Level.WARNING, "Drydock initialization did not complete before disposal", e);
+        }
+        SessionActivityMonitor theMonitor = activityMonitor;
+        if (theMonitor != null) {
+            // Before the watcher close: a tick in flight would otherwise poll
+            // a watcher that is going away.
+            theMonitor.dispose();
         }
         SessionActivityWatcher theWatcher = watcher;
         if (theWatcher != null) {

@@ -3,10 +3,15 @@
     <name>Drydock</name>
     <vendor>Jaroslav Bachorik</vendor>
     <description><![CDATA[
-        Feasibility probe of the Drydock review/agent-session concepts inside IntelliJ
-        (see docs/IntellijPluginFeasibility.md in the drydock repository).
+        Runs agent CLI sessions (Claude, Codex, pi) against git worktrees from
+        inside the IDE: one window per worktree, the agent console as a pinned
+        editor tab, and a durable session catalog that survives every window
+        and restart.
     ]]></description>
     <depends>com.intellij.modules.platform</depends>
+    <!-- TerminalExecutionConsole itself ships in the platform, but its
+         rendering resolves the terminal plugin's colour scheme and font
+         settings; the console renders wrong without it. -->
     <depends>org.jetbrains.plugins.terminal</depends>
     <extensions defaultExtensionNs="com.intellij">
         <!-- A plain (not @State) application service: persistence goes through
@@ -14,31 +19,65 @@
              class is registered (no separate service interface exists). -->
         <applicationService
                 serviceImplementation="app.drydock.intellij.DrydockPluginService"/>
-        <toolWindow id="Drydock" anchor="right"
-                    factoryClass="app.drydock.intellij.toolwindow.SessionsToolWindowFactory"/>
+
+        <!-- The window's live executions. A declarative projectService (unlike
+             the session service) because its only constructor argument is the
+             project, and because the platform disposing it on project close is
+             exactly the stop-everything hook the model needs. -->
+        <projectService
+                serviceImplementation="app.drydock.intellij.agent.AgentExecutionService"/>
+
+        <!-- The agent console tab. The protocol exists so the IDE can restore
+             a pinned console tab from the project's workspace file by URL; a
+             LightVirtualFile has none, and drydock reopening tabs itself was
+             the v2 duplicate-tab bug. -->
+        <virtualFileSystem key="drydock-agent"
+                           implementationClass="app.drydock.intellij.agent.AgentConsoleFileSystem"/>
+        <fileEditorProvider
+                implementation="app.drydock.intellij.agent.AgentConsoleEditorProvider"/>
+        <!-- The tab's label and status dot. The platform builds both from
+             these extension points, not from FileEditor.getName(), so without
+             them a console tab shows a bare session id. -->
+        <editorTabTitleProvider
+                implementation="app.drydock.intellij.agent.AgentConsoleTabPresentation"/>
+        <fileIconProvider
+                implementation="app.drydock.intellij.agent.AgentConsoleTabPresentation"/>
+
         <!-- ProjectRepositoryService and DrydockSessionService are plain
              classes with constructor arguments the component container
-             cannot supply (the plugin's executor, the terminal launcher),
-             so instead of declarative projectService entries the startup
-             activity constructs exactly one instance per project, holds
-             them in the project's user data, and pre-warms the plugin init
-             and the project's repository with visible progress. -->
+             cannot supply (the plugin's executor, the window's execution
+             host), so instead of declarative projectService entries the
+             startup activity constructs exactly one instance per project,
+             holds them in the project's user data, and pre-warms the plugin
+             init and the project's repository with visible progress. It
+             starts no agent. -->
         <postStartupActivity
                 implementation="app.drydock.intellij.startup.DrydockStartupActivity"/>
     </extensions>
-    <!-- The Drydock tool window's toolbar group. Later tasks (T14/T15)
-         append further <action> entries to it. -->
+    <applicationListeners>
+        <!-- projectClosing, not the service's dispose: a disposing project's
+             message bus no longer delivers the process-terminated event that
+             carries the idle status, which left rows persisted as RUNNING with
+             nothing running. -->
+        <listener class="app.drydock.intellij.agent.AgentWindowCloseListener"
+                  topic="com.intellij.openapi.project.ProjectManagerListener"/>
+    </applicationListeners>
     <actions>
-        <group id="Drydock.SessionToolbar">
+        <!-- Phase-one entry points, in Tools rather than a tool window: the
+             MVP's catalog surfaces are the Agents toolbar widget and the
+             Welcome-screen tab, and the handoff is explicit that the old
+             Drydock tool window must not ship alongside them. -->
+        <group id="Drydock.Tools" text="Drydock" popup="true">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
             <action id="Drydock.NewSession"
                     class="app.drydock.intellij.actions.NewSessionAction"
-                    text="New Session…"
-                    description="Start a new agent session in a terminal tab"
+                    text="New Agent Session…"
+                    description="Start a new agent session in this worktree"
                     icon="AllIcons.General.Add"/>
             <action id="Drydock.ResumeConversation"
                     class="app.drydock.intellij.actions.ResumeConversationAction"
                     text="Resume Conversation…"
-                    description="Resume an on-disk agent conversation in a terminal tab"
+                    description="Resume an on-disk agent conversation"
                     icon="AllIcons.Actions.Restart"/>
             <action id="Drydock.NewWorktree"
                     class="app.drydock.intellij.actions.NewWorktreeAction"
@@ -47,7 +86,7 @@
                     icon="AllIcons.Actions.NewFolder"/>
             <action id="Drydock.CheckoutWorktree"
                     class="app.drydock.intellij.actions.CheckoutWorktreeAction"
-                    text="Check out branch in worktree…"
+                    text="Check Out Branch in Worktree…"
                     description="Check out an existing branch in a new worktree"
                     icon="AllIcons.Vcs.Branch"/>
         </group>

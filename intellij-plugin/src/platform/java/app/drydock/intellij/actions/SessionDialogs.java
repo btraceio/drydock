@@ -6,6 +6,8 @@ import app.drydock.agent.api.AgentRegistry;
 import app.drydock.agent.api.ConversationSource;
 import app.drydock.domain.ApplicationState;
 import app.drydock.domain.ManagedAgentSession;
+import app.drydock.domain.ManagedSessionId;
+import app.drydock.intellij.agent.AgentConsoles;
 import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
 import app.drydock.git.WorktreeService;
@@ -368,12 +370,22 @@ public final class SessionDialogs {
      * bounded — and every path (success, failure, timeout, interrupt) ends
      * it, which clears the progress. A failure surfaces an error naming the
      * agent (AC11 UI half).
+     *
+     * <p>The console tab is opened between prepare and launch, as soon as the
+     * session has an id. It is a separate step on purpose — showing a console
+     * never starts an agent anywhere in this plugin — but it has to happen,
+     * and happen first: without it the agent spawns with no tab, which looks
+     * exactly like the dialog doing nothing at all.</p>
      */
     private static void launchNewSession(Project project, Path workingDirectory, AgentKind kind, String displayName) {
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         String agentName = AgentLabels.displayName(plugin.registry(), kind);
         CompletableFuture<ManagedAgentSession> launch =
                 DrydockStartupActivity.sessions(project).prepareSession(workingDirectory, kind, displayName)
+                        .thenApply(session -> {
+                            showConsoleTab(project, session.id());
+                            return session;
+                        })
                         .thenCompose(session -> DrydockStartupActivity.sessions(project).launchSession(session));
         ProgressManager.getInstance().run(new Task.Backgroundable(project,
                 "Starting " + agentName + " session…", true) {
@@ -391,6 +403,18 @@ public final class SessionDialogs {
                 }
             }
         });
+    }
+
+    /**
+     * Opens the session's console tab on the EDT, without waiting for it: the
+     * editor renders its Not-running state immediately and swaps to the live
+     * console when the execution starts, which it learns from
+     * {@code AgentExecutionListener}. Blocking the launch on the tab would put
+     * an EDT round-trip in front of the spawn for no gain.
+     */
+    private static void showConsoleTab(Project project, ManagedSessionId sessionId) {
+        ApplicationManager.getApplication().invokeLater(
+                () -> AgentConsoles.show(project, sessionId), ModalityState.any(), project.getDisposed());
     }
 
     // ---- resume conversation --------------------------------------------------

@@ -10,7 +10,6 @@ import app.drydock.git.WorktreeNaming;
 import app.drydock.git.WorktreeService;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.startup.DrydockStartupActivity;
-import app.drydock.intellij.toolwindow.SessionsPanel;
 import app.drydock.intellij.worktree.WorktreeDialogs;
 import app.drydock.intellij.worktree.WorktreeErrors;
 
@@ -392,9 +391,6 @@ public final class CheckoutWorktreeAction extends AnAction {
                     reportFailure(project, "Could not check out " + request.localName(), e);
                     return;
                 }
-                // The panel refresh is coalesced and EDT-hopping; the offer
-                // reuses T14's post-create flow verbatim (AC25).
-                SessionsPanel.refreshFor(project);
                 WorktreeDialogs.offerOpenAsProject(project, created);
             }
         });

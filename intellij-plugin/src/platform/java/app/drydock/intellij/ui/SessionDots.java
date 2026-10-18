@@ -1,4 +1,4 @@
-package app.drydock.intellij.toolwindow;
+package app.drydock.intellij.ui;
 
 import app.drydock.domain.SessionActivity;
 import app.drydock.domain.SessionStatus;
@@ -17,11 +17,17 @@ import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * The session list's status-dot vocabulary (C15): one place that maps a
- * lifecycle status (optionally joined with live activity) to a color, a
- * status word, and a tooltip. All other status words in the tool window
- * resolve through here, so the dot, the row text, and the tooltip can never
- * disagree.
+ * The status-dot vocabulary: one place that maps a lifecycle status
+ * (optionally joined with live activity) to a color, a status word, and a
+ * tooltip. Every status word drydock shows — the agent strip's bold state
+ * word, the Agents popup rows, the Welcome tab — resolves through here, so
+ * the dot, the row text, and the tooltip can never disagree.
+ *
+ * <p>The words are the ones the UX handoff names: <em>Working</em>,
+ * <em>At prompt</em>, <em>Needs you</em>, <em>Not running</em>, and the error
+ * facet's own words. They fold activity into the lifecycle rather than
+ * appending it, because the surfaces that show them have room for one word,
+ * not two.</p>
  *
  * <p>Rules the vocabulary enforces:</p>
  *
@@ -47,16 +53,16 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class SessionDots {
 
     /** IntelliJ's link blue; reads on both light and dark LaFs. */
-    private static final Color RUNNING_BLUE = new Color(0x3574F0);
+    public static final Color RUNNING_BLUE = new Color(0x3574F0);
 
-    private static final Color ERROR_RED = new Color(0xDB3B3B);
+    public static final Color ERROR_RED = new Color(0xDB3B3B);
 
     /** Distinct from running blue and error red: "worth a badge". */
-    private static final Color ATTENTION_AMBER = new Color(0xE0A030);
+    public static final Color ATTENTION_AMBER = new Color(0xE0A030);
 
-    private static final Color IDLE_GRAY = new Color(0x8C8C8C);
+    public static final Color IDLE_GRAY = new Color(0x8C8C8C);
 
-    private static final int DOT_DIAMETER = 8;
+    public static final int DOT_DIAMETER = 8;
 
     /** Icons are immutable, so one cached instance per (color, filled) serves every render. */
     private static final Map<CacheKey, Icon> ICONS = new ConcurrentHashMap<>();
@@ -77,39 +83,61 @@ public final class SessionDots {
         return facet == SessionStatusFacet.RUNNING ? RUNNING_BLUE : IDLE_GRAY;
     }
 
-    /** The single-line status text of a row, e.g. {@code "Running · busy"}. */
-    public static String statusText(SessionStatus status, Optional<SessionActivity> activity) {
-        String word = statusWord(status);
-        return activityWord(status, activity).isEmpty()
-                ? word
-                : word + " · " + activityWord(status, activity);
+    /**
+     * The one word for a session's state: {@code Working} / {@code At prompt}
+     * / {@code Needs you} for the running band (by activity), {@code Not
+     * running} for the idle band, and the error facet's own word otherwise.
+     *
+     * <p>A running session whose activity cannot be read — an agent with no
+     * activity reporter, or one whose first report has not landed — is
+     * {@code Running}. The handoff names no word for that case, and the
+     * alternatives both assert something unknown: {@code Working} claims the
+     * agent is busy when the user may be looking at an idle prompt, and
+     * {@code At prompt} claims the reverse. The dot stays filled blue either
+     * way, which is the part that is actually known.</p>
+     */
+    public static String statusWord(SessionStatus status, Optional<SessionActivity> activity) {
+        if (SessionStatusFacet.of(status) != SessionStatusFacet.RUNNING) {
+            return statusWord(status);
+        }
+        return switch (activity.orElse(SessionActivity.UNKNOWN)) {
+            case BUSY -> "Working";
+            case IDLE -> "At prompt";
+            case NEEDS_ATTENTION -> "Needs you";
+            case UNKNOWN -> "Running";
+        };
     }
 
     /** The row's tooltip: one sentence explaining the state in full words. */
     public static String tooltip(SessionStatus status, Optional<SessionActivity> activity) {
         return switch (status) {
-            case STARTING, RUNNING -> "The agent's terminal is live"
+            case STARTING, RUNNING -> "The agent's console is live"
                     + switch (activity.orElse(SessionActivity.UNKNOWN)) {
                         case BUSY -> ": the agent is working";
                         case NEEDS_ATTENTION -> ": waiting for you (permission prompt or notification)";
                         case IDLE -> ": waiting at the prompt";
                         case UNKNOWN -> "";
                     };
-            case EXITED -> "The agent process exited on its own";
-            case INACTIVE -> "Not running: the tab was closed while the agent was live, or the IDE restarted";
+            case EXITED -> "Not running: the agent process exited on its own";
+            case INACTIVE -> "Not running: Drydock stopped it, or the IDE restarted. Nothing restarts on its own";
             case FAILED -> "The last launch or resume failed";
             case MISSING_WORKING_DIRECTORY -> "The session's working directory no longer exists";
             case UNSUPPORTED_AGENT -> "This Drydock build cannot run this session's agent";
         };
     }
 
-    /** Lifecycle words; error statuses are named for what went wrong, never "inactive". */
+    /**
+     * Lifecycle words without activity; error statuses are named for what
+     * went wrong, never "inactive". {@code INACTIVE} and {@code EXITED} share
+     * one word: from the user's side a session the IDE stopped and one whose
+     * agent exited are both simply not running, and the difference is carried
+     * by the strip's "stopped &lt;when/why&gt;" line instead.
+     */
     public static String statusWord(SessionStatus status) {
         return switch (status) {
             case STARTING -> "Starting";
             case RUNNING -> "Running";
-            case INACTIVE -> "Inactive";
-            case EXITED -> "Exited";
+            case INACTIVE, EXITED -> "Not running";
             case FAILED -> "Failed";
             case MISSING_WORKING_DIRECTORY -> "Missing directory";
             case UNSUPPORTED_AGENT -> "Unsupported agent";
@@ -117,25 +145,7 @@ public final class SessionDots {
     }
 
     /**
-     * The activity suffix, or {@code ""} when there is nothing honest to
-     * append: no activity known, or the session is not in the running band.
-     */
-    private static String activityWord(SessionStatus status, Optional<SessionActivity> activity) {
-        if (SessionStatusFacet.of(status) != SessionStatusFacet.RUNNING
-                || activity.isEmpty()
-                || activity.get() == SessionActivity.UNKNOWN) {
-            return "";
-        }
-        return switch (activity.get()) {
-            case BUSY -> "busy";
-            case IDLE -> "idle";
-            case NEEDS_ATTENTION -> "needs attention";
-            case UNKNOWN -> "";
-        };
-    }
-
-    /**
-     * The static dot icon for a row: filled for the running and error bands,
+     * The static dot icon: filled for the running and error bands,
      * a hollow ring for the idle band (mirrors the app's design vocabulary —
      * error always fills, so a failed idle session still shows a solid dot).
      */

@@ -17,21 +17,15 @@ import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
-import app.drydock.domain.SessionActivity;
+import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionStatus;
+import app.drydock.domain.SessionStatusFacet;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.intellij.DrydockPluginService;
+import app.drydock.intellij.DrydockSessionsListener;
+import app.drydock.intellij.agent.AgentConsoleHost;
+import app.drydock.intellij.agent.AgentExecutionListener;
 import app.drydock.intellij.project.ProjectRepositoryService;
-import app.drydock.intellij.terminal.SessionEventSink;
-import app.drydock.intellij.terminal.SessionTabRegistry;
-import app.drydock.intellij.terminal.TerminalSessionLauncher;
-
-import com.intellij.openapi.application.ApplicationManager;
-import com.intellij.openapi.application.ModalityState;
-import com.intellij.openapi.project.Project;
-import com.intellij.terminal.frontend.toolwindow.TerminalToolWindowTab;
-import com.intellij.terminal.frontend.toolwindow.TerminalToolWindowTabsManager;
-import com.intellij.ui.content.Content;
 
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
@@ -39,7 +33,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -68,9 +61,8 @@ import java.util.function.Supplier;
  * snapshot (disk I/O), {@code buildCreateCommand} (may probe capabilities),
  * state persistence — runs on the supplied {@link ExecutorService}; callers
  * get futures and never have their thread blocked. Progress UI is the
- * caller's concern (the dialogs in T13 own it). The launch future completes
- * on the executor, after hopping off the EDT hop {@link TerminalSessionLauncher#open}
- * makes to create the tab.</p>
+ * caller's concern. The launch future completes on the executor, after the
+ * EDT hop {@link AgentConsoleHost#startConsole} makes to build the console.</p>
  *
  * <p>State discipline (C4): every mutation goes through the plugin's single
  * writer ({@link ApplicationStateStore#update}); this class never loads or
@@ -93,12 +85,20 @@ import java.util.function.Supplier;
  * bound to the conversation id first (idempotently — one row per
  * conversation), then takes the same resume-with-id path.</p>
  *
- * <p>This class is also the persistence half of the {@link SessionEventSink}
- * contract (AC13): {@link #sessionExited} persists EXITED (natural exit) or
- * INACTIVE (tab closed while running). The display halves are the tool
- * window's concern (T12), which subscribes separately.</p>
+ * <p>This class is also the persistence half of
+ * {@link AgentExecutionListener}: a process that exited on its own persists
+ * {@code EXITED}, one drydock stopped persists {@code INACTIVE}, and
+ * <strong>neither removes the row</strong>. Only an explicit Forget does.
+ * That is the single biggest correction to the v2 runtime, where a closed tab
+ * deleted the session it belonged to — the display tier now has no way to
+ * destroy durable state, because it no longer reports anything that could.</p>
+ *
+ * <p>Every mutation also publishes {@link DrydockSessionsListener}: the
+ * surfaces that show sessions live in other windows (and on the Welcome
+ * screen, in no window at all), so a change has to be announced rather than
+ * pushed to a panel this service knows about.</p>
  */
-public final class DrydockSessionService implements SessionEventSink {
+public final class DrydockSessionService implements AgentExecutionListener {
 
     private static final Logger LOG = System.getLogger(DrydockSessionService.class.getName());
 
@@ -107,7 +107,7 @@ public final class DrydockSessionService implements SessionEventSink {
     private final Supplier<AgentRegistry> registry;
     private final Supplier<SessionActivityWatcher> watcher;
     private final Function<Path, CompletableFuture<RepositoryId>> repositoryIdFor;
-    private final TerminalSessionLauncher launcher;
+    private final AgentConsoleHost consoles;
     private final ExecutorService executor;
 
     /**
@@ -121,10 +121,10 @@ public final class DrydockSessionService implements SessionEventSink {
     private final Set<String> claimedAgentSessionIds = ConcurrentHashMap.newKeySet();
     private final AtomicBoolean claimedIdsSeeded = new AtomicBoolean();
 
-    public DrydockSessionService(DrydockPluginService plugin, TerminalSessionLauncher launcher,
+    public DrydockSessionService(DrydockPluginService plugin, AgentConsoleHost consoles,
             ProjectRepositoryService repos, ExecutorService executor) {
         this(plugin.initialization(), plugin::stateStore, plugin::registry, plugin::watcher,
-                repos::repositoryIdFor, launcher, executor);
+                repos::repositoryIdFor, consoles, executor);
     }
 
     /**
@@ -136,13 +136,13 @@ public final class DrydockSessionService implements SessionEventSink {
     DrydockSessionService(CompletableFuture<Void> initialization, Supplier<ApplicationStateStore> stateStore,
             Supplier<AgentRegistry> registry, Supplier<SessionActivityWatcher> watcher,
             Function<Path, CompletableFuture<RepositoryId>> repositoryIdFor,
-            TerminalSessionLauncher launcher, ExecutorService executor) {
+            AgentConsoleHost consoles, ExecutorService executor) {
         this.initialization = Objects.requireNonNull(initialization, "initialization");
         this.stateStore = Objects.requireNonNull(stateStore, "stateStore");
         this.registry = Objects.requireNonNull(registry, "registry");
         this.watcher = Objects.requireNonNull(watcher, "watcher");
         this.repositoryIdFor = Objects.requireNonNull(repositoryIdFor, "repositoryIdFor");
-        this.launcher = Objects.requireNonNull(launcher, "launcher");
+        this.consoles = Objects.requireNonNull(consoles, "consoles");
         this.executor = Objects.requireNonNull(executor, "executor");
     }
 
@@ -157,12 +157,20 @@ public final class DrydockSessionService implements SessionEventSink {
      * project that started it.
      */
     public CompletableFuture<ManagedAgentSession> prepareSession(Path repoRoot, AgentKind kind, String displayName) {
+        return prepareSession(repoRoot, kind, displayName, SessionMode.WRITES);
+    }
+
+    /** As {@link #prepareSession(Path, AgentKind, String)} in an explicit mode. */
+    public CompletableFuture<ManagedAgentSession> prepareSession(Path repoRoot, AgentKind kind, String displayName,
+            SessionMode mode) {
         Objects.requireNonNull(repoRoot, "repoRoot");
         Objects.requireNonNull(kind, "kind");
         Objects.requireNonNull(displayName, "displayName");
+        Objects.requireNonNull(mode, "mode");
         Path workingDirectory = repoRoot.toAbsolutePath().normalize();
         return repositoryIdFor.apply(workingDirectory)
-                .thenApplyAsync(repositoryId -> newSessionMetadata(repositoryId, workingDirectory, kind, displayName),
+                .thenApplyAsync(
+                        repositoryId -> newSessionMetadata(repositoryId, workingDirectory, kind, displayName, mode),
                         executor);
     }
 
@@ -202,12 +210,16 @@ public final class DrydockSessionService implements SessionEventSink {
             persistFailedBestEffort(prepared);
             throw failure;
         }
-        return started.openFuture().handleAsync((tab, ex) -> finalizeCreate(started, ex), executor);
+        return started.openFuture().handleAsync((ignored, ex) -> finalizeCreate(started, ex), executor);
     }
 
     /** Everything that must happen before the process spawns. */
     private StartedLaunch startLaunch(ManagedAgentSession prepared, AgentProvider provider) {
-        persistNewSession(prepared);
+        // Upsert, not insert: the same create path serves a brand-new session
+        // and a fresh conversation started on a row that already exists
+        // ({@link #startSession}). Inserting unconditionally would give the
+        // second case a duplicate row.
+        persistSession(prepared);
         String generatedId = provider.idStrategy() == SessionIdStrategy.PRESET
                 ? UUID.randomUUID().toString()
                 : "";
@@ -222,7 +234,7 @@ public final class DrydockSessionService implements SessionEventSink {
         Object snapshot = discovery.map(d -> d.snapshot(cwd)).orElse(null);
         Instant launchedAt = Instant.now();
         CreateContext ctx = new CreateContext(prepared.displayName(), generatedId, cwd,
-                Optional.empty(), Optional.empty(), false);
+                Optional.empty(), Optional.empty(), false, prepared.readOnly());
         LaunchPlan plan = provider.buildCreateCommand(ctx);
         if (!plan.supported()) {
             // AC11: name the agent, open nothing.
@@ -231,8 +243,7 @@ public final class DrydockSessionService implements SessionEventSink {
         }
         boolean sessionIdUsed = !generatedId.isEmpty()
                 && plan.sessionIdUsed() && plan.command().contains(generatedId);
-        CompletableFuture<TerminalSessionLauncher.TerminalSessionTab> open =
-                launcher.open(prepared.id(), prepared.displayName(), cwd, plan);
+        CompletableFuture<Void> open = consoles.startConsole(prepared.id(), cwd, plan);
         return new StartedLaunch(prepared, discovery, snapshot, launchedAt, generatedId, sessionIdUsed, open);
     }
 
@@ -283,15 +294,19 @@ public final class DrydockSessionService implements SessionEventSink {
             started.discovery().get()
                     .discover(started.prepared().workingDirectory(), started.launchedAt(),
                             started.snapshot(), claimedAgentSessionIds)
-                    .ifPresent(id -> stateStore.get().update(state -> {
-                        // The session may have been deleted while discovery
-                        // polled; a no-op beats resurrecting a deleted row.
-                        ManagedAgentSession existing = findIn(state, started.prepared().id());
-                        return existing == null
-                                ? state
-                                : withReplacedSession(state,
-                                        existing.withAgentSessionId(Optional.of(id)));
-                    }));
+                    .ifPresent(id -> {
+                        stateStore.get().update(state -> {
+                            // The session may have been forgotten while
+                            // discovery polled; a no-op beats resurrecting a
+                            // removed row.
+                            ManagedAgentSession existing = findIn(state, started.prepared().id());
+                            return existing == null
+                                    ? state
+                                    : withReplacedSession(state,
+                                            existing.withAgentSessionId(Optional.of(id)));
+                        });
+                        DrydockSessionsListener.publishChanged();
+                    });
         } catch (RuntimeException e) {
             // Never fails the launch (AC14): an empty id degrades resume to
             // the interactive picker.
@@ -325,6 +340,36 @@ public final class DrydockSessionService implements SessionEventSink {
     }
 
     /**
+     * Starts a <em>fresh conversation</em> on an existing session row.
+     *
+     * <p>For a row with no agent session id there is nothing to resume into:
+     * the agent never recorded a conversation (a session stopped before it
+     * completed a turn is the common case), so resuming could only drop the
+     * user into the provider's own picker. This runs the provider's
+     * <em>create</em> command instead, keeping the row, its worktree, its
+     * title and its mode, and binding whatever id the new conversation
+     * produces.</p>
+     *
+     * <p>Deliberately not offered for a row that already has an id — that one
+     * resumes, and starting fresh would strand a conversation the user can no
+     * longer reach from drydock.</p>
+     */
+    public CompletableFuture<ManagedAgentSession> startSession(ManagedSessionId sessionId) {
+        Objects.requireNonNull(sessionId, "sessionId");
+        return initialization
+                .thenApplyAsync(unused -> {
+                    seedClaimedIdsOnce();
+                    ManagedAgentSession session = requireSession(sessionId);
+                    if (session.agentSessionId().isPresent()) {
+                        throw new IllegalStateException(
+                                "Session " + sessionId + " has a conversation to resume; use resumeSession");
+                    }
+                    return session.withStatus(SessionStatus.STARTING);
+                }, executor)
+                .thenComposeAsync(this::launchPrepared, executor);
+    }
+
+    /**
      * Adopts an on-disk conversation picked from a provider's
      * {@link ConversationSource} (AC20's record half): records a fresh
      * managed session bound to the conversation's agent session id — unless
@@ -344,13 +389,20 @@ public final class DrydockSessionService implements SessionEventSink {
                 .thenComposeAsync(this::resumePrepared, executor);
     }
 
-    private CompletableFuture<ManagedAgentSession> resumePrepared(ManagedAgentSession session) {
+    private CompletableFuture<ManagedAgentSession> resumePrepared(ManagedAgentSession prepared) {
         // A persisted agent kind the plugin's providers do not know decodes
         // to this status with a placeholder kind; launching it would silently
         // run the wrong agent (the app's checkResumeBlocked guard).
-        if (session.status() == SessionStatus.UNSUPPORTED_AGENT) {
-            return CompletableFuture.completedFuture(session);
+        if (prepared.status() == SessionStatus.UNSUPPORTED_AGENT) {
+            return CompletableFuture.completedFuture(prepared);
         }
+        // Backstop for the binding that normally happens at termination: an
+        // IDE killed outright, or a crash, never ran that, and without this
+        // the session would resume into the provider's picker forever. Only
+        // ever adds an id, never replaces one.
+        ManagedAgentSession session = prepared.agentSessionId().isPresent()
+                ? prepared
+                : Optional.ofNullable(lateBindAgentSessionId(prepared.id())).orElse(prepared);
         // The working directory is probed on disk (possibly a network
         // volume): this runs on the executor, never the caller's thread.
         if (Files.notExists(session.workingDirectory())) {
@@ -366,7 +418,7 @@ public final class DrydockSessionService implements SessionEventSink {
             // No remote, no MCP, never eval (spec non-goals): the provider's
             // own no-id branch is what a session without an id gets (AC21).
             ResumeContext ctx = new ResumeContext(session.agentSessionId(), session.agentSessionName(),
-                    session.workingDirectory(), Optional.empty(), Optional.empty(), false);
+                    session.workingDirectory(), Optional.empty(), Optional.empty(), false, session.readOnly());
             plan = provider.buildResumeCommand(ctx);
         } catch (RuntimeException failure) {
             persistFailedBestEffort(session);
@@ -378,8 +430,8 @@ public final class DrydockSessionService implements SessionEventSink {
             throw new IllegalStateException(
                     kindName(provider.kind()) + " cannot resume this session (unsupported context)");
         }
-        return launcher.open(session.id(), session.displayName(), session.workingDirectory(), plan)
-                .handleAsync((tab, ex) -> finalizeResume(session, ex), executor);
+        return consoles.startConsole(session.id(), session.workingDirectory(), plan)
+                .handleAsync((ignored, ex) -> finalizeResume(session, ex), executor);
     }
 
     private ManagedAgentSession finalizeResume(ManagedAgentSession session, Throwable failure) {
@@ -410,8 +462,12 @@ public final class DrydockSessionService implements SessionEventSink {
                     return state;
                 }
             }
-            ManagedAgentSession adopted = newSessionMetadata(repository.id(), repository.root(), kind, displayName)
-                    .withAgentSessionId(Optional.of(agentSessionId));
+            // A conversation adopted from disk was written by a writing
+            // agent: nothing in a transcript records a read-only launch, and
+            // assuming read-only would mislabel every adopted row.
+            ManagedAgentSession adopted =
+                    newSessionMetadata(repository.id(), repository.root(), kind, displayName, SessionMode.WRITES)
+                            .withAgentSessionId(Optional.of(agentSessionId));
             result[0] = adopted;
             List<ManagedAgentSession> updated = new ArrayList<>(state.sessions());
             updated.add(adopted);
@@ -421,207 +477,210 @@ public final class DrydockSessionService implements SessionEventSink {
         return result[0];
     }
 
-    // ---- lifecycle events (the persistence half of SessionEventSink) ---------
+    // ---- lifecycle events (the persistence half of AgentExecutionListener) ---
 
     /**
-     * {@link SessionEventSink}: the session's tab went away. A natural exit
-     * persists EXITED (the row stays, resumable) and bumps
-     * {@code lastOpenedAt} so the list keeps sorting by "when it was last
-     * open"; {@code lastExitCode} stays empty — the terminal surface exposes
-     * no exit code (same decision as the app's close path).
+     * The session's process ended; the row goes idle and <strong>stays</strong>.
      *
-     * <p>A closed tab DELETES the session (watcher forgets, the row leaves
-     * the state): the terminal tab is the session's home, and without it the
-     * row would linger as a dead entry — the inverse of deleteSession's
-     * rule that a deleted session takes its terminal with it. Any registry
-     * handle still pointing at the (already closed) tab is dropped so no
-     * stale handle accumulates.</p>
+     * <p>Which idle status depends on who ended it. A natural exit is
+     * {@code EXITED}; a stop drydock asked for — the Stop button, the window
+     * closing, the IDE quitting — is {@code INACTIVE}. Both are "Not running"
+     * to the user; the distinction exists so the strip's stopped line can say
+     * which happened, and so a crash is not reported as a deliberate stop.</p>
      *
-     * <p>Thread-safe from either dispatch context the monitor uses (its
-     * polling executor, or the EDT for the content-removed variant): the
-     * single writer serializes the transform and backgrounds the save. A
-     * session already gone is a no-op, and an already-EXITED session is
-     * never rewritten — the monitor guarantees that ordering, this is the
-     * belt-and-braces half.</p>
+     * <p>{@code lastOpenedAt} is bumped either way, so the catalog keeps
+     * sorting by when a session was last live. {@code lastExitCode} is
+     * recorded only when the platform reported one.</p>
+     *
+     * <p>A DISCOVERED session that still has no agent session id gets one
+     * bound here, off this thread — see {@link #scheduleLateBind}. Termination
+     * is the best moment there is: the create-time poll has to give up while
+     * the agent may not have written its record yet, but a process that has
+     * <em>ended</em> certainly has.</p>
+     *
+     * <p>Called on whichever thread delivered the process event. The single
+     * writer serializes the transform and backgrounds the save, so no hop is
+     * needed; a session already forgotten is a no-op rather than a
+     * resurrection.</p>
      */
     @Override
-    public void sessionExited(ManagedSessionId id, boolean tabClosed) {
+    public void executionTerminated(ManagedSessionId id, boolean stopRequested, Integer exitCode) {
         Objects.requireNonNull(id, "id");
-        if (!tabClosed) {
-            stateStore.get().update(state -> {
-                ManagedAgentSession existing = findIn(state, id);
-                if (existing == null || existing.status() == SessionStatus.EXITED) {
-                    return state;
-                }
-                return withReplacedSession(state,
-                        existing.withStatus(SessionStatus.EXITED).withLastOpenedAt(Instant.now()));
-            });
-            return;
-        }
-        // The tab is gone; the session goes with it. Read-forget-remove
-        // under one update so the watcher never holds state for a session
-        // the state no longer knows.
+        SessionStatus ended = stopRequested ? SessionStatus.INACTIVE : SessionStatus.EXITED;
         stateStore.get().update(state -> {
             ManagedAgentSession existing = findIn(state, id);
-            if (existing != null) {
-                existing.agentSessionId().ifPresent(agentId -> watcher.get().forget(agentId));
+            if (existing == null || existing.status() == ended) {
+                return state;
             }
-            return state.withSessions(state.sessions().stream()
-                    .filter(session -> !session.id().equals(id))
-                    .toList());
+            ManagedAgentSession idle = existing.withStatus(ended).withLastOpenedAt(Instant.now());
+            if (exitCode != null) {
+                idle = idle.withLastExitCode(Optional.of(exitCode));
+            }
+            return withReplacedSession(state, idle);
         });
-        for (TerminalSessionLauncher.TerminalSessionTab handle : launcher.tabRegistry().tabsFor(id)) {
-            launcher.tabRegistry().remove(handle.tabKey());
-        }
+        DrydockSessionsListener.publishChanged();
+        scheduleLateBind(id);
     }
 
-    /**
-     * {@link SessionEventSink}: no persistence role. Activity is display
-     * state — the tool window list model (T12) consumes it; the session row
-     * never records it.
-     */
-    @Override
-    public void sessionActivityChanged(ManagedSessionId id, Optional<SessionActivity> activity) {
-        // Deliberately empty (see javadoc).
-    }
+    // ---- late id binding (DISCOVERED providers) -------------------------------
 
     /**
-     * {@link SessionEventSink}: no persistence role. The watcher
-     * acknowledge is driven by the monitor itself; focusing has no state to
-     * persist.
+     * Binds the agent session id of a DISCOVERED session that does not have
+     * one yet, on the executor and detached: resolving reads the agent's own
+     * session store, and a failure must never surface as a failed stop.
      */
-    @Override
-    public void tabFocused(ManagedSessionId id) {
-        // Deliberately empty (see javadoc).
-    }
-
-    // ---- restart guard (R4/AC15's second half) -------------------------------
-
-    /**
-     * Closes terminal tabs the Reworked Terminal restored from its own
-     * persistence after an IDE restart, before they can re-run the agent
-     * command the tab was saved with (AC15: no duplicate tab re-launching an
-     * agent). The 253.3 restoration re-applies the persisted
-     * {@code shellCommand} verbatim — verified in the plugin's bytecode:
-     * {@code Initializer.restoreTabs} feeds the saved
-     * {@code TerminalSessionTab.getShellCommand()} straight back into the tab
-     * builder — so an agent tab restored this way re-runs the agent on
-     * project open.
-     *
-     * <p>A tab is restored-and-foreign when it is NOT in this launcher's
-     * {@link SessionTabRegistry} (every tab this service opens is registered
-     * the moment it is created) and its tab name equals a persisted
-     * session's display name. Best-effort by design, and honestly so: the
-     * restoration runs on the terminal's own async coroutine, so a tab
-     * restored <em>after</em> this sweep ran is not caught — the caller (the
-     * project's post-startup hook, wired in T11) should invoke this once the
-     * tool window has settled, and the manual runIde restart check verifies
-     * what is left. Name equality is equally best-effort: a tab whose title
-     * the running shell changed (OSC title sequences) persists under the
-     * changed name and will not match.</p>
-     */
-    public void closeRestoredAgentTabs(Project project) {
-        Objects.requireNonNull(project, "project");
+    private void scheduleLateBind(ManagedSessionId id) {
         try {
-            // The persisted display names are captured off the EDT; the
-            // sweep itself touches the tool window model (EDT-only).
-            initialization.thenAcceptAsync(unused -> {
-                Set<String> persistedNames = new HashSet<>();
-                for (ManagedAgentSession session : stateStore.get().state().sessions()) {
-                    persistedNames.add(session.displayName());
-                }
-                ApplicationManager.getApplication().invokeLater(
-                        () -> sweepRestoredTabs(project, persistedNames), ModalityState.any());
-            }, executor);
+            CompletableFuture.runAsync(() -> lateBindAgentSessionId(id), executor);
         } catch (RejectedExecutionException e) {
-            // Shutdown already drained the executor (IDE closing): there is
-            // nothing left to guard.
-            LOG.log(Level.DEBUG, "Skipping restored-tab guard during shutdown");
-        }
-    }
-
-    private void sweepRestoredTabs(Project project, Set<String> persistedNames) {
-        SessionTabRegistry registry = launcher.tabRegistry();
-        TerminalToolWindowTabsManager tabs = TerminalToolWindowTabsManager.getInstance(project);
-        for (TerminalToolWindowTab tab : tabs.getTabs()) {
-            if (registry.lookup(tab) != null) {
-                continue;  // ours: opened through this service this IDE session
-            }
-            String name = restoredTabName(tab);
-            if (!isRestoredAgentTab(name, persistedNames)) {
-                continue;
-            }
-            try {
-                tabs.closeTab(tab);
-                LOG.log(Level.INFO,
-                        "Closed terminal tab \"{0}\" restored by the IDE; it would have re-run an agent command", name);
-            } catch (RuntimeException e) {
-                LOG.log(Level.WARNING, "Could not close restored agent tab \"" + name + "\": " + e);
-            }
+            // Shutdown drained the executor. The id stays unknown and the
+            // resume path tries again — which is exactly why that backstop
+            // exists.
+            LOG.log(Level.DEBUG, "Skipping late id binding for {0} during shutdown", id);
         }
     }
 
     /**
-     * Pure decision: an unregistered tab bearing this name is a restored
-     * agent tab. Static and IDE-free so the matching rule is pinned without
-     * a running tool window.
+     * Resolves and persists the agent session id for {@code id}, returning the
+     * session as it now stands (with the id, if one was found).
+     *
+     * <p>Blocking: reads the provider's on-disk session store. Runs on the
+     * executor, never a caller's thread.</p>
+     *
+     * <p>Only ever <em>adds</em> an id. A session that already has one is
+     * returned untouched — rebinding a live id to a different conversation
+     * would silently resume the wrong transcript, which looks like success and
+     * is far worse than falling back to the picker.</p>
      */
-    static boolean isRestoredAgentTab(String tabName, Set<String> persistedSessionDisplayNames) {
-        return tabName != null && persistedSessionDisplayNames.contains(tabName);
-    }
-
-    /**
-     * A tab's name on 253.3: {@link TerminalToolWindowTab} exposes no name,
-     * but its content carries one (the builder's {@code tabName} flows into
-     * the content, and the persisted tab name is restored the same way).
-     */
-    private static String restoredTabName(TerminalToolWindowTab tab) {
-        Content content = tab.getContent();
-        if (content == null) {
-            return null;
+    private ManagedAgentSession lateBindAgentSessionId(ManagedSessionId id) {
+        ManagedAgentSession session = findIn(stateStore.get().state(), id);
+        if (session == null || session.agentSessionId().isPresent()) {
+            return session;
         }
-        String tabName = content.getTabName();
-        return tabName != null && !tabName.isBlank() ? tabName : content.getDisplayName();
-    }
-
-    /** The registry of live tabs this service's launcher opened (read by the tool window, T12). */
-    public SessionTabRegistry tabRegistry() {
-        // Plain delegation, deliberately: the registry is the one instance the
-        // launcher owns, and every consumer (lifecycle monitor, session list)
-        // must see the tabs the service opens — a second launcher would carry
-        // a registry that never sees them.
-        return launcher.tabRegistry();
+        Optional<SessionIdDiscovery> discovery = registry.get().provider(session.agentKind())
+                .filter(provider -> provider.idStrategy() == SessionIdStrategy.DISCOVERED)
+                .flatMap(AgentProvider::idDiscovery);
+        if (discovery.isEmpty()) {
+            return session;   // PRESET, or a provider with no discovery at all
+        }
+        // Seeded so a resolve can never claim an id another row already owns;
+        // the create flow seeds the same set on its first launch.
+        seedClaimedIdsOnce();
+        Optional<String> resolved;
+        try {
+            resolved = discovery.get().resolve(
+                    session.workingDirectory(), session.createdAt(), claimedAgentSessionIds);
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, () -> "Late id binding failed for " + id + ": " + e);
+            return session;
+        }
+        if (resolved.isEmpty()) {
+            // Logged, because "no id" has two very different causes and the
+            // difference is invisible otherwise: the agent wrote no session
+            // record at all (a conversation that never completed a turn), or
+            // it wrote one drydock could not match. Both leave resume on the
+            // picker, and only the second is a bug.
+            LOG.log(Level.INFO,
+                    "No agent session id resolved for {0} in {1}; resume falls back to the provider''s picker",
+                    id, session.workingDirectory());
+            return session;
+        }
+        String agentSessionId = resolved.get();
+        // resolve() filters by the claimed set but does not add to it (unlike
+        // discover(), which claims atomically), so the claim is ours to make.
+        if (!claimedAgentSessionIds.add(agentSessionId)) {
+            return session;   // another binding won the race
+        }
+        ManagedAgentSession[] bound = new ManagedAgentSession[]{session};
+        stateStore.get().update(state -> {
+            // The session may have been forgotten while the store was read.
+            ManagedAgentSession existing = findIn(state, id);
+            if (existing == null || existing.agentSessionId().isPresent()) {
+                bound[0] = existing;
+                return state;
+            }
+            bound[0] = existing.withAgentSessionId(Optional.of(agentSessionId));
+            return withReplacedSession(state, bound[0]);
+        });
+        LOG.log(Level.INFO, "Bound agent session id {0} to session {1}", agentSessionId, id);
+        DrydockSessionsListener.publishChanged();
+        return bound[0] != null ? bound[0] : session;
     }
 
     // ---- delete ---------------------------------------------------------------
 
     /**
-     * Deletes a session's metadata: the activity watcher forgets its state
-     * (AC18), every live terminal tab registered for the session is closed
-     * (deleting a session in the panel takes its terminal with it — the tab's
-     * shell is the session's, and a tab left behind would host an orphaned
-     * agent), and the row leaves the persisted state. The agent's own on-disk
-     * transcript is never touched.
+     * Forgets a session: its execution is stopped and discarded, the activity
+     * watcher drops its state, and the row leaves the catalog. This is the
+     * <em>only</em> path that removes a row — a stopped process, a closed tab,
+     * a closed window and an IDE restart all leave it.
+     *
+     * <p>The agent's own conversation history on disk is never touched. The
+     * row is drydock's bookkeeping; the transcript is the user's record of
+     * what the agent did, and deleting that is not something a session row's
+     * removal should imply.</p>
      */
     public CompletableFuture<Void> deleteSession(ManagedSessionId sessionId) {
         Objects.requireNonNull(sessionId, "sessionId");
         return initialization
                 .thenApplyAsync(unused -> requireSession(sessionId), executor)
                 .thenComposeAsync(session -> {
-                    // Registry snapshot on the service's executor; each
-                    // handle's close() hops to the EDT itself.
-                    launcher.tabRegistry().tabsFor(sessionId)
-                            .forEach(TerminalSessionLauncher.TerminalSessionTab::close);
+                    consoles.forgetConsole(sessionId);
                     CompletableFuture<Void> forgotten = session.agentSessionId()
                             .map(id -> watcher.get().forget(id))
                             .orElseGet(() -> CompletableFuture.completedFuture(null));
                     // watcher.forget runs on the watcher's own executor; hop
                     // back here before mutating the state.
-                    return forgotten.thenRunAsync(() -> stateStore.get().update(state ->
-                            state.withSessions(state.sessions().stream()
-                                    .filter(existing -> !existing.id().equals(sessionId))
-                                    .toList())), executor);
+                    return forgotten.thenRunAsync(() -> {
+                        stateStore.get().update(state ->
+                                state.withSessions(state.sessions().stream()
+                                        .filter(existing -> !existing.id().equals(sessionId))
+                                        .toList()));
+                        DrydockSessionsListener.publishChanged();
+                    }, executor);
                 }, executor);
+    }
+
+    /** Stops a session's agent without touching its row (the strip's Stop). */
+    public void stopSession(ManagedSessionId sessionId) {
+        Objects.requireNonNull(sessionId, "sessionId");
+        consoles.stopConsole(sessionId);
+    }
+
+    /**
+     * Window close and IDE quit: marks each session idle <strong>first</strong>,
+     * then stops its agent.
+     *
+     * <p>The order is the whole point. Everywhere else the idle status comes
+     * from {@link #executionTerminated}, which arrives on the project's
+     * message bus — and on a closing project that bus is already going away,
+     * so the event never lands and the row stays {@code RUNNING} forever. A
+     * row left {@code RUNNING} with nothing running then tells the reopened
+     * window that its stopped agent "is running", and
+     * {@code normalizeOnLoad}'s RUNNING→INACTIVE sweep does not help because it
+     * runs once per <em>IDE</em> start, not per project open.</p>
+     *
+     * <p>Marking first means a crash between the mark and the kill leaves a
+     * row claiming to be stopped while its process lingers. That is the
+     * harmless direction: the next IDE start reaps it, and drydock asked for
+     * the stop in the first place.</p>
+     */
+    public void stopSessionsForClose(List<ManagedSessionId> sessionIds) {
+        Objects.requireNonNull(sessionIds, "sessionIds");
+        if (sessionIds.isEmpty()) {
+            return;
+        }
+        Set<ManagedSessionId> closing = Set.copyOf(sessionIds);
+        stateStore.get().update(state -> state.withSessions(state.sessions().stream()
+                .map(session -> closing.contains(session.id())
+                        && SessionStatusFacet.of(session.status()) == SessionStatusFacet.RUNNING
+                        ? session.withStatus(SessionStatus.INACTIVE).withLastOpenedAt(Instant.now())
+                        : session)
+                .toList()));
+        DrydockSessionsListener.publishChanged();
+        for (ManagedSessionId sessionId : sessionIds) {
+            consoles.stopConsole(sessionId);
+        }
     }
 
     // ---- persistence helpers (all through the single writer, C4) -------------
@@ -652,16 +711,22 @@ public final class DrydockSessionService implements SessionEventSink {
         return null;
     }
 
-    private void persistNewSession(ManagedAgentSession session) {
+    /** Inserts {@code session}, or replaces the row that already carries its id. */
+    private void persistSession(ManagedAgentSession session) {
         stateStore.get().update(state -> {
+            if (findIn(state, session.id()) != null) {
+                return withReplacedSession(state, session);
+            }
             List<ManagedAgentSession> updated = new ArrayList<>(state.sessions());
             updated.add(session);
             return state.withSessions(updated);
         });
+        DrydockSessionsListener.publishChanged();
     }
 
     private void persistUpdatedSession(ManagedAgentSession session) {
         stateStore.get().update(state -> withReplacedSession(state, session));
+        DrydockSessionsListener.publishChanged();
     }
 
     private void persistFailedBestEffort(ManagedAgentSession session) {
@@ -695,10 +760,10 @@ public final class DrydockSessionService implements SessionEventSink {
     }
 
     private static ManagedAgentSession newSessionMetadata(RepositoryId repositoryId, Path workingDirectory,
-            AgentKind kind, String displayName) {
+            AgentKind kind, String displayName, SessionMode mode) {
         return new ManagedAgentSession.Builder(
                 ManagedSessionId.newId(), repositoryId, displayName,
-                AgentBinding.unlaunched(kind),
+                AgentBinding.unlaunched(kind, mode),
                 SessionWorkspace.inRepository(workingDirectory),
                 Instant.now())
                 .status(SessionStatus.STARTING)
@@ -734,6 +799,6 @@ public final class DrydockSessionService implements SessionEventSink {
             Instant launchedAt,
             String generatedId,
             boolean sessionIdUsed,
-            CompletableFuture<TerminalSessionLauncher.TerminalSessionTab> openFuture) {
+            CompletableFuture<Void> openFuture) {
     }
 }
