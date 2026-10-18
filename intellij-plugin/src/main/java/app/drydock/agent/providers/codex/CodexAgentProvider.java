@@ -95,6 +95,16 @@ public final class CodexAgentProvider implements AgentProvider {
     }
 
     /**
+     * Codex's sandbox is a first-class, always-present CLI option rather than
+     * a probed flag, so read-only is enforced unconditionally -- no capability
+     * snapshot to wait for.
+     */
+    @Override
+    public boolean enforcesReadOnly() {
+        return true;
+    }
+
+    /**
      * Codex takes its MCP wiring as config overrides, not as a file: there is
      * no {@code --mcp-config} equivalent, but {@code -c} sets any config value
      * for one invocation, so nothing of the user's {@code ~/.codex/config.toml}
@@ -117,7 +127,8 @@ public final class CodexAgentProvider implements AgentProvider {
         // require the user's base_url and auth -- too invasive and fragile.
         // So an eval Codex session is marked but its requests are NOT routed
         // to the eval account. See ManagedAgentSession.evalMode.
-        return LaunchPlan.of(codexCommand(c.mcp()), false);   // DISCOVERED: no id; no --settings
+        // DISCOVERED: no id; no --settings
+        return LaunchPlan.of(codexCommand(c.mcp(), c.readOnly()), false);
     }
 
     @Override
@@ -125,7 +136,7 @@ public final class CodexAgentProvider implements AgentProvider {
         if (r.remote().isPresent()) {
             return LaunchPlan.unsupported();
         }
-        String codex = codexCommand(r.mcp());
+        String codex = codexCommand(r.mcp(), r.readOnly());
         if (r.agentSessionId().isPresent()) {
             return LaunchPlan.of(codex + " resume " + AgentCommands.shellQuote(r.agentSessionId().get()), false);
         }
@@ -159,15 +170,24 @@ public final class CodexAgentProvider implements AgentProvider {
      * the session launches with no Drydock tools rather than with a leaked
      * credential. {@code SessionManager} always mints one when MCP is wired,
      * so this is a guard, not an expected path.</p>
+     *
+     * <p>{@code readOnly} adds {@code --sandbox read-only}, which is where a
+     * read-only Codex session's enforcement actually comes from: the sandbox
+     * refuses the writes rather than the model being asked to abstain.
+     * Like {@code -c} it is placed before the subcommand -- verified against
+     * the installed CLI in both the bare and the {@code resume} form -- so
+     * create and resume get it from this one place.</p>
      */
-    private String codexCommand(Optional<McpAccess> access) {
+    private String codexCommand(Optional<McpAccess> access, boolean readOnly) {
+        String sandbox = readOnly ? " --sandbox read-only" : "";
         Optional<Path> tokenFile = access.flatMap(McpAccess::credentialFile);
         if (access.isEmpty() || tokenFile.isEmpty()) {
-            return AgentCommands.envPrefix(ENV_SCRUB) + codexBinary();
+            return AgentCommands.envPrefix(ENV_SCRUB) + codexBinary() + sandbox;
         }
         McpAccess mcp = access.get();
         return AgentCommands.envPrefixFromFiles(ENV_SCRUB, Map.of(TOKEN_ENV_VAR, tokenFile.get()))
                 + codexBinary()
+                + sandbox
                 + " -c " + AgentCommands.shellQuote(
                         "mcp_servers." + SERVER_NAME + ".url=" + tomlString(mcp.endpointUrl()))
                 + " -c " + AgentCommands.shellQuote(

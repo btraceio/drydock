@@ -12,6 +12,7 @@ import app.drydock.domain.PrState;
 import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.RepositorySettings;
+import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SshRemote;
 import app.drydock.domain.UiTheme;
@@ -327,6 +328,47 @@ class ApplicationStateCodecTest {
         ApplicationState decoded = ApplicationStateCodec.fromJson(JsonParser.parse(sessionDocument(session)));
 
         assertFalse(decoded.sessions().getFirst().evalMode());
+    }
+
+    @Test
+    void readOnlyModeRoundTrips() {
+        Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/repo"), "repo",
+                Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT);
+        ManagedAgentSession readOnly = new ManagedAgentSession(
+                ManagedSessionId.newId(), repo.id(), "reading session",
+                new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty(), SessionMode.READ_ONLY),
+                new SessionWorkspace(Path.of("/tmp/repo/wd"), Optional.empty(), true),
+                SessionStatus.INACTIVE, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
+                PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty());
+        ApplicationState state = new ApplicationState(List.of(repo), List.of(readOnly), List.of(),
+                WorkspaceUiState.empty(), List.of());
+
+        ApplicationState decoded = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state));
+
+        assertEquals(SessionMode.READ_ONLY, decoded.sessions().getFirst().mode());
+        assertTrue(decoded.sessions().getFirst().readOnly());
+    }
+
+    @Test
+    void aSessionWrittenBeforeModeDecodesAsWriting() {
+        // VALID_SESSION has no "mode" member, as every state file written
+        // before read-only sessions existed. Defaulting the other way would
+        // silently strip edit rights from a session whose owner believes it
+        // still has them.
+        ApplicationState decoded = ApplicationStateCodec.fromJson(JsonParser.parse(sessionDocument(VALID_SESSION)));
+
+        assertEquals(SessionMode.WRITES, decoded.sessions().getFirst().mode());
+    }
+
+    @Test
+    void anUnrecognizedModeDecodesAsWriting() {
+        String session = VALID_SESSION.replace(
+                "\"lastOpenedAt\": \"2026-01-02T00:00:00Z\"",
+                "\"lastOpenedAt\": \"2026-01-02T00:00:00Z\",\n\"mode\": \"SOMETHING_ELSE\"");
+
+        ApplicationState decoded = ApplicationStateCodec.fromJson(JsonParser.parse(sessionDocument(session)));
+
+        assertEquals(SessionMode.WRITES, decoded.sessions().getFirst().mode());
     }
 
     @Test

@@ -107,6 +107,14 @@ public final class ClaudeAgentProvider implements AgentProvider {
     private Path activityDirectory;
     /** Set once by the background probe at {@link #init}; read by {@link #evalAvailable()} on the FX thread. */
     private volatile boolean evalAvailable;
+    /**
+     * Set once by the background capability probe at {@link #init}; read by
+     * {@link #enforcesReadOnly()}, which the UI calls synchronously and which
+     * therefore must never re-probe. Starts {@code false}, so a strip painted
+     * before the probe lands says "not enforced" rather than promising an
+     * enforcement that may not exist.
+     */
+    private volatile boolean planModeAvailable;
 
     /**
      * Fallback locations for {@code ddtool}, tried after the live PATH.
@@ -166,6 +174,11 @@ public final class ClaudeAgentProvider implements AgentProvider {
             evalContainer = new ClaudeEvalContainer(ctx.stateDirectory());
         }
         ctx.backgroundExecutor().execute(() -> evalAvailable = evalContainer.probe());
+        // Same shape as the eval probe: `claude --help` is a process spawn, so
+        // the plan-mode answer is snapshotted here instead of being re-probed
+        // from the EDT every time the strip repaints. A probe failure leaves
+        // the flag false (detectCaps's conservative fallback).
+        ctx.backgroundExecutor().execute(() -> planModeAvailable = detectCaps().supportsPlanMode());
     }
 
     @Override
@@ -222,6 +235,7 @@ public final class ClaudeAgentProvider implements AgentProvider {
         }
         command.append(activitySettingsFlag(caps));
         command.append(mcpConfigFlag(caps, c.mcp().flatMap(McpAccess::credentialFile)));
+        command.append(planModeFlag(caps, c.readOnly()));
         if (c.evalMode()) {
             return LaunchPlan.of(
                     wrapEval(command.toString(), c.sessionId(), c.workingDirectory(),
@@ -243,7 +257,8 @@ public final class ClaudeAgentProvider implements AgentProvider {
             return LaunchPlan.of(SshCommandBuilder.interactiveSessionCommand(r.remote().get(), exec), false);
         }
         ClaudeCapabilities caps = detectCaps();
-        String suffix = activitySettingsFlag(caps) + mcpConfigFlag(caps, r.mcp().flatMap(McpAccess::credentialFile));
+        String suffix = activitySettingsFlag(caps) + mcpConfigFlag(caps, r.mcp().flatMap(McpAccess::credentialFile))
+                + planModeFlag(caps, r.readOnly());
         // Eval runs inside a container whose PATH has `claude`, not the host path.
         String binary = r.evalMode() ? "claude" : claudeBinary();
         // ddtool is not in the eval container and apiKeyHelper is stripped
@@ -295,6 +310,11 @@ public final class ClaudeAgentProvider implements AgentProvider {
     }
 
     @Override
+    public boolean enforcesReadOnly() {
+        return planModeAvailable;
+    }
+
+    @Override
     public void markEvalSession(String sessionKey) {
         evalContainer.mark(sessionKey);
     }
@@ -314,8 +334,9 @@ public final class ClaudeAgentProvider implements AgentProvider {
         try {
             return capabilityService.detectCapabilitiesBlocking();
         } catch (RuntimeException e) {
-            // Fail conservatively: no name/session-id/settings support (matches NO_CAPABILITIES semantics).
-            return new ClaudeCapabilities(false, true, false, false, false, false, "unknown");
+            // Fail conservatively: no name/session-id/settings/plan-mode
+            // support (matches NO_CAPABILITIES semantics).
+            return new ClaudeCapabilities(false, true, false, false, false, false, false, "unknown");
         }
     }
 
@@ -369,6 +390,25 @@ public final class ClaudeAgentProvider implements AgentProvider {
             return "";
         }
         return " --mcp-config " + AgentCommands.shellQuote(mcpConfig.get().toString());
+    }
+
+    /**
+     * Claude's read-only mode: {@code --permission-mode plan}, which lets the
+     * session read and plan but holds back every edit behind an approval the
+     * read-only session never gives.
+     *
+     * <p>Empty when the installed {@code claude} does not advertise both the
+     * flag and the {@code plan} choice: an unlisted choice is a startup error,
+     * and a read-only session that refuses to launch is worse than one the UI
+     * has to call unenforced. {@link #enforcesReadOnly()} reports the same
+     * probe, so the strip never claims an enforcement this returned nothing
+     * for.</p>
+     */
+    private static String planModeFlag(ClaudeCapabilities caps, boolean readOnly) {
+        if (!readOnly || !caps.supportsPlanMode()) {
+            return "";
+        }
+        return " --permission-mode plan";
     }
 
 }

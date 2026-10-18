@@ -11,6 +11,7 @@ import app.drydock.domain.PrState;
 import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.RepositorySettings;
+import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.domain.SshRemote;
@@ -66,6 +67,7 @@ import java.util.Set;
  *       "agentKind": "claude" | "codex" | "pi",
  *       "agentSessionId": "<string>" | null,
  *       "agentSessionName": "<string>" | null,
+ *       "mode": "WRITES" | "READ_ONLY",
  *       "workingDirectory": "/absolute/normalized/path",
  *       "worktreeRoot": "/absolute/normalized/path" | null,
  *       "status": "INACTIVE" | "STARTING" | "RUNNING" | "EXITED" | "FAILED" | "MISSING_WORKING_DIRECTORY",
@@ -153,7 +155,13 @@ import java.util.Set;
  * an absent or malformed value decodes to {@code false} -- a session persisted
  * before eval mode existed was never on the eval account, and an unreadable
  * value must not silently route a session's traffic to it. No version bump
- * was needed and downgrades stay non-destructive. The {@code handoffBriefs} array and the session {@code forkedFrom} member
+ * was needed and downgrades stay non-destructive.
+ * The session {@code mode} member was likewise added leniently within version
+ * 2: an absent or unrecognized value decodes to {@link SessionMode#WRITES} --
+ * every session persisted before read-only sessions existed was a writing
+ * session, and defaulting the other way would silently strip edit rights from
+ * a session whose owner believes it still has them.
+ * The {@code handoffBriefs} array and the session {@code forkedFrom} member
  * were likewise added leniently within version 2: an absent {@code
  * handoffBriefs} decodes to an empty list, an absent or unparseable {@code
  * forkedFrom} to empty (a session persisted before it existed was not a fork),
@@ -252,6 +260,7 @@ public final class ApplicationStateCodec {
         obj.put("agentKind", new JsonString(session.agentKind().persistedName()));
         obj.put("agentSessionId", optionalStringToJson(session.agentSessionId()));
         obj.put("agentSessionName", optionalStringToJson(session.agentSessionName()));
+        obj.put("mode", new JsonString(session.mode().persistedName()));
         obj.put("workingDirectory", new JsonString(session.workingDirectory().toString()));
         obj.put("worktreeRoot", session.worktreeRoot()
                 .<JsonValue>map(p -> new JsonString(p.toString()))
@@ -513,6 +522,14 @@ public final class ApplicationStateCodec {
                     .or(() -> optionalString(obj, "claudeSessionId"));
             Optional<String> agentSessionName = optionalString(obj, "agentSessionName")
                     .or(() -> optionalString(obj, "claudeSessionName"));
+            // Lenient like namePinned, and defaulting the same way round: a
+            // session persisted before read-only sessions existed was a
+            // writing session, and an unrecognized mode must not silently
+            // downgrade one -- a session the user believes can edit files
+            // and silently cannot is the worse failure of the two.
+            SessionMode mode = optionalString(obj, "mode")
+                    .flatMap(SessionMode::fromPersisted)
+                    .orElse(SessionMode.WRITES);
             Path workingDirectory = Path.of(requireString(obj, "workingDirectory"));
             Optional<Path> worktreeRoot = optionalString(obj, "worktreeRoot").map(Path::of);
             SessionStatus status = parsedKind.isEmpty()
@@ -558,7 +575,7 @@ public final class ApplicationStateCodec {
             // The persisted shape stays FLAT: grouping is a Java-side change,
             // and schemaVersion must not move for it.
             return new ManagedAgentSession(id, repositoryId, displayName,
-                    new AgentBinding(agentKind, agentSessionId, agentSessionName),
+                    new AgentBinding(agentKind, agentSessionId, agentSessionName, mode),
                     new SessionWorkspace(workingDirectory, worktreeRoot, branchCreatedHere),
                     status, createdAt, lastOpenedAt, lastExitCode,
                     PrLink.fromPersisted(prState, prNumber), namePinned, forkedFrom, evalMode, workflowId);

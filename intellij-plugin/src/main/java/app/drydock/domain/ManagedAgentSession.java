@@ -155,6 +155,16 @@ public record ManagedAgentSession(
         return binding.sessionName();
     }
 
+    /** Whether this session's agent may edit files (see {@link SessionMode}). */
+    public SessionMode mode() {
+        return binding.mode();
+    }
+
+    /** Shorthand for the UI's read-only chip and the one-writer-per-worktree rule. */
+    public boolean readOnly() {
+        return binding.mode() == SessionMode.READ_ONLY;
+    }
+
     public Path workingDirectory() {
         return workspace.workingDirectory();
     }
@@ -195,6 +205,10 @@ public record ManagedAgentSession(
 
     public ManagedAgentSession withAgentSessionName(Optional<String> newAgentSessionName) {
         return toBuilder().binding(binding.withSessionName(newAgentSessionName)).build();
+    }
+
+    public ManagedAgentSession withMode(SessionMode newMode) {
+        return toBuilder().binding(binding.withMode(newMode)).build();
     }
 
     public ManagedAgentSession withWorkingDirectory(Path newWorkingDirectory) {

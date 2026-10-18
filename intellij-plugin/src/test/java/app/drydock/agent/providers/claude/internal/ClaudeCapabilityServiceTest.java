@@ -138,4 +138,35 @@ class ClaudeCapabilityServiceTest {
     void aSimilarlyNamedFlagDoesNotCountAsMcpConfig() {
         assertFalse(ClaudeCapabilityService.helpMentionsMcpConfig("  --mcp-config-verbose <x>"));
     }
+
+    @Test
+    void planModeNeedsTheFlagAndThePlanChoice() {
+        // The shape the installed CLI prints: the choices are listed after
+        // the flag, wrapped across lines.
+        String help = """
+                  --permission-mode <mode>              Permission mode to use for the session
+                                                        (choices: "acceptEdits", "auto",
+                                                        "bypassPermissions", "manual",
+                                                        "dontAsk", "plan")
+                """;
+
+        assertTrue(ClaudeCapabilityService.helpMentionsPlanMode(help));
+    }
+
+    @Test
+    void aPermissionModeWithoutAPlanChoiceIsNotPlanMode() {
+        // Passing a choice the CLI does not list is a startup error, not a
+        // degraded launch, so the choice is checked rather than assumed from
+        // the flag's presence.
+        String help = """
+                  --permission-mode <mode>   Permission mode (choices: "acceptEdits", "manual")
+                """;
+
+        assertFalse(ClaudeCapabilityService.helpMentionsPlanMode(help));
+    }
+
+    @Test
+    void absentPermissionModeFlagIsReportedConservativelyAsUnsupported() {
+        assertFalse(ClaudeCapabilityService.helpMentionsPlanMode("  --settings <file-or-json>\n"));
+    }
 }

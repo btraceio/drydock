@@ -186,6 +186,29 @@ class ClaudeAgentProviderTest {
      * override is emitted -- claude and its bash-tool children keep the full
      * shell PATH rather than a stripped prefix.
      */
+    /**
+     * A read-only session on a {@code claude} whose capabilities could not be
+     * probed emits no {@code --permission-mode} at all, and the provider says
+     * so: a flag the installed CLI may not list is a startup error, and a
+     * read-only session that refuses to launch is worse than one the UI has
+     * to call unenforced.
+     */
+    @Test
+    void readOnlyEmitsNoPlanFlagWhenPlanModeCouldNotBeProbed() {
+        ClaudeAgentProvider provider = newProviderNoExecutable();
+
+        String created = provider.buildCreateCommand(new CreateContext(
+                "S", "uuid", Path.of("/tmp"), Optional.empty(), Optional.empty(), false, true)).command();
+        String resumed = provider.buildResumeCommand(new ResumeContext(
+                Optional.of("sess"), Optional.empty(), Path.of("/tmp"), Optional.empty(), Optional.empty(),
+                false, true)).command();
+
+        assertFalse(created.contains("--permission-mode"), created);
+        assertFalse(resumed.contains("--permission-mode"), resumed);
+        assertFalse(provider.enforcesReadOnly(),
+                "an unprobed plan mode must never be reported as enforced");
+    }
+
     @Test
     void noPathInjectionWhenDdtoolIsAlreadyOnPath() {
         // noDdtool() -> ddtool unresolved -> nothing to inject.

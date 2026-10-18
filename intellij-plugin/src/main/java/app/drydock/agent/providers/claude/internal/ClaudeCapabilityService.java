@@ -41,6 +41,12 @@ public final class ClaudeCapabilityService implements AutoCloseable {
     // Not "--mcp-config\\b": '-' is a non-word character, so \b would also
     // match "--mcp-config-verbose". Require a non-flag character after it.
     private static final Pattern MCP_CONFIG_FLAG = Pattern.compile("--mcp-config(?![\\w-])");
+    // Plan mode needs BOTH halves: the flag, and "plan" among the choices it
+    // lists. `--permission-mode` has existed with choice sets that did not
+    // include plan, and passing an unlisted choice is a startup error rather
+    // than a degraded launch -- so the choice is checked, not assumed.
+    private static final Pattern PERMISSION_MODE_FLAG = Pattern.compile("--permission-mode(?![\\w-])");
+    private static final Pattern PLAN_CHOICE = Pattern.compile("\"plan\"");
 
     private final ClaudeExecutableLocator locator;
     private final ExecutorService executor;
@@ -98,14 +104,24 @@ public final class ClaudeCapabilityService implements AutoCloseable {
         boolean supportsSessionId = SESSION_ID_FLAG.matcher(help).find();
         boolean supportsSettings = SETTINGS_FLAG.matcher(help).find();
         boolean supportsMcpConfig = helpMentionsMcpConfig(help);
+        boolean supportsPlanMode = helpMentionsPlanMode(help);
 
         return new ClaudeCapabilities(supportsName, supportsResume, supportsForkSession, supportsSessionId,
-                supportsSettings, supportsMcpConfig, version);
+                supportsSettings, supportsMcpConfig, supportsPlanMode, version);
     }
 
     /** Package-private for tests: conservative presence check for {@code --mcp-config}. */
     static boolean helpMentionsMcpConfig(String helpOutput) {
         return MCP_CONFIG_FLAG.matcher(helpOutput).find();
+    }
+
+    /**
+     * Package-private for tests: conservative presence check for
+     * {@code --permission-mode plan} -- the flag AND {@code "plan"} among the
+     * choices printed for it.
+     */
+    static boolean helpMentionsPlanMode(String helpOutput) {
+        return PERMISSION_MODE_FLAG.matcher(helpOutput).find() && PLAN_CHOICE.matcher(helpOutput).find();
     }
 
     private ProcessResult runAndRequireSuccess(Path claude, String arg) {

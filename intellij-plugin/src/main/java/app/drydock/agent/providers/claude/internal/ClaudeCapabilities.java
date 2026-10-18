@@ -20,10 +20,23 @@ public record ClaudeCapabilities(
         boolean supportsSessionId,
         boolean supportsSettings,
         boolean supportsMcpConfig,
+        boolean supportsPlanMode,
         String version
 ) {
 
     public ClaudeCapabilities {
         Objects.requireNonNull(version, "version");
+    }
+
+    /**
+     * As the canonical constructor with {@code supportsPlanMode = false};
+     * conservative, per this record's default, and the shape callers and
+     * tests written before read-only sessions existed still use.
+     */
+    public ClaudeCapabilities(boolean supportsName, boolean supportsResume, boolean supportsForkSession,
+                              boolean supportsSessionId, boolean supportsSettings, boolean supportsMcpConfig,
+                              String version) {
+        this(supportsName, supportsResume, supportsForkSession, supportsSessionId, supportsSettings,
+                supportsMcpConfig, false, version);
     }
 }

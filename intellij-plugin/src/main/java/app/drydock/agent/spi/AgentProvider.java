@@ -64,6 +64,23 @@ public interface AgentProvider {
     }
 
     /**
+     * Whether this integration can actually hold a read-only session to
+     * reading -- i.e. whether {@code CreateContext.readOnly()} turns into a
+     * real flag on the CLI's command line. A provider whose CLI has no
+     * read-only mode returns {@code false}, and the UI then says the
+     * restriction is <em>not enforced</em> instead of showing a guarantee the
+     * agent cannot keep.
+     *
+     * <p>Like {@link #supportsRemote()}, a static fact about the integration:
+     * implementations MUST make this CHEAP and non-blocking. A provider whose
+     * flag is probed from {@code --help} returns the probed snapshot, never a
+     * fresh probe.</p>
+     */
+    default boolean enforcesReadOnly() {
+        return false;
+    }
+
+    /**
      * How this integration is handed drydock's own MCP tools -- a file it
      * points at, overrides on its command line, or not at all. A static fact
      * about the integration, like {@link #supportsRemote()}, so implementations

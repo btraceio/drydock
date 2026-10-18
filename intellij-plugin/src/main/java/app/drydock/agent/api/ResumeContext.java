@@ -17,10 +17,15 @@ import java.util.Optional;
  * <p>{@code evalMode} is as documented on {@link CreateContext#evalMode()}.
  * For a resume it comes from the persisted session, so an eval session
  * reopened stays on the eval account.</p>
+ *
+ * <p>{@code readOnly} is as documented on {@link CreateContext#readOnly()}.
+ * It comes from the persisted session's mode, so resuming a read-only
+ * session re-applies the same restriction: a session cannot gain write
+ * rights by being resumed.</p>
  */
 public record ResumeContext(Optional<String> agentSessionId, Optional<String> agentSessionName,
                             Path workingDirectory, Optional<SshRemote> remote, Optional<McpAccess> mcp,
-                            boolean evalMode) {
+                            boolean evalMode, boolean readOnly) {
     public ResumeContext {
         Objects.requireNonNull(agentSessionId, "agentSessionId");
         Objects.requireNonNull(agentSessionName, "agentSessionName");
@@ -29,9 +34,16 @@ public record ResumeContext(Optional<String> agentSessionId, Optional<String> ag
         Objects.requireNonNull(mcp, "mcp");
     }
 
+    /** As the canonical constructor with {@code readOnly = false} (a writing resume). */
+    public ResumeContext(Optional<String> agentSessionId, Optional<String> agentSessionName,
+                         Path workingDirectory, Optional<SshRemote> remote, Optional<McpAccess> mcp,
+                         boolean evalMode) {
+        this(agentSessionId, agentSessionName, workingDirectory, remote, mcp, evalMode, false);
+    }
+
     /** As the canonical constructor with {@code evalMode = false} (a non-eval resume). */
     public ResumeContext(Optional<String> agentSessionId, Optional<String> agentSessionName,
                          Path workingDirectory, Optional<SshRemote> remote, Optional<McpAccess> mcp) {
-        this(agentSessionId, agentSessionName, workingDirectory, remote, mcp, false);
+        this(agentSessionId, agentSessionName, workingDirectory, remote, mcp, false, false);
     }
 }

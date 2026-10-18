@@ -25,9 +25,17 @@ import java.util.Optional;
  * must never write files or mint state as a side effect of reading it inside
  * {@code buildCreateCommand}. Injection is implemented for Pi; Claude and
  * Codex are marked but not rerouted (see their providers for why).</p>
+ *
+ * <p>{@code readOnly} asks the CLI not to edit files: it comes from the
+ * session's {@code SessionMode} and each provider renders it with its own
+ * flag. A provider whose CLI has no read-only mode <em>ignores</em> it rather
+ * than refusing the launch — the restriction is best-effort by construction,
+ * and the UI says so for that agent instead of pretending the flag exists.
+ * Nothing here enforces it on drydock's side.</p>
  */
 public record CreateContext(String displayName, String sessionId, Path workingDirectory,
-                            Optional<SshRemote> remote, Optional<McpAccess> mcp, boolean evalMode) {
+                            Optional<SshRemote> remote, Optional<McpAccess> mcp, boolean evalMode,
+                            boolean readOnly) {
     public CreateContext {
         Objects.requireNonNull(displayName, "displayName");
         Objects.requireNonNull(sessionId, "sessionId");
@@ -36,9 +44,15 @@ public record CreateContext(String displayName, String sessionId, Path workingDi
         Objects.requireNonNull(mcp, "mcp");
     }
 
+    /** As the canonical constructor with {@code readOnly = false} (a writing session). */
+    public CreateContext(String displayName, String sessionId, Path workingDirectory,
+                         Optional<SshRemote> remote, Optional<McpAccess> mcp, boolean evalMode) {
+        this(displayName, sessionId, workingDirectory, remote, mcp, evalMode, false);
+    }
+
     /** As the canonical constructor with {@code evalMode = false} (a non-eval session). */
     public CreateContext(String displayName, String sessionId, Path workingDirectory,
                          Optional<SshRemote> remote, Optional<McpAccess> mcp) {
-        this(displayName, sessionId, workingDirectory, remote, mcp, false);
+        this(displayName, sessionId, workingDirectory, remote, mcp, false, false);
     }
 }

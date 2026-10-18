@@ -46,6 +46,35 @@ class CodexAgentProviderTest {
     }
 
     @Test
+    void aReadOnlySessionRunsInCodexSandbox() {
+        LaunchPlan plan = provider().buildCreateCommand(
+                new CreateContext("Session 1", "ignored-uuid", Path.of("/repo"), Optional.empty(),
+                        Optional.empty(), false, true));
+        assertTrue(plan.command().endsWith("codex --sandbox read-only"), plan.command());
+        assertTrue(provider().enforcesReadOnly(),
+                "the sandbox is a first-class CLI option, not a probed flag");
+    }
+
+    @Test
+    void aReadOnlyResumeKeepsTheSandboxAndKeepsItGlobal() {
+        // Before the subcommand, like the -c overrides: the option is parsed
+        // as a global one, and codex resume rejects nothing there (verified
+        // against the installed CLI in both forms).
+        LaunchPlan plan = provider().buildResumeCommand(
+                new ResumeContext(Optional.of("019f9072-abc"), Optional.empty(), Path.of("/repo"),
+                        Optional.empty(), Optional.empty(), false, true));
+        assertTrue(plan.command().endsWith("codex --sandbox read-only resume '019f9072-abc'"), plan.command());
+    }
+
+    @Test
+    void aWritingSessionCarriesNoSandboxFlag() {
+        LaunchPlan plan = provider().buildCreateCommand(
+                new CreateContext("Session 1", "ignored-uuid", Path.of("/repo"), Optional.empty(),
+                        Optional.empty(), false, false));
+        assertFalse(plan.command().contains("--sandbox"), plan.command());
+    }
+
+    @Test
     void resumeByIdWhenKnown() {
         LaunchPlan plan = provider().buildResumeCommand(
                 new ResumeContext(Optional.of("019f9072-abc"), Optional.empty(), Path.of("/repo"), Optional.empty(), Optional.empty()));

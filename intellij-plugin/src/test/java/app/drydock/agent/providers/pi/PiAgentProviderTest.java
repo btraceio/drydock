@@ -93,6 +93,31 @@ class PiAgentProviderTest {
         assertTrue(plan.command().endsWith("pi --resume"));   // picker; never --continue/--last
     }
 
+    /**
+     * Pi has no read-only mode, so a read-only session's command is
+     * byte-for-byte the writing one and the provider reports the restriction
+     * as unenforced. Inventing one out of {@code --exclude-tools} would rot
+     * the moment pi adds an edit tool, and the chip would be a promise the
+     * agent is not keeping.
+     */
+    @Test
+    void readOnlyIsNotEnforcedAndChangesNothingOnTheCommandLine() {
+        PiAgentProvider p = provider();
+        String writing = p.buildCreateCommand(new CreateContext(
+                "s", "x", Path.of("/repo"), Optional.empty(), Optional.empty(), false, false)).command();
+        String reading = p.buildCreateCommand(new CreateContext(
+                "s", "x", Path.of("/repo"), Optional.empty(), Optional.empty(), false, true)).command();
+
+        // Pi mints a fresh PI_SESSION_ID per invocation, so the ids differ by
+        // design; everything else must be identical.
+        assertEquals(withoutSessionId(writing), withoutSessionId(reading));
+        assertFalse(p.enforcesReadOnly());
+    }
+
+    private static String withoutSessionId(String command) {
+        return command.replaceAll("PI_SESSION_ID='[^']*'", "PI_SESSION_ID='<id>'");
+    }
+
     @Test
     void remoteIsUnsupported() {
         LaunchPlan createPlan = provider().buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),

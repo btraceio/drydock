@@ -159,6 +159,19 @@ public final class PiAgentProvider implements AgentProvider {
     }
 
     /**
+     * Pi's CLI has no read-only mode: {@code pi --help} offers tool
+     * allow/deny lists ({@code --tools}, {@code --exclude-tools}), but no
+     * single switch that means "read, do not write", and enumerating edit
+     * tools here would silently rot the moment pi adds one. A read-only pi
+     * session therefore runs unrestricted, and the UI calls it unenforced
+     * rather than showing a chip that is not true.
+     */
+    @Override
+    public boolean enforcesReadOnly() {
+        return false;
+    }
+
+    /**
      * Pi has no MCP client of its own, and by design: its README says so
      * outright ("No MCP. Build CLI tools with READMEs, or build an extension
      * that adds MCP support"). This takes the second half of that sentence at

@@ -160,6 +160,19 @@ public final class AgentRegistry {
     }
 
     /**
+     * Whether a read-only session on {@code kind} is actually held to reading,
+     * per {@link app.drydock.agent.spi.AgentProvider#enforcesReadOnly()}.
+     * Delegates live rather than caching at construction like
+     * {@link #supportsRemote}: a provider whose flag comes from a {@code
+     * --help} probe only learns the answer once that probe lands, and a value
+     * frozen at construction would read "not enforced" for the whole run.
+     * Safe on the FX thread -- the provider returns an in-memory snapshot.
+     */
+    public boolean enforcesReadOnly(AgentKind kind) {
+        return provider(kind).map(AgentProvider::enforcesReadOnly).orElse(false);
+    }
+
+    /**
      * When the eval session's auth token expires, for display only. Delegates
      * to the provider; safe to read on the FX thread (it reads an in-memory
      * snapshot, no I/O).
