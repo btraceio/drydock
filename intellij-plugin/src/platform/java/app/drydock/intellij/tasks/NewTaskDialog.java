@@ -334,7 +334,7 @@ final class NewTaskDialog extends DialogWrapper {
         String text = instructions.getText();
         return new Choice(name.getText().strip(), text.isBlank() ? Optional.empty() : Optional.of(text), agent,
                 readOnly.isSelected() ? SessionMode.READ_ONLY : SessionMode.WRITES, workIn, chosenBranch,
-                String.valueOf(start.getSelectedItem()).strip(), chosenFolder,
+                startPoint(), chosenFolder,
                 thisWindow.isSelected() ? OpenIn.THIS_WINDOW : OpenIn.NEW_WINDOW);
     }
 
@@ -349,13 +349,33 @@ final class NewTaskDialog extends DialogWrapper {
 
     @Override
     protected void doOKAction() {
+        // The folder check reads the disk, so it runs off the EDT; OK stays
+        // disabled meanwhile, and the dialog closes (or says why not) when
+        // the answer comes back.
         Choice choice = choice();
-        Optional<String> refusal = NewTaskPlan.refusal(inputs, choice, NewTaskDialog::occupied);
-        if (refusal.isPresent()) {
-            setErrorText(refusal.get(), folder);
-            return;
-        }
-        super.doOKAction();
+        getOKAction().setEnabled(false);
+        ModalityState modality = ModalityState.stateForComponent(getContentPanel());
+        ApplicationManager.getApplication().executeOnPooledThread(() -> {
+            Optional<String> refusal = NewTaskPlan.refusal(inputs, choice, NewTaskDialog::occupied);
+            ApplicationManager.getApplication().invokeLater(() -> {
+                getOKAction().setEnabled(true);
+                if (refusal.isPresent()) {
+                    setErrorText(refusal.get(), folder);
+                } else if (isShowing()) {
+                    close(OK_EXIT_CODE);
+                }
+            }, modality);
+        });
+    }
+
+    /**
+     * The start point as shown: the editor's text, since a value typed into
+     * the editable combo is only committed to its selection on Enter or
+     * focus loss, and Start pressed straight after typing would miss it.
+     */
+    private String startPoint() {
+        Object typed = start.getEditor().getItem();
+        return String.valueOf(typed != null ? typed : start.getSelectedItem()).strip();
     }
 
     @Override
