@@ -786,7 +786,16 @@ public final class SessionDialogs {
             @Override
             public void run(@NotNull ProgressIndicator indicator) {
                 try {
-                    resume.get(LAUNCH_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                    ManagedAgentSession resumed = resume.get(LAUNCH_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                    // The service starts the process but owns no UI. Without
+                    // this the agent ran with no tab, and the action looked
+                    // like it had done nothing. A session that could not
+                    // start (missing directory, unknown agent) opens too:
+                    // its tab is what says why.
+                    ApplicationManager.getApplication().invokeLater(() -> {
+                        AgentConsoles.show(project, resumed.id());
+                        AgentConsoles.focusConsole(project, resumed.id());
+                    }, ModalityState.nonModal(), project.getDisposed());
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 } catch (ExecutionException e) {
