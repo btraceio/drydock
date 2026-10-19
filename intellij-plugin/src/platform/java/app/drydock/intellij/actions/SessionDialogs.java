@@ -69,8 +69,10 @@ import java.util.stream.Collectors;
  * Task.Backgroundable} on a background thread, shown the moment the user
  * clicks and cleared on success, failure, and every early return (the
  * startup activity's bounded-wait pattern). Swing is touched only on the
- * EDT; the hops go through {@code invokeLater(..., ModalityState.any())}
- * so a completion while a dialog is showing still lands.</p>
+ * EDT. Hops that open a dialog use {@code ModalityState.nonModal()}: a
+ * dialog opened under {@code any()} runs its modal loop in a write-unsafe
+ * context, and the platform's own VFS refresh on app activation then fails
+ * inside it.</p>
  *
  * <p>Pure seams: the default-agent resolution (AC8), the provider choice
  * for the resume action (AC22), the newest-first ordering (AC20), and the
@@ -239,7 +241,7 @@ public final class SessionDialogs {
                 NewSessionInput input = prepareNewSession(project, plugin, workingDirectory);
                 if (input != null) {
                     ApplicationManager.getApplication().invokeLater(
-                            () -> openNewSessionDialog(project, input, workingDirectory), ModalityState.any());
+                            () -> openNewSessionDialog(project, input, workingDirectory), ModalityState.nonModal());
                 }
             }
         });
@@ -281,7 +283,7 @@ public final class SessionDialogs {
         } catch (ExecutionException | TimeoutException e) {
             LOG.log(Level.WARNING, "Could not prepare the new-session dialog: " + e);
             ApplicationManager.getApplication().invokeLater(() -> Messages.showErrorDialog(project,
-                    "Drydock did not finish loading: " + e, "Drydock"), ModalityState.any());
+                    "Drydock did not finish loading: " + e, "Drydock"), ModalityState.nonModal());
             return null;
         }
     }
@@ -484,7 +486,7 @@ public final class SessionDialogs {
                     if (dialog.showAndGet()) {
                         startChosenSession(project, inputs, dialog.choice());
                     }
-                }, ModalityState.any());
+                }, ModalityState.nonModal());
             }
         });
     }
@@ -683,7 +685,7 @@ public final class SessionDialogs {
             // AC22: no provider can list conversations — disabled in update();
             // reaching here means it changed since. Informational, not an error.
             ApplicationManager.getApplication().invokeLater(() -> Messages.showInfoMessage(project,
-                    "No agent here can list conversations to resume.", "Drydock"), ModalityState.any());
+                    "No agent here can list conversations to resume.", "Drydock"), ModalityState.nonModal());
             return;
         }
         Optional<ConversationSource> source = registry.conversations(kind.get());
@@ -700,7 +702,7 @@ public final class SessionDialogs {
         }
         ApplicationManager.getApplication().invokeLater(
                 () -> openResumePicker(project, repository, kind.get(), agentName, conversations),
-                ModalityState.any());
+                ModalityState.nonModal());
     }
 
     private static void openResumePicker(Project project, Repository repository, AgentKind kind, String agentName,
@@ -844,14 +846,14 @@ public final class SessionDialogs {
         ApplicationManager.getApplication().invokeLater(
                 () -> Messages.showErrorDialog(project,
                         "Could not " + what + ": " + message(cause), "Drydock"),
-                ModalityState.any());
+                ModalityState.nonModal());
     }
 
     private static void reportFailureOnEdt(Project project, String title, Throwable failure) {
         LOG.log(Level.WARNING, title + ": " + failure);
         ApplicationManager.getApplication().invokeLater(
                 () -> Messages.showErrorDialog(project, title + ": " + message(failure), "Drydock"),
-                ModalityState.any());
+                ModalityState.nonModal());
     }
 
     private static String message(Throwable failure) {

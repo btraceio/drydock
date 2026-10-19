@@ -251,7 +251,7 @@ public final class CheckoutWorktreeAction extends AnAction {
         BranchCatalog loaded = catalog;
         Repository repo = repository;
         ApplicationManager.getApplication().invokeLater(
-                () -> new CheckoutDialog(project, repo, loaded).show(), ModalityState.any());
+                () -> new CheckoutDialog(project, repo, loaded).show(), ModalityState.nonModal());
     }
 
     /** The checkout dialog: branch picker with live classification + editable directory field. */
@@ -402,7 +402,7 @@ public final class CheckoutWorktreeAction extends AnAction {
         ApplicationManager.getApplication().invokeLater(
                 () -> Messages.showErrorDialog(project,
                         title + ": " + WorktreeErrors.visibleMessage(failure), "Drydock"),
-                ModalityState.any());
+                ModalityState.nonModal());
     }
 
     /** A {@link DocumentListener} with one body for all three callbacks. */

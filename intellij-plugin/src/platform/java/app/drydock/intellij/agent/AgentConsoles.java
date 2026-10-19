@@ -155,7 +155,7 @@ public final class AgentConsoles {
                     ApplicationManager.getApplication().invokeLater(
                             () -> Messages.showErrorDialog(project,
                                     "Could not " + verb + " this session: " + rootMessage(e), "Drydock"),
-                            ModalityState.any(), project.getDisposed());
+                            ModalityState.nonModal(), project.getDisposed());
                 }
             }
         });

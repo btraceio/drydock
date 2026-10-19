@@ -50,8 +50,10 @@ import java.util.function.Consumer;
  * <p>Threading: the remotes the branch validation needs ({@code
  * listBranches} runs git) load inside a background task before the dialog
  * opens; the create itself runs in its own background task. Swing is
- * touched only on the EDT, and the {@code invokeLater(..., ModalityState.any())}
- * hops keep completions landing while a dialog is showing.</p>
+ * touched only on the EDT. Hops that open a dialog use {@code
+ * ModalityState.nonModal()}: a dialog opened under {@code any()} runs its
+ * modal loop in a write-unsafe context, and the platform's own VFS refresh
+ * on app activation then fails inside it.</p>
  *
  * <p>Pure seams: branch refusal and hint text, the directory default
  * derivation, and the OK-decision ({@link #createRequest} — the only pure
@@ -188,7 +190,7 @@ public final class WorktreeDialogs {
         String repositoryName = repository.displayName();
         ApplicationManager.getApplication().invokeLater(
                 () -> new NewWorktreeDialog(project, repositoryRoot, repositoryName, remotes).show(),
-                ModalityState.any());
+                ModalityState.nonModal());
     }
 
     /** The new-worktree dialog: branch field with live validation + editable directory field. */
@@ -390,6 +392,6 @@ public final class WorktreeDialogs {
         ApplicationManager.getApplication().invokeLater(
                 () -> Messages.showErrorDialog(project,
                         title + ": " + WorktreeErrors.visibleMessage(failure), "Drydock"),
-                ModalityState.any());
+                ModalityState.nonModal());
     }
 }
