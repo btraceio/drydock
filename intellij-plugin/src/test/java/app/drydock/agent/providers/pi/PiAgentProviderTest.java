@@ -596,4 +596,12 @@ class PiAgentProviderTest {
         assertTrue(message.contains("v0.84.1"),
                 "the log must quote what it actually read: " + message);
     }
+
+    /** The task is pi's first message: after {@code --}, quoted, last. */
+    @Test
+    void theInitialPromptIsTheFirstMessageAfterEndOfOptions() {
+        String command = provider().buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
+                Optional.empty(), Optional.empty(), false, false, Optional.of("Add a farewell method"))).command();
+        assertTrue(command.endsWith(" -- 'Add a farewell method'"), command);
+    }
 }

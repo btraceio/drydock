@@ -189,7 +189,13 @@ public final class PiAgentProvider implements AgentProvider {
         if (c.remote().isPresent()) {
             return LaunchPlan.unsupported();   // Pi declines remote
         }
-        return LaunchPlan.of(piCommand(c.mcp(), c.evalMode()), false);   // DISCOVERED: no id
+        String pi = piCommand(c.mcp(), c.evalMode());
+        // pi [options] [--] [@files...] [messages...]: the task is the first
+        // message, after "--" so a leading dash cannot read as an option.
+        String withTask = c.initialPrompt()
+                .map(prompt -> pi + " -- " + AgentCommands.shellQuote(prompt))
+                .orElse(pi);
+        return LaunchPlan.of(withTask, false);   // DISCOVERED: no id
     }
 
     @Override

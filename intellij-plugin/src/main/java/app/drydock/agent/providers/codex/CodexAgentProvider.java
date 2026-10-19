@@ -128,6 +128,13 @@ public final class CodexAgentProvider implements AgentProvider {
         // So an eval Codex session is marked but its requests are NOT routed
         // to the eval account. See ManagedAgentSession.evalMode.
         // DISCOVERED: no id; no --settings
+        //
+        // initialPrompt is deliberately NOT rendered. Codex documents a
+        // positional [PROMPT], but every flag here was read off the installed
+        // binary's --help, and on the machine this was built on that binary
+        // did not answer --help or --version at all. An unverified argument
+        // in a launch command is a launch that may fail outright, which is
+        // worse than the user typing the task once.
         return LaunchPlan.of(codexCommand(c.mcp(), c.readOnly()), false);
     }
 

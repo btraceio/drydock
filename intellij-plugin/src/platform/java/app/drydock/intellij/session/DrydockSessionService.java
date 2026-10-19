@@ -183,7 +183,19 @@ public final class DrydockSessionService implements AgentExecutionListener {
      * RUNNING session or exceptionally after the FAILED status is persisted.
      */
     public CompletableFuture<ManagedAgentSession> launchSession(ManagedAgentSession prepared) {
+        return launchSession(prepared, Optional.empty());
+    }
+
+    /**
+     * As {@link #launchSession(ManagedAgentSession)}, handing the agent
+     * {@code initialPrompt} — the task typed into the New Agent Session
+     * dialog — as its first message, for providers whose CLI accepts one on
+     * the command line (see {@code CreateContext.initialPrompt}).
+     */
+    public CompletableFuture<ManagedAgentSession> launchSession(ManagedAgentSession prepared,
+                                                                Optional<String> initialPrompt) {
         Objects.requireNonNull(prepared, "prepared");
+        Objects.requireNonNull(initialPrompt, "initialPrompt");
         return initialization
                 .thenApplyAsync(unused -> {
                     seedClaimedIdsOnce();
@@ -193,17 +205,18 @@ public final class DrydockSessionService implements AgentExecutionListener {
                 // thread whenever the gate is already complete (the common
                 // production case): thenCompose on a completed source runs
                 // its function inline.
-                .thenComposeAsync(this::launchPrepared, executor);
+                .thenComposeAsync(session -> launchPrepared(session, initialPrompt), executor);
     }
 
-    private CompletableFuture<ManagedAgentSession> launchPrepared(ManagedAgentSession prepared) {
+    private CompletableFuture<ManagedAgentSession> launchPrepared(ManagedAgentSession prepared,
+                                                                  Optional<String> initialPrompt) {
         AgentKind kind = prepared.agentKind();
         AgentProvider provider = registry.get().provider(kind)
                 .orElseThrow(() -> new IllegalStateException(
                         "No " + kind + " (" + kind.persistedName() + ") provider is registered; cannot launch session"));
         StartedLaunch started;
         try {
-            started = startLaunch(prepared, provider);
+            started = startLaunch(prepared, provider, initialPrompt);
         } catch (RuntimeException failure) {
             // The session row exists from here on (persistNewSession ran),
             // so the failure must be visible in the persisted state too.
@@ -214,7 +227,8 @@ public final class DrydockSessionService implements AgentExecutionListener {
     }
 
     /** Everything that must happen before the process spawns. */
-    private StartedLaunch startLaunch(ManagedAgentSession prepared, AgentProvider provider) {
+    private StartedLaunch startLaunch(ManagedAgentSession prepared, AgentProvider provider,
+                                      Optional<String> initialPrompt) {
         // Upsert, not insert: the same create path serves a brand-new session
         // and a fresh conversation started on a row that already exists
         // ({@link #startSession}). Inserting unconditionally would give the
@@ -234,7 +248,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
         Object snapshot = discovery.map(d -> d.snapshot(cwd)).orElse(null);
         Instant launchedAt = Instant.now();
         CreateContext ctx = new CreateContext(prepared.displayName(), generatedId, cwd,
-                Optional.empty(), Optional.empty(), false, prepared.readOnly());
+                Optional.empty(), Optional.empty(), false, prepared.readOnly(), initialPrompt);
         LaunchPlan plan = provider.buildCreateCommand(ctx);
         if (!plan.supported()) {
             // AC11: name the agent, open nothing.
@@ -366,7 +380,9 @@ public final class DrydockSessionService implements AgentExecutionListener {
                     }
                     return session.withStatus(SessionStatus.STARTING);
                 }, executor)
-                .thenComposeAsync(this::launchPrepared, executor);
+                // No task: it was only ever the create dialog's input, and is
+                // not kept on the row.
+                .thenComposeAsync(session -> launchPrepared(session, Optional.empty()), executor);
     }
 
     /**

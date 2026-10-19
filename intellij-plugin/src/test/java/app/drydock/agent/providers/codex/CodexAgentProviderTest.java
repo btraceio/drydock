@@ -231,4 +231,18 @@ class CodexAgentProviderTest {
 
         assertFalse(plan.supported());
     }
+
+    /**
+     * Codex ignores the initial prompt: its positional-prompt contract has not
+     * been read off an installed binary, and an unverified argument is a
+     * launch that may fail. Pinned so that changes deliberately.
+     */
+    @Test
+    void theInitialPromptIsNotRenderedUntilItsContractIsVerified() {
+        String without = provider().buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
+                Optional.empty(), Optional.empty(), false, false)).command();
+        String with = provider().buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
+                Optional.empty(), Optional.empty(), false, false, Optional.of("Add a farewell method"))).command();
+        assertEquals(without, with);
+    }
 }

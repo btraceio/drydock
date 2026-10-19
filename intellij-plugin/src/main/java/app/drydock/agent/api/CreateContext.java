@@ -32,16 +32,34 @@ import java.util.Optional;
  * than refusing the launch — the restriction is best-effort by construction,
  * and the UI says so for that agent instead of pretending the flag exists.
  * Nothing here enforces it on drydock's side.</p>
+ *
+ * <p>{@code initialPrompt} is the task the user gave when creating the
+ * session — the first message the agent should act on. A provider whose CLI
+ * accepts a prompt on its command line renders it there; one that does not
+ * (or whose contract has not been verified against the installed binary)
+ * ignores it, and the user types the task into the console instead. It is a
+ * create-only input: resuming a conversation never re-sends it.</p>
  */
 public record CreateContext(String displayName, String sessionId, Path workingDirectory,
                             Optional<SshRemote> remote, Optional<McpAccess> mcp, boolean evalMode,
-                            boolean readOnly) {
+                            boolean readOnly, Optional<String> initialPrompt) {
     public CreateContext {
         Objects.requireNonNull(displayName, "displayName");
         Objects.requireNonNull(sessionId, "sessionId");
         Objects.requireNonNull(workingDirectory, "workingDirectory");
         Objects.requireNonNull(remote, "remote");
         Objects.requireNonNull(mcp, "mcp");
+        Objects.requireNonNull(initialPrompt, "initialPrompt");
+        // A blank task is no task: rendering it would launch the agent with
+        // an empty first message.
+        initialPrompt = initialPrompt.filter(prompt -> !prompt.isBlank());
+    }
+
+    /** As the canonical constructor with no initial prompt. */
+    public CreateContext(String displayName, String sessionId, Path workingDirectory,
+                         Optional<SshRemote> remote, Optional<McpAccess> mcp, boolean evalMode,
+                         boolean readOnly) {
+        this(displayName, sessionId, workingDirectory, remote, mcp, evalMode, readOnly, Optional.empty());
     }
 
     /** As the canonical constructor with {@code readOnly = false} (a writing session). */

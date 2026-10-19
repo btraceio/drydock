@@ -391,11 +391,11 @@ public final class SessionDialogs {
      */
     private static void launchNewSession(Project project, Path workingDirectory, AgentKind kind,
             String displayName) {
-        launchNewSession(project, workingDirectory, kind, displayName, SessionMode.WRITES);
+        launchNewSession(project, workingDirectory, kind, displayName, SessionMode.WRITES, Optional.empty());
     }
 
     private static void launchNewSession(Project project, Path workingDirectory, AgentKind kind,
-            String displayName, SessionMode mode) {
+            String displayName, SessionMode mode, Optional<String> task) {
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         String agentName = AgentLabels.displayName(plugin.registry(), kind);
         CompletableFuture<ManagedAgentSession> launch =
@@ -404,7 +404,7 @@ public final class SessionDialogs {
                             showConsoleTab(project, session.id());
                             return session;
                         })
-                        .thenCompose(session -> DrydockStartupActivity.sessions(project).launchSession(session));
+                        .thenCompose(session -> DrydockStartupActivity.sessions(project).launchSession(session, task));
         ProgressManager.getInstance().run(new Task.Backgroundable(project,
                 "Starting " + agentName + " session…", true) {
             @Override
@@ -517,7 +517,8 @@ public final class SessionDialogs {
             NewAgentSessionDialog.Choice choice) {
         String title = NewAgentSessionPlan.sessionTitle(choice.task());
         if (choice.placement() == NewAgentSessionPlan.Placement.HERE) {
-            launchNewSession(project, inputs.workingDirectory(), choice.agent(), title, choice.mode());
+            launchNewSession(project, inputs.workingDirectory(), choice.agent(), title, choice.mode(),
+                    Optional.of(choice.task()));
             return;
         }
         DrydockPluginService plugin = DrydockPluginService.getInstance();
@@ -556,7 +557,8 @@ public final class SessionDialogs {
                     // says "IDE still indexing" while the project is dumb,
                     // and an agent that only appeared after a large import
                     // would be useless.
-                    launchNewSession(opened, worktree, choice.agent(), title, choice.mode());
+                    launchNewSession(opened, worktree, choice.agent(), title, choice.mode(),
+                            Optional.of(choice.task()));
                     // Non-modal, not any(): opening a project is a model
                     // change, allowed only from a write-safe context. The
                     // dialog has closed by now, so nothing modal holds this

@@ -218,4 +218,22 @@ class ClaudeAgentProviderTest {
         assertEquals(ENV + "claude", command);
         assertFalse(command.contains("PATH='"), "no PATH override when ddtool is absent/on PATH: " + command);
     }
+
+    /**
+     * The task typed into New Agent Session reaches claude as its positional
+     * prompt, last, after {@code --} — so the session opens working on it,
+     * and a task that starts with a dash cannot be read as an option.
+     */
+    @Test
+    void theInitialPromptIsThePositionalPromptAfterEndOfOptions() {
+        ClaudeAgentProvider provider = newProviderNoExecutable();
+        String command = provider.buildCreateCommand(new CreateContext("S", "uuid", Path.of("/tmp"),
+                Optional.empty(), Optional.empty(), false, false,
+                Optional.of("--fix the 'parser' crash"))).command();
+        assertTrue(command.endsWith(" -- '--fix the '\\''parser'\\'' crash'"), command);
+
+        String blank = provider.buildCreateCommand(new CreateContext("S", "uuid", Path.of("/tmp"),
+                Optional.empty(), Optional.empty(), false, false, Optional.of("  "))).command();
+        assertEquals(ENV + "claude", blank, "a blank task must not become an empty first message");
+    }
 }

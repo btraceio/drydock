@@ -236,6 +236,11 @@ public final class ClaudeAgentProvider implements AgentProvider {
         command.append(activitySettingsFlag(caps));
         command.append(mcpConfigFlag(caps, c.mcp().flatMap(McpAccess::credentialFile)));
         command.append(planModeFlag(caps, c.readOnly()));
+        // The task goes last, as claude's positional [prompt], so the session
+        // opens already working on it. After "--" so a task that starts with
+        // a dash is a prompt, never an option. Remote launches above do not
+        // carry it: their command crosses an ssh hop with its own quoting.
+        c.initialPrompt().ifPresent(prompt -> command.append(" -- ").append(AgentCommands.shellQuote(prompt)));
         if (c.evalMode()) {
             return LaunchPlan.of(
                     wrapEval(command.toString(), c.sessionId(), c.workingDirectory(),
