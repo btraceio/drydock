@@ -25,6 +25,7 @@ import org.jetbrains.annotations.NotNull;
 import javax.swing.JComponent;
 import javax.swing.JPanel;
 import javax.swing.SwingConstants;
+import javax.swing.Timer;
 
 import java.awt.BorderLayout;
 import java.beans.PropertyChangeListener;
@@ -56,6 +57,9 @@ import java.util.concurrent.RejectedExecutionException;
  */
 final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor {
 
+    /** How often the strip's age is recomputed; finer than the age's one-minute steps past a minute. */
+    private static final int AGE_TICK_MILLIS = 10_000;
+
     private final Project project;
     private final AgentConsoleFile file;
     private final PropertyChangeSupport propertyChange = new PropertyChangeSupport(this);
@@ -81,6 +85,14 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
     private volatile boolean everResolved;
 
     private volatile boolean valid = true;
+
+    /**
+     * Repaints the strip so its age keeps moving. Every other repaint is
+     * pushed by an event, and an agent sitting at its prompt produces none —
+     * so without this the strip said "Claude · 0s" for as long as nobody
+     * touched it. Stopped in {@link #dispose()}.
+     */
+    private final Timer ageTicker = new Timer(AGE_TICK_MILLIS, event -> refresh());
 
     AgentConsoleEditor(Project project, AgentConsoleFile file) {
         this.project = Objects.requireNonNull(project, "project");
@@ -119,6 +131,8 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
             }
         });
         reloadSession();
+        ageTicker.setRepeats(true);
+        ageTicker.start();
     }
 
     // ---- session resolution --------------------------------------------------
@@ -315,6 +329,7 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
     @Override
     public void dispose() {
         valid = false;
+        ageTicker.stop();
         applicationBus.disconnect();
         projectBus.disconnect();
         // The console is NOT disposed here: it belongs to the execution, and
