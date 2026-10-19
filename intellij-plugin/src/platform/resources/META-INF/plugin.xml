@@ -58,6 +58,10 @@
         <projectCloseHandler
                 implementation="app.drydock.intellij.agent.AgentCloseConfirmation"/>
 
+        <!-- "Claude needs you": the balloon raised when an agent starts
+             waiting for the user (AttentionNotifier). -->
+        <notificationGroup id="Drydock attention" displayType="BALLOON"/>
+
         <postStartupActivity
                 implementation="app.drydock.intellij.startup.DrydockStartupActivity"/>
     </extensions>
@@ -68,6 +72,10 @@
              nothing running. -->
         <listener class="app.drydock.intellij.agent.AgentWindowCloseListener"
                   topic="com.intellij.openapi.project.ProjectManagerListener"/>
+        <!-- Every window's agents, so the "needs you" balloon can appear in
+             whichever window the user is in. -->
+        <listener class="app.drydock.intellij.agent.AttentionNotifier"
+                  topic="app.drydock.intellij.agent.SessionActivityListener"/>
     </applicationListeners>
     <actions>
         <!-- Phase-one entry points, in Tools rather than a tool window: the

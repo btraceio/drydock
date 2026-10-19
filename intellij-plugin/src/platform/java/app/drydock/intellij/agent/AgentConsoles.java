@@ -8,8 +8,8 @@ import app.drydock.intellij.startup.DrydockStartupActivity;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.fileEditor.FileEditorManager;
-import com.intellij.openapi.fileEditor.FileEditorManagerListener;
 import com.intellij.openapi.fileEditor.FileEditorManagerKeys;
+import com.intellij.openapi.fileEditor.FileEditorManagerListener;
 import com.intellij.openapi.fileEditor.ex.FileEditorManagerEx;
 import com.intellij.openapi.fileEditor.impl.EditorWindow;
 import com.intellij.openapi.progress.ProgressIndicator;
@@ -19,11 +19,15 @@ import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.Messages;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.openapi.wm.IdeFocusManager;
+import com.intellij.openapi.wm.WindowManager;
 import com.intellij.util.messages.MessageBusConnection;
 import org.jetbrains.annotations.NotNull;
 
+import javax.swing.JFrame;
+
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
+import java.util.Arrays;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Function;
@@ -155,6 +159,24 @@ public final class AgentConsoles {
                 }
             }
         });
+    }
+
+    /**
+     * Whether the user is looking at {@code sessionId} right now: its tab is
+     * selected in {@code project}, and {@code project}'s window is the active
+     * window. A tab selected in a window behind another app is not being
+     * looked at. EDT only.
+     */
+    public static boolean isBeingViewed(Project project, ManagedSessionId sessionId) {
+        if (project.isDisposed()) {
+            return false;
+        }
+        JFrame frame = WindowManager.getInstance().getFrame(project);
+        if (frame == null || !frame.isActive()) {
+            return false;
+        }
+        AgentConsoleFile file = AgentConsoleFileSystem.getInstance().fileFor(sessionId);
+        return Arrays.asList(FileEditorManager.getInstance(project).getSelectedFiles()).contains(file);
     }
 
     /** How long after a window opens its README-on-first-open is still expected. */

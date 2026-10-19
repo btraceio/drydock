@@ -90,6 +90,39 @@ public final class SessionActivityMonitor implements Disposable {
         return lastActivity.getOrDefault(sessionId, Optional.empty());
     }
 
+    /**
+     * The user has seen {@code sessionId} while it was waiting for them: its
+     * NEEDS_ATTENTION reads as IDLE from now on, until the agent's state
+     * changes and it can ask again.
+     *
+     * <p>Without this nothing ever cleared the state. Claude's hook reports
+     * "needs you" both for a permission prompt and for its idle "waiting for
+     * your input" reminder, so in {@code runIde} a Claude session turned
+     * amber a minute after finishing a turn and stayed amber while the user
+     * was looking straight at it — and the close confirmation then asked
+     * before stopping an agent that was only waiting.</p>
+     *
+     * <p>Republished at once rather than on the next tick, so the dot and
+     * the strip change as the user looks, not up to a second later. A
+     * session not currently waiting is left alone.</p>
+     */
+    public void acknowledge(ManagedSessionId sessionId) {
+        if (!current(sessionId).equals(Optional.of(SessionActivity.NEEDS_ATTENTION))) {
+            return;
+        }
+        Optional<String> agentSessionId = stateStore.get().state().sessions().stream()
+                .filter(session -> session.id().equals(sessionId))
+                .findFirst()
+                .flatMap(ManagedAgentSession::agentSessionId);
+        if (agentSessionId.isEmpty()) {
+            return;
+        }
+        watcher.get().acknowledge(agentSessionId.get());
+        Optional<SessionActivity> seen = Optional.of(SessionActivity.IDLE);
+        lastActivity.put(sessionId, seen);
+        publish(sessionId, seen);
+    }
+
     /** Starts the single coalesced polling loop. Idempotent. */
     public synchronized void start() {
         if (started || disposed) {

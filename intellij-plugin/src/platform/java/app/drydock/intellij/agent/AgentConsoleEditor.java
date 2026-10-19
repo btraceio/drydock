@@ -7,6 +7,7 @@ import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.DrydockSessionsListener;
 import app.drydock.ui.AgentLabels;
 
+import com.intellij.openapi.application.ApplicationActivationListener;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.fileEditor.FileEditor;
@@ -16,6 +17,7 @@ import com.intellij.openapi.project.DumbService;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.UserDataHolderBase;
 import com.intellij.openapi.vfs.VirtualFile;
+import com.intellij.openapi.wm.IdeFrame;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.util.messages.MessageBusConnection;
 import com.intellij.util.ui.JBUI;
@@ -25,9 +27,15 @@ import org.jetbrains.annotations.NotNull;
 import javax.swing.JComponent;
 import javax.swing.JPanel;
 import javax.swing.SwingConstants;
+import javax.swing.SwingUtilities;
 import javax.swing.Timer;
 
 import java.awt.BorderLayout;
+import java.awt.Window;
+import java.awt.event.HierarchyEvent;
+import java.awt.event.WindowAdapter;
+import java.awt.event.WindowEvent;
+import java.awt.event.WindowFocusListener;
 import java.beans.PropertyChangeListener;
 import java.beans.PropertyChangeSupport;
 import java.time.Duration;
@@ -112,8 +120,29 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
                 (SessionActivityListener) (id, activity) -> {
                     if (id.equals(file.sessionId())) {
                         refreshLater();
+                        if (activity.equals(Optional.of(SessionActivity.NEEDS_ATTENTION))) {
+                            // Asking while the user is already looking at it:
+                            // seen the moment it is raised.
+                            acknowledgeIfViewedLater();
+                        }
                     }
                 });
+        // Moving between IDE windows does not activate the application, so
+        // the window this tab lives in reports its own focus gains.
+        root.addHierarchyListener(event -> {
+            if ((event.getChangeFlags() & HierarchyEvent.SHOWING_CHANGED) != 0 && root.isShowing()) {
+                watchWindowFocus(SwingUtilities.getWindowAncestor(root));
+            }
+        });
+        // Coming back to the IDE with this tab selected is looking at it.
+        applicationBus.subscribe(ApplicationActivationListener.TOPIC, new ApplicationActivationListener() {
+            @Override
+            public void applicationActivated(@NotNull IdeFrame ideFrame) {
+                if (ideFrame.getProject() == project) {
+                    acknowledgeIfViewedLater();
+                }
+            }
+        });
         projectBus = project.getMessageBus().connect(this);
         projectBus.subscribe(AgentExecutionListener.TOPIC, new AgentExecutionListener() {
             @Override
@@ -170,6 +199,48 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
             }
         }
         return null;
+    }
+
+    // ---- attention -------------------------------------------------------------
+
+    /**
+     * Clears this session's "needs you" once the user is looking at it — its
+     * tab selected in the active window. See
+     * {@link SessionActivityMonitor#acknowledge}.
+     */
+    private void acknowledgeIfViewed() {
+        if (valid && AgentConsoles.isBeingViewed(project, file.sessionId())) {
+            DrydockPluginService.getInstance().activityMonitor().acknowledge(file.sessionId());
+        }
+    }
+
+    /** The window this tab lives in, watched for focus; null until the tab is first shown. */
+    private Window focusWatchedWindow;
+
+    private final WindowFocusListener windowFocus = new WindowAdapter() {
+        @Override
+        public void windowGainedFocus(WindowEvent event) {
+            acknowledgeIfViewedLater();
+        }
+    };
+
+    /** EDT: moves the focus listener to {@code window} (a tab can be dragged to another window). */
+    private void watchWindowFocus(Window window) {
+        if (window == focusWatchedWindow) {
+            return;
+        }
+        if (focusWatchedWindow != null) {
+            focusWatchedWindow.removeWindowFocusListener(windowFocus);
+        }
+        focusWatchedWindow = window;
+        if (window != null) {
+            window.addWindowFocusListener(windowFocus);
+        }
+    }
+
+    private void acknowledgeIfViewedLater() {
+        ApplicationManager.getApplication().invokeLater(
+                this::acknowledgeIfViewed, ModalityState.any(), project.getDisposed());
     }
 
     // ---- painting --------------------------------------------------------------
@@ -294,6 +365,12 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
         return current.readOnly() ? current.displayName() + " · RO" : current.displayName();
     }
 
+    /** Selecting the tab is looking at it. */
+    @Override
+    public void selectNotify() {
+        acknowledgeIfViewedLater();
+    }
+
     @Override
     public void setState(@NotNull FileEditorState state) {
         // Nothing to restore: the console's content belongs to the process,
@@ -330,6 +407,7 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
     public void dispose() {
         valid = false;
         ageTicker.stop();
+        watchWindowFocus(null);
         applicationBus.disconnect();
         projectBus.disconnect();
         // The console is NOT disposed here: it belongs to the execution, and
