@@ -17,6 +17,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -25,6 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 class SharedProjectsFileTest {
 
@@ -193,6 +195,29 @@ class SharedProjectsFileTest {
                 .update(list -> append(list, added), () -> List.of(known));
 
         assertEquals(List.of(known, added), written);
+    }
+
+    @Test
+    void twoProcessesWritingTogetherLoseNothing() throws Exception {
+        // The JVM-wide lock serialises same-process writers before they reach
+        // the OS lock; only a second process exercises the file lock itself.
+        String java = ProcessHandle.current().info().command().orElse(null);
+        assumeTrue(java != null, "no java executable to start a second process");
+        int each = 60;
+        Process other = new ProcessBuilder(java, "-cp", System.getProperty("java.class.path"),
+                SharedProjectsWriterProcess.class.getName(), file().toString(), "other", String.valueOf(each))
+                .redirectErrorStream(true)
+                .redirectOutput(dir.resolve("writer.log").toFile())
+                .start();
+        SharedProjectsFile shared = new SharedProjectsFile(file());
+        for (int i = 0; i < each; i++) {
+            SharedProject project = local("/w/this-" + i);
+            shared.update(list -> append(list, project));
+        }
+        assertTrue(other.waitFor(60, TimeUnit.SECONDS), "the second writer did not finish");
+        assertEquals(0, other.exitValue(), Files.readString(dir.resolve("writer.log")));
+
+        assertEquals(2 * each, shared.read().projects().size());
     }
 
     @Test
