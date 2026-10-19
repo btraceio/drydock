@@ -174,4 +174,14 @@ class AgentStripTextTest {
         assertEquals("1d", AgentStripText.relativeAge(Duration.ofDays(1)));
         assertEquals("30d", AgentStripText.relativeAge(Duration.ofDays(30)));
     }
+
+    @Test
+    void aSessionWithoutARecordedTranscriptStartsInsteadOfResuming() {
+        // Claude gets its id at launch; stopped before its first turn it has
+        // an id but nothing on disk, and --resume answers "No conversation found".
+        assertFalse(AgentStripText.resumable(true, Optional.of(false)));
+        assertTrue(AgentStripText.resumable(true, Optional.of(true)));
+        assertTrue(AgentStripText.resumable(true, Optional.empty()), "a provider that cannot tell keeps Resume");
+        assertFalse(AgentStripText.resumable(false, Optional.empty()));
+    }
 }

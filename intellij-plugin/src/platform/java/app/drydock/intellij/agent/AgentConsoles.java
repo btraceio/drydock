@@ -2,6 +2,7 @@ package app.drydock.intellij.agent;
 
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.session.DrydockSessionService;
 import app.drydock.intellij.startup.DrydockStartupActivity;
 
@@ -29,6 +30,7 @@ import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.util.Arrays;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Function;
 
@@ -126,6 +128,36 @@ public final class AgentConsoles {
     public static void resume(Project project, ManagedSessionId sessionId) {
         start(project, sessionId, "Resuming Drydock session…", "resume",
                 sessions -> sessions.resumeSession(sessionId));
+    }
+
+    /**
+     * Whether {@code session} has a conversation to resume into. Reads the
+     * provider's transcript store: blocking, off the EDT only.
+     */
+    public static boolean hasConversation(ManagedAgentSession session) {
+        Optional<Boolean> transcript = session.agentSessionId().flatMap(id ->
+                DrydockPluginService.getInstance().registry().conversations(session.agentKind())
+                        .map(source -> source.transcriptExists(session.workingDirectory(), id)));
+        return AgentStripText.resumable(session.agentSessionId().isPresent(), transcript);
+    }
+
+    /**
+     * Resume when there is a conversation to resume, else start a fresh one
+     * on the same row — what the strip's primary button does, for callers
+     * outside the strip (the Drydock tool window). EDT.
+     */
+    public static void resumeOrStart(Project project, ManagedAgentSession session) {
+        DrydockPluginService plugin = DrydockPluginService.getInstance();
+        plugin.executor().execute(() -> {
+            boolean resumable = hasConversation(session);
+            ApplicationManager.getApplication().invokeLater(() -> {
+                if (resumable) {
+                    resume(project, session.id());
+                } else {
+                    startFresh(project, session.id());
+                }
+            }, ModalityState.nonModal(), project.getDisposed());
+        });
     }
 
     /**

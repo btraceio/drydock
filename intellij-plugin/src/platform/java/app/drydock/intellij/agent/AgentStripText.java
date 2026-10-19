@@ -132,6 +132,22 @@ public final class AgentStripText {
      * they wanted.</p>
      */
     public static String primaryLabel(boolean resumable, Optional<Integer> estimatedTokens) {
+        return primaryLabelFor(resumable, estimatedTokens);
+    }
+
+    /**
+     * Whether a stopped session has a conversation to resume: an agent
+     * session id, and — when the provider can say — a transcript on disk.
+     * Claude is given its id at launch, so a session stopped before its
+     * first turn has an id and nothing recorded; resuming it answered "No
+     * conversation found" and exited. A provider that cannot tell keeps
+     * Resume.
+     */
+    public static boolean resumable(boolean hasAgentSessionId, Optional<Boolean> transcriptExists) {
+        return hasAgentSessionId && transcriptExists.orElse(true);
+    }
+
+    private static String primaryLabelFor(boolean resumable, Optional<Integer> estimatedTokens) {
         if (!resumable) {
             return "Start";
         }

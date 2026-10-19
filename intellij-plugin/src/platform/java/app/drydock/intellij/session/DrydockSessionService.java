@@ -354,6 +354,19 @@ public final class DrydockSessionService implements AgentExecutionListener {
     }
 
     /**
+     * Whether the provider confirms that no transcript exists for the
+     * session's id. A provider that cannot tell answers false: an unknown is
+     * treated as a conversation, never as permission to strand one. Blocking
+     * (reads the transcript store): executor only.
+     */
+    private boolean nothingRecordedUnder(ManagedAgentSession session) {
+        return session.agentSessionId()
+                .flatMap(id -> registry.get().conversations(session.agentKind())
+                        .map(source -> !source.transcriptExists(session.workingDirectory(), id)))
+                .orElse(false);
+    }
+
+    /**
      * Starts a <em>fresh conversation</em> on an existing session row.
      *
      * <p>For a row with no agent session id there is nothing to resume into:
@@ -375,8 +388,17 @@ public final class DrydockSessionService implements AgentExecutionListener {
                     seedClaimedIdsOnce();
                     ManagedAgentSession session = requireSession(sessionId);
                     if (session.agentSessionId().isPresent()) {
-                        throw new IllegalStateException(
-                                "Session " + sessionId + " has a conversation to resume; use resumeSession");
+                        if (!nothingRecordedUnder(session)) {
+                            throw new IllegalStateException(
+                                    "Session " + sessionId + " has a conversation to resume; use resumeSession");
+                        }
+                        // An id with no transcript behind it (Claude is given
+                        // its id at launch; stopped before its first turn,
+                        // nothing was ever written). There is nothing to
+                        // strand, and the fresh conversation gets its own id.
+                        session = session.toBuilder()
+                                .binding(session.binding().withSessionId(Optional.empty()))
+                                .build();
                     }
                     return session.withStatus(SessionStatus.STARTING);
                 }, executor)

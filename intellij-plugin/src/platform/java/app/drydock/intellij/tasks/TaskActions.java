@@ -62,7 +62,7 @@ final class TaskActions {
                         TaskRow::running, (project, row) -> stop(project, row, true)),
                 task("Resume", "Open the task and resume its conversation", AllIcons.Actions.Execute,
                         row -> !row.running(), (project, row) -> TaskNavigator.switchTo(row.session(),
-                                target -> AgentConsoles.resume(target, row.session().id()))),
+                                target -> AgentConsoles.resumeOrStart(target, row.session()))),
                 task("Done with This Task…", "Forget the task, and optionally remove its worktree",
                         AllIcons.Actions.Checked, row -> true, TaskActions::done),
                 removeProject());

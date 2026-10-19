@@ -903,6 +903,44 @@ class DrydockSessionServiceTest {
         harness.store.flush();
     }
 
+    @Test
+    void startingFreshReplacesAnIdWithNothingRecordedUnderIt(@TempDir Path base) throws Exception {
+        // Claude is given its id at launch. A task stopped before its first
+        // turn keeps that id with no transcript behind it; resuming it fails
+        // ("No conversation found"), so starting fresh must be allowed and
+        // must bind the new conversation's id instead.
+        Harness harness = harness(base);
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, true, null, harness.events) {
+            @Override
+            public Optional<ConversationSource> conversations() {
+                return Optional.of(new ConversationSource() {
+                    @Override
+                    public List<Conversation> listConversations(Path workingDirectory) {
+                        return List.of();
+                    }
+
+                    @Override
+                    public boolean transcriptExists(Path workingDirectory, String agentSessionId) {
+                        return false;
+                    }
+                });
+            }
+        };
+        DrydockSessionService service = harness.service(provider);
+        ManagedAgentSession neverPrompted = persistSession(harness, AgentKind.CLAUDE, "Never prompted",
+                AgentBinding.unlaunched(AgentKind.CLAUDE).withSessionId(Optional.of("claude-empty")),
+                base, SessionStatus.INACTIVE, Instant.parse("2026-08-12T10:00:00Z"));
+
+        ManagedAgentSession started = service.startSession(neverPrompted.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(SessionStatus.RUNNING, started.status());
+        assertEquals(1, provider.createContexts.size());
+        assertEquals(Optional.of(provider.createContexts.get(0).sessionId()),
+                persisted(harness, neverPrompted.id()).agentSessionId());
+        harness.store.flush();
+    }
+
     // ---- delete ----------------------------------------------------------------
 
     @Test

@@ -92,6 +92,9 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
     /** {@link #estimateResumeTokens}'s last answer for this tab's session. */
     private volatile Optional<Integer> resumeTokens = Optional.empty();
 
+    /** Whether the session has a conversation to resume; see {@link AgentConsoles#hasConversation}. */
+    private volatile boolean resumable;
+
     /** The resolved session; null until the catalog load completes. */
     private volatile ManagedAgentSession session;
 
@@ -192,6 +195,7 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
             plugin.initialization().whenCompleteAsync((ignored, failure) -> {
                 ManagedAgentSession found = failure == null ? findSession(plugin, file.sessionId()) : null;
                 resumeTokens = found != null ? estimateResumeTokens(plugin, found) : Optional.empty();
+                resumable = found != null && AgentConsoles.hasConversation(found);
                 session = found;
                 if (found != null) {
                     everResolved = true;
@@ -316,7 +320,7 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
                 // Without one, Resume could reach nothing but the provider's
                 // own picker, so the button starts a fresh conversation on
                 // this same row instead.
-                current.agentSessionId().isPresent(), resumeTokens,
+                resumable, resumeTokens,
                 DumbService.isDumb(project));
 
         String stoppedLine = AgentStripText.stoppedFooter(
