@@ -16,6 +16,7 @@ import com.intellij.openapi.ui.ComboBox;
 import com.intellij.openapi.ui.DialogWrapper;
 import com.intellij.openapi.ui.TextFieldWithBrowseButton;
 import com.intellij.openapi.ui.ValidationInfo;
+import com.intellij.openapi.util.text.StringUtil;
 import com.intellij.ui.ComboboxSpeedSearch;
 import com.intellij.ui.DocumentAdapter;
 import com.intellij.ui.HyperlinkLabel;
@@ -62,6 +63,9 @@ import java.util.stream.Stream;
 final class NewTaskDialog extends DialogWrapper {
 
     private static final int WIDTH = 540;
+
+    /** The summary line wraps here, leaving room for its Change… link. */
+    private static final int SUMMARY_WIDTH = 420;
 
     private final Project project;
     private final NewTaskPlan.Inputs inputs;
@@ -275,7 +279,10 @@ final class NewTaskDialog extends DialogWrapper {
         start.setEnabled(worktree);
         folder.setEnabled(worktree);
         Choice choice = choice();
-        summary.setText(NewTaskPlan.summary(inputs, choice));
+        // Wrapped at a fixed width: as plain text the line grew with the
+        // branch and folder names and widened the dialog on every keystroke.
+        summary.setText("<html><div style=\"width:" + JBUI.scale(SUMMARY_WIDTH) + "px\">"
+                + StringUtil.escapeXmlEntities(NewTaskPlan.summary(inputs, choice)) + "</div></html>");
         Optional<String> caution = NewTaskPlan.warning(inputs, choice);
         warning.setText(caution.orElse(""));
         warning.setVisible(caution.isPresent());

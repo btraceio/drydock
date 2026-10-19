@@ -5,6 +5,7 @@ import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.DrydockSessionsListener;
 import app.drydock.intellij.agent.SessionActivityListener;
 import app.drydock.intellij.tasks.TaskNode.AddCurrentProject;
+import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
@@ -49,6 +50,7 @@ import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -66,6 +68,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
     /** The selected row, for the tool window's actions. */
     public static final DataKey<TaskNode> SELECTED_NODE = DataKey.create("drydock.task.node");
+
+    /** The main checkout of the project the selected row belongs to. */
+    public static final DataKey<Path> SELECTED_PROJECT_ROOT = DataKey.create("drydock.task.projectRoot");
 
     private static final Logger LOG = System.getLogger(TaskTreePanel.class.getName());
 
@@ -128,6 +133,31 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 }
             }
         });
+        AnAction newTaskAction = ActionManager.getInstance().getAction("Drydock.NewTask");
+        if (newTaskAction != null) {
+            contextActions.add(newTaskAction);
+        }
+        contextActions.add(new DumbAwareAction("New Task in This Worktree…",
+                "Start another agent in this task's worktree", AllIcons.General.Add) {
+            @Override
+            public void update(@NotNull AnActionEvent e) {
+                Path root = e.getData(SELECTED_PROJECT_ROOT);
+                e.getPresentation().setEnabledAndVisible(root != null
+                        && worktreeOf(e.getData(SELECTED_NODE), root).isPresent());
+            }
+
+            @Override
+            public @NotNull ActionUpdateThread getActionUpdateThread() {
+                return ActionUpdateThread.EDT;
+            }
+
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                Path root = e.getData(SELECTED_PROJECT_ROOT);
+                worktreeOf(e.getData(SELECTED_NODE), root).ifPresent(fixed ->
+                        TaskLauncher.open(project, Optional.ofNullable(root), Optional.of(fixed)));
+            }
+        });
         PopupHandler.installPopupMenu(tree, contextActions, "Drydock.TaskTree.Popup");
         tree.addMouseListener(new MouseAdapter() {
             @Override
@@ -136,6 +166,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 Object node = path == null ? null : ((DefaultMutableTreeNode) path.getLastPathComponent()).getUserObject();
                 if (node instanceof AddCurrentProject add && event.getClickCount() == 1) {
                     register(add);
+                } else if (node instanceof IdleWorktree idle && event.getClickCount() == 1) {
+                    TaskLauncher.open(project, projectRootOf(path),
+                            Optional.of(new NewTaskPlan.FixedWorktree(idle.worktree(), idle.branch())));
                 } else if (node instanceof TaskRow task && event.getClickCount() == 2) {
                     TaskNavigator.switchTo(task.session());
                 }
@@ -179,6 +212,33 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     @Override
     public void uiDataSnapshot(@NotNull DataSink sink) {
         selected().ifPresent(node -> sink.set(SELECTED_NODE, node));
+        projectRootOf(tree.getSelectionPath()).ifPresent(root -> sink.set(SELECTED_PROJECT_ROOT, root));
+    }
+
+    /** The main checkout of the project row at or above {@code path}. */
+    private static Optional<Path> projectRootOf(TreePath path) {
+        for (TreePath at = path; at != null; at = at.getParentPath()) {
+            if (at.getLastPathComponent() instanceof DefaultMutableTreeNode node
+                    && node.getUserObject() instanceof ProjectRow row) {
+                return Optional.of(row.project().root());
+            }
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * The worktree a new task would join from {@code node}: a group's or an
+     * idle worktree's, or a task's own when it works in a linked worktree
+     * (not the main checkout at {@code mainRoot}).
+     */
+    private static Optional<NewTaskPlan.FixedWorktree> worktreeOf(TaskNode node, Path mainRoot) {
+        return switch (node) {
+            case WorktreeGroup group -> Optional.of(new NewTaskPlan.FixedWorktree(group.worktree(), group.branch()));
+            case IdleWorktree idle -> Optional.of(new NewTaskPlan.FixedWorktree(idle.worktree(), idle.branch()));
+            case TaskRow task when task.branch().isPresent() && !task.session().workingDirectory().equals(mainRoot) ->
+                    Optional.of(new NewTaskPlan.FixedWorktree(task.session().workingDirectory(), task.branch().get()));
+            case null, default -> Optional.empty();
+        };
     }
 
     private Optional<TaskNode> selected() {

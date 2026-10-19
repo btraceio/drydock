@@ -92,42 +92,17 @@
                   topic="app.drydock.intellij.agent.SessionActivityListener"/>
     </applicationListeners>
     <actions>
-        <!-- Phase-one entry points, in Tools rather than a tool window: the
-             MVP's catalog surfaces are the Agents toolbar widget and the
-             Welcome-screen tab, and the handoff is explicit that the old
-             Drydock tool window must not ship alongside them. -->
-        <group id="Drydock.Tools" text="Drydock" popup="true">
-            <add-to-group group-id="ToolsMenu" anchor="last"/>
-            <action id="Drydock.NewSession"
-                    class="app.drydock.intellij.actions.NewSessionAction"
-                    text="New Agent Session…"
-                    description="Start a new agent session in this worktree"
-                    icon="AllIcons.General.Add">
-                <!-- Carried by the action so the Agents popup footer can
-                     advertise it once that lands. Bound in $default as
-                     "alt meta N", which the macOS keymaps translate (meta
-                     <-> control) to ⌃⌥N; verified in runIde to open this
-                     dialog with no conflict. NOT the handoff's ⌥⌘N: on macOS
-                     that is Refactor | Inline in an editor and Git's New
-                     Branch elsewhere, and pressing it opened Create New
-                     Branch. -->
-                <keyboard-shortcut keymap="$default" first-keystroke="alt meta N"/>
-            </action>
-            <action id="Drydock.ResumeConversation"
-                    class="app.drydock.intellij.actions.ResumeConversationAction"
-                    text="Resume Conversation…"
-                    description="Resume an on-disk agent conversation"
-                    icon="AllIcons.Actions.Restart"/>
-            <action id="Drydock.NewWorktree"
-                    class="app.drydock.intellij.actions.NewWorktreeAction"
-                    text="New Worktree…"
-                    description="Create a worktree on a new branch"
-                    icon="AllIcons.Actions.NewFolder"/>
-            <action id="Drydock.CheckoutWorktree"
-                    class="app.drydock.intellij.actions.CheckoutWorktreeAction"
-                    text="Check Out Branch in Worktree…"
-                    description="Check out an existing branch in a new worktree"
-                    icon="AllIcons.Vcs.Branch"/>
-        </group>
+        <!-- Drydock is reached through its tool window, not a menu: this is
+             the one action outside it, so the shortcut works anywhere. -->
+        <action id="Drydock.NewTask"
+                class="app.drydock.intellij.tasks.NewTaskAction"
+                text="New Task…"
+                description="Start an agent on a new task"
+                icon="AllIcons.General.Add">
+            <!-- $default "alt meta N" is ⌃⌥N on macOS (the keymaps swap meta
+                 and control). Not ⌥⌘N: on macOS that is Refactor | Inline in
+                 an editor and Git's New Branch elsewhere. -->
+            <keyboard-shortcut keymap="$default" first-keystroke="alt meta N"/>
+        </action>
     </actions>
 </idea-plugin>
