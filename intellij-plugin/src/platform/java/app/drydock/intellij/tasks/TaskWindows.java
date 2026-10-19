@@ -1,4 +1,4 @@
-package app.drydock.intellij.worktree;
+package app.drydock.intellij.tasks;
 
 import com.intellij.ide.impl.OpenProjectTask;
 import com.intellij.ide.impl.ProjectUtil;
@@ -7,9 +7,9 @@ import com.intellij.openapi.project.Project;
 import java.nio.file.Path;
 
 /** Opening a worktree as its own IDE window. */
-public final class WorktreeDialogs {
+public final class TaskWindows {
 
-    private WorktreeDialogs() {
+    private TaskWindows() {
     }
 
     /**

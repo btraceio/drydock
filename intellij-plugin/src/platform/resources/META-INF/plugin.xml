@@ -59,17 +59,19 @@
         <projectCloseHandler
                 implementation="app.drydock.intellij.agent.AgentCloseConfirmation"/>
 
-        <!-- "Claude needs you": the balloon raised when an agent starts
-             waiting for the user (AttentionNotifier). -->
         <!-- Settings > Tools > Drydock: the worktree base folder, shared with
              the standalone app through ~/.drydock/config.json. -->
         <applicationConfigurable parentId="tools" id="drydock" displayName="Drydock"
                                  instance="app.drydock.intellij.settings.DrydockConfigurable"/>
+
         <!-- The task-centric view: registered projects (shared with the
              standalone app) and their agent tasks, in every window. -->
         <toolWindow id="Drydock" anchor="left" secondary="false"
                     icon="AllIcons.Toolwindows.ToolWindowRun"
                     factoryClass="app.drydock.intellij.tasks.DrydockToolWindowFactory"/>
+
+        <!-- "Claude needs you": the balloon raised when an agent starts
+             waiting for the user (AttentionNotifier). -->
         <notificationGroup id="Drydock attention" displayType="BALLOON"/>
 
         <postStartupActivity

@@ -5,7 +5,6 @@ import app.drydock.domain.RepositoryCatalog;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.agent.AgentConsoles;
 import app.drydock.intellij.agent.AgentExecutionService;
-import app.drydock.intellij.worktree.WorktreeDialogs;
 
 import com.intellij.ide.impl.ProjectUtil;
 import com.intellij.openapi.application.ApplicationManager;
@@ -95,7 +94,7 @@ public final class TaskNavigator {
                     return;
                 }
                 Project target = window.filter(project -> !project.isDisposed())
-                        .orElseGet(() -> WorktreeDialogs.openAsProject(directory));
+                        .orElseGet(() -> TaskWindows.openAsProject(directory));
                 if (target == null || target.isDisposed()) {
                     return;
                 }

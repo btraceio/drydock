@@ -18,7 +18,6 @@ import app.drydock.intellij.tasks.NewTaskPlan.Choice;
 import app.drydock.intellij.tasks.NewTaskPlan.FixedWorktree;
 import app.drydock.intellij.tasks.NewTaskPlan.OpenIn;
 import app.drydock.intellij.tasks.NewTaskPlan.WorkIn;
-import app.drydock.intellij.worktree.WorktreeDialogs;
 import app.drydock.intellij.worktree.WorktreeErrors;
 import app.drydock.projects.SharedProject;
 import app.drydock.projects.SharedProjectsSeed;
@@ -251,7 +250,7 @@ public final class TaskLauncher {
                                 OpenProjectTask.build().withProjectToClose(from));
                         fresh = true;
                     } else {
-                        target = WorktreeDialogs.openAsProject(steps.workingDirectory());
+                        target = TaskWindows.openAsProject(steps.workingDirectory());
                         fresh = true;
                     }
                     if (target == null || target.isDisposed()) {
