@@ -167,7 +167,7 @@ class RepositoryManagerTest {
         Path repo = initGitRepo("repo-c");
         Repository added = manager.addRepository(repo).get();
 
-        manager.removeRepository(added.id());
+        manager.removeRepository(added.id()).join();
 
         assertTrue(manager.repositories().isEmpty());
         assertTrue(Files.exists(repo), "removing a repository must never delete it from disk");
@@ -182,7 +182,7 @@ class RepositoryManagerTest {
         flushState();
         int savesBefore = stateRepository.saveCount();
 
-        manager.removeRepository(RepositoryId.newId());
+        manager.removeRepository(RepositoryId.newId()).join();
 
         flushState();
         assertEquals(1, manager.repositories().size());
@@ -533,6 +533,18 @@ class RepositoryManagerTest {
         manager.reconcile();
 
         assertEquals(fromIde.id(), repositoryOf(session));
+    }
+
+    @Test
+    void aRemoveTheSharedListRefusesFailsAndKeepsTheRepository() throws Exception {
+        Repository kept = manager.addRepository(initGitRepo("not-removed").toRealPath()).join();
+        Files.writeString(sharedFile.file(), "{broken");
+
+        CompletionException thrown = assertThrows(CompletionException.class,
+                () -> manager.removeRepository(kept.id()).join());
+
+        assertTrue(thrown.getMessage().contains("projects.json"), thrown.getMessage());
+        assertEquals(List.of(kept), manager.repositories(), "a remove that did not happen must not look done");
     }
 
     private static final class InMemoryStateRepository implements ApplicationStateRepository {

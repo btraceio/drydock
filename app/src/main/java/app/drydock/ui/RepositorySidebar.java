@@ -2418,10 +2418,14 @@ public final class RepositorySidebar extends VBox {
         confirm.setContentText("This removes it from Drydock's list, here and in the IntelliJ plugin. "
                 + "Nothing at " + location + " is touched or deleted.");
         confirm.showAndWait().filter(button -> button == ButtonType.OK).ifPresent(button -> {
-            repositoryManager.removeRepository(repository.id());
-            // The manager's change listener rebuilds the repo list; the
-            // model forgets the removed repo's status/discovery data.
-            viewModel.removeRepository(repository.id());
+            // The manager's change listener rebuilds the repo list and the
+            // model forgets the removed repo's status/discovery data; a
+            // remove the shared list refused says why instead.
+            repositoryManager.removeRepository(repository.id()).whenComplete((ignored, failure) -> {
+                if (failure != null) {
+                    Platform.runLater(() -> UiErrors.show("Could not remove repository", failure));
+                }
+            });
         });
     }
 

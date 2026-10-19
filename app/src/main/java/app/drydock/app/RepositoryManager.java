@@ -248,10 +248,6 @@ public final class RepositoryManager {
         return SharedProjectsSeed.fromRepositories(stateStore.state().repositories(), mainCheckoutOf);
     }
 
-    private synchronized void forceNextReconcile() {
-        reconciledStamp = Long.MIN_VALUE;
-    }
-
     private static ApplicationState withMembers(ApplicationState state, List<SharedProject> members) {
         Map<RepositoryId, Repository> known = new LinkedHashMap<>();
         state.repositories().forEach(repository -> known.put(repository.id(), repository));
@@ -411,27 +407,17 @@ public final class RepositoryManager {
 
     /**
      * Removes the repository from the shared list -- for the IntelliJ plugin
-     * too -- and from this app's list. Never touches the filesystem (plan
-     * section 21), and keeps the repository's sessions, so adding it again
-     * brings them back. The local list changes at once; the shared write
-     * runs off the caller's thread, and if it fails the next reconcile puts
-     * the repository back rather than diverging from the shared list.
+     * too -- and then from this app's list. Never touches the filesystem
+     * (plan section 21), and keeps the repository's sessions, so adding it
+     * again brings them back.
+     *
+     * <p>The shared list is written first, on the shared-list thread, so a
+     * reconcile already queued there cannot put the repository back, and a
+     * write the shared list refuses (malformed, unreadable entries) leaves
+     * everything as it was. The returned future fails then, for the caller
+     * to show.</p>
      */
     public CompletableFuture<Void> removeRepository(RepositoryId id) {
-        boolean[] removed = new boolean[1];
-        stateStore.update(state -> {
-            List<Repository> updated = state.repositories().stream()
-                    .filter(repository -> !repository.id().equals(id))
-                    .toList();
-            if (updated.size() == state.repositories().size()) {
-                return state;
-            }
-            removed[0] = true;
-            return state.withRepositories(updated);
-        });
-        if (removed[0]) {
-            notifyChanged();
-        }
         return CompletableFuture.runAsync(() -> {
             try {
                 sharedFile.update(projects -> projects.stream().filter(project -> !project.id().equals(id)).toList(),
@@ -439,8 +425,21 @@ public final class RepositoryManager {
             } catch (SharedProjectsException e) {
                 LOG.log(Level.WARNING, () -> "Could not remove " + id + " from the shared projects list: "
                         + e.getMessage());
-                forceNextReconcile();
                 throw new CompletionException(e);
+            }
+            boolean[] removed = new boolean[1];
+            stateStore.update(state -> {
+                List<Repository> updated = state.repositories().stream()
+                        .filter(repository -> !repository.id().equals(id))
+                        .toList();
+                if (updated.size() == state.repositories().size()) {
+                    return state;
+                }
+                removed[0] = true;
+                return state.withRepositories(updated);
+            });
+            if (removed[0]) {
+                notifyChanged();
             }
         }, sharedIo);
     }
