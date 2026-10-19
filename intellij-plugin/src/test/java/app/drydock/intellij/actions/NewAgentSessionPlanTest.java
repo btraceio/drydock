@@ -1,5 +1,6 @@
 package app.drydock.intellij.actions;
 
+import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.SessionMode;
 import app.drydock.intellij.actions.NewAgentSessionPlan.Placement;
 
@@ -8,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -86,5 +88,15 @@ class NewAgentSessionPlanTest {
         String title = NewAgentSessionPlan.sessionTitle(long_);
         assertTrue(title.length() <= 49, title);
         assertTrue(title.endsWith("…"), title);
+    }
+
+    @Test
+    void theDialogOffersTheAgentCLIsAndNotThePlainShell() {
+        // The dialog hands its task to whatever it starts; a shell has
+        // nothing to hand it to. The handoff names exactly these three.
+        assertTrue(NewAgentSessionPlan.offersAgent(AgentKind.CLAUDE));
+        assertTrue(NewAgentSessionPlan.offersAgent(AgentKind.CODEX));
+        assertTrue(NewAgentSessionPlan.offersAgent(AgentKind.PI));
+        assertFalse(NewAgentSessionPlan.offersAgent(AgentKind.TERMINAL));
     }
 }

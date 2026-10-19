@@ -1,5 +1,6 @@
 package app.drydock.intellij.actions;
 
+import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.SessionMode;
 import app.drydock.git.WorktreeNaming;
 
@@ -27,6 +28,18 @@ public final class NewAgentSessionPlan {
     }
 
     private NewAgentSessionPlan() {
+    }
+
+    /**
+     * Whether the dialog offers {@code kind} as an agent.
+     *
+     * <p>Every agentic CLI, and not {@link AgentKind#TERMINAL}: that kind is a
+     * plain shell, so a dialog that asks "What should the agent do?" and
+     * gives a task to whatever it starts has nothing to give the task to. The
+     * handoff names exactly Claude, Codex and pi.</p>
+     */
+    public static boolean offersAgent(AgentKind kind) {
+        return kind != AgentKind.TERMINAL;
     }
 
     /**

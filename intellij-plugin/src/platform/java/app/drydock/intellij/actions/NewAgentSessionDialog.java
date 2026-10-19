@@ -139,13 +139,13 @@ final class NewAgentSessionDialog extends DialogWrapper {
 
         ButtonGroup agentGroup = new ButtonGroup();
         JPanel agentRow = row();
-        for (Agent agent : inputs.agents()) {
+        for (Agent agent : offeredAgents()) {
             JBRadioButton button = new JBRadioButton(agent.displayName());
             button.setEnabled(agent.isAvailable());
             if (!agent.isAvailable()) {
                 button.setToolTipText("Not found on PATH: " + agent.describeSearched());
             }
-            button.setSelected(agent.kind() == inputs.preselected());
+            button.setSelected(agent.kind() == preselectedAgent());
             agentGroup.add(button);
             agentButtons.put(agent.kind(), button);
             agentRow.add(button);
@@ -221,6 +221,28 @@ final class NewAgentSessionDialog extends DialogWrapper {
     @Override
     public @Nullable JComponent getPreferredFocusedComponent() {
         return task;
+    }
+
+    /** The agents the dialog offers: the agent CLIs, never the plain shell. */
+    private List<Agent> offeredAgents() {
+        return inputs.agents().stream()
+                .filter(agent -> NewAgentSessionPlan.offersAgent(agent.kind()))
+                .toList();
+    }
+
+    /**
+     * The agent selected on open: the remembered one when the dialog offers
+     * it, otherwise the first available one. A remembered Terminal would
+     * otherwise open the dialog with no agent selected at all.
+     */
+    private AgentKind preselectedAgent() {
+        List<Agent> offered = offeredAgents();
+        for (Agent agent : offered) {
+            if (agent.kind() == inputs.preselected() && agent.isAvailable()) {
+                return agent.kind();
+            }
+        }
+        return offered.stream().filter(Agent::isAvailable).map(Agent::kind).findFirst().orElse(null);
     }
 
     /**
