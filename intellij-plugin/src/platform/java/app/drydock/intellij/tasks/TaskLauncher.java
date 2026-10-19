@@ -175,18 +175,32 @@ public final class TaskLauncher {
 
     /**
      * Git's own branch/tag picker for the repository at {@code mainRoot},
-     * when some open window has it as a Git repository; otherwise none.
+     * when an open window belongs to that repository and holds exactly one
+     * Git repository; otherwise none.
+     *
+     * <p>No {@link GitRepository} method is called: {@code getRoot()} is
+     * inherited from {@code com.intellij.dvcs.repo.Repository}, which
+     * 2026.3 moved into a separate VCS plugin Plugin Verifier cannot resolve
+     * from here, and {@code getGitDir()} is scheduled for removal. The
+     * window is matched by its own main checkout instead. Blocking ({@code
+     * git worktree list}): background only.</p>
      */
     private static Optional<Supplier<Optional<String>>> refChooser(Path mainRoot) {
-        for (Project open : ProjectManager.getInstance().getOpenProjects()) {
-            if (open.isDisposed()) {
-                continue;
-            }
-            for (GitRepository repository : GitRepositoryManager.getInstance(open).getRepositories()) {
-                Path root = RepositoryCatalog.canonicalize(repository.getRoot().toNioPath());
-                if (root.equals(mainRoot)) {
+        try (WorktreeService worktrees = new WorktreeService()) {
+            for (Project open : ProjectManager.getInstance().getOpenProjects()) {
+                if (open.isDisposed() || open.getBasePath() == null) {
+                    continue;
+                }
+                boolean sameRepository = SharedProjectsSeed.mainCheckoutVia(worktrees)
+                        .apply(Path.of(open.getBasePath()))
+                        .map(RepositoryCatalog::canonicalize)
+                        .map(mainRoot::equals)
+                        .orElse(false);
+                List<GitRepository> repositories = sameRepository
+                        ? GitRepositoryManager.getInstance(open).getRepositories() : List.of();
+                if (repositories.size() == 1) {
                     return Optional.of(() -> {
-                        GitRefDialog dialog = new GitRefDialog(open, List.of(repository), "Start From",
+                        GitRefDialog dialog = new GitRefDialog(open, repositories, "Start From",
                                 "Branch, tag or revision:");
                         return dialog.showAndGet() ? Optional.of(dialog.getReference()) : Optional.empty();
                     });
