@@ -51,6 +51,13 @@
              holds them in the project's user data, and pre-warms the plugin
              init and the project's repository with visible progress. It
              starts no agent. -->
+        <!-- "Stop n working agents?" before a window close or a quit stops
+             agents mid-task. A close handler rather than an exit listener:
+             the only exit veto (ApplicationListener.canExitApplication) is
+             deprecated, and an exit closes every project through this. -->
+        <projectCloseHandler
+                implementation="app.drydock.intellij.agent.AgentCloseConfirmation"/>
+
         <postStartupActivity
                 implementation="app.drydock.intellij.startup.DrydockStartupActivity"/>
     </extensions>

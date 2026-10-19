@@ -1,6 +1,7 @@
 package app.drydock.intellij.startup;
 
 import app.drydock.intellij.DrydockPluginService;
+import app.drydock.intellij.project.ProjectIdentity;
 import app.drydock.intellij.project.ProjectRepositoryService;
 import app.drydock.intellij.agent.AgentExecutionListener;
 import app.drydock.intellij.agent.AgentExecutionService;
@@ -133,6 +134,9 @@ public final class DrydockStartupActivity implements StartupActivity {
             @Override
             public void run(@NotNull ProgressIndicator indicator) {
                 started.awaitWarmup();
+                // <repo> · <branch> for the surfaces that name this window on
+                // the EDT, where git cannot be asked.
+                ProjectIdentity.resolve(project);
             }
         });
     }
