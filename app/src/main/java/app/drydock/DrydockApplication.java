@@ -27,6 +27,8 @@ import app.drydock.mcp.McpServer;
 import app.drydock.mcp.McpSessionRegistry;
 import app.drydock.mcp.McpToolRouter;
 import app.drydock.mcp.WorkspaceMcpSessionContext;
+import app.drydock.projects.SharedProjectsFile;
+import app.drydock.projects.SharedProjectsSeed;
 import app.drydock.review.AnnotationStore;
 import app.drydock.review.RepositoryPullRequests;
 import app.drydock.review.ReviewScopeRegistry;
@@ -307,7 +309,12 @@ public final class DrydockApplication extends Application {
         agentContextExecutor = Executors.newVirtualThreadPerTaskExecutor();
         AgentContext agentContext = new AgentContext(stateDir, activityDir, agentContextExecutor);
         agentRegistry = AgentRegistry.create(agentContext);
-        repositoryManager = new RepositoryManager(stateRepository, gitStatusService);
+        repositoryManager = new RepositoryManager(stateRepository, gitStatusService,
+                new SharedProjectsFile(SharedProjectsFile.defaultFile()),
+                SharedProjectsSeed.mainCheckoutVia(worktreeService));
+        // Seeds the shared projects list on first run and follows the
+        // IntelliJ plugin's changes to it; off the FX thread.
+        repositoryManager.start();
         sessionManager = new SessionManager(stateRepository, agentRegistry);
         ChangedLineService changedLineService = new ChangedLineService(diffService);
         annotationStore = new AnnotationStore(AnnotationStore.siblingOf(stateRepository.stateFile()));
@@ -1362,6 +1369,9 @@ public final class DrydockApplication extends Application {
         }
         if (sessionManager != null) {
             closeQuietly("SessionManager", sessionManager::close);
+        }
+        if (repositoryManager != null) {
+            closeQuietly("RepositoryManager shared-list polling", repositoryManager::stop);
         }
         closeQuietly("hook install", this::awaitHookInstall);
         if (agentContextExecutor != null) {

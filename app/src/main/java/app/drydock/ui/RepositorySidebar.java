@@ -136,6 +136,8 @@ public final class RepositorySidebar extends VBox {
     private final SessionManager sessionManager;
     private final WorkspaceNavigator navigator;
     private final WorkspaceViewModel viewModel;
+    /** The repositories the last repository-list change showed; FX thread only. */
+    private Set<RepositoryId> shownRepositoryIds = new HashSet<>();
     private final ExternalEditorLauncher editorLauncher = new ExternalEditorLauncher();
 
     private final TextField filterField = new TextField();
@@ -1063,6 +1065,17 @@ public final class RepositorySidebar extends VBox {
     }
 
     private void onRepositoriesChanged() {
+        // A repository removed elsewhere -- in the IntelliJ plugin, through
+        // the shared projects list -- gets the same cleanup as one removed
+        // with this sidebar's own button.
+        Set<RepositoryId> current = new HashSet<>();
+        repositoryManager.repositories().forEach(repository -> current.add(repository.id()));
+        for (RepositoryId shown : shownRepositoryIds) {
+            if (!current.contains(shown)) {
+                viewModel.removeRepository(shown);
+            }
+        }
+        shownRepositoryIds = current;
         for (Repository repository : repositoryManager.repositories()) {
             if (viewModel.repoStatus(repository.id()).isEmpty()
                     && viewModel.repoStatusFailure(repository.id()).isEmpty()) {
@@ -2392,7 +2405,7 @@ public final class RepositorySidebar extends VBox {
         String location = repository.isRemote()
                 ? repository.remote().host() + ":" + repository.remote().remotePath()
                 : repository.root().toString();
-        confirm.setContentText("This only removes it from Drydock's list. "
+        confirm.setContentText("This removes it from Drydock's list, here and in the IntelliJ plugin. "
                 + "Nothing at " + location + " is touched or deleted.");
         confirm.showAndWait().filter(button -> button == ButtonType.OK).ifPresent(button -> {
             repositoryManager.removeRepository(repository.id());

@@ -1,15 +1,22 @@
 package app.drydock.app;
 
 import app.drydock.domain.ApplicationState;
+import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.SessionWorkspace;
 import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
+import app.drydock.domain.RepositorySettings;
 import app.drydock.domain.SshRemote;
 import app.drydock.domain.UiTheme;
 import app.drydock.domain.WorkspaceUiState;
 import app.drydock.git.GitExecutableLocator;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.NotAGitRepositoryException;
+import app.drydock.git.WorktreeService;
+import app.drydock.projects.SharedProject;
+import app.drydock.projects.SharedProjectsFile;
+import app.drydock.projects.SharedProjectsSeed;
 import app.drydock.review.SessionReviewScopes;
 import app.drydock.state.ApplicationStateRepository;
 import org.junit.jupiter.api.AfterEach;
@@ -26,8 +33,11 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.time.Instant;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -38,18 +48,28 @@ class RepositoryManagerTest {
     Path tempDir;
 
     private GitStatusService gitStatusService;
+    private WorktreeService worktreeService;
     private InMemoryStateRepository stateRepository;
+    private SharedProjectsFile sharedFile;
     private RepositoryManager manager;
 
     @BeforeEach
     void setUp() {
         gitStatusService = new GitStatusService();
+        worktreeService = new WorktreeService();
         stateRepository = new InMemoryStateRepository();
-        manager = new RepositoryManager(stateRepository, gitStatusService);
+        sharedFile = new SharedProjectsFile(tempDir.resolve("shared").resolve("projects.json"));
+        manager = newManager(stateRepository, gitStatusService);
+    }
+
+    private RepositoryManager newManager(ApplicationStateRepository state, GitStatusService git) {
+        return new RepositoryManager(state, git, sharedFile, SharedProjectsSeed.mainCheckoutVia(worktreeService));
     }
 
     @AfterEach
     void tearDown() {
+        manager.stop();
+        worktreeService.close();
         gitStatusService.close();
     }
 
@@ -126,7 +146,7 @@ class RepositoryManagerTest {
     void addRemoteRepositoryRegistersWithResolvedRootAndRejectsDuplicates() throws Exception {
         Path fake = fakeSsh("printf '/srv/app\\n'");
         try (GitStatusService remoteGitStatusService = new GitStatusService(new GitExecutableLocator(), fake.toString())) {
-            RepositoryManager remoteManager = new RepositoryManager(stateRepository, remoteGitStatusService);
+            RepositoryManager remoteManager = newManager(stateRepository, remoteGitStatusService);
             SshRemote candidate = new SshRemote("user@h", "/srv/app/subdir");
 
             Repository added = remoteManager.addRemoteRepository(candidate).join();
@@ -304,6 +324,142 @@ class RepositoryManagerTest {
         flushState();
 
         assertEquals(savesBefore, stateRepository.saveCount());
+    }
+
+    // ---- the shared registered-projects list ---------------------------------
+
+    private Path initGitRepoWithCommit(String name) throws IOException, InterruptedException {
+        Path dir = initGitRepo(name);
+        run(dir, "git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init");
+        return dir;
+    }
+
+    private static Repository localRepository(Path root) {
+        Instant now = Instant.now();
+        return new Repository(RepositoryId.newId(), root, root.getFileName().toString(), now, now,
+                RepositorySettings.DEFAULT);
+    }
+
+    private List<RepositoryId> sharedIds() {
+        return sharedFile.read().projects().stream().map(SharedProject::id).toList();
+    }
+
+    @Test
+    void startSeedsSharedFileFromLocalListWhenAbsent() throws Exception {
+        Repository existing = localRepository(initGitRepo("seeded").toRealPath());
+        ApplicationStateStore.forRepository(stateRepository)
+                .update(state -> state.withRepositories(List.of(existing)));
+
+        manager.start().join();
+
+        assertEquals(List.of(existing.id()), sharedIds());
+        assertEquals(List.of(existing.id()), manager.repositories().stream().map(Repository::id).toList());
+    }
+
+    @Test
+    void startDoesNotSeedWhenSharedFilePresent() throws Exception {
+        Repository local = localRepository(initGitRepo("local-only").toRealPath());
+        ApplicationStateStore.forRepository(stateRepository)
+                .update(state -> state.withRepositories(List.of(local)));
+        SharedProject other = SharedProject.local(RepositoryId.newId(), initGitRepo("other").toRealPath(), "other",
+                Instant.now());
+        sharedFile.update(list -> List.of(other));
+
+        manager.start().join();
+
+        assertEquals(List.of(other.id()), sharedIds());
+        assertEquals(List.of(other.id()), manager.repositories().stream().map(Repository::id).toList());
+    }
+
+    @Test
+    void addWritesSharedAndLocalWithSameId() throws Exception {
+        Path repo = initGitRepo("added").toRealPath();
+
+        Repository added = manager.addRepository(repo).join();
+
+        assertEquals(List.of(added.id()), sharedIds());
+        assertEquals(List.of(added), manager.repositories());
+    }
+
+    @Test
+    void addingWorktreeFolderRegistersItsMainCheckout() throws Exception {
+        Path main = initGitRepoWithCommit("main").toRealPath();
+        Path worktree = tempDir.resolve("wt");
+        run(main, "git", "worktree", "add", "-q", "-b", "feature", worktree.toString());
+
+        Repository added = manager.addRepository(worktree).join();
+
+        assertEquals(main, added.root());
+        assertEquals("main", added.displayName());
+    }
+
+    @Test
+    void reAddReusesOrphanedSessionIdSoSessionsReattach() throws Exception {
+        Path repo = initGitRepo("again").toRealPath();
+        Repository first = manager.addRepository(repo).join();
+        ManagedAgentSession session = SessionManagerTest.newSessionFixture().toBuilder()
+                .repositoryId(first.id())
+                .workspace(new SessionWorkspace(repo, Optional.empty(), true))
+                .build();
+        ApplicationStateStore.forRepository(stateRepository)
+                .update(state -> state.withSessions(List.of(session)));
+
+        manager.removeRepository(first.id()).join();
+        Repository second = manager.addRepository(repo).join();
+
+        assertEquals(first.id(), second.id());
+    }
+
+    @Test
+    void removeDropsFromSharedAndVisibleList() throws Exception {
+        Repository added = manager.addRepository(initGitRepo("gone").toRealPath()).join();
+
+        manager.removeRepository(added.id()).join();
+
+        assertEquals(List.of(), sharedIds());
+        assertEquals(List.of(), manager.repositories());
+    }
+
+    @Test
+    void externalAddAppearsAndNotifiesOnce() throws Exception {
+        manager.start().join();
+        AtomicInteger notified = new AtomicInteger();
+        manager.addChangeListener(notified::incrementAndGet);
+        SharedProject fromIde = SharedProject.local(RepositoryId.newId(), initGitRepo("from-ide").toRealPath(),
+                "from-ide", Instant.now());
+        new SharedProjectsFile(sharedFile.file()).update(list -> List.of(fromIde));
+
+        manager.reconcile();
+        manager.reconcile();
+
+        assertEquals(List.of(fromIde.id()), manager.repositories().stream().map(Repository::id).toList());
+        assertEquals(1, notified.get());
+    }
+
+    @Test
+    void externalRemoveHidesAndNotifies() throws Exception {
+        Repository added = manager.addRepository(initGitRepo("ext-removed").toRealPath()).join();
+        AtomicInteger notified = new AtomicInteger();
+        manager.addChangeListener(notified::incrementAndGet);
+        new SharedProjectsFile(sharedFile.file()).update(list -> List.of());
+
+        manager.reconcile();
+
+        assertFalse(manager.repositories().stream().anyMatch(repository -> repository.id().equals(added.id())));
+        assertEquals(1, notified.get());
+    }
+
+    @Test
+    void malformedSharedFileKeepsLastGoodListAndRefusesAdd() throws Exception {
+        Repository added = manager.addRepository(initGitRepo("kept").toRealPath()).join();
+        Files.writeString(sharedFile.file(), "{broken");
+
+        manager.reconcile();
+        CompletionException thrown = assertThrows(CompletionException.class,
+                () -> manager.addRepository(initGitRepo("refused")).join());
+
+        assertEquals(List.of(added), manager.repositories());
+        assertTrue(thrown.getMessage().contains("projects.json"), thrown.getMessage());
     }
 
     private static final class InMemoryStateRepository implements ApplicationStateRepository {

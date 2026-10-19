@@ -5,6 +5,8 @@ import app.drydock.domain.RepositoryCatalog;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.RepositorySettings;
 import app.drydock.domain.SshRemote;
+import app.drydock.git.WorktreeService;
+import app.drydock.git.WorktreeService.Worktree;
 import app.drydock.state.json.JsonParseException;
 import app.drydock.state.json.JsonParser;
 import app.drydock.state.json.JsonValue;
@@ -27,6 +29,9 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Function;
 
 /**
@@ -50,6 +55,32 @@ public final class SharedProjectsSeed {
     private static final Logger LOG = System.getLogger(SharedProjectsSeed.class.getName());
 
     private SharedProjectsSeed() {
+    }
+
+    /** Bounded wait for {@code git worktree list} when resolving a main checkout. */
+    private static final long MAIN_CHECKOUT_TIMEOUT_SECONDS = 15;
+
+    /**
+     * The main checkout of the repository a folder belongs to, through
+     * {@code git worktree list}: the folder itself for a main checkout,
+     * empty when git cannot tell (the folder is gone, or it is not a
+     * repository). The function blocks: call it off the UI thread.
+     */
+    public static Function<Path, Optional<Path>> mainCheckoutVia(WorktreeService worktrees) {
+        return root -> {
+            try {
+                return worktrees.list(root).get(MAIN_CHECKOUT_TIMEOUT_SECONDS, TimeUnit.SECONDS).stream()
+                        .filter(Worktree::mainCheckout)
+                        .map(Worktree::path)
+                        .findFirst();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return Optional.empty();
+            } catch (ExecutionException | TimeoutException | RuntimeException e) {
+                LOG.log(Level.DEBUG, () -> "No main checkout for " + root + ": " + e);
+                return Optional.empty();
+            }
+        };
     }
 
     /** {@code ~/Library/Application Support/ClaudeProjectManager}, where every app install keeps its state. */
