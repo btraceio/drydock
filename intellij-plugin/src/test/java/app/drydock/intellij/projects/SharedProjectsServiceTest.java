@@ -161,4 +161,18 @@ class SharedProjectsServiceTest {
 
         assertEquals(List.of(fromApp, added), file.read().projects());
     }
+
+    @Test
+    void aServiceStoppedBeforeItStartedNeverWrites() throws Exception {
+        // The IDE can dispose the plugin service before its initialization
+        // reaches start(): the late start must not seed files afterwards.
+        SharedProjectsService service = new SharedProjectsService(file,
+                () -> List.of(project(dir.resolve("app-repo"))), executor);
+
+        service.stop();
+        service.start().join();
+        service.refresh();
+
+        assertFalse(Files.exists(file.file()));
+    }
 }

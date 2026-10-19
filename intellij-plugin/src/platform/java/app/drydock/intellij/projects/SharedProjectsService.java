@@ -19,6 +19,7 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
@@ -55,6 +56,8 @@ public final class SharedProjectsService {
     private volatile Optional<String> problem = Optional.empty();
     /** Guarded by {@code this}. */
     private long stamp = Long.MIN_VALUE;
+    /** Once stopped, never started or written again — disposal can come before initialization's start(). */
+    private volatile boolean stopped;
 
     public SharedProjectsService(SharedProjectsFile file, Supplier<List<SharedProject>> appSeed,
                                  ScheduledExecutorService executor) {
@@ -65,19 +68,28 @@ public final class SharedProjectsService {
 
     /** Seeds when needed, reads the list, then follows it; the future completes after the first read. */
     public CompletableFuture<Void> start() {
-        CompletableFuture<Void> first = CompletableFuture.runAsync(() -> {
-            try {
-                file.seedIfAbsent(appSeed);
-            } catch (SharedProjectsException e) {
-                LOG.log(Level.WARNING, () -> "Could not seed the shared projects list: " + e.getMessage());
-            }
-            refresh();
-        }, executor);
-        executor.scheduleWithFixedDelay(this::refreshQuietly, POLL_SECONDS, POLL_SECONDS, TimeUnit.SECONDS);
-        return first;
+        if (stopped) {
+            return CompletableFuture.completedFuture(null);
+        }
+        try {
+            CompletableFuture<Void> first = CompletableFuture.runAsync(() -> {
+                try {
+                    file.seedIfAbsent(appSeed);
+                } catch (SharedProjectsException e) {
+                    LOG.log(Level.WARNING, () -> "Could not seed the shared projects list: " + e.getMessage());
+                }
+                refresh();
+            }, executor);
+            executor.scheduleWithFixedDelay(this::refreshQuietly, POLL_SECONDS, POLL_SECONDS, TimeUnit.SECONDS);
+            return first;
+        } catch (RejectedExecutionException e) {
+            // stop() landed between the check above and here.
+            return CompletableFuture.completedFuture(null);
+        }
     }
 
     public void stop() {
+        stopped = true;
         executor.shutdownNow();
     }
 
@@ -146,6 +158,9 @@ public final class SharedProjectsService {
 
     /** Re-reads the file when it changed and tells the listeners. Blocking; package-private for tests. */
     synchronized void refresh() {
+        if (stopped) {
+            return;
+        }
         SharedProjectsFile.Snapshot snapshot = file.read();
         if (!snapshot.present()) {
             // Deleted while running (the advice for a malformed file): seed
