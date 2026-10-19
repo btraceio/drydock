@@ -28,6 +28,18 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class UserConfigTest {
 
     @Test
+    void withWorktreesDirectoryPreservesOtherFields() {
+        UserConfig base = new UserConfig(Optional.empty(), false,
+                new UserConfig.LanguageServer(Optional.of(Path.of("/opt/jdtls")), Optional.empty()));
+
+        UserConfig changed = base.withWorktreesDirectory(Optional.of(Path.of("/base")));
+
+        assertEquals(Optional.of(Path.of("/base")), changed.worktreesDirectory());
+        assertEquals(base.openChangedFilesInSkim(), changed.openChangedFilesInSkim());
+        assertEquals(base.languageServer(), changed.languageServer());
+    }
+
+    @Test
     void loadReturnsEmptyWhenTheConfigFileIsMissing(@TempDir Path dir) {
         UserConfig config = UserConfig.load(dir.resolve("config.json"));
 
