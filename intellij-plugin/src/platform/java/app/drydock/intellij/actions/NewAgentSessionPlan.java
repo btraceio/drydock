@@ -6,6 +6,7 @@ import app.drydock.git.WorktreeNaming;
 
 import java.util.Locale;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Every decision the New Agent Session dialog makes, as pure functions.
@@ -63,6 +64,34 @@ public final class NewAgentSessionPlan {
      * than inventing a name like {@code worktree} that says nothing.</p>
      */
     public static Optional<String> branchSuggestion(String task) {
+        return branchSuggestion(task, Set.of());
+    }
+
+    /**
+     * As {@link #branchSuggestion(String)}, never suggesting a name in
+     * {@code taken}: {@code add-a-farewell} becomes {@code add-a-farewell-2},
+     * then {@code -3}. A suggestion that git then refuses ("a branch named …
+     * already exists") reached the user only after the dialog had closed and
+     * taken their task with it.
+     */
+    public static Optional<String> branchSuggestion(String task, Set<String> taken) {
+        return baseSuggestion(task).map(base -> {
+            String candidate = base;
+            for (int n = 2; taken.contains(candidate); n++) {
+                candidate = base + "-" + n;
+            }
+            return candidate;
+        });
+    }
+
+    /** The refusal for a branch name that already exists locally, or empty. */
+    public static Optional<String> existingBranchRefusal(String branch, Set<String> localBranches) {
+        return localBranches.contains(branch)
+                ? Optional.of("A branch named " + branch + " already exists. Choose another name.")
+                : Optional.empty();
+    }
+
+    private static Optional<String> baseSuggestion(String task) {
         if (task == null || task.isBlank()) {
             return Optional.empty();
         }

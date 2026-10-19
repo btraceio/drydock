@@ -7,6 +7,7 @@ import app.drydock.intellij.actions.NewAgentSessionPlan.Placement;
 import org.junit.jupiter.api.Test;
 
 import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -98,5 +99,24 @@ class NewAgentSessionPlanTest {
         assertTrue(NewAgentSessionPlan.offersAgent(AgentKind.CODEX));
         assertTrue(NewAgentSessionPlan.offersAgent(AgentKind.PI));
         assertFalse(NewAgentSessionPlan.offersAgent(AgentKind.TERMINAL));
+    }
+
+    @Test
+    void theSuggestedBranchSkipsNamesThatAlreadyExist() {
+        // Git refuses an existing name only after the dialog has closed, and
+        // the typed task goes with it; the suggestion must never be one.
+        assertEquals(Optional.of("add-a-farewell"),
+                NewAgentSessionPlan.branchSuggestion("Add a farewell method", Set.of("main")));
+        assertEquals(Optional.of("add-a-farewell-2"),
+                NewAgentSessionPlan.branchSuggestion("Add a farewell method", Set.of("add-a-farewell")));
+        assertEquals(Optional.of("add-a-farewell-3"), NewAgentSessionPlan.branchSuggestion(
+                "Add a farewell method", Set.of("add-a-farewell", "add-a-farewell-2")));
+    }
+
+    @Test
+    void anExistingLocalBranchIsRefusedInTheDialog() {
+        assertEquals(Optional.of("A branch named add-a-farewell already exists. Choose another name."),
+                NewAgentSessionPlan.existingBranchRefusal("add-a-farewell", Set.of("main", "add-a-farewell")));
+        assertTrue(NewAgentSessionPlan.existingBranchRefusal("add-a-shout", Set.of("main")).isEmpty());
     }
 }

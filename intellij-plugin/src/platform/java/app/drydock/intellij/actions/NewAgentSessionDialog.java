@@ -43,6 +43,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * "New Agent Session…": what the agent should do, which agent, whether it may
@@ -67,7 +68,7 @@ final class NewAgentSessionDialog extends DialogWrapper {
     /** Everything resolved off the EDT before the dialog can be built. */
     record Inputs(Path workingDirectory, String repositoryName, String currentBranch, String defaultBranch,
                   List<Agent> agents, AgentKind preselected, boolean anotherWriterActive,
-                  List<String> remoteNames) {
+                  List<String> remoteNames, Set<String> localBranches) {
     }
 
     /** What the user chose. */
@@ -298,7 +299,8 @@ final class NewAgentSessionDialog extends DialogWrapper {
         if (branchEdited || !newWorktree.isSelected()) {
             return;
         }
-        String suggested = NewAgentSessionPlan.branchSuggestion(task.getText()).orElse("");
+        String suggested = NewAgentSessionPlan.branchSuggestion(task.getText(), inputs.localBranches())
+                .orElse("");
         if (!suggested.equals(branch.getText())) {
             boolean wasEdited = branchEdited;
             branch.setText(suggested);
@@ -324,6 +326,8 @@ final class NewAgentSessionDialog extends DialogWrapper {
                 // refusals cannot disagree about what a legal branch is.
                 BranchNameRules.check(name, inputs.remoteNames()).ifPresent(refusal ->
                         problems.add(new ValidationInfo(BranchNameRules.humanSentence(refusal), branch)));
+                NewAgentSessionPlan.existingBranchRefusal(name, inputs.localBranches()).ifPresent(refusal ->
+                        problems.add(new ValidationInfo(refusal, branch)));
             }
         }
         return problems;

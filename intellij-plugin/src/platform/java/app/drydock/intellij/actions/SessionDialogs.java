@@ -9,6 +9,8 @@ import app.drydock.config.UserConfig;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.SessionMode;
+import app.drydock.git.BranchListing;
+import app.drydock.git.BranchRef;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.WorktreeNaming;
 import app.drydock.intellij.agent.AgentConsoles;
@@ -44,6 +46,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -505,13 +508,20 @@ public final class SessionDialogs {
             // off another session's branch inherits work nobody asked for.
             String base = git.defaultBranch(repository.root())
                     .get(PREPARE_TIMEOUT_SECONDS, TimeUnit.SECONDS).orElse("main");
-            List<String> remotes = git.listBranches(repository.root())
-                    .get(PREPARE_TIMEOUT_SECONDS, TimeUnit.SECONDS).remotes();
+            BranchListing branches = git.listBranches(repository.root())
+                    .get(PREPARE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            List<String> remotes = branches.remotes();
+            // Local names only: a new worktree's branch is local, and a remote
+            // branch of the same name is not a collision git refuses.
+            Set<String> localBranches = branches.branches().stream()
+                    .filter(ref -> !ref.remote())
+                    .map(BranchRef::name)
+                    .collect(Collectors.toUnmodifiableSet());
             AgentRegistry registry = plugin.registry();
             AgentKind preselected = defaultAgent(registry, repository.settings().lastUsedAgent()).orElse(null);
             boolean writerActive = DrydockStartupActivity.sessions(project).hasActiveWriterIn(workingDirectory);
             return new NewAgentSessionDialog.Inputs(workingDirectory, repository.displayName(), current, base,
-                    registry.agents(), preselected, writerActive, remotes);
+                    registry.agents(), preselected, writerActive, remotes, localBranches);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return null;
