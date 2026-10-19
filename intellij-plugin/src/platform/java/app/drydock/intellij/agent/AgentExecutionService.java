@@ -188,7 +188,20 @@ public final class AgentExecutionService implements AgentConsoleHost, Disposable
                 .withInitialRows(30);
         commandLine.withWorkDirectory(workingDirectory.toString());
         commandLine.withCharset(StandardCharsets.UTF_8);
-        KillableProcessHandler handler = new KillableProcessHandler(commandLine);
+        KillableProcessHandler handler = new KillableProcessHandler(commandLine) {
+            /**
+             * Null, so {@code startNotify()} does not print the command line
+             * into the console. For a Run configuration that echo is useful;
+             * here it put five lines of {@code /bin/zsh -l -i -c "env -u …
+             * --settings …/hooks/settings.json"} above the agent's own screen
+             * on every start and resume — internals the user did not ask for,
+             * in the one place they read the agent.
+             */
+            @Override
+            public String getCommandLineForLog() {
+                return null;
+            }
+        };
         // Non-soft from birth, not only at Stop: a soft destroy anywhere in
         // the lifecycle (project close, IDE shutdown hooks) would send the
         // SIGINT that pi survives.
