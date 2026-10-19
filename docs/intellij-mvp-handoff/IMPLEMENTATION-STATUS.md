@@ -54,8 +54,9 @@ Also outstanding: the `DiffExtension` gutter/inlay findings; *enforcing* (not
 merely warning about) one writer per worktree; and the
 `n stale worktrees · Prune` line.
 
-Entry points are the **Drydock tool window** (left stripe) and ⌃⌥N (New
-task). The Tools → Drydock menu is gone, and with it Resume Conversation…
+Entry points are the **Drydock tool window** (right stripe, Drydock icon;
+its toolbar holds New task, Switch, Stop, Stop & Close, Resume, Done, Remove
+from Drydock and Refresh) and ⌃⌥N (New task). The Tools → Drydock menu is gone, and with it Resume Conversation…
 (out of the MVP until conversations can be summarised), New Worktree… and
 Check Out Branch in Worktree….
 
@@ -174,8 +175,12 @@ instead of showing a guarantee the agent cannot keep.
   2025.3 target has no replacement for. The full `recommended()` set was
   not rerun: it extracts ~4 GB per IDE and filled the verification host's
   disk; IU-253.33813.55 reported Compatible earlier in the pass.
-- **Manual**, in `./gradlew runIde` → Tools → Drydock. S1's gate (above) was
-  run this way, and so was window-close-without-stopping.
+- **Manual**, in `./gradlew runIde` (the Drydock tool window on the right;
+  Tools → Drydock before the task tool window replaced it). S1's gate (above)
+  was run this way, and so was window-close-without-stopping. Click from the
+  Mac itself: over a remote-viewing session the Welcome screen's project list
+  did not receive clicks at all (the IDE's UI thread saw no input), which
+  looked like a freeze and was not one.
 
 **Automated gates have twice been green while the feature was unusable** —
 once when the create flow started an agent but opened no tab at all, and once
@@ -273,9 +278,13 @@ standalone app following the shared list (this worktree's ghostty submodule
 is not initialised, so the app was not run — its side is covered by
 `RepositoryManagerTest` only).
 
-**Gate:** `./gradlew test buildPlugin verifyPlugin` → BUILD SUCCESSFUL, 1810
-tests, 0 failed; Plugin Verifier against IU-263.7031.23 (temporary override):
-Compatible, 7 usages of deprecated API.
+**Gate (latest):** `./gradlew test buildPlugin verifyPlugin` → BUILD
+SUCCESSFUL, 1828 tests, 0 failed; Plugin Verifier against IU-263.7031.23
+(temporary override): Compatible, 7 usages of deprecated API. App:
+`./gradlew :app:test` → BUILD SUCCESSFUL (all passing).
+
+The whole-branch review's findings (7 important, 13 minor) are all fixed,
+each with its own commit.
 
 **Known gap:** an agent at its prompt counts as working (and is asked about)
 until Claude reports its first activity event.
