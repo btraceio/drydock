@@ -20,7 +20,6 @@ import com.intellij.openapi.ui.DialogWrapper;
 import com.intellij.openapi.ui.TextFieldWithBrowseButton;
 import com.intellij.openapi.ui.ValidationInfo;
 import com.intellij.openapi.util.text.StringUtil;
-import com.intellij.ui.ComboboxSpeedSearch;
 import com.intellij.ui.DocumentAdapter;
 import com.intellij.ui.HyperlinkLabel;
 import com.intellij.ui.ScrollPaneFactory;
@@ -41,6 +40,7 @@ import javax.swing.JButton;
 import javax.swing.JComponent;
 import javax.swing.JPanel;
 import javax.swing.event.DocumentEvent;
+import javax.swing.text.JTextComponent;
 
 import java.awt.BorderLayout;
 import java.awt.Dimension;
@@ -205,8 +205,20 @@ final class NewTaskDialog extends DialogWrapper {
         inputs.startPoints().forEach(start::addItem);
         start.setEditable(true);
         start.setSelectedItem(inputs.defaultStart());
-        ComboboxSpeedSearch.installOn(start);
+        // No speed search: on an editable combo it moved the selection while
+        // the user typed ("old-experiment" jumped to add-farewell-method).
+        // Typing is free entry; Choose… is Git's own searchable picker.
         start.addActionListener(e -> refresh());
+        // The summary follows the text as it is typed, not only once the
+        // combo commits it on Enter or focus loss.
+        if (start.getEditor().getEditorComponent() instanceof JTextComponent typed) {
+            typed.getDocument().addDocumentListener(new DocumentAdapter() {
+                @Override
+                protected void textChanged(@NotNull DocumentEvent e) {
+                    refresh();
+                }
+            });
+        }
         JPanel startRow = new JPanel(new BorderLayout(JBUI.scale(6), 0));
         startRow.add(start, BorderLayout.CENTER);
         refChooser.ifPresent(chooser -> {
@@ -299,12 +311,21 @@ final class NewTaskDialog extends DialogWrapper {
         Choice choice = choice();
         // Wrapped at a fixed width: as plain text the line grew with the
         // branch and folder names and widened the dialog on every keystroke.
+        int before = summary.getPreferredSize().height;
         summary.setText("<html><div style=\"width:" + JBUI.scale(SUMMARY_WIDTH) + "px\">"
                 + StringUtil.escapeXmlEntities(NewTaskPlan.summary(inputs, choice)) + "</div></html>");
+        boolean resized = summary.getPreferredSize().height != before;
         Optional<String> caution = NewTaskPlan.warning(inputs, choice);
         warning.setText(caution.orElse(""));
+        resized |= warning.isVisible() != caution.isPresent();
         warning.setVisible(caution.isPresent());
         setOKButtonText(NewTaskPlan.primaryLabel(caution.isPresent()));
+        if (resized && summary.isShowing()) {
+            // The summary wrapped onto another line (or back), or the warning
+            // came or went: without a re-pack the dialog kept its height and
+            // cut off its last row.
+            pack();
+        }
     }
 
     private WorkIn workIn() {
