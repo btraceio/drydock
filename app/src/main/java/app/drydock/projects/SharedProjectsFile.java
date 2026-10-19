@@ -81,8 +81,19 @@ public final class SharedProjectsFile {
         this.lockFile = this.file.resolveSibling(this.file.getFileName() + ".lock");
     }
 
-    /** {@code ~/.drydock/projects.json}, beside the shared {@code config.json}. */
+    /** Overrides {@link #defaultFile()}: a sandbox IDE or a test run keeps its own list. */
+    public static final String OVERRIDE_PROPERTY = "drydock.projectsFile";
+
+    /**
+     * {@code ~/.drydock/projects.json}, beside the shared {@code config.json},
+     * unless the {@value #OVERRIDE_PROPERTY} system property names another
+     * file.
+     */
     public static Path defaultFile() {
+        String override = System.getProperty(OVERRIDE_PROPERTY);
+        if (override != null && !override.isBlank()) {
+            return Path.of(override);
+        }
         return Path.of(System.getProperty("user.home"), ".drydock", "projects.json");
     }
 

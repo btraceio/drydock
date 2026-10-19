@@ -48,6 +48,22 @@ class SharedProjectsFileTest {
     }
 
     @Test
+    void defaultFileHonoursTheOverrideProperty() {
+        String before = System.getProperty(SharedProjectsFile.OVERRIDE_PROPERTY);
+        try {
+            System.setProperty(SharedProjectsFile.OVERRIDE_PROPERTY, dir.resolve("elsewhere.json").toString());
+
+            assertEquals(dir.resolve("elsewhere.json"), SharedProjectsFile.defaultFile());
+        } finally {
+            if (before == null) {
+                System.clearProperty(SharedProjectsFile.OVERRIDE_PROPERTY);
+            } else {
+                System.setProperty(SharedProjectsFile.OVERRIDE_PROPERTY, before);
+            }
+        }
+    }
+
+    @Test
     void missingFileReadsEmptyNotPresent() {
         SharedProjectsFile.Snapshot snapshot = new SharedProjectsFile(file()).read();
 

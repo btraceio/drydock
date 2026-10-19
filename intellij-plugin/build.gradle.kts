@@ -154,6 +154,16 @@ tasks {
     named("buildSearchableOptions") {
         enabled = false
     }
+    // The sandbox IDE keeps its own registered-projects list: trying the
+    // tool window out must not add scratch repositories to the list the
+    // user's real Drydock app and IDE share (~/.drydock/projects.json).
+    // Seeding still reads the real app's list, read-only.
+    named<JavaExec>("runIde") {
+        val sandboxProjects = layout.buildDirectory.file("sandbox-projects/projects.json")
+        jvmArgumentProviders.add(CommandLineArgumentProvider {
+            listOf("-Ddrydock.projectsFile=" + sandboxProjects.get().asFile.absolutePath)
+        })
+    }
 }
 
 /**
