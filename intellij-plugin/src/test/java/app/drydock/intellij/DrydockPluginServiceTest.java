@@ -136,6 +136,20 @@ class DrydockPluginServiceTest {
     }
 
     @Test
+    void testServiceKeepsTheSharedProjectsListInItsOwnDirectory(@TempDir Path base) throws Exception {
+        DrydockPluginService service = new DrydockPluginService(base);
+        service.initialization().get(60, TimeUnit.SECONDS);
+        try {
+            service.sharedProjects().register(base.resolve("repo"), "repo").get(60, TimeUnit.SECONDS);
+
+            assertTrue(Files.exists(base.resolve("projects.json")), "the test seam must not use ~/.drydock");
+            assertEquals(1, service.sharedProjects().projects().size());
+        } finally {
+            service.dispose();
+        }
+    }
+
+    @Test
     void disposeBeforeInitializationCompletesIsSafe(@TempDir Path base) throws Exception {
         DrydockPluginService service = new DrydockPluginService(base);
         // Disposal races init: it must wait for it (bounded) rather than

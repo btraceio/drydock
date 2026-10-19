@@ -9,6 +9,11 @@ import app.drydock.intellij.agent.SessionActivityMonitor;
 import app.drydock.domain.ApplicationState;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.SessionStatus;
+import app.drydock.git.WorktreeService;
+import app.drydock.intellij.projects.SharedProjectsService;
+import app.drydock.projects.SharedProject;
+import app.drydock.projects.SharedProjectsFile;
+import app.drydock.projects.SharedProjectsSeed;
 import app.drydock.state.JsonApplicationStateRepository;
 
 import com.intellij.openapi.Disposable;
@@ -21,12 +26,14 @@ import java.lang.System.Logger.Level;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.Supplier;
 
 /**
  * The application-scoped Drydock service: the single owner of the plugin's
@@ -56,18 +63,33 @@ public final class DrydockPluginService implements Disposable {
     }
 
     public DrydockPluginService() {
-        this(defaultBaseDir());
+        this(defaultBaseDir(), SharedProjectsFile.defaultFile(), DrydockPluginService::seedFromApp);
     }
 
-    /** Test seam: an injected base directory instead of the IDE config path. */
+    /**
+     * Test seam: an injected base directory instead of the IDE config path,
+     * and a shared projects list inside it, seeded empty — a test must never
+     * touch the user's real {@code ~/.drydock/projects.json}.
+     */
     DrydockPluginService(Path baseDir) {
+        this(baseDir, baseDir.resolve("projects.json"), List::of);
+    }
+
+    private DrydockPluginService(Path baseDir, Path sharedProjectsFile, Supplier<List<SharedProject>> appSeed) {
         this.baseDir = baseDir;
+        this.sharedProjects = new SharedProjectsService(new SharedProjectsFile(sharedProjectsFile), appSeed,
+                Executors.newSingleThreadScheduledExecutor(runnable -> {
+                    Thread thread = new Thread(runnable, "drydock-shared-projects");
+                    thread.setDaemon(true);
+                    return thread;
+                }));
         this.repository = new JsonApplicationStateRepository(baseDir.resolve("state.json"));
         this.executor = Executors.newVirtualThreadPerTaskExecutor();
         this.initialization = CompletableFuture.runAsync(this::initialize, executor);
     }
 
     private final Path baseDir;
+    private final SharedProjectsService sharedProjects;
     private final JsonApplicationStateRepository repository;
     private final ExecutorService executor;
     private final CompletableFuture<Void> initialization;
@@ -126,6 +148,32 @@ public final class DrydockPluginService implements Disposable {
         return requireInitialized(activityMonitor, "activity monitor");
     }
 
+    /**
+     * The registered projects shared with the standalone app: what the
+     * Drydock tool window lists. Usable at once; its first read completes
+     * shortly after the service starts.
+     */
+    public SharedProjectsService sharedProjects() {
+        return sharedProjects;
+    }
+
+    /**
+     * The first shared list, when none exists: the standalone app's own
+     * projects, from its newest state file, read-only. The plugin's own
+     * catalog is deliberately not a source (it registered every project
+     * the IDE opened). Blocking git calls: runs on the shared list's thread.
+     */
+    private static List<SharedProject> seedFromApp() {
+        Optional<Path> appState = SharedProjectsSeed.newestAppStateFile(SharedProjectsSeed.appDataRoot());
+        if (appState.isEmpty()) {
+            return List.of();
+        }
+        try (WorktreeService worktrees = new WorktreeService()) {
+            return SharedProjectsSeed.fromRepositories(SharedProjectsSeed.readRepositoriesOnly(appState.get()),
+                    SharedProjectsSeed.mainCheckoutVia(worktrees));
+        }
+    }
+
     Path baseDir() {
         return baseDir;
     }
@@ -147,6 +195,7 @@ public final class DrydockPluginService implements Disposable {
         installActivityReporters();
         activityMonitor = new SessionActivityMonitor(this::stateStore, this::watcher, executor);
         activityMonitor.start();
+        sharedProjects.start();
     }
 
     private void installActivityReporters() {
@@ -216,6 +265,7 @@ public final class DrydockPluginService implements Disposable {
             // an executor it owns, so this shuts nothing down here.
             theWatcher.close();
         }
+        sharedProjects.stop();
         ApplicationStateStore theStore = stateStore;
         if (theStore != null) {
             theStore.flush();
