@@ -87,9 +87,17 @@ public final class NewTaskPlan {
             for (int i = 0; i < Math.min(3, words.length); i++) {
                 first.append(' ').append(words[i]);
             }
-            String slug = WorktreeNaming.slug(first.toString().toLowerCase(Locale.ROOT));
-            // slug() answers "worktree" when nothing usable survives.
-            base = "worktree".equals(slug) ? FALLBACK_BRANCH : slug;
+            // Not WorktreeNaming.slug: that keeps only what follows the last
+            // "/" (it names folders after branches like feat/x), which turned
+            // "CI/CD pipeline fix" into "cd-pipeline-fix", and it answers
+            // "worktree" for nothing usable, so a task named "Worktree" lost
+            // its name too.
+            String slug = first.toString().toLowerCase(Locale.ROOT)
+                    .replaceAll("[^a-z0-9]+", "-")
+                    .replaceAll("^-+|-+$", "");
+            if (!slug.isEmpty()) {
+                base = slug;
+            }
         }
         String candidate = base;
         for (int n = 2; taken.contains(candidate); n++) {

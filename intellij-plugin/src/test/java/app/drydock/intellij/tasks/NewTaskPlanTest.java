@@ -179,4 +179,11 @@ class NewTaskPlanTest {
         assertEquals(Optional.of("Choose a full folder path for the worktree."),
                 NewTaskPlan.refusal(inputs(Optional.empty(), false), relative, folder -> false));
     }
+
+    @Test
+    void branchKeepsWordsAroundSlashesAndTheWordWorktree() {
+        assertEquals("ci-cd-pipeline-fix", NewTaskPlan.branchFor("CI/CD pipeline fix", Set.of()));
+        assertEquals("fix-a-b-parser", NewTaskPlan.branchFor("Fix a/b parser", Set.of()));
+        assertEquals("worktree", NewTaskPlan.branchFor("Worktree", Set.of()));
+    }
 }
