@@ -6,6 +6,7 @@ import app.drydock.intellij.agent.SessionDonePlan.Risks;
 import com.intellij.icons.AllIcons;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.DialogWrapper;
+import com.intellij.openapi.util.text.StringUtil;
 import com.intellij.ui.components.JBCheckBox;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBRadioButton;
@@ -75,8 +76,11 @@ final class SessionDoneDialog extends DialogWrapper {
                 .orElseGet(() -> SessionDonePlan.removeDetail(inputs.windowOpen()))));
 
         SessionDonePlan.riskLine(inputs.risks()).ifPresent(line -> {
-            risk.setText("Removing loses " + line + ".");
+            // Wrapped at the dialog's width: as one plain line, adding the
+            // icon cut it to "1 commit not m...".
             risk.setIcon(AllIcons.General.Warning);
+            risk.setText("<html><div style=\"width:" + JBUI.scale(WIDTH - 40) + "px\">Removing loses "
+                    + StringUtil.escapeXmlEntities(line) + ".</div></html>");
             risk.setAlignmentX(Component.LEFT_ALIGNMENT);
             risk.setBorder(JBUI.Borders.emptyTop(8));
             root.add(risk);

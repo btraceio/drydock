@@ -6,6 +6,7 @@ import app.drydock.git.GitStatusService;
 import app.drydock.git.WorktreeService;
 import app.drydock.git.WorktreeService.Worktree;
 import app.drydock.intellij.DrydockPluginService;
+import app.drydock.intellij.DrydockSessionsListener;
 import app.drydock.intellij.agent.SessionDonePlan.Choice;
 import app.drydock.intellij.agent.SessionDonePlan.Risks;
 import app.drydock.intellij.startup.DrydockStartupActivity;
@@ -121,7 +122,10 @@ public final class SessionDone {
     private static Risks risks(GitStatusService git, WorktreeService worktrees, Path directory, Path main,
                                Worktree own, Optional<String> branch, boolean prMerged)
             throws InterruptedException, ExecutionException, TimeoutException {
-        List<String> status = worktrees.uncommittedChanges(directory).get(QUERY_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        List<String> status = worktrees.uncommittedChanges(directory).get(QUERY_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                .stream()
+                .filter(line -> !SessionDonePlan.isIdeProjectFile(line))
+                .toList();
         int untracked = (int) status.stream().filter(line -> line.startsWith("??")).count();
         int uncommitted = status.size() - untracked;
         if (branch.isEmpty()) {
@@ -218,6 +222,9 @@ public final class SessionDone {
                             ? worktrees.removeForced(mainCheckout, directory, branch)
                             : worktrees.remove(mainCheckout, directory, branch))
                             .get(REMOVE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                    // The task tree rebuilt when the row was forgotten, before
+                    // the folder was gone, and listed it as an idle worktree.
+                    DrydockSessionsListener.publishChanged();
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 } catch (ExecutionException | TimeoutException | RuntimeException e) {

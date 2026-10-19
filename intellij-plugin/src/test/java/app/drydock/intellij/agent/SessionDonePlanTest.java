@@ -82,4 +82,13 @@ class SessionDonePlanTest {
         assertEquals("Forget & Remove", SessionDonePlan.primaryLabel(Choice.FORGET_AND_REMOVE, false));
         assertEquals("Remove anyway", SessionDonePlan.primaryLabel(Choice.FORGET_AND_REMOVE, true));
     }
+
+    @Test
+    void ideProjectFilesAreNotCountedAsWorkToLose() {
+        assertTrue(SessionDonePlan.isIdeProjectFile("?? .idea/"));
+        assertTrue(SessionDonePlan.isIdeProjectFile("?? demo-add-farewell-method.iml"));
+        assertFalse(SessionDonePlan.isIdeProjectFile("?? notes.txt"));
+        assertFalse(SessionDonePlan.isIdeProjectFile("?? sub/module.iml"));
+        assertFalse(SessionDonePlan.isIdeProjectFile(" M .idea/workspace.xml"));
+    }
 }

@@ -81,6 +81,20 @@ public final class SessionDonePlan {
         return parts.isEmpty() ? Optional.empty() : Optional.of(String.join(", ", parts));
     }
 
+    /**
+     * Whether a {@code git status --porcelain} line is an untracked IDE
+     * project file at the worktree's top: {@code .idea/} or a {@code .iml}.
+     * Opening the worktree as a window creates them, so counting them would
+     * make every task's removal warn about files nobody wrote.
+     */
+    public static boolean isIdeProjectFile(String porcelainLine) {
+        if (!porcelainLine.startsWith("?? ")) {
+            return false;
+        }
+        String path = porcelainLine.substring(3);
+        return path.equals(".idea/") || (path.endsWith(".iml") && !path.contains("/"));
+    }
+
     /** Whether removing asks first: anything in {@link #riskLine}. */
     public static boolean needsConfirmation(Risks risks) {
         return riskLine(risks).isPresent();
