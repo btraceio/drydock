@@ -19,6 +19,7 @@ import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
 import app.drydock.git.WorktreeService;
 import app.drydock.intellij.DrydockPluginService;
+import app.drydock.intellij.project.ProjectIdentity;
 import app.drydock.intellij.startup.DrydockStartupActivity;
 import app.drydock.ui.AgentLabels;
 
@@ -520,7 +521,13 @@ public final class SessionDialogs {
             AgentRegistry registry = plugin.registry();
             AgentKind preselected = defaultAgent(registry, repository.settings().lastUsedAgent()).orElse(null);
             boolean writerActive = DrydockStartupActivity.sessions(project).hasActiveWriterIn(workingDirectory);
-            return new NewAgentSessionDialog.Inputs(workingDirectory, repository.displayName(), current, base,
+            // The main checkout's name, not this window's directory: a worktree
+            // registers as its own repository (R7), so displayName() said
+            // "Here — dd-scratch-add-a-farewell / add-a-farewell".
+            String repositoryName = ProjectIdentity.resolved(project)
+                    .map(ProjectIdentity::repository)
+                    .orElse(repository.displayName());
+            return new NewAgentSessionDialog.Inputs(workingDirectory, repositoryName, current, base,
                     registry.agents(), preselected, writerActive, remotes, localBranches);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();

@@ -58,6 +58,17 @@ public record ProjectIdentity(String repository, Optional<String> branch) {
     }
 
     /**
+     * {@code project}'s identity, resolving it now if the window's warm-up has
+     * not yet. Blocking git calls when it has not: a background thread only.
+     */
+    public static Optional<ProjectIdentity> resolved(Project project) {
+        if (of(project).isEmpty()) {
+            resolve(project);
+        }
+        return of(project);
+    }
+
+    /**
      * Resolves and stores {@code project}'s identity. Blocking git calls: a
      * background thread only. A directory git cannot describe keeps the
      * project's name and no branch rather than failing anything.
