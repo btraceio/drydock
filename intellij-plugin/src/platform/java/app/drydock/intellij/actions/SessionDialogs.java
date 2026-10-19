@@ -557,7 +557,11 @@ public final class SessionDialogs {
                     // and an agent that only appeared after a large import
                     // would be useless.
                     launchNewSession(opened, worktree, choice.agent(), title, choice.mode());
-                }, ModalityState.any());
+                    // Non-modal, not any(): opening a project is a model
+                    // change, allowed only from a write-safe context. The
+                    // dialog has closed by now, so nothing modal holds this
+                    // back.
+                }, ModalityState.nonModal());
             }
         });
     }

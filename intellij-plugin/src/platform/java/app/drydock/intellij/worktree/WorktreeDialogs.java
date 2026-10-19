@@ -8,13 +8,13 @@ import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.startup.DrydockStartupActivity;
 
 import com.intellij.ide.impl.OpenProjectTask;
+import com.intellij.ide.impl.ProjectUtil;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.progress.ProgressIndicator;
 import com.intellij.openapi.progress.ProgressManager;
 import com.intellij.openapi.progress.Task;
 import com.intellij.openapi.project.Project;
-import com.intellij.openapi.project.ex.ProjectManagerEx;
 import com.intellij.openapi.ui.DialogWrapper;
 import com.intellij.openapi.ui.Messages;
 import com.intellij.openapi.ui.ValidationInfo;
@@ -325,17 +325,21 @@ public final class WorktreeDialogs {
             if (answer == Messages.YES) {
                 openAsProject(worktreeRoot);
             }
-        }, ModalityState.any());
+            // Non-modal, not any(): opening a project changes the project
+            // model, which the platform only allows from a write-safe
+            // context. Under any() every open logged two SEVERE
+            // "Write-unsafe context" errors blamed on Drydock.
+        }, ModalityState.nonModal());
     }
 
     /**
      * Opens {@code worktreeRoot} as a project in a new frame. {@code
      * OpenProjectTask.build()} is this build's builder shape (the plan's
      * {@code newProject(...)} sketch was written before the API could be
-     * javap'd); the sync {@code openProject(Path, OpenProjectTask)} is the
-     * verified 253.3 surface and wraps itself in modal progress when called
-     * from the EDT (verified in its bytecode), so the EDT hop is the
-     * sanctioned path, not a re-implementation of it. Public because T15's
+     * javap'd); the sync {@code ProjectUtil.openOrImport(Path,
+     * OpenProjectTask)} is the File &gt; Open path and wraps itself in modal
+     * progress when called from the EDT, so the EDT hop is the sanctioned
+     * path, not a re-implementation of it. Public because T15's
      * worktree list panel reuses this same path for its per-row "Open as
      * project" action — one open path, two entries to it.
      *
@@ -343,9 +347,18 @@ public final class WorktreeDialogs {
      * cancelled: the new-agent-session flow has to continue <em>into</em> that
      * window to open the console tab and start the agent, so it needs the
      * instance rather than only the side effect.</p>
+     *
+     * <p>EDT, from a write-safe context: callers hop here with
+     * {@code ModalityState.nonModal()}, never {@code any()}.</p>
      */
     public static Project openAsProject(Path worktreeRoot) {
-        return ProjectManagerEx.getInstanceEx().openProject(worktreeRoot,
+        // openOrImport, not ProjectManagerEx.openProject: only the former runs
+        // the project-open processors File > Open runs -- a module for a plain
+        // directory, a Gradle or Maven import for a build. Without them the
+        // worktree window opened with a Project view holding nothing but
+        // External Libraries: no sources, not even the files the agent was
+        // editing.
+        return ProjectUtil.openOrImport(worktreeRoot,
                 OpenProjectTask.build().withForceOpenInNewFrame(true));
     }
 
