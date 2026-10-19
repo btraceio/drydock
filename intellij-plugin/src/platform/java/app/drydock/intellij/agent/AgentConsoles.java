@@ -209,15 +209,14 @@ public final class AgentConsoles {
     }
 
     /**
-     * The strip carries two controls whose surfaces land in later phases. They
-     * are present because the strip is the handoff's strip; saying so is
-     * better than a button that silently does nothing.
+     * The strip's Changes link, whose surface lands in a later phase. It is
+     * present because the strip is the handoff's strip; saying so is better
+     * than a link that silently does nothing.
      */
     static void notImplementedYet(Project project, AgentConsoleStrip.StripAction action) {
         String what = switch (action) {
             case SHOW_CHANGES -> "The branch-vs-main review opens in the Commit tool window, which is not built yet.";
-            case SESSION_MENU -> "\"Done with this session…\" is not built yet.";
-            case STOP, RESUME, START -> "";
+            case STOP, RESUME, START, SESSION_MENU -> "";
         };
         Messages.showInfoMessage(project, what, "Drydock");
     }

@@ -256,11 +256,11 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
             case STOP -> AgentExecutionService.getInstance(project).stop(current.id());
             case RESUME -> AgentConsoles.resume(project, current.id());
             case START -> AgentConsoles.startFresh(project, current.id());
-            // Both land in later phases (the review surface and the "Done with
-            // this session…" dialog). The buttons exist now because the strip
-            // is the handoff's strip; wiring them to nothing silently would be
-            // worse than saying so.
-            case SHOW_CHANGES, SESSION_MENU -> AgentConsoles.notImplementedYet(project, action);
+            case SESSION_MENU -> SessionDone.show(project, current);
+            // The review surface lands in a later phase. The link exists now
+            // because the strip is the handoff's strip; wiring it to nothing
+            // silently would be worse than saying so.
+            case SHOW_CHANGES -> AgentConsoles.notImplementedYet(project, action);
         }
     }
 
