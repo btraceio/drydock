@@ -11,10 +11,13 @@ import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.DialogWrapper;
 import com.intellij.openapi.ui.ValidationInfo;
 import com.intellij.ui.DocumentAdapter;
+import com.intellij.ui.ScrollPaneFactory;
 import com.intellij.ui.JBColor;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBRadioButton;
 import com.intellij.ui.components.JBTextField;
+import com.intellij.util.ui.EmptyIcon;
+import com.intellij.util.ui.JBFont;
 import com.intellij.util.ui.JBUI;
 import com.intellij.util.ui.UIUtil;
 import org.jetbrains.annotations.NotNull;
@@ -98,18 +101,39 @@ final class NewAgentSessionDialog extends DialogWrapper {
 
     @Override
     protected @Nullable JComponent createCenterPanel() {
-        JPanel root = new JPanel();
+        // The width is a floor, applied when the layout asks: a preferred
+        // size fixed here, while the panel is still empty, pinned the height
+        // to nothing, and the dialog opened with the task squashed to a thin
+        // strip that read as a separator rather than a field.
+        JPanel root = new JPanel() {
+            @Override
+            public Dimension getPreferredSize() {
+                Dimension natural = super.getPreferredSize();
+                return new Dimension(Math.max(natural.width, JBUI.scale(WIDTH)), natural.height);
+            }
+        };
         root.setLayout(new BoxLayout(root, BoxLayout.Y_AXIS));
-        root.setPreferredSize(new Dimension(JBUI.scale(WIDTH), root.getPreferredSize().height));
 
         task.setLineWrap(true);
         task.setWrapStyleWord(true);
+        // A JTextArea takes the LaF's monospaced TextArea font; a task is
+        // prose, and every other field in an IDE dialog is in the UI font.
+        task.setFont(JBFont.label());
         // The placeholder is an emptyText on JBTextArea in newer platforms;
         // a plain JTextArea in a scroll pane keeps the hint in the label
         // above it, which survives any LaF.
         root.add(section("Task", hint("What should the agent do?")));
-        JScrollPane taskScroll = new JScrollPane(task);
-        taskScroll.setPreferredSize(new Dimension(JBUI.scale(WIDTH - 40), JBUI.scale(66)));
+        JScrollPane taskScroll = ScrollPaneFactory.createScrollPane(task);
+        // Every child of a Y-axis BoxLayout must share one alignmentX. A
+        // centred one (a scroll pane's and a plain panel's default) among
+        // left-aligned sections makes BoxLayout align them all on a common
+        // axis: with the warning showing, every section jumped to the right
+        // half of the dialog and the branch field was cut to "farewell-methc".
+        taskScroll.setAlignmentX(Component.LEFT_ALIGNMENT);
+        // Three rows at all times: BoxLayout hands a shortfall to whichever
+        // child can shrink, and when the warning appeared that was the task,
+        // squeezed to a single line.
+        taskScroll.setMinimumSize(new Dimension(0, taskScroll.getPreferredSize().height));
         root.add(taskScroll);
         root.add(Box.createVerticalStrut(JBUI.scale(12)));
 
@@ -153,19 +177,20 @@ final class NewAgentSessionDialog extends DialogWrapper {
         worktreeRow.add(new JBLabel("⑂"));
         worktreeRow.add(Box.createHorizontalStrut(JBUI.scale(4)));
         branch.setColumns(22);
+        // One line tall, always: a Y-axis BoxLayout hands spare height to any
+        // child without a maximum, and the branch field used to take it and
+        // render twice its height.
+        branch.setMaximumSize(new Dimension(Integer.MAX_VALUE, branch.getPreferredSize().height));
         worktreeRow.add(branch);
         worktreeRow.add(Box.createHorizontalStrut(JBUI.scale(6)));
         worktreeRow.add(hint("from " + inputs.defaultBranch()));
         whereColumn.add(worktreeRow);
         root.add(section("Where", whereColumn));
 
-        warningLabel.setIcon(AllIcons.General.Warning);
-        warningPanel.setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createLineBorder(JBUI.CurrentTheme.Banner.WARNING_BORDER_COLOR),
-                JBUI.Borders.empty(6, 8)));
         warningPanel.setBackground(JBUI.CurrentTheme.Banner.WARNING_BACKGROUND);
         warningPanel.add(warningLabel, BorderLayout.CENTER);
-        warningPanel.setVisible(false);
+        warningPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        showWarning(Optional.empty());
         root.add(Box.createVerticalStrut(JBUI.scale(12)));
         root.add(warningPanel);
 
@@ -189,6 +214,16 @@ final class NewAgentSessionDialog extends DialogWrapper {
     }
 
     /**
+     * The task, so the dialog opens ready to type into. Without this the
+     * platform focused the primary button, and the first words typed went
+     * nowhere.
+     */
+    @Override
+    public @Nullable JComponent getPreferredFocusedComponent() {
+        return task;
+    }
+
+    /**
      * Mode decides the default placement (writes → its own worktree,
      * read-only → here). Only the default: the human can still override it,
      * and a later mode change re-applies the default because the two choices
@@ -206,13 +241,34 @@ final class NewAgentSessionDialog extends DialogWrapper {
         branch.setEnabled(worktree);
         Optional<String> warning = NewAgentSessionPlan.warning(
                 selectedMode(), selectedPlacement(), inputs.anotherWriterActive());
-        warningLabel.setText(warning.orElse(""));
-        warningPanel.setVisible(warning.isPresent());
+        showWarning(warning);
         setOKButtonText(NewAgentSessionPlan.primaryLabel(selectedPlacement(), warning.isPresent()));
         if (worktree) {
             suggestBranch();
         }
         repaint();
+    }
+
+    /**
+     * Fills or empties the warning's slot. The slot itself never leaves the
+     * layout: hiding it made the window either take the warning's height out
+     * of the task field (squeezed to one line) or, once re-packed, refuse to
+     * shrink back and hand the spare height to the branch field. A slot of
+     * constant size keeps the dialog still while Mode and Where are toggled,
+     * so the buttons do not move under the pointer either.
+     */
+    private void showWarning(Optional<String> warning) {
+        boolean shown = warning.isPresent();
+        // The same outer size either way: a 1 px line plus padding, or 1 px
+        // of nothing plus the same padding.
+        warningPanel.setBorder(BorderFactory.createCompoundBorder(
+                shown ? BorderFactory.createLineBorder(JBUI.CurrentTheme.Banner.WARNING_BORDER_COLOR)
+                        : BorderFactory.createEmptyBorder(1, 1, 1, 1),
+                JBUI.Borders.empty(6, 8)));
+        warningPanel.setOpaque(shown);
+        warningLabel.setIcon(shown ? AllIcons.General.Warning : EmptyIcon.create(AllIcons.General.Warning));
+        // A space, not "", so the empty slot keeps a text line's height.
+        warningLabel.setText(warning.orElse(" "));
     }
 
     /** Keeps the branch field in step with the task until the human takes it over. */
