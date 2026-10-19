@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>body{margin:0;background:#e4e5e9;color:#1e1f22;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}a{color:#3574f0}a:hover{color:#2557c4}textarea,input{font-family:inherit}</style>
+</helmet>
+<div style="width:{{ outerW }};height:{{ outerH }};overflow:hidden;margin:0 auto">
+<div style="display:flex;flex-direction:column;align-items:flex-start;gap:14px;padding:18px 20px 40px;box-sizing:border-box;width:1400px;transform:scale({{ zoom }});transform-origin:top left">
+
+<div style="width:1360px;display:flex;align-items:center;gap:8px;font-size:12px;color:#5a5d68;flex-wrap:wrap">
+  <b style="color:#1e1f22;font-size:13px">Drydock MVP · clickable prototype</b>
+  <span style="color:#9a9ca6">·</span><span>Scenario:</span>
+  <button onClick="{{ simAttention }}" style="font:inherit;padding:3px 10px;border:1px solid #c9ccd6;border-radius:5px;background:#fff;cursor:pointer" style-hover="background:#f0f1f3">Codex needs you</button>
+  <button onClick="{{ simClose }}" style="font:inherit;padding:3px 10px;border:1px solid #c9ccd6;border-radius:5px;background:#fff;cursor:pointer" style-hover="background:#f0f1f3">Close this window</button>
+  <button onClick="{{ simRestart }}" style="font:inherit;padding:3px 10px;border:1px solid #c9ccd6;border-radius:5px;background:#fff;cursor:pointer" style-hover="background:#f0f1f3">Restart IDE</button>
+  <button onClick="{{ simWelcome }}" style="font:inherit;padding:3px 10px;border:1px solid #c9ccd6;border-radius:5px;background:#fff;cursor:pointer" style-hover="background:#f0f1f3">Welcome screen</button>
+  <button onClick="{{ simReset }}" style="font:inherit;padding:3px 10px;border:1px solid transparent;border-radius:5px;background:transparent;cursor:pointer;color:#6c707e" style-hover="color:#1e1f22">Reset</button>
+  <span style="flex:1"></span>
+  <span style="color:#818594">Try: Agents ▾ in the title bar · the Commit stripe icon · ⋯ on the agent strip</span>
+</div>
+
+<sc-if value="{{ isWelcome }}" hint-placeholder-val="{{ false }}">
+<div style="width:900px;height:600px;border-radius:10px;overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,.18);background:#fff;display:flex;flex-direction:column;border:1px solid #c9ccd6">
+  <div style="height:38px;flex:none;display:flex;align-items:center;gap:8px;padding:0 14px;background:#f2f3f5;border-bottom:1px solid #ebecf0"><span style="width:12px;height:12px;border-radius:50%;background:#ff5f57"></span><span style="width:12px;height:12px;border-radius:50%;background:#febc2e"></span><span style="width:12px;height:12px;border-radius:50%;background:#28c840"></span><span style="flex:1;text-align:center;font-size:13px;color:#5a5d68;margin-right:52px">Welcome</span></div>
+  <div style="flex:1;display:flex;min-height:0">
+    <div style="width:200px;flex:none;background:#f7f8fa;border-right:1px solid #ebecf0;padding:14px 10px;display:flex;flex-direction:column;gap:2px;font-size:13px">
+      <span style="padding:6px 10px;border-radius:5px;color:#5a5d68">Projects</span>
+      <span style="padding:6px 10px;border-radius:5px;background:#d5e1ff;display:flex;align-items:center;gap:8px"><b>Agents</b><span style="flex:1"></span><span style="font-size:11px;color:#5a5d68">{{ sessionCount }}</span></span>
+      <span style="padding:6px 10px;border-radius:5px;color:#5a5d68">Customize</span>
+      <span style="padding:6px 10px;border-radius:5px;color:#5a5d68">Plugins</span>
+      <span style="padding:6px 10px;border-radius:5px;color:#5a5d68">Learn</span>
+    </div>
+    <div style="flex:1;display:flex;flex-direction:column;padding:18px 22px;gap:14px;min-width:0;overflow:auto">
+      <div style="display:flex;gap:10px;align-items:center">
+        <span style="flex:1;height:30px;border:1px solid #c9ccd6;border-radius:5px;display:flex;align-items:center;padding:0 10px;color:#9a9ca6;font-size:13px">Search sessions</span>
+        <button onClick="{{ openNewFromWelcome }}" style="font:inherit;font-size:13px;height:30px;padding:0 14px;border:none;border-radius:5px;background:#3574f0;color:#fff;cursor:pointer" style-hover="background:#2b63d9">New Agent Worktree…</button>
+      </div>
+      <sc-for list="{{ welcomeGroups }}" as="g" hint-placeholder-count="3">
+        <div style="display:flex;flex-direction:column;gap:2px">
+          <div style="font-size:12px;font-weight:600;color:#5a5d68;padding:4px 0">{{ g.repo }}</div>
+          <sc-for list="{{ g.rows }}" as="r" hint-placeholder-count="2">
+            <div style="display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:6px;font-size:13px" style-hover="background:#f0f1f3">
+              <span style="width:9px;height:9px;border-radius:50%;box-sizing:border-box;flex:none;background:{{ r.dotBg }};border:{{ r.dotBorder }}"></span>
+              <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ r.title }}</span>
+              <sc-if value="{{ r.ro }}" hint-placeholder-val="{{ false }}"><span style="font-size:10px;padding:0 4px;border:1px solid #a8abb6;border-radius:3px;color:#5a5d68">RO</span></sc-if>
+              <span style="flex:1"></span>
+              <span style="color:#818594;font-size:12px;white-space:nowrap">{{ r.meta }}</span>
+              <button onClick="{{ r.open }}" style="font:inherit;font-size:12px;padding:2px 10px;border:1px solid #c9ccd6;border-radius:4px;background:#fff;cursor:pointer" style-hover="background:#f0f1f3">Open</button>
+              <sc-if value="{{ r.idle }}" hint-placeholder-val="{{ true }}"><button onClick="{{ r.resume }}" style="font:inherit;font-size:12px;padding:2px 10px;border:none;border-radius:4px;background:#3574f0;color:#fff;cursor:pointer" style-hover="background:#2b63d9">Resume</button></sc-if>
+            </div>
+          </sc-for>
+        </div>
+      </sc-for>
+      <div style="font-size:12px;color:#818594">Nothing runs without a window. Open opens the worktree window; Resume also starts one execution.</div>
+    </div>
+  </div>
+</div>
+</sc-if>
+
+<sc-if value="{{ isIde }}" hint-placeholder-val="{{ true }}">
+<div style="width:1360px;height:860px;border-radius:10px;overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,.18);background:#fff;display:flex;flex-direction:column;position:relative;border:1px solid #c9ccd6">
+
+  <div style="height:40px;flex:none;display:flex;align-items:center;gap:6px;padding:0 10px 0 14px;background:#f2f3f5;border-bottom:1px solid #ebecf0;font-size:13px">
+    <span style="display:flex;gap:8px;margin-right:14px"><span style="width:12px;height:12px;border-radius:50%;background:#ff5f57"></span><span style="width:12px;height:12px;border-radius:50%;background:#febc2e"></span><span style="width:12px;height:12px;border-radius:50%;background:#28c840"></span></span>
+    <span style="display:flex;align-items:center;gap:7px;padding:4px 8px;border-radius:5px;cursor:default" style-hover="background:#e3e4e8"><span style="width:20px;height:20px;border-radius:4px;background:{{ repoColor }};color:#fff;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center">{{ repoInitials }}</span><b>{{ winRepo }}</b><span style="color:#818594;font-size:10px">▼</span></span>
+    <span style="display:flex;align-items:center;gap:6px;padding:4px 8px;border-radius:5px;color:#1e1f22" style-hover="background:#e3e4e8"><span style="color:#6c707e">⑂</span>{{ winBranch }}<span style="color:#818594;font-size:10px">▼</span></span>
+    <sc-if value="{{ hasWaiting }}" hint-placeholder-val="{{ false }}">
+      <button onClick="{{ toggleAgents }}" style="font:inherit;display:flex;align-items:center;gap:7px;height:28px;padding:0 10px;border-radius:5px;border:1px solid #f0c674;background:#fdf3dc;cursor:pointer;margin-left:4px;white-space:nowrap" style-hover="background:#fbe9c0"><span style="width:8px;height:8px;border-radius:50%;background:#e0a030"></span><b style="font-size:12.5px">{{ waitingCount }} waiting</b><span style="color:#5a5d68;font-size:12.5px">· Agents</span><span style="color:#818594;font-size:10px">▼</span></button>
+    </sc-if>
+    <sc-if value="{{ noWaiting }}" hint-placeholder-val="{{ true }}">
+      <button onClick="{{ toggleAgents }}" style="font:inherit;display:flex;align-items:center;gap:7px;height:28px;padding:0 10px;border-radius:5px;border:1px solid transparent;background:transparent;cursor:pointer;margin-left:4px" style-hover="background:#e3e4e8"><span style="width:8px;height:8px;border-radius:50%;background:#3574f0"></span><span style="font-size:12.5px">{{ runningCount }}</span><span style="font-size:12.5px">Agents</span><span style="color:#818594;font-size:10px">▼</span></button>
+    </sc-if>
+    <span style="flex:1"></span>
+    <span style="color:#6c707e;padding:4px 8px;font-size:14px">⌕</span>
+    <span style="color:#6c707e;padding:4px 8px;font-size:14px">⚙</span>
+  </div>
+
+  <div style="flex:1;display:flex;min-height:0">
+    <div style="width:40px;flex:none;background:#f7f8fa;border-right:1px solid #ebecf0;display:flex;flex-direction:column;align-items:center;gap:4px;padding-top:8px">
+      <button onClick="{{ toggleProject }}" title="Project" style="width:30px;height:30px;border:none;border-radius:5px;background:{{ projectBtnBg }};cursor:pointer;font-size:14px;color:#5a5d68" style-hover="background:#e3e4e8">▤</button>
+      <button onClick="{{ toggleReview }}" title="Commit" style="position:relative;width:30px;height:30px;border:none;border-radius:5px;background:{{ reviewBtnBg }};cursor:pointer;font-size:14px;color:#5a5d68" style-hover="background:#e3e4e8">◉<sc-if value="{{ hasOpenFinding }}" hint-placeholder-val="{{ false }}"><span style="position:absolute;right:3px;top:3px;width:7px;height:7px;border-radius:50%;background:#e0a030;border:1.5px solid #f7f8fa"></span></sc-if></button>
+    </div>
+
+    <sc-if value="{{ showProjectTw }}" hint-placeholder-val="{{ false }}">
+      <div style="width:250px;flex:none;border-right:1px solid #ebecf0;display:flex;flex-direction:column;font-size:13px">
+        <div style="height:36px;flex:none;display:flex;align-items:center;padding:0 12px;font-weight:600">Project</div>
+        <div style="padding:0 8px;display:flex;flex-direction:column;gap:1px;color:#1e1f22">
+          <span style="padding:3px 6px">▾ {{ winFolder }}</span>
+          <span style="padding:3px 6px 3px 22px">▸ app</span>
+          <span style="padding:3px 6px 3px 22px">▸ docs</span>
+          <span style="padding:3px 6px 3px 22px">▸ intellij-plugin</span>
+          <span style="padding:3px 6px 3px 22px">build.gradle.kts</span>
+          <span style="padding:3px 6px 3px 22px">README.md</span>
+        </div>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ showReviewTw }}" hint-placeholder-val="{{ false }}">
+      <div style="width:320px;flex:none;border-right:1px solid #ebecf0;display:flex;flex-direction:column;font-size:13px;position:relative">
+        <div style="height:36px;flex:none;display:flex;align-items:center;gap:14px;padding:0 12px"><b>Commit</b><span style="color:#818594">Shelf</span></div>
+        <div style="flex:none;padding:6px 12px 8px;display:flex;flex-direction:column;gap:3px;border-bottom:1px solid #ebecf0">
+          <span style="display:flex;align-items:center;gap:6px;font-size:12.5px"><span style="color:#6c707e">Scope</span><b>Branch vs main</b><span style="color:#818594;font-size:10px">▼</span><span style="flex:1"></span><span style="color:#5a5d68">{{ reviewedLabel }}</span></span>
+          <span style="font-size:12px;color:#6c707e">{{ scopeHint }}</span>
+        </div>
+        <div style="flex:1;overflow:auto;padding:6px 6px;display:flex;flex-direction:column;gap:1px">
+          <div style="padding:3px 6px;color:#5a5d68;font-size:12.5px">▾ {{ winBranch }} vs main · {{ fileCount }} files</div>
+          <sc-for list="{{ changeRows }}" as="c" hint-placeholder-count="4">
+            <div style="display:flex;flex-direction:column">
+              <div onClick="{{ c.open }}" style="display:flex;align-items:center;gap:6px;padding:3px 6px 3px 22px;border-radius:4px;cursor:pointer;background:{{ c.bg }}" style-hover="background:#e8ecf7">
+                <span style="color:#6c707e;font-size:11px">{{ c.caret }}</span>
+                <span style="color:#3574f0;font-size:11px;font-family:'JetBrains Mono',monospace">J</span>
+                <span style="white-space:nowrap">{{ c.file }}</span>
+                <sc-if value="{{ c.uncommitted }}" hint-placeholder-val="{{ false }}"><span title="uncommitted" style="color:#3574f0;font-size:10px">●</span></sc-if>
+                <span style="color:#818594;font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ c.dir }}</span>
+                <span style="flex:1"></span>
+                <span style="font-size:12px;white-space:nowrap;color:{{ c.markColor }}">{{ c.mark }}</span>
+              </div>
+              <sc-for list="{{ c.findings }}" as="fd" hint-placeholder-count="0">
+                <div onClick="{{ fd.open }}" style="display:flex;align-items:center;gap:6px;padding:3px 6px 3px 46px;border-radius:4px;cursor:pointer;font-size:12.5px" style-hover="background:#e8ecf7">
+                  <span style="font-size:10px;font-weight:700;color:#a86500;background:#fdf3dc;border-radius:3px;padding:0 4px">{{ fd.sev }}</span>
+                  <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0">{{ fd.title }}</span>
+                  <span style="color:#818594;font-size:11.5px">:{{ fd.line }}</span>
+                </div>
+              </sc-for>
+            </div>
+          </sc-for>
+          <div style="padding:6px 6px 0 22px;font-size:12px;color:#818594">{{ resolvedNote }}</div>
+        </div>
+        <div style="flex:none;border-top:1px solid #ebecf0;padding:10px 12px;display:flex;flex-direction:column;gap:8px">
+          <div style="border:1px solid #c9ccd6;border-radius:5px;padding:7px 9px;font-size:13px;min-height:44px;display:flex;flex-direction:column;gap:2px"><span>{{ commitMsg }}</span><span style="font-size:11.5px;color:#818594">Drafted by {{ winAgent }} · edit freely</span></div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span style="font-size:12px;color:#818594">No checkboxes in branch scope</span>
+            <span style="flex:1"></span>
+            <button onClick="{{ toggleFinish }}" style="font:inherit;font-size:13px;height:28px;padding:0 12px;border:none;border-radius:5px;background:#3574f0;color:#fff;cursor:pointer" style-hover="background:#2b63d9">Finish ▾</button>
+          </div>
+        </div>
+        <sc-if value="{{ finishOpen }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute;left:12px;right:12px;bottom:54px;background:#fff;border:1px solid #c9ccd6;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.16);padding:5px;display:flex;flex-direction:column;font-size:13px;z-index:5">
+            <div onClick="{{ doMerge }}" style="padding:7px 10px;border-radius:5px;display:flex;flex-direction:column;gap:2px;cursor:pointer" style-hover="background:#e8ecf7"><b>Merge into main</b><span style="font-size:12px;color:#6c707e">Commit, merge in the main checkout, close this window</span><span style="font-size:12px;color:#2f7d32">✓ main checkout is clean and on main</span></div>
+            <div onClick="{{ doPush }}" style="padding:7px 10px;border-radius:5px;display:flex;flex-direction:column;gap:2px;cursor:pointer" style-hover="background:#e8ecf7"><b>Push &amp; create pull request…</b><span style="font-size:12px;color:#6c707e">Commit, push, open a PR; the window stays for review rounds</span></div>
+            <div onClick="{{ toggleRemoveAfter }}" style="padding:7px 10px;border-top:1px solid #ebecf0;margin-top:3px;display:flex;align-items:center;gap:8px;cursor:pointer;color:#1e1f22"><span style="width:14px;height:14px;border:1px solid #a8abb6;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:11px;background:#fff">{{ removeAfterMark }}</span>Remove worktree after merge</div>
+            <sc-if value="{{ hasOpenFinding }}" hint-placeholder-val="{{ false }}"><div style="padding:4px 10px 6px;font-size:12px;color:#a86500">1 open finding. You can still finish.</div></sc-if>
+          </div>
+        </sc-if>
+      </div>
+    </sc-if>
+
+    <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+      <div style="height:38px;flex:none;display:flex;align-items:stretch;border-bottom:1px solid #ebecf0;padding:0 4px;overflow:hidden">
+        <sc-for list="{{ tabs }}" as="t" hint-placeholder-count="3">
+          <div onClick="{{ t.select }}" style="display:flex;align-items:center;gap:7px;padding:0 12px;font-size:13px;cursor:pointer;white-space:nowrap;border-bottom:2px solid {{ t.underline }};color:{{ t.color }}" style-hover="background:#f0f1f3">
+            <sc-if value="{{ t.isAgent }}" hint-placeholder-val="{{ false }}"><span style="width:8px;height:8px;border-radius:50%;box-sizing:border-box;flex:none;background:{{ t.dotBg }};border:{{ t.dotBorder }}"></span></sc-if>
+            <sc-if value="{{ t.isFile }}" hint-placeholder-val="{{ true }}"><span style="color:#3574f0;font-size:11px;font-family:'JetBrains Mono',monospace">J</span></sc-if>
+            <span>{{ t.label }}</span>
+            <sc-if value="{{ t.ro }}" hint-placeholder-val="{{ false }}"><span style="font-size:10px;padding:0 4px;border:1px solid #a8abb6;border-radius:3px;color:#5a5d68">RO</span></sc-if>
+            <sc-if value="{{ t.isAgent }}" hint-placeholder-val="{{ false }}"><span style="color:#a8abb6;font-size:10px" title="pinned">⚲</span></sc-if>
+            <sc-if value="{{ t.isFile }}" hint-placeholder-val="{{ true }}"><span style="color:#a8abb6;font-size:11px">✕</span></sc-if>
+          </div>
+        </sc-for>
+        <span style="flex:1"></span>
+      </div>
+
+      <sc-if value="{{ showAgent }}" hint-placeholder-val="{{ true }}">
+        <div style="flex:1;display:flex;flex-direction:column;min-height:0">
+          <div style="height:36px;flex:none;display:flex;align-items:center;gap:10px;padding:0 12px;background:#f7f8fa;border-bottom:1px solid #ebecf0;font-size:13px;white-space:nowrap">
+            <span style="width:9px;height:9px;border-radius:50%;box-sizing:border-box;flex:none;background:{{ cur.dotBg }};border:{{ cur.dotBorder }}"></span>
+            <b>{{ cur.stateWord }}</b>
+            <sc-if value="{{ cur.ro }}" hint-placeholder-val="{{ false }}"><span style="font-size:11.5px;padding:1px 6px;border:1px solid #a8abb6;border-radius:4px;color:#5a5d68">Read-only · won't edit files</span></sc-if>
+            <span style="color:#6c707e">{{ cur.agent }} · {{ cur.meta }}</span>
+            <span style="flex:1"></span>
+            <sc-if value="{{ cur.running }}" hint-placeholder-val="{{ true }}">
+              <a onClick="{{ toggleReview }}" style="cursor:pointer;font-size:12.5px">Changes</a>
+              <button onClick="{{ stopCur }}" style="font:inherit;font-size:12.5px;height:26px;padding:0 10px;border:1px solid #c9ccd6;border-radius:5px;background:#fff;cursor:pointer;display:flex;align-items:center;gap:6px" style-hover="background:#f0f1f3"><span style="width:8px;height:8px;background:#db3b3b;border-radius:1px"></span>Stop</button>
+            </sc-if>
+            <sc-if value="{{ cur.idle }}" hint-placeholder-val="{{ false }}">
+              <button onClick="{{ resumeCur }}" style="font:inherit;font-size:12.5px;height:26px;padding:0 12px;border:none;border-radius:5px;background:#3574f0;color:#fff;cursor:pointer" style-hover="background:#2b63d9">Resume · {{ cur.cost }}</button>
+            </sc-if>
+            <button onClick="{{ openDone }}" title="Done with this session…" style="font:inherit;font-size:15px;height:26px;width:28px;border:none;border-radius:5px;background:transparent;cursor:pointer;color:#5a5d68" style-hover="background:#e3e4e8">⋯</button>
+          </div>
+          <div style="flex:1;overflow:auto;padding:14px 18px;font:13px/1.6 'JetBrains Mono',ui-monospace,Menlo,monospace;background:#fff">
+            <sc-for list="{{ cur.lines }}" as="l" hint-placeholder-count="6">
+              <div style="white-space:pre-wrap;color:{{ l.color }};background:{{ l.bg }};opacity:{{ l.op }}">{{ l.t }}</div>
+            </sc-for>
+            <sc-if value="{{ cur.attention }}" hint-placeholder-val="{{ false }}">
+              <div style="margin-top:10px;border:1px solid #e0a030;border-radius:6px;padding:10px 14px;max-width:620px;display:flex;flex-direction:column;gap:6px;background:#fffaf0">
+                <b style="font-weight:600">Allow command?</b>
+                <span style="background:#f7f8fa;padding:4px 8px;border-radius:4px">./gradlew :intellij-plugin:test</span>
+                <div onClick="{{ answerYes }}" style="cursor:pointer;padding:2px 6px;border-radius:4px;color:#3574f0" style-hover="background:#e8ecf7">› 1. Yes</div>
+                <div onClick="{{ answerYes }}" style="cursor:pointer;padding:2px 6px;border-radius:4px" style-hover="background:#e8ecf7">  2. Yes, and don't ask again for gradlew</div>
+                <div onClick="{{ answerNo }}" style="cursor:pointer;padding:2px 6px;border-radius:4px" style-hover="background:#e8ecf7">  3. No, tell Codex what to do instead</div>
+              </div>
+            </sc-if>
+            <sc-if value="{{ cur.idle }}" hint-placeholder-val="{{ false }}">
+              <div style="margin-top:12px;color:#818594;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:12.5px">— stopped {{ cur.stoppedWhy }} · nothing restarts on its own —</div>
+            </sc-if>
+            <sc-if value="{{ cur.running }}" hint-placeholder-val="{{ true }}">
+              <div style="margin-top:8px;display:flex;gap:6px;color:#1e1f22"><span style="color:#818594">&gt;</span><span style="width:8px;height:17px;background:#1e1f22;opacity:.7"></span></div>
+            </sc-if>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ showCode }}" hint-placeholder-val="{{ false }}">
+        <div style="flex:1;overflow:auto;padding:10px 0;font:13px/20px 'JetBrains Mono',ui-monospace,Menlo,monospace">
+          <sc-for list="{{ codeLines }}" as="l" hint-placeholder-count="10">
+            <div style="display:flex;white-space:pre"><span style="width:52px;flex:none;text-align:right;padding-right:16px;color:#a8abb6">{{ l.n }}</span><span style="color:{{ l.color }}">{{ l.t }}</span></div>
+          </sc-for>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ showDiff }}" hint-placeholder-val="{{ false }}">
+        <div style="flex:1;display:flex;flex-direction:column;min-height:0">
+          <div style="height:36px;flex:none;display:flex;align-items:center;gap:10px;padding:0 12px;background:#f7f8fa;border-bottom:1px solid #ebecf0;font-size:13px">
+            <b>SessionDots.java</b><span style="color:#6c707e">dot-cpu ↔ main · unified</span><span style="flex:1"></span>
+            <span style="color:#6c707e">1 of 2 changes</span>
+            <button onClick="{{ markReviewed }}" style="font:inherit;font-size:12.5px;height:26px;padding:0 10px;border:1px solid #c9ccd6;border-radius:5px;background:#fff;cursor:pointer" style-hover="background:#f0f1f3">{{ reviewBtnLabel }}</button>
+          </div>
+          <div style="flex:1;overflow:auto;padding:8px 0;font:13px/20px 'JetBrains Mono',ui-monospace,Menlo,monospace">
+            <sc-for list="{{ diffLines }}" as="l" hint-placeholder-count="10">
+              <div style="display:flex;flex-direction:column">
+                <div style="display:flex;white-space:pre;background:{{ l.bg }}"><span style="width:20px;flex:none;text-align:center;color:#e0a030">{{ l.gutter }}</span><span style="width:40px;flex:none;text-align:right;padding-right:8px;color:#a8abb6">{{ l.o }}</span><span style="width:40px;flex:none;text-align:right;padding-right:12px;color:#a8abb6">{{ l.n }}</span><span style="width:14px;flex:none;color:{{ l.signColor }}">{{ l.sign }}</span><span>{{ l.t }}</span></div>
+                <sc-if value="{{ l.hasFinding }}" hint-placeholder-val="{{ false }}">
+                  <div style="margin:4px 40px 6px 126px;border:1px solid #f0c674;border-radius:8px;background:#fffaf0;padding:10px 14px;display:flex;flex-direction:column;gap:6px;font:13px/1.45 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:640px">
+                    <div style="display:flex;gap:8px;align-items:center"><span style="font-size:10.5px;font-weight:700;color:#a86500;background:#fdf3dc;border:1px solid #f0c674;border-radius:3px;padding:0 5px">MED</span><b>tick() can still run once after cancel()</b><span style="flex:1"></span><span style="font-size:12px;color:#818594">{{ findingStatus }}</span></div>
+                    <span style="color:#3d3f46">cancel() doesn't wait for an in-flight tick, and tick() reads row.view after the row was hidden. Guard tick() with row.timer == null.</span>
+                    <sc-if value="{{ findingProposed }}" hint-placeholder-val="{{ true }}">
+                      <div style="display:flex;gap:8px">
+                        <button onClick="{{ confirmFinding }}" style="font:inherit;font-size:12.5px;height:26px;padding:0 10px;border:none;border-radius:5px;background:#3574f0;color:#fff;cursor:pointer">Confirm</button>
+                        <button onClick="{{ dismissFinding }}" style="font:inherit;font-size:12.5px;height:26px;padding:0 10px;border:1px solid #c9ccd6;border-radius:5px;background:#fff;cursor:pointer">Dismiss…</button>
+                        <button style="font:inherit;font-size:12.5px;height:26px;padding:0 10px;border:1px solid transparent;border-radius:5px;background:transparent;color:#3574f0;cursor:pointer;white-space:nowrap">Not sure · ask {{ winAgent }}</button>
+                      </div>
+                    </sc-if>
+                    <sc-if value="{{ findingConfirmed }}" hint-placeholder-val="{{ false }}">
+                      <div style="display:flex;gap:8px;align-items:center"><button onClick="{{ askFix }}" style="font:inherit;font-size:12.5px;height:26px;padding:0 10px;border:none;border-radius:5px;background:#3574f0;color:#fff;cursor:pointer">Ask {{ winAgent }} to fix</button><span style="font-size:12px;color:#6c707e">Sends the finding to the agent tab</span></div>
+                    </sc-if>
+                  </div>
+                </sc-if>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </sc-if>
+    </div>
+
+    <div style="width:40px;flex:none;background:#f7f8fa;border-left:1px solid #ebecf0"></div>
+  </div>
+
+  <div style="height:26px;flex:none;display:flex;align-items:center;gap:14px;padding:0 12px;background:#f7f8fa;border-top:1px solid #ebecf0;font-size:12px;color:#5a5d68">
+    <span>{{ winFolder }}</span><span style="color:#a8abb6">›</span><span>{{ winBranch }}</span>
+    <span style="flex:1"></span>
+    <span>{{ toast }}</span>
+  </div>
+
+  <sc-if value="{{ agentsOpen }}" hint-placeholder-val="{{ false }}">
+    <div onClick="{{ closeAgents }}" style="position:absolute;inset:0;z-index:20"></div>
+    <div style="position:absolute;top:40px;left:300px;width:440px;background:#fff;border:1px solid #c9ccd6;border-radius:10px;box-shadow:0 12px 32px rgba(0,0,0,.18);z-index:21;display:flex;flex-direction:column;font-size:13px;overflow:hidden">
+      <div style="padding:10px 10px 6px"><input value="{{ query }}" onChange="{{ onQuery }}" placeholder="Search sessions" style="width:100%;box-sizing:border-box;height:30px;border:1px solid #3574f0;border-radius:5px;padding:0 10px;font-size:13px;outline:none"></div>
+      <div style="max-height:420px;overflow:auto;padding:2px 6px 6px;display:flex;flex-direction:column;gap:1px">
+        <sc-for list="{{ agentRows }}" as="r" hint-placeholder-count="6">
+          <div style="display:flex;flex-direction:column">
+            <sc-if value="{{ r.isRepo }}" hint-placeholder-val="{{ false }}"><div style="padding:8px 8px 3px;font-size:11.5px;font-weight:600;color:#6c707e;display:flex;gap:6px">{{ r.label }}<span style="font-weight:400;color:#a8abb6">{{ r.meta }}</span></div></sc-if>
+            <sc-if value="{{ r.isWt }}" hint-placeholder-val="{{ false }}"><div style="padding:3px 8px 3px 14px;font-size:12.5px;color:#5a5d68;display:flex;gap:6px"><span style="color:#818594">⑂</span>{{ r.label }}<span style="flex:1"></span><span style="color:#a8abb6">{{ r.meta }}</span></div></sc-if>
+            <sc-if value="{{ r.isSession }}" hint-placeholder-val="{{ true }}">
+              <div onClick="{{ r.go }}" style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px;cursor:pointer;margin-left:{{ r.indent }};background:{{ r.bg }}" style-hover="background:#e8ecf7">
+                <span style="width:8px;height:8px;border-radius:50%;box-sizing:border-box;flex:none;background:{{ r.dotBg }};border:{{ r.dotBorder }}"></span>
+                <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0">{{ r.label }}</span>
+                <sc-if value="{{ r.ro }}" hint-placeholder-val="{{ false }}"><span style="font-size:10px;padding:0 4px;border:1px solid #a8abb6;border-radius:3px;color:#5a5d68">RO</span></sc-if>
+                <span style="flex:1"></span>
+                <span style="color:#818594;font-size:12px;white-space:nowrap">{{ r.meta }}</span>
+              </div>
+            </sc-if>
+          </div>
+        </sc-for>
+      </div>
+      <div onClick="{{ openNew }}" style="border-top:1px solid #ebecf0;padding:9px 14px;display:flex;gap:8px;align-items:center;cursor:pointer" style-hover="background:#f0f1f3"><span style="color:#3574f0">＋</span>New Agent Session…<span style="flex:1"></span><span style="color:#818594;font-size:12px">⌥⌘N</span></div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ balloonOn }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute;right:56px;bottom:40px;width:340px;background:#fff;border:1px solid #c9ccd6;border-radius:10px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:12px 14px;display:flex;flex-direction:column;gap:6px;z-index:15;font-size:13px">
+      <div style="display:flex;align-items:center;gap:8px"><span style="width:8px;height:8px;border-radius:50%;background:#e0a030"></span><b>Codex needs you</b><span style="flex:1"></span><span onClick="{{ closeBalloon }}" style="cursor:pointer;color:#a8abb6">✕</span></div>
+      <span>Port review tour to gutter · drydock</span>
+      <span style="color:#6c707e;font-size:12.5px">Allow <code style="font-family:'JetBrains Mono',monospace;font-size:12px">./gradlew :intellij-plugin:test</code>?</span>
+      <div style="display:flex;gap:14px;margin-top:2px"><a onClick="{{ raiseBalloon }}" style="cursor:pointer">Raise window</a><a onClick="{{ closeBalloon }}" style="cursor:pointer;color:#6c707e">Snooze</a></div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ dialogOn }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute;inset:0;background:rgba(30,31,34,.18);z-index:30;display:flex;align-items:flex-start;justify-content:center;padding-top:110px">
+
+      <sc-if value="{{ isNewDialog }}" hint-placeholder-val="{{ false }}">
+        <div style="width:520px;background:#fff;border-radius:10px;box-shadow:0 16px 48px rgba(0,0,0,.25);display:flex;flex-direction:column;font-size:13px">
+          <div style="padding:14px 18px 6px;font-weight:600;font-size:14px">New Agent Session</div>
+          <div style="padding:8px 18px;display:grid;grid-template-columns:90px 1fr;gap:12px 12px;align-items:center">
+            <span style="color:#5a5d68;align-self:start;padding-top:6px">Task</span>
+            <textarea value="{{ form.task }}" onChange="{{ onTask }}" placeholder="What should the agent do?" style="height:64px;resize:none;border:1px solid #3574f0;border-radius:5px;padding:7px 9px;font-size:13px;outline:none"></textarea>
+            <span style="color:#5a5d68">Agent</span>
+            <div style="display:flex;gap:6px">
+              <sc-for list="{{ agentChips }}" as="a" hint-placeholder-count="3"><button onClick="{{ a.pick }}" style="font:inherit;font-size:12.5px;height:26px;padding:0 12px;border-radius:13px;cursor:pointer;border:1px solid {{ a.border }};background:{{ a.bg }};color:{{ a.color }}">{{ a.label }}</button></sc-for>
+            </div>
+            <span style="color:#5a5d68">Mode</span>
+            <div style="display:flex;border:1px solid #c9ccd6;border-radius:6px;overflow:hidden;width:fit-content">
+              <sc-for list="{{ modeChips }}" as="m" hint-placeholder-count="2"><button onClick="{{ m.pick }}" style="font:inherit;font-size:12.5px;height:26px;padding:0 14px;border:none;cursor:pointer;background:{{ m.bg }};color:{{ m.color }}">{{ m.label }}</button></sc-for>
+            </div>
+            <span style="color:#5a5d68;align-self:start;padding-top:2px">Where</span>
+            <div style="display:flex;flex-direction:column;gap:6px">
+              <sc-for list="{{ whereChips }}" as="w" hint-placeholder-count="2"><div onClick="{{ w.pick }}" style="display:flex;align-items:center;gap:8px;cursor:pointer"><span style="width:14px;height:14px;border-radius:50%;box-sizing:border-box;border:{{ w.ring }};flex:none"></span><span>{{ w.label }}</span><span style="color:#818594;font-size:12px">{{ w.meta }}</span></div></sc-for>
+            </div>
+          </div>
+          <sc-if value="{{ form.warn }}" hint-placeholder-val="{{ false }}"><div style="margin:4px 18px 0;padding:8px 10px;border-radius:6px;background:#fdf3dc;color:#7a4b00;font-size:12.5px">{{ form.warnText }}</div></sc-if>
+          <div style="padding:14px 18px;display:flex;gap:8px;justify-content:flex-end">
+            <button onClick="{{ closeDialog }}" style="font:inherit;font-size:13px;height:30px;padding:0 14px;border:1px solid #c9ccd6;border-radius:5px;background:#fff;cursor:pointer">Cancel</button>
+            <button onClick="{{ createSession }}" style="font:inherit;font-size:13px;height:30px;padding:0 14px;border:none;border-radius:5px;background:#3574f0;color:#fff;cursor:pointer" style-hover="background:#2b63d9">{{ form.cta }}</button>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isDoneDialog }}" hint-placeholder-val="{{ false }}">
+        <div style="width:460px;background:#fff;border-radius:10px;box-shadow:0 16px 48px rgba(0,0,0,.25);display:flex;flex-direction:column;font-size:13px">
+          <div style="padding:14px 18px 4px;font-weight:600;font-size:14px">Done with "{{ cur.title }}"?</div>
+          <div style="padding:8px 18px;display:flex;flex-direction:column;gap:10px">
+            <sc-for list="{{ doneChips }}" as="d" hint-placeholder-count="2"><div onClick="{{ d.pick }}" style="display:flex;gap:10px;cursor:pointer;align-items:flex-start"><span style="width:14px;height:14px;border-radius:50%;box-sizing:border-box;border:{{ d.ring }};flex:none;margin-top:2px"></span><span style="display:flex;flex-direction:column;gap:2px"><span>{{ d.label }}</span><span style="color:#6c707e;font-size:12px">{{ d.meta }}</span></span></div></sc-for>
+            <span style="color:#818594;font-size:12px">The agent's own conversation history on disk is kept either way.</span>
+          </div>
+          <div style="padding:14px 18px;display:flex;gap:8px;justify-content:flex-end">
+            <button onClick="{{ closeDialog }}" style="font:inherit;font-size:13px;height:30px;padding:0 14px;border:1px solid #c9ccd6;border-radius:5px;background:#fff;cursor:pointer">Cancel</button>
+            <button onClick="{{ confirmDone }}" style="font:inherit;font-size:13px;height:30px;padding:0 14px;border:none;border-radius:5px;background:#3574f0;color:#fff;cursor:pointer">{{ doneCta }}</button>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isCloseDialog }}" hint-placeholder-val="{{ false }}">
+        <div style="width:440px;background:#fff;border-radius:10px;box-shadow:0 16px 48px rgba(0,0,0,.25);display:flex;flex-direction:column;font-size:13px">
+          <div style="padding:14px 18px 4px;font-weight:600;font-size:14px">{{ closeTitle }}</div>
+          <div style="padding:6px 18px;display:flex;flex-direction:column;gap:6px">
+            <span style="color:#5a5d68">Closing <b style="color:#1e1f22">{{ winTitle }}</b> stops them mid-task.</span>
+            <sc-for list="{{ workingHere }}" as="w" hint-placeholder-count="1"><span style="display:flex;align-items:center;gap:8px"><span style="width:8px;height:8px;border-radius:50%;background:#3574f0"></span>{{ w.title }}<span style="color:#818594;font-size:12px">· {{ w.agent }}</span></span></sc-for>
+            <span style="color:#818594;font-size:12px">Agents waiting at the prompt are stopped without asking.</span>
+          </div>
+          <div style="padding:14px 18px;display:flex;gap:8px;align-items:center">
+            <span style="font-size:12px;color:#5a5d68;display:flex;align-items:center;gap:6px"><span style="width:13px;height:13px;border:1px solid #a8abb6;border-radius:3px"></span>Don't ask again</span>
+            <span style="flex:1"></span>
+            <button onClick="{{ closeDialog }}" style="font:inherit;font-size:13px;height:30px;padding:0 14px;border:1px solid #c9ccd6;border-radius:5px;background:#fff;cursor:pointer">Cancel</button>
+            <button onClick="{{ confirmClose }}" style="font:inherit;font-size:13px;height:30px;padding:0 14px;border:none;border-radius:5px;background:#3574f0;color:#fff;cursor:pointer">Stop &amp; Close</button>
+          </div>
+        </div>
+      </sc-if>
+
+    </div>
+  </sc-if>
+
+</div>
+</sc-if>
+
+<div style="width:1360px;font-size:12px;color:#818594;line-height:1.5">Host IDE chrome is a neutral approximation, so that the Drydock surfaces are what's being judged: Agents ▾, the agent editor tab, the New Agent Session dialog, attention, resume, close confirmation, review in the Commit view with Finish, and the Welcome screen Agents tab. Content is sample data.</div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+const INIT = () => ([
+  { id:'s1', title:'Fix worktree add JVM hang', agent:'Claude', repo:'drydock', branch:'fix/wt-hang', ro:false, state:'working', age:'12 min', cost:'~42k tokens' },
+  { id:'s2', title:'Why does git need the hostname?', agent:'Claude', repo:'drydock', branch:'fix/wt-hang', ro:true, state:'prompt', age:'4 min', cost:'~9k tokens' },
+  { id:'s3', title:'Port review tour to gutter', agent:'Codex', repo:'drydock', branch:'review-gutter', ro:false, state:'working', age:'31 min', cost:'~118k tokens' },
+  { id:'s4', title:'Status dot CPU regression', agent:'pi', repo:'drydock', branch:'dot-cpu', ro:false, state:'prompt', age:'1 h', cost:'~64k tokens' },
+  { id:'s5', title:'Sampling rate flag', agent:'Claude', repo:'dd-trace-java', branch:'sampling-flag', ro:false, state:'working', age:'22 min', cost:'~51k tokens' },
+  { id:'s6', title:'Upgrade ASM to 9.8', agent:'Codex', repo:'btrace', branch:'asm-98', ro:false, state:'idle', age:'3 d', cost:'~84k tokens', stoppedWhy:'when the window closed · Oct 15 18:04' },
+]);
+const T = {
+  s1: [['dim','╭─ Claude Code · ~/wt/drydock-fix-wt-hang'],['user','> Fix the worktree add hang when the hostname doesn\'t resolve'],['',''],['tool','⏺ Bash(git -c user.name= branch b1 HEAD)'],['dim','  ⎿  real 5.3s'],['','⏺ Reproduced. With an empty GIT_CONFIG_GLOBAL, git builds a default ident'],['','  from user@hostname, and this machine\'s hostname takes ~5 s to resolve.'],['','  Each worktree add spawns 3 git children, so the 15 s timeout trips.'],['tool','⏺ Update(app/build.gradle.kts)'],['add','  +  environment("GIT_CONFIG_COUNT", "3")'],['add','  +  environment("GIT_CONFIG_KEY_1", "user.name")'],['add','  +  environment("GIT_CONFIG_VALUE_1", "Drydock Test")'],['tool','⏺ Bash(./gradlew :app:test --tests WorktreeServiceTest)'],['work','✻ Running tests… (38s · esc to interrupt)']],
+  s2: [['dim','╭─ Claude Code · plan mode · ~/wt/drydock-fix-wt-hang'],['user','> Why does git need the hostname for a branch create?'],['',''],['tool','⏺ Read(ident.c)'],['','⏺ With no user.email configured, git builds a default committer ident'],['','  as <user>@<hostname>. Writing the reflog for the new branch needs that'],['','  ident, so `git branch` looks up the hostname even though it never'],['','  makes a commit.'],['',''],['','  Setting user.name and user.email in the test config avoids the lookup.']],
+  s3: [['dim','╭─ OpenAI Codex · ~/wt/drydock-review-gutter'],['user','> Port the review tour anchors to editor gutter markers'],['',''],['tool','• Edited ReviewGutterProvider.java (+84 −0)'],['tool','• Edited TourAnchor.java (+6 −2)'],['','  Anchors now resolve to RangeHighlighters keyed by line key.'],['','  I want to run the plugin tests to check the anchor migration.']],
+  s4: [['dim','╭─ pi · ~/wt/drydock-dot-cpu'],['user','> The status dot pulse burns CPU when rows are hidden. Fix it.'],['',''],['tool','▸ edit SessionDots.java'],['tool','▸ edit SessionListModel.java'],['tool','▸ edit SessionsPanel.java'],['tool','▸ write SessionDotsTest.java'],['tool','▸ run ./gradlew test --tests SessionDotsTest  ✓ 6 passed'],['',''],['','Done. Hidden rows no longer schedule a timer, and hiding a row cancels'],['','its timer. 4 files changed; ready for review.']],
+  s5: [['dim','╭─ Claude Code · ~/wt/dd-trace-java-sampling-flag'],['user','> Add a dd.profiling.sampling.rate flag with validation'],['',''],['tool','⏺ Read(ProfilingConfig.java)'],['tool','⏺ Update(ProfilingConfig.java)'],['work','✻ Wiring the flag through ConfigProvider…']],
+  s6: [['dim','╭─ OpenAI Codex · ~/wt/btrace-asm-98'],['user','> Upgrade ASM to 9.8'],['',''],['tool','• Edited pom.xml  asm 9.7 → 9.8'],['tool','• Ran mvn -q test'],['dim','  2 failures in ClassFilterTest'],['','  Two tests in ClassFilterTest need the new opcodes…']],
+};
+const COLORS = { dim:'#818594', user:'#1e1f22', tool:'#3574f0', add:'#2f7d32', work:'#a86500', '':'#1e1f22' };
+const REPO_COLOR = { 'drydock':'#4a7fd8', 'dd-trace-java':'#7a5bd0', 'btrace':'#2f9b74' };
+const CODE = [
+  ['1','package app.drydock.git;','#8a8d99'],['2','',''],['3','import java.nio.file.Path;','#8a8d99'],['4','import java.util.List;','#8a8d99'],['5','',''],
+  ['6','public final class WorktreeService implements AutoCloseable {','#1e1f22'],['7','',''],
+  ['8','    private static final Duration COMMAND_TIMEOUT = Duration.ofSeconds(15);','#1e1f22'],['9','',''],
+  ['10','    public CompletableFuture<Worktree> add(Path repo, String branch) {','#1e1f22'],
+  ['11','        return supplyAsync(() -> {','#1e1f22'],
+  ['12','            ProcessResult result = runner.run(git("worktree", "add", "-b",','#1e1f22'],
+  ['13','                    branch, pathFor(repo, branch).toString()), COMMAND_TIMEOUT);','#1e1f22'],
+  ['14','            return parse(result);','#1e1f22'],['15','        }, executor);','#1e1f22'],['16','    }','#1e1f22'],['17','}','#1e1f22'],
+];
+const DIFF = [
+  ['84','84',' ','private void schedule(Row row) {','ctx'],
+  ['85','85',' ','    if (row.timer != null) return;','ctx'],
+  ['','86','+','    if (!row.visible()) {','add'],
+  ['','87','+','        return; // scheduled again on show','add'],
+  ['','88','+','    }','add'],
+  ['86','89',' ','    row.timer = scheduler.every(PULSE_MS, row::tick);','ctx'],
+  ['87','90',' ','}','ctx'],
+  ['88','91',' ','','ctx'],
+  ['89','92',' ','void onHide(Row row) {','ctx'],
+  ['90','','-','    // nothing to stop','del'],
+  ['','93','+','    if (row.timer != null) {','add'],
+  ['','94','+','        row.timer.cancel();','add','finding'],
+  ['','95','+','        row.timer = null;','add'],
+  ['','96','+','    }','add'],
+  ['91','97',' ','}','ctx'],
+];
+const CHANGES_DOTCPU = [
+  { file:'SessionListModel.java', dir:'intellij-plugin/…/toolwindow', mark:'ok' },
+  { file:'SessionDots.java', dir:'intellij-plugin/…/toolwindow', mark:'finding', diff:true },
+  { file:'SessionsPanel.java', dir:'intellij-plugin/…/toolwindow', mark:'ok' },
+  { file:'SessionDotsTest.java', dir:'intellij-plugin/src/test', mark:'none', uncommitted:true },
+];
+const CHANGES_DEFAULT = [
+  { file:'WorktreeService.java', dir:'app/…/git', mark:'none' },
+  { file:'build.gradle.kts', dir:'app', mark:'none', uncommitted:true },
+];
+
+class Component extends DCLogic {
+  state = this.fresh();
+  fresh() {
+    return { sessions: INIT(), win:'drydock|fix/wt-hang', tab:'s1', screen:'ide', agentsOpen:false, query:'', leftTw:null,
+      dialog:null, form:{ task:'', agent:'Claude', mode:'W', where:'new' }, doneChoice:'forget', balloon:false, finishOpen:false,
+      removeAfter:true, finding:'proposed', reviewed:{}, openDiff:false, toast:'', extraWorktrees:[] };
+  }
+  set(p) { this.setState(p); }
+  upd(id, patch) { this.setState(s => ({ sessions: s.sessions.map(x => x.id === id ? { ...x, ...patch } : x) })); }
+  dot(st) {
+    if (st === 'attention') return { bg:'#e0a030', border:'none' };
+    if (st === 'idle') return { bg:'transparent', border:'1.5px solid #8c8c8c' };
+    return { bg:'#3574f0', border:'none' };
+  }
+  stateWord(s) { return { working:'Working', prompt:'At prompt', attention:'Needs you', idle:'Not running' }[s.state]; }
+  goTo(sess) { this.set({ win: sess.repo + '|' + sess.branch, tab: sess.id, agentsOpen:false, query:'', balloon:false, screen:'ide', openDiff:false, finishOpen:false, leftTw: this.state.leftTw === 'review' ? null : this.state.leftTw }); }
+  toastMsg(t) { this.set({ toast: t }); clearTimeout(this._tt); this._tt = setTimeout(() => this.set({ toast:'' }), 4000); }
+  componentDidMount() { this._fit = () => this.set({ zoom: Math.min(1, (window.innerWidth - 8) / 1400) }); this._fit(); window.addEventListener('resize', this._fit); }
+  componentWillUnmount() { clearTimeout(this._tt); window.removeEventListener('resize', this._fit); }
+
+  renderVals() {
+    const s = this.state;
+    const [winRepo, winBranch] = s.win.split('|');
+    const here = s.sessions.filter(x => x.repo === winRepo && x.branch === winBranch);
+    const waiting = s.sessions.filter(x => x.state === 'attention').length;
+    const running = s.sessions.filter(x => x.state !== 'idle').length;
+    const cs = s.sessions.find(x => x.id === s.tab) || here[0];
+    const codeTab = 'file:WorktreeService.java';
+    let tabKey = s.tab;
+    if (!cs && tabKey !== codeTab && tabKey !== 'diff') tabKey = codeTab;
+    const showAgent = !!cs && tabKey === cs.id;
+
+    const tabs = [
+      ...here.map(x => { const d = this.dot(x.state); const sel = showAgent && cs.id === x.id; return { isAgent:true, isFile:false, label:x.title, ro:x.ro, dotBg:d.bg, dotBorder:d.border, underline: sel ? '#3574f0' : 'transparent', color: sel ? '#1e1f22' : '#5a5d68', select:() => this.set({ tab:x.id }) }; }),
+      { isAgent:false, isFile:true, label:'WorktreeService.java', ro:false, underline: tabKey === codeTab ? '#3574f0' : 'transparent', color: tabKey === codeTab ? '#1e1f22' : '#5a5d68', select:() => this.set({ tab:codeTab }) },
+      ...(s.openDiff ? [{ isAgent:false, isFile:true, label:'SessionDots.java ↔ main', ro:false, underline: tabKey === 'diff' ? '#3574f0' : 'transparent', color: tabKey === 'diff' ? '#1e1f22' : '#5a5d68', select:() => this.set({ tab:'diff' }) }] : []),
+    ];
+
+    let cur = { title:'', lines:[], dotBg:'', dotBorder:'', stateWord:'', agent:'', meta:'', ro:false, running:false, idle:false, attention:false, cost:'', stoppedWhy:'' };
+    if (cs) {
+      const d = this.dot(cs.state);
+      const idle = cs.state === 'idle';
+      cur = { title: cs.title, dotBg:d.bg, dotBorder:d.border, stateWord:this.stateWord(cs), agent:cs.agent, ro:cs.ro,
+        meta: idle ? 'last active ' + cs.age + ' ago' : cs.age + (cs.ro ? '' : ' · ' + (cs.id === 's4' ? '4 files changed' : '3 files changed')),
+        running: !idle, idle, attention: cs.state === 'attention', cost: cs.cost, stoppedWhy: cs.stoppedWhy || 'when the IDE restarted',
+        lines: (T[cs.id] || cs.lines || []).map(([c,t]) => ({ t, color: COLORS[c] || '#1e1f22', bg: c === 'add' ? '#eef7ee' : 'transparent', op: idle ? .5 : 1 })) };
+    }
+
+    // Agents popup rows
+    const q = s.query.trim().toLowerCase();
+    const repos = ['drydock','dd-trace-java','btrace'];
+    const agentRows = [];
+    repos.forEach(repo => {
+      const rs = s.sessions.filter(x => x.repo === repo && (!q || x.title.toLowerCase().includes(q) || x.branch.includes(q)));
+      if (!rs.length) return;
+      agentRows.push({ isRepo:true, isWt:false, isSession:false, label:repo, meta: repo === winRepo ? '' : '' });
+      const branches = [...new Set(rs.map(x => x.branch))];
+      branches.forEach(b => {
+        const inWt = rs.filter(x => x.branch === b);
+        const isThis = repo === winRepo && b === winBranch;
+        const multi = inWt.length > 1;
+        if (multi) agentRows.push({ isRepo:false, isWt:true, isSession:false, label:b, meta: isThis ? 'this window' : '' });
+        inWt.forEach(x => { const d = this.dot(x.state); agentRows.push({ isRepo:false, isWt:false, isSession:true, label:x.title, ro:x.ro, dotBg:d.bg, dotBorder:d.border, indent: multi ? '18px' : '0px', bg: (isThis && x.id === s.tab) ? '#eef2fc' : 'transparent', meta: multi ? x.agent : (isThis ? 'this window' : x.agent + ' · ' + b), go:() => this.goTo(x) }); });
+      });
+    });
+
+    // review
+    const isDot = s.win === 'drydock|dot-cpu';
+    const base = isDot ? CHANGES_DOTCPU : CHANGES_DEFAULT;
+    const openF = isDot && s.finding !== 'dismissed';
+    const changeRows = base.map(c => {
+      const rev = s.reviewed[s.win + c.file] || c.mark === 'ok';
+      const showFind = c.mark === 'finding' && openF;
+      const mark = showFind ? '◆ 1' : rev ? '✓' : '○';
+      return { file:c.file, dir:c.dir, uncommitted:!!c.uncommitted, caret: showFind ? '▾' : ' ', mark, markColor: showFind ? '#e0a030' : rev ? '#2f7d32' : '#a8abb6',
+        bg: (s.tab === 'diff' && c.diff) ? '#e8ecf7' : 'transparent',
+        open: () => c.diff ? this.set({ openDiff:true, tab:'diff' }) : this.toastMsg('Opens the IDE diff for ' + c.file),
+        findings: showFind ? [{ sev:'MED', title:'tick() can still run once after cancel()', line:'94', open:() => this.set({ openDiff:true, tab:'diff' }) }] : [] };
+    });
+    const reviewedCount = changeRows.filter(c => c.mark === '✓').length;
+
+    const diffLines = DIFF.map(([o,n,sign,t,k,f]) => ({ o, n, sign, t, bg: k === 'add' ? '#e9f5e9' : k === 'del' ? '#fbeaea' : 'transparent', signColor: k === 'add' ? '#2f7d32' : '#c0392b', gutter: (f && openF) ? '◆' : '', hasFinding: !!f && s.finding !== 'dismissed' }));
+
+    // welcome groups
+    const welcomeGroups = repos.map(repo => ({ repo, rows: s.sessions.filter(x => x.repo === repo).map(x => { const d = this.dot(x.state); return { title:x.title, ro:x.ro, idle: x.state === 'idle', dotBg:d.bg, dotBorder:d.border, meta: x.agent + ' · ' + x.branch + ' · ' + x.age, open:() => this.goTo(x), resume:() => { this.upd(x.id, { state:'working' }); this.goTo(x); } }; }) })).filter(g => g.rows.length);
+
+    // new dialog
+    const f = s.form;
+    const isMain = winBranch === 'main';
+    const warn = f.mode === 'W' && f.where === 'here';
+    const agentChips = ['Claude','Codex','pi'].map(a => ({ label:a, bg: f.agent === a ? '#3574f0' : '#fff', color: f.agent === a ? '#fff' : '#1e1f22', border: f.agent === a ? '#3574f0' : '#c9ccd6', pick:() => this.set({ form:{ ...f, agent:a } }) }));
+    const modeChips = [['W','Writes'],['RO','Read-only']].map(([k,l]) => ({ label:l, bg: f.mode === k ? '#3574f0' : '#fff', color: f.mode === k ? '#fff' : '#1e1f22', pick:() => this.set({ form:{ ...f, mode:k, where: k === 'RO' ? 'here' : 'new' } }) }));
+    const slug = (f.task.trim().toLowerCase().replace(/[^a-z0-9 ]/g,'').split(/\s+/).filter(Boolean).slice(0,3).join('-')) || 'new-task';
+    const whereChips = [['here','Here', winRepo + ' / ' + winBranch],['new','New worktree', '⑂ ' + slug + ' from main']].map(([k,l,m]) => ({ label:l, meta:m, ring: f.where === k ? '4.5px solid #3574f0' : '1px solid #a8abb6', pick:() => this.set({ form:{ ...f, where:k } }) }));
+    const form = { ...f, warn, warnText: here.some(x => !x.ro && x.state !== 'idle') ? 'Another writing session is active in this worktree. Two writers can overwrite each other.' : 'A writing agent here shares the tree with your own edits.', cta: warn ? 'Start anyway' : f.where === 'new' ? 'Create & Open Window' : 'Start Here' };
+
+    const doneChips = [['forget','Forget session only','Removes the row. Worktree and branch stay.'],['remove','Forget + remove worktree','Closes this window. 1 uncommitted file will be discarded.']].map(([k,l,m]) => ({ label:l, meta:m, ring: s.doneChoice === k ? '4.5px solid #3574f0' : '1px solid #a8abb6', pick:() => this.set({ doneChoice:k }) }));
+    const workingHere = here.filter(x => x.state === 'working' || x.state === 'attention').map(x => ({ title:x.title, agent:x.agent }));
+
+    return {
+      isWelcome: s.screen === 'welcome', isIde: s.screen === 'ide',
+      sessionCount: s.sessions.length, welcomeGroups,
+      winRepo, winBranch, winTitle: winRepo + ' · ' + winBranch, winFolder: winRepo + (winBranch === 'main' ? '' : '-' + winBranch.replace('/','-')),
+      repoColor: REPO_COLOR[winRepo] || '#888', repoInitials: winRepo.slice(0,2).toUpperCase(), winAgent: cs ? cs.agent : 'the agent',
+      hasWaiting: waiting > 0, noWaiting: waiting === 0, waitingCount: waiting, runningCount: running,
+      agentsOpen: s.agentsOpen, toggleAgents: () => this.set({ agentsOpen: !s.agentsOpen, query:'' }), closeAgents: () => this.set({ agentsOpen:false }),
+      query: s.query, onQuery: e => this.set({ query: e.target.value }), agentRows,
+      openNew: () => this.set({ agentsOpen:false, dialog:'new', form:{ task:'', agent:'Claude', mode:'W', where:'new' } }),
+      openNewFromWelcome: () => this.set({ screen:'ide', dialog:'new', form:{ task:'', agent:'Claude', mode:'W', where:'new' } }),
+      tabs, showAgent, showCode: tabKey === codeTab, showDiff: tabKey === 'diff', cur,
+      codeLines: CODE.map(([n,t,c]) => ({ n, t, color: c || '#1e1f22' })), diffLines,
+      projectBtnBg: s.leftTw === 'project' ? '#dfe1e5' : 'transparent', reviewBtnBg: s.leftTw === 'review' ? '#dfe1e5' : 'transparent',
+      toggleProject: () => this.set({ leftTw: s.leftTw === 'project' ? null : 'project' }),
+      toggleReview: () => this.set({ leftTw: s.leftTw === 'review' ? null : 'review', finishOpen:false }),
+      showProjectTw: s.leftTw === 'project', showReviewTw: s.leftTw === 'review',
+      scopeHint: isDot ? '3 commits + 1 uncommitted file vs main' : '2 commits + 1 uncommitted file vs main',
+      fileCount: changeRows.length, changeRows, reviewedLabel: reviewedCount + ' / ' + changeRows.length + ' reviewed',
+      resolvedNote: isDot ? (s.finding === 'dismissed' ? '1 dismissed finding hidden' : '2 resolved findings hidden') : '',
+      hasOpenFinding: openF && s.finding !== 'dismissed',
+      commitMsg: isDot ? 'Stop status-dot timer when its row is hidden' : 'Set a fixture git ident so worktree add never resolves the hostname',
+      finishOpen: s.finishOpen, toggleFinish: () => this.set({ finishOpen: !s.finishOpen }),
+      removeAfterMark: s.removeAfter ? '✓' : '', toggleRemoveAfter: () => this.set({ removeAfter: !s.removeAfter }),
+      doMerge: () => { const keep = s.sessions.filter(x => !(x.repo === winRepo && x.branch === winBranch)); this.set({ sessions: keep, win: winRepo + '|main', tab: codeTab, finishOpen:false, leftTw:null, openDiff:false }); this.toastMsg('Merged ' + winBranch + ' into main' + (s.removeAfter ? ' · worktree removed' : '')); },
+      doPush: () => { this.set({ finishOpen:false }); this.toastMsg('Pushed ' + winBranch + ' · pull request #412 opened'); },
+      markReviewed: () => this.set({ reviewed: { ...s.reviewed, [s.win + 'SessionDots.java']: !s.reviewed[s.win + 'SessionDots.java'] } }),
+      reviewBtnLabel: s.reviewed[s.win + 'SessionDots.java'] ? 'Reviewed ✓' : 'Mark file reviewed',
+      findingStatus: { proposed:'Proposed by ' + (cs ? cs.agent : 'agent'), confirmed:'Confirmed', dismissed:'' }[s.finding],
+      findingProposed: s.finding === 'proposed', findingConfirmed: s.finding === 'confirmed',
+      confirmFinding: () => this.set({ finding:'confirmed' }), dismissFinding: () => { this.set({ finding:'dismissed' }); this.toastMsg('Finding dismissed · reason sent to the agent'); },
+      askFix: () => { this.set({ tab:'s4' }); this.upd('s4', { state:'working' }); this.toastMsg('Finding sent to pi'); },
+      stopCur: () => cs && this.upd(cs.id, { state:'idle', stoppedWhy:'by you' }),
+      resumeCur: () => cs && this.upd(cs.id, { state:'working' }),
+      answerYes: () => cs && this.upd(cs.id, { state:'working' }), answerNo: () => cs && this.upd(cs.id, { state:'prompt' }),
+      openDone: () => this.set({ dialog:'done', doneChoice:'forget' }),
+      doneChips, doneCta: s.doneChoice === 'remove' ? 'Forget & Remove' : 'Forget',
+      confirmDone: () => { if (!cs) return; const rest = s.sessions.filter(x => x.id !== cs.id); if (s.doneChoice === 'remove') { const keep = rest.filter(x => !(x.repo === winRepo && x.branch === winBranch)); this.set({ sessions: keep, dialog:null, win: winRepo + '|main', tab: codeTab }); this.toastMsg('Forgot session · removed worktree ' + winBranch); } else { const next = rest.find(x => x.repo === winRepo && x.branch === winBranch); this.set({ sessions: rest, dialog:null, tab: next ? next.id : codeTab }); this.toastMsg('Forgot "' + cs.title + '"'); } },
+      dialogOn: !!s.dialog, isNewDialog: s.dialog === 'new', isDoneDialog: s.dialog === 'done', isCloseDialog: s.dialog === 'close',
+      closeDialog: () => this.set({ dialog:null }),
+      form, agentChips, modeChips, whereChips, onTask: e => this.set({ form:{ ...f, task: e.target.value } }),
+      createSession: () => { const id = 'n' + Date.now(); const title = (f.task.trim() || 'New task').slice(0, 44); const branch = f.where === 'new' ? slug : winBranch; const ns = { id, title, agent:f.agent, repo:winRepo, branch, ro: f.mode === 'RO', state:'working', age:'just now', cost:'~2k tokens', lines:[['dim','╭─ ' + f.agent + (f.mode === 'RO' ? ' · read-only' : '') + ' · ~/wt/' + winRepo + '-' + branch],['user','> ' + (f.task.trim() || 'New task')],['',''],['work','✻ Starting…']] }; T[id] = ns.lines; this.set({ sessions:[...s.sessions, ns], dialog:null, win: winRepo + '|' + branch, tab:id, leftTw:null, openDiff:false }); this.toastMsg(f.where === 'new' ? 'Created worktree ' + branch + ' · opened its window · IDE still indexing' : 'Started in this window'); },
+      workingHere, closeTitle: 'Stop ' + workingHere.length + ' working agent' + (workingHere.length === 1 ? '' : 's') + '?',
+      confirmClose: () => { this.set({ dialog:null, screen:'welcome', sessions: s.sessions.map(x => (x.repo === winRepo && x.branch === winBranch) ? { ...x, state:'idle', stoppedWhy:'when the window closed' } : x) }); },
+      balloonOn: s.balloon && s.screen === 'ide', closeBalloon: () => this.set({ balloon:false }),
+      raiseBalloon: () => { const x = s.sessions.find(y => y.id === 's3'); if (x) this.goTo(x); },
+      simAttention: () => { if (!s.sessions.find(x => x.id === 's3')) return; this.upd('s3', { state:'attention' }); const isHere = s.win === 'drydock|review-gutter'; this.set({ balloon: !isHere, screen:'ide' }); if (s.win === 'drydock|review-gutter') this.set({ tab:'s3' }); },
+      simClose: () => { if (s.screen !== 'ide') return; if (workingHere.length) this.set({ dialog:'close' }); else this.set({ screen:'welcome', sessions: s.sessions.map(x => (x.repo === winRepo && x.branch === winBranch) ? { ...x, state:'idle', stoppedWhy:'when the window closed' } : x) }); },
+      simRestart: () => this.set({ screen:'ide', dialog:null, balloon:false, agentsOpen:false, sessions: s.sessions.map(x => x.state === 'idle' ? x : { ...x, state:'idle', stoppedWhy:'when the IDE quit' }) }),
+      simWelcome: () => this.set({ screen:'welcome', dialog:null, balloon:false, agentsOpen:false }),
+      simReset: () => this.setState({ ...this.fresh(), zoom: s.zoom }),
+      toast: s.toast, zoom: s.zoom || 1, outerW: Math.round(1400 * (s.zoom || 1)) + 'px', outerH: Math.round(1000 * (s.zoom || 1)) + 'px',
+    };
+  }
+}
+</script>
+</body>
+</html>

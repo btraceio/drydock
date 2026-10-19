@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Kalam:wght@400;700&family=Patrick+Hand&display=swap" rel="stylesheet">
+<style>body{margin:0;background:#f3f1ec;color:#2b2b2b}a{color:#0f8b8d}a:hover{color:#0a5f60}</style>
+</helmet>
+<div style="padding:44px 48px 64px;display:flex;flex-direction:column;gap:36px;font-family:'Patrick Hand',cursive">
+
+<header style="display:flex;flex-wrap:wrap;gap:40px;align-items:flex-start;max-width:1900px">
+  <div style="display:flex;flex-direction:column;gap:10px;max-width:620px">
+    <a href="Drydock IntelliJ UX.dc.html" style="font:13px ui-monospace,Menlo,monospace;text-decoration:none">← all directions</a>
+    <div style="display:flex;align-items:baseline;gap:12px"><span style="font:600 12px ui-monospace,Menlo,monospace;padding:4px 8px;background:#2b2b2b;color:#fff;border-radius:4px">B</span><h1 style="margin:0;font:700 34px/1.1 Kalam,cursive">Drydock tool window + Run console</h1></div>
+    <p style="margin:0;font-size:19px;line-height:1.4;text-wrap:pretty">The v3 direction, refined. A dedicated <b>Drydock</b> tool window (right) lists the app-wide catalog, with <b>This window</b> pinned on top. The agent runs as Run-tool-window content in its worktree's window, owned by Drydock's execution service, so there's no native Rerun and no persisted run configuration. Review is the tool window's second tab.</p>
+  </div>
+  <div style="display:grid;grid-template-columns:auto auto;gap:6px 18px;font-size:16px;align-self:end;padding:14px 18px;background:#fff;border:1.5px solid #2b2b2b;border-radius:8px">
+    <b style="grid-column:1/3;font:700 15px Kalam,cursive">Who owns what</b>
+    <span style="color:#8a867d">Durable session</span><span>Drydock tool window row (app catalog)</span>
+    <span style="color:#8a867d">Live process</span><span>project execution service → ProcessHandler</span>
+    <span style="color:#8a867d">Presentation</span><span>Run tool window content</span>
+    <span style="color:#8a867d">Window</span><span>one Project per worktree</span>
+  </div>
+  <div style="display:flex;flex-direction:column;gap:8px;font-size:16px;align-self:end;max-width:400px">
+    <div><b style="font:700 15px Kalam,cursive;color:#2f7d32">Fits</b> — Phase 0 already proved the Run-console path for all three agents; one branded place to look; Run already means "a process that starts, stops and exits".</div>
+    <div><b style="font:700 15px Kalam,cursive;color:#c0392b">Strains</b> — two tool windows for one concept; agent tabs sit beside the user's own run configs; right list + bottom console use up both edges.</div>
+  </div>
+  <div style="display:flex;flex-direction:column;gap:6px;font-size:14px;align-self:end">
+    <span style="display:flex;align-items:center;gap:6px"><span style="width:22px;height:12px;background:#e6f4f3;outline:1.5px solid #0f8b8d"></span>added by Drydock</span>
+    <span style="display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#3574F0"></span>running</span>
+    <span style="display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#E0A030"></span>needs you</span>
+    <span style="display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;border:1.5px solid #8C8C8C;box-sizing:border-box"></span>idle, not running</span>
+  </div>
+</header>
+
+<div style="display:flex;flex-wrap:wrap;gap:44px 40px;align-items:flex-start">
+
+<!-- B1 -->
+<div id="B1" style="display:flex;flex-direction:column;gap:10px;width:600px">
+  <div style="display:flex;align-items:baseline;gap:8px"><span style="font:600 11px ui-monospace,Menlo,monospace;padding:3px 7px;background:#2b2b2b;color:#fff;border-radius:4px">B1</span><span style="font:700 21px Kalam,cursive">Multi-repo overview</span></div>
+  <div style="width:600px;height:360px;border:1.5px solid #2b2b2b;border-radius:8px;background:#fff;display:flex;flex-direction:column;overflow:hidden;font-size:13px;line-height:1.3">
+    <div style="height:28px;flex:none;display:flex;align-items:center;gap:12px;padding:0 10px;border-bottom:1.5px solid #2b2b2b;background:#f4f2ee"><span style="display:flex;gap:4px"><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span></span><b>drydock ▾</b><span>⑂ main ▾</span></div>
+    <div style="flex:1;display:flex;min-height:0">
+      <div style="width:24px;flex:none;border-right:1.5px solid #2b2b2b;background:#f4f2ee;display:flex;flex-direction:column;align-items:center;gap:7px;padding-top:7px"><span style="width:12px;height:12px;border:1.5px solid #2b2b2b;border-radius:3px"></span><span style="width:12px;height:12px;border:1.5px solid #2b2b2b;border-radius:3px"></span></div>
+      <div style="flex:1;background:repeating-linear-gradient(to bottom,transparent 0 10px,#ebe8e1 10px 15px);background-clip:content-box;padding:10px 40px 10px 24px"></div>
+      <div style="width:270px;flex:none;border-left:1.5px solid #2b2b2b;display:flex;flex-direction:column;background:#e6f4f3;outline:1.5px solid #0f8b8d;outline-offset:-2px">
+        <div style="height:22px;flex:none;display:flex;align-items:center;gap:10px;padding:0 8px;border-bottom:1px solid #b9dcda;font-size:12px"><b>Drydock</b><b style="border-bottom:2px solid #2b2b2b">Sessions</b><span>Review</span><span style="flex:1"></span><span>＋ ⋯</span></div>
+        <div style="flex:1;padding:4px 0;display:flex;flex-direction:column;gap:2px;background:#fff;margin:3px;font-size:12px">
+          <div style="padding:2px 8px;color:#8a867d;font-size:11px;display:flex;gap:6px;align-items:center">THIS WINDOW<span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive">1</span></div>
+          <div style="padding:2px 8px 4px 20px;color:#6b675f">No session on main · <span style="color:#3574F0">New…</span></div>
+          <div style="padding:2px 8px;color:#8a867d;font-size:11px">NEEDS YOU</div>
+          <div style="display:flex;flex-direction:column;padding:2px 8px 2px 20px;background:#dfe7f7"><span style="display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#E0A030;flex:none"></span>Port review tour to gutter<span style="flex:1"></span><span style="color:#8a867d">↗</span></span><span style="padding-left:14px;color:#8a867d;font-size:11px">Codex · drydock / review-gutter</span></div>
+          <div style="padding:2px 8px;color:#8a867d;font-size:11px">DRYDOCK</div>
+          <div style="display:flex;flex-direction:column;padding:2px 8px 2px 20px"><span style="display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#3574F0;flex:none"></span>Fix worktree add JVM hang<span style="flex:1"></span><span style="color:#8a867d">↗</span></span><span style="padding-left:14px;color:#8a867d;font-size:11px">Claude · fix/wt-hang · working</span></div>
+          <div style="display:flex;flex-direction:column;padding:2px 8px 2px 20px"><span style="display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#3574F0;flex:none"></span>Status dot CPU regression<span style="flex:1"></span><span style="color:#8a867d">↗</span></span><span style="padding-left:14px;color:#8a867d;font-size:11px">pi · dot-cpu · at prompt</span></div>
+          <div style="padding:2px 8px;color:#8a867d;font-size:11px">DD-TRACE-JAVA</div>
+          <div style="display:flex;align-items:center;gap:6px;padding:2px 8px 2px 20px"><span style="width:8px;height:8px;border-radius:50%;background:#3574F0;flex:none"></span>Sampling rate flag</div>
+          <div style="padding:2px 8px;color:#8a867d;font-size:11px">BTRACE</div>
+          <div style="display:flex;align-items:center;gap:6px;padding:2px 8px 2px 20px;color:#6b675f"><span style="width:8px;height:8px;border-radius:50%;border:1.5px solid #8C8C8C;box-sizing:border-box;flex:none"></span>Upgrade ASM to 9.8<span style="flex:1"></span><span style="font-size:11px">3d</span></div>
+        </div>
+      </div>
+      <div style="width:24px;flex:none;border-left:1.5px solid #2b2b2b;background:#f4f2ee;display:flex;flex-direction:column;align-items:center;gap:7px;padding-top:7px"><span style="position:relative;width:12px;height:12px;border-radius:3px;background:#2b2b2b"><span style="position:absolute;right:-5px;top:-5px;width:8px;height:8px;border-radius:50%;background:#E0A030;border:1.5px solid #fff"></span></span></div>
+    </div>
+    <div style="height:20px;flex:none;border-top:1.5px solid #2b2b2b;background:#f4f2ee;display:flex;align-items:center;gap:10px;padding:0 10px;font-size:11px;color:#6b675f"><span>drydock</span></div>
+  </div>
+  <ol style="margin:0;padding-left:22px;font:16px/1.35 Kalam,cursive;color:#3a3a3a;display:flex;flex-direction:column;gap:3px">
+    <li><b>This window</b> is always first, so the list answers "what's mine here" before "what's everywhere". Then Needs you, then per repo.</li>
+    <li>↗ = runs in another window. Double-click raises it; the row never opens a second console here.</li>
+  </ol>
+</div>
+
+<!-- B2 -->
+<div id="B2" style="display:flex;flex-direction:column;gap:10px;width:600px">
+  <div style="display:flex;align-items:baseline;gap:8px"><span style="font:600 11px ui-monospace,Menlo,monospace;padding:3px 7px;background:#2b2b2b;color:#fff;border-radius:4px">B2</span><span style="font:700 21px Kalam,cursive">Start a session on a new worktree</span></div>
+  <div style="width:600px;height:360px;border:1.5px solid #2b2b2b;border-radius:8px;background:#fff;display:flex;flex-direction:column;overflow:hidden;font-size:13px;line-height:1.3;position:relative">
+    <div style="height:28px;flex:none;display:flex;align-items:center;gap:12px;padding:0 10px;border-bottom:1.5px solid #2b2b2b;background:#f4f2ee"><span style="display:flex;gap:4px"><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span></span><b>drydock ▾</b><span>⑂ main ▾</span></div>
+    <div style="flex:1;display:flex;min-height:0">
+      <div style="width:24px;flex:none;border-right:1.5px solid #2b2b2b;background:#f4f2ee"></div>
+      <div style="flex:1;background:repeating-linear-gradient(to bottom,transparent 0 10px,#ebe8e1 10px 15px);background-clip:content-box;padding:10px 40px 10px 24px;opacity:.5"></div>
+      <div style="width:270px;flex:none;border-left:1.5px solid #2b2b2b;display:flex;flex-direction:column">
+        <div style="height:22px;flex:none;display:flex;align-items:center;gap:10px;padding:0 8px;border-bottom:1px solid #d6d2c9;font-size:12px"><b>Drydock</b><span style="flex:1"></span><span style="padding:0 4px;background:#2b2b2b;color:#fff;border-radius:3px">＋</span></div>
+        <div style="flex:1;opacity:.35;background:repeating-linear-gradient(to bottom,transparent 0 14px,#ebe8e1 14px 19px);background-clip:content-box;padding:8px 30px 8px 12px"></div>
+      </div>
+      <div style="width:24px;flex:none;border-left:1.5px solid #2b2b2b;background:#f4f2ee"></div>
+    </div>
+    <div style="position:absolute;right:40px;top:58px;width:330px;border:1.5px solid #2b2b2b;border-radius:8px;background:#fff;box-shadow:0 8px 24px rgba(0,0,0,.15);display:flex;flex-direction:column;outline:1.5px solid #0f8b8d;outline-offset:3px">
+      <div style="padding:8px 10px;display:flex;flex-direction:column;gap:8px">
+        <span style="color:#8a867d;font-size:12px">What should the agent do?</span>
+        <span style="border:1.5px solid #2b2b2b;border-radius:4px;padding:5px 7px;min-height:44px">Fix the worktree add hang when the hostname doesn't resolve|</span>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;font-size:12px;align-items:center"><span style="padding:1px 7px;border:1px solid #b7b2a7;border-radius:10px">drydock ▾</span><span style="padding:1px 7px;border:1px solid #b7b2a7;border-radius:10px">from main ▾</span><span style="padding:1px 7px;border:1.5px solid #2b2b2b;border-radius:10px;background:#2b2b2b;color:#fff">Claude ▾</span><span style="color:#6b675f">→ ⑂ fix/wt-hang ✎</span><span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive">1</span></div>
+      </div>
+      <div style="padding:5px 10px;border-top:1px solid #d6d2c9;display:flex;gap:10px;font-size:11px;color:#8a867d;background:#f9f8f5"><span>⌘⏎ create &amp; open window</span><span>⌥⏎ in this window</span><span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive">2</span></div>
+    </div>
+    <div style="height:20px;flex:none;border-top:1.5px solid #2b2b2b;background:#f4f2ee;display:flex;align-items:center;gap:10px;padding:0 10px;font-size:11px;color:#6b675f"><span>drydock</span></div>
+  </div>
+  <ol style="margin:0;padding-left:22px;font:16px/1.35 Kalam,cursive;color:#3a3a3a;display:flex;flex-direction:column;gap:3px">
+    <li>A popup anchored to ＋, not a modal: one text field, three chips, a derived branch name. Fully keyboard-driven.</li>
+    <li>The default creates the worktree, opens its window and starts the Run content there. ⌥⏎ runs in the current checkout instead (refused if the tree is dirty).</li>
+  </ol>
+</div>
+
+<!-- B3 -->
+<div id="B3" style="display:flex;flex-direction:column;gap:10px;width:600px">
+  <div style="display:flex;align-items:baseline;gap:8px"><span style="font:600 11px ui-monospace,Menlo,monospace;padding:3px 7px;background:#2b2b2b;color:#fff;border-radius:4px">B3</span><span style="font:700 21px Kalam,cursive">Juggling 4 running sessions</span></div>
+  <div style="width:600px;height:360px;border:1.5px solid #2b2b2b;border-radius:8px;background:#fff;display:flex;flex-direction:column;overflow:hidden;font-size:13px;line-height:1.3;position:relative">
+    <div style="height:28px;flex:none;display:flex;align-items:center;gap:12px;padding:0 10px;border-bottom:1.5px solid #2b2b2b;background:#f4f2ee"><span style="display:flex;gap:4px"><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span></span><b>drydock · fix/wt-hang ▾</b><span>⑂ fix/wt-hang ▾</span></div>
+    <div style="flex:1;display:flex;min-height:0">
+      <div style="width:24px;flex:none;border-right:1.5px solid #2b2b2b;background:#f4f2ee;display:flex;flex-direction:column;align-items:center;padding-top:7px"><span style="flex:1"></span><span style="width:12px;height:12px;border-radius:3px;background:#2b2b2b;margin-bottom:8px"></span></div>
+      <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+        <div style="flex:1;background:repeating-linear-gradient(to bottom,transparent 0 10px,#ebe8e1 10px 15px);background-clip:content-box;padding:8px 60px 4px 24px"></div>
+        <div style="height:150px;flex:none;border-top:1.5px solid #2b2b2b;display:flex;flex-direction:column">
+          <div style="height:22px;flex:none;display:flex;align-items:center;gap:10px;padding:0 8px;border-bottom:1px solid #d6d2c9;font-size:12px"><b>Run</b><span style="padding:0 6px;background:#e6f4f3;outline:1.5px solid #0f8b8d;border-bottom:2px solid #2b2b2b">● Claude · Fix worktree add…</span><span style="color:#8a867d">▷ DrydockApp</span><span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive">1</span></div>
+          <div style="flex:1;display:flex;min-height:0">
+            <div style="width:24px;flex:none;border-right:1px solid #d6d2c9;display:flex;flex-direction:column;align-items:center;gap:6px;padding-top:6px;font-size:11px;background:#e6f4f3"><span>■</span><span>⌂</span></div>
+            <div style="flex:1;font:11px/1.45 ui-monospace,Menlo,monospace;padding:6px 8px;color:#4a4740;overflow:hidden">⏺ Bash(git -c user.name=x branch b1)<br>  ⎿ 0.3s<br>✻ Setting fixture ident in config…<br><span style="color:#8a867d">&gt; _</span></div>
+          </div>
+        </div>
+      </div>
+      <div style="width:24px;flex:none;border-left:1.5px solid #2b2b2b;background:#f4f2ee;display:flex;flex-direction:column;align-items:center;padding-top:7px"><span style="position:relative;width:12px;height:12px;border:1.5px solid #2b2b2b;border-radius:3px"><span style="position:absolute;right:-6px;top:-6px;width:8px;height:8px;border-radius:50%;background:#E0A030;border:1.5px solid #fff"></span></span></div>
+    </div>
+    <div style="position:absolute;left:150px;top:44px;width:320px;border:1.5px solid #2b2b2b;border-radius:8px;background:#fff;box-shadow:0 8px 24px rgba(0,0,0,.15);display:flex;flex-direction:column;font-size:12px;outline:1.5px solid #0f8b8d;outline-offset:3px">
+      <div style="padding:5px 10px;border-bottom:1px solid #d6d2c9;display:flex;gap:6px;align-items:center"><b>Go to Session</b><span style="color:#8a867d">⌃⇧S</span><span style="flex:1"></span><span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive">2</span></div>
+      <div style="display:flex;align-items:center;gap:6px;padding:3px 10px;background:#dfe7f7"><span style="width:8px;height:8px;border-radius:50%;background:#E0A030;flex:none"></span>Port review tour to gutter<span style="flex:1"></span><span style="color:#8a867d">drydock · review-gutter</span></div>
+      <div style="display:flex;align-items:center;gap:6px;padding:3px 10px"><span style="width:8px;height:8px;border-radius:50%;background:#3574F0;flex:none"></span>Sampling rate flag<span style="flex:1"></span><span style="color:#8a867d">dd-trace-java</span></div>
+      <div style="display:flex;align-items:center;gap:6px;padding:3px 10px"><span style="width:8px;height:8px;border-radius:50%;background:#3574F0;flex:none"></span>Status dot CPU regression<span style="flex:1"></span><span style="color:#8a867d">drydock · dot-cpu</span></div>
+      <div style="display:flex;align-items:center;gap:6px;padding:3px 10px;color:#6b675f"><span style="width:8px;height:8px;border-radius:50%;background:#3574F0;flex:none"></span>Fix worktree add JVM hang<span style="flex:1"></span><span style="color:#8a867d">this window</span></div>
+    </div>
+    <div style="height:20px;flex:none;border-top:1.5px solid #2b2b2b;background:#f4f2ee;display:flex;align-items:center;gap:10px;padding:0 10px;font-size:11px;color:#6b675f"><span>drydock · fix/wt-hang</span></div>
+  </div>
+  <ol style="margin:0;padding-left:22px;font:16px/1.35 Kalam,cursive;color:#3a3a3a;display:flex;flex-direction:column;gap:3px">
+    <li>Run tab for this window's session only, sitting next to the user's own run configs. Stop is Drydock's (non-soft + force-kill); there's no Rerun.</li>
+    <li>Switching is a Recent-Files-style popup sorted by urgency; Enter raises that window. Drydock tool window can stay collapsed.</li>
+  </ol>
+</div>
+
+<!-- B4 -->
+<div id="B4" style="display:flex;flex-direction:column;gap:10px;width:600px">
+  <div style="display:flex;align-items:baseline;gap:8px"><span style="font:600 11px ui-monospace,Menlo,monospace;padding:3px 7px;background:#2b2b2b;color:#fff;border-radius:4px">B4</span><span style="font:700 21px Kalam,cursive">An agent needs you, elsewhere</span></div>
+  <div style="width:600px;height:360px;border:1.5px solid #2b2b2b;border-radius:8px;background:#fff;display:flex;flex-direction:column;overflow:hidden;font-size:13px;line-height:1.3;position:relative">
+    <div style="height:28px;flex:none;display:flex;align-items:center;gap:12px;padding:0 10px;border-bottom:1.5px solid #2b2b2b;background:#f4f2ee"><span style="display:flex;gap:4px"><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span></span><b>dd-trace-java · sampling-flag ▾</b><span>⑂ sampling-flag ▾</span></div>
+    <div style="flex:1;display:flex;min-height:0">
+      <div style="width:24px;flex:none;border-right:1.5px solid #2b2b2b;background:#f4f2ee"></div>
+      <div style="flex:1;background:repeating-linear-gradient(to bottom,transparent 0 10px,#ebe8e1 10px 15px);background-clip:content-box;padding:10px 60px 10px 24px"></div>
+      <div style="width:24px;flex:none;border-left:1.5px solid #2b2b2b;background:#f4f2ee;display:flex;flex-direction:column;align-items:center;padding-top:7px;gap:4px"><span style="position:relative;width:12px;height:12px;border:1.5px solid #2b2b2b;border-radius:3px;outline:1.5px solid #0f8b8d;outline-offset:2px"><span style="position:absolute;right:-6px;top:-6px;width:8px;height:8px;border-radius:50%;background:#E0A030;border:1.5px solid #fff"></span></span><span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive;margin-top:4px">1</span></div>
+    </div>
+    <div style="position:absolute;right:36px;bottom:30px;width:290px;border:1.5px solid #2b2b2b;border-radius:8px;background:#fff;box-shadow:0 8px 24px rgba(0,0,0,.15);padding:10px 12px;display:flex;flex-direction:column;gap:6px;outline:1.5px solid #0f8b8d;outline-offset:3px">
+      <div style="display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#E0A030"></span><b>Codex needs you</b><span style="flex:1"></span><span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive">2</span></div>
+      <div>Port review tour to gutter · drydock</div>
+      <div style="font-size:12px;color:#6b675f">Allow <code>./gradlew test</code>?</div>
+      <div style="display:flex;gap:12px;color:#3574F0"><span>Raise window</span><span>Show in Drydock</span></div>
+    </div>
+    <div style="height:20px;flex:none;border-top:1.5px solid #2b2b2b;background:#f4f2ee;display:flex;align-items:center;gap:10px;padding:0 10px;font-size:11px;color:#6b675f"><span>dd-trace-java</span></div>
+  </div>
+  <div style="display:flex;align-items:center;gap:10px;font-size:13px;padding:6px 10px;border:1.5px solid #2b2b2b;border-radius:6px;background:#f4f2ee;width:fit-content"><span style="color:#8a867d">⌘` ▸</span><span>dd-trace-java · sampling-flag</span><span style="background:#e6f4f3;outline:1.5px solid #0f8b8d;padding:0 4px"><b>◐ drydock · review-gutter — waiting</b></span><span>drydock · fix/wt-hang</span><span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive">3</span></div>
+  <ol style="margin:0;padding-left:22px;font:16px/1.35 Kalam,cursive;color:#3a3a3a;display:flex;flex-direction:column;gap:3px">
+    <li>Badge on the Drydock stripe icon in every window. It's the same icon whose tool window lists the waiting row under Needs you.</li>
+    <li>Balloon on entering "needs you". Raise window, or Show in Drydock to see it in context without leaving.</li>
+    <li>Frame title marker on the waiting window.</li>
+  </ol>
+</div>
+
+<!-- B5 -->
+<div id="B5" style="display:flex;flex-direction:column;gap:10px;width:600px">
+  <div style="display:flex;align-items:baseline;gap:8px"><span style="font:600 11px ui-monospace,Menlo,monospace;padding:3px 7px;background:#2b2b2b;color:#fff;border-radius:4px">B5</span><span style="font:700 21px Kalam,cursive">Resume after IDE restart</span></div>
+  <div style="width:600px;height:360px;border:1.5px solid #2b2b2b;border-radius:8px;background:#fff;display:flex;flex-direction:column;overflow:hidden;font-size:13px;line-height:1.3">
+    <div style="height:28px;flex:none;display:flex;align-items:center;gap:12px;padding:0 10px;border-bottom:1.5px solid #2b2b2b;background:#f4f2ee"><span style="display:flex;gap:4px"><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span></span><b>btrace · asm-98 ▾</b><span>⑂ asm-98 ▾</span></div>
+    <div style="flex:1;display:flex;min-height:0">
+      <div style="width:24px;flex:none;border-right:1.5px solid #2b2b2b;background:#f4f2ee"></div>
+      <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+        <div style="flex:1;background:repeating-linear-gradient(to bottom,transparent 0 10px,#ebe8e1 10px 15px);background-clip:content-box;padding:10px 40px 10px 24px"></div>
+        <div style="height:24px;flex:none;border-top:1.5px solid #2b2b2b;display:flex;align-items:center;gap:8px;padding:0 8px;font-size:12px;color:#8a867d"><b style="color:#2b2b2b">Run</b> no content <span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive">1</span></div>
+      </div>
+      <div style="width:270px;flex:none;border-left:1.5px solid #2b2b2b;display:flex;flex-direction:column">
+        <div style="height:22px;flex:none;display:flex;align-items:center;gap:10px;padding:0 8px;border-bottom:1px solid #d6d2c9;font-size:12px"><b>Drydock</b><b style="border-bottom:2px solid #2b2b2b">Sessions</b><span>Review</span></div>
+        <div style="flex:1;padding:4px 0;display:flex;flex-direction:column;gap:2px;font-size:12px">
+          <div style="padding:2px 8px;color:#8a867d;font-size:11px">THIS WINDOW</div>
+          <div style="margin:2px 8px;padding:8px;border:1.5px solid #2b2b2b;border-radius:6px;display:flex;flex-direction:column;gap:6px;background:#e6f4f3;outline:1.5px solid #0f8b8d">
+            <span style="display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;border:1.5px solid #8C8C8C;box-sizing:border-box;flex:none"></span><b>Upgrade ASM to 9.8</b></span>
+            <span style="color:#6b675f;font-size:11px">Codex · not running · last active 3d</span>
+            <span style="font-size:11px;color:#4a4740;background:#fff;border:1px dashed #b7b2a7;border-radius:4px;padding:4px 6px">"…two tests in ClassFilterTest need new opcodes"</span>
+            <span style="display:flex;gap:6px;align-items:center"><span style="padding:1px 10px;border:1.5px solid #2b2b2b;border-radius:4px;background:#2b2b2b;color:#fff">Resume ⌃⇧R</span><span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive">2</span></span>
+          </div>
+          <div style="padding:6px 8px 2px;color:#8a867d;font-size:11px">ELSEWHERE · all idle</div>
+          <div style="display:flex;align-items:center;gap:6px;padding:2px 8px 2px 20px;color:#6b675f"><span style="width:8px;height:8px;border-radius:50%;border:1.5px solid #8C8C8C;box-sizing:border-box;flex:none"></span>Fix worktree add…<span style="flex:1"></span>2h</div>
+          <div style="display:flex;align-items:center;gap:6px;padding:2px 8px 2px 20px;color:#6b675f"><span style="width:8px;height:8px;border-radius:50%;border:1.5px solid #8C8C8C;box-sizing:border-box;flex:none"></span>Port review tour…<span style="flex:1"></span>2h</div>
+          <div style="display:flex;align-items:center;gap:6px;padding:2px 8px 2px 20px;color:#6b675f"><span style="width:8px;height:8px;border-radius:50%;border:1.5px solid #8C8C8C;box-sizing:border-box;flex:none"></span>Sampling rate flag<span style="flex:1"></span>1d</div>
+        </div>
+      </div>
+      <div style="width:24px;flex:none;border-left:1.5px solid #2b2b2b;background:#f4f2ee"></div>
+    </div>
+    <div style="height:20px;flex:none;border-top:1.5px solid #2b2b2b;background:#f4f2ee;display:flex;align-items:center;gap:10px;padding:0 10px;font-size:11px;color:#6b675f"><span>btrace · asm-98</span></div>
+  </div>
+  <ol style="margin:0;padding-left:22px;font:16px/1.35 Kalam,cursive;color:#3a3a3a;display:flex;flex-direction:column;gap:3px">
+    <li>IDE restored the window; Run is empty, because Run content dies with its process and nothing auto-starts.</li>
+    <li>The tool window's This-window card turns into the resume prompt: last message, one button, starts exactly one execution.</li>
+  </ol>
+</div>
+
+<!-- B6 -->
+<div id="B6" style="display:flex;flex-direction:column;gap:10px;width:600px">
+  <div style="display:flex;align-items:baseline;gap:8px"><span style="font:600 11px ui-monospace,Menlo,monospace;padding:3px 7px;background:#2b2b2b;color:#fff;border-radius:4px">B6</span><span style="font:700 21px Kalam,cursive">Review the agent's diff, then finish</span></div>
+  <div style="width:600px;height:360px;border:1.5px solid #2b2b2b;border-radius:8px;background:#fff;display:flex;flex-direction:column;overflow:hidden;font-size:13px;line-height:1.3;position:relative">
+    <div style="height:28px;flex:none;display:flex;align-items:center;gap:12px;padding:0 10px;border-bottom:1.5px solid #2b2b2b;background:#f4f2ee"><span style="display:flex;gap:4px"><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span></span><b>drydock · dot-cpu ▾</b><span>⑂ dot-cpu ▾</span></div>
+    <div style="flex:1;display:flex;min-height:0">
+      <div style="width:24px;flex:none;border-right:1.5px solid #2b2b2b;background:#f4f2ee"></div>
+      <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+        <div style="height:22px;flex:none;display:flex;align-items:center;gap:8px;padding:0 8px;border-bottom:1px solid #d6d2c9;font-size:12px;background:#f9f8f5"><span style="padding:1px 6px;border:1px solid #b7b2a7;border-bottom:none;background:#fff">SessionDots.java ↔ main</span></div>
+        <div style="flex:1;display:flex;flex-direction:column;padding:8px 0 0">
+          <div style="height:40px;margin:0 30px 0 24px;background:repeating-linear-gradient(to bottom,transparent 0 10px,#ebe8e1 10px 15px)"></div>
+          <div style="display:flex;align-items:center;gap:4px;padding-left:6px"><span style="color:#E0A030;font-size:14px">◆</span><span style="flex:1;height:16px;background:#e3f2df;margin-right:30px"></span></div>
+          <div style="margin:4px 30px 4px 24px;padding:6px 8px;border:1.5px solid #2b2b2b;border-radius:6px;background:#e6f4f3;outline:1.5px solid #0f8b8d;font-size:12px;display:flex;flex-direction:column;gap:3px"><span><b style="color:#b26a00">MED</b> Timer still scheduled when row hidden</span><span style="color:#3574F0">Reply · Apply patch · Resolve</span></div>
+          <div style="flex:1;margin:0 30px 0 24px;background:repeating-linear-gradient(to bottom,transparent 0 10px,#ebe8e1 10px 15px)"></div>
+        </div>
+      </div>
+      <div style="width:220px;flex:none;border-left:1.5px solid #2b2b2b;display:flex;flex-direction:column;background:#e6f4f3;outline:1.5px solid #0f8b8d;outline-offset:-2px">
+        <div style="height:22px;flex:none;display:flex;align-items:center;gap:10px;padding:0 8px;border-bottom:1px solid #b9dcda;font-size:12px"><b>Drydock</b><span>Sessions</span><b style="border-bottom:2px solid #2b2b2b">Review</b></div>
+        <div style="flex:1;background:#fff;margin:3px;padding:4px 0;display:flex;flex-direction:column;gap:2px;font-size:12px">
+          <div style="padding:2px 8px;color:#8a867d;font-size:11px">dot-cpu vs main · 4 files</div>
+          <div style="padding:2px 8px;display:flex;gap:6px"><span style="color:#2f7d32">✓</span>SessionListModel.java</div>
+          <div style="padding:2px 8px;display:flex;gap:6px;background:#dfe7f7"><span style="color:#E0A030">◆1</span>SessionDots.java</div>
+          <div style="padding:2px 8px;display:flex;gap:6px"><span style="color:#8a867d">○</span>SessionsPanel.java</div>
+          <div style="padding:2px 8px;display:flex;gap:6px"><span style="color:#8a867d">○</span>SessionDotsTest.java</div>
+          <div style="padding:6px 8px 2px;color:#8a867d;font-size:11px">TOUR · 2 / 5 steps <span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive">1</span></div>
+          <div style="padding:2px 8px;color:#6b675f">3 · Where the timer is owned</div>
+        </div>
+        <div style="flex:none;padding:6px;display:flex;flex-wrap:wrap;gap:4px;border-top:1px solid #b9dcda;font-size:12px"><span style="padding:1px 6px;border:1px solid #b7b2a7;border-radius:4px;background:#fff">Request change</span><span style="padding:1px 6px;border:1px solid #b7b2a7;border-radius:4px;background:#fff;color:#a8a49b">Approve</span><span style="padding:1px 8px;border:1.5px solid #2b2b2b;border-radius:4px;background:#2b2b2b;color:#fff">Finish ▾</span><span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive">2</span></div>
+      </div>
+      <div style="width:24px;flex:none;border-left:1.5px solid #2b2b2b;background:#f4f2ee"></div>
+    </div>
+    <div style="height:20px;flex:none;border-top:1.5px solid #2b2b2b;background:#f4f2ee;display:flex;align-items:center;gap:10px;padding:0 10px;font-size:11px;color:#6b675f"><span>drydock · dot-cpu</span></div>
+  </div>
+  <ol style="margin:0;padding-left:22px;font:16px/1.35 Kalam,cursive;color:#3a3a3a;display:flex;flex-direction:column;gap:3px">
+    <li>Review tab = file list with verdict state + the guided tour outline. Selecting opens the IDE's diff viewer with gutter ◆ and inlay finding cards.</li>
+    <li>The verdict bar lives in the tool window, so it's always there whatever editor is focused. Finish ▾ → Merge locally / Push &amp; PR (+ remove worktree).</li>
+  </ol>
+</div>
+
+<!-- B7 -->
+<div id="B7" style="display:flex;flex-direction:column;gap:10px;width:600px">
+  <div style="display:flex;align-items:baseline;gap:8px"><span style="font:600 11px ui-monospace,Menlo,monospace;padding:3px 7px;background:#2b2b2b;color:#fff;border-radius:4px">B7</span><span style="font:700 21px Kalam,cursive">Forget a session, clean up worktrees</span></div>
+  <div style="width:600px;height:360px;border:1.5px solid #2b2b2b;border-radius:8px;background:#fff;display:flex;flex-direction:column;overflow:hidden;font-size:13px;line-height:1.3;position:relative">
+    <div style="height:28px;flex:none;display:flex;align-items:center;gap:12px;padding:0 10px;border-bottom:1.5px solid #2b2b2b;background:#f4f2ee"><span style="display:flex;gap:4px"><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span></span><b>drydock ▾</b><span>⑂ main ▾</span></div>
+    <div style="flex:1;display:flex;min-height:0">
+      <div style="width:24px;flex:none;border-right:1.5px solid #2b2b2b;background:#f4f2ee"></div>
+      <div style="flex:1;background:repeating-linear-gradient(to bottom,transparent 0 10px,#ebe8e1 10px 15px);background-clip:content-box;padding:10px 40px 10px 24px;opacity:.5"></div>
+      <div style="width:270px;flex:none;border-left:1.5px solid #2b2b2b;display:flex;flex-direction:column">
+        <div style="height:22px;flex:none;display:flex;align-items:center;gap:10px;padding:0 8px;border-bottom:1px solid #d6d2c9;font-size:12px"><b>Drydock</b><b style="border-bottom:2px solid #2b2b2b">Sessions</b><span>Review</span></div>
+        <div style="flex:1;padding:4px 0;display:flex;flex-direction:column;gap:2px;font-size:12px">
+          <div style="padding:2px 8px;color:#8a867d;font-size:11px">DRYDOCK</div>
+          <div style="display:flex;align-items:center;gap:6px;padding:2px 8px 2px 20px;background:#dfe7f7"><span style="width:8px;height:8px;border-radius:50%;border:1.5px solid #8C8C8C;box-sizing:border-box;flex:none"></span>Status dot CPU regression</div>
+          <div style="padding:6px 8px 2px;color:#8a867d;font-size:11px">WORKTREES WITHOUT SESSION</div>
+          <div style="padding:2px 8px 2px 20px;color:#6b675f">⑂ old-spike</div>
+          <div style="padding:6px 8px 2px;color:#8a867d;font-size:11px;display:flex;gap:6px;align-items:center">STALE · 2 <span style="color:#3574F0">Prune</span><span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive">2</span></div>
+          <div style="padding:2px 8px 2px 20px;color:#a8a49b;text-decoration:line-through">⑂ tmp-bisect</div>
+          <div style="padding:2px 8px 2px 20px;color:#a8a49b;text-decoration:line-through">⑂ lsp-tier3</div>
+        </div>
+      </div>
+      <div style="width:24px;flex:none;border-left:1.5px solid #2b2b2b;background:#f4f2ee"></div>
+    </div>
+    <div style="position:absolute;left:34px;top:60px;width:256px;border:1.5px solid #2b2b2b;border-radius:8px;background:#fff;box-shadow:0 8px 24px rgba(0,0,0,.15);display:flex;flex-direction:column;outline:1.5px solid #0f8b8d;outline-offset:3px">
+      <div style="padding:8px 12px;border-bottom:1px solid #d6d2c9;display:flex;align-items:center;gap:6px"><b>Done with this session?</b><span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive">1</span></div>
+      <div style="padding:8px 12px;display:flex;flex-direction:column;gap:6px;font-size:12px">
+        <span>◉ Forget session only</span>
+        <span>○ Forget + remove worktree <span style="color:#6b675f">(closes window)</span></span>
+        <span style="padding-left:16px;color:#b26a00">2 uncommitted files will be discarded</span>
+        <span style="padding-left:16px;color:#6b675f">☐ also delete branch dot-cpu</span>
+        <span style="color:#8a867d">Codex/Claude/pi history on disk is kept.</span>
+      </div>
+      <div style="padding:6px 12px;border-top:1px solid #d6d2c9;display:flex;gap:8px;justify-content:flex-end"><span style="padding:1px 10px;border:1px solid #b7b2a7;border-radius:4px">Cancel</span><span style="padding:1px 10px;border:1.5px solid #2b2b2b;border-radius:4px;background:#2b2b2b;color:#fff">Forget</span></div>
+    </div>
+    <div style="height:20px;flex:none;border-top:1.5px solid #2b2b2b;background:#f4f2ee;display:flex;align-items:center;gap:10px;padding:0 10px;font-size:11px;color:#6b675f"><span>drydock</span></div>
+  </div>
+  <ol style="margin:0;padding-left:22px;font:16px/1.35 Kalam,cursive;color:#3a3a3a;display:flex;flex-direction:column;gap:3px">
+    <li>One "done" dialog: forget only, or forget + remove worktree. The data-loss line appears only when the tree is dirty.</li>
+    <li>Today's three sections survive. Stale gets an inline Prune (no confirm, metadata only).</li>
+  </ol>
+</div>
+
+</div>
+</div>
+</x-dc>
+</body>
+</html>

@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Kalam:wght@400;700&family=Patrick+Hand&display=swap" rel="stylesheet">
+<style>body{margin:0;background:#f3f1ec;color:#2b2b2b}a{color:#0f8b8d}a:hover{color:#0a5f60}</style>
+</helmet>
+<div style="padding:44px 48px 64px;display:flex;flex-direction:column;gap:40px;font-family:'Patrick Hand',cursive">
+
+<header style="display:flex;flex-wrap:wrap;gap:40px;align-items:flex-start;max-width:1900px">
+  <div style="display:flex;flex-direction:column;gap:10px;max-width:640px">
+    <a href="Drydock IntelliJ UX.dc.html" style="font:13px ui-monospace,Menlo,monospace;text-decoration:none">← all directions</a>
+    <div style="display:flex;align-items:baseline;gap:12px"><span style="font:600 12px ui-monospace,Menlo,monospace;padding:4px 8px;background:#2b2b2b;color:#fff;border-radius:4px">E</span><h1 style="margin:0;font:700 34px/1.1 Kalam,cursive">Synthesis: agent in the editor</h1></div>
+    <p style="margin:0;font-size:19px;line-height:1.4;text-wrap:pretty">Built from your four answers. It uses the window model and <b>editor-tab console</b> from <a href="C Window-centric.dc.html">C</a> and only IDE-native surfaces for the catalog: an <b>Agents ▾</b> title-bar widget next to the Project widget, a status-bar widget, and an optional Services node from <a href="A Services-native.dc.html">A</a>. Closing a window <b>stops</b> the agent; there's no detach in v1. Review decorates the stock <b>Local Changes</b> view, as in <a href="D Hybrid Services + Terminal.dc.html">D</a>. Three density levels are shown so you can judge how crowded it gets.</p>
+  </div>
+  <div style="display:grid;grid-template-columns:auto auto;gap:6px 18px;font-size:16px;align-self:end;padding:14px 18px;background:#fff;border:1.5px solid #2b2b2b;border-radius:8px">
+    <b style="grid-column:1/3;font:700 15px Kalam,cursive">Who owns what</b>
+    <span style="color:#8a867d">Durable session</span><span>app catalog → Agents ▾ widget / Services</span>
+    <span style="color:#8a867d">Live process</span><span>ProcessHandler in the worktree Project</span>
+    <span style="color:#8a867d">Presentation</span><span>agent FileEditor (light virtual file)</span>
+    <span style="color:#8a867d">Window</span><span>one Project per worktree, 1…n sessions</span>
+    <span style="color:#8a867d">Tab closed</span><span>hides the view; agent keeps running</span>
+    <span style="color:#8a867d">Window closed</span><span>stops the agent; session goes idle</span>
+  </div>
+  <div style="display:flex;flex-direction:column;gap:8px;font-size:16px;align-self:end;max-width:440px;padding:14px 18px;border:1.5px dashed #0f8b8d;border-radius:8px;background:#e6f4f3">
+    <b style="font:700 15px Kalam,cursive">Can the console live in an editor?</b>
+    <span><b>1 ·</b> A custom <code>FileEditorProvider</code> whose component is the <code>TerminalExecutionConsole</code> that Phase 0A already validated for Claude, Codex and pi. Same widget, different container.</span>
+    <span><b>2 ·</b> Precedent: the stock Terminal already offers <i>Move to Editor</i>, so a terminal widget inside an editor tab is a supported shape.</span>
+    <span><b>3 ·</b> libghostty inside the FileEditor: a native surface over Swing (z-order, popups, focus). Last resort only.</span>
+  </div>
+</header>
+
+<section id="M" style="display:flex;flex-direction:column;gap:16px;padding:24px 0 8px;border-top:1.5px dashed #b7b2a7;border-bottom:1.5px dashed #b7b2a7">
+  <div style="display:flex;flex-direction:column;gap:6px;max-width:960px">
+    <div style="display:flex;align-items:baseline;gap:10px"><span style="font:600 11px ui-monospace,Menlo,monospace;padding:3px 7px;background:#0f8b8d;color:#fff;border-radius:4px">NEW</span><h2 style="margin:0;font:700 26px Kalam,cursive">More than one session in a worktree</h2></div>
+    <p style="margin:0;font-size:18px;line-height:1.4;text-wrap:pretty">A window is still one worktree, but it can hold several agent tabs. A <b>read-only</b> session is the usual second one: ask questions, explore, plan, without creating a worktree. Sessions are created in a mode, <b>Writes</b> or <b>Read-only</b>, and the mode shows on the tab. Rule: at most one <i>writing</i> session per worktree by default; a second one needs an explicit override.</p>
+  </div>
+  <div style="display:flex;flex-wrap:wrap;gap:44px 40px;align-items:flex-start">
+
+<!-- E9 -->
+<div id="E9" style="display:flex;flex-direction:column;gap:10px;width:600px">
+  <div style="display:flex;align-items:baseline;gap:8px"><span style="font:600 11px ui-monospace,Menlo,monospace;padding:3px 7px;background:#2b2b2b;color:#fff;border-radius:4px">E9</span><span style="font:700 21px Kalam,cursive">Two sessions, one window</span></div>
+  <div style="width:600px;height:360px;border:1.5px solid #2b2b2b;border-radius:8px;background:#fff;display:flex;flex-direction:column;overflow:hidden;font-size:13px;line-height:1.3">
+    <div style="height:28px;flex:none;display:flex;align-items:center;gap:12px;padding:0 10px;border-bottom:1.5px solid #2b2b2b;background:#f4f2ee"><span style="display:flex;gap:4px"><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span></span><b style="white-space:nowrap">drydock · Fix worktree add JVM hang <span style="color:#6b675f">+1</span> ▾</b><span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive;flex:none">3</span><span style="white-space:nowrap">⑂ fix/wt-hang ▾</span></div>
+    <div style="flex:1;display:flex;min-height:0">
+      <div style="width:24px;flex:none;border-right:1.5px solid #2b2b2b;background:#f4f2ee"></div>
+      <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+        <div style="height:24px;flex:none;display:flex;align-items:flex-end;gap:2px;padding:0 6px;border-bottom:1px solid #d6d2c9;font-size:12px;background:#f9f8f5">
+          <span style="padding:2px 8px;color:#6b675f;display:flex;gap:5px;align-items:center;white-space:nowrap">📌<span style="width:7px;height:7px;border-radius:50%;background:#3574F0"></span>Fix worktree add…</span>
+          <span style="padding:2px 8px;border:1.5px solid #2b2b2b;border-bottom:none;background:#e6f4f3;outline:1.5px solid #0f8b8d;display:flex;gap:5px;align-items:center;border-radius:4px 4px 0 0;white-space:nowrap">📌<span style="width:7px;height:7px;border-radius:50%;background:#3574F0"></span>Why does git need the hostname?<span style="padding:0 4px;border:1px solid #8a867d;border-radius:3px;font-size:10px;color:#6b675f">RO</span></span>
+          <span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive;margin-bottom:3px;flex:none">1</span>
+          <span style="padding:2px 8px;color:#8a867d;white-space:nowrap">WorktreeService.java</span>
+        </div>
+        <div style="height:28px;flex:none;display:flex;align-items:center;gap:10px;padding:0 10px;border-bottom:1px solid #b9dcda;background:#e6f4f3;font-size:12px;white-space:nowrap">
+          <span style="display:flex;align-items:center;gap:5px"><span style="width:8px;height:8px;border-radius:50%;background:#3574F0"></span><b>At prompt</b></span>
+          <span style="padding:0 6px;border:1px solid #8a867d;border-radius:3px;font-size:11px">Read-only</span>
+          <span style="color:#6b675f">Claude · plan mode · can't edit files</span>
+          <span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive;flex:none">2</span>
+          <span style="flex:1"></span><span style="padding:0 8px;border:1px solid #b7b2a7;border-radius:4px;background:#fff">■ Stop</span>
+        </div>
+        <div style="flex:1;font:11px/1.5 ui-monospace,Menlo,monospace;padding:10px 14px;color:#4a4740;overflow:hidden;background:#fdfdfb">
+          &gt; Why does git need the hostname for a branch create?<br><br>
+          ⏺ Read(git/ident.c) …<br>
+          ⏺ With no user.email set, git builds a default ident from<br>&nbsp;&nbsp;user@hostname, which calls gethostbyname()…<br>
+          <span style="color:#8a867d">&gt; _</span>
+        </div>
+      </div>
+    </div>
+    <div style="height:20px;flex:none;border-top:1.5px solid #2b2b2b;background:#f4f2ee;display:flex;align-items:center;gap:10px;padding:0 10px;font-size:11px;color:#6b675f"><span>drydock · fix/wt-hang</span></div>
+  </div>
+  <ol style="margin:0;padding-left:22px;font:16px/1.35 Kalam,cursive;color:#3a3a3a;display:flex;flex-direction:column;gap:3px">
+    <li>Every session is its own pinned agent tab with its own dot and title. Read-only tabs carry an <b>RO</b> chip so a glance tells you which one can touch files.</li>
+    <li>The strip names the mode and how it's enforced (Claude plan mode, Codex read-only sandbox). If an agent has no enforced mode, the strip says "not enforced" instead of implying safety.</li>
+    <li>The window title uses the writing session's title, plus a "+1" count.</li>
+  </ol>
+</div>
+
+<!-- E10 -->
+<div id="E10" style="display:flex;flex-direction:column;gap:10px;width:600px">
+  <div style="display:flex;align-items:baseline;gap:8px"><span style="font:600 11px ui-monospace,Menlo,monospace;padding:3px 7px;background:#2b2b2b;color:#fff;border-radius:4px">E10</span><span style="font:700 21px Kalam,cursive">New session here, without a worktree</span></div>
+  <div style="width:600px;height:360px;border:1.5px solid #2b2b2b;border-radius:8px;background:#fff;display:flex;flex-direction:column;overflow:hidden;font-size:13px;line-height:1.3;position:relative">
+    <div style="height:28px;flex:none;display:flex;align-items:center;gap:12px;padding:0 10px;border-bottom:1.5px solid #2b2b2b;background:#f4f2ee"><span style="display:flex;gap:4px"><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span></span><b>drydock ▾</b><span>⑂ main ▾</span><span style="color:#8a867d;font-size:11px">2 uncommitted files</span></div>
+    <div style="flex:1;background:repeating-linear-gradient(to bottom,transparent 0 10px,#ebe8e1 10px 15px);background-clip:content-box;padding:10px 120px 10px 54px;opacity:.5"></div>
+    <div style="position:absolute;left:100px;top:40px;width:400px;border:1.5px solid #2b2b2b;border-radius:8px;background:#fff;box-shadow:0 8px 24px rgba(0,0,0,.15);display:flex;flex-direction:column;outline:1.5px solid #0f8b8d;outline-offset:3px">
+      <div style="padding:8px 12px;border-bottom:1px solid #d6d2c9;display:flex;align-items:center;gap:8px"><b>New Agent Session</b><span style="flex:1"></span><span style="color:#8a867d">✕</span></div>
+      <div style="padding:10px 12px;display:grid;grid-template-columns:80px 1fr;gap:8px 10px;align-items:center">
+        <span style="color:#6b675f">Task</span><span style="border:1.5px solid #2b2b2b;border-radius:4px;padding:4px 6px;min-height:34px">How is the MCP budget enforced across sessions?</span>
+        <span style="color:#6b675f">Agent</span><span style="display:flex;gap:4px"><span style="padding:1px 8px;border:1.5px solid #2b2b2b;border-radius:10px;background:#2b2b2b;color:#fff">Claude</span><span style="padding:1px 8px;border:1px solid #b7b2a7;border-radius:10px">Codex</span><span style="padding:1px 8px;border:1px solid #b7b2a7;border-radius:10px">pi</span></span>
+        <span style="color:#6b675f">Mode</span><span style="display:flex;gap:4px;align-items:center"><span style="padding:1px 8px;border:1px solid #b7b2a7;border-radius:10px">Writes</span><span style="padding:1px 8px;border:1.5px solid #2b2b2b;border-radius:10px;background:#2b2b2b;color:#fff">Read-only</span><span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive;flex:none">1</span></span>
+        <span style="color:#6b675f">Where</span><span style="display:flex;flex-direction:column;gap:3px;font-size:12px"><span>◉ Here · <b>drydock / main</b></span><span style="color:#6b675f">○ New worktree from main…</span></span>
+      </div>
+      <div style="padding:6px 12px;background:#f9f8f5;border-top:1px solid #d6d2c9;font-size:11px;color:#6b675f;display:flex;gap:6px;align-items:center">Read-only runs fine on a dirty checkout. Writes here would share the tree with your edits.<span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive;flex:none">2</span></div>
+      <div style="padding:8px 12px;border-top:1px solid #d6d2c9;display:flex;gap:8px;align-items:center;justify-content:flex-end"><span style="padding:2px 10px;border:1px solid #b7b2a7;border-radius:4px">Cancel</span><span style="padding:2px 10px;border:1.5px solid #2b2b2b;border-radius:4px;background:#2b2b2b;color:#fff">Start Here</span></div>
+    </div>
+    <div style="height:20px;flex:none;border-top:1.5px solid #2b2b2b;background:#f4f2ee;display:flex;align-items:center;gap:10px;padding:0 10px;font-size:11px;color:#6b675f"><span>⌥⌘N · or Agents ▾ ▸ ⋯ ▸ New Session Here</span></div>
+  </div>
+  <ol style="margin:0;padding-left:22px;font:16px/1.35 Kalam,cursive;color:#3a3a3a;display:flex;flex-direction:column;gap:3px">
+    <li>The same dialog as <a href="#E3">E3</a>, with Mode and Where added. Read-only defaults to Here; Writes defaults to New worktree.</li>
+    <li>Writes + Here is allowed but flagged: on a dirty checkout, or when another writing session is active in this worktree, the primary button becomes "Start anyway".</li>
+  </ol>
+</div>
+
+<!-- E11 -->
+<div id="E11" style="display:flex;flex-direction:column;gap:10px;width:600px">
+  <div style="display:flex;align-items:baseline;gap:8px"><span style="font:600 11px ui-monospace,Menlo,monospace;padding:3px 7px;background:#2b2b2b;color:#fff;border-radius:4px">E11</span><span style="font:700 21px Kalam,cursive">The catalog with 1…n sessions per worktree</span></div>
+  <div style="width:600px;height:360px;border:1.5px solid #2b2b2b;border-radius:8px;background:#fff;display:flex;flex-direction:column;overflow:hidden;font-size:13px;line-height:1.3;position:relative">
+    <div style="height:28px;flex:none;display:flex;align-items:center;gap:12px;padding:0 10px;border-bottom:1.5px solid #2b2b2b;background:#f4f2ee"><span style="display:flex;gap:4px"><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span></span><b>dd-trace-java ▾</b><span style="display:inline-flex;align-items:center;gap:5px;padding:1px 7px;background:#dfe7f7;outline:1.5px solid #0f8b8d;border-radius:4px;font-size:12px;white-space:nowrap"><span style="width:7px;height:7px;border-radius:50%;background:#E0A030"></span>1<span style="width:7px;height:7px;border-radius:50%;background:#3574F0"></span>3 Agents ▴</span></div>
+    <div style="flex:1;display:flex;min-height:0">
+      <div style="width:24px;flex:none;border-right:1.5px solid #2b2b2b;background:#f4f2ee"></div>
+      <div style="flex:1;background:repeating-linear-gradient(to bottom,transparent 0 10px,#ebe8e1 10px 15px);background-clip:content-box;padding:10px 60px 10px 24px;opacity:.5"></div>
+    </div>
+    <div style="position:absolute;left:170px;top:30px;width:360px;border:1.5px solid #2b2b2b;border-radius:8px;background:#fff;box-shadow:0 8px 24px rgba(0,0,0,.15);display:flex;flex-direction:column;font-size:12px;padding:4px 0">
+      <div style="padding:3px 10px;color:#8a867d">⌕ Search sessions</div>
+      <div style="background:#e6f4f3;outline:1.5px solid #0f8b8d;outline-offset:-1px;margin:2px 0;padding:2px 0;display:flex;flex-direction:column;gap:1px">
+        <div style="padding:2px 10px"><b>drydock</b></div>
+        <div style="padding:1px 10px 1px 22px;display:flex;align-items:center;gap:6px;color:#6b675f;white-space:nowrap">⑂ main<span style="flex:1"></span><span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive;flex:none">1</span></div>
+        <div style="padding:1px 10px 1px 36px;display:flex;align-items:center;gap:6px;white-space:nowrap"><span style="width:8px;height:8px;border-radius:50%;background:#3574F0;flex:none"></span>How is the MCP budget enforced?<span style="padding:0 3px;border:1px solid #8a867d;border-radius:3px;font-size:10px;color:#6b675f">RO</span></div>
+        <div style="padding:1px 10px 1px 22px;display:flex;align-items:center;gap:6px;color:#6b675f;white-space:nowrap">⑂ fix/wt-hang</div>
+        <div style="padding:1px 10px 1px 36px;display:flex;align-items:center;gap:6px;white-space:nowrap"><span style="width:8px;height:8px;border-radius:50%;background:#3574F0;flex:none"></span>Fix worktree add JVM hang<span style="flex:1"></span><span style="color:#8a867d">Claude</span></div>
+        <div style="padding:1px 10px 1px 36px;display:flex;align-items:center;gap:6px;white-space:nowrap"><span style="width:8px;height:8px;border-radius:50%;background:#3574F0;flex:none"></span>Why does git need the hostname?<span style="padding:0 3px;border:1px solid #8a867d;border-radius:3px;font-size:10px;color:#6b675f">RO</span></div>
+        <div style="padding:1px 10px 1px 22px;display:flex;align-items:center;gap:6px;white-space:nowrap"><span style="width:8px;height:8px;border-radius:50%;background:#E0A030;flex:none"></span>Port review tour to gutter<span style="flex:1"></span><span style="color:#8a867d">review-gutter</span><span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive;flex:none">2</span></div>
+        <div style="padding:3px 10px 1px"><b>dd-trace-java</b> <span style="color:#8a867d">this window</span></div>
+        <div style="padding:1px 10px 1px 22px;display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#3574F0;flex:none"></span>Sampling rate flag</div>
+      </div>
+      <div style="padding:3px 10px;border-top:1px solid #d6d2c9;background:#e6f4f3">＋ New Agent Session…  <span style="color:#8a867d">⌥⌘N</span></div>
+    </div>
+    <div style="height:20px;flex:none;border-top:1.5px solid #2b2b2b;background:#f4f2ee;display:flex;align-items:center;gap:10px;padding:0 10px;font-size:11px;color:#6b675f"><span>dd-trace-java</span></div>
+  </div>
+  <ol style="margin:0;padding-left:22px;font:16px/1.35 Kalam,cursive;color:#3a3a3a;display:flex;flex-direction:column;gap:3px">
+    <li>A worktree with more than one session gets a ⑂ header row with its sessions beneath. Clicking a session raises the window <i>and</i> selects that agent tab. The main checkout appears as an ordinary worktree with read-only sessions.</li>
+    <li>A worktree with one session stays a single flat row, as in <a href="#E2">E2</a>, so the common case doesn't get deeper.</li>
+  </ol>
+</div>
+
+  </div>
+  <ul style="margin:0;padding-left:20px;font:17px/1.4 Kalam,cursive;color:#3a3a3a;display:flex;flex-direction:column;gap:4px;max-width:960px">
+    <li><b>Closing the window</b> stops every session in it. The <a href="#E6">E6</a> balloon lists them, and "Reopen &amp; resume" restores all of them.</li>
+    <li><b>Attention</b> names the session, not just the window. Raise selects the waiting tab.</li>
+    <li><b>Review / Finish</b> covers the worktree's diff; read-only sessions add nothing to it. Finish on a worktree that has read-only sessions stops them too.</li>
+    <li><b>Promote:</b> a read-only session can't change mode in place, because that needs a restart with new flags. "Continue as writing session…" resumes the same conversation in Writes mode, here or in a new worktree.</li>
+  </ul>
+</section>
+
+<div style="display:flex;flex-wrap:wrap;gap:44px 40px;align-items:flex-start">
+
+<!-- E1 -->
+<div id="E1" style="display:flex;flex-direction:column;gap:10px;width:600px">
+  <div style="display:flex;align-items:baseline;gap:8px"><span style="font:600 11px ui-monospace,Menlo,monospace;padding:3px 7px;background:#2b2b2b;color:#fff;border-radius:4px">E1</span><span style="font:700 21px Kalam,cursive">Anatomy of the agent editor</span></div>
+  <div style="width:600px;height:360px;border:1.5px solid #2b2b2b;border-radius:8px;background:#fff;display:flex;flex-direction:column;overflow:hidden;font-size:13px;line-height:1.3">
+    <div style="height:28px;flex:none;display:flex;align-items:center;gap:12px;padding:0 10px;border-bottom:1.5px solid #2b2b2b;background:#f4f2ee"><span style="display:flex;gap:4px"><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span></span><b style="white-space:nowrap">drydock · Fix worktree add JVM hang ▾</b><span style="white-space:nowrap">⑂ fix/wt-hang ▾</span></div>
+    <div style="flex:1;display:flex;min-height:0">
+      <div style="width:24px;flex:none;border-right:1.5px solid #2b2b2b;background:#f4f2ee;display:flex;flex-direction:column;align-items:center;padding-top:7px;gap:7px"><span style="width:12px;height:12px;border:1.5px solid #2b2b2b;border-radius:3px"></span><span style="width:12px;height:12px;border:1.5px solid #2b2b2b;border-radius:3px"></span></div>
+      <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+        <div style="height:24px;flex:none;display:flex;align-items:flex-end;gap:2px;padding:0 6px;border-bottom:1px solid #d6d2c9;font-size:12px;background:#f9f8f5">
+          <span style="padding:2px 8px;border:1.5px solid #2b2b2b;border-bottom:none;background:#e6f4f3;outline:1.5px solid #0f8b8d;display:flex;gap:5px;align-items:center;border-radius:4px 4px 0 0;white-space:nowrap">📌<span style="width:7px;height:7px;border-radius:50%;background:#3574F0"></span>Fix worktree add JVM hang</span>
+          <span style="padding:2px 8px;color:#8a867d;white-space:nowrap">WorktreeService.java</span>
+          <span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive;margin-bottom:3px;flex:none">1</span>
+        </div>
+        <div style="height:28px;flex:none;display:flex;align-items:center;gap:10px;padding:0 10px;border-bottom:1px solid #b9dcda;background:#e6f4f3;font-size:12px;white-space:nowrap">
+          <span style="display:flex;align-items:center;gap:5px"><span style="width:8px;height:8px;border-radius:50%;background:#3574F0"></span><b>Working</b></span>
+          <span style="color:#6b675f">Claude · 12 min · 3 files changed</span>
+          <span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive;flex:none">2</span>
+          <span style="flex:1"></span>
+          <span style="color:#3574F0">Changes</span><span style="color:#3574F0">Review</span><span style="padding:0 8px;border:1px solid #b7b2a7;border-radius:4px;background:#fff">■ Stop</span>
+        </div>
+        <div style="flex:1;font:11px/1.5 ui-monospace,Menlo,monospace;padding:10px 14px;color:#4a4740;overflow:hidden;background:#fdfdfb">
+          <span style="color:#8a867d">╭ Claude Code · ~/wt/drydock-fix-wt-hang</span><br>
+          &gt; Fix the worktree add hang when the hostname doesn't resolve<br><br>
+          ⏺ Reproduced: <span style="text-decoration:underline;color:#3574F0">WorktreeService.java:212</span> spawns git with empty config…<br>
+          ⏺ Bash(git branch b1 HEAD)<br>
+          &nbsp;&nbsp;⎿ real 5.3s<br>
+          ✻ Setting fixture ident in GIT_CONFIG_COUNT…
+        </div>
+        <div style="height:20px;flex:none;border-top:1px solid #d6d2c9;display:flex;align-items:center;gap:6px;padding:0 10px;font-size:11px;color:#6b675f;white-space:nowrap"><span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive;flex:none">3</span>file:line in output is a link → opens beside, in the right split</div>
+      </div>
+    </div>
+    <div style="height:20px;flex:none;border-top:1.5px solid #2b2b2b;background:#f4f2ee;display:flex;align-items:center;gap:10px;padding:0 10px;font-size:11px;color:#6b675f"><span>drydock · fix/wt-hang</span></div>
+  </div>
+  <ol style="margin:0;padding-left:22px;font:16px/1.35 Kalam,cursive;color:#3a3a3a;display:flex;flex-direction:column;gap:3px">
+    <li>The agent is a pinned first tab with a status dot and the agent-given title. It persists and restores with the editors. Closing it hides the view; reopen it with ⌃⇧A or from Agents ▾.</li>
+    <li>An editor-notification-style strip carries status, Stop and jumps to Changes/Review. The console body stays a pure terminal.</li>
+    <li>Output file links open in the adjacent split, so the agent stays put.</li>
+  </ol>
+</div>
+
+<!-- E2 -->
+<div id="E2" style="display:flex;flex-direction:column;gap:10px;width:600px">
+  <div style="display:flex;align-items:baseline;gap:8px"><span style="font:600 11px ui-monospace,Menlo,monospace;padding:3px 7px;background:#2b2b2b;color:#fff;border-radius:4px">E2</span><span style="font:700 21px Kalam,cursive">Overview: Agents ▾ widget + Services</span></div>
+  <div style="width:600px;height:360px;border:1.5px solid #2b2b2b;border-radius:8px;background:#fff;display:flex;flex-direction:column;overflow:hidden;font-size:13px;line-height:1.3;position:relative">
+    <div style="height:28px;flex:none;display:flex;align-items:center;gap:12px;padding:0 10px;border-bottom:1.5px solid #2b2b2b;background:#f4f2ee"><span style="display:flex;gap:4px"><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span></span><b>drydock ▾</b><span style="display:inline-flex;align-items:center;gap:5px;padding:1px 7px;background:#dfe7f7;outline:1.5px solid #0f8b8d;border-radius:4px;font-size:12px;white-space:nowrap"><span style="width:7px;height:7px;border-radius:50%;background:#E0A030"></span>1<span style="width:7px;height:7px;border-radius:50%;background:#3574F0"></span>3 Agents ▴</span><span>⑂ main ▾</span></div>
+    <div style="flex:1;display:flex;min-height:0">
+      <div style="width:24px;flex:none;border-right:1.5px solid #2b2b2b;background:#f4f2ee;display:flex;flex-direction:column;align-items:center;padding-top:7px"><span style="flex:1"></span><span style="width:12px;height:12px;border-radius:3px;background:#2b2b2b;margin-bottom:8px"></span></div>
+      <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+        <div style="flex:1;background:repeating-linear-gradient(to bottom,transparent 0 10px,#ebe8e1 10px 15px);background-clip:content-box;padding:10px 40px 6px 24px;opacity:.5"></div>
+        <div style="height:90px;flex:none;border-top:1.5px solid #2b2b2b;display:flex;flex-direction:column">
+          <div style="height:22px;flex:none;display:flex;align-items:center;gap:10px;padding:0 8px;border-bottom:1px solid #d6d2c9;font-size:12px"><b>Services</b><span style="color:#8a867d">Group by: Status ▾</span></div>
+          <div style="flex:1;display:flex;min-height:0;font-size:12px">
+            <div style="width:270px;flex:none;border-right:1px solid #d6d2c9;padding:3px 0;background:#e6f4f3">
+              <div style="padding:1px 8px;display:flex;gap:6px;align-items:center">▾ <b>Drydock</b> · 4 running<span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive">2</span></div>
+              <div style="display:flex;align-items:center;gap:6px;padding:1px 8px 1px 22px;white-space:nowrap"><span style="width:8px;height:8px;border-radius:50%;background:#E0A030;flex:none"></span>Port review tour to gutter</div>
+              <div style="display:flex;align-items:center;gap:6px;padding:1px 8px 1px 22px;white-space:nowrap"><span style="width:8px;height:8px;border-radius:50%;background:#3574F0;flex:none"></span>Fix worktree add JVM hang</div>
+              <div style="padding:1px 8px 1px 22px;color:#8a867d">…</div>
+            </div>
+            <div style="flex:1;padding:8px 10px;color:#6b675f;display:flex;flex-direction:column;gap:4px">status card · Raise / Resume<br>(no console here)</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div style="position:absolute;left:130px;top:30px;width:330px;border:1.5px solid #2b2b2b;border-radius:8px;background:#fff;box-shadow:0 8px 24px rgba(0,0,0,.15);display:flex;flex-direction:column;font-size:12px;padding:4px 0">
+      <div style="padding:3px 10px;color:#8a867d">⌕ Search sessions</div>
+      <div style="background:#e6f4f3;outline:1.5px solid #0f8b8d;outline-offset:-1px;margin:2px 0;padding:2px 0;display:flex;flex-direction:column;gap:1px">
+        <div style="padding:2px 10px;display:flex;gap:6px;align-items:center"><b>drydock</b><span style="flex:1"></span><span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive">1</span></div>
+        <div style="padding:1px 10px 1px 22px;display:flex;align-items:center;gap:6px;white-space:nowrap"><span style="width:8px;height:8px;border-radius:50%;background:#E0A030;flex:none"></span>Port review tour to gutter<span style="flex:1"></span><span style="color:#8a867d">Codex</span></div>
+        <div style="padding:1px 10px 1px 22px;display:flex;align-items:center;gap:6px;white-space:nowrap"><span style="width:8px;height:8px;border-radius:50%;background:#3574F0;flex:none"></span>Fix worktree add JVM hang<span style="flex:1"></span><span style="color:#8a867d">Claude</span></div>
+        <div style="padding:1px 10px 1px 22px;display:flex;align-items:center;gap:6px;white-space:nowrap"><span style="width:8px;height:8px;border-radius:50%;background:#3574F0;flex:none"></span>Status dot CPU regression<span style="flex:1"></span><span style="color:#8a867d">pi</span></div>
+        <div style="padding:2px 10px 1px"><b>dd-trace-java</b></div>
+        <div style="padding:1px 10px 1px 22px;display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#3574F0;flex:none"></span>Sampling rate flag</div>
+        <div style="padding:2px 10px;color:#8a867d">btrace · 1 idle ▸</div>
+      </div>
+      <div style="padding:3px 10px;border-top:1px solid #d6d2c9;background:#e6f4f3">＋ New Agent Worktree…  <span style="color:#8a867d">⌥⌘N</span></div>
+    </div>
+    <div style="height:20px;flex:none;border-top:1.5px solid #2b2b2b;background:#f4f2ee;display:flex;align-items:center;gap:10px;padding:0 10px;font-size:11px;color:#6b675f"><span>drydock</span><span style="flex:1"></span><span style="display:flex;align-items:center;gap:5px;padding:0 6px;background:#e6f4f3;outline:1.5px solid #0f8b8d"><span style="width:7px;height:7px;border-radius:50%;background:#E0A030"></span>1<span style="width:7px;height:7px;border-radius:50%;background:#3574F0"></span>3</span></div>
+  </div>
+  <ol style="margin:0;padding-left:22px;font:16px/1.35 Kalam,cursive;color:#3a3a3a;display:flex;flex-direction:column;gap:3px">
+    <li>A Drydock <b>Agents ▾</b> widget sits right after the stock Project widget, in the title bar's left toolbar area (public action groups). Its popup is the quick list: <b>every repo and session, whatever window you're in</b> (the catalog is app-level, not scoped to this project), each row a window, searchable. The counts on the widget make it a status light too.</li>
+    <li>Optional Services node for a list that stays open (triage, group by status). Its detail pane is a status card only; the console stays in the editor.</li>
+  </ol>
+</div>
+
+<!-- E12 -->
+<div id="E12" style="display:flex;flex-direction:column;gap:10px;width:600px">
+  <div style="display:flex;align-items:baseline;gap:8px"><span style="font:600 11px ui-monospace,Menlo,monospace;padding:3px 7px;background:#2b2b2b;color:#fff;border-radius:4px">E12</span><span style="font:700 21px Kalam,cursive">No window open: Welcome screen</span></div>
+  <div style="width:600px;height:360px;border:1.5px solid #2b2b2b;border-radius:8px;background:#fff;display:flex;flex-direction:column;overflow:hidden;font-size:13px;line-height:1.3">
+    <div style="height:28px;flex:none;display:flex;align-items:center;gap:12px;padding:0 10px;border-bottom:1.5px solid #2b2b2b;background:#f4f2ee"><span style="display:flex;gap:4px"><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span></span><span style="color:#6b675f">Welcome to IntelliJ IDEA</span></div>
+    <div style="flex:1;display:flex;min-height:0">
+      <div style="width:150px;flex:none;border-right:1px solid #d6d2c9;background:#f4f2ee;display:flex;flex-direction:column;gap:2px;padding:10px 8px;font-size:13px">
+        <span style="padding:3px 8px;color:#6b675f">Projects</span>
+        <span style="padding:3px 8px;background:#e6f4f3;outline:1.5px solid #0f8b8d;border-radius:4px;display:flex;gap:6px;align-items:center"><b>Agents</b><span style="width:7px;height:7px;border-radius:50%;background:#E0A030"></span><span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive;flex:none">1</span></span>
+        <span style="padding:3px 8px;color:#6b675f">Customize</span>
+        <span style="padding:3px 8px;color:#6b675f">Plugins</span>
+        <span style="padding:3px 8px;color:#6b675f">Learn</span>
+      </div>
+      <div style="flex:1;display:flex;flex-direction:column;padding:12px 16px;gap:8px;min-width:0;font-size:12.5px">
+        <div style="display:flex;gap:8px;align-items:center"><span style="flex:1;border:1px solid #b7b2a7;border-radius:4px;padding:3px 8px;color:#8a867d">⌕ Search sessions</span><span style="padding:2px 10px;border:1.5px solid #2b2b2b;border-radius:4px;background:#2b2b2b;color:#fff;white-space:nowrap">New Agent Worktree…</span></div>
+        <div style="display:flex;flex-direction:column;gap:2px">
+          <b style="padding:2px 0">drydock</b>
+          <div style="display:flex;align-items:center;gap:6px;padding:2px 8px;white-space:nowrap"><span style="width:8px;height:8px;border-radius:50%;border:1.5px solid #8C8C8C;box-sizing:border-box;flex:none"></span>Port review tour to gutter<span style="flex:1"></span><span style="color:#8a867d">Codex · review-gutter · 2h</span></div>
+          <div style="display:flex;align-items:center;gap:6px;padding:2px 8px;white-space:nowrap;background:#dfe7f7"><span style="width:8px;height:8px;border-radius:50%;border:1.5px solid #8C8C8C;box-sizing:border-box;flex:none"></span>Fix worktree add JVM hang<span style="flex:1"></span><span style="color:#3574F0">Open · Resume</span></div>
+          <div style="display:flex;align-items:center;gap:6px;padding:2px 8px;white-space:nowrap"><span style="width:8px;height:8px;border-radius:50%;border:1.5px solid #8C8C8C;box-sizing:border-box;flex:none"></span>Why does git need the hostname? <span style="padding:0 3px;border:1px solid #8a867d;border-radius:3px;font-size:10px;color:#6b675f">RO</span><span style="flex:1"></span><span style="color:#8a867d">main · 2h</span></div>
+          <b style="padding:6px 0 2px">dd-trace-java</b>
+          <div style="display:flex;align-items:center;gap:6px;padding:2px 8px;white-space:nowrap"><span style="width:8px;height:8px;border-radius:50%;border:1.5px solid #8C8C8C;box-sizing:border-box;flex:none"></span>Sampling rate flag<span style="flex:1"></span><span style="color:#8a867d">Claude · 1d</span></div>
+          <b style="padding:6px 0 2px">btrace</b>
+          <div style="display:flex;align-items:center;gap:6px;padding:2px 8px;white-space:nowrap"><span style="width:8px;height:8px;border-radius:50%;border:1.5px solid #8C8C8C;box-sizing:border-box;flex:none"></span>Upgrade ASM to 9.8<span style="flex:1"></span><span style="color:#8a867d">Codex · 3d</span></div>
+        </div>
+        <div style="flex:1"></div>
+        <div style="display:flex;gap:6px;align-items:center;color:#6b675f;font-size:11.5px"><span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive;flex:none">2</span>Open = window only · Resume = window + one execution</div>
+      </div>
+    </div>
+  </div>
+  <ol style="margin:0;padding-left:22px;font:16px/1.35 Kalam,cursive;color:#3a3a3a;display:flex;flex-direction:column;gap:3px">
+    <li>The only moment with no window to host Agents ▾ is the Welcome screen. Drydock adds an <b>Agents</b> tab there next to Projects: the same app-wide list, all idle, since nothing runs without a window.</li>
+    <li>Picking a session opens its worktree window directly. You never open the main checkout first.</li>
+  </ol>
+</div>
+
+<!-- E3 -->
+<div id="E3" style="display:flex;flex-direction:column;gap:10px;width:600px">
+  <div style="display:flex;align-items:baseline;gap:8px"><span style="font:600 11px ui-monospace,Menlo,monospace;padding:3px 7px;background:#2b2b2b;color:#fff;border-radius:4px">E3</span><span style="font:700 21px Kalam,cursive">Start on a new worktree</span></div>
+  <div style="width:600px;height:360px;border:1.5px solid #2b2b2b;border-radius:8px;background:#fff;display:flex;flex-direction:column;overflow:hidden;font-size:13px;line-height:1.3;position:relative">
+    <div style="height:28px;flex:none;display:flex;align-items:center;gap:12px;padding:0 10px;border-bottom:1.5px solid #2b2b2b;background:#f4f2ee"><span style="display:flex;gap:4px"><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span></span><b>drydock ▾</b><span>⑂ main ▾</span></div>
+    <div style="flex:1;background:repeating-linear-gradient(to bottom,transparent 0 10px,#ebe8e1 10px 15px);background-clip:content-box;padding:10px 120px 10px 54px;opacity:.5"></div>
+    <div style="position:absolute;left:110px;top:46px;width:380px;border:1.5px solid #2b2b2b;border-radius:8px;background:#fff;box-shadow:0 8px 24px rgba(0,0,0,.15);display:flex;flex-direction:column;outline:1.5px solid #0f8b8d;outline-offset:3px">
+      <div style="padding:8px 12px;border-bottom:1px solid #d6d2c9;display:flex;align-items:center;gap:8px"><b>New Agent Worktree</b><span style="flex:1"></span><span style="color:#8a867d">✕</span></div>
+      <div style="padding:10px 12px;display:grid;grid-template-columns:80px 1fr;gap:8px 10px;align-items:center">
+        <span style="color:#6b675f">Task</span><span style="border:1.5px solid #2b2b2b;border-radius:4px;padding:4px 6px;min-height:40px">Fix the worktree add hang when the hostname doesn't resolve…</span>
+        <span style="color:#6b675f">Agent</span><span style="display:flex;gap:4px"><span style="padding:1px 8px;border:1.5px solid #2b2b2b;border-radius:10px;background:#2b2b2b;color:#fff">Claude</span><span style="padding:1px 8px;border:1px solid #b7b2a7;border-radius:10px">Codex</span><span style="padding:1px 8px;border:1px solid #b7b2a7;border-radius:10px">pi</span></span>
+        <span style="color:#6b675f">Branch</span><span style="display:flex;gap:6px;align-items:center;white-space:nowrap"><span style="border:1px solid #b7b2a7;border-radius:4px;padding:2px 6px;flex:1">fix/wt-hang</span><span style="color:#8a867d;font-size:11px">from main ▾</span></span>
+        <span style="color:#6b675f">Repository</span><span style="color:#6b675f">drydock <span style="font-size:11px">(this window)</span></span>
+      </div>
+      <div style="padding:8px 12px;border-top:1px solid #d6d2c9;display:flex;gap:8px;align-items:center;justify-content:flex-end"><span style="padding:2px 10px;border:1px solid #b7b2a7;border-radius:4px">Cancel</span><span style="padding:2px 10px;border:1.5px solid #2b2b2b;border-radius:4px;background:#2b2b2b;color:#fff">Create &amp; Open Window</span></div>
+    </div>
+    <div style="height:20px;flex:none;border-top:1.5px solid #2b2b2b;background:#f4f2ee;display:flex;align-items:center;gap:10px;padding:0 10px;font-size:11px;color:#6b675f"><span>Agents ▾ ▸ New Agent Worktree… · ⌥⌘N</span></div>
+  </div>
+  <ol style="margin:0;padding-left:22px;font:16px/1.35 Kalam,cursive;color:#3a3a3a;display:flex;flex-direction:column;gap:3px">
+    <li>Task and agent first, then the derived branch. Repository defaults to this window's repo, and the base to the repo's default branch.</li>
+    <li>Creates the worktree, opens its window, opens the agent editor (<a href="#E1">E1</a>) and starts one execution. The window title becomes the agent-given title once the agent reports one.</li>
+  </ol>
+</div>
+
+<!-- E4 -->
+<div id="E4" style="display:flex;flex-direction:column;gap:10px;width:600px">
+  <div style="display:flex;align-items:baseline;gap:8px"><span style="font:600 11px ui-monospace,Menlo,monospace;padding:3px 7px;background:#2b2b2b;color:#fff;border-radius:4px">E4</span><span style="font:700 21px Kalam,cursive">Working alongside; juggling</span></div>
+  <div style="width:600px;height:360px;border:1.5px solid #2b2b2b;border-radius:8px;background:#fff;display:flex;flex-direction:column;overflow:hidden;font-size:13px;line-height:1.3;position:relative">
+    <div style="height:28px;flex:none;display:flex;align-items:center;gap:12px;padding:0 10px;border-bottom:1.5px solid #2b2b2b;background:#f4f2ee"><span style="display:flex;gap:4px"><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span></span><b style="white-space:nowrap">drydock · Fix worktree add JVM hang ▾</b></div>
+    <div style="flex:1;display:flex;min-height:0">
+      <div style="width:24px;flex:none;border-right:1.5px solid #2b2b2b;background:#f4f2ee"></div>
+      <div style="flex:1;display:flex;flex-direction:column;min-width:0;border-right:1.5px solid #2b2b2b">
+        <div style="height:24px;flex:none;display:flex;align-items:flex-end;padding:0 6px;border-bottom:1px solid #d6d2c9;font-size:12px;background:#f9f8f5"><span style="padding:2px 8px;border:1.5px solid #2b2b2b;border-bottom:none;background:#e6f4f3;display:flex;gap:5px;align-items:center;border-radius:4px 4px 0 0;white-space:nowrap">📌<span style="width:7px;height:7px;border-radius:50%;background:#3574F0"></span>Fix worktree add…</span></div>
+        <div style="height:22px;flex:none;display:flex;align-items:center;gap:6px;padding:0 8px;border-bottom:1px solid #b9dcda;background:#e6f4f3;font-size:11px;white-space:nowrap"><span style="width:7px;height:7px;border-radius:50%;background:#3574F0"></span><b>Working</b><span style="flex:1"></span>■ Stop</div>
+        <div style="flex:1;font:11px/1.5 ui-monospace,Menlo,monospace;padding:8px 10px;color:#4a4740;overflow:hidden">⏺ Update(WorktreeService.java)<br>&nbsp;&nbsp;⎿ +3 −1<br>⏺ Bash(./gradlew test)<br>✻ Running tests…<br><span style="color:#8a867d">&gt; also cover the remote case_</span></div>
+      </div>
+      <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+        <div style="height:24px;flex:none;display:flex;align-items:flex-end;padding:0 6px;border-bottom:1px solid #d6d2c9;font-size:12px;background:#f9f8f5"><span style="padding:2px 8px;border:1.5px solid #2b2b2b;border-bottom:none;background:#fff;border-radius:4px 4px 0 0">WorktreeService.java</span></div>
+        <div style="flex:1;background:repeating-linear-gradient(to bottom,transparent 0 10px,#ebe8e1 10px 15px);background-clip:content-box;padding:10px 20px 10px 14px;position:relative"><div style="position:absolute;left:4px;top:40px;width:4px;height:30px;background:#7cb87f"></div></div>
+      </div>
+    </div>
+    <div style="position:absolute;right:10px;bottom:26px;width:280px;border:1.5px solid #2b2b2b;border-radius:8px;background:#fff;box-shadow:0 8px 24px rgba(0,0,0,.15);display:flex;flex-direction:column;font-size:12px;padding:3px 0;outline:1.5px solid #0f8b8d;outline-offset:3px">
+      <div style="display:flex;align-items:center;gap:6px;padding:3px 10px;background:#dfe7f7;white-space:nowrap"><span style="width:8px;height:8px;border-radius:50%;background:#E0A030;flex:none"></span>Port review tour to gutter<span style="flex:1"></span><span style="color:#8a867d">⌃1</span></div>
+      <div style="display:flex;align-items:center;gap:6px;padding:3px 10px;white-space:nowrap"><span style="width:8px;height:8px;border-radius:50%;background:#3574F0;flex:none"></span>Sampling rate flag<span style="flex:1"></span><span style="color:#8a867d">⌃2</span></div>
+      <div style="display:flex;align-items:center;gap:6px;padding:3px 10px;white-space:nowrap"><span style="width:8px;height:8px;border-radius:50%;background:#3574F0;flex:none"></span>Status dot CPU regression<span style="flex:1"></span><span style="color:#8a867d">⌃3</span></div>
+    </div>
+    <div style="height:20px;flex:none;border-top:1.5px solid #2b2b2b;background:#f4f2ee;display:flex;align-items:center;gap:10px;padding:0 10px;font-size:11px;color:#6b675f"><span>drydock · fix/wt-hang</span><span style="flex:1"></span><span style="display:flex;align-items:center;gap:5px;padding:0 6px;background:#dfe7f7;outline:1.5px solid #0f8b8d"><span style="width:7px;height:7px;border-radius:50%;background:#E0A030"></span>1<span style="width:7px;height:7px;border-radius:50%;background:#3574F0"></span>3 ▴</span></div>
+  </div>
+  <ol style="margin:0;padding-left:22px;font:16px/1.35 Kalam,cursive;color:#3a3a3a;display:flex;flex-direction:column;gap:3px">
+    <li>A plain split editor: agent left, touched file right, with the IDE's own change bars. You can follow up in the agent while reading its edit.</li>
+    <li>The status-bar widget popup is the switcher, sorted by urgency. ⌃n raises that window.</li>
+  </ol>
+</div>
+
+<!-- E5 -->
+<div id="E5" style="display:flex;flex-direction:column;gap:10px;width:600px">
+  <div style="display:flex;align-items:baseline;gap:8px"><span style="font:600 11px ui-monospace,Menlo,monospace;padding:3px 7px;background:#2b2b2b;color:#fff;border-radius:4px">E5</span><span style="font:700 21px Kalam,cursive">An agent needs you, elsewhere</span></div>
+  <div style="width:600px;height:360px;border:1.5px solid #2b2b2b;border-radius:8px;background:#fff;display:flex;flex-direction:column;overflow:hidden;font-size:13px;line-height:1.3;position:relative">
+    <div style="height:28px;flex:none;display:flex;align-items:center;gap:12px;padding:0 10px;border-bottom:1.5px solid #2b2b2b;background:#f4f2ee"><span style="display:flex;gap:4px"><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span></span><b style="white-space:nowrap">dd-trace-java · Sampling rate flag ▾</b><span style="display:inline-flex;align-items:center;gap:5px;padding:1px 7px;background:#fbe9c4;outline:1.5px solid #E0A030;border-radius:4px;font-size:12px;white-space:nowrap"><span style="width:7px;height:7px;border-radius:50%;background:#E0A030"></span>1 waiting · 3 Agents ▾</span><span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive;flex:none">1</span></div>
+    <div style="flex:1;display:flex;min-height:0">
+      <div style="width:24px;flex:none;border-right:1.5px solid #2b2b2b;background:#f4f2ee;display:flex;flex-direction:column;align-items:center;padding-top:7px"><span style="flex:1"></span><span style="position:relative;width:12px;height:12px;border:1.5px solid #2b2b2b;border-radius:3px;margin-bottom:8px"><span style="position:absolute;right:-6px;top:-6px;width:8px;height:8px;border-radius:50%;background:#E0A030;border:1.5px solid #fff"></span></span></div>
+      <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+        <div style="height:24px;flex:none;display:flex;align-items:flex-end;gap:2px;padding:0 6px;border-bottom:1px solid #d6d2c9;font-size:12px;background:#f9f8f5"><span style="padding:2px 8px;color:#8a867d;display:flex;gap:5px;align-items:center;white-space:nowrap">📌<span style="width:7px;height:7px;border-radius:50%;background:#3574F0"></span>Sampling rate flag</span><span style="padding:2px 8px;border:1.5px solid #2b2b2b;border-bottom:none;background:#fff;border-radius:4px 4px 0 0">ProfilerConfig.java</span></div>
+        <div style="flex:1;background:repeating-linear-gradient(to bottom,transparent 0 10px,#ebe8e1 10px 15px);background-clip:content-box;padding:10px 60px 10px 24px"></div>
+      </div>
+    </div>
+    <div style="position:absolute;right:14px;bottom:30px;width:290px;border:1.5px solid #2b2b2b;border-radius:8px;background:#fff;box-shadow:0 8px 24px rgba(0,0,0,.15);padding:10px 12px;display:flex;flex-direction:column;gap:6px;outline:1.5px solid #0f8b8d;outline-offset:3px">
+      <div style="display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#E0A030"></span><b>Codex needs you</b><span style="flex:1"></span><span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive">2</span></div>
+      <div>Port review tour to gutter · drydock</div>
+      <div style="font-size:12px;color:#6b675f">Allow <code>./gradlew test</code>?</div>
+      <div style="display:flex;gap:12px;color:#3574F0"><span>Raise window</span><span>Snooze</span></div>
+    </div>
+    <div style="height:20px;flex:none;border-top:1.5px solid #2b2b2b;background:#f4f2ee;display:flex;align-items:center;gap:10px;padding:0 10px;font-size:11px;color:#6b675f"><span>dd-trace-java</span><span style="flex:1"></span><span style="display:flex;align-items:center;gap:5px;padding:0 6px;background:#fbe9c4;outline:1.5px solid #E0A030"><span style="width:7px;height:7px;border-radius:50%;background:#E0A030"></span>1<span style="width:7px;height:7px;border-radius:50%;background:#3574F0"></span>3</span></div>
+  </div>
+  <div style="display:flex;align-items:center;gap:10px;font-size:13px;padding:6px 10px;border:1.5px solid #2b2b2b;border-radius:6px;background:#f4f2ee;width:fit-content"><span style="color:#8a867d">⌘` ▸</span><span>dd-trace-java · Sampling rate flag</span><span style="background:#e6f4f3;outline:1.5px solid #0f8b8d;padding:0 4px"><b>◐ drydock · Port review tour to gutter — waiting</b></span><span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive">3</span></div>
+  <ol style="margin:0;padding-left:22px;font:16px/1.35 Kalam,cursive;color:#3a3a3a;display:flex;flex-direction:column;gap:3px">
+    <li>The Agents ▾ widget turns amber and reads "1 waiting". There's also a badge on the Services stripe when that node is in use, and the status widget turns amber.</li>
+    <li>One balloon per transition into "needs you". Raise is the action; the answer is typed in the agent editor, never proxied.</li>
+    <li>The waiting window's frame title gets the marker. Inside that window, the agent's tab dot turns amber too.</li>
+  </ol>
+</div>
+
+<!-- E6 -->
+<div id="E6" style="display:flex;flex-direction:column;gap:10px;width:600px">
+  <div style="display:flex;align-items:baseline;gap:8px"><span style="font:600 11px ui-monospace,Menlo,monospace;padding:3px 7px;background:#2b2b2b;color:#fff;border-radius:4px">E6</span><span style="font:700 21px Kalam,cursive">Window close stops; restart restores idle</span></div>
+  <div style="width:600px;height:360px;border:1.5px solid #2b2b2b;border-radius:8px;background:#fff;display:flex;flex-direction:column;overflow:hidden;font-size:13px;line-height:1.3">
+    <div style="height:28px;flex:none;display:flex;align-items:center;gap:12px;padding:0 10px;border-bottom:1.5px solid #2b2b2b;background:#f4f2ee"><span style="display:flex;gap:4px"><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span></span><b style="white-space:nowrap">btrace · Upgrade ASM to 9.8 ▾</b><span>⑂ asm-98 ▾</span></div>
+    <div style="flex:1;display:flex;min-height:0">
+      <div style="width:24px;flex:none;border-right:1.5px solid #2b2b2b;background:#f4f2ee"></div>
+      <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+        <div style="height:24px;flex:none;display:flex;align-items:flex-end;gap:2px;padding:0 6px;border-bottom:1px solid #d6d2c9;font-size:12px;background:#f9f8f5"><span style="padding:2px 8px;border:1.5px solid #2b2b2b;border-bottom:none;background:#e6f4f3;display:flex;gap:5px;align-items:center;border-radius:4px 4px 0 0;white-space:nowrap">📌<span style="width:7px;height:7px;border-radius:50%;border:1.5px solid #8C8C8C;box-sizing:border-box"></span>Upgrade ASM to 9.8</span><span style="padding:2px 8px;color:#8a867d">ClassFilter.java</span></div>
+        <div style="height:30px;flex:none;display:flex;align-items:center;gap:10px;padding:0 10px;border-bottom:1px solid #b9dcda;background:#e6f4f3;font-size:12px;white-space:nowrap"><span style="width:8px;height:8px;border-radius:50%;border:1.5px solid #8C8C8C;box-sizing:border-box"></span><b>Not running</b><span style="color:#6b675f">Codex · 3d</span><span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive;flex:none">1</span><span style="flex:1"></span><span style="padding:1px 12px;border:1.5px solid #2b2b2b;border-radius:4px;background:#2b2b2b;color:#fff">Resume</span><span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive;flex:none">2</span></div>
+        <div style="flex:1;font:11px/1.5 ui-monospace,Menlo,monospace;padding:10px 14px;color:#a8a49b;overflow:hidden;background:#fdfdfb">⏺ Update(pom.xml) asm 9.7 → 9.8<br>⏺ Bash(mvn -q test)<br>&nbsp;&nbsp;⎿ 2 failures in ClassFilterTest<br>⏺ Two tests in ClassFilterTest need new opcodes…<br><span style="color:#8a867d">— stopped when the window closed · Oct 15 18:04 —</span></div>
+      </div>
+    </div>
+    <div style="height:20px;flex:none;border-top:1.5px solid #2b2b2b;background:#f4f2ee;display:flex;align-items:center;gap:10px;padding:0 10px;font-size:11px;color:#6b675f"><span>btrace · asm-98</span></div>
+  </div>
+  <div style="width:380px;border:1.5px solid #2b2b2b;border-radius:8px;background:#fff;box-shadow:0 8px 24px rgba(0,0,0,.12);display:flex;flex-direction:column;font-size:13px;outline:1.5px solid #0f8b8d;outline-offset:3px">
+    <div style="padding:10px 14px 4px;display:flex;gap:8px;align-items:center"><b>Stop 2 working agents?</b><span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive;flex:none">3</span></div>
+    <div style="padding:2px 14px 8px;display:flex;flex-direction:column;gap:4px;font-size:12.5px">
+      <span style="color:#6b675f">Closing <b style="color:#2b2b2b">btrace · asm-98</b> stops them mid-task.</span>
+      <span style="display:flex;gap:6px;align-items:center"><span style="width:8px;height:8px;border-radius:50%;background:#3574F0"></span>Upgrade ASM to 9.8 <span style="color:#8a867d">· running mvn test</span></span>
+      <span style="display:flex;gap:6px;align-items:center"><span style="width:8px;height:8px;border-radius:50%;background:#3574F0"></span>Why does ClassFilter… <span style="padding:0 3px;border:1px solid #8a867d;border-radius:3px;font-size:10px;color:#6b675f">RO</span> <span style="color:#8a867d">· reading</span></span>
+      <span style="color:#8a867d;font-size:12px">Agents at the prompt are stopped without asking.</span>
+    </div>
+    <div style="padding:8px 14px;border-top:1px solid #d6d2c9;display:flex;gap:8px;align-items:center"><span style="font-size:12px;color:#6b675f">☐ Don't ask again</span><span style="flex:1"></span><span style="padding:2px 10px;border:1px solid #b7b2a7;border-radius:4px">Cancel</span><span style="padding:2px 10px;border:1.5px solid #2b2b2b;border-radius:4px;background:#2b2b2b;color:#fff">Stop &amp; Close</span></div>
+  </div>
+  <ol style="margin:0;padding-left:22px;font:16px/1.35 Kalam,cursive;color:#3a3a3a;display:flex;flex-direction:column;gap:3px">
+    <li>The editor restores with the window. The strip says Not running, and the transcript tail is dimmed with a "stopped when…" line. Nothing auto-starts.</li>
+    <li>Resume starts exactly one execution in place: <code>codex resume &lt;id&gt;</code>.</li>
+    <li>Decided (H2): closing a window, or quitting the IDE, asks only when at least one agent is <i>working</i>. Idle and at-prompt agents stop silently. On quit, one dialog lists working agents across all windows.</li>
+  </ol>
+</div>
+
+<!-- E7 -->
+<div id="E7" style="display:flex;flex-direction:column;gap:10px;width:600px">
+  <div style="display:flex;align-items:baseline;gap:8px"><span style="font:600 11px ui-monospace,Menlo,monospace;padding:3px 7px;background:#2b2b2b;color:#fff;border-radius:4px">E7</span><span style="font:700 21px Kalam,cursive">Finish from the commit panel</span></div>
+  <div style="width:600px;height:360px;border:1.5px solid #2b2b2b;border-radius:8px;background:#fff;display:flex;flex-direction:column;overflow:hidden;font-size:13px;line-height:1.3;position:relative">
+    <div style="height:28px;flex:none;display:flex;align-items:center;gap:12px;padding:0 10px;border-bottom:1.5px solid #2b2b2b;background:#f4f2ee"><span style="display:flex;gap:4px"><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span></span><b style="white-space:nowrap">drydock · Status dot CPU regression ▾</b></div>
+    <div style="flex:1;display:flex;min-height:0">
+      <div style="width:24px;flex:none;border-right:1.5px solid #2b2b2b;background:#f4f2ee;display:flex;flex-direction:column;align-items:center;padding-top:7px;gap:7px"><span style="width:12px;height:12px;border:1.5px solid #2b2b2b;border-radius:3px"></span><span style="width:12px;height:12px;border-radius:3px;background:#2b2b2b"></span></div>
+      <div style="width:260px;flex:none;border-right:1.5px solid #2b2b2b;display:flex;flex-direction:column">
+        <div style="height:22px;flex:none;display:flex;align-items:center;gap:10px;padding:0 8px;border-bottom:1px solid #d6d2c9;font-size:12px"><b style="border-bottom:2px solid #2b2b2b">Commit</b><span style="color:#8a867d">Shelf</span></div>
+        <div style="flex:1;opacity:.45;background:repeating-linear-gradient(to bottom,transparent 0 14px,#ebe8e1 14px 19px);background-clip:content-box;padding:8px 40px 8px 12px"></div>
+        <div style="flex:none;padding:8px;border-top:1px solid #d6d2c9;display:flex;flex-direction:column;gap:6px;font-size:12px">
+          <span style="border:1px solid #b7b2a7;border-radius:4px;padding:4px 6px;color:#4a4740;min-height:34px">Stop status-dot timer when row is hidden<br><span style="color:#8a867d">drafted by pi · edit freely</span></span>
+          <span style="display:flex;gap:5px;align-items:center;white-space:nowrap"><span style="color:#8a867d;font-size:11px">branch vs main</span><span style="flex:1"></span><span style="padding:1px 8px;border:1.5px solid #2b2b2b;border-radius:4px;background:#2b2b2b;color:#fff;outline:1.5px solid #0f8b8d;outline-offset:2px">Finish ▾</span><span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive;flex:none">1</span></span>
+        </div>
+      </div>
+      <div style="flex:1;background:repeating-linear-gradient(to bottom,transparent 0 10px,#ebe8e1 10px 15px);background-clip:content-box;padding:10px 30px 10px 20px;opacity:.5"></div>
+    </div>
+    <div style="position:absolute;left:150px;top:150px;width:270px;border:1.5px solid #2b2b2b;border-radius:6px;background:#fff;box-shadow:0 6px 18px rgba(0,0,0,.15);display:flex;flex-direction:column;font-size:12px;padding:3px 0">
+      <span style="padding:4px 10px;display:flex;flex-direction:column"><b>Merge into main</b><span style="color:#8a867d">commit → merge in main checkout → close window</span></span>
+      <span style="padding:4px 10px;display:flex;flex-direction:column;background:#dfe7f7"><b>Push &amp; create pull request…</b><span style="color:#8a867d">commit → push → gh pr create → keep window</span></span>
+      <span style="padding:4px 10px;border-top:1px solid #d6d2c9;color:#6b675f;display:flex;gap:6px;align-items:center">☑ Remove worktree after merge<span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive;flex:none">2</span></span>
+      <span style="padding:4px 10px;color:#b26a00">1 open finding · Finish anyway?</span>
+    </div>
+    <div style="height:20px;flex:none;border-top:1.5px solid #2b2b2b;background:#f4f2ee;display:flex;align-items:center;gap:10px;padding:0 10px;font-size:11px;color:#6b675f"><span>drydock · dot-cpu</span></div>
+  </div>
+  <ol style="margin:0;padding-left:22px;font:16px/1.35 Kalam,cursive;color:#3a3a3a;display:flex;flex-direction:column;gap:3px">
+    <li>In branch scope, Finish replaces Commit (H3), and uncommitted files are committed as its first step. The agent drafts the message.</li>
+    <li>Merge offers worktree removal (and closes the window, which stops the agent). PR keeps the window for review rounds. An open finding warns but doesn't block.</li>
+  </ol>
+</div>
+
+<!-- E8 -->
+<div id="E8" style="display:flex;flex-direction:column;gap:10px;width:600px">
+  <div style="display:flex;align-items:baseline;gap:8px"><span style="font:600 11px ui-monospace,Menlo,monospace;padding:3px 7px;background:#2b2b2b;color:#fff;border-radius:4px">E8</span><span style="font:700 21px Kalam,cursive">Forget a session, clean up worktrees</span></div>
+  <div style="width:600px;height:360px;border:1.5px solid #2b2b2b;border-radius:8px;background:#fff;display:flex;flex-direction:column;overflow:hidden;font-size:13px;line-height:1.3;position:relative">
+    <div style="height:28px;flex:none;display:flex;align-items:center;gap:12px;padding:0 10px;border-bottom:1.5px solid #2b2b2b;background:#f4f2ee"><span style="display:flex;gap:4px"><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span></span><b>drydock ▾</b><span style="display:inline-flex;align-items:center;gap:5px;padding:1px 7px;background:#dfe7f7;outline:1.5px solid #0f8b8d;border-radius:4px;font-size:12px;white-space:nowrap"><span style="width:7px;height:7px;border-radius:50%;background:#E0A030"></span>1<span style="width:7px;height:7px;border-radius:50%;background:#3574F0"></span>3 Agents ▴</span></div>
+    <div style="flex:1;display:flex;min-height:0">
+      <div style="width:24px;flex:none;border-right:1.5px solid #2b2b2b;background:#f4f2ee"></div>
+      <div style="flex:1;background:repeating-linear-gradient(to bottom,transparent 0 10px,#ebe8e1 10px 15px);background-clip:content-box;padding:10px 60px 10px 24px;opacity:.5"></div>
+    </div>
+    <div style="position:absolute;left:120px;top:30px;width:300px;border:1.5px solid #2b2b2b;border-radius:8px;background:#fff;box-shadow:0 8px 24px rgba(0,0,0,.15);display:flex;flex-direction:column;font-size:12px;padding:4px 0">
+      <div style="padding:2px 10px"><b>drydock</b></div>
+      <div style="padding:1px 10px 1px 22px;color:#6b675f">⑂ main · this window</div>
+      <div style="padding:1px 10px 1px 22px;display:flex;align-items:center;gap:6px;background:#dfe7f7;white-space:nowrap"><span style="width:8px;height:8px;border-radius:50%;border:1.5px solid #8C8C8C;box-sizing:border-box;flex:none"></span>Status dot CPU regression<span style="flex:1"></span><span>⋯</span></div>
+      <div style="padding:1px 10px 1px 22px;color:#6b675f">⑂ old-spike <span style="color:#8a867d">· no session</span></div>
+      <div style="padding:1px 10px 1px 22px;color:#a8a49b;background:#e6f4f3;outline:1.5px solid #0f8b8d;outline-offset:-1px;display:flex;gap:6px;align-items:center">2 stale worktrees · <span style="color:#3574F0">Prune</span><span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive">2</span></div>
+    </div>
+    <div style="position:absolute;left:385px;top:66px;width:200px;border:1.5px solid #2b2b2b;border-radius:6px;background:#fff;box-shadow:0 6px 18px rgba(0,0,0,.15);display:flex;flex-direction:column;font-size:12px;padding:3px 0;outline:1.5px solid #0f8b8d;outline-offset:3px">
+      <span style="padding:3px 10px">Open Window</span><span style="padding:3px 10px">Resume</span><span style="padding:3px 10px">Rename…</span><span style="padding:3px 10px;border-top:1px solid #d6d2c9;display:flex;gap:6px;align-items:center">Forget Session<span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive">1</span></span><span style="padding:3px 10px">Remove Worktree…</span>
+    </div>
+    <div style="height:20px;flex:none;border-top:1.5px solid #2b2b2b;background:#f4f2ee;display:flex;align-items:center;gap:10px;padding:0 10px;font-size:11px;color:#6b675f"><span>drydock</span></div>
+  </div>
+  <ol style="margin:0;padding-left:22px;font:16px/1.35 Kalam,cursive;color:#3a3a3a;display:flex;flex-direction:column;gap:3px">
+    <li>Forget removes the row only (the agent's own history stays). Remove Worktree… closes the window, stops the agent and warns on a dirty tree. The same menu is on the Services node.</li>
+    <li>Stale entries collapse to one line with an inline Prune (no confirm, metadata only).</li>
+  </ol>
+</div>
+
+</div>
+
+<section style="display:flex;flex-direction:column;gap:16px">
+  <div style="display:flex;flex-direction:column;gap:6px;max-width:900px">
+    <div style="display:flex;align-items:baseline;gap:10px"><span style="font:600 11px ui-monospace,Menlo,monospace;padding:3px 7px;background:#2b2b2b;color:#fff;border-radius:4px">R</span><h2 style="margin:0;font:700 26px Kalam,cursive">Review in Local Changes: how much decoration?</h2></div>
+    <p style="margin:0;font-size:18px;line-height:1.4;text-wrap:pretty">The same four files and one finding, shown three ways. Each shape uses an existing Changes-view mechanism: node decorations, child nodes, and a custom <b>Group by</b> option. The diff and its gutter finding cards (<a href="#E7">E7</a> background) are the same in all three.</p>
+  </div>
+  <div style="display:flex;flex-wrap:wrap;gap:32px;align-items:flex-start">
+
+    <div id="R1" style="display:flex;flex-direction:column;gap:10px;width:340px">
+      <div style="display:flex;align-items:baseline;gap:8px"><span style="font:600 11px ui-monospace,Menlo,monospace;padding:3px 7px;background:#2b2b2b;color:#fff;border-radius:4px">R1</span><span style="font:700 20px Kalam,cursive">Quiet: one glyph per file</span></div>
+      <div style="width:340px;height:300px;border:1.5px solid #2b2b2b;border-radius:8px;background:#fff;display:flex;flex-direction:column;overflow:hidden;font-size:12px;line-height:1.3">
+        <div style="height:22px;flex:none;display:flex;align-items:center;gap:10px;padding:0 8px;border-bottom:1px solid #d6d2c9"><b style="border-bottom:2px solid #2b2b2b">Commit</b><span style="color:#8a867d">Shelf</span></div>
+        <div style="height:22px;flex:none;display:flex;align-items:center;gap:6px;padding:0 8px;border-bottom:1px solid #b9dcda;font-size:11px;background:#e6f4f3;outline:1.5px solid #0f8b8d;outline-offset:-1px;white-space:nowrap">Scope: <b>branch vs main ▾</b><span style="flex:1"></span>2 / 4 reviewed</div>
+        <div style="flex:1;padding:4px 0;display:flex;flex-direction:column;gap:2px">
+          <div style="padding:2px 8px">▾ ☑ Changes · 4 files</div>
+          <div style="padding:1px 8px 1px 22px;display:flex;gap:6px">SessionListModel.java<span style="flex:1"></span><span style="color:#2f7d32">✓</span></div>
+          <div style="padding:1px 8px 1px 22px;display:flex;gap:6px;background:#dfe7f7">SessionDots.java<span style="flex:1"></span><span style="color:#E0A030">◆</span></div>
+          <div style="padding:1px 8px 1px 22px;display:flex;gap:6px">SessionsPanel.java<span style="flex:1"></span><span style="color:#2f7d32">✓</span></div>
+          <div style="padding:1px 8px 1px 22px;display:flex;gap:6px">SessionDotsTest.java<span style="flex:1"></span></div>
+        </div>
+        <div style="flex:none;padding:6px 8px;border-top:1px solid #d6d2c9;display:flex;gap:5px;align-items:center"><span style="padding:1px 8px;border:1px solid #b7b2a7;border-radius:4px">Commit</span><span style="padding:1px 8px;border:1.5px solid #2b2b2b;border-radius:4px;background:#2b2b2b;color:#fff">Finish ▾</span></div>
+      </div>
+      <ul style="margin:0;padding-left:20px;font:15px/1.35 Kalam,cursive;color:#3a3a3a;display:flex;flex-direction:column;gap:2px">
+        <li><b style="color:#2f7d32">+</b> Indistinguishable from stock until you look. Never crowded.</li>
+        <li><b style="color:#c0392b">−</b> Findings are only visible inside the diff. No tour.</li>
+      </ul>
+    </div>
+
+    <div id="R2" style="display:flex;flex-direction:column;gap:10px;width:340px">
+      <div style="display:flex;align-items:baseline;gap:8px"><span style="font:600 11px ui-monospace,Menlo,monospace;padding:3px 7px;background:#2b2b2b;color:#fff;border-radius:4px">R2</span><span style="font:700 20px Kalam,cursive">Findings as child nodes</span><span style="font:600 11px ui-monospace,Menlo,monospace;padding:3px 7px;background:#0f8b8d;color:#fff;border-radius:4px">CHOSEN</span></div>
+      <div style="width:340px;height:300px;border:1.5px solid #2b2b2b;border-radius:8px;background:#fff;display:flex;flex-direction:column;overflow:hidden;font-size:12px;line-height:1.3;outline:3px solid #0f8b8d;outline-offset:4px">
+        <div style="height:22px;flex:none;display:flex;align-items:center;gap:10px;padding:0 8px;border-bottom:1px solid #d6d2c9"><b style="border-bottom:2px solid #2b2b2b">Commit</b><span style="color:#8a867d">Shelf</span></div>
+        <div style="height:22px;flex:none;display:flex;align-items:center;gap:6px;padding:0 8px;border-bottom:1px solid #b9dcda;font-size:11px;background:#e6f4f3;outline:1.5px solid #0f8b8d;outline-offset:-1px;white-space:nowrap">Scope: <b>branch vs main ▾</b><span style="flex:1"></span>2 / 4 · 1 open</div>
+        <div style="flex:1;padding:4px 0;display:flex;flex-direction:column;gap:2px">
+          <div style="padding:2px 8px;color:#6b675f;font-size:11px">3 commits + 1 uncommitted file vs main</div><div style="padding:2px 8px">▾ dot-cpu vs main · 4 files</div>
+          <div style="padding:1px 8px 1px 22px;display:flex;gap:6px">SessionListModel.java<span style="flex:1"></span><span style="color:#2f7d32">✓</span></div>
+          <div style="padding:1px 8px 1px 22px;display:flex;gap:6px;background:#dfe7f7">▾ SessionDots.java<span style="flex:1"></span><span style="color:#E0A030">◆1</span></div>
+          <div style="padding:1px 8px 1px 40px;display:flex;gap:6px;color:#4a4740;background:#e6f4f3;white-space:nowrap"><span style="color:#b26a00">MED</span>Timer still scheduled…<span style="color:#8a867d">:88</span></div>
+          <div style="padding:1px 8px 1px 22px;display:flex;gap:6px">SessionsPanel.java<span style="flex:1"></span><span style="color:#2f7d32">✓</span></div>
+          <div style="padding:1px 8px 1px 22px;display:flex;gap:6px">SessionDotsTest.java <span style="color:#3574F0" title="uncommitted">●</span><span style="flex:1"></span><span style="color:#8a867d">○</span></div>
+        </div>
+        <div style="flex:none;padding:6px 8px;border-top:1px solid #d6d2c9;display:flex;gap:5px;align-items:center"><span style="color:#8a867d;font-size:11px">no checkboxes in branch scope</span><span style="flex:1"></span><span style="padding:1px 8px;border:1.5px solid #2b2b2b;border-radius:4px;background:#2b2b2b;color:#fff">Finish ▾</span></div>
+      </div>
+      <ul style="margin:0;padding-left:20px;font:15px/1.35 Kalam,cursive;color:#3a3a3a;display:flex;flex-direction:column;gap:2px">
+        <li><b style="color:#2f7d32">+</b> Open findings are visible and navigable (Enter = jump to line). Only open findings get a row; resolved ones collapse away.</li>
+        <li><b style="color:#c0392b">−</b> Ten findings on one file make a long tree. Needs a "hide resolved" default.</li><li><b>Decided (H3):</b> in branch scope there are no checkboxes and no Commit button, only Finish ▾. A hint line names the scope, and uncommitted files carry ●.</li>
+      </ul>
+    </div>
+
+    <div id="R3" style="display:flex;flex-direction:column;gap:10px;width:340px">
+      <div style="display:flex;align-items:baseline;gap:8px"><span style="font:600 11px ui-monospace,Menlo,monospace;padding:3px 7px;background:#2b2b2b;color:#fff;border-radius:4px">R3</span><span style="font:700 20px Kalam,cursive">Group by: Tour step</span></div>
+      <div style="width:340px;height:300px;border:1.5px solid #2b2b2b;border-radius:8px;background:#fff;display:flex;flex-direction:column;overflow:hidden;font-size:12px;line-height:1.3">
+        <div style="height:22px;flex:none;display:flex;align-items:center;gap:10px;padding:0 8px;border-bottom:1px solid #d6d2c9"><b style="border-bottom:2px solid #2b2b2b">Commit</b><span style="color:#8a867d">Shelf</span><span style="flex:1"></span><span style="font-size:11px;padding:0 4px;background:#e6f4f3;outline:1.5px solid #0f8b8d;white-space:nowrap">Group by ▸ ☑ Tour step</span></div>
+        <div style="height:22px;flex:none;display:flex;align-items:center;gap:6px;padding:0 8px;border-bottom:1px solid #b9dcda;font-size:11px;background:#e6f4f3;outline:1.5px solid #0f8b8d;outline-offset:-1px;white-space:nowrap">Scope: <b>branch vs main ▾</b><span style="flex:1"></span>step 2 / 3</div>
+        <div style="flex:1;padding:4px 0;display:flex;flex-direction:column;gap:2px">
+          <div style="padding:2px 8px;display:flex;gap:6px"><span style="color:#2f7d32">✓</span>1 · Where the timer lives</div>
+          <div style="padding:1px 8px 1px 26px;color:#8a867d">SessionListModel.java</div>
+          <div style="padding:2px 8px;display:flex;gap:6px;background:#dfe7f7"><span style="color:#E0A030">◆</span><b>2 · Hide stops the timer</b></div>
+          <div style="padding:1px 8px 1px 26px;display:flex;gap:6px">SessionDots.java<span style="flex:1"></span><span style="color:#E0A030">◆1</span></div>
+          <div style="padding:1px 8px 1px 26px">SessionsPanel.java</div>
+          <div style="padding:2px 8px;display:flex;gap:6px;color:#6b675f"><span>○</span>3 · Proving it in tests</div>
+          <div style="padding:1px 8px 1px 26px;color:#8a867d">SessionDotsTest.java</div>
+        </div>
+        <div style="flex:none;padding:6px 8px;border-top:1px solid #d6d2c9;display:flex;gap:5px;align-items:center"><span style="padding:1px 8px;border:1px solid #b7b2a7;border-radius:4px">Commit</span><span style="padding:1px 8px;border:1.5px solid #2b2b2b;border-radius:4px;background:#2b2b2b;color:#fff">Finish ▾</span></div>
+      </div>
+      <ul style="margin:0;padding-left:20px;font:15px/1.35 Kalam,cursive;color:#3a3a3a;display:flex;flex-direction:column;gap:2px">
+        <li><b style="color:#2f7d32">+</b> The tour becomes a grouping, so it needs no extra panel. Toggle it off and you're back at R1/R2.</li>
+        <li><b style="color:#c0392b">−</b> Tour checks (predict / trace) still need a home, maybe an inlay in the diff. A file in two steps shows twice.</li>
+      </ul>
+    </div>
+
+  </div>
+  <p style="margin:0;font:17px/1.4 Kalam,cursive;color:#3a3a3a;max-width:900px"><b>Decision: <a href="#R2">R2</a>.</b> Findings are child nodes under their file, and resolved ones are hidden by default. Tour steps are not in the Changes tree; the tour gets its own editor (<a href="#T1">T1</a> / <a href="#T2">T2</a>, below). <a href="#R1">R1</a> and <a href="#R3">R3</a> are kept for reference.</p>
+</section>
+
+<section id="T" style="display:flex;flex-direction:column;gap:16px">
+  <div style="display:flex;flex-direction:column;gap:6px;max-width:960px">
+    <div style="display:flex;align-items:baseline;gap:10px"><span style="font:600 11px ui-monospace,Menlo,monospace;padding:3px 7px;background:#0f8b8d;color:#fff;border-radius:4px">NEW</span><h2 style="margin:0;font:700 26px Kalam,cursive">The guided tour gets its own editor</h2></div>
+    <p style="margin:0;font-size:18px;line-height:1.4;text-wrap:pretty">A step is a logical change: narrative, anchored line ranges with notes, impact, checks that gate it, and an optional staged diagram. A file can belong to several steps, so the tour can't be a grouping of the Changes tree. Both options open the tour as an editor tab next to the agent, reached from the agent strip's Review link or the Changes header. They differ in who renders the code.</p>
+  </div>
+  <div style="display:flex;flex-wrap:wrap;gap:44px 40px;align-items:flex-start">
+<!-- T1 -->
+<div id="T1" style="display:flex;flex-direction:column;gap:10px;width:860px">
+  <div style="display:flex;align-items:baseline;gap:8px"><span style="font:600 11px ui-monospace,Menlo,monospace;padding:3px 7px;background:#2b2b2b;color:#fff;border-radius:4px">T1</span><span style="font:700 21px Kalam,cursive">Tour editor: Drydock owns the whole surface</span><span style="font-size:13px;color:#6b675f">shown with a PREDICT open</span></div>
+  <div style="width:860px;height:500px;border:1.5px solid #2b2b2b;border-radius:8px;background:#fff;display:flex;flex-direction:column;overflow:hidden;font-size:13px;line-height:1.3">
+    <div style="height:28px;flex:none;display:flex;align-items:center;gap:12px;padding:0 10px;border-bottom:1.5px solid #2b2b2b;background:#f4f2ee"><span style="display:flex;gap:4px"><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span></span><b style="white-space:nowrap">drydock · Status dot CPU regression ▾</b></div>
+    <div style="flex:1;display:flex;min-height:0">
+      <div style="width:24px;flex:none;border-right:1.5px solid #2b2b2b;background:#f4f2ee"></div>
+      <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+        <div style="height:24px;flex:none;display:flex;align-items:flex-end;gap:2px;padding:0 6px;border-bottom:1px solid #d6d2c9;font-size:12px;background:#f9f8f5"><span style="padding:2px 8px;color:#8a867d;white-space:nowrap">📌 ● Status dot CPU…</span><span style="padding:2px 8px;border:1.5px solid #2b2b2b;border-bottom:none;background:#e6f4f3;outline:1.5px solid #0f8b8d;border-radius:4px 4px 0 0;white-space:nowrap">◨ Tour · dot-cpu vs main</span><span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive;flex:none">1</span></div>
+        <div style="flex:1;display:flex;min-height:0;background:#e6f4f3;outline:1.5px solid #0f8b8d;outline-offset:-2px">
+          <div style="width:170px;flex:none;border-right:1px solid #d6d2c9;display:flex;flex-direction:column;font-size:12px;background:#fbfaf7">
+<div style="padding:5px 8px;border-bottom:1px solid #d6d2c9;color:#8a867d;font-size:11px">TOUR · 5 steps</div>
+<div style="padding:4px 8px;display:flex;flex-direction:column;gap:2px;"><span style="display:flex;gap:6px;align-items:baseline"><span style="flex:none"><span style="color:#2f7d32">✓</span></span><span style="">Where the timer is owned</span></span><span style="padding-left:16px;color:#8a867d;font-size:10.5px;white-space:nowrap">SessionListModel · SessionDots</span></div>
+<div style="padding:4px 8px;display:flex;flex-direction:column;gap:2px;background:#dfe7f7"><span style="display:flex;gap:6px;align-items:baseline"><span style="flex:none"><span style="color:#3574F0">◐</span></span><span style="font-weight:700">Hiding a row stops its timer</span></span><span style="padding-left:16px;color:#8a867d;font-size:10.5px;white-space:nowrap">SessionDots ×2 · SessionsPanel</span></div>
+<div style="padding:4px 8px;display:flex;flex-direction:column;gap:2px;"><span style="display:flex;gap:6px;align-items:baseline"><span style="flex:none"><span style="color:#8a867d">○</span></span><span style="">Showing restarts lazily</span></span><span style="padding-left:16px;color:#8a867d;font-size:10.5px;white-space:nowrap">SessionDots · SessionsPanel</span></div>
+<div style="padding:4px 8px;display:flex;flex-direction:column;gap:2px;"><span style="display:flex;gap:6px;align-items:baseline"><span style="flex:none"><span style="color:#b26a00">↻</span></span><span style="">Dispose path</span></span><span style="padding-left:16px;color:#8a867d;font-size:10.5px;white-space:nowrap">SessionsPanel · stale</span></div>
+<div style="padding:4px 8px;display:flex;flex-direction:column;gap:2px;"><span style="display:flex;gap:6px;align-items:baseline"><span style="flex:none"><span style="color:#8a867d">○</span></span><span style="">Proving it in tests</span></span><span style="padding-left:16px;color:#8a867d;font-size:10.5px;white-space:nowrap">SessionDotsTest</span></div>
+<div style="flex:1"></div><div style="padding:5px 8px;border-top:1px solid #d6d2c9;color:#8a867d;font-size:10.5px">1 file without line changes · ack</div></div>
+          <div style="flex:1;display:flex;flex-direction:column;min-width:0;background:#fff;font:11px/1.6 ui-monospace,Menlo,monospace;overflow:hidden">
+            <div style="padding:3px 8px;background:#f4f2ee;border-top:1px solid #d6d2c9;border-bottom:1px solid #d6d2c9;font:13px 'Patrick Hand',cursive;display:flex;gap:8px;white-space:nowrap"><b>SessionDots.java</b><span style="color:#8a867d">1 of 2 · also steps 1, 3</span></div>
+            <div style="display:flex;gap:8px;padding:0 8px;;white-space:pre"><span style="width:26px;text-align:right;color:#a8a49b;flex:none">84</span><span>private void schedule(Row row) {</span></div>
+            <div style="display:flex;gap:8px;padding:0 8px;;white-space:pre"><span style="width:26px;text-align:right;color:#a8a49b;flex:none">85</span><span>  if (row.timer != null) return;</span></div>
+            <div style="display:flex;gap:8px;padding:0 8px;background:repeating-linear-gradient(45deg,#f1efe9 0 4px,#e6e3dc 4px 8px);color:#a8a49b;white-space:pre"><span style="width:26px;text-align:right;color:#a8a49b;flex:none"></span><span>  added rows hidden until you answer (3)</span></div>
+            <div style="display:flex;gap:8px;padding:0 8px;;white-space:pre"><span style="width:26px;text-align:right;color:#a8a49b;flex:none">89</span><span>  row.timer = scheduler.every(500, row::tick);</span></div>
+            <div style="display:flex;gap:8px;padding:0 8px;;white-space:pre"><span style="width:26px;text-align:right;color:#a8a49b;flex:none">90</span><span>}</span></div>
+            <div style="display:flex;gap:8px;padding:0 8px;background:#f1f7ef;color:#8a867d;white-space:pre"><span style="width:26px;text-align:right;color:#a8a49b;flex:none">112</span><span>  void onShow(Row r) {  <span style="color:#a8a49b">// step 3</span></span></div>
+            <div style="padding:3px 8px;background:#f4f2ee;border-top:1px solid #d6d2c9;border-bottom:1px solid #d6d2c9;font:13px 'Patrick Hand',cursive;display:flex;gap:8px;white-space:nowrap"><b>SessionsPanel.java</b><span style="color:#8a867d">also steps 3, 4</span></div>
+            <div style="display:flex;gap:8px;padding:0 8px;;white-space:pre"><span style="width:26px;text-align:right;color:#a8a49b;flex:none">301</span><span>list.addAncestorListener(new AncestorListener() {</span></div>
+            <div style="display:flex;gap:8px;padding:0 8px;;white-space:pre"><span style="width:26px;text-align:right;color:#a8a49b;flex:none">302</span><span>  public void ancestorRemoved(AncestorEvent e) {</span></div>
+            <div style="display:flex;gap:8px;padding:0 8px;background:#f7dede;color:#8a6a6a;white-space:pre"><span style="width:26px;text-align:right;color:#a8a49b;flex:none">−</span><span>    // Nothing to stop</span></div>
+            <div style="display:flex;gap:8px;padding:0 8px;background:repeating-linear-gradient(45deg,#f1efe9 0 4px,#e6e3dc 4px 8px);color:#a8a49b;white-space:pre"><span style="width:26px;text-align:right;color:#a8a49b;flex:none"></span><span>  added rows hidden until you answer (2)</span></div>
+            <div style="display:flex;gap:8px;padding:0 8px;;white-space:pre"><span style="width:26px;text-align:right;color:#a8a49b;flex:none">306</span><span>  }</span></div>
+            <div style="flex:1"></div>
+            <div style="padding:3px 8px;border-top:1px solid #d6d2c9;font:11px 'Patrick Hand',cursive;color:#6b675f;display:flex;gap:10px;white-space:nowrap"><span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive;flex:none">2</span> real read-only editors: ⌘-click, ⌥Space peek, ⌘[ back all work</div>
+          </div>
+          <div style="width:260px;flex:none;border-left:1px solid #d6d2c9;display:flex;flex-direction:column;gap:8px;padding:10px 12px;background:#fff;font-size:12.5px;line-height:1.5">
+            <div style="padding:5px 8px;border:1px dashed #b7b2a7;border-radius:4px;color:#6b675f;font-size:12px">This step's added lines are hidden until you answer. The code around them isn't.</div>
+            <div style="color:#3574F0;font-size:12px">↳ SessionDots.java:85–89 · SessionsPanel.java:302–306</div>
+            <div style="display:flex;gap:6px;align-items:center"><span style="font:600 10px ui-monospace,Menlo,monospace;padding:2px 5px;background:#2b2b2b;color:#fff;border-radius:3px">PREDICT</span><span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive;flex:none">3</span></div>
+            <b style="line-height:1.4">When a row scrolls out of view, what happens to its 500 ms timer today?</b>
+            <div style="display:flex;flex-direction:column;gap:4px;font-size:12px"><span style="padding:3px 8px;border:1px solid #b7b2a7;border-radius:4px">It's cancelled by the list</span><span style="padding:3px 8px;border:1.5px solid #2b2b2b;border-radius:4px;background:#dfe7f7">It keeps firing until the panel is disposed</span><span style="padding:3px 8px;border:1px solid #b7b2a7;border-radius:4px">It pauses and resumes on show</span></div>
+            <div style="flex:1"></div>
+            <div style="display:flex;gap:6px;align-items:center;font-size:12px;border-top:1px solid #d6d2c9;padding-top:6px;white-space:nowrap"><span style="padding:1px 8px;border:1.5px solid #2b2b2b;border-radius:4px;background:#2b2b2b;color:#fff">Answer ⏎</span><span style="color:#8a867d">Override step…</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div style="height:20px;flex:none;border-top:1.5px solid #2b2b2b;background:#f4f2ee;display:flex;align-items:center;gap:10px;padding:0 10px;font-size:11px;color:#6b675f"><span>1–9 choose · ⏎ answer · ] next step</span></div>
+  </div>
+  <ol style="margin:0;padding-left:22px;font:16px/1.35 Kalam,cursive;color:#3a3a3a;display:flex;flex-direction:column;gap:3px">
+    <li>The tour is its own editor tab, a custom FileEditor beside the agent tab. Outline on the left: one row per step with state, and under it the files the step touches (SessionDots ×2 = two ranges in one file).</li>
+    <li>The centre stacks only <i>this step's</i> ranges, file by file, as read-only IDE editors over a display-only full-context diff document. Other steps' changes in the same file show faintly, tagged "step 3". Drydock controls hiding, so PREDICT can hide added rows exactly as the app does.</li>
+    <li>The step panel order follows the spec: hidden-lines notice → range links → check (narrative held back). After the answer: narrative, diagram stages, impact, findings to triage.</li>
+  </ol>
+</div>
+<!-- T2 -->
+<div id="T2" style="display:flex;flex-direction:column;gap:10px;width:860px">
+  <div style="display:flex;align-items:baseline;gap:8px"><span style="font:600 11px ui-monospace,Menlo,monospace;padding:3px 7px;background:#2b2b2b;color:#fff;border-radius:4px">T2</span><span style="font:700 21px Kalam,cursive">Native diff viewer + attached step panel</span><span style="font-size:13px;color:#6b675f">shown after answering, reading claims</span></div>
+  <div style="width:860px;height:500px;border:1.5px solid #2b2b2b;border-radius:8px;background:#fff;display:flex;flex-direction:column;overflow:hidden;font-size:13px;line-height:1.3">
+    <div style="height:28px;flex:none;display:flex;align-items:center;gap:12px;padding:0 10px;border-bottom:1.5px solid #2b2b2b;background:#f4f2ee"><span style="display:flex;gap:4px"><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span><span style="width:8px;height:8px;border-radius:50%;border:1.2px solid #2b2b2b"></span></span><b style="white-space:nowrap">drydock · Status dot CPU regression ▾</b></div>
+    <div style="flex:1;display:flex;min-height:0">
+      <div style="width:24px;flex:none;border-right:1.5px solid #2b2b2b;background:#f4f2ee"></div>
+      <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+        <div style="height:24px;flex:none;display:flex;align-items:flex-end;gap:2px;padding:0 6px;border-bottom:1px solid #d6d2c9;font-size:12px;background:#f9f8f5"><span style="padding:2px 8px;color:#8a867d;white-space:nowrap">📌 ● Status dot CPU…</span><span style="padding:2px 8px;border:1.5px solid #2b2b2b;border-bottom:none;background:#fff;border-radius:4px 4px 0 0;white-space:nowrap">SessionDots.java ↔ main</span></div>
+        <div style="height:26px;flex:none;display:flex;align-items:center;gap:8px;padding:0 8px;border-bottom:1px solid #b9dcda;background:#e6f4f3;outline:1.5px solid #0f8b8d;outline-offset:-1px;font-size:12px;white-space:nowrap"><b>Step 2 / 5 ▾</b><span>Hiding a row stops its timer</span><span style="color:#8a867d">· SessionDots (1 of 2) → SessionsPanel</span><span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive;flex:none">1</span><span style="flex:1"></span><span>‹ ›</span></div>
+        <div style="flex:1;display:flex;min-height:0">
+          <div style="flex:1;display:flex;flex-direction:column;min-width:0;font:11px/1.6 ui-monospace,Menlo,monospace;overflow:hidden">
+            <div style="padding:2px 8px;color:#8a867d;font:11px 'Patrick Hand',cursive">IDE unified diff · "Do not collapse unchanged"</div>
+            <div style="display:flex;gap:8px;padding:0 8px;;white-space:pre"><span style="width:26px;text-align:right;color:#a8a49b;flex:none">84</span><span>private void schedule(Row row) {</span></div>
+            <div style="display:flex;gap:8px;padding:0 8px;;white-space:pre"><span style="width:26px;text-align:right;color:#a8a49b;flex:none">85</span><span>  if (row.timer != null) return;</span></div>
+            <div style="display:flex;gap:0;align-items:stretch"><span style="width:4px;background:#0f8b8d;flex:none"></span><div style="flex:1"><div style="display:flex;gap:8px;padding:0 8px;background:#e3f2df;white-space:pre"><span style="width:26px;text-align:right;color:#a8a49b;flex:none">86</span><span>  if (!row.visible) {</span></div><div style="display:flex;gap:8px;padding:0 8px;background:#e3f2df;white-space:pre"><span style="width:26px;text-align:right;color:#a8a49b;flex:none">87</span><span>    return; // scheduled on show</span></div><div style="display:flex;gap:8px;padding:0 8px;background:#e3f2df;white-space:pre"><span style="width:26px;text-align:right;color:#a8a49b;flex:none">88</span><span>  }</span></div></div></div>
+            <div style="margin:2px 8px 2px 42px;padding:4px 8px;border:1.5px solid #0f8b8d;border-radius:5px;background:#e6f4f3;font:12px/1.4 'Patrick Hand',cursive;display:flex;gap:6px;white-space:normal"><b style="color:#0f8b8d">①</b>Hidden rows never get a timer; onShow (step 3) schedules it later.</div>
+            <div style="display:flex;gap:8px;padding:0 8px;;white-space:pre"><span style="width:26px;text-align:right;color:#a8a49b;flex:none">89</span><span>  row.timer = scheduler.every(500, row::tick);</span></div>
+            <div style="display:flex;gap:8px;padding:0 8px;;white-space:pre"><span style="width:26px;text-align:right;color:#a8a49b;flex:none">90</span><span>}</span></div>
+            <div style="display:flex;gap:8px;padding:0 8px;background:#f1f7ef;color:#8a867d;white-space:pre"><span style="width:26px;text-align:right;color:#a8a49b;flex:none">112</span><span>  void onShow(Row r) {</span></div>
+            <div style="padding:0 8px 0 42px;color:#a8a49b;font:11px 'Patrick Hand',cursive">step 3 ›</div>
+            <div style="display:flex;gap:6px;align-items:center;padding:2px 8px"><div style="display:flex;gap:8px;padding:0 8px;;white-space:pre"><span style="width:26px;text-align:right;color:#a8a49b;flex:none"></span><span></span></div><span style="color:#E0A030">◆</span><span style="font:12px 'Patrick Hand',cursive;color:#6b675f">finding on :131 · MED · Timer leaks on dispose</span></div>
+            <div style="flex:1"></div>
+            <div style="padding:3px 8px;border-top:1px solid #d6d2c9;font:11px 'Patrick Hand',cursive;color:#6b675f;display:flex;gap:10px;white-space:nowrap"><span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive;flex:none">2</span> Drydock adds highlighters, inlays, gutter marks: no own diff renderer</div>
+          </div>
+          <div style="width:260px;flex:none;border-left:1px solid #d6d2c9;display:flex;flex-direction:column;gap:8px;padding:10px 12px;background:#e6f4f3;outline:1.5px solid #0f8b8d;outline-offset:-2px;font-size:12.5px;line-height:1.5">
+            <div style="display:flex;gap:6px;align-items:center"><span style="color:#2f7d32">✓ PREDICT answered</span><span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#0f8b8d;color:#fff;font:700 10px Kalam,cursive;flex:none">3</span></div>
+            <div style="background:#fff;border:1px solid #d6d2c9;border-radius:4px;padding:6px 8px">Rows that scroll out of view used to keep their 500&nbsp;ms timer until the panel closed. The fix schedules only visible rows and cancels on hide.</div>
+            <div style="font:11px/1.35 ui-monospace,Menlo,monospace;background:#fff;border:1px solid #d6d2c9;border-radius:4px;padding:6px 8px;color:#4a4740;white-space:pre">show ─▶ schedule ─▶ tick…
+hide ─▶ cancel</div>
+            <div style="font-size:12px"><b>Impact</b><br><span style="color:#6b675f">called from</span> SessionsPanel.rebuild · 2<br><span style="color:#6b675f">calls</span> Scheduler.every</div>
+            <div style="flex:1"></div>
+            <div style="display:flex;gap:6px;align-items:center;font-size:12px;border-top:1px solid #b9dcda;padding-top:6px;white-space:nowrap"><span style="padding:1px 8px;border:1.5px solid #2b2b2b;border-radius:4px;background:#2b2b2b;color:#fff">Next range ›</span><span style="color:#8a867d">2 / 3</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div style="height:20px;flex:none;border-top:1.5px solid #2b2b2b;background:#f4f2ee;display:flex;align-items:center;gap:10px;padding:0 10px;font-size:11px;color:#6b675f"><span>] next step · n next range · ⌘[ back</span></div>
+  </div>
+  <ol style="margin:0;padding-left:22px;font:16px/1.35 Kalam,cursive;color:#3a3a3a;display:flex;flex-direction:column;gap:3px">
+    <li>The tour drives the IDE's own diff viewer: a step bar on top and a step panel attached on the right. The outline collapses into the "Step 2 / 5 ▾" dropdown. A step spanning files walks its ranges in order; "Next range" can switch to the next file.</li>
+    <li>Anchored ranges get a strong left bar, notes become inlay callouts under the range, other steps' rows are faint with a "step 3 ›" inlay, and findings use the existing gutter ◆.</li>
+    <li>The same step panel content as T1. Hiding added rows for PREDICT has to be done by folding them inside the diff viewer, which is less certain than T1's own document.</li>
+  </ol>
+</div>
+  </div>
+  <div style="display:flex;flex-wrap:wrap;gap:40px;font:17px/1.4 Kalam,cursive;color:#3a3a3a">
+    <div style="max-width:560px;display:flex;flex-direction:column;gap:4px"><b>Shared by both</b>
+      <span>• Same file in several steps: the outline lists the files per step ("SessionDots ×2"); in the code, other steps' changes are faint and tagged with their step number.</span>
+      <span>• R2's Changes tree gets one more secondary label per file, its steps: "SessionDots.java · steps 1 2 3".</span>
+      <span>• Peek, trail and search come from the IDE: ⌘-click, Quick Definition, Back/Forward, Find in Files. The app's own copies aren't ported.</span>
+      <span>• Step states (passed, overridden, stale) and the coverage footer are the same as in the app.</span>
+    </div>
+    <div style="max-width:560px;display:flex;flex-direction:column;gap:4px"><b>Trade-off</b>
+      <span><b>T1</b> keeps every tour rule as specified (hidden added rows, receding claims), and the app's display-only diff carries over. You build and maintain one more viewer.</span>
+      <span><b>T2</b> feels most native and reuses the diff viewer users know. It depends on how far the diff viewer can be extended for the step panel, folding added rows and inlays. That needs a spike before committing.</span>
+    </div>
+  </div>
+</section>
+
+
+</div>
+</x-dc>
+</body>
+</html>

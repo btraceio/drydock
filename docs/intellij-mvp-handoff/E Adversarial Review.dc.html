@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Kalam:wght@400;700&family=Patrick+Hand&display=swap" rel="stylesheet">
+<style>body{margin:0;background:#f3f1ec;color:#2b2b2b}a{color:#0f8b8d}a:hover{color:#0a5f60}</style>
+</helmet>
+<div style="padding:44px 48px 72px;display:flex;flex-direction:column;gap:32px;font-family:'Patrick Hand',cursive;max-width:1100px">
+
+<header style="display:flex;flex-direction:column;gap:10px">
+  <a href="E Synthesis.dc.html" style="font:13px ui-monospace,Menlo,monospace;text-decoration:none">← E Synthesis</a>
+  <h1 style="margin:0;font:700 36px/1.1 Kalam,cursive">Adversarial review of E for MVP</h1>
+  <p style="margin:0;font-size:18px;line-height:1.45;text-wrap:pretty">An IntelliJ-UX reviewer's pass over <a href="E Synthesis.dc.html">E</a>, looking for what breaks under real use. It was written by the same model that drew E, so treat it as a checklist, not an independent sign-off. Each item has the frames it affects, the failure, and a proposed fix. Items marked <span style="font:600 11px ui-monospace,Menlo,monospace;padding:2px 6px;background:#b26a00;color:#fff;border-radius:3px">DECIDE</span> need your call.</p>
+</header>
+
+<section style="display:flex;flex-direction:column;gap:14px">
+  <h2 style="margin:0;font:700 24px Kalam,cursive;color:#c0392b">High: likely to hurt in week one</h2>
+
+  <div style="background:#fff;border:1.5px solid #2b2b2b;border-radius:8px;padding:14px 18px;display:flex;flex-direction:column;gap:6px;font-size:16.5px;line-height:1.4">
+    <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap"><b style="font:700 18px Kalam,cursive">H1 · Keystrokes the agent needs get eaten by the IDE</b><span style="color:#8a867d">E1, E4, E9</span></div>
+    <span>Agent TUIs live on Esc (interrupt), Shift+Tab (mode), ⌃C, ⌃R and arrow history. In an editor tab, the IDE keymap and editor actions see those keys first. A swallowed Esc means the user can't stop a runaway agent from the place they're looking at it. My own ⌃⇧A / ⌃⇧R shortcuts add more conflicts.</span>
+    <span><b>Fix:</b> add a pass-through key list to the Phase 0 editor spike as a pass/fail gate, test it with all three agents, and give Drydock shortcuts only actions that don't fire while the agent tab has focus.</span>
+  </div>
+
+  <div style="background:#fff;border:1.5px solid #2b2b2b;border-radius:8px;padding:14px 18px;display:flex;flex-direction:column;gap:6px;font-size:16.5px;line-height:1.4">
+    <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap"><b style="font:700 18px Kalam,cursive">H2 · ⌘Q silently kills every working agent</b><span style="font:600 11px ui-monospace,Menlo,monospace;padding:2px 6px;background:#2f7d32;color:#fff;border-radius:3px">DECIDED · confirm</span><span style="color:#8a867d">E6</span></div>
+    <span>"Window close stops, no prompt" was set for one window. Quitting the IDE closes all of them, and an agent mid-edit or mid-test leaves a half-applied change. A balloon <i>afterwards</i> doesn't undo that.</span>
+    <span><b>Fix:</b> keep "no prompt" for idle and at-prompt agents. Confirm only when ≥1 agent is <i>working</i>: "Stop 2 working agents?" with Stop / Cancel / Don't ask again. That's one dialog in the rare dangerous case.</span>
+  </div>
+
+  <div style="background:#fff;border:1.5px solid #2b2b2b;border-radius:8px;padding:14px 18px;display:flex;flex-direction:column;gap:6px;font-size:16.5px;line-height:1.4">
+    <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap"><b style="font:700 18px Kalam,cursive">H3 · Committing from the wrong scope</b><span style="font:600 11px ui-monospace,Menlo,monospace;padding:2px 6px;background:#2f7d32;color:#fff;border-radius:3px">DECIDED · proposal</span><span style="color:#8a867d">R2, E7</span></div>
+    <span>R2 reuses the Commit view, where checkboxes mean "include in commit". In "branch vs main" scope the tree lists files that are already committed, still next to checkboxes and a Commit button. Users will read it as "commit these 4 files".</span>
+    <span><b>Fix:</b> in branch scope, hide the checkboxes and swap Commit for Finish ▾. Show a one-line hint ("Reviewing 3 commits + 1 uncommitted file vs main") so the scope is always named. Uncommitted files keep a ● marker.</span>
+  </div>
+
+  <div style="background:#fff;border:1.5px solid #2b2b2b;border-radius:8px;padding:14px 18px;display:flex;flex-direction:column;gap:6px;font-size:16.5px;line-height:1.4">
+    <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap"><b style="font:700 18px Kalam,cursive">H4 · A new window is slow before it's useful</b><span style="color:#8a867d">E3</span></div>
+    <span>Each worktree is a new Project: Gradle/Maven import and indexing on a fresh copy of dd-trace-java takes minutes and memory. If the agent waits for the window to be "ready", the main promise (start a task fast) breaks. If it doesn't, the user sees a red, half-indexed project.</span>
+    <span><b>Fix:</b> start the agent as soon as the frame exists, and say so in the strip ("Working · IDE still indexing"). Offer shared indexes and "skip build import" in the New Agent Worktree dialog. Measure on dd-trace-java before MVP.</span>
+  </div>
+
+  <div style="background:#fff;border:1.5px solid #2b2b2b;border-radius:8px;padding:14px 18px;display:flex;flex-direction:column;gap:6px;font-size:16.5px;line-height:1.4">
+    <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap"><b style="font:700 18px Kalam,cursive">H5 · You and the agent editing the same file</b><span style="color:#8a867d">E4, E10</span></div>
+    <span>The split-editor story (<a href="E Synthesis.dc.html#E4">E4</a>) invites typing in the file the agent is changing. Unsaved buffer vs on-disk write gives you IntelliJ's "file changed on disk" conflict, or silently lost keystrokes. "Writes + Here" on the main checkout makes it a daily event.</span>
+    <span><b>Fix:</b> while an agent is working, mark the files it has touched this turn as read-only in the editor (a soft lock with an "Edit anyway" banner), and flush unsaved buffers before each agent turn. Keep "Writes + Here" behind Start anyway (already in E10).</span>
+  </div>
+</section>
+
+<section style="display:flex;flex-direction:column;gap:14px">
+  <h2 style="margin:0;font:700 24px Kalam,cursive;color:#b26a00">Medium: friction and confusion</h2>
+
+  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(480px,1fr));gap:14px">
+    <div style="background:#fff;border:1.5px solid #2b2b2b;border-radius:8px;padding:12px 16px;display:flex;flex-direction:column;gap:5px;font-size:16px;line-height:1.4">
+      <b style="font:700 17px Kalam,cursive">M1 · Four places list the same sessions</b>
+      <span>Agents ▾, the status-bar widget, the Services node and the Welcome tab all show the same catalog. Each needs its own state syncing and its own bugs. The status widget mostly repeats the Agents ▾ counts.</span>
+      <span><b>Fix:</b> MVP ships Agents ▾ + Welcome tab only. Status widget and Services node come later, and only if users ask.</span>
+    </div>
+    <div style="background:#fff;border:1.5px solid #2b2b2b;border-radius:8px;padding:12px 16px;display:flex;flex-direction:column;gap:5px;font-size:16px;line-height:1.4">
+      <b style="font:700 17px Kalam,cursive">M2 · Window titles that rename themselves</b>
+      <span>Agent-given titles arrive late and change, and two sessions can get near-identical titles. A window whose name shifts under ⌘` is hard to find again.</span>
+      <span><b>Fix:</b> window = <i>repo · branch</i> (stable, unique). The agent title lives on the tab and in Agents ▾ rows, where change is expected.</span>
+    </div>
+    <div style="background:#fff;border:1.5px solid #2b2b2b;border-radius:8px;padding:12px 16px;display:flex;flex-direction:column;gap:5px;font-size:16px;line-height:1.4">
+      <b style="font:700 17px Kalam,cursive">M3 · Attention you miss when the IDE isn't in front</b>
+      <span>Balloons and badges only show in the focused IDE. With the browser in front, "needs you" can sit unnoticed for 20 minutes. With 4 agents in the IDE, balloons stack up.</span>
+      <span><b>Fix:</b> use the IDE's own system notification when the app is inactive, as it does for long builds. Collapse simultaneous balloons into one ("2 agents need you").</span>
+    </div>
+    <div style="background:#fff;border:1.5px solid #2b2b2b;border-radius:8px;padding:12px 16px;display:flex;flex-direction:column;gap:5px;font-size:16px;line-height:1.4">
+      <b style="font:700 17px Kalam,cursive">M4 · Merge into main touches your own checkout</b>
+      <span>"Merge into main" runs in the main checkout, which may be dirty, on another branch, or open in a window you're editing.</span>
+      <span><b>Fix:</b> a pre-flight in the Finish menu ("main checkout has 2 uncommitted files: stash / cancel"), never a silent branch switch. Disable it with a reason when main isn't on the target branch.</span>
+    </div>
+    <div style="background:#fff;border:1.5px solid #2b2b2b;border-radius:8px;padding:12px 16px;display:flex;flex-direction:column;gap:5px;font-size:16px;line-height:1.4">
+      <b style="font:700 17px Kalam,cursive">M5 · Too many verbs that end a session</b>
+      <span>Close tab, Stop, close window, Forget, Remove Worktree… Each does something different, and users won't keep them apart.</span>
+      <span><b>Fix:</b> a single "Done with this…" action that offers the combinations (as in B7), plus a tooltip on tab close: "Agent keeps running · ⌃⇧A to reopen".</span>
+    </div>
+    <div style="background:#fff;border:1.5px solid #2b2b2b;border-radius:8px;padding:12px 16px;display:flex;flex-direction:column;gap:5px;font-size:16px;line-height:1.4">
+      <b style="font:700 17px Kalam,cursive">M6 · Resume has a cost nobody sees</b>
+      <span>Resuming a long conversation re-sends its context. The core already has <code>ResumeCostEstimate</code>, but E6's Resume button doesn't show it.</span>
+      <span><b>Fix:</b> show the estimate on the Resume button ("Resume · ~180k tokens"), and offer "Resume with summary" when the estimate is large.</span>
+    </div>
+    <div style="background:#fff;border:1.5px solid #2b2b2b;border-radius:8px;padding:12px 16px;display:flex;flex-direction:column;gap:5px;font-size:16px;line-height:1.4">
+      <b style="font:700 17px Kalam,cursive">M7 · The tour holds up the MVP</b>
+      <span>T1 and T2 are both large and undecided. Shipping R2 with findings already covers "review the agent's diff".</span>
+      <span><b>Fix:</b> cut the tour from MVP. Run the T2 diff-viewer extension spike alongside, and decide T1/T2 from its result.</span>
+    </div>
+  </div>
+</section>
+
+<section style="display:flex;flex-direction:column;gap:10px">
+  <h2 style="margin:0;font:700 24px Kalam,cursive;color:#6b675f">Low</h2>
+  <ul style="margin:0;padding-left:22px;font:16.5px/1.45 'Patrick Hand',cursive;display:flex;flex-direction:column;gap:4px">
+    <li><b>Colour-only status.</b> Blue vs amber dots are weak for colour-blind users. Pair them with shape (● working, ◐ needs you, ○ idle), as the title marker already does.</li>
+    <li><b>RO overstates safety.</b> Even enforced read-only agents can run shell commands. Strip copy: "can't edit files" → "won't edit files (plan mode)".</li>
+    <li><b>Raising windows across macOS Spaces</b> jumps the whole desktop when a worktree window is full-screen elsewhere. Raise should show which window it's going to.</li>
+    <li><b>Title-bar marker</b> (E5 ③) needs internal API and is rarely visible in the New UI on macOS. Drop it from MVP.</li>
+  </ul>
+</section>
+
+<section style="display:flex;flex-direction:column;gap:10px;padding:16px 20px;background:#e6f4f3;border:1.5px solid #0f8b8d;border-radius:8px">
+  <h2 style="margin:0;font:700 24px Kalam,cursive">Proposed MVP cut</h2>
+  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px 24px;font-size:16.5px;line-height:1.4">
+    <div style="display:flex;flex-direction:column;gap:3px"><b>In</b>
+      <span>• Agent editor tab (<a href="E Synthesis.dc.html#E1">E1</a>), gated on H1</span>
+      <span>• Agents ▾ + Welcome tab (<a href="E Synthesis.dc.html#E2">E2</a>, <a href="E Synthesis.dc.html#E12">E12</a>)</span>
+      <span>• New Agent Worktree / Session Here + modes (<a href="E Synthesis.dc.html#E3">E3</a>, <a href="E Synthesis.dc.html#E10">E10</a>)</span>
+      <span>• Badge + collapsed balloon + system notification (M3)</span>
+      <span>• Resume with cost (<a href="E Synthesis.dc.html#E6">E6</a> + M6)</span>
+      <span>• R2 review with H3's scope fix (<a href="E Synthesis.dc.html#R2">R2</a>); Finish with M4's pre-flight</span><span>• Confirm only for working agents on close/quit (<a href="E Synthesis.dc.html#E6">E6</a>)</span>
+      <span>• "Done with this…" cleanup (M5)</span>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:3px"><b>Later</b>
+      <span>• Guided tour (T1 or T2, after the spike)</span>
+      <span>• Services node, status-bar widget</span>
+      <span>• Title-bar marker</span>
+      <span>• Injecting rows into the stock Project widget</span>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:3px"><b>Spikes before build</b>
+      <span>• Terminal in a FileEditor + key pass-through (H1)</span>
+      <span>• Worktree window time-to-useful on dd-trace-java (H4)</span>
+      <span>• Welcome-screen tab extension point</span>
+    </div>
+  </div>
+</section>
+
+</div>
+</x-dc>
+</body>
+</html>

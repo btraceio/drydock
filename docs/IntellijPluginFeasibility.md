@@ -1,5 +1,11 @@
 # Drydock → IntelliJ plugin: feasibility investigation
 
+> **Superseded for design purposes.** The MVP is now built against the design
+> handoff in [`docs/intellij-mvp-handoff/`](intellij-mvp-handoff/README.md);
+> what is and is not implemented against it is tracked in
+> [`IMPLEMENTATION-STATUS.md`](intellij-mvp-handoff/IMPLEMENTATION-STATUS.md).
+> This document stays as the record of why a plugin was judged feasible at all.
+
 **Date:** 2026-10-14 · **Status:** investigation complete, no decision taken
 **Method:** concept inventory from this repo's code and docs (evidence paths cited
 inline), IntelliJ Platform capability check via SDK docs and JetBrains platform
