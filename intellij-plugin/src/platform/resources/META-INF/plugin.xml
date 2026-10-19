@@ -73,7 +73,11 @@
                     class="app.drydock.intellij.actions.NewSessionAction"
                     text="New Agent Session…"
                     description="Start a new agent session in this worktree"
-                    icon="AllIcons.General.Add"/>
+                    icon="AllIcons.General.Add">
+                <!-- The handoff's shortcut, carried by the action so the
+                     Agents popup footer can advertise it once that lands. -->
+                <keyboard-shortcut keymap="$default" first-keystroke="alt meta N"/>
+            </action>
             <action id="Drydock.ResumeConversation"
                     class="app.drydock.intellij.actions.ResumeConversationAction"
                     text="Resume Conversation…"

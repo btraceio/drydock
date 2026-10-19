@@ -641,6 +641,30 @@ public final class DrydockSessionService implements AgentExecutionListener {
                 }, executor);
     }
 
+    /**
+     * Whether a writing session is already live in {@code workingDirectory} —
+     * the one-writer-per-worktree rule the new-session dialog warns about.
+     *
+     * <p>"Live" means the running band, not merely recorded: a stopped writer
+     * cannot overwrite anything, and warning about one would train the user to
+     * dismiss the warning that matters. Reads the in-memory catalog snapshot,
+     * so it is safe on the EDT, but it needs {@link #initialization} to have
+     * completed — callers resolve it on a background thread with the rest of
+     * the dialog's inputs.</p>
+     */
+    public boolean hasActiveWriterIn(Path workingDirectory) {
+        Objects.requireNonNull(workingDirectory, "workingDirectory");
+        Path normalized = workingDirectory.toAbsolutePath().normalize();
+        for (ManagedAgentSession session : stateStore.get().state().sessions()) {
+            if (session.mode() == SessionMode.WRITES
+                    && SessionStatusFacet.of(session.status()) == SessionStatusFacet.RUNNING
+                    && session.workingDirectory().equals(normalized)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** Stops a session's agent without touching its row (the strip's Stop). */
     public void stopSession(ManagedSessionId sessionId) {
         Objects.requireNonNull(sessionId, "sessionId");

@@ -338,9 +338,14 @@ public final class WorktreeDialogs {
      * sanctioned path, not a re-implementation of it. Public because T15's
      * worktree list panel reuses this same path for its per-row "Open as
      * project" action — one open path, two entries to it.
+     *
+     * <p>Returns the opened project, or null when the open failed or was
+     * cancelled: the new-agent-session flow has to continue <em>into</em> that
+     * window to open the console tab and start the agent, so it needs the
+     * instance rather than only the side effect.</p>
      */
-    public static void openAsProject(Path worktreeRoot) {
-        ProjectManagerEx.getInstanceEx().openProject(worktreeRoot,
+    public static Project openAsProject(Path worktreeRoot) {
+        return ProjectManagerEx.getInstanceEx().openProject(worktreeRoot,
                 OpenProjectTask.build().withForceOpenInNewFrame(true));
     }
 

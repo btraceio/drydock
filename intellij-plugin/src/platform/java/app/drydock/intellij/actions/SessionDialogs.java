@@ -5,9 +5,14 @@ import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.AgentRegistry;
 import app.drydock.agent.api.ConversationSource;
 import app.drydock.domain.ApplicationState;
+import app.drydock.config.UserConfig;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.SessionMode;
+import app.drydock.git.GitStatusService;
+import app.drydock.git.WorktreeNaming;
 import app.drydock.intellij.agent.AgentConsoles;
+import app.drydock.intellij.worktree.WorktreeDialogs;
 import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
 import app.drydock.git.WorktreeService;
@@ -77,6 +82,13 @@ public final class SessionDialogs {
 
     /** Bounded wait for a launch: tab creation plus command build, generously. */
     private static final long LAUNCH_TIMEOUT_SECONDS = 60;
+
+    /**
+     * Bounded wait for `git worktree add`. Generous next to the others: on a
+     * repository with submodules the checkout is the slow part, and timing it
+     * out would leave a half-made worktree nobody asked about.
+     */
+    private static final long WORKTREE_TIMEOUT_SECONDS = 180;
 
     /** UTC, so the rendered time is deterministic across machines (and testable). */
     private static final DateTimeFormatter LAST_MODIFIED_FORMAT =
@@ -377,11 +389,17 @@ public final class SessionDialogs {
      * and happen first: without it the agent spawns with no tab, which looks
      * exactly like the dialog doing nothing at all.</p>
      */
-    private static void launchNewSession(Project project, Path workingDirectory, AgentKind kind, String displayName) {
+    private static void launchNewSession(Project project, Path workingDirectory, AgentKind kind,
+            String displayName) {
+        launchNewSession(project, workingDirectory, kind, displayName, SessionMode.WRITES);
+    }
+
+    private static void launchNewSession(Project project, Path workingDirectory, AgentKind kind,
+            String displayName, SessionMode mode) {
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         String agentName = AgentLabels.displayName(plugin.registry(), kind);
         CompletableFuture<ManagedAgentSession> launch =
-                DrydockStartupActivity.sessions(project).prepareSession(workingDirectory, kind, displayName)
+                DrydockStartupActivity.sessions(project).prepareSession(workingDirectory, kind, displayName, mode)
                         .thenApply(session -> {
                             showConsoleTab(project, session.id());
                             return session;
@@ -415,6 +433,133 @@ public final class SessionDialogs {
     private static void showConsoleTab(Project project, ManagedSessionId sessionId) {
         ApplicationManager.getApplication().invokeLater(
                 () -> AgentConsoles.show(project, sessionId), ModalityState.any(), project.getDisposed());
+    }
+
+    // ---- new agent session (the handoff's dialog) -------------------------------
+
+    /**
+     * Opens the New Agent Session dialog for {@code project}'s own worktree.
+     *
+     * <p>Its inputs need git (current branch, default branch) and the catalog
+     * (is a writer already live here), so they are resolved inside a
+     * background task and the dialog opens on the EDT once they are ready.
+     * Every early return ends that task, which clears its progress.</p>
+     */
+    public static void showNewAgentSession(Project project) {
+        if (project.getBasePath() == null) {
+            Messages.showInfoMessage(project,
+                    "This project has no directory, so Drydock cannot start a session in it.", "Drydock");
+            return;
+        }
+        Path workingDirectory = Path.of(project.getBasePath());
+        DrydockPluginService plugin = DrydockPluginService.getInstance();
+        ProgressManager.getInstance().run(new Task.Backgroundable(project, "Preparing new Drydock session…", true) {
+            @Override
+            public void run(@NotNull ProgressIndicator indicator) {
+                NewAgentSessionDialog.Inputs inputs = prepareAgentSession(project, plugin, workingDirectory);
+                if (inputs == null) {
+                    return;
+                }
+                ApplicationManager.getApplication().invokeLater(() -> {
+                    if (project.isDisposed()) {
+                        return;
+                    }
+                    NewAgentSessionDialog dialog = new NewAgentSessionDialog(project, inputs);
+                    if (dialog.showAndGet()) {
+                        startChosenSession(project, inputs, dialog.choice());
+                    }
+                }, ModalityState.any());
+            }
+        });
+    }
+
+    /** Blocking, bounded; null (after logging) on any failure, so the task always ends. */
+    @Nullable
+    private static NewAgentSessionDialog.Inputs prepareAgentSession(Project project, DrydockPluginService plugin,
+            Path workingDirectory) {
+        try (GitStatusService git = new GitStatusService()) {
+            plugin.initialization().get(PREPARE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            Repository repository = DrydockStartupActivity.repositories(project)
+                    .repositoryFor(workingDirectory).get(PREPARE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            if (repository == null) {
+                LOG.log(Level.WARNING, "Project {0} has no Drydock repository; cannot offer a new session",
+                        project.getName());
+                return null;
+            }
+            String current = git.currentBranch(workingDirectory)
+                    .get(PREPARE_TIMEOUT_SECONDS, TimeUnit.SECONDS).orElse("detached HEAD");
+            // The base for a new worktree is the repository's DEFAULT branch,
+            // not whatever happens to be checked out here: a session branched
+            // off another session's branch inherits work nobody asked for.
+            String base = git.defaultBranch(repository.root())
+                    .get(PREPARE_TIMEOUT_SECONDS, TimeUnit.SECONDS).orElse("main");
+            List<String> remotes = git.listBranches(repository.root())
+                    .get(PREPARE_TIMEOUT_SECONDS, TimeUnit.SECONDS).remotes();
+            AgentRegistry registry = plugin.registry();
+            AgentKind preselected = defaultAgent(registry, repository.settings().lastUsedAgent()).orElse(null);
+            boolean writerActive = DrydockStartupActivity.sessions(project).hasActiveWriterIn(workingDirectory);
+            return new NewAgentSessionDialog.Inputs(workingDirectory, repository.displayName(), current, base,
+                    registry.agents(), preselected, writerActive, remotes);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        } catch (ExecutionException | TimeoutException | RuntimeException e) {
+            LOG.log(Level.WARNING, () -> "Could not prepare the new-session dialog: " + e);
+            return null;
+        }
+    }
+
+    /**
+     * Acts on the dialog's choice: start here, or create a worktree, open it
+     * as its own window, and start there.
+     */
+    private static void startChosenSession(Project project, NewAgentSessionDialog.Inputs inputs,
+            NewAgentSessionDialog.Choice choice) {
+        String title = NewAgentSessionPlan.sessionTitle(choice.task());
+        if (choice.placement() == NewAgentSessionPlan.Placement.HERE) {
+            launchNewSession(project, inputs.workingDirectory(), choice.agent(), title, choice.mode());
+            return;
+        }
+        DrydockPluginService plugin = DrydockPluginService.getInstance();
+        ProgressManager.getInstance().run(new Task.Backgroundable(project,
+                "Creating worktree " + choice.branch() + "…", true) {
+            @Override
+            public void run(@NotNull ProgressIndicator indicator) {
+                Path worktree;
+                try (GitStatusService git = new GitStatusService()) {
+                    Path repositoryRoot = DrydockStartupActivity.repositories(project)
+                            .repositoryFor(inputs.workingDirectory())
+                            .get(PREPARE_TIMEOUT_SECONDS, TimeUnit.SECONDS).root();
+                    Path directory = WorktreeNaming.defaultDirectory(
+                            Path.of(System.getProperty("user.home", "")),
+                            UserConfig.load().worktreesDirectory(),
+                            inputs.repositoryName(), choice.branch());
+                    worktree = git.createWorktree(repositoryRoot, directory, choice.branch(),
+                            Optional.of(inputs.defaultBranch())).get(WORKTREE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                } catch (ExecutionException | TimeoutException | RuntimeException e) {
+                    reportLaunchFailure(project, "create the worktree for " + choice.branch(), e);
+                    return;
+                }
+                // Opening a project wraps itself in modal progress when called
+                // from the EDT, which is the sanctioned path; the agent then
+                // starts in the NEW window, not this one.
+                ApplicationManager.getApplication().invokeLater(() -> {
+                    Project opened = WorktreeDialogs.openAsProject(worktree);
+                    if (opened == null) {
+                        LOG.log(Level.WARNING, "Worktree {0} was created but its project did not open", worktree);
+                        return;
+                    }
+                    // Immediately, without waiting for indexing: the strip
+                    // says "IDE still indexing" while the project is dumb,
+                    // and an agent that only appeared after a large import
+                    // would be useless.
+                    launchNewSession(opened, worktree, choice.agent(), title, choice.mode());
+                }, ModalityState.any());
+            }
+        });
     }
 
     // ---- resume conversation --------------------------------------------------
@@ -649,7 +794,7 @@ public final class SessionDialogs {
     }
 
     /** The launch/resume failure the user sees (AC11): names the action's agent, keeps the cause's own words. */
-    private static void reportLaunchFailure(Project project, String what, ExecutionException failure) {
+    private static void reportLaunchFailure(Project project, String what, Throwable failure) {
         Throwable cause = failure.getCause() != null ? failure.getCause() : failure;
         LOG.log(Level.WARNING, "Could not " + what + ": " + cause);
         ApplicationManager.getApplication().invokeLater(

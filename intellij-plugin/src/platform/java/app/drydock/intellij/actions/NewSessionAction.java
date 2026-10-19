@@ -7,12 +7,11 @@ import com.intellij.openapi.project.Project;
 import org.jetbrains.annotations.NotNull;
 
 /**
- * "New Session…" (T13): opens the new-session dialog — agent combo with
- * availability (AC6 UI half), the resolved default (AC8), a name
- * suggestion — and on OK launches the session into a new terminal tab
- * with immediate, always-cleared progress (AC12). A launch failure
- * surfaces an error naming the agent (AC11 UI half); the work itself is
- * {@link SessionDialogs}'s (this class is the toolbar entry only).
+ * "New Agent Session…": opens the dialog the UX handoff specifies — task,
+ * agent, Writes/Read-only, and Here vs a new worktree — and on OK either
+ * starts here or creates the worktree, opens it as its own window, and starts
+ * the agent there. The work itself is {@link SessionDialogs}'s; this class is
+ * the menu entry only.
  *
  * <p>Keyboard access (AGENTS.md): a toolbar action renders as a real
  * focusable button, so Enter/Space trigger {@link #actionPerformed} like a
@@ -21,7 +20,7 @@ import org.jetbrains.annotations.NotNull;
 public final class NewSessionAction extends AnAction {
 
     public NewSessionAction() {
-        super("New Session…", "Start a new agent session in a terminal tab", AllIcons.General.Add);
+        super("New Agent Session…", "Start a new agent session in this repository", AllIcons.General.Add);
     }
 
     @Override
@@ -30,7 +29,7 @@ public final class NewSessionAction extends AnAction {
         if (project == null || project.isDisposed()) {
             return;
         }
-        SessionDialogs.showNewSession(project);
+        SessionDialogs.showNewAgentSession(project);
     }
 
     @Override

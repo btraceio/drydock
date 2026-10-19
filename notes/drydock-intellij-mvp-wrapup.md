@@ -5,14 +5,40 @@ is canonical; this note is the zero-context refill artifact.*
 
 ## Current question
 
-S1 is answered: the agent console **works** as a pinned editor tab. The open
-question is now which of P2–P9 to build next, and whether to make pi a PRESET
-provider first.
+S1 is answered: the agent console **works** as a pinned editor tab. P3 (the
+New Agent Session dialog) is built and awaiting its manual check. The open
+question is which of the remaining surfaces to build next, and whether to make
+pi a PRESET provider first.
+
+## How much of the MVP is done
+
+Roughly a third. The commit diff is net **negative** (3470 insertions against
+3962 deletions), because most of the work so far replaced a larger broken
+runtime with a smaller correct one — so the log is a bad guide to progress.
+
+| # | Handoff surface | State |
+|---|---|---|
+| 1 | Agents ▾ widget + popup | not built |
+| 2 | Agent editor tab | partial — missing dimmed transcript, path hyperlinks, `<n> files changed`, window title |
+| 3 | New Agent Session dialog | **built**, manual check pending |
+| 4 | Attention / "needs you" | not built (the activity monitor already publishes NEEDS_ATTENTION) |
+| 5 | Resume & idle | mostly — `~Nk tokens` never renders, `ResumeCostEstimate` unwired |
+| 6 | Close/quit confirmation | not built (stopping works, the dialog does not) |
+| 7 | Review in the Commit tool window | not built |
+| 8 | Finish ▾ | not built |
+| 9 | Done with this session… | not built |
+| 10 | Welcome-screen Agents tab | not built |
+
+Also outstanding: spikes S2, S3, S4; the `DiffExtension` findings; enforcing
+(not just warning) one writer per worktree; the stale-worktree Prune line.
+**P7–P9 should not be planned until S4 is answered** — the handoff expects it
+to fail, and its fallback is a different build.
 
 ## Where the work stands
 
-**Phase 0 (reset) and Phase 1 (the editor runtime) are built, tested and
-verified. Spike S1 PASSED.** P2–P9 are planned but not started.
+**Phase 0 (reset) and Phase 1 (the editor runtime) are built, tested, verified
+and committed. Spike S1 PASSED.** P3 is built but uncommitted, pending its
+manual check; P2 and P4–P9 are not started.
 
 S1 verdict (user, in `runIde`): *"the tab shows up now, keys work too"* — the
 TUI renders in a `FileEditor`-hosted `TerminalExecutionConsole` and the keys an
@@ -36,8 +62,14 @@ user's instruction, scoped to `intellij-plugin/src/` only. `notes/*.md` and
 `.sphinx/` were left alone on purpose: this note is itself untracked and a
 blanket `git clean` would have taken it.
 
-Nothing is committed. The change set sits uncommitted on `feat/intellij-mvp`
-and splits into: reset, removal, core session-mode, runtime.
+Two commits on `feat/intellij-mvp`: `fd30d600` (core session mode) and
+`e8a0d07a` (the editor-tab runtime — removal and replacement together, because
+neither side compiles alone). Deliberately excluded: the
+`third_party/ghostty` submodule pointer, and the untracked notes belonging to
+other investigations.
+
+Nothing pushed, and **no PR**: a third-finished MVP would cost a reviewer a
+pass over scaffolding the remaining surfaces will keep moving.
 
 ## The model (unchanged in ownership, changed in presentation)
 
@@ -145,7 +177,14 @@ content. That comes from the UX design handoff
 
 ## Immediate next step
 
-Pick one:
+**First: manually check P3**, in `runIde` via Tools → Drydock → New Agent
+Session… (⌥⌘N). The path that matters is the new worktree one, because it
+crosses a project boundary: worktree created off the repository's *default*
+branch, opened as its own window, agent started there without waiting for
+indexing. Also worth checking that a Read-only Claude session shows
+`Read-only · won't edit files` while pi shows `Read-only · not enforced`.
+
+Then pick one:
 
 - **P2-P9**, in the handoff's order: Agents widget, New Agent Session dialog,
   attention balloons, close/quit confirmation, Welcome tab, review in the
@@ -177,7 +216,11 @@ an API whose replacement does not exist in 2025.3).
 - `hyp-editor-tab-agent-console` — the editor-tab model; CONFIRMED by S1.
 - `ev-s1-manual-gate` — the S1 verdict, the two defects it caught, and the
   on-disk proof about pi's session records.
+- `find-editor-tab-console-works` — the distilled S1 result and the three
+  conditions it depends on. Read this one first.
 - `find-resume-only-when-resumable` — Start vs Resume, and its two traps.
+- `ev-mvp-surface-status` — the per-surface accounting above.
+- `ev-p3-new-session-dialog` — P3 as built, and its two deviations.
 - `q-pi-preset-session-id` — the pi PRESET proposal.
 - `ev-design-handoff-mvp` — the handoff's surfaces, copy and spikes.
 - `ev-phase1-editor-runtime` — what was built, and the platform API facts.
