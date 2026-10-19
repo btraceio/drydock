@@ -74,4 +74,10 @@ class StopAgentsPlanTest {
         assertEquals("drydock.stopWorkingAgents.dontAsk", StopAgentsPlan.dontAskKey(false),
                 "the close/quit key keeps its stored name");
     }
+
+    @Test
+    void anAgentThatDoesNotStopIsReportedNotIgnored() {
+        assertEquals("\"Add farewell\" has not stopped yet. Try again in a moment.",
+                StopAgentsPlan.notStoppedYet("Add farewell"));
+    }
 }

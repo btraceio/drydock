@@ -256,6 +256,7 @@ public final class TaskLauncher {
                     }
                     if (target == null || target.isDisposed()) {
                         LOG.log(Level.WARNING, "The window for {0} did not open", steps.workingDirectory());
+                        Messages.showErrorDialog(from, windowDidNotOpen(steps.workingDirectory()), "Drydock");
                         return;
                     }
                     SessionDialogs.launchNewSession(target, steps.workingDirectory(), mainRoot, choice.agent(), choice.name(),
@@ -275,6 +276,12 @@ public final class TaskLauncher {
             }
         }
         return Optional.empty();
+    }
+
+    /** The worktree exists but its window did not open (cancelled, or a failed import). */
+    static String windowDidNotOpen(Path directory) {
+        return "The worktree " + directory + " is ready, but its window did not open. "
+                + "Open it with File › Open, or double-click the task in the Drydock tool window.";
     }
 
     private static void report(Project project, String message) {

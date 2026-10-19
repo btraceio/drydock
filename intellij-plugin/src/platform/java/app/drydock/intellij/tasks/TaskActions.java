@@ -1,5 +1,6 @@
 package app.drydock.intellij.tasks;
 
+import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.SessionStatus;
 import app.drydock.intellij.DrydockPluginService;
@@ -46,8 +47,11 @@ import java.util.function.Predicate;
  */
 final class TaskActions {
 
-    /** How long Stop &amp; Close waits for the agent to end before closing its window. */
-    private static final long STOP_WAIT_MILLIS = 3_000;
+    /**
+     * How long Stop &amp; Close and Done wait for the agent to end: past the
+     * execution's own two-second force-kill, with room to spare.
+     */
+    private static final long STOP_WAIT_MILLIS = 5_000;
     private static final long STOP_POLL_MILLIS = 100;
 
     private TaskActions() {
@@ -211,15 +215,17 @@ final class TaskActions {
 
     /**
      * Runs {@code then} on the EDT once {@code id} no longer runs in
-     * {@code window}, or after {@link #STOP_WAIT_MILLIS}. Closing before the
-     * process has ended would make the window's own close confirmation list
-     * the agent that is already being stopped.
+     * {@code window}; if it still runs after {@link #STOP_WAIT_MILLIS}, says
+     * so instead. Closing before the process has ended would make the
+     * window's own close confirmation list the agent being stopped, and Done
+     * would read a worktree the agent is still writing.
      */
     private static void whenStopped(Project window, ManagedSessionId id, Runnable then) {
         DrydockPluginService.getInstance().executor().execute(() -> {
             long deadline = System.currentTimeMillis() + STOP_WAIT_MILLIS;
-            while (System.currentTimeMillis() < deadline && !window.isDisposed()
-                    && AgentExecutionService.getInstance(window).isRunning(id)) {
+            boolean running = true;
+            while (!window.isDisposed() && (running = AgentExecutionService.getInstance(window).isRunning(id))
+                    && System.currentTimeMillis() < deadline) {
                 try {
                     Thread.sleep(STOP_POLL_MILLIS);
                 } catch (InterruptedException e) {
@@ -227,7 +233,24 @@ final class TaskActions {
                     return;
                 }
             }
-            ApplicationManager.getApplication().invokeLater(then, ModalityState.nonModal());
+            boolean stillRunning = running && !window.isDisposed();
+            ApplicationManager.getApplication().invokeLater(() -> {
+                if (stillRunning) {
+                    // Never carry on regardless: closing would ask about the
+                    // agent again, and Done would read a tree it still writes.
+                    Messages.showInfoMessage(window, StopAgentsPlan.notStoppedYet(taskName(id)), "Drydock");
+                    return;
+                }
+                then.run();
+            }, ModalityState.nonModal());
         });
+    }
+
+    private static String taskName(ManagedSessionId id) {
+        return DrydockPluginService.getInstance().stateStore().state().sessions().stream()
+                .filter(session -> session.id().equals(id))
+                .map(ManagedAgentSession::displayName)
+                .findFirst()
+                .orElse("The agent");
     }
 }

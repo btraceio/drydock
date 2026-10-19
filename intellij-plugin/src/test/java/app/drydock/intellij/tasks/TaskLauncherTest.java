@@ -90,4 +90,11 @@ class TaskLauncherTest {
                 List.of("origin")));
         assertEquals("main", TaskLauncher.defaultStart("main", List.of("main"), List.of()));
     }
+
+    @Test
+    void aWindowThatDidNotOpenIsReportedWithItsFolder() {
+        assertEquals("The worktree /wt/drydock-x is ready, but its window did not open. "
+                        + "Open it with File › Open, or double-click the task in the Drydock tool window.",
+                TaskLauncher.windowDidNotOpen(Path.of("/wt/drydock-x")));
+    }
 }

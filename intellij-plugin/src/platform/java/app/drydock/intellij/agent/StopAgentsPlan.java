@@ -76,4 +76,9 @@ public final class StopAgentsPlan {
     public static String dontAskKey(boolean fromTree) {
         return fromTree ? "drydock.stopTaskFromTree.dontAsk" : "drydock.stopWorkingAgents.dontAsk";
     }
+
+    /** When a stopped agent has not ended in time for what was to follow (closing its window, Done). */
+    public static String notStoppedYet(String taskName) {
+        return "\"" + taskName + "\" has not stopped yet. Try again in a moment.";
+    }
 }
