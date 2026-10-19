@@ -54,6 +54,7 @@ class TaskTreeModelTest {
         final Set<ManagedSessionId> running = new HashSet<>();
         final Set<Path> missing = new HashSet<>();
         final Map<RepositoryId, Path> recordedRoots = new HashMap<>();
+        Optional<String> problem = Optional.empty();
         String filter = "";
 
         In project(Path root) {
@@ -77,7 +78,7 @@ class TaskTreeModelTest {
 
         TaskTreeModel.Inputs build() {
             return new TaskTreeModel.Inputs(projects, sessions, worktrees, mainRootOf, currentMain, currentWorking,
-                    activity, running, missing, recordedRoots, filter);
+                    activity, running, missing, recordedRoots, problem, filter);
         }
     }
 
@@ -109,6 +110,17 @@ class TaskTreeModelTest {
     private static List<Path> projectRoots(List<TaskNode> nodes) {
         return nodes.stream().filter(ProjectRow.class::isInstance).map(node -> ((ProjectRow) node).project().root())
                 .toList();
+    }
+
+    @Test
+    void aListProblemIsTheFirstRow() {
+        In in = new In().project(ALPHA);
+        in.problem = Optional.of("projects.json is malformed; fix it to change projects.");
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build());
+
+        assertEquals(new TaskNode.ListProblem("projects.json is malformed; fix it to change projects."), nodes.get(0));
+        assertEquals(List.of(ALPHA), projectRoots(nodes));
     }
 
     @Test

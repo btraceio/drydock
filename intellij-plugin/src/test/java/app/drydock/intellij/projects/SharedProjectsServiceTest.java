@@ -132,7 +132,7 @@ class SharedProjectsServiceTest {
 
         service.start().join();
 
-        assertTrue(service.malformed());
+        assertTrue(service.problem().isPresent());
         assertThrows(CompletionException.class, () -> service.register(dir.resolve("r"), "r").join());
         assertFalse(Files.readString(file.file()).contains("\"r\""));
     }

@@ -462,6 +462,22 @@ class RepositoryManagerTest {
         assertTrue(thrown.getMessage().contains("projects.json"), thrown.getMessage());
     }
 
+    @Test
+    void aSharedFileItCannotFullyReadIsNotAppliedAndIsReported() throws Exception {
+        Repository kept = manager.addRepository(initGitRepo("kept-too").toRealPath()).join();
+        AtomicInteger notified = new AtomicInteger();
+        manager.addChangeListener(notified::incrementAndGet);
+        Files.writeString(sharedFile.file(), """
+                {"schemaVersion":1,"projects":[{"id":"%s","root":"/w/no-added-at","displayName":"x"}]}"""
+                .formatted(RepositoryId.newId()));
+
+        manager.reconcile();
+
+        assertEquals(List.of(kept), manager.repositories(), "an unreadable entry must not empty the list");
+        assertTrue(manager.sharedListProblem().isPresent());
+        assertEquals(1, notified.get(), "the sidebar learns there is a problem to show");
+    }
+
     private static final class InMemoryStateRepository implements ApplicationStateRepository {
         // volatile: saves arrive on the state store's background writer thread.
         private volatile ApplicationState state = ApplicationState.empty();

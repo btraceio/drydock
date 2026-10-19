@@ -58,17 +58,40 @@ public final class SharedProjectsCodec {
                 .put("projects", JsonArray.of(entries)));
     }
 
+    /**
+     * A decoded file: the projects that could be read, how many entries
+     * could not, and the schema version it declares (0 when it declares
+     * none).
+     */
+    public record Decoded(List<SharedProject> projects, int skipped, int schemaVersion) {
+        public Decoded {
+            projects = List.copyOf(projects);
+        }
+    }
+
     /** Decodes the list; throws {@link JsonParseException} only when the file as a whole is unusable. */
     public static List<SharedProject> fromJson(String json) {
+        return decode(json).projects();
+    }
+
+    /** As {@link #fromJson}, also reporting what was skipped and the declared schema version. */
+    public static Decoded decode(String json) {
         if (!(JsonParser.parse(json) instanceof JsonObject root)
                 || !(root.get("projects") instanceof JsonArray array)) {
             throw new JsonParseException("Expected an object with a \"projects\" array");
         }
+        int schemaVersion = root.get("schemaVersion") instanceof JsonNumber number ? number.asInt() : 0;
         List<SharedProject> projects = new ArrayList<>();
+        int skipped = 0;
         for (JsonValue element : array.elements()) {
-            decode(element).ifPresent(projects::add);
+            Optional<SharedProject> project = decode(element);
+            if (project.isPresent()) {
+                projects.add(project.get());
+            } else {
+                skipped++;
+            }
         }
-        return projects;
+        return new Decoded(projects, skipped, schemaVersion);
     }
 
     private static Optional<SharedProject> decode(JsonValue element) {

@@ -77,6 +77,9 @@ public final class RepositoryManager {
         return thread;
     });
 
+    /** Why the shared list cannot be applied or changed, for the sidebar; guarded by {@code this}. */
+    private volatile Optional<String> sharedListProblem = Optional.empty();
+
     /** The shared file's stamp at the last reconcile; guarded by {@code this}. */
     private long reconciledStamp = Long.MIN_VALUE;
 
@@ -147,7 +150,13 @@ public final class RepositoryManager {
      */
     synchronized void reconcile() {
         SharedProjectsFile.Snapshot snapshot = sharedFile.read();
-        if (snapshot.malformed() || !snapshot.present() || snapshot.stamp() == reconciledStamp) {
+        if (!snapshot.problem().equals(sharedListProblem)) {
+            sharedListProblem = snapshot.problem();
+            notifyChanged();
+        }
+        if (snapshot.problem().isPresent() || !snapshot.present() || snapshot.stamp() == reconciledStamp) {
+            // A file this version cannot fully read is never applied: its
+            // unreadable entries would drop out of this app's list.
             return;
         }
         reconciledStamp = snapshot.stamp();
@@ -201,6 +210,15 @@ public final class RepositoryManager {
 
     public ApplicationState state() {
         return stateStore.state();
+    }
+
+    /**
+     * Why the shared projects list is not being followed or cannot be
+     * changed (malformed, entries this version cannot read, a newer
+     * schema); empty when all is well. The sidebar shows it.
+     */
+    public Optional<String> sharedListProblem() {
+        return sharedListProblem;
     }
 
     public List<Repository> repositories() {

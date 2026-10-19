@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -66,8 +67,15 @@ public final class SharedProjectsFile {
      * {@code malformed} when it exists but cannot be decoded (then
      * {@code projects} is empty). {@code stamp} changes whenever the file
      * does, and is 0 when it is absent.
+     *
+     * <p>{@code problem} says why the file must not be rewritten, for the
+     * user to see: it is malformed, it has entries this version cannot read
+     * (rewriting would drop them for good), or it was written by a newer
+     * schema (rewriting would downgrade it). The projects that could be read
+     * are still listed.</p>
      */
-    public record Snapshot(List<SharedProject> projects, boolean present, boolean malformed, long stamp) {
+    public record Snapshot(List<SharedProject> projects, boolean present, boolean malformed, long stamp,
+                           Optional<String> problem) {
         public Snapshot {
             projects = List.copyOf(projects);
         }
@@ -108,17 +116,30 @@ public final class SharedProjectsFile {
             stamp = stampOf(file);
             text = Files.readString(file, StandardCharsets.UTF_8);
         } catch (NoSuchFileException e) {
-            return new Snapshot(List.of(), false, false, 0L);
+            return new Snapshot(List.of(), false, false, 0L, Optional.empty());
         } catch (IOException e) {
             LOG.log(Level.WARNING, () -> "Could not read " + file + ": " + e);
-            return new Snapshot(List.of(), true, true, 0L);
+            return new Snapshot(List.of(), true, true, 0L, Optional.of("Could not read " + file + "."));
         }
         try {
-            return new Snapshot(SharedProjectsCodec.fromJson(text), true, false, stamp);
+            SharedProjectsCodec.Decoded decoded = SharedProjectsCodec.decode(text);
+            Optional<String> problem = Optional.empty();
+            if (decoded.schemaVersion() > SharedProjectsCodec.SCHEMA_VERSION) {
+                problem = Optional.of(file.getFileName() + " was written by a newer Drydock; update this one "
+                        + "to change projects.");
+            } else if (decoded.skipped() > 0) {
+                problem = Optional.of(file.getFileName() + " has " + decoded.skipped()
+                        + (decoded.skipped() == 1 ? " entry" : " entries")
+                        + " Drydock cannot read; fix " + (decoded.skipped() == 1 ? "it" : "them")
+                        + " to change projects.");
+            }
+            problem.ifPresent(reason -> LOG.log(Level.WARNING, () -> file + ": " + reason));
+            return new Snapshot(decoded.projects(), true, false, stamp, problem);
         } catch (JsonParseException e) {
             LOG.log(Level.WARNING, () -> file + " is malformed and will not be changed until it is fixed: "
                     + e.getMessage());
-            return new Snapshot(List.of(), true, true, stamp);
+            return new Snapshot(List.of(), true, true, stamp,
+                    Optional.of(file.getFileName() + " is malformed; fix it to change projects."));
         }
     }
 
@@ -130,8 +151,9 @@ public final class SharedProjectsFile {
     public List<SharedProject> update(UnaryOperator<List<SharedProject>> change) throws SharedProjectsException {
         return locked(() -> {
             Snapshot current = read();
-            if (current.malformed()) {
-                throw new SharedProjectsException(file + " is malformed; fix or delete it before changing projects");
+            if (current.problem().isPresent()) {
+                // Never rewrite what this version cannot fully read.
+                throw new SharedProjectsException(current.problem().get());
             }
             List<SharedProject> next = distinctByRoot(change.apply(new ArrayList<>(current.projects())));
             if (!current.present() || !next.equals(current.projects())) {

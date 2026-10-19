@@ -33,6 +33,10 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
             return;
         }
         switch (node.getUserObject()) {
+            case TaskNode.ListProblem problem -> {
+                setIcon(AllIcons.General.Warning);
+                append(problem.message(), SimpleTextAttributes.ERROR_ATTRIBUTES);
+            }
             case AddCurrentProject add -> {
                 setIcon(AllIcons.General.Add);
                 append(add.repoName() + " isn't in Drydock · ", SimpleTextAttributes.GRAYED_ATTRIBUTES);

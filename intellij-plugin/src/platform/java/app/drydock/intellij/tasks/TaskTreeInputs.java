@@ -109,7 +109,8 @@ final class TaskTreeInputs implements AutoCloseable {
             }
         }
         return new TaskTreeModel.Inputs(projects, sessions, byMain, mainRootOf, currentMain, currentWorking,
-                activity, running, missing, recordedRoots, filter);
+                activity, running, missing, recordedRoots,
+                plugin.sharedProjects().problem(), filter);
     }
 
     /** {@code root}'s worktrees, canonical paths; empty when git cannot list them. */

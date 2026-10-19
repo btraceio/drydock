@@ -52,7 +52,7 @@ public final class SharedProjectsService {
 
     private volatile List<SharedProject> projects = List.of();
     private volatile Map<Path, SharedProject> byCanonicalRoot = Map.of();
-    private volatile boolean malformed;
+    private volatile Optional<String> problem = Optional.empty();
     /** Guarded by {@code this}. */
     private long stamp = Long.MIN_VALUE;
 
@@ -86,9 +86,13 @@ public final class SharedProjectsService {
         return projects;
     }
 
-    /** Whether the shared file is malformed; then the list is empty and nothing can be registered. */
-    public boolean malformed() {
-        return malformed;
+    /**
+     * Why the shared list cannot be changed, for the tool window to show:
+     * malformed, entries this version cannot read, or a newer schema.
+     * Empty when all is well.
+     */
+    public Optional<String> problem() {
+        return problem;
     }
 
     /** The project registered at {@code mainRoot}, compared canonically. Touches the disk: not on the EDT. */
@@ -143,13 +147,12 @@ public final class SharedProjectsService {
     /** Re-reads the file when it changed and tells the listeners. Blocking; package-private for tests. */
     synchronized void refresh() {
         SharedProjectsFile.Snapshot snapshot = file.read();
-        boolean malformedNow = snapshot.malformed();
-        if (snapshot.stamp() == stamp && malformedNow == malformed) {
+        if (snapshot.stamp() == stamp && snapshot.problem().equals(problem)) {
             return;
         }
         stamp = snapshot.stamp();
-        malformed = malformedNow;
-        if (malformedNow) {
+        problem = snapshot.problem();
+        if (snapshot.malformed()) {
             // Keep showing the last good list while the file is being fixed.
             listeners.forEach(Runnable::run);
             return;
@@ -158,12 +161,9 @@ public final class SharedProjectsService {
         for (SharedProject project : snapshot.projects()) {
             index.put(RepositoryCatalog.canonicalize(project.root()), project);
         }
-        boolean changed = !snapshot.projects().equals(projects);
         projects = snapshot.projects();
         byCanonicalRoot = index;
-        if (changed) {
-            listeners.forEach(Runnable::run);
-        }
+        listeners.forEach(Runnable::run);
     }
 
     private void refreshQuietly() {

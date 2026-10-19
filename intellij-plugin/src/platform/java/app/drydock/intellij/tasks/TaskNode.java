@@ -12,6 +12,13 @@ import java.util.Optional;
 /** One row of the Drydock tool window's tree, as {@link TaskTreeModel} decides it. */
 public sealed interface TaskNode {
 
+    /** The shared projects list cannot be changed; says why (malformed, unreadable entries, newer schema). */
+    record ListProblem(String message) implements TaskNode {
+        public ListProblem {
+            Objects.requireNonNull(message, "message");
+        }
+    }
+
     /** {@code <repo> isn't in Drydock · Add}: this window's project is not registered. */
     record AddCurrentProject(Path mainRoot, String repoName) implements TaskNode {
         public AddCurrentProject {

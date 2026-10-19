@@ -70,6 +70,7 @@ class SharedProjectsFileTest {
         assertEquals(List.of(), snapshot.projects());
         assertFalse(snapshot.present());
         assertFalse(snapshot.malformed());
+        assertEquals(Optional.empty(), snapshot.problem());
         assertEquals(0L, snapshot.stamp());
     }
 
@@ -112,6 +113,42 @@ class SharedProjectsFileTest {
         assertFalse(snapshot.malformed());
         assertEquals(1, snapshot.projects().size());
         assertEquals(Path.of("/w/good"), snapshot.projects().get(0).root());
+        assertTrue(snapshot.problem().isPresent(), "a skipped entry is a problem worth showing");
+    }
+
+    @Test
+    void fileWithAnUndecodableEntryIsShownButNeverRewritten() throws Exception {
+        // A hand-added entry missing "addedAt": the next Add in either tool
+        // used to rewrite the list without it, losing it for good.
+        Files.writeString(file(), """
+                {"schemaVersion":1,"projects":[
+                  {"id":"%s","root":"/w/good","displayName":"good","addedAt":"2026-10-19T10:00:00Z"},
+                  {"id":"%s","root":"/w/hand-added","displayName":"hand-added"}
+                ]}""".formatted(RepositoryId.newId(), RepositoryId.newId()), StandardCharsets.UTF_8);
+        byte[] before = Files.readAllBytes(file());
+        SharedProjectsFile shared = new SharedProjectsFile(file());
+
+        SharedProjectsFile.Snapshot snapshot = shared.read();
+        assertEquals(1, snapshot.projects().size());
+        assertTrue(snapshot.problem().isPresent());
+        assertThrows(SharedProjectsException.class, () -> shared.update(list -> append(list, local("/w/x"))));
+        assertArrayEquals(before, Files.readAllBytes(file()));
+    }
+
+    @Test
+    void fileFromANewerSchemaIsShownButNeverRewritten() throws Exception {
+        String id = RepositoryId.newId().toString();
+        Files.writeString(file(), """
+                {"schemaVersion":2,"projects":[
+                  {"id":"%s","root":"/w/a","displayName":"a","addedAt":"2026-10-19T10:00:00Z","pinned":true}
+                ]}""".formatted(id), StandardCharsets.UTF_8);
+        byte[] before = Files.readAllBytes(file());
+        SharedProjectsFile shared = new SharedProjectsFile(file());
+
+        assertEquals(1, shared.read().projects().size());
+        assertTrue(shared.read().problem().isPresent());
+        assertThrows(SharedProjectsException.class, () -> shared.update(list -> append(list, local("/w/x"))));
+        assertArrayEquals(before, Files.readAllBytes(file()));
     }
 
     @Test

@@ -189,6 +189,8 @@ public final class RepositorySidebar extends VBox {
      */
     private final VBox emptyState;
     private final Label emptyBanner = new Label("Nothing matches your filters");
+    /** Why the projects list shared with the IntelliJ plugin is not being followed; hidden when it is. */
+    private final Label sharedListBanner = new Label();
     private final Label footerLabel = new Label();
     private final Region footerDot = new Region();
 
@@ -398,7 +400,11 @@ public final class RepositorySidebar extends VBox {
         HBox footer = new HBox(footerDot, footerLabel);
         footer.getStyleClass().add("sidebar-footer");
 
-        getChildren().addAll(collapseHeader.node(), header, emptyBanner, repoTabStrip, tree, footer);
+        sharedListBanner.getStyleClass().add("sidebar-empty-banner");
+        sharedListBanner.setWrapText(true);
+        sharedListBanner.setVisible(false);
+        sharedListBanner.setManaged(false);
+        getChildren().addAll(collapseHeader.node(), header, sharedListBanner, emptyBanner, repoTabStrip, tree, footer);
 
         // Keep the displayed list in sync with EVERY repository mutation,
         // not just the ones initiated by this sidebar's own handlers. The
@@ -1065,6 +1071,10 @@ public final class RepositorySidebar extends VBox {
     }
 
     private void onRepositoriesChanged() {
+        Optional<String> problem = repositoryManager.sharedListProblem();
+        sharedListBanner.setText(problem.orElse(""));
+        sharedListBanner.setVisible(problem.isPresent());
+        sharedListBanner.setManaged(problem.isPresent());
         // A repository removed elsewhere -- in the IntelliJ plugin, through
         // the shared projects list -- gets the same cleanup as one removed
         // with this sidebar's own button.

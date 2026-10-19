@@ -61,7 +61,8 @@ public final class TaskTreeModel {
                          Map<Path, List<Worktree>> worktreesByMainRoot, Map<Path, Path> mainRootOf,
                          Optional<Path> currentMainRoot, Optional<Path> currentWorkingRoot,
                          Map<ManagedSessionId, Optional<SessionActivity>> activity, Set<ManagedSessionId> running,
-                         Set<Path> missingFolders, Map<RepositoryId, Path> recordedRoots, String filter) {
+                         Set<Path> missingFolders, Map<RepositoryId, Path> recordedRoots,
+                         Optional<String> listProblem, String filter) {
         public Inputs {
             projects = List.copyOf(projects);
             sessions = List.copyOf(sessions);
@@ -73,6 +74,7 @@ public final class TaskTreeModel {
             running = Set.copyOf(running);
             missingFolders = Set.copyOf(missingFolders);
             recordedRoots = Map.copyOf(recordedRoots);
+            Objects.requireNonNull(listProblem, "listProblem");
             filter = filter == null ? "" : filter.strip();
         }
     }
@@ -89,6 +91,7 @@ public final class TaskTreeModel {
         }
 
         List<TaskNode> nodes = new ArrayList<>();
+        in.listProblem().ifPresent(message -> nodes.add(new TaskNode.ListProblem(message)));
         Optional<Path> current = in.currentMainRoot();
         if (current.isPresent() && local.stream().noneMatch(project -> project.root().equals(current.get()))) {
             Path root = current.get();
