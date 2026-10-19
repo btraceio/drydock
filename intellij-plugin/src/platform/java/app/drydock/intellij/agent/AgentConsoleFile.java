@@ -1,10 +1,12 @@
 package app.drydock.intellij.agent;
 
+import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.openapi.vfs.VirtualFileSystem;
 import com.intellij.openapi.vfs.VirtualFileWithoutContent;
+import org.jetbrains.annotations.NotNull;
 
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
@@ -43,6 +45,18 @@ public final class AgentConsoleFile extends VirtualFile implements VirtualFileWi
     @Override
     public String getName() {
         return sessionId.value().toString();
+    }
+
+    /**
+     * The session's title, for the surfaces that name a file without asking
+     * the tab-title provider — the status bar's breadcrumb among them, which
+     * otherwise showed the raw session UUID. {@link #getName()} stays the id
+     * for the reason given on the class.
+     */
+    @Override
+    public @NotNull String getPresentableName() {
+        ManagedAgentSession session = AgentConsoleTabPresentation.sessionOf(this);
+        return session != null ? session.displayName() : "Agent session";
     }
 
     @Override

@@ -63,7 +63,7 @@ public final class AgentConsoleTabPresentation implements EditorTabTitleProvider
      * console or the catalog has not loaded. Never waits on initialization:
      * this runs on the EDT during a paint.
      */
-    private static ManagedAgentSession sessionOf(VirtualFile file) {
+    static ManagedAgentSession sessionOf(VirtualFile file) {
         if (!(file instanceof AgentConsoleFile console)) {
             return null;
         }
