@@ -74,8 +74,14 @@
                     text="New Agent Session…"
                     description="Start a new agent session in this worktree"
                     icon="AllIcons.General.Add">
-                <!-- The handoff's shortcut, carried by the action so the
-                     Agents popup footer can advertise it once that lands. -->
+                <!-- Carried by the action so the Agents popup footer can
+                     advertise it once that lands. Bound in $default as
+                     "alt meta N", which the macOS keymaps translate (meta
+                     <-> control) to ⌃⌥N; verified in runIde to open this
+                     dialog with no conflict. NOT the handoff's ⌥⌘N: on macOS
+                     that is Refactor | Inline in an editor and Git's New
+                     Branch elsewhere, and pressing it opened Create New
+                     Branch. -->
                 <keyboard-shortcut keymap="$default" first-keystroke="alt meta N"/>
             </action>
             <action id="Drydock.ResumeConversation"
