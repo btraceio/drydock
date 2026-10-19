@@ -1,0 +1,80 @@
+package app.drydock.intellij.tasks;
+
+import app.drydock.domain.ManagedAgentSession;
+import app.drydock.domain.RepositoryCatalog;
+import app.drydock.intellij.DrydockPluginService;
+import app.drydock.intellij.agent.AgentConsoles;
+import app.drydock.intellij.agent.AgentExecutionService;
+import app.drydock.intellij.worktree.WorktreeDialogs;
+
+import com.intellij.ide.impl.ProjectUtil;
+import com.intellij.openapi.application.ApplicationManager;
+import com.intellij.openapi.application.ModalityState;
+import com.intellij.openapi.project.Project;
+import com.intellij.openapi.project.ProjectManager;
+
+import java.nio.file.Path;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Optional;
+import java.util.function.Function;
+import java.util.function.Predicate;
+
+/**
+ * "Switch to this task", from the Drydock tool window: its window to the
+ * front, its agent tab selected, the keyboard in its terminal. A task
+ * whose window is closed gets its window opened, with the tab showing and
+ * <b>no agent started</b> — starting again stays an explicit Resume.
+ */
+public final class TaskNavigator {
+
+    private TaskNavigator() {
+    }
+
+    /**
+     * The window a task lives in: the one whose execution service knows the
+     * session (it runs, or ran, there), else the one opened on the task's
+     * working directory. Pure; {@code canonicalBase} gives a window's
+     * canonical project directory.
+     */
+    static <W> Optional<W> windowFor(List<W> windows, Predicate<W> ownsExecution,
+                                     Function<W, Optional<Path>> canonicalBase, Path canonicalWorkingDirectory) {
+        Optional<W> owner = windows.stream().filter(ownsExecution).findFirst();
+        if (owner.isPresent()) {
+            return owner;
+        }
+        return windows.stream()
+                .filter(window -> canonicalBase.apply(window).map(canonicalWorkingDirectory::equals).orElse(false))
+                .findFirst();
+    }
+
+    /**
+     * Switches to {@code session}. Resolving the window touches the disk
+     * (canonical paths), so it runs on the plugin's executor; the switch
+     * itself happens on the EDT.
+     */
+    public static void switchTo(ManagedAgentSession session) {
+        DrydockPluginService plugin = DrydockPluginService.getInstance();
+        plugin.executor().execute(() -> {
+            Path directory = RepositoryCatalog.canonicalize(session.workingDirectory());
+            List<Project> open = Arrays.stream(ProjectManager.getInstance().getOpenProjects())
+                    .filter(project -> !project.isDisposed())
+                    .toList();
+            Optional<Project> window = windowFor(open,
+                    project -> AgentExecutionService.getInstance(project).knownSessions().contains(session.id()),
+                    project -> Optional.ofNullable(project.getBasePath())
+                            .map(base -> RepositoryCatalog.canonicalize(Path.of(base))),
+                    directory);
+            ApplicationManager.getApplication().invokeLater(() -> {
+                Project target = window.filter(project -> !project.isDisposed())
+                        .orElseGet(() -> WorktreeDialogs.openAsProject(directory));
+                if (target == null || target.isDisposed()) {
+                    return;
+                }
+                ProjectUtil.focusProjectWindow(target, true);
+                AgentConsoles.show(target, session.id());
+                AgentConsoles.focusConsole(target, session.id());
+            }, ModalityState.nonModal());
+        });
+    }
+}

@@ -60,6 +60,11 @@
 
         <!-- "Claude needs you": the balloon raised when an agent starts
              waiting for the user (AttentionNotifier). -->
+        <!-- The task-centric view: registered projects (shared with the
+             standalone app) and their agent tasks, in every window. -->
+        <toolWindow id="Drydock" anchor="left" secondary="false"
+                    icon="AllIcons.Toolwindows.ToolWindowRun"
+                    factoryClass="app.drydock.intellij.tasks.DrydockToolWindowFactory"/>
         <notificationGroup id="Drydock attention" displayType="BALLOON"/>
 
         <postStartupActivity
