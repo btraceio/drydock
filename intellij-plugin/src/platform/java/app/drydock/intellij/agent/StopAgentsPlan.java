@@ -55,4 +55,16 @@ public final class StopAgentsPlan {
     public static String primaryLabel(boolean quitting) {
         return quitting ? "Stop & Quit" : "Stop & Close";
     }
+
+    /** Stopping one task from the Drydock tool window: the default button. */
+    public static String primaryLabelForTree(boolean closing) {
+        return closing ? "Stop & Close" : "Stop anyway";
+    }
+
+    /** Stopping one task from the Drydock tool window: what it does, and what it keeps. */
+    public static String treeBody(boolean closing) {
+        return closing
+                ? "Stopping ends it mid-task and closes its window. Open files are saved and the worktree stays."
+                : "Stopping ends it mid-task. Its conversation can be resumed later.";
+    }
 }

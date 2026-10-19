@@ -46,4 +46,22 @@ class StopAgentsPlanTest {
         assertEquals("Stop & Close", StopAgentsPlan.primaryLabel(false));
         assertEquals("Stop & Quit", StopAgentsPlan.primaryLabel(true));
     }
+
+    @Test
+    void primaryLabelForTreeStop() {
+        assertEquals("Stop anyway", StopAgentsPlan.primaryLabelForTree(false));
+    }
+
+    @Test
+    void primaryLabelForTreeClose() {
+        assertEquals("Stop & Close", StopAgentsPlan.primaryLabelForTree(true));
+    }
+
+    @Test
+    void treeBodySaysWhatStoppingKeeps() {
+        assertEquals("Stopping ends it mid-task. Its conversation can be resumed later.",
+                StopAgentsPlan.treeBody(false));
+        assertEquals("Stopping ends it mid-task and closes its window. Open files are saved and the worktree "
+                + "stays.", StopAgentsPlan.treeBody(true));
+    }
 }

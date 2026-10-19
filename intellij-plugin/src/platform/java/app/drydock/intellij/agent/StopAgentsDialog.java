@@ -28,7 +28,7 @@ import java.util.List;
  * ({@link #isSuppressed()}) and only when the user confirmed: cancelling
  * with the box ticked must not silently turn the question off.</p>
  */
-final class StopAgentsDialog extends DialogWrapper {
+public final class StopAgentsDialog extends DialogWrapper {
 
     /** The application-level "Don't ask again" flag. */
     private static final String SUPPRESSED_KEY = "drydock.stopWorkingAgents.dontAsk";
@@ -41,6 +41,11 @@ final class StopAgentsDialog extends DialogWrapper {
     private final List<Row> rows;
 
     StopAgentsDialog(@Nullable Project project, int working, String body, List<Row> rows, boolean quitting) {
+        this(project, working, body, rows, StopAgentsPlan.primaryLabel(quitting));
+    }
+
+    private StopAgentsDialog(@Nullable Project project, int working, String body, List<Row> rows,
+                             String primaryLabel) {
         super(project, true);
         this.body = body;
         this.rows = List.copyOf(rows);
@@ -65,7 +70,20 @@ final class StopAgentsDialog extends DialogWrapper {
         // After init(), not before: set on the action before the button
         // exists, the "&" is parsed as a mnemonic marker and the button read
         // "Stop  Close".
-        setOKButtonText(StopAgentsPlan.primaryLabel(quitting));
+        setOKButtonText(primaryLabel);
+    }
+
+    /**
+     * Asks before stopping one working agent from the Drydock tool window;
+     * true to go ahead. Honours "Don't ask again" like the close question.
+     * EDT only.
+     */
+    public static boolean confirmTreeStop(Project project, Icon dot, String row, boolean closing) {
+        if (isSuppressed()) {
+            return true;
+        }
+        return new StopAgentsDialog(project, 1, StopAgentsPlan.treeBody(closing), List.of(new Row(dot, row)),
+                StopAgentsPlan.primaryLabelForTree(closing)).showAndGet();
     }
 
     /** Whether the user asked never to be asked again. Safe on the EDT. */

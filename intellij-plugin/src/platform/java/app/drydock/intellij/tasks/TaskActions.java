@@ -1,0 +1,152 @@
+package app.drydock.intellij.tasks;
+
+import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.SessionStatus;
+import app.drydock.intellij.DrydockPluginService;
+import app.drydock.intellij.agent.AgentConsoles;
+import app.drydock.intellij.agent.AgentExecutionService;
+import app.drydock.intellij.agent.StopAgentsDialog;
+import app.drydock.intellij.agent.StopAgentsPlan;
+import app.drydock.intellij.startup.DrydockStartupActivity;
+import app.drydock.intellij.tasks.TaskNode.TaskRow;
+import app.drydock.intellij.ui.SessionDots;
+import app.drydock.ui.AgentLabels;
+
+import com.intellij.icons.AllIcons;
+import com.intellij.openapi.actionSystem.ActionUpdateThread;
+import com.intellij.openapi.actionSystem.AnAction;
+import com.intellij.openapi.actionSystem.AnActionEvent;
+import com.intellij.openapi.application.ApplicationManager;
+import com.intellij.openapi.application.ModalityState;
+import com.intellij.openapi.project.DumbAwareAction;
+import com.intellij.openapi.project.Project;
+import com.intellij.openapi.project.ProjectManager;
+import org.jetbrains.annotations.NotNull;
+
+import javax.swing.Icon;
+
+import java.util.Arrays;
+import java.util.List;
+import java.util.Optional;
+import java.util.function.Predicate;
+
+/**
+ * What the Drydock tool window can do to a task: switch to it, stop it,
+ * stop it and close its window, resume it.
+ *
+ * <p>Stopping asks first only when the agent is mid-task (not at its
+ * prompt), and the question can always be answered "Stop anyway". Closing
+ * a window loses nothing — IntelliJ saves open files and the worktree stays
+ * on disk — so the close itself adds no question of its own; the window's
+ * <em>other</em> working agents get the usual close confirmation.</p>
+ */
+final class TaskActions {
+
+    /** How long Stop &amp; Close waits for the agent to end before closing its window. */
+    private static final long STOP_WAIT_MILLIS = 3_000;
+    private static final long STOP_POLL_MILLIS = 100;
+
+    private TaskActions() {
+    }
+
+    /** The task actions for the tree's context menu. */
+    static List<AnAction> contextActions() {
+        return List.of(
+                task("Stop", "Stop this task's agent", AllIcons.Actions.Suspend, TaskRow::running,
+                        (project, row) -> stop(project, row, false)),
+                task("Stop && Close Window", "Stop the agent and close its window", AllIcons.Actions.Close,
+                        TaskRow::running, (project, row) -> stop(project, row, true)),
+                task("Resume", "Open the task and resume its conversation", AllIcons.Actions.Execute,
+                        row -> !row.running(), (project, row) -> TaskNavigator.switchTo(row.session(),
+                                target -> AgentConsoles.resume(target, row.session().id()))));
+    }
+
+    private interface RowAction {
+        void run(Project project, TaskRow row);
+    }
+
+    private static AnAction task(String text, String description, Icon icon, Predicate<TaskRow> enabled,
+                                 RowAction action) {
+        return new DumbAwareAction(text, description, icon) {
+            @Override
+            public void update(@NotNull AnActionEvent e) {
+                boolean visible = e.getData(TaskTreePanel.SELECTED_NODE) instanceof TaskRow;
+                e.getPresentation().setVisible(visible);
+                e.getPresentation().setEnabled(visible
+                        && e.getData(TaskTreePanel.SELECTED_NODE) instanceof TaskRow row && enabled.test(row));
+            }
+
+            @Override
+            public @NotNull ActionUpdateThread getActionUpdateThread() {
+                return ActionUpdateThread.EDT;
+            }
+
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                if (e.getProject() != null && e.getData(TaskTreePanel.SELECTED_NODE) instanceof TaskRow row) {
+                    action.run(e.getProject(), row);
+                }
+            }
+        };
+    }
+
+    /**
+     * Stops {@code row}'s agent, asking first when it is mid-task; with
+     * {@code closeWindow}, then closes the window it ran in. EDT.
+     */
+    static void stop(Project from, TaskRow row, boolean closeWindow) {
+        ManagedSessionId id = row.session().id();
+        Optional<Project> owner = owner(id);
+        if (owner.isEmpty()) {
+            return;   // ended meanwhile
+        }
+        if (StopAgentsPlan.isWorking(row.activity())) {
+            String agent = AgentLabels.displayName(DrydockPluginService.getInstance().registry(),
+                    row.session().agentKind());
+            if (!StopAgentsDialog.confirmTreeStop(from,
+                    SessionDots.dotIcon(SessionStatus.RUNNING, row.activity()),
+                    StopAgentsPlan.row(row.session().displayName(), agent, Optional.empty()), closeWindow)) {
+                return;
+            }
+        }
+        Project window = owner.get();
+        DrydockStartupActivity.sessions(window).stopSession(id);
+        if (closeWindow) {
+            whenStopped(window, id, () -> {
+                if (!window.isDisposed()) {
+                    ProjectManager.getInstance().closeAndDispose(window);
+                }
+            });
+        }
+    }
+
+    /** The open window running {@code id}. In-memory, EDT-safe. */
+    private static Optional<Project> owner(ManagedSessionId id) {
+        return Arrays.stream(ProjectManager.getInstance().getOpenProjects())
+                .filter(project -> !project.isDisposed())
+                .filter(project -> AgentExecutionService.getInstance(project).isRunning(id))
+                .findFirst();
+    }
+
+    /**
+     * Runs {@code then} on the EDT once {@code id} no longer runs in
+     * {@code window}, or after {@link #STOP_WAIT_MILLIS}. Closing before the
+     * process has ended would make the window's own close confirmation list
+     * the agent that is already being stopped.
+     */
+    private static void whenStopped(Project window, ManagedSessionId id, Runnable then) {
+        DrydockPluginService.getInstance().executor().execute(() -> {
+            long deadline = System.currentTimeMillis() + STOP_WAIT_MILLIS;
+            while (System.currentTimeMillis() < deadline && !window.isDisposed()
+                    && AgentExecutionService.getInstance(window).isRunning(id)) {
+                try {
+                    Thread.sleep(STOP_POLL_MILLIS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
+            ApplicationManager.getApplication().invokeLater(then, ModalityState.nonModal());
+        });
+    }
+}

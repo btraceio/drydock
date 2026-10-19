@@ -17,6 +17,7 @@ import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Predicate;
 
@@ -54,6 +55,11 @@ public final class TaskNavigator {
      * itself happens on the EDT.
      */
     public static void switchTo(ManagedAgentSession session) {
+        switchTo(session, target -> { });
+    }
+
+    /** As {@link #switchTo(ManagedAgentSession)}, then {@code then} with the task's window, on the EDT. */
+    public static void switchTo(ManagedAgentSession session, Consumer<Project> then) {
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         plugin.executor().execute(() -> {
             Path directory = RepositoryCatalog.canonicalize(session.workingDirectory());
@@ -74,6 +80,7 @@ public final class TaskNavigator {
                 ProjectUtil.focusProjectWindow(target, true);
                 AgentConsoles.show(target, session.id());
                 AgentConsoles.focusConsole(target, session.id());
+                then.accept(target);
             }, ModalityState.nonModal());
         });
     }

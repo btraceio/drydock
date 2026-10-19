@@ -158,6 +158,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                         TaskLauncher.open(project, Optional.ofNullable(root), Optional.of(fixed)));
             }
         });
+        contextActions.addAll(TaskActions.contextActions());
         PopupHandler.installPopupMenu(tree, contextActions, "Drydock.TaskTree.Popup");
         tree.addMouseListener(new MouseAdapter() {
             @Override
