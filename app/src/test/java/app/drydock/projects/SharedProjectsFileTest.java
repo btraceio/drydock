@@ -183,6 +183,19 @@ class SharedProjectsFileTest {
     }
 
     @Test
+    void updateOnAMissingFileStartsFromTheSeed() throws Exception {
+        // The user deleted projects.json; the next Add must not leave a
+        // one-entry list that empties the other tool.
+        SharedProject known = local("/w/known");
+        SharedProject added = local("/w/added");
+
+        List<SharedProject> written = new SharedProjectsFile(file())
+                .update(list -> append(list, added), () -> List.of(known));
+
+        assertEquals(List.of(known, added), written);
+    }
+
+    @Test
     void seedIfAbsentWritesOnceOnly() throws Exception {
         SharedProjectsFile shared = new SharedProjectsFile(file());
         AtomicBoolean secondSupplierCalled = new AtomicBoolean();

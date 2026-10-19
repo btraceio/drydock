@@ -117,7 +117,7 @@ public final class SharedProjectsService {
                     List<SharedProject> next = new ArrayList<>(list);
                     next.add(result[0]);
                     return next;
-                });
+                }, appSeed);
             } catch (SharedProjectsException e) {
                 throw new CompletionException(e);
             }
@@ -130,7 +130,7 @@ public final class SharedProjectsService {
     public CompletableFuture<Void> remove(RepositoryId id) {
         return CompletableFuture.runAsync(() -> {
             try {
-                file.update(list -> list.stream().filter(project -> !project.id().equals(id)).toList());
+                file.update(list -> list.stream().filter(project -> !project.id().equals(id)).toList(), appSeed);
             } catch (SharedProjectsException e) {
                 throw new CompletionException(e);
             }
@@ -147,6 +147,16 @@ public final class SharedProjectsService {
     /** Re-reads the file when it changed and tells the listeners. Blocking; package-private for tests. */
     synchronized void refresh() {
         SharedProjectsFile.Snapshot snapshot = file.read();
+        if (!snapshot.present()) {
+            // Deleted while running (the advice for a malformed file): seed
+            // it again rather than show, and later write, an empty list.
+            try {
+                file.seedIfAbsent(appSeed);
+            } catch (SharedProjectsException e) {
+                LOG.log(Level.WARNING, () -> "Could not re-seed the shared projects list: " + e.getMessage());
+            }
+            snapshot = file.read();
+        }
         if (snapshot.stamp() == stamp && snapshot.problem().equals(problem)) {
             return;
         }

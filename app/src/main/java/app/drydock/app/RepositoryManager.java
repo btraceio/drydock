@@ -114,8 +114,7 @@ public final class RepositoryManager {
     public CompletableFuture<Void> start() {
         CompletableFuture<Void> first = CompletableFuture.runAsync(() -> {
             try {
-                sharedFile.seedIfAbsent(() -> SharedProjectsSeed.fromRepositories(
-                        stateStore.state().repositories(), mainCheckoutOf));
+                sharedFile.seedIfAbsent(this::localSeed);
             } catch (SharedProjectsException e) {
                 LOG.log(Level.WARNING, () -> "Could not seed the shared projects list: " + e.getMessage());
             }
@@ -150,6 +149,17 @@ public final class RepositoryManager {
      */
     synchronized void reconcile() {
         SharedProjectsFile.Snapshot snapshot = sharedFile.read();
+        if (!snapshot.present()) {
+            // Deleted while running (the advice for a malformed file): seed
+            // it again from this app's list rather than leave it to the next
+            // Add, which would write a one-entry list.
+            try {
+                sharedFile.seedIfAbsent(this::localSeed);
+            } catch (SharedProjectsException e) {
+                LOG.log(Level.WARNING, () -> "Could not re-seed the shared projects list: " + e.getMessage());
+            }
+            snapshot = sharedFile.read();
+        }
         if (!snapshot.problem().equals(sharedListProblem)) {
             sharedListProblem = snapshot.problem();
             notifyChanged();
@@ -160,15 +170,21 @@ public final class RepositoryManager {
             return;
         }
         reconciledStamp = snapshot.stamp();
+        List<SharedProject> members = snapshot.projects();
         boolean[] changed = new boolean[1];
         stateStore.update(state -> {
-            ApplicationState next = withMembers(state, snapshot.projects());
+            ApplicationState next = withMembers(state, members);
             changed[0] = !next.repositories().equals(state.repositories());
             return next;
         });
         if (changed[0]) {
             notifyChanged();
         }
+    }
+
+    /** This app's own list in shared form: the seed whenever the shared file is missing. */
+    private List<SharedProject> localSeed() {
+        return SharedProjectsSeed.fromRepositories(stateStore.state().repositories(), mainCheckoutOf);
     }
 
     private synchronized void forceNextReconcile() {
@@ -284,7 +300,7 @@ public final class RepositoryManager {
                 next.add(new SharedProject(added.id(), added.root(), added.displayName(), added.addedAt(),
                         Optional.ofNullable(added.remote())));
                 return next;
-            });
+            }, this::localSeed);
         } catch (SharedProjectsException e) {
             throw new CompletionException(e);
         }
@@ -357,7 +373,8 @@ public final class RepositoryManager {
         }
         return CompletableFuture.runAsync(() -> {
             try {
-                sharedFile.update(projects -> projects.stream().filter(project -> !project.id().equals(id)).toList());
+                sharedFile.update(projects -> projects.stream().filter(project -> !project.id().equals(id)).toList(),
+                        this::localSeed);
             } catch (SharedProjectsException e) {
                 LOG.log(Level.WARNING, () -> "Could not remove " + id + " from the shared projects list: "
                         + e.getMessage());

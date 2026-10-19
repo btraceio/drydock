@@ -478,6 +478,18 @@ class RepositoryManagerTest {
         assertEquals(1, notified.get(), "the sidebar learns there is a problem to show");
     }
 
+    @Test
+    void aDeletedSharedFileIsReseededFromThisAppsList() throws Exception {
+        Repository first = manager.addRepository(initGitRepo("survives-1").toRealPath()).join();
+        Repository second = manager.addRepository(initGitRepo("survives-2").toRealPath()).join();
+        Files.delete(sharedFile.file());
+
+        manager.reconcile();
+
+        assertEquals(List.of(first.id(), second.id()), sharedIds());
+        assertEquals(List.of(first, second), manager.repositories());
+    }
+
     private static final class InMemoryStateRepository implements ApplicationStateRepository {
         // volatile: saves arrive on the state store's background writer thread.
         private volatile ApplicationState state = ApplicationState.empty();

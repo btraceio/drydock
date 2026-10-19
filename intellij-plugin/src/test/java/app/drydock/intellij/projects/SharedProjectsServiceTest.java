@@ -136,4 +136,29 @@ class SharedProjectsServiceTest {
         assertThrows(CompletionException.class, () -> service.register(dir.resolve("r"), "r").join());
         assertFalse(Files.readString(file.file()).contains("\"r\""));
     }
+
+    @Test
+    void aDeletedFileIsReseededNotEmptied() throws Exception {
+        SharedProject fromApp = project(dir.resolve("app-repo"));
+        SharedProjectsService service = new SharedProjectsService(file, () -> List.of(fromApp), executor);
+        service.start().join();
+        Files.delete(file.file());
+
+        service.refresh();
+
+        assertEquals(List.of(fromApp), service.projects());
+        assertEquals(List.of(fromApp), file.read().projects());
+    }
+
+    @Test
+    void registeringAfterADeleteKeepsTheSeededProjects() throws Exception {
+        SharedProject fromApp = project(dir.resolve("app-repo"));
+        SharedProjectsService service = new SharedProjectsService(file, () -> List.of(fromApp), executor);
+        service.start().join();
+        Files.delete(file.file());
+
+        SharedProject added = service.register(dir.resolve("new"), "new").join();
+
+        assertEquals(List.of(fromApp, added), file.read().projects());
+    }
 }

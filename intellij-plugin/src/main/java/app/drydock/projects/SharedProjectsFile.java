@@ -149,13 +149,26 @@ public final class SharedProjectsFile {
      * when the result equals what is there. Returns the list as written.
      */
     public List<SharedProject> update(UnaryOperator<List<SharedProject>> change) throws SharedProjectsException {
+        return update(change, List::of);
+    }
+
+    /**
+     * As {@link #update(UnaryOperator)}, but when no file exists the change
+     * starts from {@code seedWhenAbsent} — the caller's own list — rather
+     * than from nothing. A user who deleted the file (the advice for a
+     * malformed one) would otherwise have the next Add write a one-entry
+     * list, which the other tool then follows and empties its own.
+     */
+    public List<SharedProject> update(UnaryOperator<List<SharedProject>> change,
+                                      Supplier<List<SharedProject>> seedWhenAbsent) throws SharedProjectsException {
         return locked(() -> {
             Snapshot current = read();
             if (current.problem().isPresent()) {
                 // Never rewrite what this version cannot fully read.
                 throw new SharedProjectsException(current.problem().get());
             }
-            List<SharedProject> next = distinctByRoot(change.apply(new ArrayList<>(current.projects())));
+            List<SharedProject> base = current.present() ? current.projects() : seedWhenAbsent.get();
+            List<SharedProject> next = distinctByRoot(change.apply(new ArrayList<>(base)));
             if (!current.present() || !next.equals(current.projects())) {
                 write(next);
             }
