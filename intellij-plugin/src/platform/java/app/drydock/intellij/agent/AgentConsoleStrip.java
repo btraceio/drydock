@@ -146,7 +146,7 @@ final class AgentConsoleStrip extends JPanel {
         chip.setText(chipText.orElse(""));
         chip.setVisible(chipText.isPresent());
 
-        secondary.setText(AgentStripText.secondary(agentName, age, changedFiles, indexing));
+        secondary.setText(AgentStripText.secondary(agentName, age, changedFiles, running, indexing));
 
         // The handoff puts Changes on the running strip only; a stopped
         // session's review is reached from the Commit tool window instead.

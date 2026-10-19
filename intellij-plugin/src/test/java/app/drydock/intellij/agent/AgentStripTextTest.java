@@ -63,7 +63,7 @@ class AgentStripTextTest {
 
     @Test
     void anUnknownChangeCountIsOmittedRatherThanPrintedAsZero() {
-        String text = AgentStripText.secondary("Claude", Duration.ofMinutes(4), Optional.empty(), false);
+        String text = AgentStripText.secondary("Claude", Duration.ofMinutes(4), Optional.empty(), true, false);
 
         assertEquals("Claude · 4m", text);
         assertFalse(text.contains("files changed"));
@@ -72,15 +72,26 @@ class AgentStripTextTest {
     @Test
     void oneChangedFileIsSingular() {
         assertEquals("Claude · 4m · 1 file changed",
-                AgentStripText.secondary("Claude", Duration.ofMinutes(4), Optional.of(1), false));
+                AgentStripText.secondary("Claude", Duration.ofMinutes(4), Optional.of(1), true, false));
         assertEquals("Claude · 4m · 3 files changed",
-                AgentStripText.secondary("Claude", Duration.ofMinutes(4), Optional.of(3), false));
+                AgentStripText.secondary("Claude", Duration.ofMinutes(4), Optional.of(3), true, false));
     }
 
     @Test
     void dumbModeIsAnnouncedBecauseTheAgentStartedWithoutWaitingForIt() {
         assertEquals("Codex · 2s · IDE still indexing",
-                AgentStripText.secondary("Codex", Duration.ofSeconds(2), Optional.empty(), true));
+                AgentStripText.secondary("Codex", Duration.ofSeconds(2), Optional.empty(), true, true));
+    }
+
+    @Test
+    void aStoppedSessionNeverMentionsIndexing() {
+        // The note means "the agent started before the IDE was ready". With
+        // nothing running it explains nothing, and under the words "Not
+        // running" it reads as the reason the agent is not running.
+        String text = AgentStripText.secondary("Codex", Duration.ofSeconds(2), Optional.empty(), false, true);
+
+        assertEquals("Codex · 2s", text);
+        assertFalse(text.contains("indexing"), text);
     }
 
     @Test

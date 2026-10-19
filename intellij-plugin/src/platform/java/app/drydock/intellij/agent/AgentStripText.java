@@ -64,14 +64,21 @@ public final class AgentStripText {
      * each part dropped when it is not known rather than guessed. An unknown
      * change count is omitted entirely — "0 files changed" is a claim, and
      * before the first git status there is nothing to claim.
+     *
+     * <p>{@code IDE still indexing} appears only while an agent is actually
+     * running. The note exists to explain one thing — that the agent started
+     * without waiting for indexing, so the IDE around it is not ready yet —
+     * and on a stopped session it explains nothing: nothing started, so
+     * indexing has no bearing on it, and sitting under the words "Not running"
+     * it reads as the reason the agent is not running.</p>
      */
     public static String secondary(String agentName, Duration age, Optional<Integer> changedFiles,
-                                   boolean indexing) {
+                                   boolean running, boolean indexing) {
         StringBuilder text = new StringBuilder(agentName);
         text.append(" · ").append(relativeAge(age));
         changedFiles.ifPresent(count ->
                 text.append(" · ").append(count).append(count == 1 ? " file changed" : " files changed"));
-        if (indexing) {
+        if (running && indexing) {
             text.append(" · IDE still indexing");
         }
         return text.toString();
