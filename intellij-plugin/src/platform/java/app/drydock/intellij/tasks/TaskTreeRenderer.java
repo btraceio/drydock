@@ -26,6 +26,17 @@ import java.time.Instant;
 /** Paints one {@link TaskNode}: dot, name, and the grey where/what/age text. */
 final class TaskTreeRenderer extends ColoredTreeCellRenderer {
 
+    /** The tag on a row's link text ("Add", "Start ▸"): what a single click may act on. */
+    static final Object LINK = new Object();
+
+    /**
+     * Whether a click on a row with a link acts: a single click only on the
+     * link text, a double-click anywhere on the row. Pure.
+     */
+    static boolean clickActs(boolean onLink, int clickCount) {
+        return clickCount == 2 || (onLink && clickCount == 1);
+    }
+
     @Override
     public void customizeCellRenderer(@NotNull JTree tree, Object value, boolean selected, boolean expanded,
                                       boolean leaf, int row, boolean hasFocus) {
@@ -40,7 +51,7 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
             case AddCurrentProject add -> {
                 setIcon(AllIcons.General.Add);
                 append(add.repoName() + " isn't in Drydock · ", SimpleTextAttributes.GRAYED_ATTRIBUTES);
-                append("Add", SimpleTextAttributes.LINK_ATTRIBUTES);
+                append("Add", SimpleTextAttributes.LINK_ATTRIBUTES, LINK);
             }
             case ProjectRow project -> {
                 setIcon(AllIcons.Nodes.Folder);
@@ -56,7 +67,7 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
             case IdleWorktree idle -> {
                 append("⑂ " + idle.branch(), SimpleTextAttributes.GRAYED_ATTRIBUTES);
                 append("  no task · ", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
-                append("Start ▸", SimpleTextAttributes.LINK_ATTRIBUTES);
+                append("Start ▸", SimpleTextAttributes.LINK_ATTRIBUTES, LINK);
             }
             case TaskRow task -> paintTask(task);
             default -> append(String.valueOf(node.getUserObject()));

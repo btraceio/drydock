@@ -31,6 +31,7 @@ import com.intellij.ui.DocumentAdapter;
 import com.intellij.ui.PopupHandler;
 import com.intellij.ui.ScrollPaneFactory;
 import com.intellij.ui.SearchTextField;
+import com.intellij.ui.SimpleColoredComponent;
 import com.intellij.ui.treeStructure.Tree;
 import com.intellij.util.Alarm;
 import com.intellij.util.messages.MessageBusConnection;
@@ -44,6 +45,8 @@ import javax.swing.tree.DefaultTreeModel;
 import javax.swing.tree.TreePath;
 
 import java.awt.BorderLayout;
+import java.awt.Component;
+import java.awt.Rectangle;
 import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
 import java.awt.event.MouseAdapter;
@@ -165,9 +168,10 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             public void mouseClicked(MouseEvent event) {
                 TreePath path = tree.getPathForLocation(event.getX(), event.getY());
                 Object node = path == null ? null : ((DefaultMutableTreeNode) path.getLastPathComponent()).getUserObject();
-                if (node instanceof AddCurrentProject add && event.getClickCount() == 1) {
+                boolean acts = TaskTreeRenderer.clickActs(onLink(path, event), event.getClickCount());
+                if (node instanceof AddCurrentProject add && acts) {
                     register(add);
-                } else if (node instanceof IdleWorktree idle && event.getClickCount() == 1) {
+                } else if (node instanceof IdleWorktree idle && acts) {
                     TaskLauncher.open(project, projectRootOf(path),
                             Optional.of(new NewTaskPlan.FixedWorktree(idle.worktree(), idle.branch())));
                 } else if (node instanceof TaskRow task && event.getClickCount() == 2) {
@@ -214,6 +218,20 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     public void uiDataSnapshot(@NotNull DataSink sink) {
         selected().ifPresent(node -> sink.set(SELECTED_NODE, node));
         projectRootOf(tree.getSelectionPath()).ifPresent(root -> sink.set(SELECTED_PROJECT_ROOT, root));
+    }
+
+    /** Whether {@code event} landed on the link text of the row at {@code path}. EDT. */
+    private boolean onLink(TreePath path, MouseEvent event) {
+        Rectangle bounds = tree.getPathBounds(path);
+        if (bounds == null) {
+            return false;
+        }
+        int row = tree.getRowForPath(path);
+        Component rendered = tree.getCellRenderer().getTreeCellRendererComponent(tree,
+                path.getLastPathComponent(), tree.isRowSelected(row), tree.isExpanded(row),
+                tree.getModel().isLeaf(path.getLastPathComponent()), row, false);
+        return rendered instanceof SimpleColoredComponent colored
+                && colored.getFragmentTagAt(event.getX() - bounds.x) == TaskTreeRenderer.LINK;
     }
 
     /** The main checkout of the project row at or above {@code path}. */
