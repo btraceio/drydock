@@ -335,6 +335,7 @@ app (untouched UI except the change listener).
     - `Optional<String> warning(Inputs, Choice)`: Writes + main checkout + another writer active.
     - `Optional<String> initialPrompt(Choice)`: the instructions when non-blank, else empty. **Never the name.**
   - `NewTaskDialog(Project, NewTaskPlan.Inputs)` with `Choice choice()`.
+    - From picker: Git4Idea dependency, see the self-review notes.
     - Layout: Task name (`JTextField`, focused), `What should the agent do?` (a 4-row `JTextArea`, empty), Agent and Mode segmented, then the summary line plus a `Change…` `HyperlinkLabel`.
     - `Change…` reveals a details panel: Work in (New worktree / Main checkout), Branch, From (`ComboBox` with speed search over `startPoints`), Folder (`TextFieldWithBrowseButton`), the hint `Base <base> from Settings › Tools › Drydock · Change base…` (which opens `ShowSettingsUtil` on `drydock`), and Open in.
     - Branch and folder follow the name until the user edits either of them.
@@ -483,4 +484,7 @@ app (untouched UI except the change listener).
   - Switch: B3. Stop and close: B7. Done warnings and branch checkbox: B8. Remove: B9.
   - Shared file: A1. Seeding: A2, B1. App membership: A3.
   - Removed entry points: B6. Resume Conversation dropped: B6.
-- **Open for the user:** the spec says "the IDE's own branch picker". The plan uses a speed-search `ComboBox` because Git4Idea's picker would add a plugin dependency on `Git4Idea`, which the repo rules require asking about.
+- **Settled with the user (2026-10-19): depend on Git4Idea.** Add `<depends>Git4Idea</depends>` to `plugin.xml` and `bundledPlugin("Git4Idea")` to `build.gradle.kts`, in B5.
+  - Git4Idea's `GitRepositoryManager` only knows repositories of **open** projects. A New task for a registered project that is not open therefore still needs the core `listBranches` as its source.
+  - So the From picker's options come from Git4Idea when the project is open, and from core otherwise.
+  - The picker UI is Git4Idea's own branch popup if its public API allows it; check with Plugin Verifier. Otherwise it is a speed-search `ComboBox`.
