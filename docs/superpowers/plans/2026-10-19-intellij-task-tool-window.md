@@ -81,7 +81,7 @@ app (untouched UI except the change listener).
 
 ## Part A — Shared registered-projects list (core + standalone app)
 
-### Task A1: Shared projects store in core (both trees)
+### Task 1 (A1): Shared projects store in core (both trees)
 
 **Files:**
 - Create (identical in both trees, under `app/src/main/java/app/drydock/projects/` and `intellij-plugin/src/main/java/app/drydock/projects/`): `SharedProject.java`, `SharedProjectsCodec.java`, `SharedProjectsFile.java`, `SharedProjectsException.java`
@@ -119,7 +119,7 @@ app (untouched UI except the change listener).
 - [ ] **Step 4: Run the same command, expect PASS.** Then copy the four sources and the two tests into `app/`, and run `./gradlew :app:test --tests 'app.drydock.projects.*'` → PASS.
 - [ ] **Step 5: Check the copies are identical, then commit.** `diff -r app/src/main/java/app/drydock/projects intellij-plugin/src/main/java/app/drydock/projects` must print nothing; repeat for the tests. Commit subject: `A registered-projects list both Drydock tools can share`.
 
-### Task A2: Seeding from the app's state (core, both trees)
+### Task 2 (A2): Seeding from the app's state (core, both trees)
 
 **Files:**
 - Create (identical in both trees): `projects/SharedProjectsSeed.java`
@@ -146,7 +146,7 @@ app (untouched UI except the change listener).
 - [ ] **Step 4: Run, expect PASS.** Copy to `app/` and run `:app:test --tests 'app.drydock.projects.*'`.
 - [ ] **Step 5: Commit:** `The shared projects list can be seeded from the app's own list`
 
-### Task A3: The app takes its project membership from the shared list
+### Task 3 (A3): The app takes its project membership from the shared list
 
 **Files:**
 - Modify: `app/src/main/java/app/drydock/app/RepositoryManager.java` (`addRepository` :86, `registerValidatedRoot` :91-110, `addRemoteRepository` :122-147, `removeRepository` :158-173, listeners :149-153)
@@ -185,7 +185,7 @@ app (untouched UI except the change listener).
 
 ## Part B — The plugin
 
-### Task B1: The plugin reads, seeds and watches the shared list
+### Task 4 (B1): The plugin reads, seeds and watches the shared list
 
 **Files:**
 - Create: `intellij-plugin/src/platform/java/app/drydock/intellij/projects/SharedProjectsService.java`
@@ -215,7 +215,7 @@ app (untouched UI except the change listener).
 - [ ] **Step 4: Run, expect PASS.**
 - [ ] **Step 5: Commit:** `The plugin shares the standalone app's registered projects`
 
-### Task B2: `TaskTreeModel`, the tree as pure data
+### Task 5 (B2): `TaskTreeModel`, the tree as pure data
 
 **Files:**
 - Create: `.../intellij/tasks/TaskTreeModel.java`, `.../intellij/tasks/TaskNode.java`
@@ -252,7 +252,7 @@ app (untouched UI except the change listener).
 - [ ] **Step 4: Run, expect PASS.**
 - [ ] **Step 5: Commit:** `The task tree's shape is decided in one pure place`
 
-### Task B3: The Drydock tool window: listing and switching
+### Task 6 (B3): The Drydock tool window: listing and switching
 
 **Files:**
 - Create:
@@ -298,7 +298,7 @@ app (untouched UI except the change listener).
   4. Close the worktree window and double-click again. The window reopens with the tab and **no** running process (check `ps`).
 - [ ] **Step 5: Commit:** `A Drydock tool window lists registered projects and their tasks, and switches to any of them`
 
-### Task B4: Worktree base in Settings › Tools › Drydock
+### Task 7 (B4): Worktree base in Settings › Tools › Drydock
 
 **Files:**
 - Create: `.../intellij/settings/DrydockConfigurable.java` (`applicationConfigurable parentId="tools" id="drydock" displayName="Drydock"`)
@@ -313,7 +313,7 @@ app (untouched UI except the change listener).
 - [ ] **Step 4: Run, expect PASS.** Then check by hand: set the base in runIde, `cat ~/.drydock/config.json` shows it, and the app's own Settings shows the same value.
 - [ ] **Step 5: Commit:** `The worktree base folder is set once, in Settings, for both Drydock tools`
 
-### Task B5: The New task dialog
+### Task 8 (B5): The New task dialog
 
 **Files:**
 - Create: `.../intellij/tasks/NewTaskPlan.java`, `.../intellij/tasks/NewTaskDialog.java`
@@ -359,7 +359,7 @@ app (untouched UI except the change listener).
 - [ ] **Step 4: Run, expect PASS.** Capturing the dialog waits for B6, which wires it up.
 - [ ] **Step 5: Commit:** `New task asks for a name and generates the branch, folder and window`
 
-### Task B6: Starting a task, and the old entry points go
+### Task 9 (B6): Starting a task, and the old entry points go
 
 **Files:**
 - Create: `.../intellij/tasks/TaskLauncher.java`, `.../intellij/tasks/NewTaskAction.java`
@@ -398,7 +398,7 @@ app (untouched UI except the change listener).
   - The Tools menu no longer has a Drydock entry.
 - [ ] **Step 5: Commit:** `Tasks start from the Drydock tool window, which replaces the Tools menu`
 
-### Task B7: Stop, and Stop & close window, from the tree
+### Task 10 (B7): Stop, and Stop & close window, from the tree
 
 **Files:**
 - Create: `.../intellij/tasks/TaskActions.java` (context-menu and toolbar actions on the selected `TaskRow`: Switch, Stop, Stop & Close Window, Resume, Done…, Show in Finder)
@@ -418,7 +418,7 @@ app (untouched UI except the change listener).
   - Stop an agent at its prompt: no question.
 - [ ] **Step 5: Commit:** `Any task can be stopped from the tree, and its window closed, with one warning when it is mid-task`
 
-### Task B8: Done from the tree, with loss warnings
+### Task 11 (B8): Done from the tree, with loss warnings
 
 **Files:**
 - Modify:
@@ -454,7 +454,7 @@ app (untouched UI except the change listener).
   - Done from another window: the target window closes first.
 - [ ] **Step 5: Commit:** `Done says exactly what removing a worktree would lose, and still lets you`
 
-### Task B9: Remove a project from Drydock
+### Task 12 (B9): Remove a project from Drydock
 
 **Files:**
 - Modify: `TaskActions.java` (project-row action `Remove from Drydock`)
@@ -464,7 +464,7 @@ app (untouched UI except the change listener).
 - [ ] **Step 4: Run tests; capture:** remove a project; it vanishes from both the IDE tree and the app sidebar (if the app is running); add it again, and its old tasks come back.
 - [ ] **Step 5: Commit:** `A project can be taken off the shared list without touching it`
 
-### Task B10: Status doc and full gate
+### Task 13 (B10): Status doc and full gate
 
 **Files:**
 - Modify: `docs/intellij-mvp-handoff/IMPLEMENTATION-STATUS.md`. Record what was built and how each piece was verified, along with what was not verified.
