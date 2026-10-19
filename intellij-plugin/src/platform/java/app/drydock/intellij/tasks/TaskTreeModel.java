@@ -110,7 +110,10 @@ public final class TaskTreeModel {
             if (!in.filter().isEmpty() && children.isEmpty() && !thisWindow) {
                 continue;
             }
-            nodes.add(new ProjectRow(project, in.missingFolders().contains(project.root()), thisWindow, children));
+            int running = (int) tasksByMain.getOrDefault(project.root(), List.of()).stream()
+                    .filter(TaskRow::running).count();
+            nodes.add(new ProjectRow(project, in.missingFolders().contains(project.root()), thisWindow, children,
+                    running));
         }
         return nodes;
     }

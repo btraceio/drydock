@@ -176,7 +176,7 @@ final class TaskActions {
                     return;
                 }
                 Project project = e.getProject();
-                int running = runningUnder(row);
+                int running = row.running();
                 if (running > 0 && Messages.showOkCancelDialog(project,
                         removeQuestion(row.project().displayName(), running), "Drydock", "Remove", "Cancel",
                         null) != Messages.OK) {
@@ -193,19 +193,6 @@ final class TaskActions {
                         });
             }
         };
-    }
-
-    /** The running agents under {@code row}, in groups too. Pure. */
-    static int runningUnder(ProjectRow row) {
-        int running = 0;
-        for (TaskNode child : row.children()) {
-            if (child instanceof TaskRow task && task.running()) {
-                running++;
-            } else if (child instanceof WorktreeGroup group) {
-                running += (int) group.tasks().stream().filter(TaskRow::running).count();
-            }
-        }
-        return running;
     }
 
     /** {@code Remove <repo> from Drydock? <n> agents keep running.} */

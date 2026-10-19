@@ -27,9 +27,13 @@ public sealed interface TaskNode {
         }
     }
 
-    /** A registered project and what is under it. */
-    record ProjectRow(SharedProject project, boolean folderMissing, boolean isThisWindow, List<TaskNode> children)
-            implements TaskNode {
+    /**
+     * A registered project and what is under it. {@code running} counts its
+     * running tasks before any search filter, for questions that must not
+     * depend on what the search box shows.
+     */
+    record ProjectRow(SharedProject project, boolean folderMissing, boolean isThisWindow, List<TaskNode> children,
+                      int running) implements TaskNode {
         public ProjectRow {
             Objects.requireNonNull(project, "project");
             children = List.copyOf(children);

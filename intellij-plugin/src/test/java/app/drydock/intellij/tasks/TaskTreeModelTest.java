@@ -225,6 +225,20 @@ class TaskTreeModelTest {
     }
 
     @Test
+    void aProjectCountsItsRunningTasksEvenWhenTheSearchHidesThem() {
+        In in = new In().project(BTRACE).current(BTRACE, BTRACE);
+        ManagedAgentSession hidden = session("Unrelated work", BTRACE.resolve("a"));
+        in.sessions.add(hidden);
+        in.running.add(hidden.id());
+        in.filter = "nothing matches this";
+
+        ProjectRow row = projectRow(TaskTreeModel.build(in.build()), BTRACE);
+
+        assertEquals(List.of(), row.children());
+        assertEquals(1, row.running(), "Remove's warning must not depend on the search box");
+    }
+
+    @Test
     void missingProjectFolderIsShownNotDropped() {
         In in = new In().project(ALPHA).project(BTRACE);
         in.missing.add(BTRACE);
