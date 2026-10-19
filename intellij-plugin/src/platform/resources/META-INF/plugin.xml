@@ -13,6 +13,7 @@
          rendering resolves the terminal plugin's colour scheme and font
          settings; the console renders wrong without it. -->
     <depends>org.jetbrains.plugins.terminal</depends>
+    <depends>Git4Idea</depends>
     <extensions defaultExtensionNs="com.intellij">
         <!-- A plain (not @State) application service: persistence goes through
              the core ApplicationStateStore single writer, so only the concrete
