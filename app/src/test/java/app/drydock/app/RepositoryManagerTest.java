@@ -490,6 +490,51 @@ class RepositoryManagerTest {
         assertEquals(List.of(first, second), manager.repositories());
     }
 
+    private ManagedAgentSession sessionIn(RepositoryId repositoryId, Path workingDirectory) {
+        return SessionManagerTest.newSessionFixture().toBuilder()
+                .repositoryId(repositoryId)
+                .workspace(new SessionWorkspace(workingDirectory, Optional.empty(), true))
+                .build();
+    }
+
+    private RepositoryId repositoryOf(ManagedAgentSession session) {
+        return ApplicationStateStore.forRepository(stateRepository).state().sessions().stream()
+                .filter(s -> s.id().equals(session.id())).findFirst().orElseThrow().repositoryId();
+    }
+
+    @Test
+    void seedingFoldsAWorktreeEntryAndItsSessionsFollowTheMainCheckout() throws Exception {
+        Path main = initGitRepoWithCommit("seed-main").toRealPath();
+        Path worktree = tempDir.resolve("seed-wt");
+        run(main, "git", "worktree", "add", "-q", "-b", "feature", worktree.toString());
+        Repository mainRepo = localRepository(main);
+        Repository worktreeRepo = localRepository(worktree.toRealPath());
+        ManagedAgentSession inWorktree = sessionIn(worktreeRepo.id(), worktree.toRealPath());
+        ApplicationStateStore.forRepository(stateRepository).update(state -> state
+                .withRepositories(List.of(mainRepo, worktreeRepo))
+                .withSessions(List.of(inWorktree)));
+
+        manager.start().join();
+
+        assertEquals(List.of(mainRepo.id()), sharedIds());
+        assertEquals(mainRepo.id(), repositoryOf(inWorktree), "the session must not be orphaned by the fold");
+    }
+
+    @Test
+    void aProjectReAddedByTheIdeBringsTheAppsSessionsBack() throws Exception {
+        Path repo = initGitRepo("re-added").toRealPath();
+        Repository added = manager.addRepository(repo).join();
+        ManagedAgentSession session = sessionIn(added.id(), repo);
+        ApplicationStateStore.forRepository(stateRepository).update(state -> state.withSessions(List.of(session)));
+        manager.removeRepository(added.id()).join();
+        SharedProject fromIde = SharedProject.local(RepositoryId.newId(), repo, "re-added", Instant.now());
+        new SharedProjectsFile(sharedFile.file()).update(list -> List.of(fromIde));
+
+        manager.reconcile();
+
+        assertEquals(fromIde.id(), repositoryOf(session));
+    }
+
     private static final class InMemoryStateRepository implements ApplicationStateRepository {
         // volatile: saves arrive on the state store's background writer thread.
         private volatile ApplicationState state = ApplicationState.empty();

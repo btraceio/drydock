@@ -23,11 +23,14 @@ import java.lang.System.Logger.Level;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -171,15 +174,73 @@ public final class RepositoryManager {
         }
         reconciledStamp = snapshot.stamp();
         List<SharedProject> members = snapshot.projects();
+        // Resolved here, outside the state lock: it runs git.
+        Map<ManagedSessionId, RepositoryId> adopted = orphansToAdopt(stateStore.state(), members);
         boolean[] changed = new boolean[1];
         stateStore.update(state -> {
-            ApplicationState next = withMembers(state, members);
-            changed[0] = !next.repositories().equals(state.repositories());
+            ApplicationState next = adopt(withMembers(state, members), adopted);
+            changed[0] = !next.repositories().equals(state.repositories())
+                    || !next.sessions().equals(state.sessions());
             return next;
         });
         if (changed[0]) {
             notifyChanged();
         }
+    }
+
+    /**
+     * Sessions whose repository is not on the shared list, mapped to the
+     * member their folder belongs to: the folder is that member's root, lies
+     * under it, or git names that root as its main checkout. Two ways a
+     * session ends up so: seeding folded the worktree entry it was recorded
+     * under into its main checkout, or the project was removed and then
+     * added again by the IntelliJ plugin, which cannot know this app's id
+     * and minted a new one. Sessions of a project not on the list stay
+     * where they are — hidden, until it is added again. Blocking (git).
+     */
+    private Map<ManagedSessionId, RepositoryId> orphansToAdopt(ApplicationState state,
+                                                                List<SharedProject> members) {
+        Set<RepositoryId> memberIds = new HashSet<>();
+        Map<Path, RepositoryId> byRoot = new LinkedHashMap<>();
+        for (SharedProject member : members) {
+            memberIds.add(member.id());
+            if (!member.isRemote()) {
+                byRoot.put(RepositoryCatalog.canonicalize(member.root()), member.id());
+            }
+        }
+        Map<ManagedSessionId, RepositoryId> adopted = new HashMap<>();
+        for (ManagedAgentSession session : state.sessions()) {
+            if (memberIds.contains(session.repositoryId())) {
+                continue;
+            }
+            Path directory = RepositoryCatalog.canonicalize(session.workingDirectory());
+            RepositoryId target = byRoot.entrySet().stream()
+                    .filter(entry -> directory.startsWith(entry.getKey()))
+                    .map(Map.Entry::getValue)
+                    .findFirst()
+                    .orElse(null);
+            if (target == null) {
+                target = mainCheckoutOf.apply(session.workingDirectory())
+                        .map(RepositoryCatalog::canonicalize)
+                        .map(byRoot::get)
+                        .orElse(null);
+            }
+            if (target != null) {
+                adopted.put(session.id(), target);
+            }
+        }
+        return adopted;
+    }
+
+    private static ApplicationState adopt(ApplicationState state, Map<ManagedSessionId, RepositoryId> adopted) {
+        if (adopted.isEmpty()) {
+            return state;
+        }
+        return state.withSessions(state.sessions().stream()
+                .map(session -> adopted.containsKey(session.id())
+                        ? session.toBuilder().repositoryId(adopted.get(session.id())).build()
+                        : session)
+                .toList());
     }
 
     /** This app's own list in shared form: the seed whenever the shared file is missing. */
