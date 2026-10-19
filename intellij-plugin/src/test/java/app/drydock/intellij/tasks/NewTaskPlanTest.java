@@ -162,4 +162,21 @@ class NewTaskPlanTest {
         assertEquals("Start task", NewTaskPlan.primaryLabel(false));
         assertEquals("Start anyway", NewTaskPlan.primaryLabel(true));
     }
+
+    @Test
+    void refusesWhenNoAgentIsAvailable() {
+        Choice noAgent = new Choice("T", Optional.empty(), null, SessionMode.WRITES, WorkIn.NEW_WORKTREE, "x",
+                "origin/main", Path.of("/b/x"), OpenIn.NEW_WINDOW);
+
+        assertEquals(Optional.of("No agent is installed. Install Claude, Codex or pi to start a task."),
+                NewTaskPlan.refusal(inputs(Optional.empty(), false), noAgent, folder -> false));
+    }
+
+    @Test
+    void refusesARelativeFolder() {
+        Choice relative = choice("T", Optional.empty(), SessionMode.WRITES, WorkIn.NEW_WORKTREE, "x", Path.of("."));
+
+        assertEquals(Optional.of("Choose a full folder path for the worktree."),
+                NewTaskPlan.refusal(inputs(Optional.empty(), false), relative, folder -> false));
+    }
 }

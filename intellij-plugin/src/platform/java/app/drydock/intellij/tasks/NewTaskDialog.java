@@ -2,6 +2,7 @@ package app.drydock.intellij.tasks;
 
 import app.drydock.agent.api.Agent;
 import app.drydock.agent.api.AgentKind;
+import app.drydock.config.UserConfig;
 import app.drydock.domain.SessionMode;
 import app.drydock.intellij.settings.DrydockConfigurable;
 import app.drydock.intellij.tasks.NewTaskPlan.Choice;
@@ -9,6 +10,8 @@ import app.drydock.intellij.tasks.NewTaskPlan.OpenIn;
 import app.drydock.intellij.tasks.NewTaskPlan.WorkIn;
 
 import com.intellij.icons.AllIcons;
+import com.intellij.openapi.application.ApplicationManager;
+import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory;
 import com.intellij.openapi.options.ShowSettingsUtil;
 import com.intellij.openapi.project.Project;
@@ -87,6 +90,10 @@ final class NewTaskDialog extends DialogWrapper {
     private final JBRadioButton newWindow = new JBRadioButton("New window", true);
     private final JBRadioButton thisWindow = new JBRadioButton("This window");
     private final JBLabel warning = new JBLabel();
+    private final JBLabel base = new JBLabel();
+
+    /** Where generated folders go; starts as the inputs' and follows "Change base…". */
+    private Path worktreeBase;
 
     /** True once the user edits the branch or the folder; then the name stops rewriting it. */
     private boolean branchEdited;
@@ -103,6 +110,7 @@ final class NewTaskDialog extends DialogWrapper {
         this.project = project;
         this.inputs = inputs;
         this.refChooser = refChooser;
+        this.worktreeBase = inputs.worktreeBase();
         setTitle("New task in " + inputs.repoName());
         init();
         regenerate();
@@ -232,11 +240,21 @@ final class NewTaskDialog extends DialogWrapper {
             }
         });
 
-        JBLabel base = new JBLabel("Base " + inputs.worktreeBase() + " from Settings › Tools › Drydock");
+        base.setText("Base " + worktreeBase + " from Settings › Tools › Drydock");
         base.setForeground(UIUtil.getContextHelpForeground());
         HyperlinkLabel changeBase = new HyperlinkLabel("Change base…");
-        changeBase.addHyperlinkListener(e ->
-                ShowSettingsUtil.getInstance().showSettingsDialog(project, DrydockConfigurable.class));
+        changeBase.addHyperlinkListener(e -> {
+            ShowSettingsUtil.getInstance().showSettingsDialog(project, DrydockConfigurable.class);
+            // The folder follows the base the user just set, not the one the
+            // dialog opened with.
+            UserConfig.loadAsync().thenAccept(config -> ApplicationManager.getApplication().invokeLater(() -> {
+                worktreeBase = DrydockConfigurable.effectiveBase(config.worktreesDirectory(),
+                        Path.of(System.getProperty("user.home")));
+                base.setText("Base " + worktreeBase + " from Settings › Tools › Drydock");
+                regenerate();
+                refresh();
+            }, ModalityState.any()));
+        });
         JPanel baseRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
         baseRow.add(base);
         baseRow.add(Box.createHorizontalStrut(JBUI.scale(6)));
@@ -261,7 +279,7 @@ final class NewTaskDialog extends DialogWrapper {
                 branch.setText(NewTaskPlan.branchFor(name.getText(), inputs.takenBranches()));
             }
             if (!folderEdited) {
-                folder.setText(NewTaskPlan.folderFor(inputs.worktreeBase(), inputs.repoName(),
+                folder.setText(NewTaskPlan.folderFor(worktreeBase, inputs.repoName(),
                         branch.getText().strip()).toString());
             }
         } finally {

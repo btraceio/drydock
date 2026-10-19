@@ -121,6 +121,11 @@ public final class NewTaskPlan {
         if (choice.name().isBlank()) {
             return Optional.of("Give the task a name.");
         }
+        if (choice.agent() == null) {
+            // Checked here, not after: the launch would otherwise create the
+            // worktree and the window before failing.
+            return Optional.of("No agent is installed. Install Claude, Codex or pi to start a task.");
+        }
         if (choice.workIn() != WorkIn.NEW_WORKTREE) {
             return Optional.empty();
         }
@@ -131,6 +136,9 @@ public final class NewTaskPlan {
         Optional<BranchNameRules.Refusal> invalid = BranchNameRules.check(branch, in.remoteNames());
         if (invalid.isPresent()) {
             return Optional.of(BranchNameRules.humanSentence(invalid.get()));
+        }
+        if (!choice.folder().isAbsolute()) {
+            return Optional.of("Choose a full folder path for the worktree.");
         }
         if (in.takenBranches().contains(branch)) {
             return Optional.of("A branch named " + branch + " already exists. Choose another name.");
