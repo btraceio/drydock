@@ -26,14 +26,21 @@ import com.intellij.util.ui.UIUtil;
 import org.jetbrains.annotations.NotNull;
 
 import javax.swing.JComponent;
+import javax.swing.JLayer;
 import javax.swing.JPanel;
 import javax.swing.SwingConstants;
 import javax.swing.SwingUtilities;
 import javax.swing.Timer;
+import javax.swing.plaf.LayerUI;
 
+import java.awt.AWTEvent;
+import java.awt.AlphaComposite;
 import java.awt.BorderLayout;
+import java.awt.Graphics;
+import java.awt.Graphics2D;
 import java.awt.Window;
 import java.awt.event.HierarchyEvent;
+import java.awt.event.InputEvent;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.awt.event.WindowFocusListener;
@@ -312,18 +319,87 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
                 current.agentSessionId().isPresent(), resumeTokens,
                 DumbService.isDumb(project));
 
-        if (execution.isPresent()) {
+        String stoppedLine = AgentStripText.stoppedFooter(
+                AgentStripText.displayStatus(current.status(), false),
+                Optional.of(current.lastOpenedAt()), Instant.now());
+        if (execution.isPresent() && running) {
             showBody(execution.get().console().getComponent());
+        } else if (execution.isPresent()) {
+            // Stopped in this window: the transcript is still here to read,
+            // dimmed so it cannot be mistaken for a live agent.
+            showBody(stoppedView(execution.get(), stoppedLine));
         } else {
-            placeholder.setText(AgentStripText.stoppedFooter(
-                    AgentStripText.displayStatus(current.status(), false),
-                    Optional.of(current.lastOpenedAt()), Instant.now()));
+            placeholder.setText(stoppedLine);
             showBody(placeholder);
         }
         // The tab's dot comes from a FileIconProvider, which the platform only
         // re-reads when asked; a status change has to say so or the dot stays
         // at whatever it was when the tab opened.
         FileEditorManagerEx.getInstanceEx(project).refreshIcons();
+    }
+
+    /** The execution {@link #stoppedPanel} was built around. */
+    private AgentExecution stoppedExecution;
+    private JPanel stoppedPanel;
+    private final JBLabel stoppedFooter = new JBLabel("", SwingConstants.CENTER);
+
+    /**
+     * The handoff's Not-running body for an agent that stopped in this
+     * window: its last transcript at 50 %, with the footer line under it.
+     *
+     * <p>Before, the dead terminal stayed on screen exactly as it was — its
+     * prompt line and all — with nothing saying the agent was gone; only the
+     * strip did, and the keyboard was still in the terminal. The dimming
+     * layer also swallows keys and clicks, so nothing typed into a dead
+     * agent looks as if it went somewhere.</p>
+     */
+    private JComponent stoppedView(AgentExecution execution, String footer) {
+        if (stoppedExecution != execution) {
+            JLayer<JComponent> dimmed = new JLayer<>(execution.console().getComponent(), new DimmedLayer());
+            stoppedPanel = new JPanel(new BorderLayout());
+            stoppedPanel.add(dimmed, BorderLayout.CENTER);
+            stoppedFooter.setForeground(UIUtil.getContextHelpForeground());
+            stoppedFooter.setBorder(JBUI.Borders.empty(8));
+            stoppedPanel.add(stoppedFooter, BorderLayout.SOUTH);
+            stoppedExecution = execution;
+        }
+        stoppedFooter.setText(footer);
+        return stoppedPanel;
+    }
+
+    /** Paints its view at half strength and lets no input through to it. */
+    private static final class DimmedLayer extends LayerUI<JComponent> {
+        @Override
+        public void paint(Graphics graphics, JComponent component) {
+            super.paint(graphics, component);
+            Graphics2D g = (Graphics2D) graphics.create();
+            try {
+                g.setComposite(AlphaComposite.SrcOver.derive(0.5f));
+                g.setColor(component.getBackground() != null ? component.getBackground() : UIUtil.getPanelBackground());
+                g.fillRect(0, 0, component.getWidth(), component.getHeight());
+            } finally {
+                g.dispose();
+            }
+        }
+
+        @Override
+        public void installUI(JComponent component) {
+            super.installUI(component);
+            ((JLayer<?>) component).setLayerEventMask(AWTEvent.KEY_EVENT_MASK | AWTEvent.MOUSE_EVENT_MASK);
+        }
+
+        @Override
+        public void uninstallUI(JComponent component) {
+            ((JLayer<?>) component).setLayerEventMask(0);
+            super.uninstallUI(component);
+        }
+
+        @Override
+        public void eventDispatched(AWTEvent event, JLayer<? extends JComponent> layer) {
+            if (event instanceof InputEvent input) {
+                input.consume();
+            }
+        }
     }
 
     /**
@@ -378,9 +454,12 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
         // With no execution there is nothing to type into, so focus goes to
         // Resume — the only thing the tab can do — rather than to the
         // unfocusable placeholder label.
-        return AgentExecutionService.getInstance(project).execution(file.sessionId())
-                .<JComponent>map(execution -> execution.console().getPreferredFocusableComponent())
-                .orElseGet(strip::primaryButton);
+        // A stopped execution is the same case: its terminal is dimmed and
+        // takes no input.
+        AgentExecutionService executions = AgentExecutionService.getInstance(project);
+        return executions.isRunning(file.sessionId())
+                ? executions.execution(file.sessionId()).orElseThrow().console().getPreferredFocusableComponent()
+                : strip.primaryButton();
     }
 
     @Override
