@@ -216,6 +216,21 @@ public final class DrydockApplication extends Application {
      * code runs from and never shared with, or read from, another instance's
      * directory ({@code StateDirectory}).
      */
+    /**
+     * The shared projects list this run follows. A diagnostic run
+     * ({@code app.drydock.diag.stateFile}) keeps it beside its throwaway
+     * state unless {@code drydock.projectsFile} says otherwise: seeding,
+     * adding or removing in such a run must never reach the user's real
+     * list, which their real app and IDE follow.
+     */
+    static Path sharedProjectsFileFor(Optional<String> diagStateFile, Optional<String> explicitFile,
+                                      Path defaultFile) {
+        if (explicitFile.isPresent()) {
+            return Path.of(explicitFile.get());
+        }
+        return diagStateFile.map(state -> Path.of(state).resolveSibling("projects.json")).orElse(defaultFile);
+    }
+
     private static JsonApplicationStateRepository resolveStateRepository() {
         String diagStateFile = System.getProperty("app.drydock.diag.stateFile");
         if (diagStateFile != null) {
@@ -310,7 +325,10 @@ public final class DrydockApplication extends Application {
         AgentContext agentContext = new AgentContext(stateDir, activityDir, agentContextExecutor);
         agentRegistry = AgentRegistry.create(agentContext);
         repositoryManager = new RepositoryManager(stateRepository, gitStatusService,
-                new SharedProjectsFile(SharedProjectsFile.defaultFile()),
+                new SharedProjectsFile(sharedProjectsFileFor(
+                        Optional.ofNullable(System.getProperty("app.drydock.diag.stateFile")),
+                        Optional.ofNullable(System.getProperty(SharedProjectsFile.OVERRIDE_PROPERTY)),
+                        SharedProjectsFile.defaultFile())),
                 SharedProjectsSeed.mainCheckoutVia(worktreeService));
         // Seeds the shared projects list on first run and follows the
         // IntelliJ plugin's changes to it; off the FX thread.
