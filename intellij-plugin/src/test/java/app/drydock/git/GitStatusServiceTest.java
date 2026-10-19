@@ -156,6 +156,24 @@ class GitStatusServiceTest {
      * is not the branch name and never matches a pr-<n> alias or a PR's head.
      */
     @Test
+    void isAncestorTrueFalseAndBadRef(@TempDir Path repo) throws Exception {
+        initRepo(repo, "main");
+        writeFile(repo, "README.md", "hello\n");
+        runGit(repo, "add", "README.md");
+        commit(repo, "initial commit");
+        runGit(repo, "checkout", "-b", "feature");
+        writeFile(repo, "B.md", "more\n");
+        runGit(repo, "add", "B.md");
+        commit(repo, "feature work");
+
+        assertTrue(service.isAncestor(repo, "main", "feature").get(), "main is contained in feature");
+        assertFalse(service.isAncestor(repo, "feature", "main").get(), "feature's commit is not on main");
+        ExecutionException failure = assertThrows(ExecutionException.class,
+                () -> service.isAncestor(repo, "no-such-ref", "main").get());
+        assertInstanceOf(GitCommandFailedException.class, failure.getCause());
+    }
+
+    @Test
     void currentBranchIsTheBranchNameEvenWhenATagSharesIt(@TempDir Path repo) throws Exception {
         initRepo(repo, "main");
         writeFile(repo, "README.md", "hello\n");

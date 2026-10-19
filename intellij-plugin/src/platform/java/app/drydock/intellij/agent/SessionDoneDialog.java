@@ -1,9 +1,12 @@
 package app.drydock.intellij.agent;
 
 import app.drydock.intellij.agent.SessionDonePlan.Choice;
+import app.drydock.intellij.agent.SessionDonePlan.Risks;
 
+import com.intellij.icons.AllIcons;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.DialogWrapper;
+import com.intellij.ui.components.JBCheckBox;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBRadioButton;
 import com.intellij.util.ui.JBUI;
@@ -22,34 +25,29 @@ import java.awt.Dimension;
 import java.util.Optional;
 
 /**
- * "Done with this session…": forget the row, or forget it and remove the
- * worktree with this window.
- *
- * <p>Structure and copy follow the UX handoff; the copy and the rules for
- * when removal is offered are {@link SessionDonePlan}'s. Removal that cannot
- * be offered stays visible but disabled, with the reason as its secondary
- * line — an option that silently vanishes leaves the user hunting for it.</p>
+ * "Done with this task": forget it, or forget it and remove its worktree.
+ * When removing would lose work, the dialog says exactly what — uncommitted
+ * and untracked files, commits not merged — and the button becomes
+ * {@code Remove anyway}: a warning, never a wall.
  */
 final class SessionDoneDialog extends DialogWrapper {
 
-    /** Wide enough for the longest secondary line on one row at default font size. */
     private static final int WIDTH = 460;
 
-    /** Everything resolved off the EDT before the dialog is built. */
-    record Inputs(int uncommittedFiles, Optional<String> removalBlocker) {
+    /** Resolved off the EDT before the dialog opens. {@code branch} is the worktree's, when it has one. */
+    record Inputs(Risks risks, Optional<String> removalBlocker, boolean windowOpen, Optional<String> branch) {
     }
 
     private final Inputs inputs;
-    private final JBRadioButton forget = new JBRadioButton("Forget session only");
+    private final JBRadioButton forget = new JBRadioButton("Forget task only");
     private final JBRadioButton remove = new JBRadioButton("Forget + remove worktree");
+    private final JBLabel risk = new JBLabel();
+    private final JBCheckBox deleteBranch = new JBCheckBox();
 
     SessionDoneDialog(Project project, Inputs inputs) {
         super(project, true);
         this.inputs = inputs;
-        // The handoff's own words, not the session's title: a title long
-        // enough to be useful truncated the window title mid-word, and the
-        // session is the tab the user just clicked in.
-        setTitle("Done with this session");
+        setTitle("Done with this task");
         init();
         refresh();
     }
@@ -74,7 +72,23 @@ final class SessionDoneDialog extends DialogWrapper {
         root.add(option(forget, SessionDonePlan.forgetDetail()));
         root.add(Box.createVerticalStrut(JBUI.scale(10)));
         root.add(option(remove, inputs.removalBlocker()
-                .orElseGet(() -> SessionDonePlan.removeDetail(inputs.uncommittedFiles()))));
+                .orElseGet(() -> SessionDonePlan.removeDetail(inputs.windowOpen()))));
+
+        SessionDonePlan.riskLine(inputs.risks()).ifPresent(line -> {
+            risk.setText("Removing loses " + line + ".");
+            risk.setIcon(AllIcons.General.Warning);
+            risk.setAlignmentX(Component.LEFT_ALIGNMENT);
+            risk.setBorder(JBUI.Borders.emptyTop(8));
+            root.add(risk);
+        });
+        inputs.branch().ifPresent(name -> {
+            deleteBranch.setText("Also delete branch " + name);
+            deleteBranch.setSelected(SessionDonePlan.deleteBranchDefault(inputs.risks()));
+            deleteBranch.setAlignmentX(Component.LEFT_ALIGNMENT);
+            deleteBranch.setBorder(JBUI.Borders.emptyTop(8));
+            root.add(deleteBranch);
+        });
+
         root.add(Box.createVerticalStrut(JBUI.scale(16)));
         root.add(hint(SessionDonePlan.footer(), 0));
 
@@ -83,19 +97,26 @@ final class SessionDoneDialog extends DialogWrapper {
         return root;
     }
 
-    /** Forget is the safe default, so focus starts on it, not on the primary button. */
     @Override
     public @Nullable JComponent getPreferredFocusedComponent() {
         return forget;
     }
 
     private void refresh() {
-        setOKButtonText(SessionDonePlan.primaryLabel(choice()));
+        boolean removing = remove.isSelected();
+        risk.setEnabled(removing);
+        deleteBranch.setEnabled(removing);
+        setOKButtonText(SessionDonePlan.primaryLabel(choice(),
+                removing && SessionDonePlan.needsConfirmation(inputs.risks())));
     }
 
-    /** The choice, valid only after the dialog was closed with OK. */
     Choice choice() {
         return remove.isSelected() ? Choice.FORGET_AND_REMOVE : Choice.FORGET;
+    }
+
+    /** Whether the branch goes with the worktree; only meaningful when removing. */
+    boolean deleteBranch() {
+        return remove.isSelected() && inputs.branch().isPresent() && deleteBranch.isSelected();
     }
 
     private static JComponent option(JBRadioButton button, String detail) {

@@ -782,6 +782,35 @@ public final class GitStatusService implements AutoCloseable {
     }
 
     /**
+     * Whether {@code commit} is contained in {@code of}: {@code git merge-base
+     * --is-ancestor}. Exit 1 is a plain "no"; any other failure (an unknown
+     * ref) is a {@link GitCommandFailedException}, never a silent false —
+     * "not merged" decides whether a removal warns.
+     */
+    public CompletableFuture<Boolean> isAncestor(Path repository, String commit, String of) {
+        try {
+            return CompletableFuture.supplyAsync(() -> isAncestorBlocking(repository, commit, of), executor);
+        } catch (RejectedExecutionException e) {
+            return CompletableFuture.failedFuture(e);
+        }
+    }
+
+    boolean isAncestorBlocking(Path repository, String commit, String of) {
+        Path git = locator.locate()
+                .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
+        List<String> command = List.of(git.toString(), "-C", repository.toString(),
+                "merge-base", "--is-ancestor", "--end-of-options", commit, of);
+        ProcessResult result = run(command);
+        if (result.exitCode() == 0) {
+            return true;
+        }
+        if (result.exitCode() == 1 && result.stderr().isBlank()) {
+            return false;
+        }
+        throw new GitCommandFailedException(command, result.exitCode(), ProcessRunner.excerpt(result.stderr()));
+    }
+
+    /**
      * The branch {@code workingDirectory} has checked out, on this service's
      * background executor; empty for a detached HEAD.
      *

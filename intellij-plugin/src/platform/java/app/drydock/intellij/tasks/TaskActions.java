@@ -5,6 +5,7 @@ import app.drydock.domain.SessionStatus;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.agent.AgentConsoles;
 import app.drydock.intellij.agent.AgentExecutionService;
+import app.drydock.intellij.agent.SessionDone;
 import app.drydock.intellij.agent.StopAgentsDialog;
 import app.drydock.intellij.agent.StopAgentsPlan;
 import app.drydock.intellij.startup.DrydockStartupActivity;
@@ -58,7 +59,9 @@ final class TaskActions {
                         TaskRow::running, (project, row) -> stop(project, row, true)),
                 task("Resume", "Open the task and resume its conversation", AllIcons.Actions.Execute,
                         row -> !row.running(), (project, row) -> TaskNavigator.switchTo(row.session(),
-                                target -> AgentConsoles.resume(target, row.session().id()))));
+                                target -> AgentConsoles.resume(target, row.session().id()))),
+                task("Done with This Task…", "Forget the task, and optionally remove its worktree",
+                        AllIcons.Actions.Checked, row -> true, TaskActions::done));
     }
 
     private interface RowAction {
@@ -118,6 +121,30 @@ final class TaskActions {
                 }
             });
         }
+    }
+
+    /**
+     * "Done with this task…" from the tree. A running agent is stopped first
+     * — asking, as Stop does, when it is mid-task — so the dialog's check of
+     * the worktree sees what the agent left, not what it is still writing.
+     */
+    static void done(Project from, TaskRow row) {
+        Optional<Project> owner = owner(row.session().id());
+        if (owner.isEmpty()) {
+            SessionDone.show(from, row.session());
+            return;
+        }
+        if (StopAgentsPlan.isWorking(row.activity())) {
+            String agent = AgentLabels.displayName(DrydockPluginService.getInstance().registry(),
+                    row.session().agentKind());
+            if (!StopAgentsDialog.confirmTreeStop(from,
+                    SessionDots.dotIcon(SessionStatus.RUNNING, row.activity()),
+                    StopAgentsPlan.row(row.session().displayName(), agent, Optional.empty()), false)) {
+                return;
+            }
+        }
+        DrydockStartupActivity.sessions(owner.get()).stopSession(row.session().id());
+        whenStopped(owner.get(), row.session().id(), () -> SessionDone.show(from, row.session()));
     }
 
     /** The open window running {@code id}. In-memory, EDT-safe. */

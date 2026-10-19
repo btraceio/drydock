@@ -1,5 +1,7 @@
 package app.drydock.intellij.agent;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -24,58 +26,73 @@ public final class SessionDonePlan {
     }
 
     /**
-     * Why the worktree cannot be removed from here, if it cannot.
-     *
-     * @param mainCheckout       the session runs in the repository's main checkout,
-     *                           which is never removable
-     * @param linkedWorktree     the session's directory is one of the repository's
-     *                           linked worktrees
-     * @param otherSessions      how many other sessions are recorded in the same
-     *                           directory; removing it would strand them
-     * @param isThisWindow       the worktree is this window's own project directory,
-     *                           which is what "Closes this window" promises
+     * What removing the worktree would lose: uncommitted and untracked
+     * files, and commits not on the default branch. {@code merged} is true
+     * when the branch is merged by ancestry or its PR is recorded as merged
+     * (a squash or rebase merge leaves commits "ahead" that are merged all
+     * the same); then {@code unmergedCommits} does not count.
      */
-    public static Optional<String> removalBlocker(boolean mainCheckout, boolean linkedWorktree, int otherSessions,
-                                                  boolean isThisWindow) {
+    public record Risks(int uncommitted, int untracked, int unmergedCommits, boolean merged) {
+    }
+
+    /**
+     * Why "Forget + remove worktree" is unavailable, if it is: the main
+     * checkout, a directory that is not a linked worktree, or other tasks
+     * still using it (named, so the user knows which to forget).
+     */
+    public static Optional<String> removalBlocker(boolean mainCheckout, boolean linkedWorktree,
+                                                  List<String> otherTasks) {
         if (mainCheckout) {
-            return Optional.of("This session runs in the repository's main checkout, which is never removed.");
+            return Optional.of("This task runs in the repository's main checkout, which is never removed.");
         }
         if (!linkedWorktree) {
-            return Optional.of("This session's directory is not one of the repository's worktrees.");
+            return Optional.of("This task's directory is not one of the repository's worktrees.");
         }
-        if (otherSessions > 0) {
-            return Optional.of(otherSessions == 1
-                    ? "Another session uses this worktree; forget it first."
-                    : otherSessions + " other sessions use this worktree; forget them first.");
-        }
-        if (!isThisWindow) {
-            return Optional.of("This worktree is not this window's; remove it from its own window.");
+        if (!otherTasks.isEmpty()) {
+            return Optional.of("Also used by: " + String.join(", ", otherTasks) + ". Forget "
+                    + (otherTasks.size() == 1 ? "it" : "them") + " first.");
         }
         return Optional.empty();
     }
 
-    /** The first option's secondary line. */
+    /** Under "Forget task only". */
     public static String forgetDetail() {
-        return "Removes the row. Worktree and branch stay.";
+        return "Removes the task from Drydock. Worktree and branch stay.";
     }
 
-    /**
-     * The second option's secondary line. The data-loss clause appears only
-     * when there is something to lose: a warning shown on a clean tree trains
-     * the user to skip the one shown on a dirty one.
-     *
-     * <p>"The branch stays" is said outright because it is the opposite of
-     * what a worktree removal often implies, and the branch is where any
-     * committed work lives.</p>
-     */
-    public static String removeDetail(int uncommittedFiles) {
-        String detail = "Closes this window. The branch stays.";
-        if (uncommittedFiles <= 0) {
-            return detail;
+    /** Under "Forget + remove worktree". */
+    public static String removeDetail(boolean windowOpen) {
+        return "Removes the worktree folder" + (windowOpen ? " and closes its window" : "")
+                + ". The branch stays unless you tick below.";
+    }
+
+    /** {@code 3 uncommitted files, 1 untracked file, 2 commits not merged}; empty when nothing would be lost. */
+    public static Optional<String> riskLine(Risks risks) {
+        List<String> parts = new ArrayList<>();
+        if (risks.uncommitted() > 0) {
+            parts.add(count(risks.uncommitted(), "uncommitted file"));
         }
-        return detail + " " + uncommittedFiles
-                + (uncommittedFiles == 1 ? " uncommitted file" : " uncommitted files")
-                + " will be discarded.";
+        if (risks.untracked() > 0) {
+            parts.add(count(risks.untracked(), "untracked file"));
+        }
+        if (!risks.merged() && risks.unmergedCommits() > 0) {
+            parts.add(count(risks.unmergedCommits(), "commit") + " not merged");
+        }
+        return parts.isEmpty() ? Optional.empty() : Optional.of(String.join(", ", parts));
+    }
+
+    /** Whether removing asks first: anything in {@link #riskLine}. */
+    public static boolean needsConfirmation(Risks risks) {
+        return riskLine(risks).isPresent();
+    }
+
+    /** "Also delete branch" starts ticked only for a merged branch; it can always be ticked. */
+    public static boolean deleteBranchDefault(Risks risks) {
+        return risks.merged();
+    }
+
+    private static String count(int n, String noun) {
+        return n + " " + noun + (n == 1 ? "" : "s");
     }
 
     /** The footer, true of both choices. */
@@ -84,7 +101,10 @@ public final class SessionDonePlan {
     }
 
     /** The primary button names the choice it performs. */
-    public static String primaryLabel(Choice choice) {
-        return choice == Choice.FORGET_AND_REMOVE ? "Forget & Remove" : "Forget";
+    public static String primaryLabel(Choice choice, boolean risky) {
+        if (choice != Choice.FORGET_AND_REMOVE) {
+            return "Forget";
+        }
+        return risky ? "Remove anyway" : "Forget & Remove";
     }
 }
