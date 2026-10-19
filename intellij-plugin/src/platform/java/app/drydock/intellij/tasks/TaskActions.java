@@ -57,8 +57,24 @@ final class TaskActions {
     private TaskActions() {
     }
 
-    /** The task actions for the tree's context menu. */
-    static List<AnAction> contextActions() {
+    /** How an action shows: in a context menu only when it applies; in the toolbar always, greyed when it does not. */
+    record Shown(boolean visible, boolean enabled) {
+    }
+
+    /** Pure: toolbar buttons stay in place so they do not jump around as the selection changes. */
+    static Shown shown(boolean fromContextMenu, boolean applicable) {
+        return new Shown(applicable || !fromContextMenu, applicable);
+    }
+
+    /** Applies {@link #shown} to {@code e}'s presentation. */
+    static void present(AnActionEvent e, boolean applicable) {
+        Shown shown = shown(e.isFromContextMenu(), applicable);
+        e.getPresentation().setVisible(shown.visible());
+        e.getPresentation().setEnabled(shown.enabled());
+    }
+
+    /** The task and project actions, for the tree's context menu and the tool window's toolbar. */
+    static List<AnAction> taskActions() {
         return List.of(
                 task("Stop", "Stop this task's agent", AllIcons.Actions.Suspend, TaskRow::running,
                         (project, row) -> stop(project, row, false)),
@@ -81,10 +97,7 @@ final class TaskActions {
         return new DumbAwareAction(text, description, icon) {
             @Override
             public void update(@NotNull AnActionEvent e) {
-                boolean visible = e.getData(TaskTreePanel.SELECTED_NODE) instanceof TaskRow;
-                e.getPresentation().setVisible(visible);
-                e.getPresentation().setEnabled(visible
-                        && e.getData(TaskTreePanel.SELECTED_NODE) instanceof TaskRow row && enabled.test(row));
+                present(e, e.getData(TaskTreePanel.SELECTED_NODE) instanceof TaskRow row && enabled.test(row));
             }
 
             @Override
@@ -166,7 +179,7 @@ final class TaskActions {
                 + "changes", AllIcons.General.Remove) {
             @Override
             public void update(@NotNull AnActionEvent e) {
-                e.getPresentation().setEnabledAndVisible(e.getData(TaskTreePanel.SELECTED_NODE) instanceof ProjectRow);
+                present(e, e.getData(TaskTreePanel.SELECTED_NODE) instanceof ProjectRow);
             }
 
             @Override

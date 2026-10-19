@@ -95,35 +95,19 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         super(true, true);
         this.project = project;
 
-        DefaultActionGroup toolbarActions = new DefaultActionGroup();
-        AnAction newTask = ActionManager.getInstance().getAction("Drydock.NewTask");
-        if (newTask != null) {
-            toolbarActions.add(newTask);
-        }
-        toolbarActions.add(new DumbAwareAction("Refresh", "Re-read projects and worktrees", AllIcons.Actions.Refresh) {
-            @Override
-            public void actionPerformed(@NotNull AnActionEvent e) {
-                requestRebuild(true);
-            }
-        });
-        ActionToolbar toolbar = ActionManager.getInstance().createActionToolbar("Drydock.TaskTree", toolbarActions, true);
-        toolbar.setTargetComponent(this);
-
-        JPanel top = new JPanel(new BorderLayout());
-        top.add(toolbar.getComponent(), BorderLayout.NORTH);
-        top.add(search, BorderLayout.SOUTH);
-        setToolbar(top);
-
         tree.setRootVisible(false);
         tree.setShowsRootHandles(true);
         tree.setCellRenderer(new TaskTreeRenderer());
+        // The first read runs git once per project; a blank "Nothing to show"
+        // meanwhile looked like a broken window.
+        tree.getEmptyText().setText("Loading Drydock projects…");
         setContent(ScrollPaneFactory.createScrollPane(tree));
 
-        contextActions.add(new DumbAwareAction("Switch to Task", "Raise the task's window and select its agent",
+        AnAction switchToTask = new DumbAwareAction("Switch to Task", "Raise the task's window and select its agent",
                 AllIcons.Actions.Forward) {
             @Override
             public void update(@NotNull AnActionEvent e) {
-                e.getPresentation().setEnabledAndVisible(e.getData(SELECTED_NODE) instanceof TaskRow);
+                TaskActions.present(e, e.getData(SELECTED_NODE) instanceof TaskRow);
             }
 
             @Override
@@ -137,7 +121,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                     TaskNavigator.switchTo(task.session());
                 }
             }
-        });
+        };
+        contextActions.add(switchToTask);
         AnAction newTaskAction = ActionManager.getInstance().getAction("Drydock.NewTask");
         if (newTaskAction != null) {
             contextActions.add(newTaskAction);
@@ -147,8 +132,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             @Override
             public void update(@NotNull AnActionEvent e) {
                 Path root = e.getData(SELECTED_PROJECT_ROOT);
-                e.getPresentation().setEnabledAndVisible(root != null
-                        && worktreeOf(e.getData(SELECTED_NODE), root).isPresent());
+                TaskActions.present(e, root != null && worktreeOf(e.getData(SELECTED_NODE), root).isPresent());
             }
 
             @Override
@@ -163,8 +147,33 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                         TaskLauncher.open(project, Optional.ofNullable(root), Optional.of(fixed)));
             }
         });
-        contextActions.addAll(TaskActions.contextActions());
+        contextActions.addAll(TaskActions.taskActions());
         PopupHandler.installPopupMenu(tree, contextActions, "Drydock.TaskTree.Popup");
+
+        // The tool window's own buttons: start a task, then what can be done
+        // to the selected task or project. They stay in place, greyed when
+        // they do not apply (see TaskActions.shown).
+        DefaultActionGroup toolbarActions = new DefaultActionGroup();
+        if (newTaskAction != null) {
+            toolbarActions.add(newTaskAction);
+        }
+        toolbarActions.add(switchToTask);
+        toolbarActions.addSeparator();
+        toolbarActions.addAll(TaskActions.taskActions());
+        toolbarActions.addSeparator();
+        toolbarActions.add(new DumbAwareAction("Refresh", "Re-read projects and worktrees", AllIcons.Actions.Refresh) {
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                requestRebuild(true);
+            }
+        });
+        ActionToolbar toolbar = ActionManager.getInstance().createActionToolbar("Drydock.TaskTree", toolbarActions, true);
+        toolbar.setTargetComponent(this);
+        JPanel top = new JPanel(new BorderLayout());
+        top.add(toolbar.getComponent(), BorderLayout.NORTH);
+        top.add(search, BorderLayout.SOUTH);
+        setToolbar(top);
+
         tree.addMouseListener(new MouseAdapter() {
             @Override
             public void mouseClicked(MouseEvent event) {
@@ -316,6 +325,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             root.add(treeNode(node, selectedSession, toSelect));
         }
         ((DefaultTreeModel) tree.getModel()).setRoot(root);
+        tree.getEmptyText().setText(filter.isBlank()
+                ? "No projects yet. Start a task with ＋ to add this one."
+                : "No task or branch matches the search.");
         TreeUtil.expandAll(tree);
         if (toSelect[0] != null) {
             tree.setSelectionPath(new TreePath(toSelect[0].getPath()));

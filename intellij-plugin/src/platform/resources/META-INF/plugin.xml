@@ -66,8 +66,8 @@
 
         <!-- The task-centric view: registered projects (shared with the
              standalone app) and their agent tasks, in every window. -->
-        <toolWindow id="Drydock" anchor="left" secondary="false"
-                    icon="AllIcons.Toolwindows.ToolWindowRun"
+        <toolWindow id="Drydock" anchor="right" secondary="false"
+                    icon="/icons/drydock.svg"
                     factoryClass="app.drydock.intellij.tasks.DrydockToolWindowFactory"/>
 
         <!-- "Claude needs you": the balloon raised when an agent starts
