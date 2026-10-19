@@ -87,7 +87,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     private final Alarm searchAlarm = new Alarm(Alarm.ThreadToUse.SWING_THREAD, this);
     private final DefaultActionGroup contextActions = new DefaultActionGroup();
     private volatile String filter = "";
+    /** Guarded by {@code this}: subscribing after dispose() must undo itself. */
     private Runnable unsubscribeShared = () -> { };
+    private volatile boolean disposed;
 
     public TaskTreePanel(Project project) {
         super(true, true);
@@ -203,8 +205,15 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         bus.subscribe(DrydockSessionsListener.TOPIC, (DrydockSessionsListener) () -> requestRebuild(true));
         bus.subscribe(SessionActivityListener.TOPIC, (SessionActivityListener) (id, activity) -> requestRebuild(false));
         DrydockPluginService.getInstance().initialization().thenRun(() -> {
-            unsubscribeShared = DrydockPluginService.getInstance().sharedProjects()
-                    .addListener(() -> requestRebuild(true));
+            // Initialization can finish after the tool window is gone; a
+            // listener added then would outlive the panel.
+            synchronized (this) {
+                if (disposed) {
+                    return;
+                }
+                unsubscribeShared = DrydockPluginService.getInstance().sharedProjects()
+                        .addListener(() -> requestRebuild(true));
+            }
             requestRebuild(true);
         });
     }
@@ -270,6 +279,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
     /** Schedules one rebuild; {@code worktreesChanged} re-lists worktrees instead of using the cache. */
     public void requestRebuild(boolean worktreesChanged) {
+        if (disposed) {
+            return;
+        }
         if (worktreesChanged) {
             inputs.invalidateWorktrees();
         }
@@ -279,7 +291,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         plugin.initialization().thenRunAsync(() -> {
             rebuildPending.set(false);
-            if (project.isDisposed()) {
+            if (disposed || project.isDisposed()) {
                 return;
             }
             List<TaskNode> nodes = TaskTreeModel.build(inputs.gather(project, filter));
@@ -342,7 +354,12 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
     @Override
     public void dispose() {
-        unsubscribeShared.run();
+        synchronized (this) {
+            disposed = true;
+            unsubscribeShared.run();
+        }
+        // A gather already running finishes against a closed service: its
+        // git calls fail, are caught, and its result is dropped above.
         inputs.close();
     }
 }
