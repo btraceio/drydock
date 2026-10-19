@@ -251,8 +251,9 @@ file of its own**, read and written by both the standalone app and the IDE.
   `diff -rq` shows ~16 differing files, among them `ApplicationStateCodec`,
   `StateDirectory`, `ManagedAgentSession`, `WorktreeService`. *My call:* no
   re-sync as part of this work. The new shared-projects store is new code
-  and lands identically in both trees. Changes to existing files (the
-  codec dropping `repositories`) are made per side.
+  and lands identically in both trees. (Implementation plan refinement:
+  each tool keeps its `state.json` `repositories` as a local mirror keyed by
+  the shared id, holding per-tool settings, so the codec does not change.)
 - **Repo rules (AGENTS.md):** blocking work (git, filesystem, the shared
   file) off the UI thread with visible progress cleared on every path;
   processes through `ProcessRunner`; one writer per persistent state;
