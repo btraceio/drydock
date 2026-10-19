@@ -72,6 +72,10 @@
              nothing running. -->
         <listener class="app.drydock.intellij.agent.AgentWindowCloseListener"
                   topic="com.intellij.openapi.project.ProjectManagerListener"/>
+        <!-- Marks the start of a quit for AgentCloseConfirmation, so a quit
+             asks once for every window. -->
+        <listener class="app.drydock.intellij.agent.QuitSignal"
+                  topic="com.intellij.ide.AppLifecycleListener"/>
         <!-- Every window's agents, so the "needs you" balloon can appear in
              whichever window the user is in. -->
         <listener class="app.drydock.intellij.agent.AttentionNotifier"

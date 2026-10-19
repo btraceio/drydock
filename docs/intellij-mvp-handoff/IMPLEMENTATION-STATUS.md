@@ -163,18 +163,14 @@ instead of showing a guarantee the agent cannot keep.
 - **Automated**, from `intellij-plugin/`:
   `./gradlew test buildPlugin verifyPlugin`. As of the capture pass:
   `test buildPlugin` green (1774 tests, 0 failures), every commit of the
-  pass compiling on its own. **Plugin Verifier ran only partly**:
-  IU-253.33813.55 reported **Compatible** for the first ten commits of the
-  pass; the 2026.1–2026.3 verifications could not download their bundled
-  plugins' dependencies because the verification host's disk was full
-  ("No space left on device" — the verifier itself had just extracted
-  ~20 GB of IDEs into the Gradle cache). The surfaces 4, 6, 9 and the
-  later commits add public-API usage the verifier has not yet seen:
-  `ProjectCloseHandler`, `SystemNotifications`, `NotificationGroupManager`,
-  `ApplicationActivationListener`, `ProjectUtil.openOrImport` and
-  `focusProjectWindow`, `DoNotAskOption.Adapter`, and an override of
-  `BaseProcessHandler.getCommandLineForLog`. Rerun `verifyPlugin` with
-  ~10 GB free before relying on cross-version compatibility.
+  pass compiling on its own. Plugin Verifier against the **latest** IDE,
+  IU-263.7031.23: **Compatible, no internal API usage**, 5 deprecated-API
+  notes — `FileEditorManager.openFile(file, focus)` (×2),
+  `OpenProjectTask.build()` / `withForceOpenInNewFrame`, and the
+  `TerminalExecutionConsole(project, handler)` constructor — all calls the
+  2025.3 target has no replacement for. The full `recommended()` set was
+  not rerun: it extracts ~4 GB per IDE and filled the verification host's
+  disk; IU-253.33813.55 reported Compatible earlier in the pass.
 - **Manual**, in `./gradlew runIde` → Tools → Drydock. S1's gate (above) was
   run this way, and so was window-close-without-stopping.
 

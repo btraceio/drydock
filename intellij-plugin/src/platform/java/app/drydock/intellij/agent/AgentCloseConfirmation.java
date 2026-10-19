@@ -8,7 +8,6 @@ import app.drydock.intellij.project.ProjectIdentity;
 import app.drydock.intellij.ui.SessionDots;
 import app.drydock.ui.AgentLabels;
 
-import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.project.ProjectCloseHandler;
 import com.intellij.openapi.project.ProjectManager;
@@ -39,6 +38,15 @@ import java.util.stream.Collectors;
  * The agreement expires after {@link #QUIT_APPROVAL_TTL}, so it cannot leak
  * into a later close of a session that was resumed since.</p>
  *
+ * <p>"An exit is under way" comes from {@link QuitSignal}, an
+ * {@code AppLifecycleListener.appClosing()} subscriber: the application
+ * publishes that before it asks any project whether it may close (read off
+ * {@code ApplicationImpl.destructApplication}'s bytecode in 2025.3).
+ * {@code Application.isExitInProgress()} would say the same, but it is
+ * {@code @ApiStatus.Internal} and Plugin Verifier rejects it. A quit the
+ * user cancels in this dialog clears the mark at once; one cancelled
+ * elsewhere expires after {@link #QUIT_WINDOW}.</p>
+ *
  * <p>Everything read here is in memory — this window's executions, the
  * activity monitor, the catalog snapshot — because the platform asks on the
  * EDT. A failure inside drydock never blocks a close: it is logged and the
@@ -61,6 +69,22 @@ public final class AgentCloseConfirmation implements ProjectCloseHandler {
 
     private static volatile QuitApproval quitApproval;
 
+    /** How long after {@code appClosing()} a close still counts as part of the quit. */
+    private static final Duration QUIT_WINDOW = Duration.ofSeconds(60);
+
+    /** When the current quit began, or null when none is under way. */
+    private static volatile Instant quitStartedAt;
+
+    /** Called by {@link QuitSignal} when the application starts to close. */
+    static void quitStarted() {
+        quitStartedAt = Instant.now();
+    }
+
+    private static boolean quitting() {
+        Instant started = quitStartedAt;
+        return started != null && Instant.now().isBefore(started.plus(QUIT_WINDOW));
+    }
+
     /** A running agent that should not be stopped without asking. */
     private record Working(ManagedAgentSession session, Optional<SessionActivity> activity, Project project) {
     }
@@ -72,7 +96,7 @@ public final class AgentCloseConfirmation implements ProjectCloseHandler {
             if (here.isEmpty() || StopAgentsDialog.isSuppressed()) {
                 return true;
             }
-            if (ApplicationManager.getApplication().isExitInProgress()) {
+            if (quitting()) {
                 return confirmQuit(here);
             }
             return ask(project, here, Optional.of(ProjectIdentity.labelOf(project)), false);
@@ -95,6 +119,8 @@ public final class AgentCloseConfirmation implements ProjectCloseHandler {
             }
         }
         if (!ask(null, everywhere, Optional.empty(), true)) {
+            // The quit is off; the next close is an ordinary one.
+            quitStartedAt = null;
             return false;
         }
         quitApproval = new QuitApproval(
