@@ -6,6 +6,8 @@ import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory;
 import com.intellij.openapi.options.Configurable;
+import com.intellij.openapi.options.ConfigurationException;
+import com.intellij.openapi.ui.Messages;
 import com.intellij.openapi.ui.TextFieldWithBrowseButton;
 import com.intellij.util.ui.FormBuilder;
 import com.intellij.util.ui.JBUI;
@@ -57,8 +59,13 @@ public final class DrydockConfigurable implements Configurable {
                 + "Empty means " + defaultBase + ".<br>Shared with the standalone Drydock app "
                 + "(~/.drydock/config.json).</html>");
         hint.setForeground(UIUtil.getContextHelpForeground());
-        UserConfig.loadAsync().thenAccept(config -> ApplicationManager.getApplication().invokeLater(() -> {
-            loaded = config.worktreesDirectory().map(Path::toString).orElse("");
+        UserConfig.loadAsync().whenComplete((config, failure) -> ApplicationManager.getApplication().invokeLater(() -> {
+            if (baseField == null) {
+                return;   // the page was closed meanwhile
+            }
+            // A load that failed leaves the field usable (empty: the
+            // default), never stuck on "Loading…".
+            loaded = failure == null ? config.worktreesDirectory().map(Path::toString).orElse("") : "";
             baseField.setText(loaded);
             baseField.setEnabled(true);
         }, ModalityState.any()));
@@ -78,11 +85,29 @@ public final class DrydockConfigurable implements Configurable {
     }
 
     @Override
-    public void apply() {
+    public void apply() throws ConfigurationException {
         String text = baseField.getText().strip();
+        Optional<String> refusal = refusal(text);
+        if (refusal.isPresent()) {
+            throw new ConfigurationException(refusal.get());
+        }
         Optional<Path> base = text.isEmpty() ? Optional.empty() : Optional.of(Path.of(text));
-        UserConfig.updateAsync(config -> config.withWorktreesDirectory(base));
+        UserConfig.updateAsync(config -> config.withWorktreesDirectory(base)).whenComplete((ignored, failure) -> {
+            if (failure != null) {
+                ApplicationManager.getApplication().invokeLater(() -> Messages.showErrorDialog(
+                        "Could not save the worktree folder to ~/.drydock/config.json: " + failure.getMessage(),
+                        "Drydock"), ModalityState.nonModal());
+            }
+        });
         loaded = text;
+    }
+
+    /** Why the worktree folder text cannot be saved: it must be a full path, or empty for the default. Pure. */
+    public static Optional<String> refusal(String text) {
+        if (text.isEmpty() || Path.of(text).isAbsolute()) {
+            return Optional.empty();
+        }
+        return Optional.of("Enter a full folder path, or leave it empty for the default.");
     }
 
     @Override

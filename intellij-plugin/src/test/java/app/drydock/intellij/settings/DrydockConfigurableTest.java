@@ -19,4 +19,12 @@ class DrydockConfigurableTest {
         assertEquals(Path.of("/work/trees"),
                 DrydockConfigurable.effectiveBase(Optional.of(Path.of("/work/trees")), Path.of("/Users/me")));
     }
+
+    @Test
+    void aWorktreeFolderMustBeAFullPathOrEmpty() {
+        assertEquals(Optional.empty(), DrydockConfigurable.refusal(""));
+        assertEquals(Optional.empty(), DrydockConfigurable.refusal("/work/trees"));
+        assertEquals(Optional.of("Enter a full folder path, or leave it empty for the default."),
+                DrydockConfigurable.refusal("wt"));
+    }
 }
