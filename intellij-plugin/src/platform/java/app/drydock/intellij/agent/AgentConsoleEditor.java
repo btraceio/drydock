@@ -1,5 +1,6 @@
 package app.drydock.intellij.agent;
 
+import app.drydock.agent.spi.AgentProvider;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.SessionActivity;
@@ -80,6 +81,9 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
 
     /** Whatever occupies {@link BorderLayout#CENTER}, so a repaint can tell whether to swap. */
     private JComponent body;
+
+    /** {@link #estimateResumeTokens}'s last answer for this tab's session. */
+    private volatile Optional<Integer> resumeTokens = Optional.empty();
 
     /** The resolved session; null until the catalog load completes. */
     private volatile ManagedAgentSession session;
@@ -180,6 +184,7 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
             // starting placeholder with no explanation of why.
             plugin.initialization().whenCompleteAsync((ignored, failure) -> {
                 ManagedAgentSession found = failure == null ? findSession(plugin, file.sessionId()) : null;
+                resumeTokens = found != null ? estimateResumeTokens(plugin, found) : Optional.empty();
                 session = found;
                 if (found != null) {
                     everResolved = true;
@@ -189,6 +194,29 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
         } catch (RejectedExecutionException e) {
             // Shutdown drained the executor; paint what is already known.
             refreshLater();
+        }
+    }
+
+    /**
+     * The size of the conversation a Resume would reload, for the handoff's
+     * {@code Resume · ~Nk tokens}. A blocking transcript scan, so it runs here
+     * on the plugin executor, on every catalog change — which includes the
+     * one a Stop makes — and only for a session that has a conversation and
+     * no live process (a running transcript is still growing, and nothing
+     * shows the figure then).
+     */
+    private Optional<Integer> estimateResumeTokens(DrydockPluginService plugin, ManagedAgentSession found) {
+        if (found.agentSessionId().isEmpty() || AgentExecutionService.getInstance(project).isRunning(found.id())) {
+            return Optional.empty();
+        }
+        try {
+            return plugin.registry().provider(found.agentKind())
+                    .flatMap(AgentProvider::conversations)
+                    .flatMap(source -> source.estimateResumeCost(found.workingDirectory(), found.agentSessionId().get()))
+                    .map(estimate -> (int) Math.min(Integer.MAX_VALUE, estimate.contextTokens()));
+        } catch (RuntimeException e) {
+            // A cosmetic figure: an unreadable transcript shows a bare Resume.
+            return Optional.empty();
         }
     }
 
@@ -273,16 +301,15 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
                 DrydockPluginService.getInstance().registry().enforcesReadOnly(current.agentKind()),
                 AgentLabels.displayName(DrydockPluginService.getInstance().registry(), current.agentKind()),
                 Duration.between(current.lastOpenedAt(), Instant.now()),
-                // The change count is unknown until the review surface lands,
-                // and the resume estimate until the provider call that
-                // computes it. Absent prints nothing, which is honest; a zero
-                // would read as a claim.
+                // The change count is unknown until the review surface lands.
+                // Absent prints nothing, which is honest; a zero would read
+                // as a claim.
                 Optional.empty(),
                 // Resumable only with a recorded conversation to resume into.
                 // Without one, Resume could reach nothing but the provider's
                 // own picker, so the button starts a fresh conversation on
                 // this same row instead.
-                current.agentSessionId().isPresent(), Optional.empty(),
+                current.agentSessionId().isPresent(), resumeTokens,
                 DumbService.isDumb(project));
 
         if (execution.isPresent()) {

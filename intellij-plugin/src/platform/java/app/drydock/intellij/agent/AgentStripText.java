@@ -136,8 +136,18 @@ public final class AgentStripText {
             return "Start";
         }
         return estimatedTokens
-                .map(tokens -> "Resume · ~" + (tokens / 1000) + "k tokens")
+                .map(tokens -> "Resume · " + approximateThousands(tokens) + " tokens")
                 .orElse("Resume");
+    }
+
+    /**
+     * {@code ~12k}, rounded to the nearest thousand; {@code <1k} below a
+     * thousand. Truncating division rendered a short conversation as
+     * {@code ~0k} — "this costs nothing" — which is the one reading a cost
+     * estimate must never give.
+     */
+    static String approximateThousands(int tokens) {
+        return tokens < 1000 ? "<1k" : "~" + Math.round(tokens / 1000.0) + "k";
     }
 
     /**

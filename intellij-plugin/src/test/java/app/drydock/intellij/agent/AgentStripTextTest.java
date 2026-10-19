@@ -146,6 +146,9 @@ class AgentStripTextTest {
         // opposite of what an absent estimate means.
         assertEquals("Resume", AgentStripText.primaryLabel(true, Optional.empty()));
         assertEquals("Resume · ~12k tokens", AgentStripText.primaryLabel(true, Optional.of(12_400)));
+        assertEquals("Resume · ~13k tokens", AgentStripText.primaryLabel(true, Optional.of(12_600)));
+        // Never "~0k": a short conversation still costs something.
+        assertEquals("Resume · <1k tokens", AgentStripText.primaryLabel(true, Optional.of(400)));
     }
 
     @Test
