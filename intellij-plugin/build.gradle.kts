@@ -221,4 +221,11 @@ tasks.test {
     // and the takeover stays.
     useJUnitPlatform()
     withGitHostIsolation()
+    // A platform test starts the real DrydockPluginService, which seeds and
+    // follows the shared projects list. Without this it seeded the user's
+    // real ~/.drydock/projects.json from their app's state.
+    val testProjects = layout.buildDirectory.file("test-projects/projects.json")
+    jvmArgumentProviders.add(CommandLineArgumentProvider {
+        listOf("-Ddrydock.projectsFile=" + testProjects.get().asFile.absolutePath)
+    })
 }
