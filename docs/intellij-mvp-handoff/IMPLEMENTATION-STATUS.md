@@ -8,8 +8,9 @@ where the design was deviated from on purpose.
 browser, keeping `support.js` next to it). Neither is edited — this file is
 the only place the implementation's own state is recorded.
 
-*Last updated: 2026-10-19, against `feat/intellij-mvp` (after the live
-screen-capture pass recorded under "How this is verified").*
+*Last updated: 2026-10-19, against `feat/intellij-mvp`, after the
+task-centric redesign (`docs/superpowers/specs/2026-10-19-intellij-task-tool-window-design.md`)
+replaced the handoff's entry points. See "Task tool window" below.*
 
 ---
 
@@ -37,24 +38,26 @@ Numbered as in the handoff's "Screens / views".
 
 | # | Surface | State |
 |---|---|---|
-| 1 | Agents ▾ widget + popup | **not built** (needs S3) |
+| 1 | Agents ▾ widget + popup | **superseded** by the Drydock tool window (task-centric redesign) |
 | 2 | Agent editor tab | **partial** — tab (pinned, first, dot, `· RO`), strip (state word, RO chip, secondary line with a live age, Stop/Resume/Start, Changes, ⋯), the 50 %-dimmed stopped transcript with its footer, the status-bar breadcrumb named by the session title. Missing: file paths as hyperlinks, `<n> files changed`, and the `<repo> · <branch>` window title |
-| 3 | New Agent Session dialog | **built** — task (focused, three rows), agent (the agent CLIs only), Writes/Read-only, Here (`<repo> / <branch>` of the main checkout) vs new worktree (a free branch name suggested, a taken one refused), both warnings, `Start anyway`. **The task is delivered to the agent** as its first message (Claude, pi; not Codex — see deviations) |
+| 3 | New Agent Session dialog | **replaced** by **New task**: a task name (a label, never sent), optional instructions (the agent's first message only when given), agent, mode, and one generated summary line (`New branch <slug> from origin/main in <folder>`) with `Change…` for branch, start point (Git's own picker via Git4Idea), folder (base from Settings › Tools › Drydock, shared with the app), and new/this window |
 | 4 | Attention ("needs you") | **built, except the widget** — one balloon in the focused window (`Claude needs you` / `n agents need you`, `Raise window` · `Snooze`), an OS notification when the IDE is not active, and the needs-you state clears once the user is looking at the session. The amber Agents widget is surface 1. No prompt summary (the hook records only a state word) |
 | 5 | Resume and idle state | **built** — resume is by id, never `--continue`/`--last`; nothing auto-starts; `Resume · ~Nk tokens` from `ResumeCostEstimate` |
 | 6 | Close / quit confirmation | **built** — `Stop n working agent(s)?` on a window close, one dialog for all windows on quit (`Stop & Quit`), `Don't ask again` |
 | 7 | Review in the Commit tool window | **not built** (needs S4) |
 | 8 | Finish ▾ | **not built** |
-| 9 | "Done with this session…" | **built** — Forget, or Forget + remove worktree (closes the window; the branch stays; the data-loss line only on a dirty tree) |
-| 10 | Welcome screen Agents tab | **not built** (needs S3) |
+| 9 | "Done with this task…" | **built** — from the strip or the tool window, for any task in any window. Says what removal would lose (uncommitted, untracked, commits not merged — a PR recorded MERGED counts as merged; the IDE's own `.idea`/`.iml` do not count), `Remove anyway`, and `Also delete branch` (ticked only when merged) |
+| 10 | Welcome screen Agents tab | **dropped** from the MVP by the redesign |
+| — | **Drydock tool window** | **built** — registered projects (shared with the standalone app via `~/.drydock/projects.json`), their tasks and idle worktrees; `<repo> isn't in Drydock · Add`; switch, Stop, Stop & Close Window, Resume, Done, New task, New task in this worktree, Remove from Drydock |
 
 Also outstanding: the `DiffExtension` gutter/inlay findings; *enforcing* (not
 merely warning about) one writer per worktree; and the
 `n stale worktrees · Prune` line.
 
-Entry points currently live under **Tools → Drydock**, because the v1 tool
-window is gone and the handoff forbids shipping it beside its replacement.
-They move to the Agents widget when surface 1 lands.
+Entry points are the **Drydock tool window** (left stripe) and ⌃⌥N (New
+task). The Tools → Drydock menu is gone, and with it Resume Conversation…
+(out of the MVP until conversations can be summarised), New Worktree… and
+Check Out Branch in Worktree….
 
 ---
 
@@ -235,6 +238,47 @@ Observed and left as they are:
   files".
 - The status-bar breadcrumb's dot is painted once and can show a hollow
   ring while the agent works, until the selection changes.
+
+---
+
+## Task tool window (2026-10-19)
+
+Built to the design in `docs/superpowers/specs/2026-10-19-intellij-task-tool-window-design.md`
+and its plan, `docs/superpowers/plans/2026-10-19-intellij-task-tool-window.md`.
+
+**Verified live in runIde (IU 2025.3.3)**, scratch repo `/private/tmp/dd-resume/demo`,
+with the sandbox's own projects list (`build/sandbox-projects/projects.json`,
+seeded from the user's real app state):
+
+- the list seeded from the app's projects; `demo isn't in Drydock · Add`,
+  then Add; idle worktrees listed with `Start ▸`;
+- ⌃⌥N → `New task in demo`; the name generated `add-farewell-method` and its
+  folder; `Change…` unfolded with Git's `Choose…`; Start created the
+  worktree, opened a new window and started Claude at an **empty** prompt;
+- switching from the tree to a task whose window was closed reopened the
+  window with its tab and **no** agent started;
+- Settings › Tools › Drydock showed the worktree folder (cancelled unsaved);
+- Resume from the tree on a never-prompted task started it fresh (before the
+  fix it exited with "No conversation found");
+- Stop from another window: `Stop 1 working agent?` · `Stop anyway`;
+- Done with an untracked file and an unmerged commit: `Removing loses 1
+  untracked file, 1 commit not merged`, `Remove anyway`; the window closed,
+  the folder went, the branch stayed;
+- Remove from Drydock on a project with nothing running: no question, gone
+  from the list, folder untouched.
+
+**Not verified live:** Open in = This window; a read-only task; `Start ▸` on
+an idle worktree; instructions reaching the agent; Stop & Close Window; the
+standalone app following the shared list (this worktree's ghostty submodule
+is not initialised, so the app was not run — its side is covered by
+`RepositoryManagerTest` only).
+
+**Gate:** `./gradlew test buildPlugin verifyPlugin` → BUILD SUCCESSFUL, 1810
+tests, 0 failed; Plugin Verifier against IU-263.7031.23 (temporary override):
+Compatible, 7 usages of deprecated API.
+
+**Known gap:** an agent at its prompt counts as working (and is asked about)
+until Claude reports its first activity event.
 
 ---
 
