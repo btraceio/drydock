@@ -9,7 +9,9 @@ import app.drydock.intellij.agent.SessionDone;
 import app.drydock.intellij.agent.StopAgentsDialog;
 import app.drydock.intellij.agent.StopAgentsPlan;
 import app.drydock.intellij.startup.DrydockStartupActivity;
+import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
+import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
 import app.drydock.intellij.ui.SessionDots;
 import app.drydock.ui.AgentLabels;
 
@@ -22,6 +24,7 @@ import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.project.DumbAwareAction;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.project.ProjectManager;
+import com.intellij.openapi.ui.Messages;
 import org.jetbrains.annotations.NotNull;
 
 import javax.swing.Icon;
@@ -61,7 +64,8 @@ final class TaskActions {
                         row -> !row.running(), (project, row) -> TaskNavigator.switchTo(row.session(),
                                 target -> AgentConsoles.resume(target, row.session().id()))),
                 task("Done with This Task…", "Forget the task, and optionally remove its worktree",
-                        AllIcons.Actions.Checked, row -> true, TaskActions::done));
+                        AllIcons.Actions.Checked, row -> true, TaskActions::done),
+                removeProject());
     }
 
     private interface RowAction {
@@ -145,6 +149,69 @@ final class TaskActions {
         }
         DrydockStartupActivity.sessions(owner.get()).stopSession(row.session().id());
         whenStopped(owner.get(), row.session().id(), () -> SessionDone.show(from, row.session()));
+    }
+
+    /**
+     * "Remove from Drydock" on a project row: takes the project off the
+     * shared list — for the standalone app too — and touches nothing else:
+     * not the repository, not its worktrees, not running agents. Asks only
+     * when some of its agents are running here, to say they keep running.
+     */
+    private static AnAction removeProject() {
+        return new DumbAwareAction("Remove from Drydock", "Take this project off Drydock's list; nothing on disk "
+                + "changes", AllIcons.General.Remove) {
+            @Override
+            public void update(@NotNull AnActionEvent e) {
+                e.getPresentation().setEnabledAndVisible(e.getData(TaskTreePanel.SELECTED_NODE) instanceof ProjectRow);
+            }
+
+            @Override
+            public @NotNull ActionUpdateThread getActionUpdateThread() {
+                return ActionUpdateThread.EDT;
+            }
+
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                if (!(e.getData(TaskTreePanel.SELECTED_NODE) instanceof ProjectRow row) || e.getProject() == null) {
+                    return;
+                }
+                Project project = e.getProject();
+                int running = runningUnder(row);
+                if (running > 0 && Messages.showOkCancelDialog(project,
+                        removeQuestion(row.project().displayName(), running), "Drydock", "Remove", "Cancel",
+                        null) != Messages.OK) {
+                    return;
+                }
+                DrydockPluginService.getInstance().sharedProjects().remove(row.project().id())
+                        .whenComplete((ignored, failure) -> {
+                            if (failure != null) {
+                                ApplicationManager.getApplication().invokeLater(() -> Messages.showErrorDialog(
+                                        project, "Could not remove " + row.project().displayName() + ": "
+                                                + failure.getMessage(), "Drydock"),
+                                        ModalityState.nonModal(), project.getDisposed());
+                            }
+                        });
+            }
+        };
+    }
+
+    /** The running agents under {@code row}, in groups too. Pure. */
+    static int runningUnder(ProjectRow row) {
+        int running = 0;
+        for (TaskNode child : row.children()) {
+            if (child instanceof TaskRow task && task.running()) {
+                running++;
+            } else if (child instanceof WorktreeGroup group) {
+                running += (int) group.tasks().stream().filter(TaskRow::running).count();
+            }
+        }
+        return running;
+    }
+
+    /** {@code Remove <repo> from Drydock? <n> agents keep running.} */
+    static String removeQuestion(String repo, int running) {
+        return "Remove " + repo + " from Drydock? " + running + (running == 1 ? " agent keeps" : " agents keep")
+                + " running.";
     }
 
     /** The open window running {@code id}. In-memory, EDT-safe. */
