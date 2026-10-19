@@ -2,7 +2,9 @@ package app.drydock.intellij.tasks;
 
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryCatalog;
+import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionActivity;
 import app.drydock.git.WorktreeService;
 import app.drydock.git.WorktreeService.Worktree;
@@ -100,8 +102,14 @@ final class TaskTreeInputs implements AutoCloseable {
                 running.addAll(AgentExecutionService.getInstance(project).runningSessions());
             }
         }
+        Map<RepositoryId, Path> recordedRoots = new HashMap<>();
+        for (Repository repository : plugin.stateStore().state().repositories()) {
+            if (!repository.isRemote()) {
+                recordedRoots.put(repository.id(), RepositoryCatalog.canonicalize(repository.root()));
+            }
+        }
         return new TaskTreeModel.Inputs(projects, sessions, byMain, mainRootOf, currentMain, currentWorking,
-                activity, running, missing, filter);
+                activity, running, missing, recordedRoots, filter);
     }
 
     /** {@code root}'s worktrees, canonical paths; empty when git cannot list them. */

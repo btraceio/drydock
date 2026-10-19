@@ -12,7 +12,9 @@ import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.project.ProjectManager;
+import com.intellij.openapi.ui.Messages;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
@@ -50,6 +52,20 @@ public final class TaskNavigator {
     }
 
     /**
+     * What to tell the user instead of opening a window, when the task has
+     * no open window and its folder is gone (a worktree removed outside
+     * Drydock). Pure.
+     */
+    static Optional<String> missingFolderMessage(boolean windowOpen, boolean folderExists, String taskName,
+                                                 Path directory) {
+        if (windowOpen || folderExists) {
+            return Optional.empty();
+        }
+        return Optional.of("The folder of \"" + taskName + "\" is gone: " + directory
+                + ". Use Done with This Task… to forget it.");
+    }
+
+    /**
      * Switches to {@code session}. Resolving the window touches the disk
      * (canonical paths), so it runs on the plugin's executor; the switch
      * itself happens on the EDT.
@@ -71,7 +87,13 @@ public final class TaskNavigator {
                     project -> Optional.ofNullable(project.getBasePath())
                             .map(base -> RepositoryCatalog.canonicalize(Path.of(base))),
                     directory);
+            Optional<String> gone = missingFolderMessage(window.isPresent(), Files.isDirectory(directory),
+                    session.displayName(), directory);
             ApplicationManager.getApplication().invokeLater(() -> {
+                if (gone.isPresent()) {
+                    Messages.showInfoMessage(gone.get(), "Drydock");
+                    return;
+                }
                 Project target = window.filter(project -> !project.isDisposed())
                         .orElseGet(() -> WorktreeDialogs.openAsProject(directory));
                 if (target == null || target.isDisposed()) {

@@ -39,4 +39,15 @@ class TaskNavigatorTest {
 
         assertEquals(Optional.empty(), window);
     }
+
+    @Test
+    void aTaskWhoseFolderIsGoneSaysSoInsteadOfOpeningNothing() {
+        assertEquals(Optional.of("The folder of \"Add farewell\" is gone: /wt/drydock-gone. "
+                        + "Use Done with This Task… to forget it."),
+                TaskNavigator.missingFolderMessage(false, false, "Add farewell", Path.of("/wt/drydock-gone")));
+        assertEquals(Optional.empty(),
+                TaskNavigator.missingFolderMessage(true, false, "Add farewell", Path.of("/wt/drydock-gone")));
+        assertEquals(Optional.empty(),
+                TaskNavigator.missingFolderMessage(false, true, "Add farewell", Path.of("/wt/drydock-x")));
+    }
 }

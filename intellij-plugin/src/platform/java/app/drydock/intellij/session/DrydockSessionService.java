@@ -163,12 +163,25 @@ public final class DrydockSessionService implements AgentExecutionListener {
     /** As {@link #prepareSession(Path, AgentKind, String)} in an explicit mode. */
     public CompletableFuture<ManagedAgentSession> prepareSession(Path repoRoot, AgentKind kind, String displayName,
             SessionMode mode) {
+        return prepareSession(repoRoot, repoRoot, kind, displayName, mode);
+    }
+
+    /**
+     * As {@link #prepareSession(Path, AgentKind, String, SessionMode)}, but
+     * recorded under the repository at {@code repositoryRoot} instead of the
+     * working directory's own. A task in a linked worktree records its main
+     * checkout, so it can still be placed under its project once git no
+     * longer knows the worktree (removed outside Drydock).
+     */
+    public CompletableFuture<ManagedAgentSession> prepareSession(Path repoRoot, Path repositoryRoot, AgentKind kind,
+            String displayName, SessionMode mode) {
         Objects.requireNonNull(repoRoot, "repoRoot");
+        Objects.requireNonNull(repositoryRoot, "repositoryRoot");
         Objects.requireNonNull(kind, "kind");
         Objects.requireNonNull(displayName, "displayName");
         Objects.requireNonNull(mode, "mode");
         Path workingDirectory = repoRoot.toAbsolutePath().normalize();
-        return repositoryIdFor.apply(workingDirectory)
+        return repositoryIdFor.apply(repositoryRoot.toAbsolutePath().normalize())
                 .thenApplyAsync(
                         repositoryId -> newSessionMetadata(repositoryId, workingDirectory, kind, displayName, mode),
                         executor);

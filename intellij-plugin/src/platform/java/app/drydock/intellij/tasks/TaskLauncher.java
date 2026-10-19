@@ -258,7 +258,7 @@ public final class TaskLauncher {
                         LOG.log(Level.WARNING, "The window for {0} did not open", steps.workingDirectory());
                         return;
                     }
-                    SessionDialogs.launchNewSession(target, steps.workingDirectory(), choice.agent(), choice.name(),
+                    SessionDialogs.launchNewSession(target, steps.workingDirectory(), mainRoot, choice.agent(), choice.name(),
                             choice.mode(), NewTaskPlan.initialPrompt(choice), fresh);
                 }, ModalityState.nonModal());
             }

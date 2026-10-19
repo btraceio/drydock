@@ -73,16 +73,19 @@ public final class SessionDialogs {
      * and happen first: without it the agent spawns with no tab, which looks
      * exactly like the dialog doing nothing at all.</p>
      *
+     * @param repositoryRoot the main checkout the task belongs to; recorded
+     *                    on the session (see {@code DrydockSessionService
+     *                    .prepareSession(Path, Path, ...)})
      * @param freshWindow whether {@code project} is a window Drydock has just
      *                    opened for this session, where the IDE's
      *                    README-on-first-open is still to come
      */
-    public static void launchNewSession(Project project, Path workingDirectory, AgentKind kind,
+    public static void launchNewSession(Project project, Path workingDirectory, Path repositoryRoot, AgentKind kind,
             String displayName, SessionMode mode, Optional<String> task, boolean freshWindow) {
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         String agentName = AgentLabels.displayName(plugin.registry(), kind);
         CompletableFuture<ManagedAgentSession> launch =
-                DrydockStartupActivity.sessions(project).prepareSession(workingDirectory, kind, displayName, mode)
+                DrydockStartupActivity.sessions(project).prepareSession(workingDirectory, repositoryRoot, kind, displayName, mode)
                         .thenApply(session -> {
                             showConsoleTab(project, session.id(), freshWindow);
                             return session;

@@ -3,6 +3,7 @@ package app.drydock.intellij.tasks;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionActivity;
 import app.drydock.git.WorktreeService.Worktree;
 import app.drydock.intellij.tasks.TaskNode.AddCurrentProject;
@@ -32,7 +33,8 @@ import java.util.Set;
  * main checkout ({@code mainRootOf}, from {@code git worktree list}), and
  * that main checkout's registered project is its parent. When git can no
  * longer resolve it — a worktree removed outside Drydock — the longest
- * registered root containing it takes it, so a task never just vanishes.
+ * registered root containing it takes it, else the main checkout the task
+ * recorded when it was started, so a task never just vanishes.
  * Sessions are placed this way because the plugin's catalog records each
  * worktree as its own repository, and because a project removed and added
  * again must get its old tasks back.</p>
@@ -52,12 +54,14 @@ public final class TaskTreeModel {
      * @param currentMainRoot this window's project's main checkout, if it has one
      * @param currentWorkingRoot this window's project directory (a worktree or the main checkout)
      * @param missingFolders  registered roots whose folder does not exist
+     * @param recordedRoots   the canonical root of the repository each session was recorded under (the
+     *                        plugin's own catalog): a task started from New task records its main checkout
      */
     public record Inputs(List<SharedProject> projects, List<ManagedAgentSession> sessions,
                          Map<Path, List<Worktree>> worktreesByMainRoot, Map<Path, Path> mainRootOf,
                          Optional<Path> currentMainRoot, Optional<Path> currentWorkingRoot,
                          Map<ManagedSessionId, Optional<SessionActivity>> activity, Set<ManagedSessionId> running,
-                         Set<Path> missingFolders, String filter) {
+                         Set<Path> missingFolders, Map<RepositoryId, Path> recordedRoots, String filter) {
         public Inputs {
             projects = List.copyOf(projects);
             sessions = List.copyOf(sessions);
@@ -68,6 +72,7 @@ public final class TaskTreeModel {
             activity = Map.copyOf(activity);
             running = Set.copyOf(running);
             missingFolders = Set.copyOf(missingFolders);
+            recordedRoots = Map.copyOf(recordedRoots);
             filter = filter == null ? "" : filter.strip();
         }
     }
@@ -79,7 +84,7 @@ public final class TaskTreeModel {
             if (session.agentKind() == AgentKind.TERMINAL) {
                 continue;
             }
-            placement(in, local, session.workingDirectory()).ifPresent(main ->
+            placement(in, local, session).ifPresent(main ->
                     tasksByMain.computeIfAbsent(main, ignored -> new ArrayList<>()).add(row(in, main, session)));
         }
 
@@ -108,7 +113,8 @@ public final class TaskTreeModel {
     }
 
     /** The main checkout {@code workingDirectory} belongs to, if any registered or current project takes it. */
-    private static Optional<Path> placement(Inputs in, List<SharedProject> local, Path workingDirectory) {
+    private static Optional<Path> placement(Inputs in, List<SharedProject> local, ManagedAgentSession session) {
+        Path workingDirectory = session.workingDirectory();
         Path main = in.mainRootOf().get(workingDirectory);
         if (main == null) {
             main = local.stream()
@@ -116,6 +122,12 @@ public final class TaskTreeModel {
                     .filter(workingDirectory::startsWith)
                     .max(Comparator.comparingInt(Path::getNameCount))
                     .orElse(null);
+        }
+        if (main == null) {
+            // Git no longer knows the folder (a worktree removed outside
+            // Drydock lives at <base>/<repo>-<slug>, under no project root):
+            // the main checkout the task recorded when it was started.
+            main = in.recordedRoots().get(session.repositoryId());
         }
         if (main == null && in.currentWorkingRoot().isPresent()
                 && workingDirectory.startsWith(in.currentWorkingRoot().get())) {

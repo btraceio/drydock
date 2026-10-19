@@ -53,6 +53,7 @@ class TaskTreeModelTest {
         final Map<ManagedSessionId, Optional<SessionActivity>> activity = new HashMap<>();
         final Set<ManagedSessionId> running = new HashSet<>();
         final Set<Path> missing = new HashSet<>();
+        final Map<RepositoryId, Path> recordedRoots = new HashMap<>();
         String filter = "";
 
         In project(Path root) {
@@ -76,7 +77,7 @@ class TaskTreeModelTest {
 
         TaskTreeModel.Inputs build() {
             return new TaskTreeModel.Inputs(projects, sessions, worktrees, mainRootOf, currentMain, currentWorking,
-                    activity, running, missing, filter);
+                    activity, running, missing, recordedRoots, filter);
         }
     }
 
@@ -232,6 +233,21 @@ class TaskTreeModelTest {
 
         assertEquals(1, row.children().size());
         assertEquals(Optional.empty(), ((TaskRow) row.children().get(0)).branch());
+    }
+
+    @Test
+    void sessionWhoseWorktreeVanishedStaysUnderItsRecordedProject() {
+        // The default layout: <base>/<repo>-<slug>, never under the main
+        // checkout, so no path prefix can place it once git forgets it.
+        In in = new In().project(DRYDOCK);
+        ManagedAgentSession orphan = session("Removed outside Drydock", Path.of("/wt/drydock-gone"));
+        in.sessions.add(orphan);
+        in.recordedRoots.put(orphan.repositoryId(), DRYDOCK);
+
+        ProjectRow row = projectRow(TaskTreeModel.build(in.build()), DRYDOCK);
+
+        assertEquals(1, row.children().size());
+        assertEquals(orphan.id(), ((TaskRow) row.children().get(0)).session().id());
     }
 
     @Test
