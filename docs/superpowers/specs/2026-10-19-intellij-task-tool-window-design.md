@@ -45,6 +45,12 @@ Drydock app's sidebar of registered projects.
 - Inferring the task name from the instructions with a small (Haiku-class)
   model. A later step: the user would write only the instructions and get a
   suggested name and branch. Recorded so the dialog's shape does not block it.
+- **Resume Conversation…** (adopting an on-disk agent conversation Drydock
+  does not know yet) is dropped from the MVP. A list of titles, ids or the
+  last few turns is not enough to tell which conversation was doing what;
+  it needs a summary written by a small model. That is a later step, using
+  the same small-model hook as task-name inference. Resuming a task that
+  is already in the tree (Resume on its row or strip) is unaffected.
 - Showing the standalone app's sessions in the IDE. Sessions stay with the
   tool that runs them; an agent in the app's terminal cannot be attached to
   an IDE tab.
@@ -258,9 +264,9 @@ file of its own**, read and written by both the standalone app and the IDE.
 ## Removed
 
 - Tools › Drydock menu: New Agent Session…, Resume Conversation…, New
-  Worktree…, Check Out Branch in Worktree…. Their functions move into the
-  tool window (new task, resume on a task row, `Start ▸` on a discovered
-  worktree). ⌃⌥N remains as the shortcut for New task.
+  Worktree…, Check Out Branch in Worktree…. New task and `Start ▸` on a
+  discovered worktree replace the session and worktree actions. Resume
+  Conversation… goes with no replacement (see Non-goals). ⌃⌥N remains as the shortcut for New task.
 - Auto-registration of every opened project.
 - The handoff's Agents ▾ widget and Welcome-screen tab (not built).
 
@@ -312,9 +318,6 @@ file of its own**, read and written by both the standalone app and the IDE.
   icons, hover-action rendering.
 - The shared file's exact name, schema, and change-notification mechanism,
   within the rules above.
-- Whether "Resume Conversation…" (resume an on-disk conversation not yet in
-  the catalog) survives as a tool-window action or is dropped — it is the
-  only menu function without an obvious home in the tree.
 - Order of work and how to split it into commits/PRs.
 
 ## Decisions made by me, not discussed explicitly
