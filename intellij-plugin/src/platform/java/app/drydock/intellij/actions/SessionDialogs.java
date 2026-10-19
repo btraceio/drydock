@@ -391,17 +391,22 @@ public final class SessionDialogs {
      */
     private static void launchNewSession(Project project, Path workingDirectory, AgentKind kind,
             String displayName) {
-        launchNewSession(project, workingDirectory, kind, displayName, SessionMode.WRITES, Optional.empty());
+        launchNewSession(project, workingDirectory, kind, displayName, SessionMode.WRITES, Optional.empty(), false);
     }
 
+    /**
+     * @param freshWindow whether {@code project} is a window Drydock has just
+     *                    opened for this session, where the IDE's
+     *                    README-on-first-open is still to come
+     */
     private static void launchNewSession(Project project, Path workingDirectory, AgentKind kind,
-            String displayName, SessionMode mode, Optional<String> task) {
+            String displayName, SessionMode mode, Optional<String> task, boolean freshWindow) {
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         String agentName = AgentLabels.displayName(plugin.registry(), kind);
         CompletableFuture<ManagedAgentSession> launch =
                 DrydockStartupActivity.sessions(project).prepareSession(workingDirectory, kind, displayName, mode)
                         .thenApply(session -> {
-                            showConsoleTab(project, session.id());
+                            showConsoleTab(project, session.id(), freshWindow);
                             return session;
                         })
                         .thenCompose(session -> DrydockStartupActivity.sessions(project).launchSession(session, task));
@@ -410,7 +415,10 @@ public final class SessionDialogs {
             @Override
             public void run(@NotNull ProgressIndicator indicator) {
                 try {
-                    launch.get(LAUNCH_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                    ManagedAgentSession started = launch.get(LAUNCH_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                    // The tab opened before the terminal existed; now that
+                    // it does, put the agent in front and the keyboard in it.
+                    AgentConsoles.focusConsoleLater(project, started.id());
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 } catch (ExecutionException e) {
@@ -430,9 +438,13 @@ public final class SessionDialogs {
      * {@code AgentExecutionListener}. Blocking the launch on the tab would put
      * an EDT round-trip in front of the spawn for no gain.
      */
-    private static void showConsoleTab(Project project, ManagedSessionId sessionId) {
-        ApplicationManager.getApplication().invokeLater(
-                () -> AgentConsoles.show(project, sessionId), ModalityState.any(), project.getDisposed());
+    private static void showConsoleTab(Project project, ManagedSessionId sessionId, boolean freshWindow) {
+        ApplicationManager.getApplication().invokeLater(() -> {
+            if (freshWindow) {
+                AgentConsoles.keepInFrontOfReadme(project, sessionId);
+            }
+            AgentConsoles.show(project, sessionId);
+        }, ModalityState.any(), project.getDisposed());
     }
 
     // ---- new agent session (the handoff's dialog) -------------------------------
@@ -518,7 +530,7 @@ public final class SessionDialogs {
         String title = NewAgentSessionPlan.sessionTitle(choice.task());
         if (choice.placement() == NewAgentSessionPlan.Placement.HERE) {
             launchNewSession(project, inputs.workingDirectory(), choice.agent(), title, choice.mode(),
-                    Optional.of(choice.task()));
+                    Optional.of(choice.task()), false);
             return;
         }
         DrydockPluginService plugin = DrydockPluginService.getInstance();
@@ -558,7 +570,7 @@ public final class SessionDialogs {
                     // and an agent that only appeared after a large import
                     // would be useless.
                     launchNewSession(opened, worktree, choice.agent(), title, choice.mode(),
-                            Optional.of(choice.task()));
+                            Optional.of(choice.task()), true);
                     // Non-modal, not any(): opening a project is a model
                     // change, allowed only from a write-safe context. The
                     // dialog has closed by now, so nothing modal holds this
