@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -63,5 +64,14 @@ class StopAgentsPlanTest {
                 StopAgentsPlan.treeBody(false));
         assertEquals("Stopping ends it mid-task and closes its window. Open files are saved and the worktree "
                 + "stays.", StopAgentsPlan.treeBody(true));
+    }
+
+    @Test
+    void stoppingFromTheTreeRemembersItsOwnDontAsk() {
+        // Ticking "Don't ask again" on one task's Stop must not silently
+        // turn off the question a window close or a quit asks.
+        assertNotEquals(StopAgentsPlan.dontAskKey(true), StopAgentsPlan.dontAskKey(false));
+        assertEquals("drydock.stopWorkingAgents.dontAsk", StopAgentsPlan.dontAskKey(false),
+                "the close/quit key keeps its stored name");
     }
 }

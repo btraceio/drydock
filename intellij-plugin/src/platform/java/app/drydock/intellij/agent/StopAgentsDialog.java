@@ -31,7 +31,7 @@ import java.util.List;
 public final class StopAgentsDialog extends DialogWrapper {
 
     /** The application-level "Don't ask again" flag. */
-    private static final String SUPPRESSED_KEY = "drydock.stopWorkingAgents.dontAsk";
+
 
     /** One listed agent: its status dot and its line. */
     record Row(Icon dot, String text) {
@@ -41,11 +41,11 @@ public final class StopAgentsDialog extends DialogWrapper {
     private final List<Row> rows;
 
     StopAgentsDialog(@Nullable Project project, int working, String body, List<Row> rows, boolean quitting) {
-        this(project, working, body, rows, StopAgentsPlan.primaryLabel(quitting));
+        this(project, working, body, rows, StopAgentsPlan.primaryLabel(quitting), StopAgentsPlan.dontAskKey(false));
     }
 
     private StopAgentsDialog(@Nullable Project project, int working, String body, List<Row> rows,
-                             String primaryLabel) {
+                             String primaryLabel, String dontAskKey) {
         super(project, true);
         this.body = body;
         this.rows = List.copyOf(rows);
@@ -57,7 +57,7 @@ public final class StopAgentsDialog extends DialogWrapper {
             @Override
             public void rememberChoice(boolean isSelected, int exitCode) {
                 if (isSelected && exitCode == OK_EXIT_CODE) {
-                    PropertiesComponent.getInstance().setValue(SUPPRESSED_KEY, true);
+                    PropertiesComponent.getInstance().setValue(dontAskKey, true);
                 }
             }
 
@@ -75,20 +75,25 @@ public final class StopAgentsDialog extends DialogWrapper {
 
     /**
      * Asks before stopping one working agent from the Drydock tool window;
-     * true to go ahead. Honours "Don't ask again" like the close question.
+     * true to go ahead. Its "Don't ask again" is its own, never the close
+     * question's.
      * EDT only.
      */
     public static boolean confirmTreeStop(Project project, Icon dot, String row, boolean closing) {
-        if (isSuppressed()) {
+        if (isSuppressed(StopAgentsPlan.dontAskKey(true))) {
             return true;
         }
         return new StopAgentsDialog(project, 1, StopAgentsPlan.treeBody(closing), List.of(new Row(dot, row)),
-                StopAgentsPlan.primaryLabelForTree(closing)).showAndGet();
+                StopAgentsPlan.primaryLabelForTree(closing), StopAgentsPlan.dontAskKey(true)).showAndGet();
     }
 
     /** Whether the user asked never to be asked again. Safe on the EDT. */
     static boolean isSuppressed() {
-        return PropertiesComponent.getInstance().getBoolean(SUPPRESSED_KEY, false);
+        return isSuppressed(StopAgentsPlan.dontAskKey(false));
+    }
+
+    private static boolean isSuppressed(String key) {
+        return PropertiesComponent.getInstance().getBoolean(key, false);
     }
 
     @Override

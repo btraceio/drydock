@@ -67,4 +67,13 @@ public final class StopAgentsPlan {
                 ? "Stopping ends it mid-task and closes its window. Open files are saved and the worktree stays."
                 : "Stopping ends it mid-task. Its conversation can be resumed later.";
     }
+
+    /**
+     * Where "Don't ask again" is remembered: one setting for the close and
+     * quit question, another for stopping one task from the tool window, so
+     * silencing one never silences the other.
+     */
+    public static String dontAskKey(boolean fromTree) {
+        return fromTree ? "drydock.stopTaskFromTree.dontAsk" : "drydock.stopWorkingAgents.dontAsk";
+    }
 }
