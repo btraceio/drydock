@@ -41,6 +41,26 @@ record NewTaskPreset(String name, Optional<String> instructions, boolean writabl
                 6. Ensure the resulting pull request uses a GitHub closing keyword that targets this issue (for
                    example, `Closes %s`, with owner/repository included when needed), so merging the PR closes the
                    linked issue. Do not close the issue manually before the PR is merged.
+
+                Quality gates (all must pass before completion):
+                - Requirements: map every acceptance criterion to implemented behavior and verification. Resolve all
+                  material ambiguity; explicitly record any agreed non-goals.
+                - Design and plan: complete both review loops with no unresolved blocking findings before implementation.
+                - Implementation review: independently review the final diff for correctness, regressions, security,
+                  maintainability, and repository conventions; resolve every blocking or substantive finding.
+                - Verification: add or update automated tests for changed behavior, run the relevant focused and
+                  regression suites plus the repository's required build/static checks, and record the exact commands
+                  and results. Do not silently ignore failures, flakes, skipped checks, or untested behavior.
+                - Scope and hygiene: leave no unrelated changes, accidental generated files, secrets, debug code, or
+                  unexplained TODOs. Update documentation, compatibility handling, and migrations when the change
+                  requires them.
+
+                Definition of done:
+                - The issue's requirements and acceptance criteria are satisfied and traceable to the final diff.
+                - All quality gates above pass, with no known material defect or unresolved review finding.
+                - The working tree and commit history contain only intentional, reviewable changes.
+                - The pull request explains the behavior, design decisions, risks, and verification, and contains the
+                  correct closing keyword for this issue; the work is not done merely because code was written.
                 """.formatted(reference));
         return new NewTaskPreset(name, Optional.of(prompt.toString()), true);
     }

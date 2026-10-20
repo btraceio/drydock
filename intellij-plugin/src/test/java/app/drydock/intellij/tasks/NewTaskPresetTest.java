@@ -36,6 +36,11 @@ class NewTaskPresetTest {
         assertTrue(prompt.contains("Implement in coherent increments, reviewing and testing"));
         assertTrue(prompt.contains("`Closes #42`"));
         assertTrue(prompt.contains("so merging the PR closes the\n   linked issue"));
+        assertTrue(prompt.contains("Quality gates (all must pass before completion):"));
+        assertTrue(prompt.contains("map every acceptance criterion to implemented behavior and verification"));
+        assertTrue(prompt.contains("Do not silently ignore failures, flakes, skipped checks, or untested behavior"));
+        assertTrue(prompt.contains("Definition of done:"));
+        assertTrue(prompt.contains("the work is not done merely because code was written"));
         String branch = NewTaskPlan.branchFor(preset.name(), Set.of());
         assertEquals("42-fix-allocation", branch);
         assertEquals(Path.of("/worktrees/profiler-42-fix-allocation"),
