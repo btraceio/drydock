@@ -204,7 +204,13 @@ class SharedProjectsFileTest {
         String java = ProcessHandle.current().info().command().orElse(null);
         assumeTrue(java != null, "no java executable to start a second process");
         int each = 60;
-        Process other = new ProcessBuilder(java, "-cp", System.getProperty("java.class.path"),
+        // The classpath goes in an @argfile: as one argument it outgrows
+        // Linux's 128 KB per-argument cap (the IDE test classpath) and
+        // Windows' 32 KB command line. Backslashes are escapes in an
+        // argfile's quoted strings.
+        Path argFile = dir.resolve("writer.args");
+        Files.writeString(argFile, "-cp \"" + System.getProperty("java.class.path").replace("\\", "\\\\") + "\"\n");
+        Process other = new ProcessBuilder(java, "@" + argFile,
                 SharedProjectsWriterProcess.class.getName(), file().toString(), "other", String.valueOf(each))
                 .redirectErrorStream(true)
                 .redirectOutput(dir.resolve("writer.log").toFile())
