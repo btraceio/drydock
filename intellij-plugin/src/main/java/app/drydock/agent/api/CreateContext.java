@@ -3,6 +3,7 @@ package app.drydock.agent.api;
 import app.drydock.domain.SshRemote;
 
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -42,7 +43,8 @@ import java.util.Optional;
  */
 public record CreateContext(String displayName, String sessionId, Path workingDirectory,
                             Optional<SshRemote> remote, Optional<McpAccess> mcp, boolean evalMode,
-                            boolean readOnly, Optional<String> initialPrompt) {
+                            boolean readOnly, Optional<String> initialPrompt,
+                            List<StdioMcpServer> stdioMcpServers) {
     public CreateContext {
         Objects.requireNonNull(displayName, "displayName");
         Objects.requireNonNull(sessionId, "sessionId");
@@ -50,9 +52,22 @@ public record CreateContext(String displayName, String sessionId, Path workingDi
         Objects.requireNonNull(remote, "remote");
         Objects.requireNonNull(mcp, "mcp");
         Objects.requireNonNull(initialPrompt, "initialPrompt");
+        stdioMcpServers = List.copyOf(Objects.requireNonNull(stdioMcpServers, "stdioMcpServers"));
         // A blank task is no task: rendering it would launch the agent with
         // an empty first message.
         initialPrompt = initialPrompt.filter(prompt -> !prompt.isBlank());
+    }
+
+    public CreateContext(String displayName, String sessionId, Path workingDirectory,
+                         Optional<SshRemote> remote, Optional<McpAccess> mcp, boolean evalMode,
+                         boolean readOnly, Optional<String> initialPrompt) {
+        this(displayName, sessionId, workingDirectory, remote, mcp, evalMode, readOnly, initialPrompt, List.of());
+    }
+
+    /** This context, with {@code servers} as the stdio MCP servers the agent starts. */
+    public CreateContext withStdioMcpServers(List<StdioMcpServer> servers) {
+        return new CreateContext(displayName, sessionId, workingDirectory, remote, mcp, evalMode, readOnly,
+                initialPrompt, servers);
     }
 
     /** As the canonical constructor with no initial prompt. */

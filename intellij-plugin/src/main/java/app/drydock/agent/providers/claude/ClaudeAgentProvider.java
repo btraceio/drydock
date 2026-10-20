@@ -12,6 +12,7 @@ import app.drydock.agent.api.McpDelivery;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdDiscovery;
 import app.drydock.agent.api.SessionIdStrategy;
+import app.drydock.agent.api.StdioMcpServer;
 import app.drydock.agent.providers.AgentCommands;
 import app.drydock.agent.providers.HostBinaryLocator;
 import app.drydock.agent.spi.AgentProvider;
@@ -24,6 +25,8 @@ import app.drydock.agent.providers.claude.internal.ClaudeHookInstaller;
 import app.drydock.agent.providers.claude.internal.ConversationCatalog;
 import app.drydock.app.LoginShellEnvironment;
 import app.drydock.process.SshCommandBuilder;
+import app.drydock.state.json.JsonValue;
+import app.drydock.state.json.JsonWriter;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -235,6 +238,7 @@ public final class ClaudeAgentProvider implements AgentProvider {
         }
         command.append(activitySettingsFlag(caps));
         command.append(mcpConfigFlag(caps, c.mcp().flatMap(McpAccess::credentialFile)));
+        command.append(stdioMcpConfigFlag(caps, c.stdioMcpServers()));
         command.append(planModeFlag(caps, c.readOnly()));
         // The task goes last, as claude's positional [prompt], so the session
         // opens already working on it. After "--" so a task that starts with
@@ -263,7 +267,7 @@ public final class ClaudeAgentProvider implements AgentProvider {
         }
         ClaudeCapabilities caps = detectCaps();
         String suffix = activitySettingsFlag(caps) + mcpConfigFlag(caps, r.mcp().flatMap(McpAccess::credentialFile))
-                + planModeFlag(caps, r.readOnly());
+                + stdioMcpConfigFlag(caps, r.stdioMcpServers()) + planModeFlag(caps, r.readOnly());
         // Eval runs inside a container whose PATH has `claude`, not the host path.
         String binary = r.evalMode() ? "claude" : claudeBinary();
         // ddtool is not in the eval container and apiKeyHelper is stripped
@@ -395,6 +399,30 @@ public final class ClaudeAgentProvider implements AgentProvider {
             return "";
         }
         return " --mcp-config " + AgentCommands.shellQuote(mcpConfig.get().toString());
+    }
+
+    /**
+     * The stdio MCP servers as one inline {@code --mcp-config} JSON argument.
+     * Inline rather than a file: these entries carry no credential (unlike
+     * drydock's own server, whose token must stay off the command line), and
+     * no file means nothing to write, clean up or race on.
+     */
+    private static String stdioMcpConfigFlag(ClaudeCapabilities caps, List<StdioMcpServer> servers) {
+        if (!caps.supportsMcpConfig() || servers.isEmpty()) {
+            return "";
+        }
+        JsonValue.JsonObject entries = JsonValue.JsonObject.empty();
+        for (StdioMcpServer server : servers) {
+            JsonValue.JsonObject env = JsonValue.JsonObject.empty();
+            server.env().forEach((key, value) -> env.put(key, new JsonValue.JsonString(value)));
+            entries.put(server.name(), JsonValue.JsonObject.empty()
+                    .put("command", new JsonValue.JsonString(server.command()))
+                    .put("args", JsonValue.JsonArray.of(server.args().stream()
+                            .<JsonValue>map(JsonValue.JsonString::new).toList()))
+                    .put("env", env));
+        }
+        String json = JsonWriter.write(JsonValue.JsonObject.empty().put("mcpServers", entries)).strip();
+        return " --mcp-config " + AgentCommands.shellQuote(json);
     }
 
     /**

@@ -13,6 +13,7 @@ import app.drydock.agent.api.McpDelivery;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdDiscovery;
 import app.drydock.agent.api.SessionIdStrategy;
+import app.drydock.agent.api.StdioMcpServer;
 import app.drydock.agent.providers.terminal.TerminalAgentProvider;
 import app.drydock.agent.spi.AgentProvider;
 import app.drydock.app.ApplicationStateStore;
@@ -36,6 +37,7 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Queue;
 import java.util.Set;
@@ -282,13 +284,18 @@ class DrydockSessionServiceTest {
         }
 
         DrydockSessionService service(AgentProvider... providers) {
+            return service(path -> List.of(), providers);
+        }
+
+        DrydockSessionService service(Function<Path, List<StdioMcpServer>> stdioMcpServers,
+                                      AgentProvider... providers) {
             AgentRegistry registry = new AgentRegistry(List.of(providers),
                     new AgentContext(base, base.resolve("activity"), executor));
             SessionActivityWatcher watcher = new SessionActivityWatcher(base.resolve("activity"), executor);
             Function<Path, CompletableFuture<RepositoryId>> resolver =
                     path -> CompletableFuture.completedFuture(repository.id());
             return new DrydockSessionService(CompletableFuture.completedFuture(null),
-                    () -> store, () -> registry, () -> watcher, resolver, consoles, executor);
+                    () -> store, () -> registry, () -> watcher, resolver, consoles, executor, stdioMcpServers);
         }
     }
 
@@ -770,9 +777,41 @@ class DrydockSessionServiceTest {
         service.executionTerminated(running.id(), true, null);
 
         assertEquals(Optional.of("pi-session-late"), persisted(harness, running.id()).agentSessionId());
-        // Resolve is asked about the session's own creation time, which is
-        // what the record is matched against.
-        assertEquals(List.of(running.createdAt()), discovery.createdAtsReceived);
+        // Resolve is asked about this launch, not the row's creation: the
+        // record the agent writes carries its own launch time.
+        assertEquals(1, discovery.createdAtsReceived.size());
+        assertFalse(discovery.createdAtsReceived.get(0).isBefore(running.createdAt()));
+        harness.store.flush();
+    }
+
+    /**
+     * A row started again later (Start after a stop) launches a new agent
+     * session, minutes or days after the row was created. The record it
+     * writes has this launch's time, so that is what resolve must match
+     * against; the row's creation time is far outside resolve's tolerance.
+     * Seen live with Codex: row created 13:10, relaunched agent's thread
+     * 13:13:29, nothing bound at Stop.
+     */
+    @Test
+    void aRelaunchedRowIsMatchedAgainstThisLaunchNotTheRowsCreation(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingDiscovery discovery = new RecordingDiscovery(harness.events);
+        discovery.lateCandidates.add("codex-thread-2");
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.CODEX, SessionIdStrategy.DISCOVERED, discovery, true, false, null, harness.events);
+        DrydockSessionService service = harness.service(provider);
+        ManagedAgentSession old = persistSession(harness, AgentKind.CODEX, "Old row",
+                AgentBinding.unlaunched(AgentKind.CODEX), base, SessionStatus.INACTIVE,
+                Instant.parse("2026-08-12T10:00:00Z"));
+        Instant beforeLaunch = Instant.now();
+
+        service.startSession(old.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        service.executionTerminated(old.id(), true, null);
+
+        assertEquals(1, discovery.createdAtsReceived.size());
+        assertFalse(discovery.createdAtsReceived.get(0).isBefore(beforeLaunch),
+                "resolve must be anchored at this launch, got " + discovery.createdAtsReceived.get(0));
+        assertEquals(Optional.of("codex-thread-2"), persisted(harness, old.id()).agentSessionId());
         harness.store.flush();
     }
 
@@ -1018,5 +1057,52 @@ class DrydockSessionServiceTest {
         } finally {
             executor.shutdown();
         }
+    }
+
+    // ---- IDE MCP routing ---------------------------------------------------------
+
+    private static Function<Path, List<StdioMcpServer>> ideServerRoutedTo(List<Path> askedFor) {
+        return path -> {
+            askedFor.add(path);
+            return List.of(new StdioMcpServer("jetbrains", "/jbr/bin/java", List.of("Main"),
+                    Map.of("IJ_MCP_SERVER_PROJECT_PATH", path.toString())));
+        };
+    }
+
+    @Test
+    void aCreatedSessionGetsTheIdeServerRoutedToItsOwnWorktree(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, true, null, harness.events);
+        List<Path> askedFor = new CopyOnWriteArrayList<>();
+        DrydockSessionService service = harness.service(ideServerRoutedTo(askedFor), provider);
+
+        ManagedAgentSession prepared = service.prepareSession(base, AgentKind.CLAUDE, "My session")
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        service.launchSession(prepared).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(List.of(prepared.workingDirectory()), askedFor);
+        assertEquals(prepared.workingDirectory().toString(), provider.createContexts.get(0).stdioMcpServers()
+                .get(0).env().get("IJ_MCP_SERVER_PROJECT_PATH"));
+        harness.store.flush();
+    }
+
+    @Test
+    void aResumedSessionGetsTheIdeServerRoutedToItsOwnWorktree(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.PI, SessionIdStrategy.DISCOVERED, null, true, false, null, harness.events);
+        List<Path> askedFor = new CopyOnWriteArrayList<>();
+        DrydockSessionService service = harness.service(ideServerRoutedTo(askedFor), provider);
+        ManagedAgentSession stored = persistSession(harness, AgentKind.PI, "Named session",
+                new AgentBinding(AgentKind.PI, Optional.of("pi-conv-42"), Optional.empty()),
+                base, SessionStatus.EXITED, Instant.parse("2026-08-12T10:00:00Z"));
+
+        service.resumeSession(stored.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(List.of(stored.workingDirectory()), askedFor);
+        assertEquals(stored.workingDirectory().toString(), provider.resumeContexts.get(0).stdioMcpServers()
+                .get(0).env().get("IJ_MCP_SERVER_PROJECT_PATH"));
+        harness.store.flush();
     }
 }

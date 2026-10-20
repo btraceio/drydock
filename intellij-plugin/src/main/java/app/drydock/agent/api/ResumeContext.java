@@ -3,6 +3,7 @@ package app.drydock.agent.api;
 import app.drydock.domain.SshRemote;
 
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -25,13 +26,26 @@ import java.util.Optional;
  */
 public record ResumeContext(Optional<String> agentSessionId, Optional<String> agentSessionName,
                             Path workingDirectory, Optional<SshRemote> remote, Optional<McpAccess> mcp,
-                            boolean evalMode, boolean readOnly) {
+                            boolean evalMode, boolean readOnly, List<StdioMcpServer> stdioMcpServers) {
     public ResumeContext {
         Objects.requireNonNull(agentSessionId, "agentSessionId");
         Objects.requireNonNull(agentSessionName, "agentSessionName");
         Objects.requireNonNull(workingDirectory, "workingDirectory");
         Objects.requireNonNull(remote, "remote");
         Objects.requireNonNull(mcp, "mcp");
+        stdioMcpServers = List.copyOf(Objects.requireNonNull(stdioMcpServers, "stdioMcpServers"));
+    }
+
+    public ResumeContext(Optional<String> agentSessionId, Optional<String> agentSessionName,
+                         Path workingDirectory, Optional<SshRemote> remote, Optional<McpAccess> mcp,
+                         boolean evalMode, boolean readOnly) {
+        this(agentSessionId, agentSessionName, workingDirectory, remote, mcp, evalMode, readOnly, List.of());
+    }
+
+    /** This context, with {@code servers} as the stdio MCP servers the agent starts. */
+    public ResumeContext withStdioMcpServers(List<StdioMcpServer> servers) {
+        return new ResumeContext(agentSessionId, agentSessionName, workingDirectory, remote, mcp, evalMode,
+                readOnly, servers);
     }
 
     /** As the canonical constructor with {@code readOnly = false} (a writing resume). */

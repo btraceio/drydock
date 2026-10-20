@@ -14,6 +14,10 @@
          settings; the console renders wrong without it. -->
     <depends>org.jetbrains.plugins.terminal</depends>
     <depends>Git4Idea</depends>
+    <!-- Optional: agents Drydock launches get the IDE's bundled MCP server,
+         routed to their own worktree, when it is installed and running
+         (app.drydock.intellij.mcp.IdeMcpServer). -->
+    <depends optional="true" config-file="drydock-ide-mcp.xml">com.intellij.mcpServer</depends>
     <extensions defaultExtensionNs="com.intellij">
         <!-- A plain (not @State) application service: persistence goes through
              the core ApplicationStateStore single writer, so only the concrete

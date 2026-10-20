@@ -38,6 +38,14 @@ public final class CodexRolloutStore implements CandidateSource {
 
     private static final Logger LOG = System.getLogger(CodexRolloutStore.class.getName());
     private static final String ROLLOUT_GLOB = "rollout-*.jsonl";
+    /**
+     * The {@code session_meta.source} values of a session a person typed
+     * into. {@code "cli"} is the TUI before Codex 0.160. From 0.160 the TUI
+     * runs through Codex's app server, which records {@code "vscode"} (with
+     * originator {@code codex-tui}); seen on 0.163.0 from a Drydock tab.
+     * {@code "exec"} runs and subagents (whose source is an object) stay out.
+     */
+    static final Set<String> INTERACTIVE_SOURCES = Set.of("cli", "vscode");
 
     private final Path sessionsRoot;
 
@@ -54,7 +62,7 @@ public final class CodexRolloutStore implements CandidateSource {
 
     /**
      * Every rollout whose {@code session_meta.payload.cwd} equals {@code
-     * cwd} and whose {@code source} is {@code "cli"}, newest first.
+     * cwd} and whose {@code source} is an interactive one ({@link #INTERACTIVE_SOURCES}), newest first.
      */
     public List<RolloutMeta> forWorkingDirectory(Path cwd) {
         Path normalizedCwd = cwd.toAbsolutePath().normalize();
@@ -200,7 +208,7 @@ public final class CodexRolloutStore implements CandidateSource {
         List<RolloutMeta> matches = new ArrayList<>();
         for (Path file : files) {
             readMeta(file).ifPresent(meta -> {
-                if (meta.source().equals("cli") && meta.cwd().equals(normalizedCwd)) {
+                if (INTERACTIVE_SOURCES.contains(meta.source()) && meta.cwd().equals(normalizedCwd)) {
                     matches.add(meta);
                 }
             });

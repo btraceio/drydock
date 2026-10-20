@@ -9,6 +9,7 @@ import app.drydock.agent.api.LaunchPlan;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdDiscovery;
 import app.drydock.agent.api.SessionIdStrategy;
+import app.drydock.agent.api.StdioMcpServer;
 import app.drydock.agent.spi.AgentProvider;
 import app.drydock.app.ApplicationStateStore;
 import app.drydock.domain.AgentBinding;
@@ -25,6 +26,7 @@ import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.DrydockSessionsListener;
 import app.drydock.intellij.agent.AgentConsoleHost;
 import app.drydock.intellij.agent.AgentExecutionListener;
+import app.drydock.intellij.mcp.IdeMcpServer;
 import app.drydock.intellij.project.ProjectRepositoryService;
 
 import java.lang.System.Logger;
@@ -34,6 +36,7 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -109,6 +112,12 @@ public final class DrydockSessionService implements AgentExecutionListener {
     private final Function<Path, CompletableFuture<RepositoryId>> repositoryIdFor;
     private final AgentConsoleHost consoles;
     private final ExecutorService executor;
+    /**
+     * The stdio MCP servers a session in a given worktree starts: the IDE's
+     * bundled server routed to that worktree, when it is enabled. Never fails
+     * a launch; a broken lookup degrades to no IDE tools.
+     */
+    private final Function<Path, List<StdioMcpServer>> stdioMcpServers;
 
     /**
      * Agent session ids already bound to a persisted session, or claimed by
@@ -120,11 +129,20 @@ public final class DrydockSessionService implements AgentExecutionListener {
      */
     private final Set<String> claimedAgentSessionIds = ConcurrentHashMap.newKeySet();
     private final AtomicBoolean claimedIdsSeeded = new AtomicBoolean();
+    /**
+     * When each session's agent was last launched by this IDE run. The late
+     * id bind matches the agent's own record against this, not the row's
+     * creation: a row started again (Start after a stop) gets a record
+     * timestamped at the new launch, minutes or days after the row was made.
+     * Memory only; after an IDE restart the bind falls back to the creation
+     * time, as before.
+     */
+    private final Map<ManagedSessionId, Instant> lastLaunchedAt = new ConcurrentHashMap<>();
 
     public DrydockSessionService(DrydockPluginService plugin, AgentConsoleHost consoles,
             ProjectRepositoryService repos, ExecutorService executor) {
         this(plugin.initialization(), plugin::stateStore, plugin::registry, plugin::watcher,
-                repos::repositoryIdFor, consoles, executor);
+                repos::repositoryIdFor, consoles, executor, IdeMcpServer::forWorktree);
     }
 
     /**
@@ -136,7 +154,8 @@ public final class DrydockSessionService implements AgentExecutionListener {
     DrydockSessionService(CompletableFuture<Void> initialization, Supplier<ApplicationStateStore> stateStore,
             Supplier<AgentRegistry> registry, Supplier<SessionActivityWatcher> watcher,
             Function<Path, CompletableFuture<RepositoryId>> repositoryIdFor,
-            AgentConsoleHost consoles, ExecutorService executor) {
+            AgentConsoleHost consoles, ExecutorService executor,
+            Function<Path, List<StdioMcpServer>> stdioMcpServers) {
         this.initialization = Objects.requireNonNull(initialization, "initialization");
         this.stateStore = Objects.requireNonNull(stateStore, "stateStore");
         this.registry = Objects.requireNonNull(registry, "registry");
@@ -144,6 +163,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
         this.repositoryIdFor = Objects.requireNonNull(repositoryIdFor, "repositoryIdFor");
         this.consoles = Objects.requireNonNull(consoles, "consoles");
         this.executor = Objects.requireNonNull(executor, "executor");
+        this.stdioMcpServers = Objects.requireNonNull(stdioMcpServers, "stdioMcpServers");
     }
 
     // ---- create flow ---------------------------------------------------------
@@ -260,8 +280,10 @@ public final class DrydockSessionService implements AgentExecutionListener {
         // from "already there").
         Object snapshot = discovery.map(d -> d.snapshot(cwd)).orElse(null);
         Instant launchedAt = Instant.now();
+        lastLaunchedAt.put(prepared.id(), launchedAt);
         CreateContext ctx = new CreateContext(prepared.displayName(), generatedId, cwd,
-                Optional.empty(), Optional.empty(), false, prepared.readOnly(), initialPrompt);
+                Optional.empty(), Optional.empty(), false, prepared.readOnly(), initialPrompt)
+                .withStdioMcpServers(stdioMcpServersFor(cwd));
         LaunchPlan plan = provider.buildCreateCommand(ctx);
         if (!plan.supported()) {
             // AC11: name the agent, open nothing.
@@ -339,6 +361,16 @@ public final class DrydockSessionService implements AgentExecutionListener {
             // the interactive picker.
             LOG.log(Level.WARNING, () -> started.prepared().agentKind() + " id discovery failed for "
                     + started.prepared().id() + "; resume will use the picker: " + e);
+        }
+    }
+
+    private List<StdioMcpServer> stdioMcpServersFor(Path workingDirectory) {
+        try {
+            return stdioMcpServers.apply(workingDirectory);
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, () -> "Launching without the IDE's MCP server for " + workingDirectory
+                    + ": " + e);
+            return List.of();
         }
     }
 
@@ -469,7 +501,8 @@ public final class DrydockSessionService implements AgentExecutionListener {
             // No remote, no MCP, never eval (spec non-goals): the provider's
             // own no-id branch is what a session without an id gets (AC21).
             ResumeContext ctx = new ResumeContext(session.agentSessionId(), session.agentSessionName(),
-                    session.workingDirectory(), Optional.empty(), Optional.empty(), false, session.readOnly());
+                    session.workingDirectory(), Optional.empty(), Optional.empty(), false, session.readOnly())
+                    .withStdioMcpServers(stdioMcpServersFor(session.workingDirectory()));
             plan = provider.buildResumeCommand(ctx);
         } catch (RuntimeException failure) {
             persistFailedBestEffort(session);
@@ -619,8 +652,8 @@ public final class DrydockSessionService implements AgentExecutionListener {
         seedClaimedIdsOnce();
         Optional<String> resolved;
         try {
-            resolved = discovery.get().resolve(
-                    session.workingDirectory(), session.createdAt(), claimedAgentSessionIds);
+            resolved = discovery.get().resolve(session.workingDirectory(),
+                    lastLaunchedAt.getOrDefault(id, session.createdAt()), claimedAgentSessionIds);
         } catch (RuntimeException e) {
             LOG.log(Level.WARNING, () -> "Late id binding failed for " + id + ": " + e);
             return session;

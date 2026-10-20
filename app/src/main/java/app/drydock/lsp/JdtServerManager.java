@@ -51,7 +51,7 @@ import java.util.stream.Stream;
  * never at construction). Readiness: STARTING → READY (initialize response +
  * language/status ServiceReady) → INDEXING (first import/build task from
  * language/progressReport or $/progress) → INDEXED (all started tasks completed; no
- * task within 60 s of ServiceReady is a cached workspace → INDEXED); a task error or
+ * task within 5 s of ServiceReady is a cached workspace → INDEXED); a task error or
  * the amended 10-minute never-completes cap (from the FIRST started task) is terminal
  * NOT_INDEXED for the session — a late completion is never accepted. close() is
  * idempotent: a live server gets the protocol shutdown request, exit notification, then
@@ -67,7 +67,9 @@ import java.util.stream.Stream;
 public final class JdtServerManager implements AutoCloseable {
 
     private static final Logger LOG = System.getLogger(JdtServerManager.class.getName());
-    static final long NO_IMPORT_TASK_MILLIS = 60_000;        // §6: no task within 60 s of ServiceReady = cached
+    // §6, amended: no task within 5 s of ServiceReady = cached. The original 60 s made every cold
+    // first answer wait a minute; jdt.ls never reported a task on a cached workspace.
+    static final long NO_IMPORT_TASK_MILLIS = 5_000;
     static final long IMPORT_CAP_MILLIS = 600_000;           // §6 amended: never-completing task, from FIRST start
     static final long IDLE_STOP_MILLIS = 600_000;             // §5: idle stop 10 min after the last query
     static final long CRASH_BACKOFF_MILLIS = 30_000;          // §5: one restart, 30 s backoff after a crash
@@ -476,7 +478,7 @@ public final class JdtServerManager implements AutoCloseable {
     private void maybeReadyLocked() {
         if (state != Readiness.STARTING || !initializeResponded || !serviceReadySeen) return;
         state = Readiness.READY;
-        // §6: 60 s without an import task = cached workspace with nothing to import.
+        // §6: 5 s without an import task = cached workspace with nothing to import.
         noTaskTimer = scheduler.afterMillis(NO_IMPORT_TASK_MILLIS, this::onNoImportTaskTimeout);
         LOG.log(Level.DEBUG, "jdt.ls for {0} is ServiceReady", root);
     }
@@ -508,7 +510,7 @@ public final class JdtServerManager implements AutoCloseable {
         synchronized (lock) {
             if (state != Readiness.READY) return;
             state = Readiness.INDEXED;
-            LOG.log(Level.DEBUG, "no import task within 60 s of ServiceReady for {0}; cached workspace", root);
+            LOG.log(Level.DEBUG, "no import task within 5 s of ServiceReady for {0}; cached workspace", root);
         }
     }
 
