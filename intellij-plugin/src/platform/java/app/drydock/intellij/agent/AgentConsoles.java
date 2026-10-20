@@ -277,6 +277,17 @@ public final class AgentConsoles {
      * window that does not open. EDT.</p>
      */
     public static void jumpToOwnWindow(Project host, ManagedSessionId sessionId, boolean thenChanges) {
+        jumpToOwnWindow(host, sessionId, thenChanges, true);
+    }
+
+    /**
+     * As {@link #jumpToOwnWindow(Project, ManagedSessionId, boolean)};
+     * {@code announce} false for an agent {@code host} did not show (a
+     * needs-you balloon's "Open project window"), where "moved" would be
+     * untrue. EDT.
+     */
+    public static void jumpToOwnWindow(Project host, ManagedSessionId sessionId, boolean thenChanges,
+                                       boolean announce) {
         AgentExecutionRegistry registry = AgentExecutionRegistry.getInstance();
         Optional<AgentExecution> execution = registry.execution(sessionId);
         if (execution.isEmpty()) {
@@ -321,7 +332,7 @@ public final class AgentConsoles {
                             commit.activate(null);
                         }
                     }
-                    if (!host.isDisposed()) {
+                    if (announce && !host.isDisposed()) {
                         announceMove(host, target, sessionId, place);
                     }
                 } finally {

@@ -5,6 +5,7 @@ import app.drydock.intellij.agent.AttentionPlan.Ask;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -30,5 +31,23 @@ class AttentionPlanTest {
     @Test
     void aTitleIsTextNeverMarkup() {
         assertEquals("Review &lt;Greeter&gt; &amp; co · dd-scratch · main", AttentionPlan.htmlBody(List.of(PI)));
+    }
+
+    @Test
+    void theBalloonNamesTheSessionsOwnPlace() {
+        Ask hosted = new Ask("Codex", "Trim the OTLP profile",
+                new SessionPlace("dd-trace-java", Optional.of("jb/rnd_otlp")).label());
+
+        assertEquals("Trim the OTLP profile · dd-trace-java · jb/rnd_otlp", AttentionPlan.plainBody(List.of(hosted)));
+    }
+
+    @Test
+    void aNotShownSessionOffersShowHere() {
+        assertEquals(List.of("Show here", "Open project window"), AttentionPlan.actions(false));
+    }
+
+    @Test
+    void aShownSessionOffersRaise() {
+        assertEquals(List.of("Raise window", "Snooze"), AttentionPlan.actions(true));
     }
 }

@@ -7,7 +7,8 @@ import java.util.stream.Collectors;
  * The "needs you" notification's copy (handoff surface 4), as pure functions.
  *
  * <p>One agent: {@code Claude needs you}, with {@code <session title> ·
- * <repo>} as the body. Several arriving together collapse into one
+ * <repo> · <branch>} as the body — the agent's own worktree, never the
+ * window that happens to show it. Several arriving together collapse into one
  * notification, {@code 2 agents need you}, one line per agent — a stack of
  * balloons for one moment of attention is noise the user has to dismiss one
  * by one.</p>
@@ -38,6 +39,15 @@ public final class AttentionPlan {
      */
     public static String htmlBody(List<Ask> asks) {
         return asks.stream().map(ask -> escape(line(ask))).collect(Collectors.joining("<br>"));
+    }
+
+    /**
+     * The balloon's two actions: a session some window shows is raised there
+     * or snoozed; one no window shows can be shown in the window the user is
+     * in, or moved into its own (cross-project tabs, frame F5).
+     */
+    public static List<String> actions(boolean shown) {
+        return shown ? List.of("Raise window", "Snooze") : List.of("Show here", "Open project window");
     }
 
     private static String line(Ask ask) {
