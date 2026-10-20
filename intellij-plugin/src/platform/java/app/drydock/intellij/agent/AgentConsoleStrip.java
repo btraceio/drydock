@@ -97,6 +97,9 @@ final class AgentConsoleStrip extends JPanel {
         add(secondary);
         add(Box.createHorizontalStrut(JBUI.scale(12)));
         add(provenance);
+        // A fixed gap as well as the glue: in a narrow editor the glue
+        // collapses, and the provenance ran straight into the link.
+        add(Box.createHorizontalStrut(JBUI.scale(10)));
         add(Box.createHorizontalGlue());
         add(openWindow);
         add(Box.createHorizontalStrut(JBUI.scale(10)));
