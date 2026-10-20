@@ -77,7 +77,7 @@ final class TaskActions {
                 task("Deactivate", "Deactivate this task's agent", AllIcons.Actions.Suspend, TaskRow::running,
                         (project, row) -> stop(project, row, false)),
                 task("Deactivate && Close Window", "Deactivate the agent and close its window", AllIcons.Actions.Close,
-                        TaskRow::running, (project, row) -> stop(project, row, true)),
+                        TaskActions::closesOwnWindow, (project, row) -> stop(project, row, true)),
                 // F5: moves an agent another window shows into this one.
                 task("Show Here", "Move this agent's console into this window", AllIcons.Actions.MoveTo2,
                         row -> row.placement() instanceof TaskPlacement.OwnWindow
@@ -89,6 +89,18 @@ final class TaskActions {
                 task("Done with This Task…", "Forget the task, and optionally remove its worktree",
                         AllIcons.Actions.Checked, row -> true, TaskActions::done),
                 removeProject());
+    }
+
+    /**
+     * Whether Stop &amp; Close Window applies: the agent runs, and the window
+     * showing it is its own worktree's. A hosted agent's window belongs to
+     * another project — closing it would close what the user is working in,
+     * with whatever else it shows — and an agent no window shows has none to
+     * close. Pure.
+     */
+    static boolean closesOwnWindow(TaskRow row) {
+        return row.running() && (row.placement() instanceof TaskPlacement.ThisWindow
+                || row.placement() instanceof TaskPlacement.OwnWindow);
     }
 
     private interface RowAction {
