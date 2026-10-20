@@ -143,6 +143,7 @@ final class AgentConsoleStrip extends JPanel {
      * @param hostedFrom       where the agent comes from, when this tab hosts
      *                         it from another worktree; adds the provenance
      *                         and the jump to its own window
+     * @param folderMissing    whether a hosted agent's worktree folder is gone
      * @param moving           whether the console is on its way to the
      *                         agent's own window: the strip says so and its
      *                         actions wait (typing still reaches the agent)
@@ -150,7 +151,7 @@ final class AgentConsoleStrip extends JPanel {
     void update(ManagedAgentSession session, Optional<SessionActivity> activity, boolean running,
                 boolean readOnlyEnforced, String agentName, Duration age, Optional<Integer> changedFiles,
                 boolean resumable, Optional<Integer> estimatedTokens, boolean indexing,
-                Optional<SessionPlace> hostedFrom, boolean moving) {
+                Optional<SessionPlace> hostedFrom, boolean folderMissing, boolean moving) {
         // The window, not the catalog, is the authority on what is alive in
         // it: a row left in the running band with nothing running here reads
         // as not running (see AgentStripText.displayStatus).
@@ -170,7 +171,8 @@ final class AgentConsoleStrip extends JPanel {
         changes.setVisible(running);
         // A hosted tab's Changes opens in the agent's own window (F2/F3).
         changes.setText(hostedFrom.isPresent() ? "Changes ↗" : "Changes");
-        provenance.setText(hostedFrom.map(place -> moving ? JumpPlan.opening(place) : place.provenance()).orElse(""));
+        provenance.setText(hostedFrom.map(place -> moving ? JumpPlan.opening(place)
+                : place.provenance() + (folderMissing ? " · folder missing" : "")).orElse(""));
         provenance.setVisible(hostedFrom.isPresent());
         openWindow.setVisible(hostedFrom.isPresent());
         openWindow.setEnabled(!moving);

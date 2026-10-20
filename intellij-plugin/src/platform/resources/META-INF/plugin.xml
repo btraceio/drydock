@@ -105,6 +105,10 @@
              whichever window the user is in. -->
         <listener class="app.drydock.intellij.agent.AttentionNotifier"
                   topic="app.drydock.intellij.agent.SessionActivityListener"/>
+        <!-- A hosted agent's files, open as non-project files somewhere, are
+             refreshed when its turn ends: no window watches its worktree. -->
+        <listener class="app.drydock.intellij.agent.HostedFileRefresher"
+                  topic="app.drydock.intellij.agent.SessionActivityListener"/>
     </applicationListeners>
     <actions>
         <!-- Drydock is reached through its tool window, not a menu: New Task

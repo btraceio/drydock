@@ -50,6 +50,7 @@ import java.awt.event.WindowEvent;
 import java.awt.event.WindowFocusListener;
 import java.beans.PropertyChangeListener;
 import java.beans.PropertyChangeSupport;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
@@ -105,6 +106,9 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
      * comparing a worktree with the window's project means resolving paths.
      */
     private volatile Optional<SessionPlace> hostedFrom = Optional.empty();
+
+    /** Whether a hosted tab's worktree folder is gone; the strip says so. */
+    private volatile boolean folderMissing;
 
     /** {@link #hostedFrom} as the tab title last showed it. EDT. */
     private Optional<SessionPlace> paintedHostedFrom = Optional.empty();
@@ -247,6 +251,15 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
                 resumeTokens = found != null ? estimateResumeTokens(plugin, found) : Optional.empty();
                 resumable = found != null && AgentConsoles.hasConversation(found);
                 hostedFrom = found != null ? hostedPlace(plugin, found) : Optional.empty();
+                folderMissing = found != null && hostedFrom.isPresent()
+                        && HostedLifecycle.folderGone(true, Files.isDirectory(found.workingDirectory()));
+                if (found != null && !everResolved && HostedLifecycle.closeRestoredTab(hostedFrom.isPresent(),
+                        AgentExecutionRegistry.getInstance().host(found.id()).map(project::equals).orElse(false),
+                        project.getLocationHash().equals(file.getUserData(AgentConsoles.OPENED_IN)))) {
+                    // Restored by the IDE from another worktree: hosted tabs
+                    // do not come back; the Drydock list offers Resume here.
+                    closeLater();
+                }
                 if (hostedFrom.isPresent()) {
                     file.putUserData(HostedTab.KEY, new HostedTab.Facts(project, hostedFrom.get()));
                 } else if (HostedTab.placeIn(file, project).isPresent()) {
@@ -402,7 +415,7 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
                 // this same row instead.
                 resumable, resumeTokens,
                 DumbService.isDumb(project),
-                hostedFrom.map(place -> execution.map(AgentExecution::place).orElse(place)),
+                hostedFrom.map(place -> execution.map(AgentExecution::place).orElse(place)), folderMissing,
                 AgentExecutionRegistry.getInstance().moving().contains(current.id()));
 
         String stoppedLine = AgentStripText.stoppedFooter(

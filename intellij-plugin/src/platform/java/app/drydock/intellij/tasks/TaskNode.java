@@ -80,9 +80,13 @@ public sealed interface TaskNode {
         }
     }
 
-    /** One task: an agent session, and where its agent is shown. */
+    /**
+     * One task: an agent session, and where its agent is shown.
+     * {@code folderMissing}: it runs, and its worktree folder is gone.
+     */
     record TaskRow(ManagedAgentSession session, Optional<SessionActivity> activity, boolean running,
-                   Optional<String> branch, TaskPlacement placement, boolean readOnly) implements TaskNode {
+                   Optional<String> branch, TaskPlacement placement, boolean readOnly, boolean folderMissing)
+            implements TaskNode {
         public TaskRow {
             Objects.requireNonNull(session, "session");
             Objects.requireNonNull(activity, "activity");

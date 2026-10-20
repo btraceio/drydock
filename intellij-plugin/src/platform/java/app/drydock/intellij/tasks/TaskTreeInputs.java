@@ -12,6 +12,7 @@ import app.drydock.git.WorktreeService;
 import app.drydock.git.WorktreeService.Worktree;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.agent.AgentExecutionRegistry;
+import app.drydock.intellij.agent.HostedLifecycle;
 import app.drydock.intellij.project.ProjectIdentity;
 import app.drydock.projects.SharedProject;
 
@@ -121,6 +122,14 @@ final class TaskTreeInputs implements AutoCloseable {
         AgentExecutionRegistry executions = AgentExecutionRegistry.getInstance();
         Set<ManagedSessionId> running = new HashSet<>(executions.runningSessions());
         Map<ManagedSessionId, TaskTreeModel.Host> hosts = new HashMap<>();
+        // A running agent whose worktree folder is gone is marked, never
+        // stopped unasked.
+        for (ManagedAgentSession session : sessions) {
+            if (running.contains(session.id())
+                    && HostedLifecycle.folderGone(true, Files.isDirectory(session.workingDirectory()))) {
+                missing.add(session.workingDirectory());
+            }
+        }
         for (ManagedSessionId id : running) {
             executions.host(id).filter(window -> !window.isDisposed() && window.getBasePath() != null)
                     .ifPresent(window -> hosts.put(id, new TaskTreeModel.Host(

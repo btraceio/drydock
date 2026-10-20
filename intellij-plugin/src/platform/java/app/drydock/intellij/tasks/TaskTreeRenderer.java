@@ -111,6 +111,9 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
                 task.session().agentKind());
         append("   " + secondary(task, agent, Duration.between(task.session().lastOpenedAt(), Instant.now())),
                 SimpleTextAttributes.GRAYED_ATTRIBUTES);
+        if (task.folderMissing()) {
+            append("  folder missing", SimpleTextAttributes.ERROR_ATTRIBUTES);
+        }
         link(task).ifPresent(text -> {
             append(" · ", SimpleTextAttributes.GRAYED_ATTRIBUTES);
             append(text, SimpleTextAttributes.LINK_ATTRIBUTES, LINK);

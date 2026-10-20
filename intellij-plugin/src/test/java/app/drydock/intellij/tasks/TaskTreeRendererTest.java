@@ -29,7 +29,7 @@ class TaskTreeRendererTest {
         ManagedAgentSession session = new ManagedAgentSession.Builder(ManagedSessionId.newId(), RepositoryId.newId(),
                 "Fix chunk memory growth", AgentBinding.unlaunched(AgentKind.PI, SessionMode.WRITES),
                 SessionWorkspace.inRepository(DIR), Instant.EPOCH).status(SessionStatus.INACTIVE).build();
-        return new TaskRow(session, Optional.empty(), running, Optional.of("fix/chunk_memory"), placement, false);
+        return new TaskRow(session, Optional.empty(), running, Optional.of("fix/chunk_memory"), placement, false, false);
     }
 
     @Test

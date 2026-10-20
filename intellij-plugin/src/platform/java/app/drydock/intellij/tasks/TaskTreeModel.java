@@ -225,7 +225,7 @@ public final class TaskTreeModel {
         TaskPlacement placement = TaskPlacement.of(running, host.map(Host::base), host.map(Host::repo), directory,
                 in.currentWorkingRoot());
         return new TaskRow(session, in.activity().getOrDefault(session.id(), Optional.empty()),
-                running, branch, placement, session.readOnly());
+                running, branch, placement, session.readOnly(), running && in.missingFolders().contains(directory));
     }
 
     private static List<TaskNode> children(Inputs in, Path main, List<TaskRow> tasks) {

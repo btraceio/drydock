@@ -26,6 +26,7 @@ import com.intellij.openapi.progress.Task;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.project.ProjectManager;
 import com.intellij.openapi.ui.Messages;
+import com.intellij.openapi.util.Key;
 import com.intellij.openapi.util.text.StringUtil;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.openapi.wm.IdeFocusManager;
@@ -62,6 +63,9 @@ public final class AgentConsoles {
 
     private static final Logger LOG = System.getLogger(AgentConsoles.class.getName());
 
+    /** The location hash of the window Drydock last opened a console tab in, this IDE run. */
+    static final Key<String> OPENED_IN = Key.create("drydock.consoleOpenedIn");
+
     private AgentConsoles() {
     }
 
@@ -79,6 +83,9 @@ public final class AgentConsoles {
         Objects.requireNonNull(project, "project");
         Objects.requireNonNull(sessionId, "sessionId");
         AgentConsoleFile file = AgentConsoleFileSystem.getInstance().fileFor(sessionId);
+        // Drydock opened it, in this window, in this IDE run: a tab without
+        // the mark was restored by the IDE (see HostedLifecycle).
+        file.putUserData(OPENED_IN, project.getLocationHash());
         // A preview tab is replaced by the next file the user clicks; a live
         // agent must not be evictable that way.
         file.putUserData(FileEditorManagerKeys.FORBID_PREVIEW_TAB, Boolean.TRUE);
