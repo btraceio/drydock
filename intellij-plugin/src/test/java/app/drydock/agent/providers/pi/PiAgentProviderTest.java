@@ -688,4 +688,15 @@ class PiAgentProviderTest {
                 Optional.empty(), Optional.empty(), false, false, Optional.of("Add a farewell method"))).command();
         assertTrue(command.endsWith(" -- 'Add a farewell method'"), command);
     }
+
+    @Test
+    void anImplementationPromptSurvivesMultilineShellQuoting() {
+        String prompt = "Implement issue #42.\n\nReview the issue's gates and add `Closes #42`.";
+
+        String command = provider().buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
+                Optional.empty(), Optional.empty(), false, false, Optional.of(prompt))).command();
+
+        assertTrue(command.endsWith(" -- 'Implement issue #42.\n\n"
+                + "Review the issue'\\''s gates and add `Closes #42`.'"), command);
+    }
 }

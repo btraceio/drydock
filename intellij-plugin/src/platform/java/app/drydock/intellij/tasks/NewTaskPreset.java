@@ -7,7 +7,8 @@ import java.util.Objects;
 import java.util.Optional;
 
 /** Optional values and constraints supplied by a task entry point. */
-record NewTaskPreset(String name, Optional<String> instructions, boolean writableOnly) {
+record NewTaskPreset(String name, Optional<String> instructions, boolean writableOnly,
+                     boolean instructionsRequired) {
 
     NewTaskPreset {
         Objects.requireNonNull(name, "name");
@@ -15,7 +16,7 @@ record NewTaskPreset(String name, Optional<String> instructions, boolean writabl
     }
 
     static NewTaskPreset empty() {
-        return new NewTaskPreset("", Optional.empty(), false);
+        return new NewTaskPreset("", Optional.empty(), false, false);
     }
 
     static NewTaskPreset implement(OpenIssue issue) {
@@ -62,7 +63,7 @@ record NewTaskPreset(String name, Optional<String> instructions, boolean writabl
                 - The pull request explains the behavior, design decisions, risks, and verification, and contains the
                   correct closing keyword for this issue; the work is not done merely because code was written.
                 """.formatted(reference));
-        return new NewTaskPreset(name, Optional.of(prompt.toString()), true);
+        return new NewTaskPreset(name, Optional.of(prompt.toString()), true, true);
     }
 
     SessionMode mode(boolean readOnlySelected) {

@@ -102,6 +102,13 @@ final class NewTaskDialog extends DialogWrapper {
     private boolean updating;
 
     /**
+     * The exact values validated by the successful Start click. DialogWrapper
+     * disposes its peer before {@code showAndGet()} returns, so the caller must
+     * not reconstruct a choice from Swing fields after the modal has closed.
+     */
+    private Choice acceptedChoice;
+
+    /**
      * {@code refChooser} opens Git's own branch/tag picker when the
      * project's repository is open in some window; empty otherwise.
      */
@@ -372,6 +379,14 @@ final class NewTaskDialog extends DialogWrapper {
                 thisWindow.isSelected() ? OpenIn.THIS_WINDOW : OpenIn.NEW_WINDOW);
     }
 
+    /** The immutable submission captured before the dialog closed. */
+    Choice acceptedChoice() {
+        if (acceptedChoice == null) {
+            throw new IllegalStateException("The task dialog has not accepted a choice");
+        }
+        return acceptedChoice;
+    }
+
     @Override
     protected @Nullable ValidationInfo doValidate() {
         // Folder occupancy is a disk read; it is checked on OK only, not on
@@ -391,11 +406,17 @@ final class NewTaskDialog extends DialogWrapper {
         ModalityState modality = ModalityState.stateForComponent(getContentPanel());
         ApplicationManager.getApplication().executeOnPooledThread(() -> {
             Optional<String> refusal = NewTaskPlan.refusal(inputs, choice, NewTaskDialog::occupied);
+            if (refusal.isEmpty() && preset.instructionsRequired() && choice.instructions().isEmpty()) {
+                refusal = Optional.of("Give the agent implementation instructions.");
+            }
+            Optional<String> finalRefusal = refusal;
             ApplicationManager.getApplication().invokeLater(() -> {
                 getOKAction().setEnabled(true);
-                if (refusal.isPresent()) {
-                    setErrorText(refusal.get(), folder);
+                if (finalRefusal.isPresent()) {
+                    setErrorText(finalRefusal.get(),
+                            preset.instructionsRequired() && choice.instructions().isEmpty() ? instructions : folder);
                 } else if (isShowing()) {
+                    acceptedChoice = choice;
                     close(OK_EXIT_CODE);
                 }
             }, modality);

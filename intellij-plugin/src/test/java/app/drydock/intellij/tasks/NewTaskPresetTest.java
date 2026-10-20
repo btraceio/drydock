@@ -12,6 +12,7 @@ import java.util.Optional;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class NewTaskPresetTest {
@@ -48,5 +49,8 @@ class NewTaskPresetTest {
         assertEquals(SessionMode.WRITES, preset.mode(false));
         assertEquals(SessionMode.WRITES, preset.mode(true), "the hidden read-only state cannot override the preset");
         assertTrue(preset.writableOnly());
+        assertTrue(preset.instructionsRequired(),
+                "Implement must never degrade into an idle agent session");
+        assertFalse(NewTaskPreset.empty().instructionsRequired());
     }
 }

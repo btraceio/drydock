@@ -170,7 +170,7 @@ public final class TaskLauncher {
         ApplicationManager.getApplication().invokeLater(() -> {
             NewTaskDialog dialog = new NewTaskDialog(from, inputs.get(), refChooser, preset);
             if (dialog.showAndGet()) {
-                start(from, inputs.get(), dialog.choice());
+                start(from, inputs.get(), dialog.acceptedChoice());
             }
         }, ModalityState.nonModal());
     }
