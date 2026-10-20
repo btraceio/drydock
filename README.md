@@ -164,7 +164,7 @@ The runtime image layout and launcher details are documented in
 
 `intellij-plugin/` holds a Drydock plugin for IntelliJ IDEA: a **Drydock**
 tool window on the right edge that lists your projects and their agent tasks,
-starts a new task (branch and worktree pre-filled) with `⌥⌘N`, and switches to
+starts a new task (branch and worktree pre-filled) with `⌃⌥N` on macOS, and switches to
 or stops a running one. It shares the project list with the standalone app
 (`~/.drydock/projects.json`), so a project registered in one shows up in the
 other.
