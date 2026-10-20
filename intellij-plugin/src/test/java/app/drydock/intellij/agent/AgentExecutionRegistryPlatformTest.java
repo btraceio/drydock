@@ -4,6 +4,7 @@ import app.drydock.domain.ManagedSessionId;
 
 import com.intellij.openapi.util.Disposer;
 import com.intellij.terminal.TerminalExecutionConsole;
+import com.intellij.testFramework.LeakHunter;
 import com.intellij.testFramework.PlatformTestUtil;
 import com.intellij.testFramework.fixtures.BasePlatformTestCase;
 import com.jediterm.terminal.model.TerminalLine;
@@ -119,6 +120,17 @@ public class AgentExecutionRegistryPlatformTest extends BasePlatformTestCase {
         assertTrue(Disposer.isDisposed(before));
         assertEquals(pid, execution.handler().getProcess().pid());
         assertTrue(registry.isRunning(id));
+    }
+
+    public void testAConsoleMovedAwayFromIsNotKeptByTheProcess() throws Exception {
+        AgentExecution execution = start(STREAMING);
+        TerminalExecutionConsole before = execution.console().orElseThrow();
+
+        registry.moveTo(id, getProject());
+
+        // The process lives on; a console it no longer feeds must not live
+        // on with it, holding its screen buffer, for every move.
+        LeakHunter.checkLeak(execution.handler(), TerminalExecutionConsole.class, console -> console == before);
     }
 
     public void testAReleasedAgentKeepsRunningAndIsNotShown() throws Exception {

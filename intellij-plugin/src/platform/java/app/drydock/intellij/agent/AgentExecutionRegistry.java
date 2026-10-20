@@ -350,14 +350,20 @@ public final class AgentExecutionRegistry implements Disposable {
         Disposer.register(AgentExecutionService.getInstance(target), console);
         // Paths the agent prints open in its own worktree's window.
         console.addMessageFilter(new WorktreeFileLinks(execution.workingDirectory()));
-        // Always attached, even to an agent that has ended: attachToProcess
-        // is what starts the console's terminal emulator, and without it the
-        // replayed transcript is queued and never drawn. Input only: output
-        // comes through the router, so the console must not also listen to
-        // the process, or every chunk would print twice. An ended agent's
-        // input goes nowhere, and its dimmed tab takes none anyway.
+        // The console's terminal emulator is started for every console, even
+        // one showing an agent that has ended: without it the replayed
+        // transcript is queued and never drawn. The connector carries input
+        // and resizes; output comes through the router, never from the
+        // process directly, or every chunk would print twice. An ended
+        // agent's input goes nowhere, and its dimmed tab takes none anyway.
+        //
+        // Started on the widget rather than through attachToProcess, which
+        // does the same two calls but also adds a listener to the process
+        // handler that nothing ever removes: every console moved away from
+        // stayed reachable from the live process, screen buffer and all.
         ProcessHandlerTtyConnector tty = new ProcessHandlerTtyConnector(execution.handler(), StandardCharsets.UTF_8);
-        console.attachToProcess(execution.handler(), tty, false);
+        console.getTerminalWidget().createTerminalSession(tty);
+        console.getTerminalWidget().start();
         execution.shownIn(target, console);
         ProcessHandlerTtyConnector input = tty;
         // Set by the console's own disposal (a window closing, or a move):
