@@ -150,10 +150,10 @@ public class AgentExecutionRegistryPlatformTest extends BasePlatformTestCase {
 
         registry.moveTo(id, getProject());
 
-        // Its transcript is still there to read, dimmed by the tab; nothing
-        // was wired to a process that has gone.
-        assertTrue(execution.console().isPresent());
+        // Its transcript is still there to read, dimmed by the tab.
         assertFalse(registry.isRunning(id));
+        TerminalExecutionConsole console = execution.console().orElseThrow();
+        waitFor(() -> text(console).contains("done"));
     }
 
     public void testAnAgentThatEndedWhileNotShownCannotBeShown() throws Exception {

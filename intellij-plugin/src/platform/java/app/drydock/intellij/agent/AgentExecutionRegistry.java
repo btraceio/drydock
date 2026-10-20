@@ -340,14 +340,14 @@ public final class AgentExecutionRegistry implements Disposable {
         Disposer.register(AgentExecutionService.getInstance(target), console);
         // Paths the agent prints open in its own worktree's window.
         console.addMessageFilter(new WorktreeFileLinks(execution.workingDirectory()));
-        ProcessHandlerTtyConnector tty = null;
-        if (execution.isRunning()) {
-            // Input only: output comes through the router, so the console
-            // must not also listen to the process, or every chunk would print
-            // twice.
-            tty = new ProcessHandlerTtyConnector(execution.handler(), StandardCharsets.UTF_8);
-            console.attachToProcess(execution.handler(), tty, false);
-        }
+        // Always attached, even to an agent that has ended: attachToProcess
+        // is what starts the console's terminal emulator, and without it the
+        // replayed transcript is queued and never drawn. Input only: output
+        // comes through the router, so the console must not also listen to
+        // the process, or every chunk would print twice. An ended agent's
+        // input goes nowhere, and its dimmed tab takes none anyway.
+        ProcessHandlerTtyConnector tty = new ProcessHandlerTtyConnector(execution.handler(), StandardCharsets.UTF_8);
+        console.attachToProcess(execution.handler(), tty, false);
         execution.shownIn(target, console);
         ProcessHandlerTtyConnector input = tty;
         // Set by the console's own disposal (a window closing, or a move):
@@ -358,7 +358,11 @@ public final class AgentExecutionRegistry implements Disposable {
             if (!disposed.get()) {
                 console.print(text, ConsoleViewContentType.NORMAL_OUTPUT);
             }
-        }, () -> redraw(console, input));
+        }, () -> {
+            if (execution.isRunning()) {
+                redraw(console, input);
+            }
+        });
         previous.ifPresent(Disposer::dispose);
         publish().executionShown(sessionId, target);
         return execution;
@@ -371,9 +375,6 @@ public final class AgentExecutionRegistry implements Disposable {
      * this the new console would show it wrong until the agent next drew.
      */
     private static void redraw(TerminalExecutionConsole console, ProcessHandlerTtyConnector tty) {
-        if (tty == null) {
-            return;
-        }
         try {
             TermSize size = console.getTerminalWidget().getTerminal().getSize();
             if (size == null || size.getColumns() <= 0 || size.getRows() <= 0) {
