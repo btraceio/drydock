@@ -6,6 +6,7 @@ import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.agent.AgentStripText;
 import app.drydock.intellij.tasks.TaskNode.AddCurrentProject;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
+import app.drydock.intellij.tasks.TaskNode.IssueRow;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.intellij.tasks.TaskNode.Section;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
@@ -75,6 +76,14 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
                 append("⑂ " + idle.branch(), SimpleTextAttributes.GRAYED_ATTRIBUTES);
                 append("  no task · ", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
                 append("Start ▸", SimpleTextAttributes.LINK_ATTRIBUTES, LINK);
+            }
+            case IssueRow issue -> {
+                setIcon(AllIcons.Vcs.Vendors.Github);
+                append("#" + issue.issue().number() + " " + issue.issue().title());
+                if (!issue.issue().labels().isEmpty()) {
+                    append("  " + String.join(", ", issue.issue().labels()),
+                            SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
+                }
             }
             case TaskRow task -> paintTask(task);
             default -> append(String.valueOf(node.getUserObject()));

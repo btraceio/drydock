@@ -2,6 +2,7 @@ package app.drydock.intellij.tasks;
 
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.SessionActivity;
+import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.projects.SharedProject;
 
 import java.nio.file.Path;
@@ -17,7 +18,8 @@ public sealed interface TaskNode {
         SESSIONS("Sessions"),
         ACTIVE("Active"),
         INACTIVE("Inactive"),
-        WORKTREES("Worktrees");
+        WORKTREES("Worktrees"),
+        ISSUES("Issues");
 
         private final String label;
 
@@ -93,6 +95,14 @@ public sealed interface TaskNode {
         public IdleWorktree {
             Objects.requireNonNull(worktree, "worktree");
             Objects.requireNonNull(branch, "branch");
+        }
+    }
+
+    /** One open GitHub issue belonging to the containing registered project. */
+    record IssueRow(Path mainRoot, OpenIssue issue) implements TaskNode {
+        public IssueRow {
+            Objects.requireNonNull(mainRoot, "mainRoot");
+            Objects.requireNonNull(issue, "issue");
         }
     }
 }

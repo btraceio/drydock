@@ -6,12 +6,15 @@ import app.drydock.intellij.DrydockSessionsListener;
 import app.drydock.intellij.agent.SessionActivityListener;
 import app.drydock.intellij.tasks.TaskNode.AddCurrentProject;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
+import app.drydock.intellij.tasks.TaskNode.IssueRow;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.intellij.tasks.TaskNode.Section;
+import app.drydock.intellij.tasks.TaskNode.SectionKind;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
 
 import com.intellij.icons.AllIcons;
+import com.intellij.ide.BrowserUtil;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.actionSystem.ActionManager;
 import com.intellij.openapi.actionSystem.ActionToolbar;
@@ -145,6 +148,52 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                         TaskLauncher.open(project, Optional.of(target.mainRoot()), target.fixedWorktree()));
             }
         });
+        contextActions.add(new DumbAwareAction("Open in GitHub", "Open this issue in the browser",
+                AllIcons.Vcs.Vendors.Github) {
+            @Override
+            public void update(@NotNull AnActionEvent e) {
+                TaskActions.present(e, e.getData(SELECTED_NODE) instanceof IssueRow issue
+                        && issue.issue().url().isPresent());
+            }
+
+            @Override
+            public @NotNull ActionUpdateThread getActionUpdateThread() {
+                return ActionUpdateThread.EDT;
+            }
+
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                if (e.getData(SELECTED_NODE) instanceof IssueRow issue) {
+                    issue.issue().url().ifPresent(BrowserUtil::browse);
+                }
+            }
+        });
+        contextActions.add(new DumbAwareAction("GitHub Settings…",
+                "Configure GitHub issues for this Drydock project", AllIcons.General.Settings) {
+            @Override
+            public void update(@NotNull AnActionEvent e) {
+                TaskActions.present(e, githubSettingsNode(e.getData(SELECTED_NODE)));
+            }
+
+            @Override
+            public @NotNull ActionUpdateThread getActionUpdateThread() {
+                return ActionUpdateThread.EDT;
+            }
+
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                Path root = e.getData(SELECTED_PROJECT_ROOT);
+                if (root == null) {
+                    return;
+                }
+                DrydockPluginService.getInstance().sharedProjects().byRoot(root).ifPresent(registered -> {
+                    if (new GitHubProjectSettingsDialog(project, registered).showAndGet()) {
+                        inputs.invalidateGitHub();
+                        requestRebuild(false);
+                    }
+                });
+            }
+        });
         contextActions.addAll(TaskActions.taskActions());
         PopupHandler.installPopupMenu(tree, contextActions, "Drydock.TaskTree.Popup");
 
@@ -188,6 +237,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                             Optional.of(new NewTaskPlan.FixedWorktree(idle.worktree(), idle.branch())));
                 } else if (node instanceof TaskRow task && primaryButton && event.getClickCount() == 2) {
                     TaskNavigator.switchTo(task.session());
+                } else if (node instanceof IssueRow issue && primaryButton && event.getClickCount() == 2) {
+                    issue.issue().url().ifPresent(BrowserUtil::browse);
                 }
             }
         });
@@ -299,8 +350,14 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             case WorktreeGroup ignored -> Optional.of(new NewTaskTarget(mainRoot, worktreeOf(node, mainRoot)));
             case IdleWorktree ignored -> Optional.of(new NewTaskTarget(mainRoot, worktreeOf(node, mainRoot)));
             case TaskRow ignored -> Optional.of(new NewTaskTarget(mainRoot, worktreeOf(node, mainRoot)));
+            case IssueRow ignored -> Optional.of(new NewTaskTarget(mainRoot, Optional.empty()));
             case null, default -> Optional.empty();
         };
+    }
+
+    private static boolean githubSettingsNode(TaskNode node) {
+        return node instanceof ProjectRow || node instanceof IssueRow
+                || node instanceof Section section && section.kind() == SectionKind.ISSUES;
     }
 
     record NewTaskTarget(Path mainRoot, Optional<NewTaskPlan.FixedWorktree> fixedWorktree) {

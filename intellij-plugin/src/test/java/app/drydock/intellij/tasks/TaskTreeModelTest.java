@@ -10,9 +10,12 @@ import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.domain.SshRemote;
+import app.drydock.git.GhCliService.IssueListing;
+import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.WorktreeService.Worktree;
 import app.drydock.intellij.tasks.TaskNode.AddCurrentProject;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
+import app.drydock.intellij.tasks.TaskNode.IssueRow;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.intellij.tasks.TaskNode.Section;
 import app.drydock.intellij.tasks.TaskNode.SectionKind;
@@ -56,6 +59,7 @@ class TaskTreeModelTest {
         final Set<ManagedSessionId> running = new HashSet<>();
         final Set<Path> missing = new HashSet<>();
         final Map<RepositoryId, Path> recordedRoots = new HashMap<>();
+        final Map<Path, IssueListing> issues = new HashMap<>();
         Optional<String> problem = Optional.empty();
         String filter = "";
 
@@ -80,7 +84,7 @@ class TaskTreeModelTest {
 
         TaskTreeModel.Inputs build() {
             return new TaskTreeModel.Inputs(projects, sessions, worktrees, mainRootOf, currentMain, currentWorking,
-                    activity, running, missing, recordedRoots, problem, filter);
+                    activity, running, missing, recordedRoots, issues, problem, filter);
         }
     }
 
@@ -130,6 +134,10 @@ class TaskTreeModelTest {
 
     private static List<TaskNode> worktreeNodes(ProjectRow row) {
         return section(row, SectionKind.WORKTREES).orElseThrow().children();
+    }
+
+    private static List<TaskNode> issueNodes(ProjectRow row) {
+        return section(row, SectionKind.ISSUES).orElseThrow().children();
     }
 
     @Test
@@ -234,6 +242,36 @@ class TaskTreeModelTest {
 
         assertEquals(List.of(new IdleWorktree(sessionless, "idle-work")), worktreeNodes(row));
         assertEquals(Optional.of("active-work"), ((TaskRow) sessionNodes(row).get(0)).branch());
+    }
+
+    @Test
+    void issuesIncludeUnassignedItemsAndSortByMostRecentlyUpdated() {
+        In in = new In().project(BTRACE);
+        OpenIssue olderAssigned = new OpenIssue(4, "Assigned issue", Optional.of("https://example/4"),
+                List.of("bug"), List.of("somebody"), Optional.of(T));
+        OpenIssue newerUnassigned = new OpenIssue(9, "Unassigned issue", Optional.of("https://example/9"),
+                List.of("profiling"), List.of(), Optional.of(T.plusSeconds(60)));
+        in.issues.put(BTRACE, new IssueListing.Listed(List.of(olderAssigned, newerUnassigned)));
+
+        ProjectRow row = projectRow(TaskTreeModel.build(in.build()), BTRACE);
+
+        assertEquals(List.of(9, 4), issueNodes(row).stream()
+                .map(IssueRow.class::cast).map(issue -> issue.issue().number()).toList());
+    }
+
+    @Test
+    void issueSearchMatchesNumberTitleAndLabel() {
+        In in = new In().project(BTRACE);
+        in.issues.put(BTRACE, new IssueListing.Listed(List.of(
+                new OpenIssue(9, "Allocation regression", Optional.empty(), List.of("profiling"), List.of(),
+                        Optional.of(T)),
+                new OpenIssue(10, "Documentation", Optional.empty(), List.of("docs"), List.of(), Optional.of(T)))));
+        in.filter = "#9";
+
+        ProjectRow row = projectRow(TaskTreeModel.build(in.build()), BTRACE);
+
+        IssueRow issue = assertInstanceOf(IssueRow.class, issueNodes(row).getFirst());
+        assertEquals(9, issue.issue().number());
     }
 
     @Test

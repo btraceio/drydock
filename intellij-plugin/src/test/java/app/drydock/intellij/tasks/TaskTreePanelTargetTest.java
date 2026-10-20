@@ -7,7 +7,9 @@ import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionWorkspace;
+import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
+import app.drydock.intellij.tasks.TaskNode.IssueRow;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import app.drydock.projects.SharedProject;
@@ -71,6 +73,16 @@ class TaskTreePanelTargetTest {
                 .build();
         TaskRow row = new TaskRow(session, Optional.empty(), false,
                 Optional.of("main"), false, false);
+
+        assertEquals(Optional.of(new TaskTreePanel.NewTaskTarget(REGISTERED_ROOT, Optional.empty())),
+                TaskTreePanel.newTaskTarget(row, REGISTERED_ROOT));
+    }
+
+    @Test
+    void issueRowTargetsItsRegisteredProjectRatherThanTheWindowProject() {
+        IssueRow row = new IssueRow(REGISTERED_ROOT, new OpenIssue(42, "Fix allocation profile",
+                Optional.of("https://github.com/DataDog/profiling-backend/issues/42"), List.of(), List.of(),
+                Optional.of(NOW)));
 
         assertEquals(Optional.of(new TaskTreePanel.NewTaskTarget(REGISTERED_ROOT, Optional.empty())),
                 TaskTreePanel.newTaskTarget(row, REGISTERED_ROOT));

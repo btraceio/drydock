@@ -20,6 +20,7 @@ import java.lang.System.Logger.Level;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -34,7 +35,7 @@ import java.util.regex.Pattern;
 /**
  * READ-ONLY queries against the GitHub CLI ({@code gh}): the PR chip a
  * worktree session reconciles after a hand-off, and the open pull requests
- * a repository's sidebar group lists. The app never runs
+ * and issues that repository views list. The app never runs
  * {@code gh pr create} or any other mutation -- Claude in the terminal does;
  * this service only observes. Checking a PR out is a working-tree change and
  * lives in {@code PrCheckoutService}, not here.
@@ -106,8 +107,40 @@ public final class GhCliService implements AutoCloseable {
         }
     }
 
+    /** One open GitHub issue shown in a registered project's tree. */
+    public record OpenIssue(int number, String title, Optional<String> url, List<String> labels,
+                            List<String> assignees, Optional<Instant> updatedAt) {
+        public OpenIssue {
+            Objects.requireNonNull(title, "title");
+            Objects.requireNonNull(url, "url");
+            labels = List.copyOf(labels);
+            assignees = List.copyOf(assignees);
+            Objects.requireNonNull(updatedAt, "updatedAt");
+        }
+    }
+
+    /** Result of listing issues; unsupported is deliberately distinct from a failed query. */
+    public sealed interface IssueListing {
+        record Listed(List<OpenIssue> issues) implements IssueListing {
+            public Listed {
+                issues = List.copyOf(issues);
+            }
+        }
+
+        record Unsupported() implements IssueListing { }
+
+        record Failed(String message) implements IssueListing {
+            public Failed {
+                Objects.requireNonNull(message, "message");
+            }
+        }
+    }
+
     /** How many open PRs one listing reads; one row per PR, so it can be generous. */
     private static final int PR_LIST_LIMIT = 100;
+
+    /** Enough for normal repositories without letting a large tracker swamp the task tree. */
+    public static final int ISSUE_LIST_LIMIT = 100;
 
     private final ExecutorService executor;
     private final boolean ownsExecutor;
@@ -242,6 +275,105 @@ public final class GhCliService implements AutoCloseable {
             LOG.log(Level.DEBUG, "Unparseable gh pr list output", e);
             return new PullRequestListing.Failed("gh pr list returned output that could not be parsed");
         }
+    }
+
+    /** All open issues for the repository, using the globally active {@code gh} account. */
+    public CompletableFuture<IssueListing> openIssues(Path root, Optional<String> repository) {
+        return CompletableFuture.supplyAsync(() -> openIssuesBlocking(root, repository), executor);
+    }
+
+    IssueListing openIssuesBlocking(Path root, Optional<String> repository) {
+        Path gh = locate().orElse(null);
+        if (gh == null) {
+            return new IssueListing.Unsupported();
+        }
+        if (repository.filter(value -> !validRepository(value)).isPresent()) {
+            return new IssueListing.Failed("The configured GitHub repository is not OWNER/REPO or HOST/OWNER/REPO");
+        }
+        List<String> command = new ArrayList<>(List.of(gh.toString(), "issue", "list",
+                "--state", "open", "--limit", String.valueOf(ISSUE_LIST_LIMIT),
+                "--json", "number,title,url,labels,assignees,updatedAt"));
+        repository.ifPresent(value -> {
+            command.add("--repo");
+            command.add(value);
+        });
+        ProcessResult result = runIn(root, command);
+        if (result == null) {
+            return new IssueListing.Failed("gh did not run to completion");
+        }
+        if (result.exitCode() != 0) {
+            String excerpt = ProcessRunner.excerpt(result.stderr());
+            LOG.log(Level.WARNING, "gh issue list in " + root + " exited " + result.exitCode()
+                    + (excerpt.isBlank() ? "" : ": " + excerpt));
+            return new IssueListing.Failed(excerpt.isBlank()
+                    ? "gh issue list exited " + result.exitCode() : excerpt);
+        }
+        return parseIssueListing(result.stdout());
+    }
+
+    /** The pure half of {@code gh issue list --json}. Malformed rows are skipped. */
+    static IssueListing parseIssueListing(String stdout) {
+        try {
+            if (!(JsonParser.parse(stdout) instanceof JsonArray array)) {
+                return new IssueListing.Failed("gh issue list did not return a JSON array");
+            }
+            List<OpenIssue> issues = new ArrayList<>();
+            for (JsonValue element : array.elements()) {
+                if (!(element instanceof JsonObject obj)
+                        || !(obj.get("number") instanceof JsonNumber number)
+                        || !(obj.get("title") instanceof JsonString title)) {
+                    continue;
+                }
+                Optional<String> url = obj.get("url") instanceof JsonString value
+                        ? Optional.of(value.value()) : Optional.empty();
+                Optional<Instant> updatedAt = Optional.empty();
+                if (obj.get("updatedAt") instanceof JsonString value) {
+                    try {
+                        updatedAt = Optional.of(Instant.parse(value.value()));
+                    } catch (RuntimeException ignored) {
+                        // A bad timestamp does not make the issue itself unusable.
+                    }
+                }
+                issues.add(new OpenIssue(number.asInt(), title.value(), url,
+                        names(obj.get("labels"), "name"), names(obj.get("assignees"), "login"), updatedAt));
+            }
+            return new IssueListing.Listed(issues);
+        } catch (JsonParseException | NumberFormatException e) {
+            LOG.log(Level.DEBUG, "Unparseable gh issue list output", e);
+            return new IssueListing.Failed("gh issue list returned output that could not be parsed");
+        }
+    }
+
+    private static List<String> names(JsonValue value, String member) {
+        if (!(value instanceof JsonArray array)) {
+            return List.of();
+        }
+        List<String> names = new ArrayList<>();
+        for (JsonValue element : array.elements()) {
+            if (element instanceof JsonObject object && object.get(member) instanceof JsonString name
+                    && !name.value().isBlank()) {
+                names.add(name.value());
+            }
+        }
+        return names;
+    }
+
+    /** Accepted by {@code gh --repo}: OWNER/REPO or HOST/OWNER/REPO, with no option-like segment. */
+    public static boolean validRepository(String value) {
+        if (value == null || value.isBlank() || value.startsWith("-")
+                || value.chars().anyMatch(Character::isWhitespace)) {
+            return false;
+        }
+        String[] parts = value.split("/", -1);
+        if (parts.length < 2 || parts.length > 3) {
+            return false;
+        }
+        for (String part : parts) {
+            if (part.isBlank() || part.startsWith("-")) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static PrInfo.PrLifecycle lifecycleOf(String raw) {
