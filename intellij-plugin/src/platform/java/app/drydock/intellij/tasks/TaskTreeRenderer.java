@@ -24,6 +24,7 @@ import javax.swing.tree.DefaultMutableTreeNode;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Optional;
 
 /** Paints one {@link TaskNode}: dot, name, and the grey where/what/age text. */
 final class TaskTreeRenderer extends ColoredTreeCellRenderer {
@@ -106,18 +107,44 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
         if (task.readOnly()) {
             append("  RO", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
         }
-        append("   " + secondary(task), SimpleTextAttributes.GRAYED_ATTRIBUTES);
+        String agent = AgentLabels.displayName(DrydockPluginService.getInstance().registry(),
+                task.session().agentKind());
+        append("   " + secondary(task, agent, Duration.between(task.session().lastOpenedAt(), Instant.now())),
+                SimpleTextAttributes.GRAYED_ATTRIBUTES);
+        link(task).ifPresent(text -> {
+            append(" · ", SimpleTextAttributes.GRAYED_ATTRIBUTES);
+            append(text, SimpleTextAttributes.LINK_ATTRIBUTES, LINK);
+        });
     }
 
-    /** {@code ⑂ <branch> · <Agent> · <age>}, or {@code <branch> · this window · <Agent>}. */
-    static String secondary(TaskRow task) {
-        DrydockPluginService plugin = DrydockPluginService.getInstance();
-        AgentRegistry registry = plugin.registry();
-        String agent = AgentLabels.displayName(registry, task.session().agentKind());
+    /**
+     * Pure. A running task says where it is shown: {@code <branch> · <where> ·
+     * <Agent>} (cross-project tabs, F1/F5). An idle one keeps the MVP's text:
+     * {@code <branch> · this window · <Agent>} for this window's worktree,
+     * {@code ⑂ <branch> · <Agent> · <age>} otherwise.
+     */
+    static String secondary(TaskRow task, String agent, Duration age) {
+        String meta = task.placement().meta();
+        if (!meta.isEmpty()) {
+            return task.branch().map(branch -> branch + " · ").orElse("") + meta + " · " + agent;
+        }
         if (task.isThisWindow()) {
             return task.branch().map(branch -> branch + " · ").orElse("") + "this window · " + agent;
         }
-        String age = AgentStripText.relativeAge(Duration.between(task.session().lastOpenedAt(), Instant.now()));
-        return task.branch().map(branch -> "⑂ " + branch + " · ").orElse("") + agent + " · " + age;
+        return task.branch().map(branch -> "⑂ " + branch + " · ").orElse("") + agent + " · "
+                + AgentStripText.relativeAge(age);
+    }
+
+    /**
+     * Pure: the row's inline link. {@code Show here} for an agent no window
+     * shows; {@code Resume here} for an idle task from another worktree (its
+     * own worktree's Resume is the toolbar's).
+     */
+    static Optional<String> link(TaskRow task) {
+        return switch (task.placement()) {
+            case TaskPlacement.NotShown notShown -> Optional.of("Show here");
+            case TaskPlacement.Idle idle when !idle.thisWindow() -> Optional.of("Resume here");
+            default -> Optional.empty();
+        };
     }
 }

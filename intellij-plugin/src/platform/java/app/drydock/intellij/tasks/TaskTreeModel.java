@@ -83,18 +83,27 @@ public final class TaskTreeModel {
      * @param recordedRoots   the canonical root of the repository each session was recorded under (the
      *                        plugin's own catalog): a task started from New task records its main checkout
      */
+    /** The window showing a running agent: its canonical project directory, and its repo's name. */
+    public record Host(Path base, String repo) {
+        public Host {
+            Objects.requireNonNull(base, "base");
+            Objects.requireNonNull(repo, "repo");
+        }
+    }
+
     public record Inputs(List<SharedProject> projects, List<ManagedAgentSession> sessions,
                          Map<Path, List<Worktree>> worktreesByMainRoot, Map<Path, Path> mainRootOf,
                          Optional<Path> currentMainRoot, Optional<Path> currentWorkingRoot,
                          Map<ManagedSessionId, Optional<SessionActivity>> activity, Set<ManagedSessionId> running,
-                         Set<Path> missingFolders, Map<RepositoryId, Path> recordedRoots,
-                         Map<Path, IssueListing> issuesByMainRoot, Optional<String> listProblem, String filter,
-                         ViewFilter viewFilter) {
+                         Map<ManagedSessionId, Host> hosts, Set<Path> missingFolders,
+                         Map<RepositoryId, Path> recordedRoots, Map<Path, IssueListing> issuesByMainRoot,
+                         Optional<String> listProblem, String filter, ViewFilter viewFilter) {
         public Inputs {
             projects = List.copyOf(projects);
             sessions = List.copyOf(sessions);
             worktreesByMainRoot = Map.copyOf(worktreesByMainRoot);
             mainRootOf = Map.copyOf(mainRootOf);
+            hosts = Map.copyOf(hosts);
             Objects.requireNonNull(currentMainRoot, "currentMainRoot");
             Objects.requireNonNull(currentWorkingRoot, "currentWorkingRoot");
             activity = Map.copyOf(activity);
@@ -115,7 +124,7 @@ public final class TaskTreeModel {
                       Set<Path> missingFolders, Map<RepositoryId, Path> recordedRoots,
                       Map<Path, IssueListing> issuesByMainRoot, Optional<String> listProblem, String filter) {
             this(projects, sessions, worktreesByMainRoot, mainRootOf, currentMainRoot, currentWorkingRoot,
-                    activity, running, missingFolders, recordedRoots, issuesByMainRoot, listProblem, filter,
+                    activity, running, Map.of(), missingFolders, recordedRoots, issuesByMainRoot, listProblem, filter,
                     ViewFilter.ALL);
         }
 
@@ -127,7 +136,7 @@ public final class TaskTreeModel {
                       Set<Path> missingFolders, Map<RepositoryId, Path> recordedRoots,
                       Optional<String> listProblem, String filter) {
             this(projects, sessions, worktreesByMainRoot, mainRootOf, currentMainRoot, currentWorkingRoot,
-                    activity, running, missingFolders, recordedRoots, Map.of(), listProblem, filter, ViewFilter.ALL);
+                    activity, running, Map.of(), missingFolders, recordedRoots, Map.of(), listProblem, filter, ViewFilter.ALL);
         }
     }
 
@@ -211,9 +220,12 @@ public final class TaskTreeModel {
                 .filter(worktree -> worktree.path().equals(directory))
                 .findFirst()
                 .flatMap(Worktree::branch);
-        boolean thisWindow = in.currentWorkingRoot().map(directory::equals).orElse(false);
+        boolean running = in.running().contains(session.id());
+        Optional<Host> host = Optional.ofNullable(in.hosts().get(session.id()));
+        TaskPlacement placement = TaskPlacement.of(running, host.map(Host::base), host.map(Host::repo), directory,
+                in.currentWorkingRoot());
         return new TaskRow(session, in.activity().getOrDefault(session.id(), Optional.empty()),
-                in.running().contains(session.id()), branch, thisWindow, session.readOnly());
+                running, branch, placement, session.readOnly());
     }
 
     private static List<TaskNode> children(Inputs in, Path main, List<TaskRow> tasks) {

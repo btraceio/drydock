@@ -58,6 +58,7 @@ class TaskTreeModelTest {
         Optional<Path> currentWorking = Optional.empty();
         final Map<ManagedSessionId, Optional<SessionActivity>> activity = new HashMap<>();
         final Set<ManagedSessionId> running = new HashSet<>();
+        final Map<ManagedSessionId, TaskTreeModel.Host> hosts = new HashMap<>();
         final Set<Path> missing = new HashSet<>();
         final Map<RepositoryId, Path> recordedRoots = new HashMap<>();
         final Map<Path, IssueListing> issues = new HashMap<>();
@@ -86,7 +87,7 @@ class TaskTreeModelTest {
 
         TaskTreeModel.Inputs build() {
             return new TaskTreeModel.Inputs(projects, sessions, worktrees, mainRootOf, currentMain, currentWorking,
-                    activity, running, missing, recordedRoots, issues, problem, filter, viewFilter);
+                    activity, running, hosts, missing, recordedRoots, issues, problem, filter, viewFilter);
         }
     }
 
@@ -328,6 +329,20 @@ class TaskTreeModelTest {
         assertTrue(section(row, SectionKind.SESSIONS).isEmpty());
         assertEquals(List.of(9), issueNodes(row).stream().map(IssueRow.class::cast)
                 .map(issue -> issue.issue().number()).toList());
+    }
+
+    @Test
+    void aRunningTaskFromAnotherWorktreeShownInThisWindowIsHere() {
+        Path feature = Path.of("/wt/btrace-feature");
+        In in = new In().project(BTRACE).worktree(BTRACE, feature, "feature").current(BTRACE, BTRACE);
+        ManagedAgentSession task = session("Hosted task", feature);
+        in.sessions.add(task);
+        in.running.add(task.id());
+        in.hosts.put(task.id(), new TaskTreeModel.Host(BTRACE, "btrace"));
+
+        TaskRow row = (TaskRow) sessionNodes(projectRow(TaskTreeModel.build(in.build()), BTRACE)).get(0);
+
+        assertEquals(new TaskPlacement.Here(), row.placement());
     }
 
     @Test

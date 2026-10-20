@@ -80,13 +80,20 @@ public sealed interface TaskNode {
         }
     }
 
-    /** One task: an agent session. */
+    /** One task: an agent session, and where its agent is shown. */
     record TaskRow(ManagedAgentSession session, Optional<SessionActivity> activity, boolean running,
-                   Optional<String> branch, boolean isThisWindow, boolean readOnly) implements TaskNode {
+                   Optional<String> branch, TaskPlacement placement, boolean readOnly) implements TaskNode {
         public TaskRow {
             Objects.requireNonNull(session, "session");
             Objects.requireNonNull(activity, "activity");
             Objects.requireNonNull(branch, "branch");
+            Objects.requireNonNull(placement, "placement");
+        }
+
+        /** Whether the task works in this window's own worktree, running here or idle. */
+        public boolean isThisWindow() {
+            return placement instanceof TaskPlacement.ThisWindow
+                    || placement instanceof TaskPlacement.Idle idle && idle.thisWindow();
         }
     }
 

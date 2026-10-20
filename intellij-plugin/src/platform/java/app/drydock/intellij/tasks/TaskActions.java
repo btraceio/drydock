@@ -78,6 +78,11 @@ final class TaskActions {
                         (project, row) -> stop(project, row, false)),
                 task("Deactivate && Close Window", "Deactivate the agent and close its window", AllIcons.Actions.Close,
                         TaskRow::running, (project, row) -> stop(project, row, true)),
+                // F5: moves an agent another window shows into this one.
+                task("Show Here", "Move this agent's console into this window", AllIcons.Actions.MoveTo2,
+                        row -> row.placement() instanceof TaskPlacement.OwnWindow
+                                || row.placement() instanceof TaskPlacement.OtherWindow,
+                        (project, row) -> AgentConsoles.showHere(project, row.session().id())),
                 task("Resume", "Open the task and resume its conversation", AllIcons.Actions.Execute,
                         row -> !row.running(), (project, row) -> TaskNavigator.switchTo(row.session(),
                                 target -> AgentConsoles.resumeOrStart(target, row.session()))),

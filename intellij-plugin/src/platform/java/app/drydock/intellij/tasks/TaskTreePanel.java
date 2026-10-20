@@ -3,6 +3,7 @@ package app.drydock.intellij.tasks;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.DrydockSessionsListener;
+import app.drydock.intellij.agent.AgentConsoles;
 import app.drydock.intellij.agent.SessionActivityListener;
 import app.drydock.intellij.tasks.TaskNode.AddCurrentProject;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
@@ -269,6 +270,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 } else if (node instanceof IdleWorktree idle && acts) {
                     TaskLauncher.open(project, projectRootOf(path),
                             Optional.of(new NewTaskPlan.FixedWorktree(idle.worktree(), idle.branch())));
+                } else if (node instanceof TaskRow task && primaryButton && event.getClickCount() == 1
+                        && onLink(path, event)) {
+                    hereLink(task);
                 } else if (node instanceof TaskRow task && primaryButton && event.getClickCount() == 2) {
                     TaskNavigator.switchTo(task.session());
                 } else if (node instanceof IssueRow issue && primaryButton && event.getClickCount() == 2) {
@@ -560,6 +564,17 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             }
         }
         return treeNode;
+    }
+
+    /** A row's inline link (F5): show a not-shown agent here, or resume an idle one here. EDT. */
+    private void hereLink(TaskRow task) {
+        TaskTreeRenderer.link(task).ifPresent(link -> {
+            if (task.placement() instanceof TaskPlacement.NotShown) {
+                AgentConsoles.showHere(project, task.session().id());
+            } else {
+                AgentConsoles.resumeOrStart(project, task.session());
+            }
+        });
     }
 
     private void register(AddCurrentProject add) {

@@ -56,7 +56,7 @@ class TaskTreePanelTargetTest {
                 SessionWorkspace.inRepository(LINKED_WORKTREE), NOW)
                 .build();
         TaskRow row = new TaskRow(session, Optional.empty(), false,
-                Optional.of("fix-allocation-profile"), false, false);
+                Optional.of("fix-allocation-profile"), new TaskPlacement.Idle(false), false);
         NewTaskPlan.FixedWorktree fixed = new NewTaskPlan.FixedWorktree(
                 LINKED_WORKTREE, "fix-allocation-profile");
 
@@ -72,7 +72,7 @@ class TaskTreePanelTargetTest {
                 SessionWorkspace.inRepository(REGISTERED_ROOT), NOW)
                 .build();
         TaskRow row = new TaskRow(session, Optional.empty(), false,
-                Optional.of("main"), false, false);
+                Optional.of("main"), new TaskPlacement.Idle(false), false);
 
         assertEquals(Optional.of(new TaskTreePanel.NewTaskTarget(REGISTERED_ROOT, Optional.empty())),
                 TaskTreePanel.newTaskTarget(row, REGISTERED_ROOT));
