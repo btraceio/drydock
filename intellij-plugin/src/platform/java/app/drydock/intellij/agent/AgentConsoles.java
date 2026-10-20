@@ -47,6 +47,8 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.function.Function;
 
 /**
@@ -303,7 +305,7 @@ public final class AgentConsoles {
         Path directory = execution.get().workingDirectory();
         SessionPlace place = execution.get().place();
         registry.markMoving(sessionId, true);
-        DrydockPluginService.getInstance().executor().execute(() -> {
+        runOrUndo(DrydockPluginService.getInstance().executor(), () -> {
             Optional<Project> open;
             try {
                 Path canonical = RepositoryCatalog.canonicalize(directory);
@@ -346,7 +348,20 @@ public final class AgentConsoles {
                     registry.markMoving(sessionId, false);
                 }
             }, ModalityState.nonModal());
-        });
+        }, () -> registry.markMoving(sessionId, false));
+    }
+
+    /**
+     * Submits {@code task}; when the executor refuses it (the IDE shutting
+     * down), runs {@code undo} instead, so whatever was marked in progress
+     * for the task does not stay marked. Pure apart from the two runnables.
+     */
+    static void runOrUndo(Executor executor, Runnable task, Runnable undo) {
+        try {
+            executor.execute(task);
+        } catch (RejectedExecutionException e) {
+            undo.run();
+        }
     }
 
     /** The balloon in the window the agent left: where it went, and the way back. */
