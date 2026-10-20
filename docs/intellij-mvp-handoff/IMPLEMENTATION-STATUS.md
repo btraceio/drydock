@@ -341,6 +341,12 @@ DECISION.md, SPIKE-RESULTS.md). Plan, with its rulings R1–R10:
 - A cold jump opens the window through the File › Open path, so typing in
   the hosting tab waits for it (2–5 s).
 - File links carry no hover text.
+- Quitting from the Welcome screen, with no project window open, stops
+  agents no window shows **without** the quit question. With no window
+  there is no close handler to ask, and the only quit veto left is the
+  deprecated `ApplicationListener.canExitApplication`, which the MVP
+  avoids.
+- Stop & Close Window applies only to an agent shown in its own window.
 
 **Verified live** (runIde on IU-2025.3.3, scratch repo
 `/private/tmp/mcpspike/repo`, its worktree `repo-pi-ide-mcp`, and the
@@ -365,6 +371,11 @@ DECISION.md, SPIKE-RESULTS.md). Plan, with its rulings R1–R10:
   Enter opened New task with Open in = This window.
 - The live run found two defects, both fixed on the branch: the tree not
   following a move, and the strip's provenance running into the jump link.
+  The branch's final review found three more, also fixed and each pinned
+  by a test that failed first:
+  - an ended agent's transcript rendered blank in a new window;
+  - output was recoloured at every chunk boundary;
+  - Stop & Close Window could close the hosting window.
 
 **Not verified live:**
 - Needs-you balloons. Pi reports no activity, and no Claude agent was run.
@@ -378,7 +389,7 @@ DECISION.md, SPIKE-RESULTS.md). Plan, with its rulings R1–R10:
 
 **Gate:** `./gradlew --no-daemon test buildPlugin verifyPlugin` with the
 verifier pointed at the cached IDEs (temporary override; `recommended()`
-would not fit the disk) → BUILD SUCCESSFUL, 1929 tests, 0 failed.
+would not fit the disk) → BUILD SUCCESSFUL, 1931 tests, 0 failed.
 Verifier: IU-253.31033.145 Compatible, with no notes; IU-263.7031.23
 Compatible, 6 usages of deprecated API. The 263 notes are the console
 constructor and the tab tooltip override, which have no 2025.3
