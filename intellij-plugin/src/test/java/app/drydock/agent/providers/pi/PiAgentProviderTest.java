@@ -8,10 +8,14 @@ import app.drydock.agent.api.McpAccess;
 import app.drydock.agent.api.McpDelivery;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdStrategy;
+import app.drydock.agent.api.StdioMcpServer;
 import app.drydock.agent.providers.HostBinaryLocator;
 import app.drydock.agent.providers.pi.internal.PiCapabilities;
 import app.drydock.agent.providers.pi.internal.PiExecutableLocator;
+import app.drydock.agent.providers.pi.internal.PiIdeMcpExtensionSource;
 import app.drydock.domain.SshRemote;
+import app.drydock.state.json.JsonParser;
+import app.drydock.state.json.JsonValue;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -20,6 +24,7 @@ import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
@@ -333,6 +338,85 @@ class PiAgentProviderTest {
     void noMcpAccessMeansNoFlagsEvenOnAModernPi(@TempDir Path state) {
         String command = bridgeProvider(state).buildCreateCommand(
                 new CreateContext("s", "x", Path.of("/repo"), Optional.empty(), Optional.empty())).command();
+        assertTrue(command.endsWith("pi"), command);
+    }
+
+    private static final StdioMcpServer IDE = new StdioMcpServer("jetbrains", "/jbr/bin/java",
+            List.of("-cp", "/ide/lib/a.jar:/ide/lib/b.jar", "com.intellij.mcpserver.stdio.McpStdioRunnerKt"),
+            Map.of("IJ_MCP_SERVER_PORT", "64342", "IJ_MCP_SERVER_PROJECT_PATH", "/wt/repo-task"));
+
+    /** A provider on a pi with native MCP support, which the IDE server needs. */
+    private PiAgentProvider mcpProvider(Path state, String version) {
+        PiAgentProvider p = new PiAgentProvider(new PiExecutableLocator(Path.of("/nonexistent/pi")),
+                () -> PiCapabilities.of(version));
+        p.init(new AgentContext(state, state.resolve("activity"), ForkJoinPool.commonPool()));
+        return p;
+    }
+
+    /** The servers JSON the IDE extension is handed, parsed back out of the shell-quoted assignment. */
+    private static JsonValue.JsonObject inlineServers(String command) throws Exception {
+        String marker = "DRYDOCK_STDIO_MCP_SERVERS='";
+        int start = command.indexOf(marker);
+        assertTrue(start >= 0, command);
+        int from = start + marker.length();
+        return (JsonValue.JsonObject) JsonParser.parse(command.substring(from, command.indexOf('\'', from)));
+    }
+
+    private static void assertIdeServer(JsonValue.JsonObject config) {
+        JsonValue.JsonObject server = (JsonValue.JsonObject)
+                ((JsonValue.JsonObject) config.get("mcpServers")).get("jetbrains");
+        assertEquals("/jbr/bin/java", ((JsonValue.JsonString) server.get("command")).value());
+        assertEquals(IDE.args(), ((JsonValue.JsonArray) server.get("args")).elements().stream()
+                .map(element -> ((JsonValue.JsonString) element).value()).toList());
+        JsonValue.JsonObject env = (JsonValue.JsonObject) server.get("env");
+        assertEquals("64342", ((JsonValue.JsonString) env.get("IJ_MCP_SERVER_PORT")).value());
+        assertEquals("/wt/repo-task", ((JsonValue.JsonString) env.get("IJ_MCP_SERVER_PROJECT_PATH")).value());
+    }
+
+    @Test
+    void aCreatedSessionHandsTheIdeServerToTheIdeExtension(@TempDir Path state) throws Exception {
+        String command = mcpProvider(state, "1.3.0").buildCreateCommand(
+                new CreateContext("s", "x", Path.of("/repo"), Optional.empty(), Optional.empty())
+                        .withStdioMcpServers(List.of(IDE))).command();
+
+        assertIdeServer(inlineServers(command));
+        Path extension = state.resolve("pi").resolve("drydock-ide-mcp.ts");
+        assertTrue(command.endsWith("pi -e '" + extension + "'"), command);
+        assertEquals(PiIdeMcpExtensionSource.SOURCE, Files.readString(extension));
+        assertFalse(command.contains("DRYDOCK_MCP_CONFIG"), "no Drydock server was offered: " + command);
+    }
+
+    @Test
+    void aResumedSessionHandsTheIdeServerOverToo(@TempDir Path state) throws Exception {
+        String command = mcpProvider(state, "1.3.0").buildResumeCommand(
+                new ResumeContext(Optional.of("019f9072-abc"), Optional.empty(), Path.of("/repo"),
+                        Optional.empty(), Optional.empty()).withStdioMcpServers(List.of(IDE))).command();
+
+        assertIdeServer(inlineServers(command));
+        assertTrue(command.endsWith("-e '" + state.resolve("pi").resolve("drydock-ide-mcp.ts")
+                + "' --session '019f9072-abc'"), command);
+    }
+
+    @Test
+    void theDrydockBridgeAndTheIdeServerLoadSideBySide(@TempDir Path state) throws Exception {
+        Path config = state.resolve("mcp").resolve("s1.json");
+        String command = mcpProvider(state, "1.3.0").buildCreateCommand(
+                new CreateContext("s", "x", Path.of("/repo"), Optional.empty(), Optional.of(access(config)))
+                        .withStdioMcpServers(List.of(IDE))).command();
+
+        assertTrue(command.startsWith("env -u PI_CODING_AGENT DRYDOCK_MCP_CONFIG='" + config + "' "), command);
+        assertIdeServer(inlineServers(command));
+        assertTrue(command.endsWith("pi -e '" + state.resolve("pi").resolve("drydock-mcp.ts")
+                + "' -e '" + state.resolve("pi").resolve("drydock-ide-mcp.ts") + "'"), command);
+    }
+
+    @Test
+    void aPiWithoutNativeMcpGetsNoIdeServer(@TempDir Path state) {
+        String command = mcpProvider(state, "0.84.1").buildCreateCommand(
+                new CreateContext("s", "x", Path.of("/repo"), Optional.empty(), Optional.empty())
+                        .withStdioMcpServers(List.of(IDE))).command();
+
+        assertFalse(command.contains("DRYDOCK_STDIO_MCP_SERVERS"), command);
         assertTrue(command.endsWith("pi"), command);
     }
 

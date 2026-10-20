@@ -32,10 +32,23 @@ public record PiCapabilities(String version, boolean supportsBridge) {
 
     private static final int[] MINIMUM = {0, 80, 3};
 
+    private static final int[] NATIVE_MCP = {0, 99, 0};
+
     public static PiCapabilities of(String version) {
         String reported = version == null || version.isBlank() ? "unknown" : version.strip();
         int[] components = parseComponents(reported);
-        return new PiCapabilities(reported, components != null && meetsMinimum(components));
+        return new PiCapabilities(reported, components != null && meetsMinimum(components, MINIMUM));
+    }
+
+    /**
+     * Whether this pi connects MCP servers itself, so an extension can hand it
+     * one with {@code pi.registerMcpServer}: built-in MCP support arrived in
+     * <strong>0.99.0</strong> (pi's CHANGELOG). Derived like
+     * {@link #versionParsed()}, and false for anything unparseable.
+     */
+    public boolean supportsMcpServers() {
+        int[] components = parseComponents(version);
+        return components != null && meetsMinimum(components, NATIVE_MCP);
     }
 
     /** Whether {@link #version()} was itself readable as a dotted version, independent of the floor. */
@@ -61,10 +74,10 @@ public record PiCapabilities(String version, boolean supportsBridge) {
         return components;
     }
 
-    private static boolean meetsMinimum(int[] components) {
-        for (int i = 0; i < MINIMUM.length; i++) {
-            if (components[i] != MINIMUM[i]) {
-                return components[i] > MINIMUM[i];
+    private static boolean meetsMinimum(int[] components, int[] floor) {
+        for (int i = 0; i < floor.length; i++) {
+            if (components[i] != floor[i]) {
+                return components[i] > floor[i];
             }
         }
         return true;
