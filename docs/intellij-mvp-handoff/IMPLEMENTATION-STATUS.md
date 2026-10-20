@@ -60,10 +60,9 @@ checks the existing branch out into a new worktree (`git worktree add
 <folder> <branch>`, no `-b`), refused while git has it checked out
 elsewhere, and for a remote branch a local tracking branch created first.
 
-In progress: **cross-project tabs (v1.1)** — one window hosting agents from
-any project or worktree. Design and spike results:
-`docs/intellij-cross-project-handoff/`; plan:
-`docs/superpowers/plans/2026-10-20-intellij-cross-project-tabs.md`.
+Also outstanding from cross-project tabs (v1.1, below): a Welcome-screen
+Agents tab for agents no window shows (the MVP never had one), and the
+human key-matrix pass on a moved console.
 
 Entry points are the **Drydock tool window** (right stripe, Drydock icon;
 its toolbar holds New task, Switch, Stop, Stop & Close, Resume, Done, Remove
@@ -302,6 +301,89 @@ each with its own commit.
 until Claude reports its first activity event.
 
 ---
+
+## Cross-project tabs, v1.1 (2026-10-20)
+
+Design: `docs/intellij-cross-project-handoff/` (HANDOFF.md, frames F1–F5,
+DECISION.md, SPIKE-RESULTS.md). Plan, with its rulings R1–R10:
+`docs/superpowers/plans/2026-10-20-intellij-cross-project-tabs.md`.
+
+**Built.**
+- An app service, `AgentExecutionRegistry`, owns every agent process.
+  A window only shows an agent: showing it elsewhere builds a fresh console
+  there and replays a capped buffer into it (20,000 lines / 8 MB).
+- New tasks open as a tab in this window (Open in: This window, default /
+  Its own window). A task from another worktree is hosted: its tab reads
+  `<repo> · <title>` and its strip `from <repo> ⑂ <branch>`, with
+  `Open project window ↗` and `Changes ↗`.
+- The jump moves the console without restarting the agent. A balloon
+  offers `Go to window` · `Bring back here`.
+- Closing a window asks `This window is showing n working agents`; the
+  default is Keep running & Close. Quitting still stops everything.
+- The tree says where each task is shown (`this window` / `here` /
+  `in its own window` / `in <repo> window` / `not shown`), with
+  `Show here` and `Resume here` links, `Show Here` in the context menu,
+  and the F1 `Start ▸` menu.
+- Needs-you balloons name the agent's own worktree and reach agents no
+  window shows.
+- Hosted tabs are not restored after a restart.
+- A hosted agent's open files refresh when its turn ends; a vanished
+  worktree is marked `folder missing`.
+- Paths in a console are links into the agent's own worktree window.
+
+**Rulings that differ from the handoff.**
+- **R1:** "This window" no longer replaces the current project.
+- **R2:** `Start ▸` menu items open New task preset, because a task needs
+  a name.
+- **R3:** no Welcome Agents tab.
+- **R5:** the repo chip is a text prefix.
+- **R6:** `Changes ↗` jumps, then activates the Commit tool window.
+- A cold jump opens the window through the File › Open path, so typing in
+  the hosting tab waits for it (2–5 s).
+- File links carry no hover text.
+
+**Verified live** (runIde on IU-2025.3.3, scratch repo
+`/private/tmp/mcpspike/repo`, its worktree `repo-pi-ide-mcp`, and the
+`demo` project; Pi on glm-5.3-flash):
+- `Resume here` hosted the task in the main checkout's window: tagged
+  tab, provenance strip, row `here`, conversation resumed, file links
+  shown.
+- `Open project window ↗`, cold: same PID (18331, later 19458), full
+  history replayed in the worktree window, plain local tab, hosting tab
+  closed, balloon. `Bring back here` moved it back with the same PID.
+- Close Project on the hosting window showed the F4 dialog, as framed.
+  After Keep running & Close the agent ran on, and the other window's row
+  read `not shown · Show here`. `Show here` replayed the history there
+  (row `this window`). Typed text and Ctrl+C reached the moved agent.
+- A task hosted from another project (`demo`) read `demo · Pi resume
+  check` / `from demo ⑂ old-experiment`.
+- Quit with one, then two, agents running showed one `Stop n working
+  agents?` listing each. Stop & Quit left no agent process.
+- After a restart only the window's own console tab came back, Not
+  running. The hosted one did not, and its row offered `Resume here`.
+- The `Start ▸` menu on another project's worktree showed the F1 items.
+  Enter opened New task with Open in = This window.
+- The live run found two defects, both fixed on the branch: the tree not
+  following a move, and the strip's provenance running into the jump link.
+
+**Not verified live:**
+- Needs-you balloons. Pi reports no activity, and no Claude agent was run.
+- Stopping an agent no window shows. The registry's platform test covers
+  it.
+- `Changes ↗`, a warm jump, a vanished folder, the stale-file refresh, and
+  clicking a file link.
+- The **real-keyboard key matrix including Esc** on a moved console: typed
+  text and Ctrl+C were sent as synthetic keystrokes, not by a person. The
+  handoff asks for one human pass.
+
+**Gate:** `./gradlew --no-daemon test buildPlugin verifyPlugin` with the
+verifier pointed at the cached IDEs (temporary override; `recommended()`
+would not fit the disk) → BUILD SUCCESSFUL, 1929 tests, 0 failed.
+Verifier: IU-253.31033.145 Compatible, with no notes; IU-263.7031.23
+Compatible, 6 usages of deprecated API. The 263 notes are the console
+constructor and the tab tooltip override, which have no 2025.3
+replacement, plus the MVP's `openFile` and `OpenProjectTask` ones. No
+internal API usage.
 
 ## Where the rest of the record lives
 
