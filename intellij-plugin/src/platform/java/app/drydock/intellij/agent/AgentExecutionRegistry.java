@@ -337,6 +337,8 @@ public final class AgentExecutionRegistry implements Disposable {
         // The window's service is the parent: a console is built for one
         // project and must not outlive it, even if a close path missed it.
         Disposer.register(AgentExecutionService.getInstance(target), console);
+        // Paths the agent prints open in its own worktree's window.
+        console.addMessageFilter(new WorktreeFileLinks(execution.workingDirectory()));
         ProcessHandlerTtyConnector tty = null;
         if (execution.isRunning()) {
             // Input only: output comes through the router, so the console
