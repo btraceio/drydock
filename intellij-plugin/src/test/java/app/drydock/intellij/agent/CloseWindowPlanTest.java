@@ -75,4 +75,11 @@ class CloseWindowPlanTest {
         assertEquals(new Outcome(Set.of(), Set.of(A, B, C)),
                 CloseWindowPlan.outcome(Optional.empty(), Optional.empty(), SHOWN, Set.of()));
     }
+
+    @Test
+    void theQuestionLeavesOutASessionThatIsMoving() {
+        // Its outcome is neither stop nor release, so asking about it would
+        // ask about nothing.
+        assertEquals(List.of(A, C), CloseWindowPlan.askedAbout(SHOWN, Set.of(B)));
+    }
 }

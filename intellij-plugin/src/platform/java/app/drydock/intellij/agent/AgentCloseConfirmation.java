@@ -111,7 +111,9 @@ public final class AgentCloseConfirmation implements ProjectCloseHandler {
             if (quitting()) {
                 return confirmQuit();
             }
-            List<Working> here = working(AgentExecutionRegistry.getInstance().runningShownIn(project));
+            AgentExecutionRegistry registry = AgentExecutionRegistry.getInstance();
+            List<Working> here = working(CloseWindowPlan.askedAbout(registry.runningShownIn(project),
+                    registry.moving()));
             if (here.isEmpty()) {
                 return true;
             }

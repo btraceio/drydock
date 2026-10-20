@@ -51,6 +51,16 @@ public final class CloseWindowPlan {
     }
 
     /**
+     * The running sessions the close question asks about: all the window
+     * shows except those moving to another window, whose outcome is neither
+     * stop nor release ({@link #outcome}).
+     */
+    public static List<ManagedSessionId> askedAbout(List<ManagedSessionId> runningShownHere,
+                                                    Set<ManagedSessionId> moving) {
+        return runningShownHere.stream().filter(id -> !moving.contains(id)).toList();
+    }
+
+    /**
      * Which of {@code runningShownHere} are released (kept running, not
      * shown) and which are stopped.
      *
