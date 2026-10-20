@@ -2,22 +2,38 @@ package app.drydock.intellij.tasks;
 
 import app.drydock.domain.SessionMode;
 import app.drydock.git.GhCliService.OpenIssue;
+import app.drydock.intellij.tasks.NewTaskPlan.OpenIn;
 
 import java.util.Objects;
 import java.util.Optional;
 
-/** Optional values and constraints supplied by a task entry point. */
+/**
+ * Optional values and constraints supplied by a task entry point, and which
+ * window the task opens in: this one (a tab, hosted when its worktree is
+ * another project's) unless the entry point asks for its own.
+ */
 record NewTaskPreset(String name, Optional<String> instructions, Optional<SessionMode> fixedMode,
-                     boolean instructionsRequired) {
+                     boolean instructionsRequired, OpenIn openIn) {
 
     NewTaskPreset {
         Objects.requireNonNull(name, "name");
         Objects.requireNonNull(instructions, "instructions");
         Objects.requireNonNull(fixedMode, "fixedMode");
+        Objects.requireNonNull(openIn, "openIn");
     }
 
     static NewTaskPreset empty() {
-        return new NewTaskPreset("", Optional.empty(), Optional.empty(), false);
+        return new NewTaskPreset("", Optional.empty(), Optional.empty(), false, OpenIn.THIS_WINDOW);
+    }
+
+    /**
+     * {@code Start ▸}'s menu (cross-project tabs, frame F1): the window it
+     * opens in, and read-only fixed when the item says so; a writing item
+     * leaves the mode to the user.
+     */
+    static NewTaskPreset start(OpenIn openIn, SessionMode mode) {
+        return new NewTaskPreset("", Optional.empty(),
+                mode == SessionMode.READ_ONLY ? Optional.of(SessionMode.READ_ONLY) : Optional.empty(), false, openIn);
     }
 
     static NewTaskPreset implement(OpenIssue issue) {
@@ -64,7 +80,8 @@ record NewTaskPreset(String name, Optional<String> instructions, Optional<Sessio
                 - The pull request explains the behavior, design decisions, risks, and verification, and contains the
                   correct closing keyword for this issue; the work is not done merely because code was written.
                 """.formatted(reference));
-        return new NewTaskPreset(name, Optional.of(prompt.toString()), Optional.of(SessionMode.WRITES), true);
+        return new NewTaskPreset(name, Optional.of(prompt.toString()), Optional.of(SessionMode.WRITES), true,
+                OpenIn.THIS_WINDOW);
     }
 
     static NewTaskPreset summarize(OpenIssue issue) {
@@ -83,7 +100,8 @@ record NewTaskPreset(String name, Optional<String> instructions, Optional<Sessio
 
                 Do not modify files, create commits, or begin implementation. This task is analysis only.
                 """);
-        return new NewTaskPreset(name, Optional.of(prompt.toString()), Optional.of(SessionMode.READ_ONLY), true);
+        return new NewTaskPreset(name, Optional.of(prompt.toString()), Optional.of(SessionMode.READ_ONLY), true,
+                OpenIn.THIS_WINDOW);
     }
 
     SessionMode mode(boolean readOnlySelected) {

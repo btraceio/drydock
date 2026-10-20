@@ -30,8 +30,12 @@ public final class NewTaskPlan {
     /** Where the task works. */
     public enum WorkIn { NEW_WORKTREE, MAIN_CHECKOUT, EXISTING_WORKTREE }
 
-    /** Which window it opens in. */
-    public enum OpenIn { NEW_WINDOW, THIS_WINDOW }
+    /**
+     * Which window shows it: this one — as a tab, hosted when the task's
+     * worktree is another project's (cross-project tabs) — or the
+     * worktree's own window, opened or reused.
+     */
+    public enum OpenIn { THIS_WINDOW, OWN_WINDOW }
 
     /** A worktree the task must use: opened from {@code Start ▸} or a worktree's {@code ＋}. */
     public record FixedWorktree(Path dir, String branch) {

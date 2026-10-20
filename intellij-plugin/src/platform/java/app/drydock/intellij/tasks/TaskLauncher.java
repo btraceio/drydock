@@ -23,7 +23,6 @@ import app.drydock.intellij.worktree.WorktreeErrors;
 import app.drydock.projects.SharedProject;
 import app.drydock.projects.SharedProjectsSeed;
 
-import com.intellij.ide.impl.OpenProjectTask;
 import com.intellij.ide.impl.ProjectUtil;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
@@ -73,20 +72,30 @@ public final class TaskLauncher {
     private TaskLauncher() {
     }
 
-    /** What starting a chosen task takes, in order. */
+    /**
+     * What starting a chosen task takes, in order. {@code hosted}: shown in
+     * this window although its worktree is another project's.
+     */
     public record Steps(boolean registerFirst, boolean createWorktree, Path workingDirectory, OpenIn openIn,
-                        boolean reuseOpenWindow) {
+                        boolean reuseOpenWindow, boolean hosted) {
         public Steps {
             Objects.requireNonNull(workingDirectory, "workingDirectory");
             Objects.requireNonNull(openIn, "openIn");
         }
     }
 
-    /** Pure: the steps for {@code choice}; {@code windowOpenOnTarget} is whether a window already shows its folder. */
-    static Steps plan(Choice choice, Optional<SharedProject> registered, Path mainRoot, boolean windowOpenOnTarget) {
+    /**
+     * Pure: the steps for {@code choice}. {@code windowOpenOnTarget}: a window
+     * already shows its folder; {@code targetIsThisWindow}: that window is the
+     * one asking. This window shows the task either way, hosted when its
+     * folder is another project's; its own window is reused when open.
+     */
+    static Steps plan(Choice choice, Optional<SharedProject> registered, Path mainRoot, boolean windowOpenOnTarget,
+                      boolean targetIsThisWindow) {
         Path directory = choice.workIn() == WorkIn.MAIN_CHECKOUT ? mainRoot : choice.folder();
+        boolean here = choice.openIn() == OpenIn.THIS_WINDOW;
         return new Steps(registered.isEmpty(), choice.workIn() == WorkIn.NEW_WORKTREE, directory, choice.openIn(),
-                windowOpenOnTarget);
+                !here && windowOpenOnTarget, here && !targetIsThisWindow);
     }
 
     /** Pure: the remote's default branch ({@code origin/main}) when it exists, else the local default. */
@@ -119,8 +128,9 @@ public final class TaskLauncher {
         open(from, Optional.of(mainRoot), Optional.empty(), NewTaskPreset.summarize(issue));
     }
 
-    private static void open(Project from, Optional<Path> mainRoot, Optional<FixedWorktree> fixed,
-                             NewTaskPreset preset) {
+    /** As {@link #open(Project, Optional, Optional)}, with the dialog preset ({@code Start ▸}'s menu, an issue). */
+    static void open(Project from, Optional<Path> mainRoot, Optional<FixedWorktree> fixed,
+                     NewTaskPreset preset) {
         ProgressManager.getInstance().run(new Task.Backgroundable(from, "Preparing new task…", true) {
             @Override
             public void run(@NotNull ProgressIndicator indicator) {
@@ -278,7 +288,8 @@ public final class TaskLauncher {
             public void run(@NotNull ProgressIndicator indicator) {
                 Path directory = choice.workIn() == WorkIn.MAIN_CHECKOUT ? mainRoot : choice.folder();
                 Optional<Project> openWindow = windowOn(directory);
-                Steps steps = plan(choice, plugin.sharedProjects().byRoot(mainRoot), mainRoot, openWindow.isPresent());
+                Steps steps = plan(choice, plugin.sharedProjects().byRoot(mainRoot), mainRoot, openWindow.isPresent(),
+                        openWindow.map(from::equals).orElse(false));
                 try (GitStatusService git = new GitStatusService()) {
                     if (steps.registerFirst()) {
                         indicator.setText("Adding " + inputs.repoName() + " to Drydock…");
@@ -301,14 +312,15 @@ public final class TaskLauncher {
                 ApplicationManager.getApplication().invokeLater(() -> {
                     Project target;
                     boolean fresh;
-                    if (steps.reuseOpenWindow()) {
+                    if (steps.openIn() == OpenIn.THIS_WINDOW) {
+                        // A tab here; hosted when the folder is another
+                        // project's. No window opens.
+                        target = from;
+                        fresh = false;
+                    } else if (steps.reuseOpenWindow()) {
                         target = openWindow.get();
                         fresh = false;
                         ProjectUtil.focusProjectWindow(target, true);
-                    } else if (steps.openIn() == OpenIn.THIS_WINDOW) {
-                        target = ProjectUtil.openOrImport(steps.workingDirectory(),
-                                OpenProjectTask.build().withProjectToClose(from));
-                        fresh = true;
                     } else {
                         target = TaskWindows.openAsProject(steps.workingDirectory());
                         fresh = true;
