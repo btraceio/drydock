@@ -18,7 +18,6 @@ import com.intellij.openapi.progress.ProgressIndicator;
 import com.intellij.openapi.progress.ProgressManager;
 import com.intellij.openapi.progress.Task;
 import com.intellij.openapi.project.Project;
-import com.intellij.openapi.project.ProjectManager;
 import com.intellij.openapi.ui.Messages;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.openapi.wm.IdeFocusManager;
@@ -36,7 +35,6 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Function;
-import java.util.function.Predicate;
 
 /**
  * Opening, focusing, and resuming a session's console tab.
@@ -179,20 +177,25 @@ public final class AgentConsoles {
                                       CompletableFuture<ManagedAgentSession>> launch) {
         Objects.requireNonNull(project, "project");
         Objects.requireNonNull(sessionId, "sessionId");
-        // One agent per session across the whole IDE, not just this window:
-        // AgentExecutionService only knows its own window, so Resume here
-        // while another window runs the session would start a second agent
-        // on the same conversation. Go to the running one instead.
-        Optional<Project> running = runningElsewhere(
-                Arrays.stream(ProjectManager.getInstance().getOpenProjects())
-                        .filter(open -> !open.isDisposed())
-                        .toList(),
-                project, open -> AgentExecutionService.getInstance(open).isRunning(sessionId));
-        if (running.isPresent()) {
-            ProjectUtil.focusProjectWindow(running.get(), true);
-            show(running.get(), sessionId);
-            focusConsole(running.get(), sessionId);
-            return;
+        // One agent per session across the whole IDE: the registry knows
+        // where it is shown, if anywhere, and a running one is gone to, never
+        // started a second time.
+        AgentExecutionRegistry registry = AgentExecutionRegistry.getInstance();
+        Optional<Project> host = registry.host(sessionId).filter(open -> !open.isDisposed());
+        switch (decide(registry.isRunning(sessionId), host, project)) {
+            case RAISE_HOST -> {
+                ProjectUtil.focusProjectWindow(host.orElseThrow(), true);
+                show(host.get(), sessionId);
+                focusConsole(host.get(), sessionId);
+                return;
+            }
+            case SHOW_HERE -> {
+                showHere(project, sessionId);
+                return;
+            }
+            case START -> {
+                // below
+            }
         }
         show(project, sessionId);
         ProgressManager.getInstance().run(new Task.Backgroundable(project, progressTitle, true) {
@@ -212,15 +215,38 @@ public final class AgentConsoles {
         });
     }
 
+    /** What a Resume, Start or Show does, given where the agent is shown now. */
+    public enum ShowDecision {
+        /** It runs in another window: go there. */
+        RAISE_HOST,
+        /** It runs and no other window shows it: show it here. */
+        SHOW_HERE,
+        /** Nothing runs: start it. */
+        START
+    }
+
     /**
-     * The window, other than {@code here}, whose agent for the session is
-     * running, if any. Pure.
+     * Pure: {@code running} anywhere in the IDE, {@code host} the window
+     * showing it, {@code here} the window asking.
      */
-    static <W> Optional<W> runningElsewhere(List<W> windows, W here, Predicate<W> runsSession) {
-        return windows.stream()
-                .filter(window -> !window.equals(here))
-                .filter(runsSession)
-                .findFirst();
+    public static <W> ShowDecision decide(boolean running, Optional<W> host, W here) {
+        if (!running) {
+            return ShowDecision.START;
+        }
+        return host.filter(window -> !window.equals(here)).isPresent() ? ShowDecision.RAISE_HOST : ShowDecision.SHOW_HERE;
+    }
+
+    /**
+     * Shows a running (or just-ended) agent in {@code project}, moving it
+     * from whichever window showed it before — that window's tab closes. Its
+     * history is replayed into the new console. EDT.
+     */
+    public static void showHere(Project project, ManagedSessionId sessionId) {
+        if (project.isDisposed() || AgentExecutionRegistry.getInstance().show(sessionId, project).isEmpty()) {
+            return;
+        }
+        show(project, sessionId);
+        focusConsole(project, sessionId);
     }
 
     /**

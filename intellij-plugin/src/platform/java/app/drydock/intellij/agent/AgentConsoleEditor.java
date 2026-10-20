@@ -12,6 +12,7 @@ import com.intellij.openapi.application.ApplicationActivationListener;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.fileEditor.FileEditor;
+import com.intellij.openapi.fileEditor.FileEditorManager;
 import com.intellij.openapi.fileEditor.FileEditorState;
 import com.intellij.openapi.fileEditor.ex.FileEditorManagerEx;
 import com.intellij.openapi.project.DumbService;
@@ -160,8 +161,15 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
         applicationBus.subscribe(AgentExecutionListener.TOPIC, new AgentExecutionListener() {
             @Override
             public void executionShown(ManagedSessionId sessionId, Project to) {
-                if (sessionId.equals(file.sessionId())) {
+                if (!sessionId.equals(file.sessionId())) {
+                    return;
+                }
+                if (to.equals(project)) {
                     refreshLater();
+                } else {
+                    // A session is shown in one window at a time; its console
+                    // has moved, so this tab has nothing left to show.
+                    closeLater();
                 }
             }
 
@@ -189,6 +197,15 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
         reloadSession();
         ageTicker.setRepeats(true);
         ageTicker.start();
+    }
+
+    /** Closes this tab, later: never from inside the event that asked for it. */
+    private void closeLater() {
+        ApplicationManager.getApplication().invokeLater(() -> {
+            if (valid && !project.isDisposed()) {
+                FileEditorManager.getInstance(project).closeFile(file);
+            }
+        }, ModalityState.nonModal(), project.getDisposed());
     }
 
     // ---- session resolution --------------------------------------------------

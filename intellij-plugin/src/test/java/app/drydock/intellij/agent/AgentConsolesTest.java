@@ -1,36 +1,33 @@
 package app.drydock.intellij.agent;
 
+import app.drydock.intellij.agent.AgentConsoles.ShowDecision;
+
 import org.junit.jupiter.api.Test;
 
-import java.util.List;
 import java.util.Optional;
-import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+/** Where Resume, Start and Show land, given where the agent is shown now. */
 class AgentConsolesTest {
 
     @Test
-    void aSessionRunningInAnotherWindowIsFoundThere() {
-        Optional<String> elsewhere = AgentConsoles.runningElsewhere(List.of("host", "owner"), "host",
-                Set.of("owner")::contains);
-
-        assertEquals(Optional.of("owner"), elsewhere);
+    void aSessionRunningInAnotherWindowRaisesThatWindow() {
+        assertEquals(ShowDecision.RAISE_HOST, AgentConsoles.decide(true, Optional.of("B"), "A"));
     }
 
     @Test
-    void aSessionRunningOnlyHereIsNotElsewhere() {
-        Optional<String> elsewhere = AgentConsoles.runningElsewhere(List.of("host", "owner"), "host",
-                Set.of("host")::contains);
-
-        assertEquals(Optional.empty(), elsewhere);
+    void aRunningSessionNoWindowShowsIsShownHere() {
+        assertEquals(ShowDecision.SHOW_HERE, AgentConsoles.decide(true, Optional.empty(), "A"));
     }
 
     @Test
-    void aSessionRunningNowhereIsNotElsewhere() {
-        Optional<String> elsewhere = AgentConsoles.runningElsewhere(List.of("host", "owner"), "host",
-                window -> false);
+    void aSessionAlreadyHereStaysHere() {
+        assertEquals(ShowDecision.SHOW_HERE, AgentConsoles.decide(true, Optional.of("A"), "A"));
+    }
 
-        assertEquals(Optional.empty(), elsewhere);
+    @Test
+    void aStoppedSessionStarts() {
+        assertEquals(ShowDecision.START, AgentConsoles.decide(false, Optional.of("B"), "A"));
     }
 }

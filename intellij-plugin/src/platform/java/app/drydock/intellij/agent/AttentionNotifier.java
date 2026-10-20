@@ -16,7 +16,6 @@ import com.intellij.notification.NotificationType;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.project.Project;
-import com.intellij.openapi.project.ProjectManager;
 import com.intellij.openapi.wm.IdeFocusManager;
 import com.intellij.openapi.wm.IdeFrame;
 import com.intellij.ui.SystemNotifications;
@@ -135,12 +134,10 @@ public final class AttentionNotifier implements SessionActivityListener {
     }
 
     private static Optional<Project> windowRunning(ManagedSessionId sessionId) {
-        for (Project project : ProjectManager.getInstance().getOpenProjects()) {
-            if (!project.isDisposed() && AgentExecutionService.getInstance(project).isRunning(sessionId)) {
-                return Optional.of(project);
-            }
-        }
-        return Optional.empty();
+        AgentExecutionRegistry registry = AgentExecutionRegistry.getInstance();
+        return registry.isRunning(sessionId)
+                ? registry.host(sessionId).filter(project -> !project.isDisposed())
+                : Optional.empty();
     }
 
     private static Optional<ManagedAgentSession> sessionOf(DrydockPluginService plugin, ManagedSessionId sessionId) {

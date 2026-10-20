@@ -6,7 +6,6 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -17,17 +16,17 @@ class TaskNavigatorTest {
             "worktree window", Path.of("/wt/btrace-jfr"));
 
     @Test
-    void windowForPrefersExecutionOwner() {
+    void theWindowShowingTheSessionWinsOverItsOwnWorktreeWindow() {
         Optional<String> window = TaskNavigator.windowFor(List.of("worktree window", "main window"),
-                Set.of("main window")::contains, name -> Optional.of(BASE.get(name)), Path.of("/wt/btrace-jfr"));
+                Optional.of("main window"), name -> Optional.of(BASE.get(name)), Path.of("/wt/btrace-jfr"));
 
         assertEquals(Optional.of("main window"), window);
     }
 
     @Test
-    void windowForFallsBackToBasePath() {
+    void aNotShownSessionGoesToItsWorktreeWindow() {
         Optional<String> window = TaskNavigator.windowFor(List.of("main window", "worktree window"),
-                name -> false, name -> Optional.of(BASE.get(name)), Path.of("/wt/btrace-jfr"));
+                Optional.empty(), name -> Optional.of(BASE.get(name)), Path.of("/wt/btrace-jfr"));
 
         assertEquals(Optional.of("worktree window"), window);
     }
@@ -35,7 +34,7 @@ class TaskNavigatorTest {
     @Test
     void windowForEmptyWhenNoneOpen() {
         Optional<String> window = TaskNavigator.windowFor(List.of("main window"),
-                name -> false, name -> Optional.of(BASE.get(name)), Path.of("/wt/elsewhere"));
+                Optional.empty(), name -> Optional.of(BASE.get(name)), Path.of("/wt/elsewhere"));
 
         assertEquals(Optional.empty(), window);
     }

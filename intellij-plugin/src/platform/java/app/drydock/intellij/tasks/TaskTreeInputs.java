@@ -11,11 +11,10 @@ import app.drydock.git.GhCliService.IssueListing;
 import app.drydock.git.WorktreeService;
 import app.drydock.git.WorktreeService.Worktree;
 import app.drydock.intellij.DrydockPluginService;
-import app.drydock.intellij.agent.AgentExecutionService;
+import app.drydock.intellij.agent.AgentExecutionRegistry;
 import app.drydock.projects.SharedProject;
 
 import com.intellij.openapi.project.Project;
-import com.intellij.openapi.project.ProjectManager;
 
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
@@ -117,12 +116,8 @@ final class TaskTreeInputs implements AutoCloseable {
             sessions.add(session.withWorkingDirectory(RepositoryCatalog.canonicalize(session.workingDirectory())));
             activity.put(session.id(), plugin.activityMonitor().current(session.id()));
         }
-        Set<ManagedSessionId> running = new HashSet<>();
-        for (Project project : ProjectManager.getInstance().getOpenProjects()) {
-            if (!project.isDisposed()) {
-                running.addAll(AgentExecutionService.getInstance(project).runningSessions());
-            }
-        }
+        // Every live agent, shown in a window or not.
+        Set<ManagedSessionId> running = new HashSet<>(AgentExecutionRegistry.getInstance().runningSessions());
         Map<RepositoryId, Path> recordedRoots = new HashMap<>();
         for (Repository repository : plugin.stateStore().state().repositories()) {
             if (!repository.isRemote()) {
