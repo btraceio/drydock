@@ -2,6 +2,7 @@ package app.drydock.projects;
 
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SshRemote;
+import app.drydock.testing.TestPaths;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -40,7 +41,13 @@ class SharedProjectsFileTest {
     }
 
     private static SharedProject local(String root) {
-        return SharedProject.local(RepositoryId.newId(), Path.of(root), Path.of(root).getFileName().toString(), ADDED);
+        return SharedProject.local(RepositoryId.newId(), TestPaths.abs(root), TestPaths.abs(root).getFileName().toString(),
+                ADDED);
+    }
+
+    /** {@code unixAbsolute} as an absolute path on this OS, escaped for a JSON string. */
+    private static String json(String unixAbsolute) {
+        return TestPaths.abs(unixAbsolute).toString().replace("\\", "\\\\");
     }
 
     private static List<SharedProject> append(List<SharedProject> list, SharedProject project) {
@@ -106,15 +113,15 @@ class SharedProjectsFileTest {
         String id = RepositoryId.newId().toString();
         Files.writeString(file(), """
                 {"schemaVersion":1,"projects":[
-                  {"id":"%s","root":"/w/good","displayName":"good","addedAt":"2026-10-19T10:00:00Z"},
+                  {"id":"%s","root":"%s","displayName":"good","addedAt":"2026-10-19T10:00:00Z"},
                   {"id":"%s","displayName":"no root","addedAt":"2026-10-19T10:00:00Z"}
-                ]}""".formatted(id, RepositoryId.newId()), StandardCharsets.UTF_8);
+                ]}""".formatted(id, json("/w/good"), RepositoryId.newId()), StandardCharsets.UTF_8);
 
         SharedProjectsFile.Snapshot snapshot = new SharedProjectsFile(file()).read();
 
         assertFalse(snapshot.malformed());
         assertEquals(1, snapshot.projects().size());
-        assertEquals(Path.of("/w/good"), snapshot.projects().get(0).root());
+        assertEquals(TestPaths.abs("/w/good"), snapshot.projects().get(0).root());
         assertTrue(snapshot.problem().isPresent(), "a skipped entry is a problem worth showing");
     }
 
@@ -124,9 +131,10 @@ class SharedProjectsFileTest {
         // used to rewrite the list without it, losing it for good.
         Files.writeString(file(), """
                 {"schemaVersion":1,"projects":[
-                  {"id":"%s","root":"/w/good","displayName":"good","addedAt":"2026-10-19T10:00:00Z"},
-                  {"id":"%s","root":"/w/hand-added","displayName":"hand-added"}
-                ]}""".formatted(RepositoryId.newId(), RepositoryId.newId()), StandardCharsets.UTF_8);
+                  {"id":"%s","root":"%s","displayName":"good","addedAt":"2026-10-19T10:00:00Z"},
+                  {"id":"%s","root":"%s","displayName":"hand-added"}
+                ]}""".formatted(RepositoryId.newId(), json("/w/good"), RepositoryId.newId(), json("/w/hand-added")),
+                StandardCharsets.UTF_8);
         byte[] before = Files.readAllBytes(file());
         SharedProjectsFile shared = new SharedProjectsFile(file());
 
@@ -142,8 +150,8 @@ class SharedProjectsFileTest {
         String id = RepositoryId.newId().toString();
         Files.writeString(file(), """
                 {"schemaVersion":2,"projects":[
-                  {"id":"%s","root":"/w/a","displayName":"a","addedAt":"2026-10-19T10:00:00Z","pinned":true}
-                ]}""".formatted(id), StandardCharsets.UTF_8);
+                  {"id":"%s","root":"%s","displayName":"a","addedAt":"2026-10-19T10:00:00Z","pinned":true}
+                ]}""".formatted(id, json("/w/a")), StandardCharsets.UTF_8);
         byte[] before = Files.readAllBytes(file());
         SharedProjectsFile shared = new SharedProjectsFile(file());
 

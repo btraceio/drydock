@@ -1,6 +1,7 @@
 package app.drydock.projects;
 
 import app.drydock.domain.RepositoryId;
+import app.drydock.testing.TestPaths;
 
 import java.nio.file.Path;
 import java.time.Instant;
@@ -23,7 +24,7 @@ public final class SharedProjectsWriterProcess {
         String prefix = args[1];
         int count = Integer.parseInt(args[2]);
         for (int i = 0; i < count; i++) {
-            Path root = Path.of("/w/" + prefix + "-" + i);
+            Path root = TestPaths.abs("/w/" + prefix + "-" + i);
             String name = prefix + i;
             shared.update(list -> {
                 List<SharedProject> next = new ArrayList<>(list);

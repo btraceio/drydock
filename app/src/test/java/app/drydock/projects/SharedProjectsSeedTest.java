@@ -4,6 +4,7 @@ import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.RepositorySettings;
 import app.drydock.domain.SshRemote;
+import app.drydock.testing.TestPaths;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -12,6 +13,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
 import java.time.Instant;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -27,12 +29,14 @@ class SharedProjectsSeedTest {
     Path dir;
 
     private static Repository local(String root) {
-        return new Repository(RepositoryId.newId(), Path.of(root), Path.of(root).getFileName().toString(), T, T,
+        return new Repository(RepositoryId.newId(), TestPaths.abs(root), TestPaths.abs(root).getFileName().toString(), T, T,
                 RepositorySettings.DEFAULT);
     }
 
     private static Function<Path, Optional<Path>> mains(Map<String, String> worktreeToMain) {
-        return root -> Optional.of(Path.of(worktreeToMain.getOrDefault(root.toString(), root.toString())));
+        Map<Path, Path> byPath = new HashMap<>();
+        worktreeToMain.forEach((worktree, main) -> byPath.put(TestPaths.abs(worktree), TestPaths.abs(main)));
+        return root -> Optional.of(byPath.getOrDefault(root, root));
     }
 
     @Test
@@ -54,7 +58,7 @@ class SharedProjectsSeedTest {
         List<SharedProject> seeded = SharedProjectsSeed.fromRepositories(List.of(worktree),
                 mains(Map.of("/w/wt1", "/w/main")));
 
-        assertEquals(List.of(SharedProject.local(worktree.id(), Path.of("/w/main"), "main", T)), seeded);
+        assertEquals(List.of(SharedProject.local(worktree.id(), TestPaths.abs("/w/main"), "main", T)), seeded);
     }
 
     @Test
@@ -65,7 +69,7 @@ class SharedProjectsSeedTest {
         List<SharedProject> seeded = SharedProjectsSeed.fromRepositories(List.of(worktree, main),
                 mains(Map.of("/w/wt1", "/w/main")));
 
-        assertEquals(List.of(SharedProject.local(main.id(), Path.of("/w/main"), "main", T)), seeded);
+        assertEquals(List.of(SharedProject.local(main.id(), TestPaths.abs("/w/main"), "main", T)), seeded);
     }
 
     @Test
@@ -74,7 +78,7 @@ class SharedProjectsSeedTest {
 
         List<SharedProject> seeded = SharedProjectsSeed.fromRepositories(List.of(gone), root -> Optional.empty());
 
-        assertEquals(List.of(SharedProject.local(gone.id(), Path.of("/w/gone"), "gone", T)), seeded);
+        assertEquals(List.of(SharedProject.local(gone.id(), TestPaths.abs("/w/gone"), "gone", T)), seeded);
     }
 
     @Test
@@ -103,16 +107,17 @@ class SharedProjectsSeedTest {
         Path state = dir.resolve("state.json");
         Files.writeString(state, """
                 {"schemaVersion":2,
-                 "repositories":[{"id":"%s","root":"/w/main","displayName":"main",
+                 "repositories":[{"id":"%s","root":"%s","displayName":"main",
                    "addedAt":"2026-10-19T10:00:00Z","lastOpenedAt":"2026-10-19T10:00:00Z","settings":{}},
                    {"id":"broken"}],
-                 "sessions":[{"shape":"from the future"}]}""".formatted(id));
+                 "sessions":[{"shape":"from the future"}]}""".formatted(id,
+                TestPaths.abs("/w/main").toString().replace("\\", "\\\\")));
 
         List<Repository> repositories = SharedProjectsSeed.readRepositoriesOnly(state);
 
         assertEquals(1, repositories.size());
         assertEquals(id, repositories.get(0).id());
-        assertEquals(Path.of("/w/main"), repositories.get(0).root());
+        assertEquals(TestPaths.abs("/w/main"), repositories.get(0).root());
     }
 
     @Test
