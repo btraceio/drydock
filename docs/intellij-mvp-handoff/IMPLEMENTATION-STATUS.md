@@ -52,11 +52,18 @@ Numbered as in the handoff's "Screens / views".
 
 Also outstanding: the `DiffExtension` gutter/inlay findings; *enforcing* (not
 merely warning about) one writer per worktree; and the
-`n stale worktrees · Prune` line.
+`n stale worktrees · Prune` line; and **a task that works on a picked
+branch itself**. `New Drydock Task from '<branch>'…` (Git's branch menus)
+only branches *off* the picked branch, or opens the worktree it is already
+checked out in. Working on the branch needs a fourth `WorkIn` mode that
+checks the existing branch out into a new worktree (`git worktree add
+<folder> <branch>`, no `-b`), refused while git has it checked out
+elsewhere, and for a remote branch a local tracking branch created first.
 
 Entry points are the **Drydock tool window** (right stripe, Drydock icon;
 its toolbar holds New task, Switch, Stop, Stop & Close, Resume, Done, Remove
-from Drydock and Refresh) and ⌃⌥N (New task). The Tools → Drydock menu is gone, and with it Resume Conversation…
+from Drydock and Refresh) ⌃⌥N (New task), and `New Drydock Task from '<branch>'…` in Git's
+per-branch menu (the Log's Branches pane and the branches popup). The Tools → Drydock menu is gone, and with it Resume Conversation…
 (out of the MVP until conversations can be summarised), New Worktree… and
 Check Out Branch in Worktree….
 

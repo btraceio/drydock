@@ -108,23 +108,63 @@ public final class TaskLauncher {
         ProgressManager.getInstance().run(new Task.Backgroundable(from, "Preparing new task…", true) {
             @Override
             public void run(@NotNull ProgressIndicator indicator) {
-                Optional<NewTaskPlan.Inputs> inputs = prepare(from, mainRoot, fixed);
-                if (inputs.isEmpty()) {
-                    return;
-                }
-                Optional<Supplier<Optional<String>>> refChooser = refChooser(inputs.get().project().root());
-                ApplicationManager.getApplication().invokeLater(() -> {
-                    NewTaskDialog dialog = new NewTaskDialog(from, inputs.get(), refChooser);
-                    if (dialog.showAndGet()) {
-                        start(from, inputs.get(), dialog.choice());
-                    }
-                }, ModalityState.nonModal());
+                prepareAndShow(from, mainRoot, fixed, Optional.empty());
             }
         });
     }
 
+    /**
+     * Opens the New task dialog for a branch picked in Git's menus
+     * ({@code fullRefName} is {@code refs/heads/…} or {@code refs/remotes/…})
+     * in the repository at {@code repositoryRoot}: fixed to the worktree the
+     * branch is checked out in, else with the branch as the start point —
+     * see {@link BranchTaskEntry}.
+     */
+    public static void openFromRef(Project from, Path repositoryRoot, String fullRefName) {
+        ProgressManager.getInstance().run(new Task.Backgroundable(from, "Preparing new task…", true) {
+            @Override
+            public void run(@NotNull ProgressIndicator indicator) {
+                List<WorktreeService.Worktree> worktrees;
+                try (WorktreeService service = new WorktreeService()) {
+                    worktrees = service.list(repositoryRoot).get(PREPARE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                } catch (ExecutionException | TimeoutException | RuntimeException e) {
+                    LOG.log(Level.WARNING, "Could not list the worktrees of " + repositoryRoot, e);
+                    report(from, "Drydock could not prepare a new task: " + WorktreeErrors.visibleMessage(e));
+                    return;
+                }
+                switch (BranchTaskEntry.forRef(fullRefName, worktrees).orElse(null)) {
+                    case BranchTaskEntry.InWorktree in ->
+                            prepareAndShow(from, Optional.of(repositoryRoot), Optional.of(in.worktree()), Optional.empty());
+                    case BranchTaskEntry.StartFrom branchOff ->
+                            prepareAndShow(from, Optional.of(repositoryRoot), Optional.empty(),
+                                    Optional.of(branchOff.startPoint()));
+                    case null -> LOG.log(Level.DEBUG, "No task entry for " + fullRefName);
+                }
+            }
+        });
+    }
+
+    /** Off the EDT: resolves the dialog's inputs, then shows it; {@code start} overrides the default start point. */
+    private static void prepareAndShow(Project from, Optional<Path> mainRoot, Optional<FixedWorktree> fixed,
+                                       Optional<String> start) {
+        Optional<NewTaskPlan.Inputs> inputs = prepare(from, mainRoot, fixed, start);
+        if (inputs.isEmpty()) {
+            return;
+        }
+        Optional<Supplier<Optional<String>>> refChooser = refChooser(inputs.get().project().root());
+        ApplicationManager.getApplication().invokeLater(() -> {
+            NewTaskDialog dialog = new NewTaskDialog(from, inputs.get(), refChooser);
+            if (dialog.showAndGet()) {
+                start(from, inputs.get(), dialog.choice());
+            }
+        }, ModalityState.nonModal());
+    }
+
     private static Optional<NewTaskPlan.Inputs> prepare(Project from, Optional<Path> requestedRoot,
-                                                        Optional<FixedWorktree> fixed) {
+                                                        Optional<FixedWorktree> fixed, Optional<String> start) {
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         try (GitStatusService git = new GitStatusService(); WorktreeService worktrees = new WorktreeService()) {
             plugin.initialization().get(PREPARE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
@@ -160,7 +200,10 @@ public final class TaskLauncher {
                     Path.of(System.getProperty("user.home")));
             boolean writerActive = DrydockStartupActivity.sessions(from).hasActiveWriterIn(mainRoot);
             return Optional.of(new NewTaskPlan.Inputs(project, project.displayName(), fixed, registry.agents(),
-                    preselected, defaultStart(defaultBranch, startPoints, listing.remotes()), startPoints,
+                    preselected,
+                    start.filter(startPoints::contains)
+                            .orElseGet(() -> defaultStart(defaultBranch, startPoints, listing.remotes())),
+                    startPoints,
                     listing.remotes(), taken, worktreeBase, writerActive));
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
