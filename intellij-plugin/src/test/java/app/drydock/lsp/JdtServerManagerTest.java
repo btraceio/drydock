@@ -621,18 +621,33 @@ class JdtServerManagerTest {
     }
 
     @Test
-    void serviceReadyAloneNeverReachesIndexedBeforeSixtySeconds() {
+    void serviceReadyAloneReachesIndexedAfterAFiveSecondGrace() {
         harness.newManager(null);
         query();
         respondInitialize();
         serviceReady();
         assertEquals(JdtServerManager.Readiness.READY, manager().state());
-        harness.time.advanceMillis(59_999);
+        harness.time.advanceMillis(4_999);
         assertEquals(JdtServerManager.Readiness.READY, manager().state());
         assertTrue(manager().references(srcFile(), 0, 0).isEmpty());
         harness.time.advanceMillis(1);
         assertEquals(JdtServerManager.Readiness.INDEXED, manager().state(),
-                "60 s without an import task is a cached workspace: straight to INDEXED");
+                "5 s without an import task is a cached workspace: straight to INDEXED");
+    }
+
+    @Test
+    void anImportTaskStartingInsideTheGraceStillGatesQueries() {
+        harness.newManager(null);
+        query();
+        respondInitialize();
+        serviceReady();
+        harness.time.advanceMillis(4_000);
+        importStarted("late");
+        harness.time.advanceMillis(60_000);
+        assertEquals(JdtServerManager.Readiness.INDEXING, manager().state());
+        assertTrue(manager().references(srcFile(), 0, 0).isEmpty());
+        importCompleted("late");
+        assertEquals(JdtServerManager.Readiness.INDEXED, manager().state());
     }
 
     @Test
