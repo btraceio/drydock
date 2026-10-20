@@ -78,8 +78,18 @@ public record ProjectIdentity(String repository, Optional<String> branch) {
         if (basePath == null) {
             return;
         }
-        Path directory = Path.of(basePath);
-        String repository = project.getName();
+        project.putUserData(KEY, forDirectory(Path.of(basePath), project.getName()));
+    }
+
+    /**
+     * The identity of whatever is checked out in {@code directory}, whether
+     * or not a window shows it: an agent hosted in another window is named
+     * by its own worktree. {@code fallbackName} stands in for the repository
+     * when git cannot describe the directory. Blocking git calls: a
+     * background thread only.
+     */
+    public static ProjectIdentity forDirectory(Path directory, String fallbackName) {
+        String repository = fallbackName;
         Optional<String> branch = Optional.empty();
         try (WorktreeService worktrees = new WorktreeService(); GitStatusService git = new GitStatusService()) {
             repository = worktrees.list(directory).get(GIT_TIMEOUT_SECONDS, TimeUnit.SECONDS).stream()
@@ -95,6 +105,6 @@ public record ProjectIdentity(String repository, Optional<String> branch) {
         } catch (ExecutionException | TimeoutException | RuntimeException e) {
             LOG.log(Level.DEBUG, () -> "No git identity for " + directory + ": " + e);
         }
-        project.putUserData(KEY, new ProjectIdentity(repository, branch));
+        return new ProjectIdentity(repository, branch);
     }
 }

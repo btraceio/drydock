@@ -115,13 +115,13 @@ public final class AgentConsoles {
         if (project.isDisposed()) {
             return;
         }
-        AgentExecutionService.getInstance(project).execution(sessionId).ifPresent(execution -> {
-            AgentConsoleFile file = AgentConsoleFileSystem.getInstance().fileFor(sessionId);
-            FileEditorManager.getInstance(project).openFile(file, true);
-            pin(project, file);
-            IdeFocusManager.getInstance(project)
-                    .requestFocus(execution.console().getPreferredFocusableComponent(), true);
-        });
+        AgentExecutionService.getInstance(project).execution(sessionId).flatMap(AgentExecution::console)
+                .ifPresent(console -> {
+                    AgentConsoleFile file = AgentConsoleFileSystem.getInstance().fileFor(sessionId);
+                    FileEditorManager.getInstance(project).openFile(file, true);
+                    pin(project, file);
+                    IdeFocusManager.getInstance(project).requestFocus(console.getPreferredFocusableComponent(), true);
+                });
     }
 
     /**

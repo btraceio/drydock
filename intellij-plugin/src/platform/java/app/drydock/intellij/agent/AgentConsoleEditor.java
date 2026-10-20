@@ -19,6 +19,7 @@ import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.UserDataHolderBase;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.openapi.wm.IdeFrame;
+import com.intellij.terminal.TerminalExecutionConsole;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.util.messages.MessageBusConnection;
 import com.intellij.util.ui.JBUI;
@@ -66,8 +67,8 @@ import java.util.concurrent.RejectedExecutionException;
  * so reopening a project or the IDE cannot resurrect an agent.</p>
  *
  * <p>Three sources drive a repaint, all of them pushed rather than polled:
- * the durable catalog ({@link DrydockSessionsListener}), this window's
- * executions ({@link AgentExecutionListener}), and live activity
+ * the durable catalog ({@link DrydockSessionsListener}), the agent's
+ * execution wherever it is shown ({@link AgentExecutionListener}), and live activity
  * ({@link SessionActivityListener}). Each hops to the EDT itself — subscribers
  * are called on the publisher's thread.</p>
  */
@@ -80,7 +81,6 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
     private final AgentConsoleFile file;
     private final PropertyChangeSupport propertyChange = new PropertyChangeSupport(this);
     private final MessageBusConnection applicationBus;
-    private final MessageBusConnection projectBus;
 
     private final JPanel root = new JPanel(new BorderLayout());
     private final AgentConsoleStrip strip;
@@ -157,8 +157,21 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
                 }
             }
         });
-        projectBus = project.getMessageBus().connect(this);
-        projectBus.subscribe(AgentExecutionListener.TOPIC, new AgentExecutionListener() {
+        applicationBus.subscribe(AgentExecutionListener.TOPIC, new AgentExecutionListener() {
+            @Override
+            public void executionShown(ManagedSessionId sessionId, Project to) {
+                if (sessionId.equals(file.sessionId())) {
+                    refreshLater();
+                }
+            }
+
+            @Override
+            public void executionReleased(ManagedSessionId sessionId) {
+                if (sessionId.equals(file.sessionId())) {
+                    refreshLater();
+                }
+            }
+
             @Override
             public void executionStarted(ManagedSessionId sessionId) {
                 if (sessionId.equals(file.sessionId())) {
@@ -326,12 +339,13 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
         String stoppedLine = AgentStripText.stoppedFooter(
                 AgentStripText.displayStatus(current.status(), false),
                 Optional.of(current.lastOpenedAt()), Instant.now());
-        if (execution.isPresent() && running) {
-            showBody(execution.get().console().getComponent());
-        } else if (execution.isPresent()) {
+        Optional<TerminalExecutionConsole> console = execution.flatMap(AgentExecution::console);
+        if (console.isPresent() && running) {
+            showBody(console.get().getComponent());
+        } else if (console.isPresent()) {
             // Stopped in this window: the transcript is still here to read,
             // dimmed so it cannot be mistaken for a live agent.
-            showBody(stoppedView(execution.get(), stoppedLine));
+            showBody(stoppedView(console.get(), stoppedLine));
         } else {
             placeholder.setText(stoppedLine);
             showBody(placeholder);
@@ -342,8 +356,8 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
         FileEditorManagerEx.getInstanceEx(project).refreshIcons();
     }
 
-    /** The execution {@link #stoppedPanel} was built around. */
-    private AgentExecution stoppedExecution;
+    /** The console {@link #stoppedPanel} was built around. */
+    private TerminalExecutionConsole stoppedConsole;
     private JPanel stoppedPanel;
     private final JBLabel stoppedFooter = new JBLabel("", SwingConstants.CENTER);
 
@@ -357,15 +371,15 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
      * layer also swallows keys and clicks, so nothing typed into a dead
      * agent looks as if it went somewhere.</p>
      */
-    private JComponent stoppedView(AgentExecution execution, String footer) {
-        if (stoppedExecution != execution) {
-            JLayer<JComponent> dimmed = new JLayer<>(execution.console().getComponent(), new DimmedLayer());
+    private JComponent stoppedView(TerminalExecutionConsole console, String footer) {
+        if (stoppedConsole != console) {
+            JLayer<JComponent> dimmed = new JLayer<>(console.getComponent(), new DimmedLayer());
             stoppedPanel = new JPanel(new BorderLayout());
             stoppedPanel.add(dimmed, BorderLayout.CENTER);
             stoppedFooter.setForeground(UIUtil.getContextHelpForeground());
             stoppedFooter.setBorder(JBUI.Borders.empty(8));
             stoppedPanel.add(stoppedFooter, BorderLayout.SOUTH);
-            stoppedExecution = execution;
+            stoppedConsole = console;
         }
         stoppedFooter.setText(footer);
         return stoppedPanel;
@@ -462,7 +476,9 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
         // takes no input.
         AgentExecutionService executions = AgentExecutionService.getInstance(project);
         return executions.isRunning(file.sessionId())
-                ? executions.execution(file.sessionId()).orElseThrow().console().getPreferredFocusableComponent()
+                ? executions.execution(file.sessionId()).flatMap(AgentExecution::console)
+                        .<JComponent>map(TerminalExecutionConsole::getPreferredFocusableComponent)
+                        .orElse(strip.primaryButton())
                 : strip.primaryButton();
     }
 
@@ -519,7 +535,6 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
         ageTicker.stop();
         watchWindowFocus(null);
         applicationBus.disconnect();
-        projectBus.disconnect();
         // The console is NOT disposed here: it belongs to the execution, and
         // the execution survives this tab being closed. The execution service
         // disposes it when the window goes or the session is forgotten.

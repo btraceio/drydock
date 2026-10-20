@@ -759,12 +759,10 @@ public final class DrydockSessionService implements AgentExecutionListener {
      * Window close and IDE quit: marks each session idle <strong>first</strong>,
      * then stops its agent.
      *
-     * <p>The order is the whole point. Everywhere else the idle status comes
-     * from {@link #executionTerminated}, which arrives on the project's
-     * message bus — and on a closing project that bus is already going away,
-     * so the event never lands and the row stays {@code RUNNING} forever. A
-     * row left {@code RUNNING} with nothing running then tells the reopened
-     * window that its stopped agent "is running", and
+     * <p>The order is the point. Everywhere else the idle status comes from
+     * {@link #executionTerminated}, once the process has ended — which can be
+     * after the window is gone and reopened. A row still {@code RUNNING} then
+     * tells the reopened window that its stopped agent "is running", and
      * {@code normalizeOnLoad}'s RUNNING→INACTIVE sweep does not help because it
      * runs once per <em>IDE</em> start, not per project open.</p>
      *
