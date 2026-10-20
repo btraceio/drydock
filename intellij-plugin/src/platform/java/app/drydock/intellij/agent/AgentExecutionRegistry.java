@@ -477,9 +477,13 @@ public final class AgentExecutionRegistry implements Disposable {
             return;
         }
         removed.router().detach();
-        removed.console().ifPresent(console -> ApplicationManager.getApplication()
-                .invokeLater(() -> Disposer.dispose(console), ModalityState.any()));
-        removed.notShown();
+        // The console and its host are EDT state, and forget runs wherever
+        // Done runs it (the session service's executor).
+        ApplicationManager.getApplication().invokeLater(() -> {
+            Optional<TerminalExecutionConsole> console = removed.console();
+            removed.notShown();
+            console.ifPresent(Disposer::dispose);
+        }, ModalityState.any());
     }
 
     private void scheduleForceKill(ManagedSessionId sessionId, KillableProcessHandler handler) {

@@ -216,6 +216,21 @@ public class AgentExecutionRegistryPlatformTest extends BasePlatformTestCase {
         waitFor(() -> !ended.isEmpty());
     }
 
+    public void testForgettingFromABackgroundThreadClearsTheViewOnTheEdt() throws Exception {
+        AgentExecution execution = start(STREAMING);
+        TerminalExecutionConsole console = execution.console().orElseThrow();
+
+        // Done runs this from the session service's executor.
+        Thread forgetter = new Thread(() -> registry.forget(id));
+        forgetter.start();
+        forgetter.join();
+
+        // The console and host are EDT state: untouched until the EDT gets to it.
+        assertSame(console, execution.console().orElse(null));
+        waitFor(() -> execution.console().isEmpty() && execution.host().isEmpty());
+        assertTrue(Disposer.isDisposed(console));
+    }
+
     public void testANaturalExitIsReportedOnceAsNotRequested() throws Exception {
         start(List.of("/bin/sh", "-c", "exit 3"));
 
