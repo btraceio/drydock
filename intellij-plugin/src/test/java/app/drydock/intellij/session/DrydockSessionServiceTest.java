@@ -777,9 +777,41 @@ class DrydockSessionServiceTest {
         service.executionTerminated(running.id(), true, null);
 
         assertEquals(Optional.of("pi-session-late"), persisted(harness, running.id()).agentSessionId());
-        // Resolve is asked about the session's own creation time, which is
-        // what the record is matched against.
-        assertEquals(List.of(running.createdAt()), discovery.createdAtsReceived);
+        // Resolve is asked about this launch, not the row's creation: the
+        // record the agent writes carries its own launch time.
+        assertEquals(1, discovery.createdAtsReceived.size());
+        assertFalse(discovery.createdAtsReceived.get(0).isBefore(running.createdAt()));
+        harness.store.flush();
+    }
+
+    /**
+     * A row started again later (Start after a stop) launches a new agent
+     * session, minutes or days after the row was created. The record it
+     * writes has this launch's time, so that is what resolve must match
+     * against; the row's creation time is far outside resolve's tolerance.
+     * Seen live with Codex: row created 13:10, relaunched agent's thread
+     * 13:13:29, nothing bound at Stop.
+     */
+    @Test
+    void aRelaunchedRowIsMatchedAgainstThisLaunchNotTheRowsCreation(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingDiscovery discovery = new RecordingDiscovery(harness.events);
+        discovery.lateCandidates.add("codex-thread-2");
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.CODEX, SessionIdStrategy.DISCOVERED, discovery, true, false, null, harness.events);
+        DrydockSessionService service = harness.service(provider);
+        ManagedAgentSession old = persistSession(harness, AgentKind.CODEX, "Old row",
+                AgentBinding.unlaunched(AgentKind.CODEX), base, SessionStatus.INACTIVE,
+                Instant.parse("2026-08-12T10:00:00Z"));
+        Instant beforeLaunch = Instant.now();
+
+        service.startSession(old.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        service.executionTerminated(old.id(), true, null);
+
+        assertEquals(1, discovery.createdAtsReceived.size());
+        assertFalse(discovery.createdAtsReceived.get(0).isBefore(beforeLaunch),
+                "resolve must be anchored at this launch, got " + discovery.createdAtsReceived.get(0));
+        assertEquals(Optional.of("codex-thread-2"), persisted(harness, old.id()).agentSessionId());
         harness.store.flush();
     }
 

@@ -28,9 +28,10 @@ public interface SessionIdDiscovery {
     /**
      * Best-effort late binding for a session whose create-time {@link #discover}
      * failed (timed out or was ambiguous): resolve the agent session id from
-     * the drydock session's persisted creation time, among candidates not
-     * already claimed by another session. Empty if not resolvable (no
-     * unclaimed candidates near the creation time, or ambiguous).
+     * the time the agent was launched (the caller's best knowledge of it: this
+     * launch when known, else the session's persisted creation time), among
+     * candidates not already claimed by another session. Empty if not
+     * resolvable (no unclaimed candidates near that time, or ambiguous).
      *
      * <p>Both methods may touch the filesystem and MUST run off the FX thread.
      * The default returns empty — providers that support DISCOVERED ids

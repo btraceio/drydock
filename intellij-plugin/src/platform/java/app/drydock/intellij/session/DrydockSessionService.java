@@ -36,6 +36,7 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -128,6 +129,15 @@ public final class DrydockSessionService implements AgentExecutionListener {
      */
     private final Set<String> claimedAgentSessionIds = ConcurrentHashMap.newKeySet();
     private final AtomicBoolean claimedIdsSeeded = new AtomicBoolean();
+    /**
+     * When each session's agent was last launched by this IDE run. The late
+     * id bind matches the agent's own record against this, not the row's
+     * creation: a row started again (Start after a stop) gets a record
+     * timestamped at the new launch, minutes or days after the row was made.
+     * Memory only; after an IDE restart the bind falls back to the creation
+     * time, as before.
+     */
+    private final Map<ManagedSessionId, Instant> lastLaunchedAt = new ConcurrentHashMap<>();
 
     public DrydockSessionService(DrydockPluginService plugin, AgentConsoleHost consoles,
             ProjectRepositoryService repos, ExecutorService executor) {
@@ -270,6 +280,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
         // from "already there").
         Object snapshot = discovery.map(d -> d.snapshot(cwd)).orElse(null);
         Instant launchedAt = Instant.now();
+        lastLaunchedAt.put(prepared.id(), launchedAt);
         CreateContext ctx = new CreateContext(prepared.displayName(), generatedId, cwd,
                 Optional.empty(), Optional.empty(), false, prepared.readOnly(), initialPrompt)
                 .withStdioMcpServers(stdioMcpServersFor(cwd));
@@ -641,8 +652,8 @@ public final class DrydockSessionService implements AgentExecutionListener {
         seedClaimedIdsOnce();
         Optional<String> resolved;
         try {
-            resolved = discovery.get().resolve(
-                    session.workingDirectory(), session.createdAt(), claimedAgentSessionIds);
+            resolved = discovery.get().resolve(session.workingDirectory(),
+                    lastLaunchedAt.getOrDefault(id, session.createdAt()), claimedAgentSessionIds);
         } catch (RuntimeException e) {
             LOG.log(Level.WARNING, () -> "Late id binding failed for " + id + ": " + e);
             return session;
