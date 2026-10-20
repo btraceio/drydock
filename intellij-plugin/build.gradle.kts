@@ -132,6 +132,9 @@ dependencies {
         bundledPlugin("org.jetbrains.plugins.terminal")
         // The New task dialog's start-point picker is Git's own (GitRefDialog).
         bundledPlugin("Git4Idea")
+        // Optional at runtime (plugin.xml): IdeMcpServer routes the IDE's
+        // bundled MCP server to each launched agent's worktree.
+        bundledPlugin("com.intellij.mcpServer")
         // testFramework declared in the dependencies block is what wires the
         // standard `test` task: BasePlatformTestCase + the full test-runtime
         // environment (sandbox dirs, idea.home.path, the platform classpath)

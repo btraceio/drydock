@@ -13,6 +13,7 @@ import app.drydock.agent.api.McpDelivery;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdDiscovery;
 import app.drydock.agent.api.SessionIdStrategy;
+import app.drydock.agent.api.StdioMcpServer;
 import app.drydock.agent.providers.terminal.TerminalAgentProvider;
 import app.drydock.agent.spi.AgentProvider;
 import app.drydock.app.ApplicationStateStore;
@@ -36,6 +37,7 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Queue;
 import java.util.Set;
@@ -282,13 +284,18 @@ class DrydockSessionServiceTest {
         }
 
         DrydockSessionService service(AgentProvider... providers) {
+            return service(path -> List.of(), providers);
+        }
+
+        DrydockSessionService service(Function<Path, List<StdioMcpServer>> stdioMcpServers,
+                                      AgentProvider... providers) {
             AgentRegistry registry = new AgentRegistry(List.of(providers),
                     new AgentContext(base, base.resolve("activity"), executor));
             SessionActivityWatcher watcher = new SessionActivityWatcher(base.resolve("activity"), executor);
             Function<Path, CompletableFuture<RepositoryId>> resolver =
                     path -> CompletableFuture.completedFuture(repository.id());
             return new DrydockSessionService(CompletableFuture.completedFuture(null),
-                    () -> store, () -> registry, () -> watcher, resolver, consoles, executor);
+                    () -> store, () -> registry, () -> watcher, resolver, consoles, executor, stdioMcpServers);
         }
     }
 
@@ -1018,5 +1025,52 @@ class DrydockSessionServiceTest {
         } finally {
             executor.shutdown();
         }
+    }
+
+    // ---- IDE MCP routing ---------------------------------------------------------
+
+    private static Function<Path, List<StdioMcpServer>> ideServerRoutedTo(List<Path> askedFor) {
+        return path -> {
+            askedFor.add(path);
+            return List.of(new StdioMcpServer("jetbrains", "/jbr/bin/java", List.of("Main"),
+                    Map.of("IJ_MCP_SERVER_PROJECT_PATH", path.toString())));
+        };
+    }
+
+    @Test
+    void aCreatedSessionGetsTheIdeServerRoutedToItsOwnWorktree(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, true, null, harness.events);
+        List<Path> askedFor = new CopyOnWriteArrayList<>();
+        DrydockSessionService service = harness.service(ideServerRoutedTo(askedFor), provider);
+
+        ManagedAgentSession prepared = service.prepareSession(base, AgentKind.CLAUDE, "My session")
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        service.launchSession(prepared).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(List.of(prepared.workingDirectory()), askedFor);
+        assertEquals(prepared.workingDirectory().toString(), provider.createContexts.get(0).stdioMcpServers()
+                .get(0).env().get("IJ_MCP_SERVER_PROJECT_PATH"));
+        harness.store.flush();
+    }
+
+    @Test
+    void aResumedSessionGetsTheIdeServerRoutedToItsOwnWorktree(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.PI, SessionIdStrategy.DISCOVERED, null, true, false, null, harness.events);
+        List<Path> askedFor = new CopyOnWriteArrayList<>();
+        DrydockSessionService service = harness.service(ideServerRoutedTo(askedFor), provider);
+        ManagedAgentSession stored = persistSession(harness, AgentKind.PI, "Named session",
+                new AgentBinding(AgentKind.PI, Optional.of("pi-conv-42"), Optional.empty()),
+                base, SessionStatus.EXITED, Instant.parse("2026-08-12T10:00:00Z"));
+
+        service.resumeSession(stored.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(List.of(stored.workingDirectory()), askedFor);
+        assertEquals(stored.workingDirectory().toString(), provider.resumeContexts.get(0).stdioMcpServers()
+                .get(0).env().get("IJ_MCP_SERVER_PROJECT_PATH"));
+        harness.store.flush();
     }
 }

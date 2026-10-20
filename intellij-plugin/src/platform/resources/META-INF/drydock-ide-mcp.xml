@@ -1,0 +1,4 @@
+<!-- Loaded only when com.intellij.mcpServer is present. Nothing to register:
+     IdeMcpServer checks for the plugin itself and touches its classes only then.
+     The optional dependency is what puts those classes on Drydock's class path. -->
+<idea-plugin/>
