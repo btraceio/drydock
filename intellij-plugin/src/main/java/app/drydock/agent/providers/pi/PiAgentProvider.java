@@ -30,9 +30,11 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -75,6 +77,9 @@ public final class PiAgentProvider implements AgentProvider {
     /** Read by {@code PiIdeMcpExtensionSource}: the stdio MCP servers, as JSON. */
     private static final String STDIO_SERVERS_ENV_VAR = "DRYDOCK_STDIO_MCP_SERVERS";
 
+    /** Read once and removed by {@code PiInitialPromptExtensionSource}. */
+    private static final String INITIAL_PROMPT_ENV_VAR = "DRYDOCK_PI_INITIAL_PROMPT";
+
     /** Bounds a hung filesystem: a stuck write costs a tab its tools, never its launch. */
     private static final Duration INSTALL_JOIN = Duration.ofSeconds(5);
 
@@ -90,6 +95,7 @@ public final class PiAgentProvider implements AgentProvider {
     private SessionIdDiscovery idDiscovery;
     private PiExtensionInstaller installer;
     private PiExtensionInstaller ideInstaller;
+    private PiExtensionInstaller initialPromptInstaller;
     private ExecutorService background;
 
     /**
@@ -103,6 +109,7 @@ public final class PiAgentProvider implements AgentProvider {
     private final AtomicReference<CompletableFuture<PiCapabilities>> capabilities = new AtomicReference<>();
     private final AtomicReference<CompletableFuture<Path>> extensionFile = new AtomicReference<>();
     private final AtomicReference<CompletableFuture<Path>> ideExtensionFile = new AtomicReference<>();
+    private final AtomicReference<CompletableFuture<Path>> initialPromptExtensionFile = new AtomicReference<>();
 
     /** Public no-arg constructor required by {@link java.util.ServiceLoader}. */
     public PiAgentProvider() {
@@ -143,6 +150,7 @@ public final class PiAgentProvider implements AgentProvider {
         this.idDiscovery = new SnapshotClaimDiscovery(store);
         this.installer = new PiExtensionInstaller(ctx.stateDirectory());
         this.ideInstaller = PiExtensionInstaller.ideMcp(ctx.stateDirectory());
+        this.initialPromptInstaller = PiExtensionInstaller.initialPrompt(ctx.stateDirectory());
         this.background = ctx.backgroundExecutor();
     }
 
@@ -198,12 +206,13 @@ public final class PiAgentProvider implements AgentProvider {
         if (c.remote().isPresent()) {
             return LaunchPlan.unsupported();   // Pi declines remote
         }
-        String pi = piCommand(c.mcp(), c.stdioMcpServers(), c.evalMode());
-        // pi [options] [--] [@files...] [messages...]: the task is the first
-        // message, after "--" so a leading dash cannot read as an option.
-        String withTask = c.initialPrompt()
-                .map(prompt -> pi + " -- " + AgentCommands.shellQuote(prompt))
-                .orElse(pi);
+        PiCommand pi = piCommand(c.mcp(), c.stdioMcpServers(), c.evalMode(), c.initialPrompt());
+        // The extension submits after Pi has mounted its UI and initialized
+        // the session. If its owner-only file could not be installed, retain
+        // the CLI positional form as a degraded but functional fallback.
+        String withTask = c.initialPrompt().isPresent() && !pi.initialPromptInjected()
+                ? pi.command() + " -- " + AgentCommands.shellQuote(c.initialPrompt().get())
+                : pi.command();
         return LaunchPlan.of(withTask, false);   // DISCOVERED: no id
     }
 
@@ -212,7 +221,7 @@ public final class PiAgentProvider implements AgentProvider {
         if (r.remote().isPresent()) {
             return LaunchPlan.unsupported();
         }
-        String pi = piCommand(r.mcp(), r.stdioMcpServers(), r.evalMode());
+        String pi = piCommand(r.mcp(), r.stdioMcpServers(), r.evalMode(), Optional.empty()).command();
         if (r.agentSessionId().isPresent()) {
             return LaunchPlan.of(pi + " --session " + AgentCommands.shellQuote(r.agentSessionId().get()), false);
         }
@@ -331,7 +340,8 @@ public final class PiAgentProvider implements AgentProvider {
      * the credential-only {@code fromFiles} channel. The stdio servers ride it
      * the same way: a command, a port and paths, no credential.</p>
      */
-    private String piCommand(Optional<McpAccess> access, List<StdioMcpServer> stdioServers, boolean eval) {
+    private PiCommand piCommand(Optional<McpAccess> access, List<StdioMcpServer> stdioServers, boolean eval,
+                                Optional<String> initialPrompt) {
         Optional<Path> configFile = access.flatMap(McpAccess::credentialFile);
         // PI_SESSION_ID: the user's pi models.json sends `x-claude-code-session-id: $PI_SESSION_ID`
         // to omlx_proxy for per-session correlation, but pi does NOT set PI_SESSION_ID in its
@@ -340,23 +350,25 @@ public final class PiAgentProvider implements AgentProvider {
         // a fresh shell) fails provider auth. drydock sets it per launch -- a non-secret id,
         // so it rides the env argv like DRYDOCK_EVAL.
         String piSessionId = "PI_SESSION_ID=" + AgentCommands.shellQuote(java.util.UUID.randomUUID().toString()) + " ";
-        if (configFile.isEmpty() && stdioServers.isEmpty()) {
-            return evalEnvPrefix(eval) + piSessionId + piBinary();
-        }
         // Start everything, then join everything: the cost is max(probe, writes),
         // not the sum. Sequencing them would put up to 35 s in front of the first
         // Pi tab of an app run, inside the stage that gates surface creation.
-        CompletableFuture<PiCapabilities> caps = capabilitiesFuture();
+        CompletableFuture<PiCapabilities> caps = configFile.isPresent() || !stdioServers.isEmpty()
+                ? capabilitiesFuture() : null;
         CompletableFuture<Path> bridge = configFile.isPresent() ? extensionFuture(extensionFile, installer) : null;
         CompletableFuture<Path> ide = stdioServers.isEmpty() ? null : extensionFuture(ideExtensionFile, ideInstaller);
+        CompletableFuture<Path> prompt = initialPrompt.isEmpty() ? null
+                : extensionFuture(initialPromptExtensionFile, initialPromptInstaller);
 
         // Join ALL before branching, even when a gate is about to fail. An
         // early return would leave an install running into a directory a test's
         // @TempDir is about to delete, and in production would write a file no
         // launch will read.
-        PiCapabilities probed = join(caps, PROBE_JOIN, PiCapabilities.of("unknown"));
+        PiCapabilities probed = caps == null ? PiCapabilities.of("unknown")
+                : join(caps, PROBE_JOIN, PiCapabilities.of("unknown"));
         Path bridgeExtension = bridge == null ? null : installed(extensionFile, bridge);
         Path ideExtension = ide == null ? null : installed(ideExtensionFile, ide);
+        Path promptExtension = prompt == null ? null : installed(initialPromptExtensionFile, prompt);
 
         boolean useBridge = configFile.isPresent() && probed.supportsBridge() && bridgeExtension != null;
         if (configFile.isPresent() && !useBridge) {
@@ -368,12 +380,22 @@ public final class PiAgentProvider implements AgentProvider {
             LOG.log(Level.INFO, "Pi IDE MCP servers declined for this launch: "
                     + ideDeclineReason(probed, ideExtension));
         }
+        boolean useInitialPrompt = initialPrompt.isPresent() && promptExtension != null;
+        if (initialPrompt.isPresent() && !useInitialPrompt) {
+            LOG.log(Level.WARNING, "Pi initial-prompt extension could not be installed; using CLI fallback");
+        }
 
         StringBuilder command = new StringBuilder(useBridge
                 ? AgentCommands.envPrefix(ENV_SCRUB, Map.of(CONFIG_ENV_VAR, configFile.get()), Map.of())
                         + evalEnvSuffix(eval)
                 : evalEnvPrefix(eval));
         command.append(piSessionId);
+        if (useInitialPrompt) {
+            String encoded = Base64.getEncoder().encodeToString(
+                    initialPrompt.orElseThrow().getBytes(StandardCharsets.UTF_8));
+            command.append(INITIAL_PROMPT_ENV_VAR).append('=')
+                    .append(AgentCommands.shellQuote(encoded)).append(' ');
+        }
         if (useIde) {
             command.append(STDIO_SERVERS_ENV_VAR).append('=')
                     .append(AgentCommands.shellQuote(stdioServersJson(stdioServers))).append(' ');
@@ -385,7 +407,13 @@ public final class PiAgentProvider implements AgentProvider {
         if (useIde) {
             command.append(" -e ").append(AgentCommands.shellQuote(ideExtension.toString()));
         }
-        return command.toString();
+        if (useInitialPrompt) {
+            command.append(" -e ").append(AgentCommands.shellQuote(promptExtension.toString()));
+        }
+        return new PiCommand(command.toString(), useInitialPrompt);
+    }
+
+    private record PiCommand(String command, boolean initialPromptInjected) {
     }
 
     /**

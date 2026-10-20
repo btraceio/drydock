@@ -13,16 +13,19 @@ import app.drydock.agent.providers.HostBinaryLocator;
 import app.drydock.agent.providers.pi.internal.PiCapabilities;
 import app.drydock.agent.providers.pi.internal.PiExecutableLocator;
 import app.drydock.agent.providers.pi.internal.PiIdeMcpExtensionSource;
+import app.drydock.agent.providers.pi.internal.PiInitialPromptExtensionSource;
 import app.drydock.domain.SshRemote;
 import app.drydock.state.json.JsonParser;
 import app.drydock.state.json.JsonValue;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -681,22 +684,42 @@ class PiAgentProviderTest {
                 "the log must quote what it actually read: " + message);
     }
 
-    /** The task is pi's first message: after {@code --}, quoted, last. */
+    /** The task is handed to the one-shot extension, not Pi's startup parser. */
     @Test
-    void theInitialPromptIsTheFirstMessageAfterEndOfOptions() {
+    void theInitialPromptIsSubmittedByTheStartupExtension() {
         String command = provider().buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
                 Optional.empty(), Optional.empty(), false, false, Optional.of("Add a farewell method"))).command();
-        assertTrue(command.endsWith(" -- 'Add a farewell method'"), command);
+        assertEquals("Add a farewell method", decodedInitialPrompt(command));
+        assertTrue(command.endsWith(" -e '/tmp/pi/drydock-initial-prompt.ts'"), command);
+        assertFalse(command.contains(" -- 'Add a farewell method'"), command);
     }
 
     @Test
-    void anImplementationPromptSurvivesMultilineShellQuoting() {
+    void anImplementationPromptSurvivesBase64EnvironmentTransport() {
         String prompt = "Implement issue #42.\n\nReview the issue's gates and add `Closes #42`.";
 
         String command = provider().buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
                 Optional.empty(), Optional.empty(), false, false, Optional.of(prompt))).command();
 
-        assertTrue(command.endsWith(" -- 'Implement issue #42.\n\n"
-                + "Review the issue'\\''s gates and add `Closes #42`.'"), command);
+        assertEquals(prompt, decodedInitialPrompt(command));
+    }
+
+    @Test
+    void theInitialPromptExtensionSubmitsOnceAfterSessionStartup() {
+        String source = PiInitialPromptExtensionSource.SOURCE;
+        assertTrue(source.contains("delete process.env[PROMPT_ENV]"), source);
+        assertTrue(source.contains("pi.on(\"session_start\""), source);
+        assertTrue(source.contains("if (submitted) return"), source);
+        assertTrue(source.contains("setTimeout(() => pi.sendUserMessage(prompt), 0)"), source);
+    }
+
+    private static String decodedInitialPrompt(String command) {
+        String marker = "DRYDOCK_PI_INITIAL_PROMPT='";
+        int start = command.indexOf(marker);
+        assertTrue(start >= 0, command);
+        start += marker.length();
+        int end = command.indexOf('\'', start);
+        assertTrue(end > start, command);
+        return new String(Base64.getDecoder().decode(command.substring(start, end)), StandardCharsets.UTF_8);
     }
 }

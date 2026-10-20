@@ -94,4 +94,13 @@ class PiExtensionInstallerTest {
         assertEquals(PiIdeMcpExtensionSource.SOURCE, Files.readString(written));
         assertEquals("rw-------", PosixFilePermissions.toString(Files.getPosixFilePermissions(written)));
     }
+
+    @Test
+    void theInitialPromptExtensionIsWrittenBesideTheBridgeOwnerOnly(@TempDir Path state) throws IOException {
+        Path written = PiExtensionInstaller.initialPrompt(state).install();
+
+        assertEquals(state.resolve("pi").resolve("drydock-initial-prompt.ts"), written);
+        assertEquals(PiInitialPromptExtensionSource.SOURCE, Files.readString(written));
+        assertEquals("rw-------", PosixFilePermissions.toString(Files.getPosixFilePermissions(written)));
+    }
 }

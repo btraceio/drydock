@@ -17,7 +17,9 @@ import java.util.Set;
  * Writes an extension pi loads with {@code -e} -- the bridge
  * ({@link PiExtensionSource#SOURCE}, {@code <stateDirectory>/pi/drydock-mcp.ts})
  * or the IDE servers ({@link PiIdeMcpExtensionSource#SOURCE},
- * {@code drydock-ide-mcp.ts} beside it) -- where the Pi launch command points
+ * {@code drydock-ide-mcp.ts} beside it), or the one-shot initial prompt
+ * ({@link PiInitialPromptExtensionSource#SOURCE},
+ * {@code drydock-initial-prompt.ts}) -- where the Pi launch command points
  * {@code -e}.
  *
  * <p>Modelled on {@code McpConfigWriter}, not on {@code ClaudeHookInstaller}:
@@ -60,6 +62,12 @@ public final class PiExtensionInstaller {
     /** The IDE's MCP servers, {@code drydock-ide-mcp.ts}, beside the bridge and under the same rules. */
     public static PiExtensionInstaller ideMcp(Path stateDirectory) {
         return new PiExtensionInstaller(stateDirectory, "drydock-ide-mcp.ts", PiIdeMcpExtensionSource.SOURCE);
+    }
+
+    /** The one-shot initial-prompt submitter, {@code drydock-initial-prompt.ts}. */
+    public static PiExtensionInstaller initialPrompt(Path stateDirectory) {
+        return new PiExtensionInstaller(
+                stateDirectory, "drydock-initial-prompt.ts", PiInitialPromptExtensionSource.SOURCE);
     }
 
     /** Where the extension lives, whether or not it has been written yet. */
