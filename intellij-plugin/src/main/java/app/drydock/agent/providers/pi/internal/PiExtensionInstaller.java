@@ -14,9 +14,11 @@ import java.util.Objects;
 import java.util.Set;
 
 /**
- * Writes {@link PiExtensionSource#SOURCE} to
- * {@code <stateDirectory>/pi/drydock-mcp.ts}, where the Pi launch command
- * points {@code -e}.
+ * Writes an extension pi loads with {@code -e} -- the bridge
+ * ({@link PiExtensionSource#SOURCE}, {@code <stateDirectory>/pi/drydock-mcp.ts})
+ * or the IDE servers ({@link PiIdeMcpExtensionSource#SOURCE},
+ * {@code drydock-ide-mcp.ts} beside it) -- where the Pi launch command points
+ * {@code -e}.
  *
  * <p>Modelled on {@code McpConfigWriter}, not on {@code ClaudeHookInstaller}:
  * the latter is a plain {@code Files.writeString} under the umask. The write
@@ -40,17 +42,29 @@ public final class PiExtensionInstaller {
     private static final Set<PosixFilePermission> OWNER_ONLY_DIRECTORY =
             PosixFilePermissions.fromString("rwx------");
 
-    private static final String FILE_NAME = "drydock-mcp.ts";
-
     private final Path stateDirectory;
+    private final String fileName;
+    private final String source;
 
+    /** The drydock bridge, {@code drydock-mcp.ts}. */
     public PiExtensionInstaller(Path stateDirectory) {
+        this(stateDirectory, "drydock-mcp.ts", PiExtensionSource.SOURCE);
+    }
+
+    private PiExtensionInstaller(Path stateDirectory, String fileName, String source) {
         this.stateDirectory = Objects.requireNonNull(stateDirectory, "stateDirectory");
+        this.fileName = fileName;
+        this.source = source;
+    }
+
+    /** The IDE's MCP servers, {@code drydock-ide-mcp.ts}, beside the bridge and under the same rules. */
+    public static PiExtensionInstaller ideMcp(Path stateDirectory) {
+        return new PiExtensionInstaller(stateDirectory, "drydock-ide-mcp.ts", PiIdeMcpExtensionSource.SOURCE);
     }
 
     /** Where the extension lives, whether or not it has been written yet. */
     private Path extensionFile() {
-        return stateDirectory.resolve("pi").resolve(FILE_NAME);
+        return stateDirectory.resolve("pi").resolve(fileName);
     }
 
     /** Writes (or rewrites) the extension, returning its path. */
@@ -63,7 +77,7 @@ public final class PiExtensionInstaller {
             Files.setPosixFilePermissions(directory, OWNER_ONLY_DIRECTORY);
         }
         Path target = extensionFile();
-        writeAtomically(target, PiExtensionSource.SOURCE);
+        writeAtomically(target, source);
         return target;
     }
 

@@ -85,4 +85,13 @@ class PiExtensionInstallerTest {
         assertTrue(PiExtensionSource.SOURCE.contains("export default"),
                 "pi loads an extension by calling its default export");
     }
+
+    @Test
+    void theIdeExtensionIsWrittenBesideTheBridgeOwnerOnly(@TempDir Path state) throws IOException {
+        Path written = PiExtensionInstaller.ideMcp(state).install();
+
+        assertEquals(state.resolve("pi").resolve("drydock-ide-mcp.ts"), written);
+        assertEquals(PiIdeMcpExtensionSource.SOURCE, Files.readString(written));
+        assertEquals("rw-------", PosixFilePermissions.toString(Files.getPosixFilePermissions(written)));
+    }
 }

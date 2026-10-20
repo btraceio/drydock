@@ -61,4 +61,13 @@ class PiCapabilitiesTest {
         assertFalse(PiCapabilities.of("0.80").versionParsed());       // too few components to judge
         assertFalse(PiCapabilities.of("v0.84.1").versionParsed());    // stray prefix survives whitespace-token parsing
     }
+
+    @Test
+    void nativeMcpServersArriveInZeroNinetyNine() {
+        assertTrue(PiCapabilities.of("0.99.0").supportsMcpServers());
+        assertTrue(PiCapabilities.of("1.3.0").supportsMcpServers());
+        assertFalse(PiCapabilities.of("0.98.9").supportsMcpServers());
+        assertFalse(PiCapabilities.of("0.84.1").supportsMcpServers());   // bridge yes, native MCP no
+        assertFalse(PiCapabilities.of("unknown").supportsMcpServers());
+    }
 }
