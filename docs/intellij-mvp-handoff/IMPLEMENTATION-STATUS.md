@@ -60,6 +60,11 @@ checks the existing branch out into a new worktree (`git worktree add
 <folder> <branch>`, no `-b`), refused while git has it checked out
 elsewhere, and for a remote branch a local tracking branch created first.
 
+In progress: **cross-project tabs (v1.1)** — one window hosting agents from
+any project or worktree. Design and spike results:
+`docs/intellij-cross-project-handoff/`; plan:
+`docs/superpowers/plans/2026-10-20-intellij-cross-project-tabs.md`.
+
 Entry points are the **Drydock tool window** (right stripe, Drydock icon;
 its toolbar holds New task, Switch, Stop, Stop & Close, Resume, Done, Remove
 from Drydock and Refresh) ⌃⌥N (New task), and `New Drydock Task from '<branch>'…` in Git's
