@@ -293,18 +293,18 @@ abstract class RuntimeImageTask @Inject constructor(
             into(appLibDir)
         }
 
-        // 3. Copy libghostty + the AppKit host shim for BOTH architectures
-        // (the approved dual-arch deviation) into lib/<arch>/, mirroring
-        // the build/native/<arch>/ layout the native build scripts produce,
-        // so NativeLibraryLocator's os.arch-based selection picks the
-        // right one at launch on either machine.
+        // 3. Copy libghostty, the AppKit host shim, and the WKWebView shim
+        // for BOTH architectures (the approved dual-arch deviation) into
+        // lib/<arch>/, mirroring the build/native/<arch>/ layout the native
+        // build scripts produce, so NativeLibraryLocator's os.arch-based
+        // selection picks the right one at launch on either machine.
         val nativeOut = nativeDir.get().asFile
         val libDir = File(imageRoot, "lib")
         for (arch in listOf("macos-x86_64", "macos-arm64")) {
             val src = File(nativeOut, arch)
             val dst = File(libDir, arch)
             dst.mkdirs()
-            for (name in listOf("libghostty.dylib", "libdrydockterminalhost.dylib")) {
+            for (name in listOf("libghostty.dylib", "libdrydockterminalhost.dylib", "libdrydockwebviewhost.dylib")) {
                 val source = File(src, name)
                 if (source.isFile) {
                     source.copyTo(File(dst, name), overwrite = true)

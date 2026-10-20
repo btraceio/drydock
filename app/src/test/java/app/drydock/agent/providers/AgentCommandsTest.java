@@ -1,5 +1,6 @@
 package app.drydock.agent.providers;
 
+import app.drydock.testing.TestPaths;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
@@ -10,6 +11,16 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class AgentCommandsTest {
+
+    private static final Path TOK = TestPaths.abs("/s/tok");
+    private static final Path MCP_CONFIG = TestPaths.abs(
+            "/Users/x/Library/Application Support/ClaudeProjectManager/mcp/s1.json");
+    private static final Path TOKEN_FILE = TestPaths.abs("/state/mcp/s1.token");
+
+    /** Mirrors the single-quote escaping the product must apply. */
+    private static String shellQuote(Path path) {
+        return path.toString().replace("'", "'\\''");
+    }
 
     @Test
     void shellQuoteEscapesEmbeddedSingleQuotes() {
@@ -28,14 +39,14 @@ class AgentCommandsTest {
 
     @Test
     void envPrefixReadsAnAssignedValueFromItsFileRatherThanInliningIt() {
-        assertEquals("env -u A TOKEN=\"$(cat '/s/tok')\" ",
-                AgentCommands.envPrefixFromFiles(List.of("A"), Map.of("TOKEN", Path.of("/s/tok"))));
+        assertEquals("env -u A TOKEN=\"$(cat '" + TOK + "')\" ",
+                AgentCommands.envPrefixFromFiles(List.of("A"), Map.of("TOKEN", TOK)));
     }
 
     @Test
     void envPrefixWithAssignmentsOnlyStillEmitsEnv() {
-        assertEquals("env TOKEN=\"$(cat '/s/tok')\" ",
-                AgentCommands.envPrefixFromFiles(List.of(), Map.of("TOKEN", Path.of("/s/tok"))));
+        assertEquals("env TOKEN=\"$(cat '" + TOK + "')\" ",
+                AgentCommands.envPrefixFromFiles(List.of(), Map.of("TOKEN", TOK)));
     }
 
     @Test
@@ -49,8 +60,9 @@ class AgentCommandsTest {
      */
     @Test
     void envPrefixQuotesThePathSoItCannotBecomeShellSyntax() {
-        assertEquals("env TOKEN=\"$(cat '/s/a'\\''b; rm -rf x')\" ",
-                AgentCommands.envPrefixFromFiles(List.of(), Map.of("TOKEN", Path.of("/s/a'b; rm -rf x"))));
+        Path quoted = TestPaths.abs("/s/a'b; rm -rf x");
+        assertEquals("env TOKEN=\"$(cat '" + shellQuote(quoted) + "')\" ",
+                AgentCommands.envPrefixFromFiles(List.of(), Map.of("TOKEN", quoted)));
     }
 
     /**
@@ -62,9 +74,9 @@ class AgentCommandsTest {
     @Test
     void theRenderedCommandNamesTheFileAndNeverTheSecretItHolds() {
         String rendered = AgentCommands.envPrefixFromFiles(
-                List.of("A"), Map.of("TOKEN", Path.of("/s/tok")));
+                List.of("A"), Map.of("TOKEN", TOK));
 
-        assertTrue(rendered.contains("/s/tok"), rendered);
+        assertTrue(rendered.contains(TOK.toString()), rendered);
         assertTrue(rendered.contains("$(cat "), rendered);
     }
 
@@ -72,18 +84,18 @@ class AgentCommandsTest {
     void literalPathIsQuotedSoASpaceSurvives() {
         String prefix = AgentCommands.envPrefix(
                 List.of("PI_CODING_AGENT"),
-                Map.of("DRYDOCK_MCP_CONFIG", Path.of("/Users/x/Library/Application Support/ClaudeProjectManager/mcp/s1.json")),
+                Map.of("DRYDOCK_MCP_CONFIG", MCP_CONFIG),
                 Map.of());
         assertEquals("env -u PI_CODING_AGENT "
-                + "DRYDOCK_MCP_CONFIG='/Users/x/Library/Application Support/ClaudeProjectManager/mcp/s1.json' ",
+                + "DRYDOCK_MCP_CONFIG='" + MCP_CONFIG + "' ",
                 prefix);
     }
 
     @Test
     void fromFilesStillReadsTheFileAtExecTime() {
         String prefix = AgentCommands.envPrefix(
-                List.of(), Map.of(), Map.of("TOKEN", Path.of("/state/mcp/s1.token")));
-        assertEquals("env TOKEN=\"$(cat '/state/mcp/s1.token')\" ", prefix);
+                List.of(), Map.of(), Map.of("TOKEN", TOKEN_FILE));
+        assertEquals("env TOKEN=\"$(cat '" + TOKEN_FILE + "')\" ", prefix);
     }
 
     @Test

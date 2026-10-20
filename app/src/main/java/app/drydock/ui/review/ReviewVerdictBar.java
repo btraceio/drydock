@@ -55,7 +55,7 @@ final class ReviewVerdictBar extends VBox {
          * the bound session. False when nothing was handed over: there is no
          * session to hand them to, or the target has no open finding to send.
          *
-         * <p>A boolean for the same reason {@code openInExplorer} and {@code
+         * <p>A boolean for the same reason {@code openInCodeViewer} and {@code
          * SessionReviewView.Host#askAgentToFix} are: this button can do
          * NOTHING while looking exactly as though it worked, and a control
          * that reports nothing when it did nothing is the defect family this

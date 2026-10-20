@@ -74,7 +74,7 @@ final class FakeReviewHost implements SessionReviewView.Host {
     /** Per-recorded-base deltas; {@link #baseDelta} answers for any base not listed. */
     final java.util.Map<String, BaseMove.Delta> baseDeltaByRecordedBase = new java.util.HashMap<>();
     final List<String> submittedScopes = new ArrayList<>();
-    final List<Path> explorerJumps = new ArrayList<>();
+    final List<Path> webViewerOpens = new ArrayList<>();
 
     /** What {@link #submit} was handed, keyed by scope id -- what the submit tests assert against. */
     final java.util.Map<String, app.drydock.review.SubmitPlan.DiffIndex> submittedIndexes = new java.util.HashMap<>();
@@ -99,8 +99,8 @@ final class FakeReviewHost implements SessionReviewView.Host {
      */
     BaseMove.Delta baseDelta = new BaseMove.Delta(false, new TreeSet<>());
 
-    /** Whether the Explorer jump can succeed (no session bound = false). */
-    boolean explorerAvailable;
+    /** The checkout the ⤢ code viewer reads; empty = remote-only review (button disables). */
+    Optional<Path> reviewRoot = Optional.empty();
 
     /** Set by tests that want the view's own body rather than the diff column. */
     Optional<Region> body = Optional.empty();
@@ -138,12 +138,8 @@ final class FakeReviewHost implements SessionReviewView.Host {
     }
 
     @Override
-    public boolean openInExplorer(ReviewScope scope, Path file, int line) {
-        if (!explorerAvailable) {
-            return false;
-        }
-        explorerJumps.add(file);
-        return true;
+    public Optional<Path> reviewRoot() {
+        return reviewRoot;
     }
 
     @Override

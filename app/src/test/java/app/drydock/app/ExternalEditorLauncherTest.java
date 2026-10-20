@@ -1,5 +1,7 @@
 package app.drydock.app;
 
+import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -18,6 +20,8 @@ class ExternalEditorLauncherTest {
     Path tempDir;
 
     @Test
+    // drives /bin/cp.
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void substitutesFileIntoEveryTemplateArgument() throws IOException, InterruptedException {
         // A path containing a space, to prove this never goes through a shell
         // string (plan section 21): a shell would need explicit quoting, but

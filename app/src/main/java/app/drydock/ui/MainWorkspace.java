@@ -2274,20 +2274,13 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
 
         /**
-         * The Explorer lives inside a session's tab, so this can only work
-         * for a scope whose session is open. Reports that rather than
-         * pretending, which is what lets the diff column disable the button
-         * with an explanation instead of silently doing nothing.
+         * The local checkout the reviewed file paths resolve against (the
+         * ⤢ code viewer reads file content through it); empty for a
+         * remote-only review.
          */
         @Override
-        public boolean openInExplorer(ReviewScope scope, Path file, int line) {
-            OpenSessionTab open = scope.sessionId().map(openTabs::get).orElse(null);
-            if (open == null) {
-                return false;
-            }
-            tabPane.getSelectionModel().select(open.tab);
-            open.openExplorerAt(file, line);
-            return true;
+        public Optional<Path> reviewRoot() {
+            return reviewRoot;
         }
 
         @Override

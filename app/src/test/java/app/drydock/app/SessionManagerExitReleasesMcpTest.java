@@ -1,5 +1,6 @@
 package app.drydock.app;
 
+import app.drydock.testing.TestPaths;
 import app.drydock.agent.api.AgentContext;
 import app.drydock.agent.api.AgentRegistry;
 import app.drydock.agent.providers.claude.ClaudeAgentProvider;
@@ -116,10 +117,10 @@ class SessionManagerExitReleasesMcpTest {
 
     /** A registry whose one provider can never find its executable, so nothing spawns. */
     private AgentRegistry newRegistry() {
-        AgentContext ctx = new AgentContext(Path.of("/tmp/drydock-test"), Path.of("/tmp/drydock-test/activity"),
+        AgentContext ctx = new AgentContext(TestPaths.abs("/tmp/drydock-test"), TestPaths.abs("/tmp/drydock-test/activity"),
                 backgroundExecutor);
         return new AgentRegistry(
-                List.of(new ClaudeAgentProvider(new ClaudeExecutableLocator(Path.of("/nonexistent/claude")))), ctx);
+                List.of(new ClaudeAgentProvider(new ClaudeExecutableLocator(TestPaths.abs("/nonexistent/claude")))), ctx);
     }
 
     /**

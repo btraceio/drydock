@@ -34,6 +34,8 @@ import javafx.scene.Scene;
 import javafx.scene.control.Labeled;
 import javafx.scene.layout.Region;
 import javafx.stage.Stage;
+import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -206,6 +208,9 @@ class LspReviewCompositionTest extends FxTest {
     // -------------------------------------------------- both call sites + factory
 
     @Test
+    // the fake language server is a unix script; the callee resolution times
+    // out on Windows.
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void resolveCalleesAsksTheHostFactoryAndResolvesThroughWhatItReturned() throws TimeoutException {
         settleCallees();
 
@@ -218,6 +223,9 @@ class LspReviewCompositionTest extends FxTest {
     }
 
     @Test
+    // the fake language server is a unix script; the callee resolution times
+    // out on Windows.
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void peekAtSymbolAsksTheHostFactoryAndPeeksThroughWhatItReturned() throws TimeoutException {
         settleCallees();
         int before = ReviewDiagFxThread.call(() -> host.providerCalls.size());
@@ -394,8 +402,8 @@ class LspReviewCompositionTest extends FxTest {
         }
 
         @Override
-        public boolean openInExplorer(ReviewScope scope, Path file, int line) {
-            return real.openInExplorer(scope, file, line);
+        public Optional<Path> reviewRoot() {
+            return real.reviewRoot();
         }
 
         @Override

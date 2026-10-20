@@ -1,5 +1,6 @@
 package app.drydock.config;
 
+import app.drydock.testing.TestPaths;
 import app.drydock.state.json.JsonParser;
 import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonValue.JsonNumber;
@@ -27,6 +28,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class UserConfigTest {
 
+    private static final Path WORKTREES = TestPaths.abs("/tmp/worktrees");
+
     @Test
     void withWorktreesDirectoryPreservesOtherFields() {
         UserConfig base = new UserConfig(Optional.empty(), false,
@@ -49,7 +52,7 @@ class UserConfigTest {
     @Test
     void loadReadsTheConfiguredWorktreesDirectory(@TempDir Path dir) throws Exception {
         Path configFile = dir.resolve("config.json");
-        Files.writeString(configFile, "{\"worktreesDirectory\": \"" + dir.resolve("wt") + "\"}");
+        Files.writeString(configFile, "{\"worktreesDirectory\": \"" + jsonEscape(dir.resolve("wt").toString()) + "\"}");
 
         UserConfig config = UserConfig.load(configFile);
 
@@ -103,16 +106,16 @@ class UserConfigTest {
     void savedConfigLoadsBackUnchanged(@TempDir Path tempDir) throws Exception {
         Path configFile = tempDir.resolve("config.json");
 
-        UserConfig.save(new UserConfig(Optional.of(Path.of("/tmp/worktrees")), true), configFile);
+        UserConfig.save(new UserConfig(Optional.of(WORKTREES), true), configFile);
 
-        assertEquals(Optional.of(Path.of("/tmp/worktrees")), UserConfig.load(configFile).worktreesDirectory());
+        assertEquals(Optional.of(WORKTREES), UserConfig.load(configFile).worktreesDirectory());
     }
 
     @Test
     void saveCreatesTheParentDirectory(@TempDir Path tempDir) throws Exception {
         Path configFile = tempDir.resolve("nested").resolve(".drydock").resolve("config.json");
 
-        UserConfig.save(new UserConfig(Optional.of(Path.of("/tmp/worktrees")), true), configFile);
+        UserConfig.save(new UserConfig(Optional.of(WORKTREES), true), configFile);
 
         assertTrue(Files.exists(configFile));
     }
@@ -122,9 +125,9 @@ class UserConfigTest {
         Path configFile = tempDir.resolve("config.json");
         Files.writeString(configFile, "{ this is not json");
 
-        UserConfig.save(new UserConfig(Optional.of(Path.of("/tmp/worktrees")), true), configFile);
+        UserConfig.save(new UserConfig(Optional.of(WORKTREES), true), configFile);
 
-        assertEquals(Optional.of(Path.of("/tmp/worktrees")), UserConfig.load(configFile).worktreesDirectory());
+        assertEquals(Optional.of(WORKTREES), UserConfig.load(configFile).worktreesDirectory());
         try (var entries = Files.list(tempDir)) {
             assertEquals(List.of("config.json"),
                     entries.map(p -> p.getFileName().toString()).sorted().toList());
@@ -141,13 +144,13 @@ class UserConfigTest {
         Path configFile = tempDir.resolve("config.json");
         Files.writeString(configFile, "{\"worktreesDirectory\":\"/old\",\"somethingElse\":42}");
 
-        UserConfig.save(new UserConfig(Optional.of(Path.of("/tmp/worktrees")), true), configFile);
+        UserConfig.save(new UserConfig(Optional.of(WORKTREES), true), configFile);
 
         String written = Files.readString(configFile);
         JsonValue parsed = JsonParser.parse(written);
         JsonObject root = assertInstanceOf(JsonObject.class, parsed, written);
         assertEquals(new JsonNumber("42"), root.get("somethingElse"), written);
-        assertEquals(new JsonString(Path.of("/tmp/worktrees").toString()), root.get("worktreesDirectory"), written);
+        assertEquals(new JsonString(WORKTREES.toString()), root.get("worktreesDirectory"), written);
         assertEquals(1, written.split("worktreesDirectory", -1).length - 1,
                 "worktreesDirectory must appear exactly once: " + written);
     }
@@ -155,7 +158,7 @@ class UserConfigTest {
     @Test
     void savingAnEmptyConfigClearsTheDirectory(@TempDir Path tempDir) throws Exception {
         Path configFile = tempDir.resolve("config.json");
-        UserConfig.save(new UserConfig(Optional.of(Path.of("/tmp/worktrees")), true), configFile);
+        UserConfig.save(new UserConfig(Optional.of(WORKTREES), true), configFile);
 
         UserConfig.save(UserConfig.empty(), configFile);
 
@@ -174,7 +177,7 @@ class UserConfigTest {
         // The read-modify-write the settings modal must do.
         UserConfig existing = UserConfig.load(configFile);
         UserConfig.save(new UserConfig(Optional.of(dir), existing.openChangedFilesInSkim(),
-                existing.languageServer()), configFile);
+                existing.languageServer(), existing.toolPaths()), configFile);
         UserConfig reloaded = UserConfig.load(configFile);
         assertEquals(Optional.of(dir), reloaded.worktreesDirectory());
         assertFalse(reloaded.openChangedFilesInSkim(), "…and the skim preference is still off");
@@ -256,13 +259,13 @@ class UserConfigTest {
         // Each shape must leave the OTHER settings intact: a malformed
         // component may never take the whole file down with it.
         Path configFile = dir.resolve("config.json");
-        Files.writeString(configFile, "{\"worktreesDirectory\":\"" + dir.resolve("wt")
+        Files.writeString(configFile, "{\"worktreesDirectory\":\"" + jsonEscape(dir.resolve("wt").toString())
                 + "\",\"languageServer\":\"/not/an/object\"}");
         assertEquals(Optional.of(dir.resolve("wt").toAbsolutePath().normalize()),
                 UserConfig.load(configFile).worktreesDirectory());
         assertEquals(UserConfig.LanguageServer.empty(), UserConfig.load(configFile).languageServer());
 
-        Files.writeString(configFile, "{\"worktreesDirectory\":\"" + dir.resolve("wt")
+        Files.writeString(configFile, "{\"worktreesDirectory\":\"" + jsonEscape(dir.resolve("wt").toString())
                 + "\",\"languageServer\":{\"jdtHome\":42}}");
         assertEquals(Optional.of(dir.resolve("wt").toAbsolutePath().normalize()),
                 UserConfig.load(configFile).worktreesDirectory());
@@ -431,11 +434,11 @@ class UserConfigTest {
         String originalUserHome = System.getProperty("user.home");
         System.setProperty("user.home", tempDir.toString());
         try {
-            UserConfig.saveAsync(new UserConfig(Optional.of(Path.of("/tmp/worktrees-A")), true));
-            UserConfig.saveAsync(new UserConfig(Optional.of(Path.of("/tmp/worktrees-B")), true));
+            UserConfig.saveAsync(new UserConfig(Optional.of(WORKTREES.resolve("A")), true));
+            UserConfig.saveAsync(new UserConfig(Optional.of(WORKTREES.resolve("B")), true));
             UserConfig.flushPendingSaves();
 
-            assertEquals(Optional.of(Path.of("/tmp/worktrees-B")),
+            assertEquals(Optional.of(WORKTREES.resolve("B")),
                     UserConfig.load(UserConfig.defaultConfigFile()).worktreesDirectory());
         } finally {
             UserConfig.flushPendingSaves();
@@ -453,11 +456,11 @@ class UserConfigTest {
         String originalUserHome = System.getProperty("user.home");
         System.setProperty("user.home", tempDir.toString());
         try {
-            UserConfig.saveAsync(new UserConfig(Optional.of(Path.of("/tmp/worktrees-fresh")), true));
+            UserConfig.saveAsync(new UserConfig(Optional.of(WORKTREES.resolve("fresh")), true));
 
             UserConfig loaded = UserConfig.loadAsync().get();
 
-            assertEquals(Optional.of(Path.of("/tmp/worktrees-fresh")), loaded.worktreesDirectory());
+            assertEquals(Optional.of(WORKTREES.resolve("fresh")), loaded.worktreesDirectory());
         } finally {
             UserConfig.flushPendingSaves();
             System.setProperty("user.home", originalUserHome);
@@ -472,7 +475,7 @@ class UserConfigTest {
         try {
             int calls = 50;
             for (int i = 0; i < calls; i++) {
-                UserConfig.saveAsync(new UserConfig(Optional.of(Path.of("/tmp/worktrees-" + i)), true));
+                UserConfig.saveAsync(new UserConfig(Optional.of(WORKTREES.resolve(String.valueOf(i))), true));
             }
             UserConfig.flushPendingSaves();
 
@@ -481,11 +484,17 @@ class UserConfigTest {
             // the file after this point with something other than the
             // last-issued value -- so the file's content read right here,
             // with no waiting or retrying, must already be final.
-            assertEquals(Optional.of(Path.of("/tmp/worktrees-" + (calls - 1))),
+            assertEquals(Optional.of(WORKTREES.resolve(String.valueOf(calls - 1))),
                     UserConfig.load(UserConfig.defaultConfigFile()).worktreesDirectory());
         } finally {
             UserConfig.flushPendingSaves();
             System.setProperty("user.home", originalUserHome);
         }
+    }
+
+
+    /** A path interpolated into a JSON string literal: backslash must be doubled. */
+    private static String jsonEscape(String raw) {
+        return raw.replace("\\", "\\\\");
     }
 }

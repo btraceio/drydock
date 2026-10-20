@@ -1,5 +1,7 @@
 package app.drydock.lsp;
 
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
@@ -24,6 +26,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * idempotent and interruption-safe close — pinned with local binaries
  * only, never a language server.
  */
+/**
+ * Every scenario launches a unix binary (/bin/cat, /bin/sleep, /bin/echo);
+ * the framed-transport behavior under test is OS-neutral but the harness
+ * has no Windows equivalent, so the run is unix-only by design.
+ */
+@EnabledOnOs({OS.MAC, OS.LINUX})
 class LspServerProcessTest {
 
     /** Regression ceiling: a wedged close must fail the test, not hang the suite. */

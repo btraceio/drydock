@@ -1,5 +1,6 @@
 package app.drydock.agent.providers.pi.internal;
 
+import app.drydock.testing.TestPaths;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -99,7 +100,16 @@ class PiSessionStoreTest {
 
     @Test
     void encodeCwdDirFallsBackToNormalizeForNonexistentPath() {
-        assertEquals("--repo-a--", PiSessionStore.encodeCwdDir(Path.of("/repo/a")));
+        // The fallback (path does not exist, so no toRealPath) must still
+        // produce a legal, unambiguous directory name. The exact spelling
+        // differs per OS ("/repo/a" anchors at the drive root on Windows),
+        // so the assertions check the encoding rule, not a hardcoded name:
+        // pi's contract strips the leading separator and replaces every
+        // separator and colon with '-'.
+        String encoded = PiSessionStore.encodeCwdDir(TestPaths.abs("/repo/a"));
+        assertTrue(encoded.startsWith("--") && encoded.endsWith("--"), encoded);
+        assertFalse(encoded.contains("/") || encoded.contains("\\") || encoded.contains(":"), encoded);
+        assertTrue(encoded.contains("-repo-a-"), encoded);
     }
 
     @Test

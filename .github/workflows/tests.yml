@@ -64,6 +64,59 @@ jobs:
             app/build/test-results/test
           retention-days: 7
 
+  # Trial run (2026-10): the suite is written to be platform-neutral -- Monocle
+  # headless JavaFX, OS-parameterized tool-path tests, SHORTCUT-based key
+  # combos, repo-local git fixtures -- but it has never actually run on
+  # Windows, and Windows-only regressions keep surfacing through manual
+  # user testing (see the RepositorySidebar showEmptyState crash of
+  # 2026-10-14, reproducible headless on macOS once a test walked the
+  # transition matrix). This job runs the SAME :app:test suite on
+  # windows-latest as a NON-BLOCKING signal: continue-on-error keeps PRs
+  # green while the first Windows-only failures are triaged and fixed;
+  # once the job goes reliably green, remove continue-on-error and fold it
+  # into the required checks (see the sibling macos test job for the
+  # suite's constraints -- same checkout/JDK/setup, different runner).
+  windows-test-trial:
+    name: app:test (Windows, trial)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Same rationale as the macos job: third_party/ghostty is only read
+          # by buildGhosttyNative, which :app:test never realises.
+          submodules: false
+
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: 26
+          cache: gradle
+
+      # Gradle's daemon JVM is 17 (gradle/gradle-daemon-jvm.properties) and
+      # windows-latest has no preinstalled 17 -- same as the Windows spike
+      # jobs above, which document the toolchain-download failure without it.
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Test
+        shell: bash
+        run: ./gradlew --no-daemon :app:test
+
+      - name: Upload test results
+        # failure() alone misses a timeout, same as the macos job.
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: test-results-windows-trial
+          path: |
+            app/build/reports/tests/test
+            app/build/test-results/test
+          retention-days: 7
+
   jediterm-spike:
     name: jeditermSpike (Windows)
     # The JediTermFX + pty4j spikes are pure Java + pty4j's own native PTY

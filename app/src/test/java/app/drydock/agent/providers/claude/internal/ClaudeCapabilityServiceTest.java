@@ -1,5 +1,7 @@
 package app.drydock.agent.providers.claude.internal;
 
+import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -30,6 +32,9 @@ class ClaudeCapabilityServiceTest {
     }
 
     @Test
+    // The stub claude binary is a shebang shell script marked executable --
+    // a unix mechanism with no Windows equivalent.
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void detectsAllCapabilitiesWhenHelpAdvertisesThem(@TempDir Path tempDir) throws IOException {
         Path stub = writeStub(tempDir, """
                 #!/bin/sh
@@ -61,6 +66,9 @@ class ClaudeCapabilityServiceTest {
     }
 
     @Test
+    // The stub claude binary is a shebang shell script marked executable --
+    // a unix mechanism with no Windows equivalent.
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void defaultsToUnsupportedWhenHelpDoesNotAdvertiseFlags(@TempDir Path tempDir) throws IOException {
         Path stub = writeStub(tempDir, """
                 #!/bin/sh
@@ -97,6 +105,9 @@ class ClaudeCapabilityServiceTest {
     }
 
     @Test
+    // The stub claude binary is a shebang shell script marked executable --
+    // a unix mechanism with no Windows equivalent.
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void claudeVersionFailureThrowsClaudeVersionCheckFailedException(@TempDir Path tempDir) throws IOException {
         Path stub = writeStub(tempDir, """
                 #!/bin/sh

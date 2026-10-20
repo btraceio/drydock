@@ -1,11 +1,14 @@
 package app.drydock.agent.providers.claude;
 
+import app.drydock.testing.TestPaths;
 import app.drydock.agent.api.AgentContext;
 import app.drydock.agent.api.CreateContext;
 import app.drydock.agent.api.McpAccess;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.providers.claude.internal.ClaudeExecutableLocator;
 import app.drydock.domain.SshRemote;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -32,9 +35,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class ClaudeAgentProviderMcpFlagTest {
 
+    private static final Path MCP_FILE = TestPaths.abs("/base/mcp/abc.json");
+    private static final Path SPACED = TestPaths.abs("/Users/me/Application Support/drydock/mcp/abc.json");
+
     private static final Optional<McpAccess> NO_MCP = Optional.empty();
     private static final Optional<McpAccess> SOME_MCP = Optional.of(new McpAccess(
-            "http://127.0.0.1:51234/mcp", "tok-abc", Optional.of(Path.of("/base/mcp/abc.json"))));
+            "http://127.0.0.1:51234/mcp", "tok-abc", Optional.of(MCP_FILE)));
 
     /**
      * A stub whose {@code --help} advertises {@code --mcp-config} exactly when
@@ -76,17 +82,23 @@ class ClaudeAgentProviderMcpFlagTest {
     }
 
     @Test
+    // The capability stub is a shebang shell script; Windows cannot
+    // execute it, so the flag never gets advertised there.
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void createCommandCarriesTheMcpConfigFlag(@TempDir Path dir) throws IOException {
         String command = provider(dir, true).buildCreateCommand(create(SOME_MCP)).command();
 
-        assertTrue(command.contains("--mcp-config '/base/mcp/abc.json'"), command);
+        assertTrue(command.contains("--mcp-config '" + MCP_FILE + "'"), command);
     }
 
     @Test
+    // The capability stub is a shebang shell script; Windows cannot
+    // execute it, so the flag never gets advertised there.
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void resumeCommandCarriesTheMcpConfigFlagToo(@TempDir Path dir) throws IOException {
         String command = provider(dir, true).buildResumeCommand(resume(SOME_MCP)).command();
 
-        assertTrue(command.contains("--mcp-config '/base/mcp/abc.json'"), command);
+        assertTrue(command.contains("--mcp-config '" + MCP_FILE + "'"), command);
     }
 
     @Test
@@ -116,12 +128,15 @@ class ClaudeAgentProviderMcpFlagTest {
     }
 
     @Test
+    // The capability stub is a shebang shell script; Windows cannot
+    // execute it, so the flag never gets advertised there.
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void aPathWithSpacesIsQuoted(@TempDir Path dir) throws IOException {
-        Path spaced = Path.of("/Users/me/Application Support/drydock/mcp/abc.json");
+        Path spaced = SPACED;
         String command = provider(dir, true).buildCreateCommand(create(Optional.of(
                 new McpAccess("http://127.0.0.1:51234/mcp", "tok-abc", Optional.of(spaced))))).command();
 
-        assertTrue(command.contains("'/Users/me/Application Support/drydock/mcp/abc.json'"), command);
+        assertTrue(command.contains("'" + SPACED + "'"), command);
     }
 
     /**

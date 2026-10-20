@@ -28,7 +28,7 @@ class LexicalUsageProviderTest {
 
         Optional<UsageProvider.Usage> declaration = provider.declaration("clamp").get();
 
-        assertEquals(Optional.of(new UsageProvider.Usage("ui/Size.java", 12, "double clamp(double w) {",
+        assertEquals(Optional.of(new UsageProvider.Usage(rel("ui/Size.java"), 12, "double clamp(double w) {",
                 Provenance.MEASURED, true)), declaration);
     }
 
@@ -38,7 +38,7 @@ class LexicalUsageProviderTest {
 
         Optional<UsageProvider.Usage> declaration = provider.declaration("clamp").get();
 
-        assertEquals(Optional.of(new UsageProvider.Usage("ui/Size.java", 12, "double clamp(double w) {",
+        assertEquals(Optional.of(new UsageProvider.Usage(rel("ui/Size.java"), 12, "double clamp(double w) {",
                 Provenance.MEASURED, false)), declaration);
     }
 
@@ -67,9 +67,9 @@ class LexicalUsageProviderTest {
         LexicalUsageProvider provider = new LexicalUsageProvider(symbol -> peekOf(symbol, true));
 
         assertEquals(List.of(
-                        new UsageProvider.Usage("ui/Size.java", 12, "double clamp(double w) {",
+                        new UsageProvider.Usage(rel("ui/Size.java"), 12, "double clamp(double w) {",
                                 Provenance.MEASURED, false),
-                        new UsageProvider.Usage("ui/Sidebar.java", 40, "sizing.clamp(width);",
+                        new UsageProvider.Usage(rel("ui/Sidebar.java"), 40, "sizing.clamp(width);",
                                 Provenance.MEASURED, false)),
                 provider.usages("clamp").get());
     }
@@ -95,7 +95,7 @@ class LexicalUsageProviderTest {
             @Override
             public CompletableFuture<List<Usage>> usages(String symbol) {
                 return CompletableFuture.completedFuture(List.of(
-                        new Usage("ui/Size.java", 12, "double clamp(double w) {",
+                        new Usage(rel("ui/Size.java"), 12, "double clamp(double w) {",
                                 Provenance.MEASURED, false)));
             }
         };
@@ -117,7 +117,7 @@ class LexicalUsageProviderTest {
     @Test
     void answerRowsAreImmutable() {
         List<UsageProvider.Usage> rows = new ArrayList<>();
-        rows.add(new UsageProvider.Usage("ui/Size.java", 12, "double clamp(double w) {",
+        rows.add(new UsageProvider.Usage(rel("ui/Size.java"), 12, "double clamp(double w) {",
                 Provenance.MEASURED, false));
 
         UsagesAnswer answer = new UsagesAnswer(rows, UsagesAnswer.Status.ANSWERED);
@@ -125,7 +125,7 @@ class LexicalUsageProviderTest {
 
         assertEquals(1, answer.usages().size());
         assertThrows(UnsupportedOperationException.class, () -> answer.usages().add(
-                new UsageProvider.Usage("ui/Sidebar.java", 40, "sizing.clamp(width);",
+                new UsageProvider.Usage(rel("ui/Sidebar.java"), 40, "sizing.clamp(width);",
                         Provenance.MEASURED, false)));
     }
 
@@ -136,5 +136,10 @@ class LexicalUsageProviderTest {
                 List.of(new SymbolPeek.Occurrence(Path.of("ui/Size.java"), 12, "double clamp(double w) {", false),
                         new SymbolPeek.Occurrence(Path.of("ui/Sidebar.java"), 40, "sizing.clamp(width);", true)),
                 resolved)));
+    }
+
+    /** The platform spelling of a worktree-relative test path (\ on Windows). */
+    private static String rel(String unixRelative) {
+        return Path.of(unixRelative).toString();
     }
 }

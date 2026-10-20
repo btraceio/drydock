@@ -123,11 +123,11 @@ public final class SessionReviewView extends BorderPane {
         void showShortcuts();
 
         /**
-         * {@code ⤢} -- opens {@code file} at a 1-based line in the Explorer of
-         * the session bound to {@code scope}. False when there is nowhere to
-         * open it (no session, or its tab is closed).
+         * The local checkout the reviewed scopes' file paths resolve against,
+         * empty for a remote-only review (no checkout to read files from).
+         * The ⤢ code viewer reads file content through it.
          */
-        boolean openInExplorer(ReviewScope scope, Path file, int line);
+        Optional<Path> reviewRoot();
 
         /** Every finding of {@code scope}, newest state (the store is the truth). */
         List<ReviewAnnotation> findings(ReviewScope scope);
@@ -340,7 +340,7 @@ public final class SessionReviewView extends BorderPane {
          * False when there is no session to hand them to (or nothing to
          * hand), so a caller can say so rather than appear to have asked --
          * the same contract, and for the same reason, as {@link
-         * #openInExplorer}: a control that reports nothing when it did
+         * ReviewDiffColumn #openInCodeViewer}: a control that reports nothing when it did
          * nothing is the silent failure this branch has now had to fix
          * three times.
          */
@@ -852,7 +852,13 @@ public final class SessionReviewView extends BorderPane {
     public SessionReviewView(Host host, DiffService diffService, McpActivityLog activityLog) {
         this.host = host;
         this.sections = new SectionStates(host);
-        this.diffColumn = new ReviewDiffColumn(diffService, host::openInExplorer);
+        // ⤢ opens the file in the embedded web code viewer (this view's own
+        // drawer), not the Explorer -- the viewer lives with the review so the
+        // hunk's context never leaves the board. The scope parameter is part
+        // of the diff column's seam (the column is scope-aware); the drawer
+        // is per-view, so it is unused here.
+        this.diffColumn = new ReviewDiffColumn(diffService,
+                (scope, file, line) -> openInWebViewer(file, line));
         // ⌘C / double-click copies report where the clipboard got them from:
         // a copied line looks like nothing happened the first time it's used.
         this.diffColumn.setOnLinesCopied(lines -> notice("Copied " + lines
@@ -2888,6 +2894,69 @@ public final class SessionReviewView extends BorderPane {
         Platform.runLater(this::requestFocus);
     }
 
+    // ---- embedded web code viewer ------------------------------------------
+
+    /** Built lazily on the first ⤢ click; a native overlay costs nothing while absent. */
+    private WebCodeDrawer webDrawer;
+
+    /**
+     * The drawer-open step, package-private seam: the real one builds the
+     * native overlay (WebKit), which cannot exist under TestFX, so tests
+     * replace this to observe the open request. Not a public extension point.
+     */
+    java.util.function.BiFunction<Path, Integer, Boolean> webCodeDrawerOpener = this::openWebCodeDrawer;
+
+    /**
+     * Opens {@code file} (relative to the review root) at a 1-based line in
+     * the embedded web code viewer. False when there is no local checkout to
+     * read the file from, which the diff column renders as a disabled button
+     * with a tooltip instead of a silent no-op.
+     */
+    private boolean openInWebViewer(Path file, int line) {
+        Path root = host.reviewRoot().orElse(null);
+        if (root == null) {
+            return false;
+        }
+        return webCodeDrawerOpener.apply(root.resolve(file), line);
+    }
+
+    /**
+     * The native half of the viewer.
+     */
+    boolean openWebCodeDrawer(Path absoluteFile, int line) {
+        if (webDrawer == null) {
+            webDrawer = new WebCodeDrawer();
+            webDrawer.setOnClose(() -> setRight(null));
+        }
+        if (webDrawer.content().getParent() != this) {
+            setRight(webDrawer.content());
+        }
+        webDrawer.open(absoluteFile, line);
+        return true;
+    }
+
+    /** See {@link WebCodeDrawer#setSubTabActive}; the tab calls this on every sub-tab switch. */
+    public void setWebDrawerSubTabActive(boolean active) {
+        if (webDrawer != null) {
+            webDrawer.setSubTabActive(active);
+        }
+    }
+
+    /** See {@link WebCodeDrawer#setWorkspaceVisible}; MainWorkspace's tab visibility verdict. */
+    public void setWebDrawerWorkspaceVisible(boolean visible) {
+        if (webDrawer != null) {
+            webDrawer.setWorkspaceVisible(visible);
+        }
+    }
+
+    /** Destroys the drawer's native view; part of the tab's teardown path. */
+    void disposeWebDrawer() {
+        if (webDrawer != null) {
+            webDrawer.dispose();
+            webDrawer = null;
+        }
+    }
+
     /**
      * Releases this view's timers so nothing keeps it reachable after its
      * tab is closed (see {@code OpenSessionTab.disposeNativeResources}). The
@@ -2899,6 +2968,7 @@ public final class SessionReviewView extends BorderPane {
         tourController.close();
         navNoticeTimer.stop();
         regenerateTimer.stop();
+        disposeWebDrawer();
     }
 
     // ---- tour mode ----------------------------------------------------------
@@ -3288,8 +3358,8 @@ public final class SessionReviewView extends BorderPane {
             return;
         }
         selectedScope().ifPresent(scope -> {
-            if (!host.openInExplorer(scope, peek.relativePath(), peek.startLine())) {
-                notice("No Explorer to open " + peek.relativePath() + " in");
+            if (!openInWebViewer(peek.relativePath(), peek.startLine())) {
+                notice("No local checkout to open " + peek.relativePath() + " in");
             }
         });
     }

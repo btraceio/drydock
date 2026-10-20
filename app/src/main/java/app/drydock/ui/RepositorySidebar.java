@@ -1535,33 +1535,43 @@ public final class RepositorySidebar extends VBox {
         boolean swap = nothingMatched && treeIsEmpty;
         boolean banner = nothingMatched && !treeIsEmpty;
         // Survivors exist but none is selected (an explicit deselect, or the
-        // initial build before the first pick): show a placeholder in the
-        // tree's place instead of the "nothing matched" banner -- the
-        // subtab strip above is what the user picks from.
+        // selection lost when a rebuild found no survivors): show a
+        // placeholder in the tree's place instead of the "nothing matched"
+        // banner -- the subtab strip above is what the user picks from.
         boolean placeholder = !nothingMatched && treeIsEmpty && survivorsExist;
 
         Node focusOwner = getScene() == null ? null : getScene().getFocusOwner();
 
-        if (swap && !getChildren().contains(emptyState)) {
-            boolean treeHadFocus = isDescendantOf(focusOwner, tree);
-            getChildren().set(getChildren().indexOf(tree), emptyState);
-            VBox.setVgrow(emptyState, Priority.ALWAYS);
-            if (treeHadFocus) {
-                emptyState.getChildren().get(1).requestFocus();
+        // The tree, the empty state, and the placeholder share one slot in
+        // getChildren(). Any of the three can be occupying it when the next
+        // rebuild lands -- e.g. filter to nothing (empty state, selection
+        // evaporates with the survivors), then clear the filter (placeholder
+        // wanted, tree long gone). Computing the desired node and swapping it
+        // for whichever other one holds the slot keeps every transition
+        // total; the old branch-per-transition version crashed with
+        // IndexOutOfBoundsException (-1) on the ones it forgot.
+        Node desired = swap ? emptyState : placeholder ? selectRepoPlaceholder : tree;
+        if (!getChildren().contains(desired)) {
+            Node occupant = getChildren().contains(tree) ? tree
+                    : getChildren().contains(emptyState) ? emptyState : selectRepoPlaceholder;
+            if (getChildren().contains(occupant)) {
+                boolean occupantHadFocus = isDescendantOf(focusOwner, occupant);
+                getChildren().set(getChildren().indexOf(occupant), desired);
+                VBox.setVgrow(desired, Priority.ALWAYS);
+                // Focus follows the swap only when it sat inside the node
+                // being removed: an unconditional move would yank the caret
+                // out of the filter field on the 150ms debounce, swallowing
+                // the next keystroke and turning Space into "Clear filters".
+                if (occupantHadFocus) {
+                    if (desired == emptyState) {
+                        emptyState.getChildren().get(1).requestFocus();
+                    } else if (desired == tree) {
+                        filterField.requestFocus();
+                    }
+                    // The placeholder takes no focus: nothing interactive
+                    // lives in it.
+                }
             }
-        } else if (placeholder && !getChildren().contains(selectRepoPlaceholder)) {
-            getChildren().set(getChildren().indexOf(tree), selectRepoPlaceholder);
-            VBox.setVgrow(selectRepoPlaceholder, Priority.ALWAYS);
-        } else if (!swap && !placeholder && getChildren().contains(emptyState)) {
-            boolean buttonHadFocus = isDescendantOf(focusOwner, emptyState);
-            getChildren().set(getChildren().indexOf(emptyState), tree);
-            VBox.setVgrow(tree, Priority.ALWAYS);
-            if (buttonHadFocus) {
-                filterField.requestFocus();
-            }
-        } else if (!swap && !placeholder && getChildren().contains(selectRepoPlaceholder)) {
-            getChildren().set(getChildren().indexOf(selectRepoPlaceholder), tree);
-            VBox.setVgrow(tree, Priority.ALWAYS);
         }
         emptyBanner.setVisible(banner);
         emptyBanner.setManaged(banner);

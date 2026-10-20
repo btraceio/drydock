@@ -13,6 +13,8 @@ import javafx.scene.control.Label;
 import javafx.scene.control.Labeled;
 import javafx.scene.layout.Region;
 import javafx.stage.Stage;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -35,6 +37,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * cannot be the standing action; it is a control the reader has to guess
  * at.</p>
  */
+/**
+ * Asserts pixel-level truncation/wrapping at fixed widths, which depends on
+ * the platform's real font metrics; headless Windows renders with
+ * different fonts, so the numbers do not transfer. Unix-only by design.
+ */
+@EnabledOnOs({OS.MAC, OS.LINUX})
 class ReviewVerdictBarFitTest extends FxTest {
 
     /**

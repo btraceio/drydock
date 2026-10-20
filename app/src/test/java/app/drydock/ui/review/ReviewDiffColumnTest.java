@@ -201,9 +201,9 @@ class ReviewDiffColumnTest extends FxTest {
         assertTrue(edges.contains("card-bottom"), "no card closed: " + edges);
     }
 
-    /** With no session bound, ⤢ has nowhere to go and must say so rather than silently fail. */
+    /** With no checkout to read from, ⤢ has nothing to show and must say so rather than silently fail. */
     @Test
-    void theExplorerJumpDisablesItselfWhenThereIsNowhereToOpen() throws Exception {
+    void theCodeViewerOpenDisablesItselfWhenThereIsNoCheckout() throws Exception {
         repo = repoWithUncommittedChange();
         showScope(workingTreeScope(repo));
         awaitRows();
@@ -218,8 +218,8 @@ class ReviewDiffColumnTest extends FxTest {
         interact(explorer::fire);
         FxSync.waitForFxEvents();
 
-        assertTrue(explorer.isDisabled(), "the jump must disable itself once it has nowhere to go");
-        assertTrue(explorer.getTooltip().getText().contains("session"),
+        assertTrue(explorer.isDisabled(), "the open must disable itself once it has nothing to show");
+        assertTrue(explorer.getTooltip().getText().contains("checkout"),
                 "the tooltip must explain why: " + explorer.getTooltip().getText());
     }
 

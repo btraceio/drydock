@@ -256,17 +256,19 @@ class SessionReviewViewTest extends FxTest {
     }
 
     /**
-     * The {@code ⤢} jump must keep working on a restored scope. It answers
-     * from the scope the rendered rows belong to, and a diff handed to the
-     * column rather than read by it leaves the column's LIVE scope null -- so
-     * a jump keyed on that one silently does nothing, which is precisely what
-     * the button's own design forbids ("says so on the button rather than
-     * doing nothing when clicked").
+     * The {@code ⤢} code-viewer open must keep working on a restored scope.
+     * It answers from the scope the rendered rows belong to, and a diff handed
+     * to the column rather than read by it leaves the column's LIVE scope null
+     * -- so an open keyed on that one silently does nothing, which is precisely
+     * what the button's own design forbids ("says so on the button rather than
+     * doing nothing when clicked"). The real drawer is a native overlay that
+     * cannot exist under TestFX, so the view's drawer-open seam is overridden
+     * and the request observed at that boundary.
      */
     @Test
-    void theExplorerJumpStillWorksOnARestoredScope() {
-        SessionReviewView view = newView();
-        host.explorerAvailable = true;
+    void theCodeViewerOpenStillWorksOnARestoredScope() {
+        SessionReviewView view = newViewRecordingOpens();
+        host.reviewRoot = Optional.of(Path.of("/repo"));
         interact(() -> {
             view.diagPublishOutcome(localScope.id(), new DiffOutcome.Loaded(diffOf("src/A.java")));
             view.diagPublishOutcome(prScope.id(), new DiffOutcome.Loaded(diffOf("src/C.java")));
@@ -287,12 +289,46 @@ class SessionReviewViewTest extends FxTest {
         // fire() rather than clickOn(): the button lives inside a virtualized
         // ListView cell, so the robot's hit test depends on where the list
         // happens to be scrolled (see ReviewDiffColumnTest).
-        Button explorer = (Button) lookup(".review-hunk-explorer").queryAll().iterator().next();
-        interact(explorer::fire);
+        Button codeView = (Button) lookup(".review-hunk-explorer").queryAll().iterator().next();
+        interact(codeView::fire);
         FxSync.waitForFxEvents();
 
-        assertEquals(List.of(Path.of("src/A.java")), host.explorerJumps);
-        assertFalse(explorer.isDisabled(), "the jump reached a session, so nothing should disable it");
+        assertEquals(List.of(Path.of("/repo/src/A.java")), host.webViewerOpens);
+        assertFalse(codeView.isDisabled(), "the open reached a checkout, so nothing should disable it");
+    }
+
+    /**
+     * A remote-only review (no local checkout) has nothing to show in the
+     * code viewer: the button says so instead of doing nothing.
+     */
+    @Test
+    void theCodeViewerButtonReportsAMissingCheckout() {
+        SessionReviewView view = newView();
+        host.reviewRoot = Optional.empty();
+        interact(() -> view.diagPublishOutcome(localScope.id(), new DiffOutcome.Loaded(diffOf("src/A.java"))));
+        showScopes(view, new SessionReviewScopes.Scopes(localScope, Optional.empty()),
+                SessionReviewScopes.Choice.LOCAL);
+        FxSync.waitForFxEvents();
+
+        Button codeView = (Button) lookup(".review-hunk-explorer").queryAll().iterator().next();
+        interact(codeView::fire);
+        FxSync.waitForFxEvents();
+
+        assertTrue(codeView.isDisabled(), "no checkout means the button disables itself");
+    }
+
+    /** A view whose drawer-open step records into {@link FakeReviewHost#webViewerOpens} instead of touching WebKit. */
+    private SessionReviewView newViewRecordingOpens() {
+        interact(() -> {
+            view = new SessionReviewView(host, diffService, null);
+            view.webCodeDrawerOpener = (file, line) -> {
+                host.webViewerOpens.add(file);
+                return true;
+            };
+            view.setPrefSize(SCENE_WIDTH, 900);
+            viewport.getChildren().setAll(view);
+        });
+        return view;
     }
 
     /**

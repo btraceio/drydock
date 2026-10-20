@@ -1,6 +1,7 @@
 package app.drydock.mcp;
 
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.io.OwnerOnly;
 import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonValue.JsonObject;
 import app.drydock.state.json.JsonValue.JsonString;
@@ -10,14 +11,10 @@ import java.io.IOException;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.nio.file.attribute.FileAttribute;
-import java.nio.file.attribute.PosixFilePermission;
-import java.nio.file.attribute.PosixFilePermissions;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
@@ -51,18 +48,12 @@ public final class McpConfigWriter {
 
     private static final Logger LOG = System.getLogger(McpConfigWriter.class.getName());
 
-    private static final FileAttribute<?> OWNER_ONLY =
-            PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------"));
-
     /**
      * The {@code mcp/} directory exists solely to hold token files, so its
      * listing is a discovery vector of its own: an owner-only directory is not
      * traversable or listable by anyone else, whatever the umask would have
      * allowed.
      */
-    private static final Set<PosixFilePermission> OWNER_ONLY_DIRECTORY =
-            PosixFilePermissions.fromString("rwx------");
-
     private static final String SESSION_TOKEN_HEADER = "X-Drydock-Session-Token";
 
     private final Path baseDirectory;
@@ -105,12 +96,9 @@ public final class McpConfigWriter {
     private void createMcpDirectory() throws IOException {
         Path directory = mcpDirectory();
         Files.createDirectories(directory.getParent());
-        try {
-            Files.createDirectory(directory,
-                    PosixFilePermissions.asFileAttribute(OWNER_ONLY_DIRECTORY));
-        } catch (FileAlreadyExistsException existing) {
-            Files.setPosixFilePermissions(directory, OWNER_ONLY_DIRECTORY);
-        }
+        // Owner-only creation and tightening degrade on filesystems without
+        // POSIX permissions (NTFS); see OwnerOnly for the Windows constraint.
+        OwnerOnly.createDirectories(directory);
     }
 
     private static JsonValue configJson(String endpointUrl, String token) {
@@ -206,7 +194,7 @@ public final class McpConfigWriter {
     private static void writeAtomically(Path target, String content) throws IOException {
         Path temp = target.resolveSibling(target.getFileName() + ".tmp");
         Files.deleteIfExists(temp);
-        Files.createFile(temp, OWNER_ONLY);
+        OwnerOnly.createFile(temp);
         Files.writeString(temp, content, StandardCharsets.UTF_8);
         try {
             Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);

@@ -16,7 +16,7 @@ plugins {
 // The root group/version are kept in sync with app/build.gradle.kts by the
 // release workflow's prepare job.
 group = "io.btrace"
-version = "0.3.0"
+version = "0.4.0"
 
 // Alias for the plan's literal Gate 0B task name
 // (":terminal-ghostty:ffmSmokeTest") -- the project is still a single
@@ -125,7 +125,7 @@ val nativesPrebuilt = providers.gradleProperty("natives.prebuilt")
 // The dylibs jbangJar actually bundles (per arch). checkPrebuiltNatives asserts
 // these exist when natives are supplied pre-built by upstream CI jobs.
 val prebuiltNativeDylibs = listOf("macos-arm64", "macos-x86_64").flatMap { arch ->
-    listOf("libghostty.dylib", "libdrydockterminalhost.dylib").map { lib ->
+    listOf("libghostty.dylib", "libdrydockterminalhost.dylib", "libdrydockwebviewhost.dylib").map { lib ->
         ghosttyNativeOutputDir.map { it.dir(arch).file(lib) }
     }
 }
@@ -199,4 +199,22 @@ tasks.register<Exec>("buildNativeHost") {
     outputs.file(ghosttyNativeOutputDir.map { it.dir("macos-arm64").file("libdrydockterminalhost.dylib") })
 
     commandLine("bash", "${rootDir}/scripts/build-native-host.sh")
+}
+
+// Builds the WKWebView embedding shim (native-host/DrydockWebviewHost.{h,m})
+// for both supported macOS architectures. WebKit is a macOS system framework,
+// so this is build plumbing only -- no bundling, no installation.
+// See scripts/build-webview-host.sh and the webview spike.
+tasks.register<Exec>("buildWebviewHost") {
+    group = "native"
+    description = "Builds libdrydockwebviewhost (macOS arm64 + x86_64) via scripts/build-webview-host.sh."
+    // Skipped when the natives are supplied pre-built (CI fan-in).
+    onlyIf { !nativesPrebuilt.get() }
+
+    inputs.file("${rootDir}/scripts/build-webview-host.sh")
+    inputs.dir("${rootDir}/native-host")
+    outputs.file(ghosttyNativeOutputDir.map { it.dir("macos-x86_64").file("libdrydockwebviewhost.dylib") })
+    outputs.file(ghosttyNativeOutputDir.map { it.dir("macos-arm64").file("libdrydockwebviewhost.dylib") })
+
+    commandLine("bash", "${rootDir}/scripts/build-webview-host.sh")
 }

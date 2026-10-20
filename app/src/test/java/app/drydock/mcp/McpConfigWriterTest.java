@@ -3,6 +3,8 @@ package app.drydock.mcp;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.state.json.JsonParser;
 import app.drydock.state.json.JsonValue;
+import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -67,6 +69,7 @@ class McpConfigWriterTest {
      * Owner-only, not whatever the umask allowed.
      */
     @Test
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void theMcpDirectoryIsOwnerOnly(@TempDir Path base) throws Exception {
         Path config = new McpConfigWriter(base).writeFor(ManagedSessionId.newId(), "http://127.0.0.1:1/mcp", "tok");
 
@@ -77,6 +80,7 @@ class McpConfigWriterTest {
 
     /** ...including one left looser by an earlier run: it is tightened, not trusted. */
     @Test
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void anExistingLooseMcpDirectoryIsTightened(@TempDir Path base) throws Exception {
         Path directory = Files.createDirectory(base.resolve("mcp"),
                 PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwxr-xr-x")));
@@ -88,6 +92,7 @@ class McpConfigWriterTest {
     }
 
     @Test
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void theFileIsNotReadableByOtherUsers(@TempDir Path base) throws Exception {
         McpConfigWriter writer = new McpConfigWriter(base);
 
@@ -142,6 +147,7 @@ class McpConfigWriterTest {
     }
 
     @Test
+    @EnabledOnOs({OS.MAC, OS.LINUX})
     void theTokenFileIsNotReadableByOtherUsers(@TempDir Path base) throws Exception {
         McpConfigWriter writer = new McpConfigWriter(base);
 

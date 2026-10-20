@@ -1,5 +1,6 @@
 package app.drydock.ui.review;
 
+import java.nio.file.Path;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.OutOfDiffFanIn;
 import app.drydock.review.Provenance;
@@ -188,7 +189,8 @@ class ReviewTourImpactTest extends ReviewTourFixture {
         // The fixture's scope has no checkout to read, so the peek says so
         // over the column -- proof the click reached openLocationPeek.
         Optional<String> notice = ReviewDiagFxThread.call(view::diagNotice);
-        assertTrue(notice.isPresent() && notice.get().contains("src/main.cpp"), "notice was " + notice);
+        assertTrue(notice.isPresent() && notice.get().contains(Path.of("src/main.cpp").toString()),
+                "notice was " + notice);
     }
 
     @Test

@@ -1,5 +1,6 @@
 package app.drydock.mcp;
 
+import app.drydock.testing.TestPaths;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.mcp.McpSessionRegistry.Spawn;
 import app.drydock.state.json.JsonValue;
@@ -22,7 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class McpToolRouterWorktreeTest {
 
     private final ManagedSessionId caller = ManagedSessionId.newId();
-    private final Path repo = Path.of("/repos/drydock");
+    private final Path repo = TestPaths.abs("/repos/drydock");
     private FakeMcpSessionContext context;
     private McpSessionRegistry registry;
     private McpToolRouter router;
@@ -147,7 +148,7 @@ class McpToolRouterWorktreeTest {
      */
     @Test
     void anAddThatMayHaveCreatedAWorktreeKeepsTheCharge() throws Exception {
-        context.failure = new McpWorktreeMayExistException(Path.of("/wt/feat-x"));
+        context.failure = new McpWorktreeMayExistException(TestPaths.abs("/wt/feat-x"));
         assertThrows(McpWorktreeMayExistException.class,
                 () -> router.call(caller, "worktree_create", args("branch", "feat/x")));
 
@@ -164,12 +165,12 @@ class McpToolRouterWorktreeTest {
     @Test
     void existingChecksOutTheBranchAndReportsTheResolvedLocalName() throws Exception {
         context.adopted = new McpSessionContext.ExistingBranchWorktree(
-                Path.of("/wt/drydock-login"), "feat/login", Optional.of("origin/feat/login"));
+                TestPaths.abs("/wt/drydock-login"), "feat/login", Optional.of("origin/feat/login"));
 
         JsonValue result = router.call(caller, "worktree_create",
                 argsWithFlag("existing", true, "branch", "origin/feat/login"));
 
-        assertEquals("/wt/drydock-login", str(result, "path"));
+        assertEquals(TestPaths.abs("/wt/drydock-login").toString(), str(result, "path"));
         // The resolved name, not the argument: they differ here, and it is the
         // name the agent has to hand to session_start.
         assertEquals("feat/login", str(result, "branch"));
@@ -180,7 +181,7 @@ class McpToolRouterWorktreeTest {
     @Test
     void adoptingALocalBranchReportsANullTracking() throws Exception {
         context.adopted = new McpSessionContext.ExistingBranchWorktree(
-                Path.of("/wt/drydock-login"), "feat/login", Optional.empty());
+                TestPaths.abs("/wt/drydock-login"), "feat/login", Optional.empty());
 
         JsonValue result = router.call(caller, "worktree_create",
                 argsWithFlag("existing", true, "branch", "feat/login"));
@@ -195,13 +196,14 @@ class McpToolRouterWorktreeTest {
     @Test
     void worktreeCreateTargetsANamedRepository() throws Exception {
         context.repositories.add(new McpSessionContext.RepoSummary("other-repo",
-                Path.of("/repos/other"), Optional.empty(), Optional.empty(), Optional.empty(),
+                TestPaths.abs("/repos/other"), Optional.empty(), Optional.empty(), Optional.empty(),
                 Optional.empty(), false));
 
         router.call(caller, "worktree_create", args("branch", "feat/cross", "repo", "other-repo"));
 
         assertEquals(List.of("other-repo"), context.createdWorktreeRepos);
-        assertEquals("/repos/wt-feat-cross", context.createdWorktrees.get("feat/cross").toString());
+        assertEquals(TestPaths.abs("/repos/other").resolveSibling("wt-feat-cross").toString(),
+                context.createdWorktrees.get("feat/cross").toString());
     }
 
     /** An unknown name is refused before git runs, pointing at repos_list. */
