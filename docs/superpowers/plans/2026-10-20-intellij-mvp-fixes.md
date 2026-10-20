@@ -131,3 +131,8 @@ session spawns a second agent (spike H5 case 4).
   own plan after this merges.
 - The handoff's human checks: the real-keyboard key matrix with Esc, and the
   MCP "second window empties text search" repro on a normal IDE install.
+- Pi and the IDE MCP server (fix 1 for Pi): a follow-up. Pi has no native
+  MCP support, and its Drydock bridge extension only speaks HTTP to
+  Drydock's own server. Attaching the IDE server means adding a stdio MCP
+  client to that extension, which then starts `StdioMcpServer` entries the
+  same way Claude and Codex do.
