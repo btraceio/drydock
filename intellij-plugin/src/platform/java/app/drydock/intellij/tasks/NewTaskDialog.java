@@ -3,7 +3,6 @@ package app.drydock.intellij.tasks;
 import app.drydock.agent.api.Agent;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.config.UserConfig;
-import app.drydock.domain.SessionMode;
 import app.drydock.intellij.settings.DrydockConfigurable;
 import app.drydock.intellij.tasks.NewTaskPlan.Choice;
 import app.drydock.intellij.tasks.NewTaskPlan.OpenIn;
@@ -73,6 +72,7 @@ final class NewTaskDialog extends DialogWrapper {
     private final Project project;
     private final NewTaskPlan.Inputs inputs;
     private final Optional<Supplier<Optional<String>>> refChooser;
+    private final NewTaskPreset preset;
 
     private final JBTextField name = new JBTextField();
     private final JBTextArea instructions = new JBTextArea(4, 40);
@@ -106,11 +106,19 @@ final class NewTaskDialog extends DialogWrapper {
      * project's repository is open in some window; empty otherwise.
      */
     NewTaskDialog(Project project, NewTaskPlan.Inputs inputs, Optional<Supplier<Optional<String>>> refChooser) {
+        this(project, inputs, refChooser, NewTaskPreset.empty());
+    }
+
+    NewTaskDialog(Project project, NewTaskPlan.Inputs inputs, Optional<Supplier<Optional<String>>> refChooser,
+                  NewTaskPreset preset) {
         super(project, true);
         this.project = project;
         this.inputs = inputs;
         this.refChooser = refChooser;
+        this.preset = preset;
         this.worktreeBase = inputs.worktreeBase();
+        name.setText(preset.name());
+        instructions.setText(preset.instructions().orElse(""));
         setTitle("New task in " + inputs.repoName());
         init();
         regenerate();
@@ -146,10 +154,15 @@ final class NewTaskDialog extends DialogWrapper {
                     .ifPresent(button -> button.setSelected(true));
         }
 
-        JPanel modes = row(writes, readOnly);
-        group(writes, readOnly);
-        writes.addActionListener(e -> refresh());
-        readOnly.addActionListener(e -> refresh());
+        JPanel modes;
+        if (preset.writableOnly()) {
+            modes = row(new JBLabel("Writes"));
+        } else {
+            modes = row(writes, readOnly);
+            group(writes, readOnly);
+            writes.addActionListener(e -> refresh());
+            readOnly.addActionListener(e -> refresh());
+        }
 
         JPanel summaryRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
         summary.setForeground(UIUtil.getContextHelpForeground());
@@ -354,7 +367,7 @@ final class NewTaskDialog extends DialogWrapper {
         };
         String text = instructions.getText();
         return new Choice(name.getText().strip(), text.isBlank() ? Optional.empty() : Optional.of(text), agent,
-                readOnly.isSelected() ? SessionMode.READ_ONLY : SessionMode.WRITES, workIn, chosenBranch,
+                preset.mode(readOnly.isSelected()), workIn, chosenBranch,
                 startPoint(), chosenFolder,
                 thisWindow.isSelected() ? OpenIn.THIS_WINDOW : OpenIn.NEW_WINDOW);
     }

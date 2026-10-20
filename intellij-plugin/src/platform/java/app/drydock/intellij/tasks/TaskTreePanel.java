@@ -168,6 +168,25 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 }
             }
         });
+        contextActions.add(new DumbAwareAction("Implement…",
+                "Create a writable task and worktree for this issue", AllIcons.Actions.Execute) {
+            @Override
+            public void update(@NotNull AnActionEvent e) {
+                TaskActions.present(e, e.getData(SELECTED_NODE) instanceof IssueRow);
+            }
+
+            @Override
+            public @NotNull ActionUpdateThread getActionUpdateThread() {
+                return ActionUpdateThread.EDT;
+            }
+
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                if (e.getData(SELECTED_NODE) instanceof IssueRow issue) {
+                    TaskLauncher.implement(project, issue.mainRoot(), issue.issue());
+                }
+            }
+        });
         contextActions.add(new DumbAwareAction("GitHub Settings…",
                 "Configure GitHub issues for this Drydock project", AllIcons.General.Settings) {
             @Override
