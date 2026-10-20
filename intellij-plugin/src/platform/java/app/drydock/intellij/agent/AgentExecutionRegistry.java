@@ -15,6 +15,7 @@ import com.intellij.execution.ui.ConsoleViewContentType;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
+import com.intellij.openapi.editor.markup.TextAttributes;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.Disposer;
 import com.intellij.openapi.util.Key;
@@ -90,6 +91,15 @@ public final class AgentExecutionRegistry implements Disposable {
     /** The PTY's size until a console lays itself out. */
     private static final int INITIAL_COLUMNS = 120;
     private static final int INITIAL_ROWS = 30;
+
+    /**
+     * The content type agent output is printed with: no attributes at all.
+     * The console wraps text printed with a coloured type in that colour and
+     * a reset, which recoloured a TUI's own colours at every chunk boundary;
+     * the platform's own process path prints with none.
+     */
+    private static final ConsoleViewContentType AGENT_OUTPUT =
+            new ConsoleViewContentType("DRYDOCK_AGENT_OUTPUT", new TextAttributes());
 
     private final Map<ManagedSessionId, AgentExecution> executions = new ConcurrentHashMap<>();
     /** Sessions whose console is on its way to another window (a jump, while that window opens). */
@@ -356,7 +366,7 @@ public final class AgentExecutionRegistry implements Disposable {
         Disposer.register(console, () -> disposed.set(true));
         execution.router().attach(text -> {
             if (!disposed.get()) {
-                console.print(text, ConsoleViewContentType.NORMAL_OUTPUT);
+                console.print(text, AGENT_OUTPUT);
             }
         }, () -> {
             if (execution.isRunning()) {

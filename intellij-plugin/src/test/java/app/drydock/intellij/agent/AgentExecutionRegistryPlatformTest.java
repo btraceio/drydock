@@ -6,6 +6,8 @@ import com.intellij.openapi.util.Disposer;
 import com.intellij.terminal.TerminalExecutionConsole;
 import com.intellij.testFramework.PlatformTestUtil;
 import com.intellij.testFramework.fixtures.BasePlatformTestCase;
+import com.jediterm.terminal.model.TerminalLine;
+import com.jediterm.terminal.model.TerminalTextBuffer;
 
 import java.nio.file.Path;
 import java.util.List;
@@ -154,6 +156,33 @@ public class AgentExecutionRegistryPlatformTest extends BasePlatformTestCase {
         assertFalse(registry.isRunning(id));
         TerminalExecutionConsole console = execution.console().orElseThrow();
         waitFor(() -> text(console).contains("done"));
+    }
+
+    public void testAColourAnAgentSetsSurvivesAChunkBoundary() throws Exception {
+        // Two separate writes: red is switched on in the first, the text it
+        // colours arrives in the second. The console must not reset or
+        // recolour output between chunks.
+        AgentExecution execution = start(List.of("/bin/sh", "-c",
+                "printf 'ab\\033[31mc'; sleep 0.5; printf 'de\\033[0m\\n'; sleep 30"));
+        TerminalExecutionConsole console = execution.console().orElseThrow();
+        waitFor(() -> text(console).contains("abcde"));
+
+        TerminalLine line = lineContaining(console, "abcde");
+        int at = line.getText().indexOf("abcde");
+        assertEquals(line.getStyleAt(at + 2).getForeground(), line.getStyleAt(at + 3).getForeground());
+        assertFalse(line.getStyleAt(at).getForeground() != null
+                && line.getStyleAt(at).getForeground().equals(line.getStyleAt(at + 2).getForeground()));
+    }
+
+    private static TerminalLine lineContaining(TerminalExecutionConsole console, String text) {
+        TerminalTextBuffer buffer = console.getTerminalWidget().getTerminalTextBuffer();
+        for (int row = 0; row < buffer.getHeight(); row++) {
+            TerminalLine line = buffer.getLine(row);
+            if (line.getText().contains(text)) {
+                return line;
+            }
+        }
+        throw new AssertionError("no line contains " + text);
     }
 
     public void testAnAgentThatEndedWhileNotShownCannotBeShown() throws Exception {
