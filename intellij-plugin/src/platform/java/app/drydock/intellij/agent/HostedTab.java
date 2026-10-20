@@ -24,11 +24,20 @@ public final class HostedTab {
      */
     static final Key<Facts> KEY = Key.create("drydock.hostedTab");
 
-    /** That {@code window} shows the agent hosted, and where the agent is from. */
-    record Facts(Project window, SessionPlace place) {
+    /**
+     * That the window with location hash {@code windowHash} shows the agent
+     * hosted, and where the agent is from. The window is named by its hash,
+     * not held: these live on an application-lifetime file, and a Project
+     * reference would keep a closed window alive.
+     */
+    record Facts(String windowHash, SessionPlace place) {
         Facts {
-            Objects.requireNonNull(window, "window");
+            Objects.requireNonNull(windowHash, "windowHash");
             Objects.requireNonNull(place, "place");
+        }
+
+        boolean isFor(String hash) {
+            return windowHash.equals(hash);
         }
     }
 
@@ -57,7 +66,7 @@ public final class HostedTab {
     /** The facts for {@code file} in {@code window}, if that window hosts it. EDT-safe. */
     static Optional<SessionPlace> placeIn(AgentConsoleFile file, Project window) {
         return Optional.ofNullable(file.getUserData(KEY))
-                .filter(facts -> facts.window().equals(window))
+                .filter(facts -> facts.isFor(window.getLocationHash()))
                 .map(Facts::place);
     }
 }

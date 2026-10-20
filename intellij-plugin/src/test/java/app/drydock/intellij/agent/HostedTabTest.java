@@ -1,5 +1,6 @@
 package app.drydock.intellij.agent;
 
+import com.intellij.openapi.project.Project;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
@@ -43,5 +44,18 @@ class HostedTabTest {
     void provenanceNamesRepoAndBranch() {
         assertEquals("from dd-jmc ⑂ fix/chunk_memory", DD_JMC.provenance());
         assertEquals("from dd-jmc", new SessionPlace("dd-jmc", Optional.empty()).provenance());
+    }
+
+    @Test
+    void factsNameTheirWindowByLocationNotByReference() {
+        // Kept on an application-lifetime file: a Project reference would
+        // keep a closed window alive.
+        HostedTab.Facts facts = new HostedTab.Facts("abc123", DD_JMC);
+
+        assertTrue(facts.isFor("abc123"));
+        assertFalse(facts.isFor("def456"));
+        for (var component : HostedTab.Facts.class.getRecordComponents()) {
+            assertFalse(Project.class.isAssignableFrom(component.getType()), component.getName());
+        }
     }
 }

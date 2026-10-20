@@ -67,7 +67,10 @@ public final class AgentExecutionService implements AgentConsoleHost, Disposable
     @Override
     public CompletableFuture<Void> startConsole(ManagedSessionId sessionId, Path workingDirectory,
                                                 LaunchPlan plan) {
-        return registry().start(sessionId, workingDirectory, plan, project, DrydockStartupActivity.sessions(project))
+        // The end recorder, not the session service: the agent can outlive
+        // this window, and the service would keep the window alive with it.
+        return registry().start(sessionId, workingDirectory, plan, project,
+                        DrydockStartupActivity.sessions(project).endRecorder())
                 .thenApply(execution -> null);
     }
 

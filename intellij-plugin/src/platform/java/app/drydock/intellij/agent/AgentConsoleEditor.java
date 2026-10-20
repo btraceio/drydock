@@ -261,7 +261,7 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
                     closeLater();
                 }
                 if (hostedFrom.isPresent()) {
-                    file.putUserData(HostedTab.KEY, new HostedTab.Facts(project, hostedFrom.get()));
+                    file.putUserData(HostedTab.KEY, new HostedTab.Facts(project.getLocationHash(), hostedFrom.get()));
                 } else if (HostedTab.placeIn(file, project).isPresent()) {
                     file.putUserData(HostedTab.KEY, null);
                 }

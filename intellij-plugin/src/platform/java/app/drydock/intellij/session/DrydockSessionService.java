@@ -36,17 +36,14 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -119,25 +116,8 @@ public final class DrydockSessionService implements AgentExecutionListener {
      */
     private final Function<Path, List<StdioMcpServer>> stdioMcpServers;
 
-    /**
-     * Agent session ids already bound to a persisted session, or claimed by
-     * a launch's discovery, so post-launch discovery never re-binds an id
-     * that belongs to another session (the {@code claimedAgentSessionIds}
-     * pattern from {@code SessionManager}). Seeded from the persisted state
-     * once, on the first launch — production construction races the
-     * application service's init, so seeding cannot happen in a constructor.
-     */
-    private final Set<String> claimedAgentSessionIds = ConcurrentHashMap.newKeySet();
-    private final AtomicBoolean claimedIdsSeeded = new AtomicBoolean();
-    /**
-     * When each session's agent was last launched by this IDE run. The late
-     * id bind matches the agent's own record against this, not the row's
-     * creation: a row started again (Start after a stop) gets a record
-     * timestamped at the new launch, minutes or days after the row was made.
-     * Memory only; after an IDE restart the bind falls back to the creation
-     * time, as before.
-     */
-    private final Map<ManagedSessionId, Instant> lastLaunchedAt = new ConcurrentHashMap<>();
+    /** The end-of-agent half: persistence, late id binding, and the id bookkeeping both halves share. */
+    private final SessionEnds ends;
 
     public DrydockSessionService(DrydockPluginService plugin, AgentConsoleHost consoles,
             ProjectRepositoryService repos, ExecutorService executor) {
@@ -164,6 +144,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
         this.consoles = Objects.requireNonNull(consoles, "consoles");
         this.executor = Objects.requireNonNull(executor, "executor");
         this.stdioMcpServers = Objects.requireNonNull(stdioMcpServers, "stdioMcpServers");
+        this.ends = new SessionEnds(stateStore, registry, executor);
     }
 
     // ---- create flow ---------------------------------------------------------
@@ -231,7 +212,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
         Objects.requireNonNull(initialPrompt, "initialPrompt");
         return initialization
                 .thenApplyAsync(unused -> {
-                    seedClaimedIdsOnce();
+                    ends.seedClaimedIdsOnce();
                     return prepared;
                 }, executor)
                 // Async, or the whole pre-spawn stage would run on the CALLING
@@ -280,7 +261,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
         // from "already there").
         Object snapshot = discovery.map(d -> d.snapshot(cwd)).orElse(null);
         Instant launchedAt = Instant.now();
-        lastLaunchedAt.put(prepared.id(), launchedAt);
+        ends.lastLaunchedAt().put(prepared.id(), launchedAt);
         CreateContext ctx = new CreateContext(prepared.displayName(), generatedId, cwd,
                 Optional.empty(), Optional.empty(), false, prepared.readOnly(), initialPrompt)
                 .withStdioMcpServers(stdioMcpServersFor(cwd));
@@ -342,7 +323,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
         try {
             started.discovery().get()
                     .discover(started.prepared().workingDirectory(), started.launchedAt(),
-                            started.snapshot(), claimedAgentSessionIds)
+                            started.snapshot(), ends.claimedAgentSessionIds())
                     .ifPresent(id -> {
                         stateStore.get().update(state -> {
                             // The session may have been forgotten while
@@ -430,7 +411,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
         Objects.requireNonNull(sessionId, "sessionId");
         return initialization
                 .thenApplyAsync(unused -> {
-                    seedClaimedIdsOnce();
+                    ends.seedClaimedIdsOnce();
                     ManagedAgentSession session = requireSession(sessionId);
                     if (session.agentSessionId().isPresent()) {
                         if (!nothingRecordedUnder(session)) {
@@ -485,7 +466,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
         // ever adds an id, never replaces one.
         ManagedAgentSession session = prepared.agentSessionId().isPresent()
                 ? prepared
-                : Optional.ofNullable(lateBindAgentSessionId(prepared.id())).orElse(prepared);
+                : Optional.ofNullable(ends.lateBindAgentSessionId(prepared.id())).orElse(prepared);
         // The working directory is probed on disk (possibly a network
         // volume): this runs on the executor, never the caller's thread.
         if (Files.notExists(session.workingDirectory())) {
@@ -557,7 +538,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
             updated.add(adopted);
             return state.withSessions(updated);
         });
-        claimedAgentSessionIds.add(agentSessionId);
+        ends.claimedAgentSessionIds().add(agentSessionId);
         return result[0];
     }
 
@@ -577,7 +558,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
      * recorded only when the platform reported one.</p>
      *
      * <p>A DISCOVERED session that still has no agent session id gets one
-     * bound here, off this thread — see {@link #scheduleLateBind}. Termination
+     * bound here, off this thread — see {@link SessionEnds}. Termination
      * is the best moment there is: the create-time poll has to give up while
      * the agent may not have written its record yet, but a process that has
      * <em>ended</em> certainly has.</p>
@@ -589,106 +570,17 @@ public final class DrydockSessionService implements AgentExecutionListener {
      */
     @Override
     public void executionTerminated(ManagedSessionId id, boolean stopRequested, Integer exitCode) {
-        Objects.requireNonNull(id, "id");
-        SessionStatus ended = stopRequested ? SessionStatus.INACTIVE : SessionStatus.EXITED;
-        stateStore.get().update(state -> {
-            ManagedAgentSession existing = findIn(state, id);
-            if (existing == null || existing.status() == ended) {
-                return state;
-            }
-            ManagedAgentSession idle = existing.withStatus(ended).withLastOpenedAt(Instant.now());
-            if (exitCode != null) {
-                idle = idle.withLastExitCode(Optional.of(exitCode));
-            }
-            return withReplacedSession(state, idle);
-        });
-        DrydockSessionsListener.publishChanged();
-        scheduleLateBind(id);
-    }
-
-    // ---- late id binding (DISCOVERED providers) -------------------------------
-
-    /**
-     * Binds the agent session id of a DISCOVERED session that does not have
-     * one yet, on the executor and detached: resolving reads the agent's own
-     * session store, and a failure must never surface as a failed stop.
-     */
-    private void scheduleLateBind(ManagedSessionId id) {
-        try {
-            CompletableFuture.runAsync(() -> lateBindAgentSessionId(id), executor);
-        } catch (RejectedExecutionException e) {
-            // Shutdown drained the executor. The id stays unknown and the
-            // resume path tries again — which is exactly why that backstop
-            // exists.
-            LOG.log(Level.DEBUG, "Skipping late id binding for {0} during shutdown", id);
-        }
+        ends.executionTerminated(id, stopRequested, exitCode);
     }
 
     /**
-     * Resolves and persists the agent session id for {@code id}, returning the
-     * session as it now stands (with the id, if one was found).
-     *
-     * <p>Blocking: reads the provider's on-disk session store. Runs on the
-     * executor, never a caller's thread.</p>
-     *
-     * <p>Only ever <em>adds</em> an id. A session that already has one is
-     * returned untouched — rebinding a live id to a different conversation
-     * would silently resume the wrong transcript, which looks like success and
-     * is far worse than falling back to the picker.</p>
+     * What the registry keeps to report this window's agents' ends: the
+     * persistence half without the window. An agent can outlive the window
+     * that started it (closed with "Keep running"), and holding this service
+     * would keep that window's project alive as long as the agent runs.
      */
-    private ManagedAgentSession lateBindAgentSessionId(ManagedSessionId id) {
-        ManagedAgentSession session = findIn(stateStore.get().state(), id);
-        if (session == null || session.agentSessionId().isPresent()) {
-            return session;
-        }
-        Optional<SessionIdDiscovery> discovery = registry.get().provider(session.agentKind())
-                .filter(provider -> provider.idStrategy() == SessionIdStrategy.DISCOVERED)
-                .flatMap(AgentProvider::idDiscovery);
-        if (discovery.isEmpty()) {
-            return session;   // PRESET, or a provider with no discovery at all
-        }
-        // Seeded so a resolve can never claim an id another row already owns;
-        // the create flow seeds the same set on its first launch.
-        seedClaimedIdsOnce();
-        Optional<String> resolved;
-        try {
-            resolved = discovery.get().resolve(session.workingDirectory(),
-                    lastLaunchedAt.getOrDefault(id, session.createdAt()), claimedAgentSessionIds);
-        } catch (RuntimeException e) {
-            LOG.log(Level.WARNING, () -> "Late id binding failed for " + id + ": " + e);
-            return session;
-        }
-        if (resolved.isEmpty()) {
-            // Logged, because "no id" has two very different causes and the
-            // difference is invisible otherwise: the agent wrote no session
-            // record at all (a conversation that never completed a turn), or
-            // it wrote one drydock could not match. Both leave resume on the
-            // picker, and only the second is a bug.
-            LOG.log(Level.INFO,
-                    "No agent session id resolved for {0} in {1}; resume falls back to the provider''s picker",
-                    id, session.workingDirectory());
-            return session;
-        }
-        String agentSessionId = resolved.get();
-        // resolve() filters by the claimed set but does not add to it (unlike
-        // discover(), which claims atomically), so the claim is ours to make.
-        if (!claimedAgentSessionIds.add(agentSessionId)) {
-            return session;   // another binding won the race
-        }
-        ManagedAgentSession[] bound = new ManagedAgentSession[]{session};
-        stateStore.get().update(state -> {
-            // The session may have been forgotten while the store was read.
-            ManagedAgentSession existing = findIn(state, id);
-            if (existing == null || existing.agentSessionId().isPresent()) {
-                bound[0] = existing;
-                return state;
-            }
-            bound[0] = existing.withAgentSessionId(Optional.of(agentSessionId));
-            return withReplacedSession(state, bound[0]);
-        });
-        LOG.log(Level.INFO, "Bound agent session id {0} to session {1}", agentSessionId, id);
-        DrydockSessionsListener.publishChanged();
-        return bound[0] != null ? bound[0] : session;
+    public AgentExecutionListener endRecorder() {
+        return ends;
     }
 
     // ---- delete ---------------------------------------------------------------
@@ -791,15 +683,6 @@ public final class DrydockSessionService implements AgentExecutionListener {
 
     // ---- persistence helpers (all through the single writer, C4) -------------
 
-    private void seedClaimedIdsOnce() {
-        if (!claimedIdsSeeded.compareAndSet(false, true)) {
-            return;
-        }
-        for (ManagedAgentSession session : stateStore.get().state().sessions()) {
-            session.agentSessionId().ifPresent(claimedAgentSessionIds::add);
-        }
-    }
-
     private ManagedAgentSession requireSession(ManagedSessionId sessionId) {
         ManagedAgentSession session = findIn(stateStore.get().state(), sessionId);
         if (session == null) {
@@ -808,7 +691,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
         return session;
     }
 
-    private static ManagedAgentSession findIn(ApplicationState state, ManagedSessionId sessionId) {
+    static ManagedAgentSession findIn(ApplicationState state, ManagedSessionId sessionId) {
         for (ManagedAgentSession session : state.sessions()) {
             if (session.id().equals(sessionId)) {
                 return session;
