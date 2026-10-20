@@ -106,8 +106,11 @@ class DrydockPluginServiceTest {
         ApplicationStateStore store = service.stateStore();
         List<ManagedAgentSession> sessions = store.state().sessions();
         assertEquals(2, sessions.size());
-        assertEquals(SessionStatus.INACTIVE, sessions.get(0).status());
-        assertEquals(SessionStatus.EXITED, sessions.get(1).status());
+        // Execution-sessions migration: the persisted statuses decode as IDLE
+        // at load (codec seam), so init finds nothing left to normalize — a
+        // leftover RUNNING row and an EXITED one both surface as IDLE.
+        assertEquals(SessionStatus.IDLE, sessions.get(0).status());
+        assertEquals(SessionStatus.IDLE, sessions.get(1).status());
 
         // Base-dir composition: the state was found and persisted through the
         // repository rooted at the injected base dir.

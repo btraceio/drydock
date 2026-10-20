@@ -118,6 +118,8 @@ public final class SessionDots {
                         case IDLE -> ": waiting at the prompt";
                         case UNKNOWN -> "";
                     };
+            case STOPPING -> "The agent process is being stopped";
+            case IDLE -> "Not running: no live execution, and the session can be resumed";
             case EXITED -> "Not running: the agent process exited on its own";
             case INACTIVE -> "Not running: Drydock stopped it, or the IDE restarted. Nothing restarts on its own";
             case FAILED -> "The last launch or resume failed";
@@ -137,7 +139,8 @@ public final class SessionDots {
         return switch (status) {
             case STARTING -> "Starting";
             case RUNNING -> "Running";
-            case INACTIVE, EXITED -> "Not running";
+            case STOPPING -> "Stopping";
+            case IDLE, INACTIVE, EXITED -> "Not running";
             case FAILED -> "Failed";
             case MISSING_WORKING_DIRECTORY -> "Missing directory";
             case UNSUPPORTED_AGENT -> "Unsupported agent";

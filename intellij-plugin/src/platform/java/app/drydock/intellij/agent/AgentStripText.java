@@ -110,8 +110,10 @@ public final class AgentStripText {
             // The three are not distinguished because the user already knows
             // which one they did, and the persisted row does not record it.
             case INACTIVE -> "Drydock stopped it";
-            // See the javadoc: a stale status, not a live agent.
-            case STARTING, RUNNING -> "no agent is running here";
+            // IDLE has deliberately forgotten how the prior execution ended;
+            // STARTING/RUNNING/STOPPING here are stale projections because
+            // this footer is only rendered after the execution is gone.
+            case IDLE, STARTING, RUNNING, STOPPING -> "no agent is running here";
         };
         return "— stopped " + when + " · " + why + " · nothing restarts on its own —";
     }

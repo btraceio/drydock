@@ -467,13 +467,108 @@ class ApplicationStateCodecTest {
 
     @Test
     void sessionWithInvalidStatusThrowsStateDecodeException() {
-        // SessionStatus.valueOf(requireString(obj, "status")) throws
-        // IllegalArgumentException for an unrecognized enum constant.
+        // statusFromPersisted(requireString(obj, "status")) throws
+        // StateDecodeException for a wire value it does not recognize.
         String session = VALID_SESSION.replace(
                 "\"status\": \"INACTIVE\"", "\"status\": \"NOT_A_REAL_STATUS\"");
 
         assertThrows(StateDecodeException.class,
                 () -> ApplicationStateCodec.fromJson(JsonParser.parse(sessionDocument(session))));
+    }
+
+    // ---- status migration: execution sessions, plan T1 ---------------------
+
+    private static String sessionWithStatus(String status) {
+        return """
+                {"id":"%s","repositoryId":"%s","displayName":"migrating session",
+                 "agentKind":"claude","agentSessionId":"conv-1",
+                 "agentSessionName":"the conversation","workingDirectory":"/tmp/repo/wd","worktreeRoot":null,
+                 "status":"%s","createdAt":"2026-01-01T00:00:00Z","lastOpenedAt":"2026-01-02T00:00:00Z",
+                 "lastExitCode":null,"prState":"NONE","prNumber":null,
+                 "branchCreatedHere":true,"namePinned":false,"forkedFrom":null,"evalMode":false}
+                """.formatted(SESSION_ID, REPO_ID, status);
+    }
+
+    private static String documentWithSessions(String... sessionJsons) {
+        return """
+                {"schemaVersion":2,"repositories":[],"sessions":[%s],"ui":{}}
+                """.formatted(String.join(",", sessionJsons));
+    }
+
+    @Test
+    void legacyInactiveAndExitedRowsMigrateToIdleWithoutLosingTheRow() {
+        // AC6: existing v1/v2 EXITED/INACTIVE rows migrate to IDLE without
+        // losing agent ids or workspaces. No row may be dropped.
+        ApplicationState state = ApplicationStateCodec.fromJson(JsonParser.parse(documentWithSessions(
+                sessionWithStatus("INACTIVE"), sessionWithStatus("EXITED"))));
+
+        assertEquals(2, state.sessions().size(), "the migration must not drop legacy rows");
+        for (ManagedAgentSession session : state.sessions()) {
+            assertEquals(SessionStatus.IDLE, session.status());
+            assertEquals(Optional.of("conv-1"), session.agentSessionId());
+            assertEquals(Path.of("/tmp/repo/wd"), session.workingDirectory());
+        }
+    }
+
+    @Test
+    void coldTransientStartingRunningAndStoppingNormalizeToIdle() {
+        // STARTING/RUNNING/STOPPING are execution projections; a persisted
+        // one survived a restart, so no execution can still be live. The row
+        // stays, normalized to the durable no-process state.
+        ApplicationState state = ApplicationStateCodec.fromJson(JsonParser.parse(documentWithSessions(
+                sessionWithStatus("STARTING"), sessionWithStatus("RUNNING"), sessionWithStatus("STOPPING"))));
+
+        assertEquals(3, state.sessions().size(), "a transient persisted status must never drop a row");
+        for (ManagedAgentSession session : state.sessions()) {
+            assertEquals(SessionStatus.IDLE, session.status());
+        }
+    }
+
+    @Test
+    void idleRoundTripsThroughTheCodec() {
+        Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/repo"), "repo",
+                Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT);
+        ManagedAgentSession idle = new ManagedAgentSession(
+                ManagedSessionId.newId(), repo.id(), "idle session",
+                new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
+                new SessionWorkspace(Path.of("/tmp/repo/wd"), Optional.empty(), true),
+                SessionStatus.IDLE, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
+                PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty());
+        ApplicationState state = new ApplicationState(List.of(repo), List.of(idle), List.of(),
+                WorkspaceUiState.empty(), List.of());
+
+        ApplicationState decoded = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state));
+
+        assertEquals(SessionStatus.IDLE, decoded.sessions().getFirst().status());
+    }
+
+    @Test
+    void statusFromPersistedMapsEveryLegacyAndTransientWireValueToIdle() {
+        // The explicit seam, pinned directly: every old wire value stays
+        // readable, and the durable result of each is IDLE.
+        for (String wire : new String[] {"IDLE", "INACTIVE", "EXITED", "STARTING", "RUNNING", "STOPPING"}) {
+            assertEquals(SessionStatus.IDLE, ApplicationStateCodec.statusFromPersisted(wire), wire);
+        }
+    }
+
+    @Test
+    void durableErrorStatusesDecodeAsThemselvesThroughTheSeam() {
+        // FAILED, MISSING_WORKING_DIRECTORY and UNSUPPORTED_AGENT stay
+        // visible error states — a failure keeps its identity.
+        assertEquals(SessionStatus.FAILED, ApplicationStateCodec.statusFromPersisted("FAILED"));
+        assertEquals(SessionStatus.MISSING_WORKING_DIRECTORY,
+                ApplicationStateCodec.statusFromPersisted("MISSING_WORKING_DIRECTORY"));
+        assertEquals(SessionStatus.UNSUPPORTED_AGENT,
+                ApplicationStateCodec.statusFromPersisted("UNSUPPORTED_AGENT"));
+    }
+
+    @Test
+    void unrecognizedStatusStillFailsTheDecode() {
+        // Status is strict decode, unlike the cosmetic UI fields: an
+        // unrecognized value fails the session entry rather than migrating
+        // to a guess.
+        assertThrows(StateDecodeException.class,
+                () -> ApplicationStateCodec.statusFromPersisted("PAUSED"));
     }
 
     @Test

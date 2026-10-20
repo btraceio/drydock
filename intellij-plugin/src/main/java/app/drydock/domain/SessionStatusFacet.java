@@ -9,6 +9,8 @@ package app.drydock.domain;
  *
  * <p>{@link SessionStatus#UNSUPPORTED_AGENT} is an {@link #ERROR}: a session
  * whose agent this build cannot run makes no progress and is not merely idle.
+ * {@link SessionStatus#IDLE} and the legacy {@link SessionStatus#INACTIVE}/
+ * {@link SessionStatus#EXITED} values are {@link #IDLE}.
  */
 public enum SessionStatusFacet {
     RUNNING,
@@ -17,9 +19,13 @@ public enum SessionStatusFacet {
 
     public static SessionStatusFacet of(SessionStatus status) {
         return switch (status) {
-            case RUNNING, STARTING -> RUNNING;
+            // A stopping session still owns a live process while the stop
+            // escalates (terminate, then force-kill): it stays in the live
+            // band until the process is really gone, at which point the
+            // status itself becomes IDLE and the facet follows.
+            case STARTING, RUNNING, STOPPING -> RUNNING;
             case FAILED, MISSING_WORKING_DIRECTORY, UNSUPPORTED_AGENT -> ERROR;
-            case INACTIVE, EXITED -> IDLE;
+            case IDLE, INACTIVE, EXITED -> IDLE;
         };
     }
 }
