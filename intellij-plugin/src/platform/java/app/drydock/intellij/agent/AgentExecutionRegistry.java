@@ -38,6 +38,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Every live agent process in the IDE, and which window — if any — shows
@@ -349,8 +350,12 @@ public final class AgentExecutionRegistry implements Disposable {
         }
         execution.shownIn(target, console);
         ProcessHandlerTtyConnector input = tty;
+        // Set by the console's own disposal (a window closing, or a move):
+        // a chunk arriving after it must not reach a disposed console.
+        AtomicBoolean disposed = new AtomicBoolean();
+        Disposer.register(console, () -> disposed.set(true));
         execution.router().attach(text -> {
-            if (!Disposer.isDisposed(console)) {
+            if (!disposed.get()) {
                 console.print(text, ConsoleViewContentType.NORMAL_OUTPUT);
             }
         }, () -> redraw(console, input));
