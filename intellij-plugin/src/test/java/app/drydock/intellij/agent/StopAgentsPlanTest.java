@@ -26,12 +26,11 @@ class StopAgentsPlanTest {
     }
 
     @Test
-    void theCopyCountsAndNamesTheWindow() {
+    void theQuitCopyCountsTheAgents() {
         assertEquals("Deactivate 1 working agent?", StopAgentsPlan.title(1));
         assertEquals("Deactivate 2 working agents?", StopAgentsPlan.title(2));
-        assertEquals("Closing dd-scratch · add-a-shout deactivates it mid-task.",
-                StopAgentsPlan.body(Optional.of("dd-scratch · add-a-shout"), 1));
-        assertEquals("Quitting deactivates them mid-task.", StopAgentsPlan.body(Optional.empty(), 3));
+        assertEquals("Quitting deactivates it mid-task.", StopAgentsPlan.body(1));
+        assertEquals("Quitting deactivates them mid-task.", StopAgentsPlan.body(3));
     }
 
     @Test
@@ -44,8 +43,7 @@ class StopAgentsPlanTest {
 
     @Test
     void theDefaultButtonNamesWhatItDoes() {
-        assertEquals("Deactivate & Close", StopAgentsPlan.primaryLabel(false));
-        assertEquals("Deactivate & Quit", StopAgentsPlan.primaryLabel(true));
+        assertEquals("Deactivate & Quit", StopAgentsPlan.primaryLabel());
     }
 
     @Test

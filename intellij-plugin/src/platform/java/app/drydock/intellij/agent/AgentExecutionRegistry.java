@@ -403,8 +403,9 @@ public final class AgentExecutionRegistry implements Disposable {
 
     /**
      * The window {@code project} is going away: whatever it still shows and
-     * runs is stopped (the backstop for close paths that did not decide), and
-     * what it shows that has ended is forgotten. Its consoles are its own
+     * runs is stopped (the backstop for close paths that did not decide),
+     * except a session moving to another window, and what it shows that has
+     * ended is forgotten. Its consoles are its own
      * Disposer children, so the platform disposes them.
      */
     public void hostClosed(Project project) {
@@ -414,6 +415,9 @@ public final class AgentExecutionRegistry implements Disposable {
             }
             execution.router().detach();
             execution.notShown();
+            if (moving.contains(execution.sessionId())) {
+                continue;   // about to be shown in the window it is moving to
+            }
             if (execution.isRunning()) {
                 stop(execution.sessionId());
             } else {
