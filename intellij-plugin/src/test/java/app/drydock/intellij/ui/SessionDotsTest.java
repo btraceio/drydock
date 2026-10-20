@@ -18,7 +18,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
  *
  * <p>Every drydock surface resolves its status word through
  * {@link SessionDots}, so these assertions are what keeps the strip, the tab
- * dot and the popup rows from drifting apart.</p>
+ * icon and the popup rows from drifting apart.</p>
  */
 class SessionDotsTest {
 
@@ -88,5 +88,18 @@ class SessionDotsTest {
 
         assertSame(first, again);
         assertNotEquals(first, SessionDots.dotIcon(SessionStatus.INACTIVE, NONE));
+    }
+
+    @Test
+    void sessionTabIconsAreDrydockMarksCachedByStatusColor() {
+        Icon running = SessionDots.drydockIcon(SessionStatus.RUNNING, NONE);
+
+        assertSame(running, SessionDots.drydockIcon(SessionStatus.RUNNING,
+                Optional.of(SessionActivity.BUSY)));
+        assertNotEquals(running, SessionDots.drydockIcon(SessionStatus.RUNNING,
+                Optional.of(SessionActivity.NEEDS_ATTENTION)));
+        assertNotEquals(running, SessionDots.drydockIcon(SessionStatus.IDLE, NONE));
+        assertEquals(16, running.getIconWidth());
+        assertEquals(16, running.getIconHeight());
     }
 }

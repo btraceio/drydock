@@ -40,9 +40,10 @@
                            implementationClass="app.drydock.intellij.agent.AgentConsoleFileSystem"/>
         <fileEditorProvider
                 implementation="app.drydock.intellij.agent.AgentConsoleEditorProvider"/>
-        <!-- The tab's label and status dot. The platform builds both from
-             these extension points, not from FileEditor.getName(), so without
-             them a console tab shows a bare session id. -->
+        <!-- The tab's label and status-colored Drydock icon. The platform
+             builds both from these extension points, not from
+             FileEditor.getName(), so without them a console tab shows a bare
+             session id. -->
         <editorTabTitleProvider
                 implementation="app.drydock.intellij.agent.AgentConsoleTabPresentation"/>
         <fileIconProvider

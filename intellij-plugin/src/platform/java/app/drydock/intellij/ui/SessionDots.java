@@ -6,11 +6,16 @@ import app.drydock.domain.SessionStatusFacet;
 
 import javax.swing.Icon;
 
+import java.awt.BasicStroke;
 import java.awt.Color;
 import java.awt.Component;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
 import java.awt.RenderingHints;
+import java.awt.geom.Ellipse2D;
+import java.awt.geom.Line2D;
+import java.awt.geom.Path2D;
+import java.awt.geom.RoundRectangle2D;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -65,7 +70,10 @@ public final class SessionDots {
     public static final int DOT_DIAMETER = 8;
 
     /** Icons are immutable, so one cached instance per (color, filled) serves every render. */
-    private static final Map<CacheKey, Icon> ICONS = new ConcurrentHashMap<>();
+    private static final Map<CacheKey, Icon> DOT_ICONS = new ConcurrentHashMap<>();
+
+    /** The tab mark varies only by status color, so repaints share immutable icons. */
+    private static final Map<Color, Icon> DRYDOCK_ICONS = new ConcurrentHashMap<>();
 
     private SessionDots() {
     }
@@ -155,7 +163,17 @@ public final class SessionDots {
     public static Icon dotIcon(SessionStatus status, Optional<SessionActivity> activity) {
         Color color = dotColor(status, activity);
         boolean filled = SessionStatusFacet.of(status) != SessionStatusFacet.IDLE;
-        return ICONS.computeIfAbsent(new CacheKey(color, filled), DotIcon::new);
+        return DOT_ICONS.computeIfAbsent(new CacheKey(color, filled), DotIcon::new);
+    }
+
+    /**
+     * The Drydock robot mark in the session's status color. Agent console tabs
+     * use this instead of an anonymous dot so they remain visibly associated
+     * with the Drydock tool window even while that window is closed.
+     */
+    public static Icon drydockIcon(SessionStatus status, Optional<SessionActivity> activity) {
+        Color color = dotColor(status, activity);
+        return DRYDOCK_ICONS.computeIfAbsent(color, DrydockIcon::new);
     }
 
     private record CacheKey(Color color, boolean filled) {
@@ -201,6 +219,61 @@ public final class SessionDots {
         @Override
         public String toString() {
             return "SessionDots.DotIcon[" + Integer.toHexString(color.getRGB()) + " filled=" + filled + "]";
+        }
+    }
+
+    /** Paints the same 16 px robot-and-dock silhouette as {@code drydock.svg}. */
+    private static final class DrydockIcon implements Icon {
+
+        private static final int SIZE = 16;
+
+        private final Color color;
+
+        private DrydockIcon(Color color) {
+            this.color = color;
+        }
+
+        @Override
+        public void paintIcon(Component c, Graphics g, int x, int y) {
+            Graphics2D graphics = (Graphics2D) g.create();
+            try {
+                graphics.translate(x, y);
+                graphics.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                graphics.setColor(color);
+                graphics.setStroke(new BasicStroke(1.2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+
+                Path2D.Float spark = new Path2D.Float();
+                spark.moveTo(8.0, 1.2);
+                spark.curveTo(8.2, 2.0, 8.4, 2.2, 9.2, 2.4);
+                spark.curveTo(8.4, 2.6, 8.2, 2.8, 8.0, 3.6);
+                spark.curveTo(7.8, 2.8, 7.6, 2.6, 6.8, 2.4);
+                spark.curveTo(7.6, 2.2, 7.8, 2.0, 8.0, 1.2);
+                spark.closePath();
+                graphics.fill(spark);
+
+                graphics.draw(new Line2D.Float(8.0f, 3.8f, 8.0f, 5.5f));
+                graphics.draw(new RoundRectangle2D.Float(3.1f, 5.6f, 9.8f, 6.6f, 4.0f, 4.0f));
+                graphics.fill(new Ellipse2D.Float(5.15f, 7.85f, 2.1f, 2.1f));
+                graphics.fill(new Ellipse2D.Float(8.75f, 7.85f, 2.1f, 2.1f));
+                graphics.draw(new Line2D.Float(1.6f, 14.3f, 14.4f, 14.3f));
+            } finally {
+                graphics.dispose();
+            }
+        }
+
+        @Override
+        public int getIconWidth() {
+            return SIZE;
+        }
+
+        @Override
+        public int getIconHeight() {
+            return SIZE;
+        }
+
+        @Override
+        public String toString() {
+            return "SessionDots.DrydockIcon[" + Integer.toHexString(color.getRGB()) + "]";
         }
     }
 }
