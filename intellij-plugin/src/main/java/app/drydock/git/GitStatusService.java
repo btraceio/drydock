@@ -322,6 +322,80 @@ public final class GitStatusService implements AutoCloseable {
     }
 
     /**
+     * Checks out an existing local branch {@code branch} in the repository at
+     * {@code workingDirectory} <em>in place</em> ({@code git checkout
+     * --end-of-options <branch>}), on this service's background executor.
+     *
+     * <p>Refuses a blank or dash-prefixed name <em>before</em> any git process
+     * is spawned, so no {@link GitExecutableNotFoundException} can mask the
+     * refusal and no argument can be parsed as an option. Every git-side
+     * refusal (a branch already checked out in another worktree, local changes
+     * a switch would overwrite) surfaces as a {@link GitCommandFailedException}
+     * carrying git's own stderr excerpt, verbatim for the caller's refusal
+     * sentences.</p>
+     *
+     * <p>Completes with the branch actually checked out -- verified via
+     * {@link #currentBranchBlocking} rather than a bare exit code, because a
+     * checkout can report success without leaving HEAD where the caller
+     * asked. Must never be called from the JavaFX application thread.</p>
+     */
+    public CompletableFuture<Optional<String>> checkoutBranch(Path workingDirectory, String branch) {
+        return CompletableFuture.supplyAsync(() -> checkoutBranchBlocking(workingDirectory, branch), executor);
+    }
+
+    /**
+     * Synchronous form of {@link #checkoutBranch}, package-private for tests.
+     * Neither git's exit code nor its stdout alone says the switch happened:
+     * a symbolic read of HEAD is the authority.
+     */
+    Optional<String> checkoutBranchBlocking(Path workingDirectory, String branch) {
+        // Pre-spawn refusals: a blank name selects nothing, and a dash-prefixed
+        // one reaches git as an option no matter how the command is assembled.
+        // Both are refused before locator.locate(), so a missing executable
+        // cannot mask the refusal with GitExecutableNotFoundException.
+        if (branch == null || branch.isBlank()) {
+            throw new GitCommandFailedException(
+                    List.of("git", "-C", workingDirectory.toString(), "checkout"),
+                    -1, "branch name is blank");
+        }
+        if (branch.startsWith("-")) {
+            throw new GitCommandFailedException(
+                    List.of("git", "-C", workingDirectory.toString(), "checkout", "--end-of-options"),
+                    -1, "branch name must not start with '-': " + branch);
+        }
+
+        Path git = locator.locate()
+                .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
+
+        // --end-of-options: the branch must reach git as a ref, never as a
+        // flag -- the belt to the pre-spawn dash refusal's braces.
+        List<String> command = List.of(
+                git.toString(), "-C", workingDirectory.toString(),
+                "checkout", "--end-of-options", branch);
+
+        ProcessResult result = run(command);
+        if (result.exitCode() != 0) {
+            if (result.stderr().toLowerCase(Locale.ROOT).contains("not a git repository")) {
+                throw new NotAGitRepositoryException(workingDirectory);
+            }
+            throw new GitCommandFailedException(command, result.exitCode(), ProcessRunner.excerpt(result.stderr()));
+        }
+
+        // Verify rather than trust the exit code: HEAD must name the requested
+        // branch after the switch. currentBranchBlocking (symbolic-ref on HEAD,
+        // refs/heads/ stripped here) rather than symbolic-ref --short, whose
+        // tag disambiguation answers "heads/<name>" for a branch that shares
+        // its name with a tag -- a successful checkout misread as a refusal.
+        Optional<String> checkedOut = currentBranchBlocking(workingDirectory);
+        if (checkedOut.isEmpty() || !checkedOut.get().equals(branch)) {
+            throw new GitCommandFailedException(command, result.exitCode(),
+                    "checkout reported success but HEAD is "
+                            + (checkedOut.isEmpty() ? "detached" : "on '" + checkedOut.get() + "'"));
+        }
+        return checkedOut;
+    }
+
+    /**
      * Updates every remote and drops stale remote-tracking refs
      * ({@code git fetch --all --prune}) so the branch picker can show
      * newly pushed branches, on this service's background executor.
