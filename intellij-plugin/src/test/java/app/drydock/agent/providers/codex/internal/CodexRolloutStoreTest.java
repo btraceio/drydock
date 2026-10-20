@@ -39,6 +39,24 @@ class CodexRolloutStoreTest {
         assertEquals("aaaa1111-0000-0000-0000-000000000001", metas.get(0).id());
     }
 
+    /**
+     * Codex 0.160+ runs its interactive TUI through the app server and records
+     * those sessions as {@code "vscode"}, not {@code "cli"} (originator
+     * {@code codex-tui}). Seen live on 0.163.0 from a Drydock tab: the
+     * rollout's session_meta read {"source":"vscode","originator":"codex-tui"}.
+     */
+    @Test
+    void anInteractiveSessionRecordedAsVscodeIsFound(@TempDir Path root) throws IOException {
+        writeRollout(root, "2026-10-20", "01a15972-0d3d-76a2-8353-669bc4118e36", "/repo/a",
+                "2026-10-20T13:13:29.219Z", "vscode");
+        CodexRolloutStore store = new CodexRolloutStore(root);
+
+        var metas = store.forWorkingDirectory(Path.of("/repo/a"));
+
+        assertEquals(1, metas.size());
+        assertEquals("01a15972-0d3d-76a2-8353-669bc4118e36", metas.get(0).id());
+    }
+
     @Test
     void newCandidatesSkipsSnapshotAndOldAndSortsEarliestFirst(@TempDir Path root) throws IOException {
         String preexisting = "dddd4444-0000-0000-0000-000000000004";
