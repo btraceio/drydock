@@ -16,6 +16,7 @@ import app.drydock.domain.SessionWorkspace;
 import app.drydock.git.GhCliService;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.WorktreeService;
+import app.drydock.projects.SharedProjectsFile;
 import app.drydock.review.RepositoryPullRequests;
 import app.drydock.review.SessionReviewScopes;
 import app.drydock.state.ApplicationStateRepository;
@@ -90,7 +91,9 @@ class ReviewEntryPointsTest extends FxTest {
 
         gitStatusService = new GitStatusService();
         worktreeService = new WorktreeService();
-        repositoryManager = new RepositoryManager(new InMemoryStateRepository(), gitStatusService);
+        repositoryManager = new RepositoryManager(new InMemoryStateRepository(), gitStatusService,
+                new SharedProjectsFile(Files.createTempDirectory("drydock-shared").resolve("projects.json")),
+                root -> Optional.of(root));
         AgentRegistry agentRegistry = new AgentRegistry(List.of(), null);
         SessionManager sessionManager = new SessionManager(new InMemoryStateRepository(), agentRegistry);
         RepositoryPullRequests repositoryPullRequests = new RepositoryPullRequests(

@@ -127,6 +127,11 @@ public record UserConfig(Optional<Path> worktreesDirectory, boolean openChangedF
         this(worktreesDirectory, openChangedFilesInSkim, languageServer, Map.of());
     }
 
+    /** This config with {@code worktreesDirectory} replaced; every other setting kept. */
+    public UserConfig withWorktreesDirectory(Optional<Path> newWorktreesDirectory) {
+        return new UserConfig(newWorktreesDirectory, openChangedFilesInSkim, languageServer);
+    }
+
     public static UserConfig empty() {
         // Skim-by-default is the Explorer delta's design (part 2); the
         // setting exists to turn it off, not to opt into it.

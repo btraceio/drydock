@@ -160,6 +160,42 @@ Registered only on a non-Mac host (the Windows CI runner). See
 The runtime image layout and launcher details are documented in
 [`docs/runtime-image.md`](docs/runtime-image.md).
 
+## IntelliJ plugin
+
+`intellij-plugin/` holds a Drydock plugin for IntelliJ IDEA: a **Drydock**
+tool window on the right edge that lists your projects and their agent tasks,
+starts a new task (branch and worktree pre-filled) with `⌃⌥N` on macOS, and switches to
+or stops a running one. It shares the project list with the standalone app
+(`~/.drydock/projects.json`), so a project registered in one shows up in the
+other.
+
+It needs IntelliJ IDEA **2025.3 or newer** with the bundled Git and Terminal
+plugins enabled, and at least one agent CLI (`claude`, `codex` or `pi`) on
+your `PATH`.
+
+**Get the plugin zip** — either download the `drydock-intellij-plugin`
+artifact from the latest *IntelliJ plugin* workflow run on the repository's
+Actions tab (unzip the download once; inside is the plugin zip), or build it
+yourself (no submodules or Zig needed; Gradle fetches the IDE it builds
+against):
+
+```bash
+cd intellij-plugin
+./gradlew buildPlugin    # build/distributions/drydock-intellij-0.1.0.zip
+```
+
+**Install it** — in IntelliJ IDEA open *Settings → Plugins*, click the ⚙ icon,
+choose *Install Plugin from Disk…*, pick `drydock-intellij-0.1.0.zip` (the zip
+itself, not an unpacked folder) and restart the IDE when asked. The tool
+window then appears on the right; worktree placement is under *Settings →
+Tools → Drydock*.
+
+To try it without touching your own IDE, `./gradlew runIde` starts a sandbox
+IDE with the plugin installed and a project list of its own under
+`build/sandbox-projects/`. Before a release, also run `./gradlew verifyPlugin`
+(the Plugin Verifier; it downloads several IDE versions, ~4 GB each, so check
+your free disk first).
+
 ## Releasing
 
 See [docs/RELEASING.md](docs/RELEASING.md) for how releases are cut: CI builds

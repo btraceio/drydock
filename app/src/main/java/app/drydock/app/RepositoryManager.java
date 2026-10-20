@@ -9,19 +9,35 @@ import app.drydock.domain.RepositoryId;
 import app.drydock.domain.RepositorySettings;
 import app.drydock.domain.SshRemote;
 import app.drydock.domain.WorkspaceUiState;
+import app.drydock.domain.ManagedAgentSession;
 import app.drydock.git.GitStatusService;
+import app.drydock.projects.SharedProject;
+import app.drydock.projects.SharedProjectsException;
+import app.drydock.projects.SharedProjectsFile;
+import app.drydock.projects.SharedProjectsSeed;
 import app.drydock.review.SessionReviewScopes;
 import app.drydock.state.ApplicationStateRepository;
 
+import java.lang.System.Logger;
+import java.lang.System.Logger.Level;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 
 /**
  * Orchestrates add/remove of registered repositories: validates a candidate
@@ -43,26 +59,239 @@ import java.util.concurrent.CopyOnWriteArrayList;
  */
 public final class RepositoryManager {
 
+    private static final Logger LOG = System.getLogger(RepositoryManager.class.getName());
+
+    /** How often the shared list is checked for changes made by the other Drydock tool. */
+    private static final long POLL_SECONDS = 2;
+
     private final ApplicationStateStore stateStore;
     private final GitStatusService gitStatusService;
+    private final SharedProjectsFile sharedFile;
+    private final Function<Path, Optional<Path>> mainCheckoutOf;
 
     /**
-     * Notified after every successful repository add/remove. Listeners may
-     * be invoked on any thread ({@link #addRepository} completes on {@link
-     * GitStatusService}'s background executor); UI listeners must hop to
-     * the FX application thread themselves. Registered listeners let UI
-     * components stay in sync with mutations they did not initiate (the
-     * sidebar previously only refreshed after its own button handlers).
+     * Shared-list I/O and polling: one daemon thread, so shared-file changes
+     * made by this app are serialized with its own reconciles, and the FX
+     * thread never waits on the file.
+     */
+    private final ScheduledExecutorService sharedIo = Executors.newSingleThreadScheduledExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "drydock-shared-projects");
+        thread.setDaemon(true);
+        return thread;
+    });
+
+    /** Why the shared list cannot be applied or changed, for the sidebar; guarded by {@code this}. */
+    private volatile Optional<String> sharedListProblem = Optional.empty();
+
+    /** The shared file's stamp at the last reconcile; guarded by {@code this}. */
+    private long reconciledStamp = Long.MIN_VALUE;
+
+    /**
+     * Notified after every successful repository add/remove, including ones
+     * made by the other Drydock tool through the shared list. Listeners may
+     * be invoked on any thread; UI listeners must hop to the FX application
+     * thread themselves. Registered listeners let UI components stay in sync
+     * with mutations they did not initiate.
      */
     private final List<Runnable> changeListeners = new CopyOnWriteArrayList<>();
 
-    public RepositoryManager(ApplicationStateRepository stateRepository, GitStatusService gitStatusService) {
+    /**
+     * {@code sharedFile} is the registered-projects list shared with the
+     * IntelliJ plugin; {@code mainCheckoutOf} maps a working-tree root to its
+     * repository's main checkout (see {@link SharedProjectsSeed#mainCheckoutVia}).
+     */
+    public RepositoryManager(ApplicationStateRepository stateRepository, GitStatusService gitStatusService,
+                             SharedProjectsFile sharedFile, Function<Path, Optional<Path>> mainCheckoutOf) {
         this.stateStore = ApplicationStateStore.forRepository(stateRepository);
         this.gitStatusService = gitStatusService;
+        this.sharedFile = Objects.requireNonNull(sharedFile, "sharedFile");
+        this.mainCheckoutOf = Objects.requireNonNull(mainCheckoutOf, "mainCheckoutOf");
+    }
+
+    /**
+     * Starts following the shared list: seeds it from this app's list when
+     * it does not exist yet, takes its membership, then re-checks it every
+     * {@value #POLL_SECONDS} seconds. The returned future completes after
+     * the first reconcile; the UI shows the last-known list until then.
+     */
+    public CompletableFuture<Void> start() {
+        CompletableFuture<Void> first = CompletableFuture.runAsync(() -> {
+            try {
+                sharedFile.seedIfAbsent(this::localSeed);
+            } catch (SharedProjectsException e) {
+                LOG.log(Level.WARNING, () -> "Could not seed the shared projects list: " + e.getMessage());
+            }
+            reconcile();
+        }, sharedIo);
+        sharedIo.scheduleWithFixedDelay(this::reconcileQuietly, POLL_SECONDS, POLL_SECONDS, TimeUnit.SECONDS);
+        return first;
+    }
+
+    /** Stops following the shared list; called once at shutdown. */
+    public void stop() {
+        sharedIo.shutdownNow();
+    }
+
+    private void reconcileQuietly() {
+        try {
+            reconcile();
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, "Could not apply the shared projects list", e);
+        }
+    }
+
+    /**
+     * Makes this app's repositories the shared list's members, when the
+     * shared file changed since the last call. Each member keeps what this
+     * app knows about it (settings, timestamps) under its shared id; a
+     * project this app has not seen gets a fresh entry; a project no longer
+     * shared is dropped from the list (its sessions stay, and come back if
+     * it is added again). A malformed or unreadable shared file changes
+     * nothing. Blocks on the file: package-private for tests, otherwise
+     * called on {@link #sharedIo} only.
+     */
+    synchronized void reconcile() {
+        SharedProjectsFile.Snapshot snapshot = sharedFile.read();
+        if (!snapshot.present()) {
+            // Deleted while running (the advice for a malformed file): seed
+            // it again from this app's list rather than leave it to the next
+            // Add, which would write a one-entry list.
+            try {
+                sharedFile.seedIfAbsent(this::localSeed);
+            } catch (SharedProjectsException e) {
+                LOG.log(Level.WARNING, () -> "Could not re-seed the shared projects list: " + e.getMessage());
+            }
+            snapshot = sharedFile.read();
+        }
+        if (!snapshot.problem().equals(sharedListProblem)) {
+            sharedListProblem = snapshot.problem();
+            notifyChanged();
+        }
+        if (snapshot.problem().isPresent() || !snapshot.present() || snapshot.stamp() == reconciledStamp) {
+            // A file this version cannot fully read is never applied: its
+            // unreadable entries would drop out of this app's list.
+            return;
+        }
+        reconciledStamp = snapshot.stamp();
+        List<SharedProject> members = snapshot.projects();
+        // Resolved here, outside the state lock: it runs git.
+        Map<ManagedSessionId, RepositoryId> adopted = orphansToAdopt(stateStore.state(), members);
+        boolean[] changed = new boolean[1];
+        stateStore.update(state -> {
+            ApplicationState next = adopt(withMembers(state, members), adopted);
+            changed[0] = !next.repositories().equals(state.repositories())
+                    || !next.sessions().equals(state.sessions());
+            return next;
+        });
+        if (changed[0]) {
+            notifyChanged();
+        }
+    }
+
+    /**
+     * Sessions whose repository is not on the shared list, mapped to the
+     * member their folder belongs to: the folder is that member's root, lies
+     * under it, or git names that root as its main checkout. Two ways a
+     * session ends up so: seeding folded the worktree entry it was recorded
+     * under into its main checkout, or the project was removed and then
+     * added again by the IntelliJ plugin, which cannot know this app's id
+     * and minted a new one. Sessions of a project not on the list stay
+     * where they are — hidden, until it is added again. Blocking (git).
+     */
+    private Map<ManagedSessionId, RepositoryId> orphansToAdopt(ApplicationState state,
+                                                                List<SharedProject> members) {
+        Set<RepositoryId> memberIds = new HashSet<>();
+        Map<Path, RepositoryId> byRoot = new LinkedHashMap<>();
+        for (SharedProject member : members) {
+            memberIds.add(member.id());
+            if (!member.isRemote()) {
+                byRoot.put(RepositoryCatalog.canonicalize(member.root()), member.id());
+            }
+        }
+        Map<ManagedSessionId, RepositoryId> adopted = new HashMap<>();
+        for (ManagedAgentSession session : state.sessions()) {
+            if (memberIds.contains(session.repositoryId())) {
+                continue;
+            }
+            Path directory = RepositoryCatalog.canonicalize(session.workingDirectory());
+            RepositoryId target = byRoot.entrySet().stream()
+                    .filter(entry -> directory.startsWith(entry.getKey()))
+                    .map(Map.Entry::getValue)
+                    .findFirst()
+                    .orElse(null);
+            if (target == null) {
+                target = mainCheckoutOf.apply(session.workingDirectory())
+                        .map(RepositoryCatalog::canonicalize)
+                        .map(byRoot::get)
+                        .orElse(null);
+            }
+            if (target != null) {
+                adopted.put(session.id(), target);
+            }
+        }
+        return adopted;
+    }
+
+    private static ApplicationState adopt(ApplicationState state, Map<ManagedSessionId, RepositoryId> adopted) {
+        if (adopted.isEmpty()) {
+            return state;
+        }
+        return state.withSessions(state.sessions().stream()
+                .map(session -> adopted.containsKey(session.id())
+                        ? session.toBuilder().repositoryId(adopted.get(session.id())).build()
+                        : session)
+                .toList());
+    }
+
+    /** This app's own list in shared form: the seed whenever the shared file is missing. */
+    private List<SharedProject> localSeed() {
+        return SharedProjectsSeed.fromRepositories(stateStore.state().repositories(), mainCheckoutOf);
+    }
+
+    private static ApplicationState withMembers(ApplicationState state, List<SharedProject> members) {
+        Map<RepositoryId, Repository> known = new LinkedHashMap<>();
+        state.repositories().forEach(repository -> known.put(repository.id(), repository));
+        Map<RepositoryId, RepositoryId> remapped = new LinkedHashMap<>();
+        List<Repository> repositories = new ArrayList<>();
+        for (SharedProject member : members) {
+            Repository mine = known.get(member.id());
+            if (mine == null) {
+                // The same folder known here under another id (registered on
+                // both sides before the list was shared): the shared id wins
+                // and this app's sessions follow it.
+                mine = RepositoryCatalog.findByCanonicalRoot(state.repositories(), member.root()).orElse(null);
+                if (mine != null) {
+                    remapped.put(mine.id(), member.id());
+                }
+            }
+            Instant addedAt = mine == null ? member.addedAt() : mine.addedAt();
+            Instant lastOpenedAt = mine == null ? member.addedAt() : mine.lastOpenedAt();
+            RepositorySettings settings = mine == null ? RepositorySettings.DEFAULT : mine.settings();
+            repositories.add(new Repository(member.id(), member.root(), member.displayName(), addedAt, lastOpenedAt,
+                    settings, member.remote().orElse(null)));
+        }
+        ApplicationState next = state.withRepositories(repositories);
+        if (!remapped.isEmpty()) {
+            next = next.withSessions(state.sessions().stream()
+                    .map(session -> remapped.containsKey(session.repositoryId())
+                            ? session.toBuilder().repositoryId(remapped.get(session.repositoryId())).build()
+                            : session)
+                    .toList());
+        }
+        return next;
     }
 
     public ApplicationState state() {
         return stateStore.state();
+    }
+
+    /**
+     * Why the shared projects list is not being followed or cannot be
+     * changed (malformed, entries this version cannot read, a newer
+     * schema); empty when all is well. The sidebar shows it.
+     */
+    public Optional<String> sharedListProblem() {
+        return sharedListProblem;
     }
 
     public List<Repository> repositories() {
@@ -71,42 +300,74 @@ public final class RepositoryManager {
 
     /**
      * Validates that {@code directory} is (inside) a Git working tree,
-     * resolves it to its canonical root, rejects it if already registered,
-     * and -- if all of that succeeds -- registers and persists a new
-     * {@link Repository}. Runs the Git check on {@link GitStatusService}'s
-     * background executor and only touches in-memory/persisted state once
-     * that check has succeeded, so the caller (the FX application thread)
-     * never blocks.
+     * resolves it to its repository's main checkout, rejects it if already
+     * registered, and -- if all of that succeeds -- registers it in the
+     * shared list and here. A linked worktree registers its main checkout:
+     * the shared list names repositories, and worktrees are found under
+     * them. Runs off the caller's thread, so the FX thread never blocks.
      *
      * <p>The returned future completes exceptionally with a
      * {@code app.drydock.git.GitException} subtype if {@code directory} is not
-     * a Git repository or {@code git} could not be run, or with a
-     * {@link DuplicateRepositoryException} if it is already registered.</p>
+     * a Git repository or {@code git} could not be run, with a
+     * {@link DuplicateRepositoryException} if it is already registered, or
+     * with a {@link SharedProjectsException} if the shared list cannot be
+     * changed.</p>
      */
     public CompletableFuture<Repository> addRepository(Path directory) {
         return gitStatusService.resolveRepositoryRoot(directory)
-                .thenApply(this::registerValidatedRoot);
+                .thenApplyAsync(root -> registerValidatedRoot(mainCheckoutOf.apply(root).orElse(root)), sharedIo);
     }
 
     private Repository registerValidatedRoot(Path canonicalRoot) {
-        Repository[] added = new Repository[1];
+        RepositoryCatalog.findByCanonicalRoot(repositories(), canonicalRoot).ifPresent(existing -> {
+            throw new DuplicateRepositoryException(canonicalRoot, existing);
+        });
+        Instant now = Instant.now();
+        Repository added = new Repository(reusableId(canonicalRoot), canonicalRoot,
+                defaultDisplayName(canonicalRoot), now, now, RepositorySettings.DEFAULT);
+        return register(added);
+    }
+
+    /**
+     * The id this app's sessions in {@code root} still carry from when the
+     * repository was registered before, so adding it again brings them
+     * back; a new id when there are none.
+     */
+    private RepositoryId reusableId(Path root) {
+        ApplicationState state = stateStore.state();
+        Path canonicalRoot = RepositoryCatalog.canonicalize(root);
+        return state.sessions().stream()
+                .filter(session -> state.repositories().stream()
+                        .noneMatch(repository -> repository.id().equals(session.repositoryId())))
+                .filter(session -> {
+                    Path directory = RepositoryCatalog.canonicalize(session.workingDirectory());
+                    return directory.startsWith(canonicalRoot) || mainCheckoutOf.apply(session.workingDirectory())
+                            .map(RepositoryCatalog::canonicalize).map(canonicalRoot::equals).orElse(false);
+                })
+                .map(ManagedAgentSession::repositoryId)
+                .findFirst()
+                .orElseGet(RepositoryId::newId);
+    }
+
+    /** Writes {@code added} to the shared list, then here; on {@link #sharedIo}. */
+    private Repository register(Repository added) {
+        try {
+            sharedFile.update(projects -> {
+                List<SharedProject> next = new ArrayList<>(projects);
+                next.add(new SharedProject(added.id(), added.root(), added.displayName(), added.addedAt(),
+                        Optional.ofNullable(added.remote())));
+                return next;
+            }, this::localSeed);
+        } catch (SharedProjectsException e) {
+            throw new CompletionException(e);
+        }
         stateStore.update(state -> {
-            RepositoryCatalog.findByCanonicalRoot(state.repositories(), canonicalRoot)
-                    .ifPresent(existing -> {
-                        throw new DuplicateRepositoryException(canonicalRoot, existing);
-                    });
-
-            Instant now = Instant.now();
-            String displayName = defaultDisplayName(canonicalRoot);
-            added[0] = new Repository(
-                    RepositoryId.newId(), canonicalRoot, displayName, now, now, RepositorySettings.DEFAULT);
-
             List<Repository> updated = new ArrayList<>(state.repositories());
-            updated.add(added[0]);
+            updated.add(added);
             return state.withRepositories(updated);
         });
         notifyChanged();
-        return added[0];
+        return added;
     }
 
     /**
@@ -117,33 +378,23 @@ public final class RepositoryManager {
      * existing canonical-root duplicate detection work unchanged. The same
      * physical repo reachable via two different host aliases registers
      * twice; accepted (canonicalizing aliases would mean resolving SSH
-     * config).
+     * config). Remote projects are shared too; the IDE hides them.
      */
     public CompletableFuture<Repository> addRemoteRepository(SshRemote candidate) {
         return gitStatusService.resolveRemoteRepositoryRoot(candidate)
-                .thenApply(resolvedPath -> registerValidatedRemote(new SshRemote(candidate.host(), resolvedPath)));
+                .thenApplyAsync(resolvedPath -> registerValidatedRemote(
+                        new SshRemote(candidate.host(), resolvedPath)), sharedIo);
     }
 
     private Repository registerValidatedRemote(SshRemote remote) {
         Path placeholderRoot = remote.placeholderRoot();
-        Repository[] added = new Repository[1];
-        stateStore.update(state -> {
-            RepositoryCatalog.findByCanonicalRoot(state.repositories(), placeholderRoot)
-                    .ifPresent(existing -> {
-                        throw new DuplicateRepositoryException(remote.host() + ":" + remote.remotePath(), existing);
-                    });
-
-            Instant now = Instant.now();
-            String displayName = defaultDisplayName(Path.of(remote.remotePath()));
-            added[0] = new Repository(RepositoryId.newId(), placeholderRoot, displayName, now, now,
-                    RepositorySettings.DEFAULT, remote);
-
-            List<Repository> updated = new ArrayList<>(state.repositories());
-            updated.add(added[0]);
-            return state.withRepositories(updated);
+        RepositoryCatalog.findByCanonicalRoot(repositories(), placeholderRoot).ifPresent(existing -> {
+            throw new DuplicateRepositoryException(remote.host() + ":" + remote.remotePath(), existing);
         });
-        notifyChanged();
-        return added[0];
+        Instant now = Instant.now();
+        String displayName = defaultDisplayName(Path.of(remote.remotePath()));
+        return register(new Repository(RepositoryId.newId(), placeholderRoot, displayName, now, now,
+                RepositorySettings.DEFAULT, remote));
     }
 
     public void addChangeListener(Runnable listener) {
@@ -154,22 +405,43 @@ public final class RepositoryManager {
         changeListeners.forEach(Runnable::run);
     }
 
-    /** Removes only this application's metadata; never touches the filesystem (plan section 21). */
-    public void removeRepository(RepositoryId id) {
-        boolean[] removed = new boolean[1];
-        stateStore.update(state -> {
-            List<Repository> updated = state.repositories().stream()
-                    .filter(repository -> !repository.id().equals(id))
-                    .toList();
-            if (updated.size() == state.repositories().size()) {
-                return state;
+    /**
+     * Removes the repository from the shared list -- for the IntelliJ plugin
+     * too -- and then from this app's list. Never touches the filesystem
+     * (plan section 21), and keeps the repository's sessions, so adding it
+     * again brings them back.
+     *
+     * <p>The shared list is written first, on the shared-list thread, so a
+     * reconcile already queued there cannot put the repository back, and a
+     * write the shared list refuses (malformed, unreadable entries) leaves
+     * everything as it was. The returned future fails then, for the caller
+     * to show.</p>
+     */
+    public CompletableFuture<Void> removeRepository(RepositoryId id) {
+        return CompletableFuture.runAsync(() -> {
+            try {
+                sharedFile.update(projects -> projects.stream().filter(project -> !project.id().equals(id)).toList(),
+                        this::localSeed);
+            } catch (SharedProjectsException e) {
+                LOG.log(Level.WARNING, () -> "Could not remove " + id + " from the shared projects list: "
+                        + e.getMessage());
+                throw new CompletionException(e);
             }
-            removed[0] = true;
-            return state.withRepositories(updated);
-        });
-        if (removed[0]) {
-            notifyChanged();
-        }
+            boolean[] removed = new boolean[1];
+            stateStore.update(state -> {
+                List<Repository> updated = state.repositories().stream()
+                        .filter(repository -> !repository.id().equals(id))
+                        .toList();
+                if (updated.size() == state.repositories().size()) {
+                    return state;
+                }
+                removed[0] = true;
+                return state.withRepositories(updated);
+            });
+            if (removed[0]) {
+                notifyChanged();
+            }
+        }, sharedIo);
     }
 
     /** Persists the order of open session tabs (tab-strip order, including drag-reorder). */

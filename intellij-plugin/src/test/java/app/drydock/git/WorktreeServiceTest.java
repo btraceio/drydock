@@ -1,0 +1,1076 @@
+package app.drydock.git;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.CompletionException;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+/**
+ * Integration tests against real temporary Git repositories, in the style
+ * of {@link GitStatusServiceTest}: worktree discovery via
+ * {@code git worktree list --porcelain} and the one-click removal of an
+ * unopened worktree (worktree handoff, section B "Discovering worktrees").
+ */
+class WorktreeServiceTest {
+
+    private final WorktreeService service = new WorktreeService();
+    private final GitStatusService gitStatusService = new GitStatusService();
+
+    @Test
+    void listReportsTheMainCheckoutFirst(@TempDir Path repoDir) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+
+        List<WorktreeService.Worktree> worktrees = service.list(repo).get();
+
+        assertEquals(1, worktrees.size());
+        WorktreeService.Worktree main = worktrees.get(0);
+        assertTrue(main.mainCheckout());
+        assertEquals(Optional.of("main"), main.branch());
+        assertEquals(repo.toRealPath(), main.path().toRealPath());
+    }
+
+    @Test
+    void listDiscoversWorktreesCreatedOutsideTheApp(@TempDir Path repoDir, @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path outside = worktreeParent.resolve("outside-wt");
+        runGit(repo, "worktree", "add", outside.toString(), "-b", "feat/outside");
+
+        List<WorktreeService.Worktree> worktrees = service.list(repo).get();
+
+        assertEquals(2, worktrees.size());
+        WorktreeService.Worktree discovered = worktrees.get(1);
+        assertFalse(discovered.mainCheckout());
+        assertEquals(Optional.of("feat/outside"), discovered.branch());
+        assertEquals(outside.toRealPath(), discovered.path().toRealPath());
+    }
+
+    @Test
+    void listReportsADetachedWorktreeWithoutABranch(@TempDir Path repoDir, @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        String head = runGitCapture(repo, "rev-parse", "HEAD").trim();
+        Path detachedDir = worktreeParent.resolve("detached-wt");
+        runGit(repo, "worktree", "add", "--detach", detachedDir.toString(), head);
+
+        List<WorktreeService.Worktree> worktrees = service.list(repo).get();
+
+        WorktreeService.Worktree detached = worktrees.get(1);
+        assertTrue(detached.detached());
+        assertTrue(detached.branch().isEmpty());
+    }
+
+    @Test
+    void listOnNonGitDirectoryThrowsNotAGitRepositoryException(@TempDir Path notARepo) {
+        CompletionException completion = assertThrows(CompletionException.class,
+                () -> service.list(notARepo).join());
+        assertInstanceOf(NotAGitRepositoryException.class, completion.getCause());
+    }
+
+    @Test
+    void removeDeletesTheWorktreeAndItsBranch(@TempDir Path repoDir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/short-lived").get();
+
+        service.remove(repo, worktree, Optional.of("feat/short-lived")).get();
+
+        assertFalse(Files.exists(worktree));
+        assertEquals(1, service.list(repo).get().size());
+        assertFalse(runGitCapture(repo, "branch", "--list", "feat/short-lived").contains("feat/short-lived"));
+    }
+
+    @Test
+    void removeReportsAFailedBranchDeletionDistinctly(@TempDir Path repoDir, @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/kept").get();
+        // A second worktree on the branch keeps `git branch -D` from
+        // succeeding after the first worktree is gone.
+        Path second = worktreeParent.resolve("second");
+        // --force: git otherwise refuses to check out a branch that is
+        // already checked out in another worktree, which is the fixture's
+        // whole point here.
+        runGit(repo, "worktree", "add", "--force", second.toString(), "feat/kept");
+
+        CompletionException completion = assertThrows(CompletionException.class,
+                () -> service.remove(repo, worktree, Optional.of("feat/kept")).join());
+
+        BranchNotDeletedException failure =
+                assertInstanceOf(BranchNotDeletedException.class, completion.getCause());
+        assertEquals("feat/kept", failure.branch());
+        assertFalse(Files.exists(worktree));
+        assertTrue(runGitCapture(repo, "branch", "--list", "feat/kept").contains("feat/kept"));
+    }
+
+    /**
+     * Fix round 1, finding 2: a branch-delete failure that is not a real
+     * non-zero exit (a timeout, a spawn failure, an interrupt) must still
+     * surface as {@link BranchNotDeletedException}, not the bare {@link
+     * GitCommandInterruptedException}/{@code GitCommandFailedException}
+     * {@code run()} throws for those -- otherwise {@code
+     * WorktreeSessionCleanup.classify} (which trusts that only {@code
+     * BranchNotDeletedException} means "worktree gone, branch failed") would
+     * report an already-removed worktree as kept, which is false. There is
+     * no git hook for branch deletion (unlike {@code pre-merge-commit}), so
+     * a thin git-passthrough wrapper stands in for {@code git} and only
+     * slows down {@code branch -D}; the worktree-remove half still runs
+     * against the real repository and is confirmed gone by the time the
+     * interrupt lands. Mirrors {@code
+     * mergeBlockingPropagatesAnInterruptWithoutProducingAVerdict}'s
+     * worker-thread-interrupt technique, since {@code
+     * CompletableFuture.cancel} does not interrupt a running task.
+     *
+     * <p>A genuine spawn-IOException variant of this same wrap was judged
+     * too contorted to fixture safely (it would require racing a rename of
+     * the real git executable between the two git invocations); see the
+     * fix-round-1 report.</p>
+     */
+    @Test
+    void removeBlockingWrapsABranchDeleteInterruptAsBranchNotDeletedException(@TempDir Path repoDir,
+            @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/slow-delete").get();
+        Path fakeGit = worktreeParent.resolve("fake-git.sh");
+        // The marker is the stage signal the test waits on: it is written by
+        // the branch -D invocation only, immediately before it blocks.
+        Path branchDeleteStarted = worktreeParent.resolve("branch-delete-started");
+        Files.writeString(fakeGit, """
+                #!/bin/sh
+                prev=""
+                for arg in "$@"; do
+                  if [ "$prev" = "branch" ] && [ "$arg" = "-D" ]; then
+                    : > "%s"
+                    sleep 30
+                  fi
+                  prev="$arg"
+                done
+                exec git "$@"
+                """.formatted(branchDeleteStarted));
+        fakeGit.toFile().setExecutable(true);
+
+        java.util.concurrent.atomic.AtomicReference<Throwable> thrown = new java.util.concurrent.atomic.AtomicReference<>();
+        java.util.concurrent.atomic.AtomicBoolean stillInterrupted = new java.util.concurrent.atomic.AtomicBoolean();
+        try (WorktreeService slowBranchDelete = new WorktreeService(new GitExecutableLocator(fakeGit))) {
+            Thread worker = new Thread(() -> {
+                try {
+                    slowBranchDelete.removeBlocking(repo, worktree, Optional.of("feat/slow-delete"), false);
+                } catch (Throwable t) {
+                    thrown.set(t);
+                    // Read inside the worker: a terminated thread always reports
+                    // isInterrupted() == false, so the flag run() restores can
+                    // only be observed from here.
+                    stillInterrupted.set(Thread.currentThread().isInterrupted());
+                }
+            });
+            worker.start();
+            // Poll for the stage boundary instead of sleeping a fixed interval.
+            // A fixed Thread.sleep orders the interrupt by hope: on a loaded
+            // machine `git worktree remove` can outrun it (or not finish within
+            // it), the interrupt lands in the wrong stage, and the failure
+            // surfaces as an assertion about Files.exists that points nowhere
+            // near the cause -- in the one test file guarding the destructive
+            // path. Waiting for the branch -D marker makes the ordering a fact.
+            long deadline = System.nanoTime() + java.time.Duration.ofSeconds(60).toNanos();
+            while (!Files.exists(branchDeleteStarted) && System.nanoTime() < deadline) {
+                Thread.sleep(20);
+            }
+            assertTrue(Files.exists(branchDeleteStarted), "the branch-delete stage should have been reached");
+            assertFalse(Files.exists(worktree),
+                    "the worktree half must have succeeded before the interrupt is delivered");
+            worker.interrupt();
+            worker.join(java.time.Duration.ofSeconds(10).toMillis());
+
+            assertFalse(worker.isAlive(), "the worker thread should have unblocked on the interrupt");
+        }
+
+        BranchNotDeletedException failure = assertInstanceOf(BranchNotDeletedException.class, thrown.get());
+        assertInstanceOf(GitCommandInterruptedException.class, failure.getCause());
+        // run() restores the flag rather than clearing it, so the frame that
+        // wants to act on the cancellation still sees it. Pinned here rather
+        // than left to inspection.
+        assertTrue(stillInterrupted.get(), "the interrupt flag must survive the BranchNotDeletedException wrap");
+    }
+
+    @Test
+    void removeWithoutABranchOnlyRemovesTheWorktree(@TempDir Path repoDir, @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/keep-branch").get();
+
+        service.remove(repo, worktree, Optional.empty()).get();
+
+        assertFalse(Files.exists(worktree));
+        assertTrue(runGitCapture(repo, "branch", "--list", "feat/keep-branch").contains("feat/keep-branch"));
+    }
+
+    @Test
+    void removeRefusesTheMainCheckout(@TempDir Path repoDir) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+
+        CompletionException completion = assertThrows(CompletionException.class,
+                () -> service.remove(repo, repo, Optional.of("main")).join());
+        assertInstanceOf(IllegalArgumentException.class, completion.getCause());
+        assertTrue(Files.exists(repo.resolve("README.md")));
+    }
+
+    @Test
+    void removeOfADirtyWorktreeFailsInsteadOfDiscardingChanges(@TempDir Path repoDir, @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/dirty").get();
+        Files.writeString(worktree.resolve("uncommitted.txt"), "precious\n");
+
+        CompletionException completion = assertThrows(CompletionException.class,
+                () -> service.remove(repo, worktree, Optional.of("feat/dirty")).join());
+        assertInstanceOf(WorktreeNotCleanException.class, completion.getCause());
+        assertTrue(Files.exists(worktree));
+    }
+
+    @Test
+    void uncommittedChangesListsWhatARemoveWouldDiscard(@TempDir Path repoDir, @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/list").get();
+
+        assertTrue(service.uncommittedChanges(worktree).get().isEmpty(), "a fresh worktree is clean");
+
+        // One modified tracked file, one staged addition, one untracked file --
+        // the three shapes the confirm dialog has to show before a forced
+        // delete discards them.
+        Files.writeString(worktree.resolve("README.md"), "changed\n");
+        Files.writeString(worktree.resolve("staged.txt"), "staged\n");
+        runGit(worktree, "add", "staged.txt");
+        Files.writeString(worktree.resolve("untracked.txt"), "untracked\n");
+
+        List<String> changes = service.uncommittedChanges(worktree).get();
+        assertEquals(3, changes.size());
+        // The FIRST line (README.md, an unstaged modification) must keep its
+        // leading status-column space: a whole-output strip() used to corrupt
+        // exactly that line into "M README.md", which parses as a staged change.
+        assertTrue(changes.get(0).startsWith(" M README.md"), changes.get(0));
+        assertTrue(changes.stream().anyMatch(line -> line.endsWith("staged.txt") && line.startsWith("A ")));
+        assertTrue(changes.stream().anyMatch(line -> line.endsWith("untracked.txt") && line.startsWith("??")));
+    }
+
+    @Test
+    void forcedRemoveDeletesADirtyWorktreeAndItsBranch(@TempDir Path repoDir, @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/force").get();
+        Files.writeString(worktree.resolve("uncommitted.txt"), "expendable\n");
+
+        service.removeForced(repo, worktree, Optional.of("feat/force")).get();
+
+        assertFalse(Files.exists(worktree));
+        assertEquals(1, service.list(repo).get().size());
+        assertFalse(runGitCapture(repo, "branch", "--list", "feat/force").contains("feat/force"));
+    }
+
+    @Test
+    void forcedRemoveStillRefusesTheMainCheckout(@TempDir Path repoDir) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+
+        CompletionException completion = assertThrows(CompletionException.class,
+                () -> service.removeForced(repo, repo, Optional.of("main")).join());
+        assertInstanceOf(IllegalArgumentException.class, completion.getCause());
+        assertTrue(Files.exists(repo.resolve("README.md")));
+    }
+
+    @Test
+    void removeOfALockedWorktreeSurfacesTheLockWithItsReasonInsteadOfForcing(
+            @TempDir Path repoDir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/locked").get();
+        runGit(repo, "worktree", "lock", "--reason", "initializing", worktree.toString());
+
+        CompletionException completion = assertThrows(CompletionException.class,
+                () -> service.remove(repo, worktree, Optional.of("feat/locked")).join());
+        WorktreeLockedException locked = assertInstanceOf(WorktreeLockedException.class, completion.getCause());
+        assertEquals(Optional.of("initializing"), locked.lockReason());
+        assertTrue(Files.exists(worktree));
+    }
+
+    @Test
+    void forcedRemoveDeletesALockedWorktreeAndItsBranch(@TempDir Path repoDir, @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/locked-force").get();
+        runGit(repo, "worktree", "lock", worktree.toString());
+
+        service.removeForced(repo, worktree, Optional.of("feat/locked-force")).get();
+
+        assertFalse(Files.exists(worktree));
+        assertEquals(1, service.list(repo).get().size());
+        assertFalse(runGitCapture(repo, "branch", "--list", "feat/locked-force").contains("feat/locked-force"));
+    }
+
+    /**
+     * The removal listener (usage-resolution tier 3, spec §5: a deleted
+     * worktree's language-server cache is deleted with it) fires only after
+     * a removal actually succeeded: the listener must not be able to
+     * observe a worktree that is still on disk, so the fire itself carries
+     * the proof -- the path is checked at notification time, not after.
+     */
+    @Test
+    void removeFiresTheRemovalListenerOnlyAfterTheWorktreeIsGone(
+            @TempDir Path repoDir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/listened").get();
+        List<Path> told = new java.util.ArrayList<>();
+        List<Boolean> stillOnDiskWhenTold = new java.util.ArrayList<>();
+        service.addRemovalListener((repositoryRoot, removed) -> {
+            stillOnDiskWhenTold.add(Files.exists(removed));
+            told.add(removed);
+        });
+
+        service.remove(repo, worktree, Optional.of("feat/listened")).get();
+
+        assertEquals(1, told.size(), "one removal, one notification");
+        assertEquals(WorktreeService.canonical(worktree), told.get(0),
+                "the canonical form, the same key an owner maps the worktree by");
+        assertEquals(List.of(Boolean.FALSE), stillOnDiskWhenTold,
+                "the listener fires only after the worktree is actually removed");
+    }
+
+    /**
+     * The same discipline on the refused paths: a removal that failed --
+     * dirty here, and the main-checkout refusal and a failed branch delete
+     * beside it -- must never fire the listener, or an owner would clean up
+     * a worktree that is still on disk.
+     */
+    @Test
+    void aRemovalThatFailsNeverFiresTheListener(@TempDir Path repoDir, @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path dirty = gitStatusService.createWorktree(repo, worktreeParent.resolve("dirty"), "feat/kept-alive").get();
+        Files.writeString(dirty.resolve("uncommitted.txt"), "precious\n");
+        Path retained = gitStatusService.createWorktree(repo, worktreeParent.resolve("retained"), "feat/held-branch")
+                .get();
+        // A second worktree on the branch keeps `git branch -D` from
+        // succeeding, so the retained worktree's removal fails AFTER the
+        // worktree half would have gone: the far end of the ordering a
+        // naive "fire when the directory is gone" listener would miss.
+        runGit(repo, "worktree", "add", "--force", worktreeParent.resolve("second").toString(), "feat/held-branch");
+        List<Path> told = new java.util.ArrayList<>();
+        service.addRemovalListener((repositoryRoot, removed) -> told.add(removed));
+
+        assertThrows(CompletionException.class,
+                () -> service.remove(repo, dirty, Optional.of("feat/kept-alive")).join());
+        assertThrows(CompletionException.class,
+                () -> service.remove(repo, repo, Optional.of("main")).join());
+        assertThrows(CompletionException.class,
+                () -> service.remove(repo, retained, Optional.of("feat/held-branch")).join());
+
+        assertTrue(told.isEmpty(), "no failed removal may fire the listener");
+        assertTrue(Files.exists(dirty), "the dirty worktree is still on disk");
+        assertFalse(Files.exists(retained),
+                "the branch-delete failure fixture: the worktree half did succeed,"
+                + " so this is the case where a naive directory-exists listener would have fired");
+    }
+
+    /**
+     * Pins the discriminator the force-fallback gate is built on: a
+     * submodule only blocks a plain remove once it has been checked out
+     * into the worktree, so a fresh worktree of a submodule-bearing
+     * repository still takes the ordinary path.
+     */
+    @Test
+    void removeUsesThePlainPathForAWorktreeWhoseSubmoduleIsUninitialized(
+            @TempDir Path repoDir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initRepoWithSubmodule(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/no-subs").get();
+        Path worktreeGitDir = Path.of(runGitCapture(worktree, "rev-parse", "--absolute-git-dir").strip());
+        assertFalse(Files.isDirectory(worktreeGitDir.resolve("modules")),
+                "precondition: the submodule must not be checked out into the worktree");
+
+        service.remove(repo, worktree, Optional.of("feat/no-subs")).get();
+
+        assertFalse(Files.exists(worktree));
+        assertEquals(1, service.list(repo).get().size());
+    }
+
+    /**
+     * The same worktree, left dirty: the plain path must still refuse it.
+     * Proves the uninitialized case never escalates to {@code --force},
+     * which a bare success assertion above cannot distinguish.
+     */
+    @Test
+    void removeOfADirtyUninitializedSubmoduleWorktreeStillFails(
+            @TempDir Path repoDir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initRepoWithSubmodule(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/no-subs-dirty").get();
+        Files.writeString(worktree.resolve("uncommitted.txt"), "precious\n");
+
+        CompletionException completion = assertThrows(CompletionException.class,
+                () -> service.remove(repo, worktree, Optional.of("feat/no-subs-dirty")).join());
+        assertInstanceOf(WorktreeNotCleanException.class, completion.getCause());
+        assertTrue(Files.exists(worktree.resolve("uncommitted.txt")));
+    }
+
+    @Test
+    void removeSucceedsForAWorktreeWithAnInitializedSubmodule(@TempDir Path repoDir, @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = initRepoWithSubmodule(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/subs").get();
+        initSubmodulesIn(worktree);
+
+        service.remove(repo, worktree, Optional.of("feat/subs")).get();
+
+        assertFalse(Files.exists(worktree));
+        assertEquals(1, service.list(repo).get().size());
+        assertFalse(runGitCapture(repo, "branch", "--list", "feat/subs").contains("feat/subs"));
+    }
+
+    @Test
+    void removeSucceedsForASubmoduleWorktreeWhoseOnlyDirtIsInsideTheSubmodule(
+            @TempDir Path repoDir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initRepoWithSubmodule(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/sub-dirt").get();
+        initSubmodulesIn(worktree);
+        Files.writeString(worktree.resolve("vendor/lib.txt"), "patched by the build\n");
+
+        service.remove(repo, worktree, Optional.of("feat/sub-dirt")).get();
+
+        assertFalse(Files.exists(worktree));
+    }
+
+    @Test
+    void removeOfADirtySubmoduleWorktreeFailsInsteadOfDiscardingChanges(
+            @TempDir Path repoDir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initRepoWithSubmodule(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/sub-dirty").get();
+        initSubmodulesIn(worktree);
+        Files.writeString(worktree.resolve("uncommitted.txt"), "precious\n");
+
+        CompletionException completion = assertThrows(CompletionException.class,
+                () -> service.remove(repo, worktree, Optional.of("feat/sub-dirty")).join());
+        assertInstanceOf(WorktreeNotCleanException.class, completion.getCause());
+        assertTrue(Files.exists(worktree.resolve("uncommitted.txt")));
+    }
+
+    @Test
+    void removeOfAWorktreeWithABumpedSubmodulePointerFailsInsteadOfDiscardingTheBump(
+            @TempDir Path repoDir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initRepoWithSubmodule(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/sub-bump").get();
+        initSubmodulesIn(worktree);
+        // Moving the submodule's HEAD is uncommitted work in *this*
+        // worktree's index, unlike mere dirt inside the submodule.
+        runGit(worktree.resolve("vendor"), "-c", "user.name=Test", "-c", "user.email=test@example.com",
+                "commit", "--allow-empty", "-m", "vendored bump");
+
+        CompletionException completion = assertThrows(CompletionException.class,
+                () -> service.remove(repo, worktree, Optional.of("feat/sub-bump")).join());
+        assertInstanceOf(WorktreeNotCleanException.class, completion.getCause());
+        assertTrue(Files.exists(worktree));
+    }
+
+    @Test
+    void removeSucceedsWhenTheWorktreeDirectoryWasDeletedFromDiskOutsideGit(
+            @TempDir Path repoDir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/vanished").get();
+        deleteRecursively(worktree);
+
+        service.remove(repo, worktree, Optional.of("feat/vanished")).get();
+
+        assertEquals(1, service.list(repo).get().size());
+        assertFalse(runGitCapture(repo, "branch", "--list", "feat/vanished").contains("feat/vanished"));
+    }
+
+    /**
+     * The user's cleanup-action scenario: the worktree was already removed
+     * outside the app (a prior {@code git worktree remove} or a {@code prune}),
+     * so its administrative entry is gone from {@code git worktree list} too.
+     * A bare {@code git worktree remove} fails with "is not a working tree" --
+     * not a failure the user can act on, since the state they asked for is
+     * already on disk. The removal must succeed (so the UI can refresh to
+     * mirror reality) and still delete the branch, which outlives the worktree.
+     */
+    @Test
+    void removeSucceedsWhenTheWorktreeWasAlreadyRemovedAndPruned(
+            @TempDir Path repoDir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/already-gone").get();
+        // Remove it the way an outside tool would: drop the worktree and its
+        // administrative entry, but leave the branch behind.
+        runGit(repo, "worktree", "remove", "--force", worktree.toString());
+        assertEquals(1, service.list(repo).get().size(), "precondition: the worktree is gone from the list");
+        assertTrue(runGitCapture(repo, "branch", "--list", "feat/already-gone").contains("feat/already-gone"),
+                "precondition: the branch still exists");
+
+        service.remove(repo, worktree, Optional.of("feat/already-gone")).get();
+
+        assertEquals(1, service.list(repo).get().size());
+        assertFalse(runGitCapture(repo, "branch", "--list", "feat/already-gone").contains("feat/already-gone"));
+    }
+
+    /**
+     * The forced variant of the same scenario: the cleanup of locked worktrees
+     * calls {@code removeForced}, which would otherwise hit the same
+     * "is not a working tree" from {@code --force --force}.
+     */
+    @Test
+    void forcedRemoveSucceedsWhenTheWorktreeWasAlreadyRemovedAndPruned(
+            @TempDir Path repoDir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/already-gone-force").get();
+        runGit(repo, "worktree", "remove", "--force", worktree.toString());
+        assertEquals(1, service.list(repo).get().size(), "precondition: the worktree is gone from the list");
+
+        service.removeForced(repo, worktree, Optional.of("feat/already-gone-force")).get();
+
+        assertEquals(1, service.list(repo).get().size());
+        assertFalse(runGitCapture(repo, "branch", "--list", "feat/already-gone-force")
+                .contains("feat/already-gone-force"));
+    }
+
+    /**
+     * Prune's contract (T16): a prunable entry's directory is already gone
+     * from disk, so pruning is a metadata-only clear — the branch the entry
+     * held outlives it and is kept (deleting a branch is a destructive act
+     * with no data left to confirm against, which is exactly why purge
+     * needs no confirmation dialog).
+     */
+    @Test
+    void pruneClearsStaleWorktreeMetadataButKeepsItsBranch(@TempDir Path repoDir, @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/prune").get();
+        // The directory leaves disk, but git still holds the branch and its
+        // administrative entry — the prunable case.
+        deleteRecursively(worktree);
+        WorktreeService.Worktree listed = service.list(repo).get().get(1);
+        assertTrue(listed.prunable(), "precondition: git reports the entry prunable");
+
+        service.prune(repo).get();
+
+        assertEquals(1, service.list(repo).get().size(), "the stale entry is gone; the main checkout remains");
+        assertTrue(runGitCapture(repo, "branch", "--list", "feat/prune").contains("feat/prune"),
+                "the branch outlives its worktree; pruning is metadata-only");
+    }
+
+    /**
+     * Prune never touches a working tree: live worktrees and the main
+     * checkout survive it untouched, on disk and in the listing.
+     */
+    @Test
+    void pruneLeavesLiveWorktreesAndTheMainCheckoutAlone(@TempDir Path repoDir, @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path live = gitStatusService.createWorktree(repo, worktreeParent.resolve("live"), "feat/live").get();
+        Path stale = gitStatusService.createWorktree(repo, worktreeParent.resolve("stale"), "feat/gone").get();
+        deleteRecursively(stale);
+
+        service.prune(repo).get();
+
+        List<WorktreeService.Worktree> listing = service.list(repo).get();
+        assertEquals(2, listing.size(), "main checkout + the live worktree; only the stale entry left");
+        assertTrue(listing.get(0).mainCheckout());
+        assertEquals(Optional.of("feat/live"), listing.get(1).branch());
+        assertTrue(Files.exists(live.resolve("README.md")), "the live worktree's files are untouched");
+    }
+
+    @Test
+    void pruneOnNonGitDirectoryThrowsNotAGitRepositoryException(@TempDir Path notARepo) {
+        CompletionException completion = assertThrows(CompletionException.class,
+                () -> service.prune(notARepo).join());
+        assertInstanceOf(NotAGitRepositoryException.class, completion.getCause());
+    }
+
+    @Test
+    void mergeRecordsARealMergeCommitOfTheRecordedTip(@TempDir Path repoDir, @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/mergeable").get();
+        commitFile(worktree, "feature.txt", "new feature\n", "add feature");
+        WorktreeService.MergeTarget target = service.inspectMergeTarget(repo, "feat/mergeable").get();
+
+        WorktreeService.MergeVerdict verdict = service.merge(repo, "feat/mergeable", target).get();
+
+        WorktreeService.MergeVerdict.Merged merged =
+                assertInstanceOf(WorktreeService.MergeVerdict.Merged.class, verdict);
+        assertEquals(runGitCapture(repo, "rev-parse", "HEAD").strip(), merged.mergeCommitOid());
+        assertTrue(Files.exists(repo.resolve("feature.txt")));
+    }
+
+    @Test
+    void mergeOfAnUpToDateBranchIsAlreadyMerged(@TempDir Path repoDir, @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/nothing").get();
+        WorktreeService.MergeTarget target = service.inspectMergeTarget(repo, "feat/nothing").get();
+
+        assertInstanceOf(WorktreeService.MergeVerdict.AlreadyMerged.class,
+                service.merge(repo, "feat/nothing", target).get());
+    }
+
+    @Test
+    void mergeReportsTheConflictedPaths(@TempDir Path repoDir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        conflictingBranch(repo, worktreeParent, "feat/conflict");
+        WorktreeService.MergeTarget target = service.inspectMergeTarget(repo, "feat/conflict").get();
+
+        WorktreeService.MergeVerdict.Conflicted conflicted = assertInstanceOf(
+                WorktreeService.MergeVerdict.Conflicted.class, service.merge(repo, "feat/conflict", target).get());
+        assertEquals(List.of("README.md"), conflicted.unmergedPaths());
+    }
+
+    @Test
+    void mergeStoppedByAPreMergeCommitHookIsRefusedNotConflicted(@TempDir Path repoDir,
+            @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/hooked").get();
+        commitFile(worktree, "feature.txt", "new feature\n", "add feature");
+        // git commit does NOT re-run pre-merge-commit, so treating this as a
+        // conflict and telling an agent to "just commit" would override the veto.
+        Path hook = Path.of(runGitCapture(repo, "rev-parse", "--absolute-git-dir").strip())
+                .resolve("hooks").resolve("pre-merge-commit");
+        Files.createDirectories(hook.getParent());
+        Files.writeString(hook, "#!/bin/sh\nexit 1\n");
+        hook.toFile().setExecutable(true);
+        WorktreeService.MergeTarget target = service.inspectMergeTarget(repo, "feat/hooked").get();
+
+        assertInstanceOf(WorktreeService.MergeVerdict.Refused.class, service.merge(repo, "feat/hooked", target).get());
+    }
+
+    /**
+     * Fix round 2, finding 1: an interrupt during the merge spawn must not
+     * be turned into a verdict by falling through to {@code verify(...)} --
+     * unlike a timeout, an interrupt means the caller no longer wants any
+     * more git commands run. A slow {@code pre-merge-commit} hook keeps the
+     * top-level {@code git merge} process (and therefore
+     * {@code Process.waitFor}) blocked long enough to interrupt the worker
+     * thread from outside; {@code CompletableFuture.cancel} would not
+     * interrupt the running task, so this drives {@code mergeBlocking}
+     * directly on a thread of its own.
+     */
+    @Test
+    void mergeBlockingPropagatesAnInterruptWithoutProducingAVerdict(@TempDir Path repoDir,
+            @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/interrupt").get();
+        commitFile(worktree, "feature.txt", "new feature\n", "add feature");
+        Path hook = Path.of(runGitCapture(repo, "rev-parse", "--absolute-git-dir").strip())
+                .resolve("hooks").resolve("pre-merge-commit");
+        Files.createDirectories(hook.getParent());
+        Files.writeString(hook, "#!/bin/sh\nsleep 5\nexit 0\n");
+        hook.toFile().setExecutable(true);
+        WorktreeService.MergeTarget target = service.inspectMergeTarget(repo, "feat/interrupt").get();
+
+        java.util.concurrent.atomic.AtomicReference<Throwable> thrown = new java.util.concurrent.atomic.AtomicReference<>();
+        Thread worker = new Thread(() -> {
+            try {
+                service.mergeBlocking(repo, "feat/interrupt", target);
+            } catch (Throwable t) {
+                thrown.set(t);
+            }
+        });
+        worker.start();
+        Thread.sleep(500); // let the hook's sleep start before interrupting
+        worker.interrupt();
+        worker.join(java.time.Duration.ofSeconds(10).toMillis());
+
+        assertFalse(worker.isAlive(), "the worker thread should have unblocked on the interrupt");
+        assertInstanceOf(GitCommandInterruptedException.class, thrown.get());
+    }
+
+    /**
+     * The conflict hand-off's <em>success</em> path, which nothing else here
+     * covers: it is the only path where the merge commit is produced by
+     * {@code git commit} rather than by {@code git merge}, and the only one
+     * that ends in a branch deletion after an agent has been editing the
+     * repository. The fixture does exactly what the hand-off prompt asks for
+     * -- edit the conflicted file, {@code add}, {@code commit --no-edit} --
+     * and the oracle must recognise the result, parents and all; if it did
+     * not, every resolved conflict would time out at five minutes.
+     */
+    @Test
+    void verifyMergeConfirmsAConflictResolvedAndCommittedByHand(@TempDir Path repoDir,
+            @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        conflictingBranch(repo, worktreeParent, "feat/resolved");
+        WorktreeService.MergeTarget target = service.inspectMergeTarget(repo, "feat/resolved").get();
+        assertInstanceOf(WorktreeService.MergeVerdict.Conflicted.class,
+                service.merge(repo, "feat/resolved", target).get());
+
+        Files.writeString(repo.resolve("README.md"), "both versions, reconciled\n");
+        runGit(repo, "add", "README.md");
+        runGit(repo, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--no-edit");
+
+        WorktreeService.MergeVerdict.Merged merged = assertInstanceOf(
+                WorktreeService.MergeVerdict.Merged.class, service.verifyMerge(repo, target).get());
+        assertEquals(runGitCapture(repo, "rev-parse", "HEAD").strip(), merged.mergeCommitOid());
+        String parents = runGitCapture(repo, "rev-list", "--parents", "-n", "1", "HEAD").strip();
+        assertTrue(parents.contains(target.baseHeadOid()), parents);
+        assertTrue(parents.contains(target.branchTipOid().orElseThrow()), parents);
+    }
+
+    /**
+     * Documents the honest boundary of the oracle: {@code Merged} proves a
+     * merge commit <em>of the recorded tip</em> exists on the base branch,
+     * not that its content landed in the tree. That is safe only because the
+     * recorded tip stays reachable from the base branch either way -- the
+     * later branch delete can never lose commits -- so accepting {@code -s
+     * ours} here is a deliberate, narrow limitation, not a latent bug.
+     */
+    @Test
+    void verifyMergeAcceptsStrategyOursBecauseItIsStillARealMergeCommit(@TempDir Path repoDir,
+            @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/ours").get();
+        commitFile(worktree, "feature.txt", "new feature\n", "add feature");
+        WorktreeService.MergeTarget target = service.inspectMergeTarget(repo, "feat/ours").get();
+        // `merge -s ours` makes merge-base --is-ancestor pass while the tree
+        // contains none of the branch's work: ancestry is not the oracle.
+        runGit(repo, "-c", "user.name=Test", "-c", "user.email=test@example.com",
+                "merge", "-s", "ours", "--no-ff", "feat/ours");
+
+        assertInstanceOf(WorktreeService.MergeVerdict.Merged.class, service.verifyMerge(repo, target).get());
+        assertFalse(Files.exists(repo.resolve("feature.txt")));
+    }
+
+    /**
+     * Pins the parent-set check's negative branch: {@code reset --hard} onto
+     * the branch's tip makes {@code merge-base --is-ancestor} pass (ancestry
+     * is satisfied) while no merge commit of the recorded tip exists on the
+     * base branch at all. Verified by hand that replacing the parent-set
+     * check with a plain {@code isAncestor} call makes this test fail --
+     * see the Task 2 fix-round-1 report.
+     */
+    @Test
+    void verifyMergeIsIndeterminateAfterAResetHardOntoTheBranch(@TempDir Path repoDir,
+            @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/reset-hard").get();
+        commitFile(worktree, "feature.txt", "new feature\n", "add feature");
+        WorktreeService.MergeTarget target = service.inspectMergeTarget(repo, "feat/reset-hard").get();
+
+        runGit(repo, "reset", "--hard", "feat/reset-hard");
+
+        assertInstanceOf(WorktreeService.MergeVerdict.Indeterminate.class, service.verifyMerge(repo, target).get());
+    }
+
+    @Test
+    void verifyMergeIsIndeterminateWhenTheBaseBranchChanged(@TempDir Path repoDir,
+            @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/drift").get();
+        WorktreeService.MergeTarget target = service.inspectMergeTarget(repo, "feat/drift").get();
+        runGit(repo, "checkout", "-b", "release/2.0");
+
+        assertInstanceOf(WorktreeService.MergeVerdict.Indeterminate.class, service.verifyMerge(repo, target).get());
+    }
+
+    @Test
+    void verifyMergeIsNotMergedAfterAnAbort(@TempDir Path repoDir, @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        conflictingBranch(repo, worktreeParent, "feat/aborted");
+        WorktreeService.MergeTarget target = service.inspectMergeTarget(repo, "feat/aborted").get();
+        assertInstanceOf(WorktreeService.MergeVerdict.Conflicted.class,
+                service.merge(repo, "feat/aborted", target).get());
+
+        runGit(repo, "merge", "--abort");
+
+        assertInstanceOf(WorktreeService.MergeVerdict.NotMerged.class, service.verifyMerge(repo, target).get());
+    }
+
+    @Test
+    void parseHandlesBranchDetachedAndBareStanzas() {
+        String porcelain = """
+                worktree /repos/main
+                HEAD 1111111111111111111111111111111111111111
+                branch refs/heads/main
+
+                worktree /repos/wt-feature
+                HEAD 2222222222222222222222222222222222222222
+                branch refs/heads/feat/x
+
+                worktree /repos/wt-detached
+                HEAD 3333333333333333333333333333333333333333
+                detached
+                """;
+
+        List<WorktreeService.Worktree> worktrees = WorktreeService.parse(porcelain);
+
+        assertEquals(3, worktrees.size());
+        assertTrue(worktrees.get(0).mainCheckout());
+        assertEquals(Optional.of("main"), worktrees.get(0).branch());
+        assertFalse(worktrees.get(1).mainCheckout());
+        assertEquals(Optional.of("feat/x"), worktrees.get(1).branch());
+        assertTrue(worktrees.get(2).detached());
+        assertTrue(worktrees.get(2).branch().isEmpty());
+    }
+
+    @Test
+    void parseReadsPrunableAndLockedAttributes() {
+        String porcelain = """
+                worktree /repo
+                HEAD 1111111111111111111111111111111111111111
+                branch refs/heads/main
+
+                worktree /gone
+                HEAD 2222222222222222222222222222222222222222
+                branch refs/heads/ghost
+                prunable gitdir file points to non-existent location
+
+                worktree /held
+                HEAD 3333333333333333333333333333333333333333
+                branch refs/heads/held-branch
+                locked
+
+                """;
+
+        List<WorktreeService.Worktree> worktrees = WorktreeService.parse(porcelain);
+
+        assertEquals(3, worktrees.size());
+        assertFalse(worktrees.get(0).prunable());
+        assertFalse(worktrees.get(0).locked());
+        assertTrue(worktrees.get(1).prunable());
+        assertEquals(Optional.of("ghost"), worktrees.get(1).branch());
+        assertTrue(worktrees.get(2).locked());
+        assertFalse(worktrees.get(2).prunable());
+        assertEquals(Optional.empty(), worktrees.get(2).lockReason());
+    }
+
+    @Test
+    void parseReadsTheLockReasonWhenGitRecordsOne() {
+        String porcelain = """
+                worktree /repo
+                HEAD 1111111111111111111111111111111111111111
+                branch refs/heads/main
+
+                worktree /held
+                HEAD 2222222222222222222222222222222222222222
+                branch refs/heads/held-branch
+                locked initializing
+
+                """;
+
+        List<WorktreeService.Worktree> worktrees = WorktreeService.parse(porcelain);
+
+        assertTrue(worktrees.get(1).locked());
+        assertEquals(Optional.of("initializing"), worktrees.get(1).lockReason());
+    }
+
+    @Test
+    void inspectMergeTargetReportsTheBaseBranchHeadAndBranchTip(@TempDir Path repoDir,
+            @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/x").get();
+        String head = runGitCapture(repo, "rev-parse", "HEAD").strip();
+
+        WorktreeService.MergeTarget target = service.inspectMergeTarget(repo, "feat/x").get();
+
+        assertEquals(Optional.of("main"), target.baseBranch());
+        assertEquals(head, target.baseHeadOid());
+        assertEquals(Optional.of(head), target.branchTipOid());
+        assertEquals(WorktreeService.MergeTarget.InProgress.NONE, target.inProgress());
+    }
+
+    @Test
+    void inspectMergeTargetReportsADetachedMainCheckout(@TempDir Path repoDir) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        runGit(repo, "checkout", "--detach");
+
+        WorktreeService.MergeTarget target = service.inspectMergeTarget(repo, "main").get();
+
+        assertTrue(target.baseBranch().isEmpty());
+    }
+
+    @Test
+    void inspectMergeTargetReportsAMissingBranch(@TempDir Path repoDir) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+
+        WorktreeService.MergeTarget target = service.inspectMergeTarget(repo, "feat/never-existed").get();
+
+        assertTrue(target.branchTipOid().isEmpty());
+    }
+
+    @Test
+    void inspectMergeTargetReportsAMergeAlreadyInProgress(@TempDir Path repoDir,
+            @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        conflictingBranch(repo, worktreeParent, "feat/conflict");
+        // Leaves MERGE_HEAD behind: the merge stops, we do not abort it.
+        runGitAllowingFailure(repo, "merge", "--no-ff", "feat/conflict");
+
+        WorktreeService.MergeTarget target = service.inspectMergeTarget(repo, "feat/conflict").get();
+
+        assertEquals(WorktreeService.MergeTarget.InProgress.MERGE, target.inProgress());
+    }
+
+    @Test
+    void inspectMergeTargetReportsARebaseInProgress(@TempDir Path repoDir,
+            @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        conflictingBranch(repo, worktreeParent, "feat/rebase");
+        runGitAllowingFailure(repo, "-c", "user.name=Test", "-c", "user.email=test@example.com",
+                "rebase", "feat/rebase");
+
+        WorktreeService.MergeTarget target = service.inspectMergeTarget(repo, "feat/rebase").get();
+
+        assertEquals(WorktreeService.MergeTarget.InProgress.REBASE, target.inProgress());
+    }
+
+    @Test
+    void isWorktreeCleanIgnoresADirtySubmoduleButReportsUntrackedFiles(@TempDir Path repoDir,
+            @TempDir Path worktreeParent) throws Exception {
+        Path repo = initRepoWithSubmodule(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/sub").get();
+        initSubmodulesIn(worktree);
+        // Exactly Drydock's own third_party/ghostty situation: the build
+        // leaves modified content inside the submodule on every run.
+        Files.writeString(worktree.resolve("vendor").resolve("lib.txt"), "patched by the build\n");
+
+        assertTrue(service.isWorktreeClean(worktree).get());
+
+        Files.writeString(worktree.resolve("scratch.txt"), "untracked\n");
+
+        assertFalse(service.isWorktreeClean(worktree).get());
+    }
+
+    /**
+     * A git failure is not "the worktree has uncommitted changes". The Finish
+     * panel defaults a failed probe to clean on purpose, so that a worktree
+     * whose directory vanished outside drydock is not accused of holding
+     * changes that no longer exist -- which only works if the failure arrives
+     * as an exception instead of as {@code false}.
+     */
+    @Test
+    void isWorktreeCleanFailsLoudlyWhenGitCannotAnswer(@TempDir Path worktreeParent) {
+        Path missing = worktreeParent.resolve("never-created");
+
+        CompletionException completion = assertThrows(CompletionException.class,
+                () -> service.isWorktreeClean(missing).join());
+        assertInstanceOf(GitCommandFailedException.class, completion.getCause());
+    }
+
+    private static void deleteRecursively(Path root) throws IOException {
+        try (var paths = Files.walk(root)) {
+            paths.sorted(Comparator.reverseOrder()).forEach(path -> {
+                try {
+                    Files.delete(path);
+                } catch (IOException e) {
+                    throw new UncheckedIOException(e);
+                }
+            });
+        }
+    }
+
+    private static void commitFile(Path checkout, String name, String content, String message)
+            throws IOException, InterruptedException {
+        Files.writeString(checkout.resolve(name), content);
+        runGit(checkout, "add", name);
+        runGit(checkout, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", message);
+    }
+
+    /**
+     * A repository with one commit and, importantly, an identity of its own.
+     *
+     * <p>The fixture's own commits pass {@code -c user.name}/{@code -c
+     * user.email}, but the code under test does not: {@code
+     * WorktreeService.merge} spawns {@code git merge --no-ff}, which writes a
+     * merge commit. On a machine with no ambient identity -- a CI runner, or a
+     * developer with {@code user.useConfigOnly} -- that exits 128 before
+     * touching the repository, and the merge tests fail with a message
+     * pointing nowhere near the cause. Setting it repo-locally here makes
+     * every test self-contained instead of quietly host-dependent.</p>
+     */
+    private static Path initCommittedRepo(Path parent) throws IOException, InterruptedException {
+        Path repo = Files.createDirectories(parent.resolve("repo"));
+        runGit(repo, "init", "-b", "main");
+        runGit(repo, "config", "user.name", "Test");
+        runGit(repo, "config", "user.email", "test@example.com");
+        Files.writeString(repo.resolve("README.md"), "hello\n");
+        runGit(repo, "add", "README.md");
+        runGit(repo, "commit", "-m", "initial commit");
+        return repo;
+    }
+
+    /**
+     * A repository whose {@code vendor/} is a submodule, mirroring
+     * Drydock's own vendored {@code third_party/ghostty}. {@code
+     * protocol.file.allow} has to be re-enabled explicitly: git disables
+     * {@code file://} submodule transport by default (CVE-2022-39253).
+     */
+    private static Path initRepoWithSubmodule(Path parent) throws IOException, InterruptedException {
+        Path upstream = initCommittedRepo(Files.createDirectories(parent.resolve("upstream")));
+        Files.writeString(upstream.resolve("lib.txt"), "vendored\n");
+        runGit(upstream, "add", "lib.txt");
+        runGit(upstream, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "lib");
+
+        Path repo = initCommittedRepo(parent);
+        runGit(repo, "-c", "protocol.file.allow=always",
+                "submodule", "add", "--", upstream.toString(), "vendor");
+        runGit(repo, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "add submodule");
+        return repo;
+    }
+
+    /**
+     * Checks the submodules out inside {@code worktree}, which is what
+     * makes git refuse a plain {@code worktree remove} on it.
+     */
+    private static void initSubmodulesIn(Path worktree) throws IOException, InterruptedException {
+        runGit(worktree, "-c", "protocol.file.allow=always", "submodule", "update", "--init");
+    }
+
+    /**
+     * Creates {@code branch} in a worktree with a commit that conflicts with
+     * a commit made on the main checkout's README, so a merge or rebase of
+     * it always stops.
+     */
+    private static void conflictingBranch(Path repo, Path worktreeParent, String branch)
+            throws IOException, InterruptedException {
+        Path worktree = worktreeParent.resolve(branch.replace('/', '-'));
+        runGit(repo, "worktree", "add", worktree.toString(), "-b", branch);
+        Files.writeString(worktree.resolve("README.md"), "worktree version\n");
+        runGit(worktree, "add", "README.md");
+        runGit(worktree, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "wt change");
+        Files.writeString(repo.resolve("README.md"), "main version\n");
+        runGit(repo, "add", "README.md");
+        runGit(repo, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "main change");
+    }
+
+    /** For git commands whose non-zero exit is the point of the fixture. */
+    private static void runGitAllowingFailure(Path repo, String... args) throws IOException, InterruptedException {
+        List<String> command = new java.util.ArrayList<>(List.of("git", "-C", repo.toString()));
+        command.addAll(List.of(args));
+        Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
+        process.getInputStream().readAllBytes();
+        process.waitFor();
+    }
+
+    private static void runGit(Path repo, String... args) throws IOException, InterruptedException {
+        runGitCapture(repo, args);
+    }
+
+    private static String runGitCapture(Path repo, String... args) throws IOException, InterruptedException {
+        java.util.List<String> command = new java.util.ArrayList<>();
+        command.add("git");
+        command.add("-C");
+        command.add(repo.toString());
+        command.addAll(java.util.Arrays.asList(args));
+        Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
+        String output = new String(process.getInputStream().readAllBytes());
+        int exitCode = process.waitFor();
+        if (exitCode != 0) {
+            throw new IOException("git " + String.join(" ", args) + " failed (exit " + exitCode + "): " + output);
+        }
+        return output;
+    }
+}

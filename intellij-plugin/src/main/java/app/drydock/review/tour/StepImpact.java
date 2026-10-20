@@ -1,0 +1,280 @@
+package app.drydock.review.tour;
+
+import app.drydock.git.UnifiedDiff;
+import app.drydock.review.ChangeGraph;
+import app.drydock.review.GrammarRegistry;
+import app.drydock.review.OutOfDiffFanIn;
+import app.drydock.review.SymbolScan;
+import app.drydock.review.SymbolWords;
+
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.SortedSet;
+import java.util.TreeMap;
+import java.util.TreeSet;
+import java.util.regex.Matcher;
+
+/**
+ * What one tour step touches beyond its own rows (spec §6), all of it
+ * measured from the review diff, the change graph and the out-of-diff
+ * caller scan.
+ *
+ * <p><strong>Occurrences, not resolved references.</strong> Every name here
+ * is matched by spelling. A caller listed under {@code foo} may call an
+ * unrelated {@code foo}, and a signature flag counts such lines too: the
+ * flag says "a declaration changed and these lines spell its name without
+ * having been edited", which is what a reviewer needs to go and look, not
+ * a compiler's verdict. A symbol too common to attribute is not listed at
+ * all -- it arrives in {@code suppressedCallers} as a count, so the noise
+ * never reaches the rows the reviewer clicks.</p>
+ *
+ * <p>Pure and blocking-free given its inputs, but its inputs are not: the
+ * graph and the scan are built off the FX thread, and so is this.</p>
+ *
+ * @param calledFromOutside  occurrences of the step's declarations outside
+ *                           the change, by file then line
+ * @param suppressedCallers  the step's declarations whose attributable
+ *                           occurrences were too many to list (see {@link
+ *                           OutOfDiffFanIn#MAX_ATTRIBUTABLE}): a count per
+ *                           symbol, never rows
+ * @param inChange           edges to other steps of the tour through the
+ *                           change graph
+ * @param calleesToResolve   names used on the step's changed rows that the
+ *                           change does not declare, most used first, at most
+ *                           {@link #MAX_CALLEES}
+ * @param signatureFlags     declarations on changed rows whose name still
+ *                           appears on unedited lines
+ * @param unavailableReason  why the caller scan could not run; present means
+ *                           {@code calledFromOutside} is absent, not empty
+ */
+public record StepImpact(List<Caller> calledFromOutside, List<Suppressed> suppressedCallers,
+                         List<InChange> inChange, List<String> calleesToResolve,
+                         List<SignatureFlag> signatureFlags, Optional<String> unavailableReason) {
+
+    /** Each callee is a search when it is resolved, so the list is capped. */
+    public static final int MAX_CALLEES = 8;
+
+    public enum Direction { CALLS, CALLED_BY }
+
+    /**
+     * One caller of a step's declaration. {@code bound} is the scope tier:
+     * the parse tree tied the call to this declaration, where the lexical
+     * tier only found a shared name.
+     */
+    public record Caller(String symbol, String file, int line, String text, boolean inChangedFile,
+                         boolean bound) {
+
+        /** The unclassified shape: a name match, proven by nothing. */
+        public Caller(String symbol, String file, int line, String text, boolean inChangedFile) {
+            this(symbol, file, line, text, inChangedFile, false);
+        }
+    }
+
+    /** A declaration of the step whose attributable occurrences were too many to list, and how many there were. */
+    public record Suppressed(String symbol, int occurrences) {
+    }
+
+    /** {@code symbol} links this step to step {@code otherStepNumber} ({@code otherStepId}). */
+    public record InChange(String symbol, Direction direction, String otherStepId, int otherStepNumber) {
+    }
+
+    /** {@code symbol}, declared on changed row {@code lineKey}, still spelled on {@code uneditedCallSites} lines. */
+    public record SignatureFlag(String symbol, String file, String lineKey, int uneditedCallSites) {
+    }
+
+    public StepImpact {
+        calledFromOutside = List.copyOf(calledFromOutside);
+        suppressedCallers = List.copyOf(suppressedCallers);
+        inChange = List.copyOf(inChange);
+        calleesToResolve = List.copyOf(calleesToResolve);
+        signatureFlags = List.copyOf(signatureFlags);
+        Objects.requireNonNull(unavailableReason, "unavailableReason");
+    }
+
+    public static StepImpact of(TourStep step, ReviewTour tour, UnifiedDiff reviewDiff, ChangeGraph graph,
+                                OutOfDiffFanIn.Result fanIn) {
+        AnchorIndex index = AnchorIndex.of(reviewDiff);
+        List<ChangeGraph.DeclarationSite> sites = graph.declarationSites().stream()
+                .filter(site -> inStep(step, index, site.file(), site.lineKey()))
+                .toList();
+        SortedSet<String> symbols = new TreeSet<>();
+        sites.forEach(site -> symbols.add(site.name()));
+
+        List<Caller> callers = new ArrayList<>();
+        List<Suppressed> suppressed = new ArrayList<>();
+        for (String symbol : symbols) {
+            Integer count = fanIn.suppressedCounts().get(symbol);
+            if (count != null) {
+                suppressed.add(new Suppressed(symbol, count));
+                continue;
+            }
+            for (OutOfDiffFanIn.Occurrence occurrence : fanIn.bySymbol().getOrDefault(symbol, List.of())) {
+                callers.add(new Caller(symbol, occurrence.file(), occurrence.line(), occurrence.text(),
+                        occurrence.inChangedFile(), occurrence.bound()));
+            }
+        }
+        callers.sort(Comparator.comparing(Caller::file).thenComparingInt(Caller::line)
+                .thenComparing(Caller::symbol));
+
+        List<SignatureFlag> flags = new ArrayList<>();
+        SortedSet<String> unique = graph.changedDeclarations();
+        for (ChangeGraph.DeclarationSite site : sites) {
+            // A name two changed files declare cannot be attributed to this
+            // declaration, so it is never flagged.
+            if (!unique.contains(site.name())) {
+                continue;
+            }
+            // Every site is a declaration on a changed row by construction,
+            // and the scan already dropped occurrences on changed rows, so
+            // whatever it found is an unedited line still spelling the name.
+            // occurrences() counts the suppressed ones too, so a symbol too
+            // common to list is still flagged, with its real count.
+            int unedited = fanIn.occurrences(site.name());
+            if (unedited > 0) {
+                flags.add(new SignatureFlag(site.name(), site.file(), site.lineKey(), unedited));
+            }
+        }
+
+        return new StepImpact(callers, suppressed, inChange(step, tour, index, graph, symbols),
+                callees(step, index, reviewDiff, graph), flags, fanIn.unavailableReason());
+    }
+
+    private static boolean inStep(TourStep step, AnchorIndex index, String file, String lineKey) {
+        return step.anchors().stream().anyMatch(anchor -> index.contains(anchor, file, lineKey));
+    }
+
+    /**
+     * CALLS: names this step's hunks reference, to the step owning the hunk
+     * that declares each. CALLED_BY: hunks referencing this step's
+     * declarations, to the step owning each. A hunk's owner is the first step
+     * whose anchors touch it -- the same digests {@link StepProgress#fresh}
+     * records -- and an edge back to this step is no edge.
+     */
+    private static List<InChange> inChange(TourStep step, ReviewTour tour, AnchorIndex index,
+                                           ChangeGraph graph, SortedSet<String> symbols) {
+        Map<ChangeGraph.Hunk, String> digests = new HashMap<>();
+        for (AnchorIndex.HunkRef hunk : index.hunks()) {
+            digests.put(new ChangeGraph.Hunk(hunk.file(), hunk.index()), hunk.digest());
+        }
+        Map<String, List<String>> stepDigests = new HashMap<>();
+        for (TourStep each : tour.steps()) {
+            stepDigests.put(each.id(), StepProgress.fresh(each, index).hunkDigests());
+        }
+
+        Set<InChange> edges = new LinkedHashSet<>();
+        Set<ChangeGraph.Hunk> touched = new TreeSet<>();
+        for (TourAnchor anchor : step.anchors()) {
+            for (AnchorIndex.HunkRef hunk : index.hunksTouched(anchor)) {
+                touched.add(new ChangeGraph.Hunk(hunk.file(), hunk.index()));
+            }
+        }
+        for (ChangeGraph.Hunk hunk : touched) {
+            for (String name : graph.referencesIn(hunk)) {
+                for (ChangeGraph.Hunk declaring : graph.hunksDeclaring(name)) {
+                    owner(tour, stepDigests, digests.get(declaring))
+                            .filter(other -> !other.id().equals(step.id()))
+                            .ifPresent(other -> edges.add(new InChange(name, Direction.CALLS, other.id(),
+                                    tour.number(other.id()))));
+                }
+            }
+        }
+        for (String name : symbols) {
+            for (ChangeGraph.Hunk referencing : graph.hunksReferencingSymbol(name)) {
+                owner(tour, stepDigests, digests.get(referencing))
+                        .filter(other -> !other.id().equals(step.id()))
+                        .ifPresent(other -> edges.add(new InChange(name, Direction.CALLED_BY, other.id(),
+                                tour.number(other.id()))));
+            }
+        }
+        return List.copyOf(edges);
+    }
+
+    private static Optional<TourStep> owner(ReviewTour tour, Map<String, List<String>> stepDigests,
+                                            String digest) {
+        if (digest == null) {
+            return Optional.empty();
+        }
+        return tour.steps().stream()
+                .filter(each -> stepDigests.getOrDefault(each.id(), List.of()).contains(digest))
+                .findFirst();
+    }
+
+    /**
+     * Identifiers used on the step's changed rows that the change does not
+     * declare. A name declared in more than one changed file is still
+     * declared in the change -- ambiguous, not unknown -- so it is not a
+     * callee to resolve. Most used first, then by name so the cut at {@link
+     * #MAX_CALLEES} is stable.
+     *
+     * <p>Where the file's language has a grammar the names come from its
+     * parse tree ({@link SymbolScan}), uses only, so a comment's words --
+     * which the tree holds as one comment node -- are never names. Without
+     * one the lexical rule {@link SymbolWords} gives every lens reads the
+     * rows, skipping those that start like a comment ({@code //}, {@code
+     * /*}, {@code *}, {@code #}): a deleted "// Legacy helper kept for old
+     * callers" listed five callees that do not exist.</p>
+     */
+    private static List<String> callees(TourStep step, AnchorIndex index, UnifiedDiff reviewDiff,
+                                        ChangeGraph graph) {
+        Set<String> declared = new HashSet<>();
+        graph.declarationSites().forEach(site -> declared.add(site.name()));
+        Map<String, Integer> counts = new TreeMap<>();
+        for (UnifiedDiff.FileDiff file : reviewDiff.files()) {
+            if (step.anchors().stream().noneMatch(anchor -> anchor.file().equals(file.path()))) {
+                continue;
+            }
+            for (String name : usedNames(step, index, file)) {
+                if (SymbolWords.isSymbol(name) && !declared.contains(name)) {
+                    counts.merge(name, 1, Integer::sum);
+                }
+            }
+        }
+        return counts.entrySet().stream()
+                .sorted(Map.Entry.<String, Integer>comparingByValue().reversed()
+                        .thenComparing(Map.Entry.comparingByKey()))
+                .limit(MAX_CALLEES)
+                .map(Map.Entry::getKey)
+                .toList();
+    }
+
+    /** Every use of a name on {@code file}'s changed rows inside the step, once per occurrence. */
+    private static List<String> usedNames(TourStep step, AnchorIndex index, UnifiedDiff.FileDiff file) {
+        List<String> names = new ArrayList<>();
+        if (GrammarRegistry.forPath(file.path()).isPresent()) {
+            for (SymbolScan.Symbol symbol : SymbolScan.of(file)) {
+                if (!symbol.declaration() && symbol.onChangedLine()
+                        && inStep(step, index, file.path(), symbol.lineKey())) {
+                    names.add(symbol.name());
+                }
+            }
+            return names;
+        }
+        for (UnifiedDiff.Hunk hunk : file.hunks()) {
+            for (UnifiedDiff.Line line : hunk.lines()) {
+                if (line.kind() == UnifiedDiff.Line.Kind.CONTEXT || looksLikeComment(line.text())
+                        || !inStep(step, index, file.path(), line.lineKey())) {
+                    continue;
+                }
+                Matcher matcher = SymbolWords.IDENTIFIER.matcher(line.text());
+                while (matcher.find()) {
+                    names.add(matcher.group());
+                }
+            }
+        }
+        return names;
+    }
+
+    private static boolean looksLikeComment(String text) {
+        String stripped = text.strip();
+        return stripped.startsWith("//") || stripped.startsWith("/*") || stripped.startsWith("*")
+                || stripped.startsWith("#");
+    }
+}

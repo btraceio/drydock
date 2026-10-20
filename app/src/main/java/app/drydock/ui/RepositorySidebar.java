@@ -136,6 +136,8 @@ public final class RepositorySidebar extends VBox {
     private final SessionManager sessionManager;
     private final WorkspaceNavigator navigator;
     private final WorkspaceViewModel viewModel;
+    /** The repositories the last repository-list change showed; FX thread only. */
+    private Set<RepositoryId> shownRepositoryIds = new HashSet<>();
     private final ExternalEditorLauncher editorLauncher = new ExternalEditorLauncher();
 
     private final TextField filterField = new TextField();
@@ -187,6 +189,8 @@ public final class RepositorySidebar extends VBox {
      */
     private final VBox emptyState;
     private final Label emptyBanner = new Label("Nothing matches your filters");
+    /** Why the projects list shared with the IntelliJ plugin is not being followed; hidden when it is. */
+    private final Label sharedListBanner = new Label();
     private final Label footerLabel = new Label();
     private final Region footerDot = new Region();
 
@@ -396,7 +400,11 @@ public final class RepositorySidebar extends VBox {
         HBox footer = new HBox(footerDot, footerLabel);
         footer.getStyleClass().add("sidebar-footer");
 
-        getChildren().addAll(collapseHeader.node(), header, emptyBanner, repoTabStrip, tree, footer);
+        sharedListBanner.getStyleClass().add("sidebar-empty-banner");
+        sharedListBanner.setWrapText(true);
+        sharedListBanner.setVisible(false);
+        sharedListBanner.setManaged(false);
+        getChildren().addAll(collapseHeader.node(), header, sharedListBanner, emptyBanner, repoTabStrip, tree, footer);
 
         // Keep the displayed list in sync with EVERY repository mutation,
         // not just the ones initiated by this sidebar's own handlers. The
@@ -1063,6 +1071,21 @@ public final class RepositorySidebar extends VBox {
     }
 
     private void onRepositoriesChanged() {
+        Optional<String> problem = repositoryManager.sharedListProblem();
+        sharedListBanner.setText(problem.orElse(""));
+        sharedListBanner.setVisible(problem.isPresent());
+        sharedListBanner.setManaged(problem.isPresent());
+        // A repository removed elsewhere -- in the IntelliJ plugin, through
+        // the shared projects list -- gets the same cleanup as one removed
+        // with this sidebar's own button.
+        Set<RepositoryId> current = new HashSet<>();
+        repositoryManager.repositories().forEach(repository -> current.add(repository.id()));
+        for (RepositoryId shown : shownRepositoryIds) {
+            if (!current.contains(shown)) {
+                viewModel.removeRepository(shown);
+            }
+        }
+        shownRepositoryIds = current;
         for (Repository repository : repositoryManager.repositories()) {
             if (viewModel.repoStatus(repository.id()).isEmpty()
                     && viewModel.repoStatusFailure(repository.id()).isEmpty()) {
@@ -2402,13 +2425,17 @@ public final class RepositorySidebar extends VBox {
         String location = repository.isRemote()
                 ? repository.remote().host() + ":" + repository.remote().remotePath()
                 : repository.root().toString();
-        confirm.setContentText("This only removes it from Drydock's list. "
+        confirm.setContentText("This removes it from Drydock's list, here and in the IntelliJ plugin. "
                 + "Nothing at " + location + " is touched or deleted.");
         confirm.showAndWait().filter(button -> button == ButtonType.OK).ifPresent(button -> {
-            repositoryManager.removeRepository(repository.id());
-            // The manager's change listener rebuilds the repo list; the
-            // model forgets the removed repo's status/discovery data.
-            viewModel.removeRepository(repository.id());
+            // The manager's change listener rebuilds the repo list and the
+            // model forgets the removed repo's status/discovery data; a
+            // remove the shared list refused says why instead.
+            repositoryManager.removeRepository(repository.id()).whenComplete((ignored, failure) -> {
+                if (failure != null) {
+                    Platform.runLater(() -> UiErrors.show("Could not remove repository", failure));
+                }
+            });
         });
     }
 

@@ -27,6 +27,8 @@ import app.drydock.mcp.McpServer;
 import app.drydock.mcp.McpSessionRegistry;
 import app.drydock.mcp.McpToolRouter;
 import app.drydock.mcp.WorkspaceMcpSessionContext;
+import app.drydock.projects.SharedProjectsFile;
+import app.drydock.projects.SharedProjectsSeed;
 import app.drydock.review.AnnotationStore;
 import app.drydock.review.RepositoryPullRequests;
 import app.drydock.review.ReviewScopeRegistry;
@@ -219,6 +221,21 @@ public final class DrydockApplication extends Application {
      * code runs from and never shared with, or read from, another instance's
      * directory ({@code StateDirectory}).
      */
+    /**
+     * The shared projects list this run follows. A diagnostic run
+     * ({@code app.drydock.diag.stateFile}) keeps it beside its throwaway
+     * state unless {@code drydock.projectsFile} says otherwise: seeding,
+     * adding or removing in such a run must never reach the user's real
+     * list, which their real app and IDE follow.
+     */
+    static Path sharedProjectsFileFor(Optional<String> diagStateFile, Optional<String> explicitFile,
+                                      Path defaultFile) {
+        if (explicitFile.isPresent()) {
+            return Path.of(explicitFile.get());
+        }
+        return diagStateFile.map(state -> Path.of(state).resolveSibling("projects.json")).orElse(defaultFile);
+    }
+
     private static JsonApplicationStateRepository resolveStateRepository() {
         String diagStateFile = System.getProperty("app.drydock.diag.stateFile");
         if (diagStateFile != null) {
@@ -346,7 +363,15 @@ public final class DrydockApplication extends Application {
         agentContextExecutor = Executors.newVirtualThreadPerTaskExecutor();
         AgentContext agentContext = new AgentContext(stateDir, activityDir, agentContextExecutor);
         agentRegistry = AgentRegistry.create(agentContext);
-        repositoryManager = new RepositoryManager(stateRepository, gitStatusService);
+        repositoryManager = new RepositoryManager(stateRepository, gitStatusService,
+                new SharedProjectsFile(sharedProjectsFileFor(
+                        Optional.ofNullable(System.getProperty("app.drydock.diag.stateFile")),
+                        Optional.ofNullable(System.getProperty(SharedProjectsFile.OVERRIDE_PROPERTY)),
+                        SharedProjectsFile.defaultFile())),
+                SharedProjectsSeed.mainCheckoutVia(worktreeService));
+        // Seeds the shared projects list on first run and follows the
+        // IntelliJ plugin's changes to it; off the FX thread.
+        repositoryManager.start();
         sessionManager = new SessionManager(stateRepository, agentRegistry);
         ChangedLineService changedLineService = new ChangedLineService(diffService);
         annotationStore = new AnnotationStore(AnnotationStore.siblingOf(stateRepository.stateFile()));
@@ -1402,6 +1427,9 @@ public final class DrydockApplication extends Application {
         }
         if (sessionManager != null) {
             closeQuietly("SessionManager", sessionManager::close);
+        }
+        if (repositoryManager != null) {
+            closeQuietly("RepositoryManager shared-list polling", repositoryManager::stop);
         }
         closeQuietly("hook install", this::awaitHookInstall);
         if (agentContextExecutor != null) {

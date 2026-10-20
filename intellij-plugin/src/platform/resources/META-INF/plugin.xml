@@ -1,0 +1,110 @@
+<idea-plugin>
+    <id>io.btrace.drydock</id>
+    <name>Drydock</name>
+    <vendor>Jaroslav Bachorik</vendor>
+    <description><![CDATA[
+        Runs agent CLI sessions (Claude, Codex, pi) against git worktrees from
+        inside the IDE: one window per worktree, the agent console as a pinned
+        editor tab, and a durable session catalog that survives every window
+        and restart.
+    ]]></description>
+    <depends>com.intellij.modules.platform</depends>
+    <!-- TerminalExecutionConsole itself ships in the platform, but its
+         rendering resolves the terminal plugin's colour scheme and font
+         settings; the console renders wrong without it. -->
+    <depends>org.jetbrains.plugins.terminal</depends>
+    <depends>Git4Idea</depends>
+    <extensions defaultExtensionNs="com.intellij">
+        <!-- A plain (not @State) application service: persistence goes through
+             the core ApplicationStateStore single writer, so only the concrete
+             class is registered (no separate service interface exists). -->
+        <applicationService
+                serviceImplementation="app.drydock.intellij.DrydockPluginService"/>
+
+        <!-- The window's live executions. A declarative projectService (unlike
+             the session service) because its only constructor argument is the
+             project, and because the platform disposing it on project close is
+             exactly the stop-everything hook the model needs. -->
+        <projectService
+                serviceImplementation="app.drydock.intellij.agent.AgentExecutionService"/>
+
+        <!-- The agent console tab. The protocol exists so the IDE can restore
+             a pinned console tab from the project's workspace file by URL; a
+             LightVirtualFile has none, and drydock reopening tabs itself was
+             the v2 duplicate-tab bug. -->
+        <virtualFileSystem key="drydock-agent"
+                           implementationClass="app.drydock.intellij.agent.AgentConsoleFileSystem"/>
+        <fileEditorProvider
+                implementation="app.drydock.intellij.agent.AgentConsoleEditorProvider"/>
+        <!-- The tab's label and status dot. The platform builds both from
+             these extension points, not from FileEditor.getName(), so without
+             them a console tab shows a bare session id. -->
+        <editorTabTitleProvider
+                implementation="app.drydock.intellij.agent.AgentConsoleTabPresentation"/>
+        <fileIconProvider
+                implementation="app.drydock.intellij.agent.AgentConsoleTabPresentation"/>
+
+        <!-- ProjectRepositoryService and DrydockSessionService are plain
+             classes with constructor arguments the component container
+             cannot supply (the plugin's executor, the window's execution
+             host), so instead of declarative projectService entries the
+             startup activity constructs exactly one instance per project,
+             holds them in the project's user data, and pre-warms the plugin
+             init and the project's repository with visible progress. It
+             starts no agent. -->
+        <!-- "Stop n working agents?" before a window close or a quit stops
+             agents mid-task. A close handler rather than an exit listener:
+             the only exit veto (ApplicationListener.canExitApplication) is
+             deprecated, and an exit closes every project through this. -->
+        <projectCloseHandler
+                implementation="app.drydock.intellij.agent.AgentCloseConfirmation"/>
+
+        <!-- Settings > Tools > Drydock: the worktree base folder, shared with
+             the standalone app through ~/.drydock/config.json. -->
+        <applicationConfigurable parentId="tools" id="drydock" displayName="Drydock"
+                                 instance="app.drydock.intellij.settings.DrydockConfigurable"/>
+
+        <!-- The task-centric view: registered projects (shared with the
+             standalone app) and their agent tasks, in every window. -->
+        <toolWindow id="Drydock" anchor="right" secondary="false"
+                    icon="/icons/drydock.svg"
+                    factoryClass="app.drydock.intellij.tasks.DrydockToolWindowFactory"/>
+
+        <!-- "Claude needs you": the balloon raised when an agent starts
+             waiting for the user (AttentionNotifier). -->
+        <notificationGroup id="Drydock attention" displayType="BALLOON"/>
+
+        <postStartupActivity
+                implementation="app.drydock.intellij.startup.DrydockStartupActivity"/>
+    </extensions>
+    <applicationListeners>
+        <!-- projectClosing, not the service's dispose: a disposing project's
+             message bus no longer delivers the process-terminated event that
+             carries the idle status, which left rows persisted as RUNNING with
+             nothing running. -->
+        <listener class="app.drydock.intellij.agent.AgentWindowCloseListener"
+                  topic="com.intellij.openapi.project.ProjectManagerListener"/>
+        <!-- Marks the start of a quit for AgentCloseConfirmation, so a quit
+             asks once for every window. -->
+        <listener class="app.drydock.intellij.agent.QuitSignal"
+                  topic="com.intellij.ide.AppLifecycleListener"/>
+        <!-- Every window's agents, so the "needs you" balloon can appear in
+             whichever window the user is in. -->
+        <listener class="app.drydock.intellij.agent.AttentionNotifier"
+                  topic="app.drydock.intellij.agent.SessionActivityListener"/>
+    </applicationListeners>
+    <actions>
+        <!-- Drydock is reached through its tool window, not a menu: this is
+             the one action outside it, so the shortcut works anywhere. -->
+        <action id="Drydock.NewTask"
+                class="app.drydock.intellij.tasks.NewTaskAction"
+                text="New Task…"
+                description="Start an agent on a new task"
+                icon="AllIcons.General.Add">
+            <!-- $default "alt meta N" is ⌃⌥N on macOS (the keymaps swap meta
+                 and control). Not ⌥⌘N: on macOS that is Refactor | Inline in
+                 an editor and Git's New Branch elsewhere. -->
+            <keyboard-shortcut keymap="$default" first-keystroke="alt meta N"/>
+        </action>
+    </actions>
+</idea-plugin>

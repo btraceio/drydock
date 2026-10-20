@@ -1,0 +1,634 @@
+package app.drydock.mcp;
+
+import app.drydock.domain.ManagedSessionId;
+import app.drydock.state.json.JsonParseException;
+import app.drydock.state.json.JsonParser;
+import app.drydock.state.json.JsonValue;
+import app.drydock.state.json.JsonValue.JsonArray;
+import app.drydock.state.json.JsonValue.JsonBoolean;
+import app.drydock.state.json.JsonValue.JsonNumber;
+import app.drydock.state.json.JsonValue.JsonObject;
+import app.drydock.state.json.JsonValue.JsonString;
+import app.drydock.state.json.JsonWriter;
+
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpHandler;
+import com.sun.net.httpserver.HttpServer;
+
+import java.io.IOException;
+import java.time.Duration;
+import java.time.Instant;
+import java.io.InputStream;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
+/**
+ * A localhost-only HTTP transport for the MCP tool protocol (JSON-RPC 2.0
+ * over {@code POST /mcp}). Binds {@code 127.0.0.1} on an ephemeral port and
+ * never {@code 0.0.0.0} -- this server is a bridge to a single hosted
+ * {@code claude} process on the same machine, not a network service.
+ *
+ * <p>The {@code X-Drydock-Session-Token} header identifies which managed
+ * session is calling, so tools resolve to the right repository. The same token
+ * is also accepted as {@code Authorization: Bearer}, for clients that can only
+ * be pointed at a bearer token. No drydock provider needs that form today --
+ * Codex, the one that prompted it, turned out to support custom headers after
+ * all ({@code env_http_headers}) and uses {@code X-Drydock-Session-Token} like
+ * Claude -- but the form stays because it costs one branch and is what a
+ * bearer-only client would send. As {@link
+ * McpSessionRegistry}'s Javadoc explains, the token is attribution, not a
+ * secret between sessions: any process running as this user's uid can already
+ * read a sibling session's config file -- which is also why accepting a second
+ * header form widens nothing. {@code Origin}/{@code Host} checks
+ * below are defense in depth against a browser tab rebinding to this port --
+ * they add nothing against a local process, which is why an absent {@code
+ * Origin} (as CLI clients send) is accepted rather than rejected.</p>
+ */
+public final class McpServer implements AutoCloseable {
+
+    private static final Logger LOG = Logger.getLogger(McpServer.class.getName());
+
+    private static final String TOKEN_HEADER = "X-Drydock-Session-Token";
+
+    /**
+     * The other accepted credential form, for a client that can only be told
+     * to send {@code Authorization: Bearer}. Nothing drydock launches needs it
+     * today (see this class's Javadoc), so it is a compatibility affordance,
+     * not a route any provider depends on.
+     */
+    private static final String BEARER_SCHEME = "Bearer";
+
+    private static final String PATH = "/mcp";
+
+    /** Bounded drain for in-flight handlers on close; matches SessionManager's own close budget. */
+    private static final long CLOSE_AWAIT_TERMINATION_SECONDS = 2;
+
+    /**
+     * Answered when the client asks for a version this server does not know.
+     * The oldest of {@link #SUPPORTED_PROTOCOL_VERSIONS}, because a client that
+     * does not recognise it is required to disconnect -- so the fallback must
+     * be the one most likely to be understood.
+     */
+    private static final String FALLBACK_PROTOCOL_VERSION = "2024-11-05";
+
+    /**
+     * Versions this server will echo back. All three describe the same wire
+     * shape as far as this server uses it: a POST of one JSON-RPC request
+     * answered with one JSON response, a tools-only capability set, and no
+     * server-initiated messages. Nothing here depends on the SSE stream,
+     * resources, prompts or session headers that differ between them, so the
+     * version is the client's to choose.
+     *
+     * <p>Echoing rather than asserting one version matters because the MCP
+     * spec makes the client disconnect when it does not recognise the version
+     * the server names -- the handshake is the one part of this feature no
+     * automated test can verify against a real client.</p>
+     */
+    private static final Set<String> SUPPORTED_PROTOCOL_VERSIONS =
+            Set.of("2024-11-05", "2025-03-26", "2025-06-18");
+
+    private final McpSessionRegistry registry;
+    private final McpToolRouter router;
+
+    /**
+     * The bounded traffic log the Review destination's activity panel renders
+     * (spec §4.7). Supplied rather than owned: the Review view is built
+     * before the server starts, and both must see the same log.
+     */
+    private final McpActivityLog activityLog;
+
+    // Volatile: {@link #start()} runs on a startup virtual thread while
+    // {@link #close()} is called from the JavaFX shutdown path, so a
+    // non-volatile field would let a stop() racing startup read a stale null
+    // and leak the bound listener socket.
+    private volatile HttpServer server;
+    private volatile ExecutorService executor;
+    private volatile int port;
+
+    /**
+     * Set by {@link #close()} before it looks at anything else, and honoured by
+     * {@link #start()} both before and after it binds. Publishing this object
+     * ahead of {@code start()} is NOT enough on its own: a {@code close()} that
+     * runs first sees a null {@link #server}, no-ops, and {@code start()} then
+     * goes on to bind a listener nobody will ever stop.
+     */
+    private volatile boolean closed;
+
+    /** The traffic log, for the Review activity panel. */
+    public McpActivityLog activityLog() {
+        return activityLog;
+    }
+
+    public McpServer(McpSessionRegistry registry, McpToolRouter router) {
+        this(registry, router, new McpActivityLog());
+    }
+
+    public McpServer(McpSessionRegistry registry, McpToolRouter router, McpActivityLog activityLog) {
+        this.activityLog = activityLog;
+        this.registry = registry;
+        this.router = router;
+    }
+
+    /** A no-op once {@link #close()} has been called; never binds after shutdown. */
+    public void start() throws IOException {
+        if (closed) {
+            return;
+        }
+        HttpServer created = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+        ExecutorService createdExecutor = Executors.newVirtualThreadPerTaskExecutor();
+        created.setExecutor(createdExecutor);
+        created.createContext(PATH, new McpHandler());
+        server = created;
+        executor = createdExecutor;
+        created.start();
+        port = created.getAddress().getPort();
+        if (closed) {
+            // close() ran while this method was binding: it either saw the
+            // fields (and stopped what it found) or did not, so undo it here.
+            // close() is idempotent, which makes the double-stop harmless.
+            close();
+        }
+    }
+
+    public int port() {
+        return port;
+    }
+
+    public String endpointUrl() {
+        return "http://127.0.0.1:" + port + PATH;
+    }
+
+    /** The socket's actual bound address, for tests that must not trust a literal-built string. */
+    public InetSocketAddress boundAddress() {
+        return server.getAddress();
+    }
+
+    /**
+     * Null-safe and idempotent: safe to call before {@link #start()} and safe
+     * to call twice. Calling it before {@code start()} also permanently
+     * prevents that start from binding.
+     *
+     * <p>Drains in-flight handlers before returning. {@code stop(0)} closes the
+     * listener but does not wait for exchanges already being handled, and
+     * {@code shutdownNow()} only <em>attempts</em> interruption -- so without a
+     * bounded await, a handler blocked in {@code WorkspaceMcpSessionContext}'s
+     * {@code join} could still be touching {@code SessionManager} while
+     * {@code DrydockApplication.stop()} closes it on the next line. Mirrors
+     * {@code SessionManager.close}'s bounded-drain pattern.</p>
+     */
+    @Override
+    public void close() {
+        closed = true;
+        if (server != null) {
+            server.stop(0);
+            server = null;
+        }
+        if (executor != null) {
+            executor.shutdown();
+            try {
+                if (!executor.awaitTermination(CLOSE_AWAIT_TERMINATION_SECONDS, TimeUnit.SECONDS)) {
+                    LOG.log(Level.WARNING, "MCP request handlers did not drain within "
+                            + CLOSE_AWAIT_TERMINATION_SECONDS + "s; forcing shutdown");
+                    executor.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                executor.shutdownNow();
+            }
+            executor = null;
+        }
+    }
+
+    @Override
+    public String toString() {
+        // Never the port or a token -- see class Javadoc and McpSessionRegistry's.
+        return getClass().getSimpleName();
+    }
+
+    /**
+     * One rejected-call row per this interval (see {@code recordRejectedToolCall}):
+     * the row is written from UNauthenticated request content, so a local
+     * process without a token can issue calls at HTTP-request rate and a row
+     * per request would flood the activity panel.
+     */
+    private static final Duration REJECTED_ROW_INTERVAL = Duration.ofSeconds(10);
+
+    private final class McpHandler implements HttpHandler {
+
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            try {
+                handleSafely(exchange);
+            } catch (Exception e) {
+                // One bad request must not kill the server or this connection.
+                LOG.log(Level.WARNING, "Unhandled error serving MCP request", e);
+                sendJson(exchange, 200, errorResponse(JsonValue.JsonNull.INSTANCE, -32603, "Internal error"));
+            } finally {
+                exchange.close();
+            }
+        }
+
+        /**
+         * The calling session, identified by either accepted credential.
+         *
+         * <p>{@link #TOKEN_HEADER} is tried first because it is drydock's own
+         * and unambiguous; {@code Authorization: Bearer} is the fallback for
+         * clients that cannot set an arbitrary header.</p>
+         *
+         * <p>Falling back when the drydock header is present but does not
+         * resolve is deliberate. The token is attribution, not a secret
+         * between sessions (see {@link McpSessionRegistry}), so a client that
+         * sets both and gets one wrong is a client to be forgiving of, not a
+         * privilege boundary to defend.</p>
+         */
+        private Optional<ManagedSessionId> resolveCaller(HttpExchange exchange) {
+            Optional<ManagedSessionId> byDrydockHeader =
+                    registry.resolve(exchange.getRequestHeaders().getFirst(TOKEN_HEADER));
+            if (byDrydockHeader.isPresent()) {
+                return byDrydockHeader;
+            }
+            return bearerCredential(exchange.getRequestHeaders().getFirst("Authorization"))
+                    .flatMap(registry::resolve);
+        }
+
+        /**
+         * The credential out of an {@code Authorization: Bearer <token>}
+         * header, or empty for any other scheme, a missing header, or a
+         * scheme with no credential after it.
+         *
+         * <p>The scheme is matched case-insensitively (RFC 7235 makes
+         * auth-scheme case-insensitive), and a separator is required after it
+         * so {@code Bearerabc} is not read as the token {@code abc}.</p>
+         */
+        private static Optional<String> bearerCredential(String authorization) {
+            if (authorization == null) {
+                return Optional.empty();
+            }
+            String header = authorization.strip();
+            if (header.length() <= BEARER_SCHEME.length()
+                    || !header.regionMatches(true, 0, BEARER_SCHEME, 0, BEARER_SCHEME.length())
+                    || !Character.isWhitespace(header.charAt(BEARER_SCHEME.length()))) {
+                return Optional.empty();
+            }
+            String credential = header.substring(BEARER_SCHEME.length()).strip();
+            return credential.isEmpty() ? Optional.empty() : Optional.of(credential);
+        }
+
+        private void handleSafely(HttpExchange exchange) throws IOException {
+            if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+                sendEmpty(exchange, 405);
+                return;
+            }
+
+            if (!originAllowed(exchange.getRequestHeaders().getFirst("Origin"))) {
+                sendEmpty(exchange, 403);
+                return;
+            }
+            if (!originAllowed(exchange.getRequestHeaders().getFirst("Host"))) {
+                sendEmpty(exchange, 403);
+                return;
+            }
+
+            // The body is read before the token resolves, because a rejected
+            // call is worth a row naming it -- see recordRejectedToolCall.
+            String body = readBody(exchange.getRequestBody());
+            JsonValue parsed;
+            try {
+                parsed = JsonParser.parse(body);
+            } catch (JsonParseException e) {
+                // There is nothing the activity panel can show -- no call to
+                // name -- so the one trace an unparseable request gets is here.
+                LOG.log(Level.WARNING, "Could not parse an MCP request: " + e.getMessage());
+                sendJson(exchange, 200, errorResponse(JsonValue.JsonNull.INSTANCE, -32700, "Parse error"));
+                return;
+            }
+
+            if (!(parsed instanceof JsonObject request)) {
+                sendJson(exchange, 200, errorResponse(JsonValue.JsonNull.INSTANCE, -32700, "Parse error"));
+                return;
+            }
+
+            // Notification first, before any method dispatch: a request with no
+            // "id" is a notification (e.g. notifications/initialized, sent by
+            // claude right after initialize) and must never receive an error
+            // object, whatever its method -- see class and package Javadoc.
+            JsonValue id = request.get("id");
+            if (id == null) {
+                sendEmpty(exchange, 204);
+                return;
+            }
+
+            String method = request.get("method") instanceof JsonString s ? s.value() : null;
+            JsonValue params = request.get("params");
+
+            Optional<ManagedSessionId> caller = resolveCaller(exchange);
+            if (caller.isEmpty()) {
+                recordRejectedToolCall(method, params);
+                sendEmpty(exchange, 401);
+                return;
+            }
+
+            sendJson(exchange, 200, dispatch(caller.get(), method, params, id));
+        }
+
+        private JsonValue dispatch(ManagedSessionId caller, String method, JsonValue params, JsonValue id) {
+            return switch (method == null ? "" : method) {
+                case "initialize" -> successResponse(id, initializeResult(params));
+                case "ping" -> successResponse(id, JsonObject.empty());
+                case "tools/list" -> successResponse(id, toolsListResult());
+                case "tools/call" -> toolsCall(caller, params, id);
+                default -> errorResponse(id, -32601, "Method not found: " + method);
+            };
+        }
+
+        /**
+         * One rejected-call row per this interval. The row is written from
+         * UNauthenticated request content: a local process without a token
+         * can issue tools/call at HTTP-request rate, and a row per request
+         * would flood the activity panel, drowning the genuine session rows
+         * it exists to surface. The throttle bounds that flood; the count of
+         * suppressed rows is not tracked -- the panel shows the shape of the
+         * rejection, not its volume.
+         */
+        private volatile long lastRejectedRowNanos;
+
+        /**
+         * A tools/call refused at the door still leaves a trace: the activity
+         * panel is the wiring made visible, and a 401 that recorded nothing
+         * read as "nothing happened", when what happened is that nothing CAN
+         * -- the token named a session that has ended, or resolved to nothing.
+         * Exactly the first thing to check when a reviewer sits silent.
+         * Handshake methods (initialize, tools/list) stay out: they are
+         * housekeeping both sides make without the model asking anything.
+         *
+         * <p>The tool name comes from unauthenticated request content and is
+         * stored into a row the panel renders as a Label, so it goes through
+         * the same {@link #oneLine} sanitization a call's arguments get.</p>
+         */
+        private void recordRejectedToolCall(String method, JsonValue params) {
+            if (!"tools/call".equals(method)
+                    || !(params instanceof JsonObject args)
+                    || !(args.get("name") instanceof JsonString name)) {
+                return;
+            }
+            long now = System.nanoTime();
+            if (now - lastRejectedRowNanos < REJECTED_ROW_INTERVAL.toNanos()) {
+                return; // throttled -- see REJECTED_ROW_INTERVAL
+            }
+            lastRejectedRowNanos = now;
+            String tool = oneLine(name.value());
+            try {
+                activityLog.record(new McpActivityLog.Entry(Instant.now(), directionOf(tool),
+                        tool, "rejected: no valid session token -- the session may have ended",
+                        scopeIdOf(args.get("arguments")), 0, true));
+            } catch (RuntimeException e) {
+                LOG.log(Level.FINE, "Could not log the rejected MCP call for " + tool, e);
+            }
+        }
+
+        private JsonValue toolsCall(ManagedSessionId caller, JsonValue params, JsonValue id) {
+            JsonObject args = params instanceof JsonObject object ? object : JsonObject.empty();
+            JsonValue nameValue = args.get("name");
+            if (!(nameValue instanceof JsonString nameString)) {
+                // The router's dispatch is a plain String switch with no `case
+                // null`, so passing a missing/non-string name through would NPE
+                // and degrade into a -32603 internal error. Missing tool name is
+                // a predictable bad argument, not an internal failure.
+                return successResponse(id, toolCallResult(new JsonString("Missing required \"name\""), true));
+            }
+            String name = nameString.value();
+            JsonValue arguments = args.get("arguments");
+
+            try {
+                JsonValue toolResult = router.call(caller, name, arguments);
+                // session_reclaim is bridge housekeeping, not agent-authored
+                // work: logging it as a row in the Review activity panel would
+                // be noise about something the model never asked for.
+                if (!"session_reclaim".equals(name)) {
+                    logActivity(name, arguments, summarize(arguments),
+                            bytesOf(JsonWriter.write(toolResult)), false);
+                }
+                return successResponse(id, toolCallResult(toolResult, false));
+            } catch (McpToolException e) {
+                // A tool failure is not a transport failure: it comes back as a
+                // 200 JSON-RPC result with isError: true, so the agent can read
+                // and act on the message rather than the transport swallowing it.
+                // The row says WHAT the tool refused with -- on a failed call
+                // the refusal is the payload; the request args were already
+                // visible to whoever sent them.
+                if (!"session_reclaim".equals(name)) {
+                    logActivity(name, arguments, oneLine(e.getMessage()), bytesOf(e.getMessage()), true);
+                }
+                return successResponse(id, toolCallResult(new JsonString(e.getMessage()), true));
+            }
+        }
+
+        /**
+         * Records one call in the activity log the Review panel renders.
+         * Never allowed to affect the call: a logging failure is not a tool
+         * failure, and the agent must get its answer either way.
+         */
+        private void logActivity(String tool, JsonValue arguments, String detail, int responseBytes,
+                                 boolean failed) {
+            try {
+                activityLog.record(new McpActivityLog.Entry(Instant.now(), directionOf(tool),
+                        tool, detail, scopeIdOf(arguments), responseBytes, failed));
+            } catch (RuntimeException e) {
+                LOG.log(Level.FINE, "Could not log MCP activity for " + tool, e);
+            }
+        }
+
+        /** The {@code scopeId} argument of a tool call's arguments, when it names one. */
+        private static Optional<String> scopeIdOf(JsonValue arguments) {
+            return arguments instanceof JsonObject args
+                    && args.get("scopeId") instanceof JsonString scope
+                    ? Optional.of(scope.value())
+                    : Optional.empty();
+        }
+
+        private static int bytesOf(String text) {
+            return text.getBytes(StandardCharsets.UTF_8).length;
+        }
+
+        /**
+         * Injected into the hosted agent's system prompt by the client. This
+         * is the only thing that makes a tool get called without the agent
+         * already hunting for one -- a tool description is read at selection
+         * time, not at the moment the agent learns what its work is.
+         */
+        private static final String INSTRUCTIONS = """
+                Drydock hosts this session in a tab a human is watching. As soon as you know what \
+                the work actually is, call session_rename with a short title naming the work -- not \
+                the branch. Re-title it if the work turns out to be something else. Two refusals are \
+                normal and both explain themselves: if the human has named the session, leave it \
+                alone; if another session here already has that title, pick one that tells them apart.
+
+                Keep session_handoff current as you work. This session may be handed to a different \
+                agent at any moment, and that brief is all your successor gets -- write it for them, \
+                not for the human, and especially record what you RULED OUT and why, which they \
+                cannot recover from the code.\
+                """;
+
+        private JsonValue initializeResult(JsonValue params) {
+            return JsonObject.empty()
+                    .put("protocolVersion", new JsonString(negotiatedProtocolVersion(params)))
+                    .put("capabilities", JsonObject.empty().put("tools", JsonObject.empty()))
+                    .put("serverInfo", JsonObject.empty()
+                            .put("name", new JsonString("drydock"))
+                            .put("version", new JsonString("1.0.0")))
+                    .put("instructions", new JsonString(INSTRUCTIONS));
+        }
+
+        /**
+         * The client's requested version when this server supports it,
+         * otherwise {@link #FALLBACK_PROTOCOL_VERSION}. Per the MCP spec the
+         * server echoes a version it supports and names its own preferred one
+         * when it does not -- and the client is then free to disconnect.
+         */
+        private String negotiatedProtocolVersion(JsonValue params) {
+            if (params instanceof JsonObject object
+                    && object.get("protocolVersion") instanceof JsonString requested
+                    && SUPPORTED_PROTOCOL_VERSIONS.contains(requested.value())) {
+                return requested.value();
+            }
+            return FALLBACK_PROTOCOL_VERSION;
+        }
+
+        private JsonValue toolsListResult() {
+            List<JsonValue> descriptors = router.toolDescriptors();
+            return JsonObject.empty().put("tools", new JsonArray(descriptors));
+        }
+
+        private JsonValue toolCallResult(JsonValue content, boolean isError) {
+            JsonValue textContent;
+            if (isError) {
+                textContent = content;
+            } else {
+                textContent = new JsonString(JsonWriter.write(content));
+            }
+            JsonArray contentArray = new JsonArray(List.of(
+                    JsonObject.empty()
+                            .put("type", new JsonString("text"))
+                            .put("text", textContent)));
+            return JsonObject.empty()
+                    .put("content", contentArray)
+                    .put("isError", new JsonBoolean(isError));
+        }
+
+        private boolean originAllowed(String presented) {
+            if (presented == null || presented.isEmpty()) {
+                return true;
+            }
+            return presented.equals("http://127.0.0.1:" + port) || presented.equals("http://localhost:" + port)
+                    || presented.equals("127.0.0.1:" + port) || presented.equals("localhost:" + port);
+        }
+
+        private String readBody(InputStream in) throws IOException {
+            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        }
+
+        private void sendJson(HttpExchange exchange, int status, JsonValue value) throws IOException {
+            byte[] bytes = JsonWriter.write(value).getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Content-Type", "application/json");
+            exchange.sendResponseHeaders(status, bytes.length);
+            exchange.getResponseBody().write(bytes);
+        }
+
+        private void sendEmpty(HttpExchange exchange, int status) throws IOException {
+            exchange.sendResponseHeaders(status, -1);
+        }
+    }
+
+    private static JsonValue successResponse(JsonValue id, JsonValue result) {
+        return JsonObject.empty()
+                .put("jsonrpc", new JsonString("2.0"))
+                .put("id", id)
+                .put("result", result);
+    }
+
+    private static JsonValue errorResponse(JsonValue id, int code, String message) {
+        return JsonObject.empty()
+                .put("jsonrpc", new JsonString("2.0"))
+                .put("id", id)
+                .put("error", JsonObject.empty()
+                        .put("code", JsonNumber.of(code))
+                        .put("message", new JsonString(message)));
+    }
+
+    /**
+     * The tools that WRITE into drydock. Everything else is drydock answering
+     * a question, including the tools whose names begin "review_".
+     *
+     * <p>An explicit set rather than the name-prefix rule this replaced: that
+     * rule classified {@code review_comments} as a write, which it is not --
+     * the agent asks for open threads and drydock answers -- and it would
+     * have classified {@code session_rename} as a read. A prefix cannot
+     * express either, and every tool added later must be classified on
+     * purpose rather than by how it was named.</p>
+     */
+    private static final Set<String> AGENT_WRITE_TOOLS = Set.of(
+            "review_reply", "review_tour", "review_check", "review_finding", "review_answer", "session_rename",
+            "session_handoff");
+
+    static McpActivityLog.Direction directionOf(String tool) {
+        return AGENT_WRITE_TOOLS.contains(tool)
+                ? McpActivityLog.Direction.INBOUND
+                : McpActivityLog.Direction.OUTBOUND;
+    }
+
+    /** A one-line detail for the panel: the arguments, bounded and Label-safe. */
+    static String summarize(JsonValue arguments) {
+        return arguments == null ? "" : oneLine(JsonWriter.write(arguments));
+    }
+
+    /**
+     * One line of anything a panel row shows: the arguments of a call in
+     * {@link #summarize}, or a failed call's refusal message. Bounded, and
+     * stripped of anything that can lie in a Label.
+     *
+     * <p>Order matters. The whitespace collapse runs FIRST: Java's {@code \s}
+     * is ASCII-only, so it flattens {@link JsonWriter}'s own pretty-print
+     * newlines and indents -- and a multi-line tool refusal, which the agent
+     * read across several lines -- into one row's line. Only then are the
+     * invisible and control categories replaced: sanitizing first would
+     * replace those structural newlines too and turn every row into
+     * "{&#xFFFD; ...".
+     *
+     * <p>{@code JsonWriter} escapes only {@code c < 0x20}, so U+007F, the C1
+     * block, the bidi overrides and the tag block all arrive here verbatim.
+     * The panel renders this as a {@code Label}, on failed calls as well as
+     * successful ones, so this is the boundary that has to remove them.
+     */
+    static String oneLine(String text) {
+        String collapsed = text.replaceAll("\\s+", " ");
+        StringBuilder clean = new StringBuilder(collapsed.length());
+        collapsed.codePoints().forEach(cp -> clean.appendCodePoint(isUnrenderable(cp) ? '�' : cp));
+        return truncateByCodePoints(clean.toString(), 160);
+    }
+
+    /** Categories that must never reach a Label: invisible, reordering, or not a character at all. */
+    private static boolean isUnrenderable(int codePoint) {
+        int type = Character.getType(codePoint);
+        return type == Character.CONTROL || type == Character.FORMAT || type == Character.SURROGATE
+                || type == Character.PRIVATE_USE || type == Character.UNASSIGNED
+                || type == Character.LINE_SEPARATOR || type == Character.PARAGRAPH_SEPARATOR;
+    }
+
+    /** Truncates on a code-point boundary, so a cut never re-creates a lone surrogate. */
+    private static String truncateByCodePoints(String text, int maxCodePoints) {
+        if (text.codePointCount(0, text.length()) <= maxCodePoints) {
+            return text;
+        }
+        int end = text.offsetByCodePoints(0, maxCodePoints - 1);
+        return text.substring(0, end) + "…";
+    }
+}

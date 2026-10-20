@@ -31,6 +31,18 @@ class UserConfigTest {
     private static final Path WORKTREES = TestPaths.abs("/tmp/worktrees");
 
     @Test
+    void withWorktreesDirectoryPreservesOtherFields() {
+        UserConfig base = new UserConfig(Optional.empty(), false,
+                new UserConfig.LanguageServer(Optional.of(Path.of("/opt/jdtls")), Optional.empty()));
+
+        UserConfig changed = base.withWorktreesDirectory(Optional.of(Path.of("/base")));
+
+        assertEquals(Optional.of(Path.of("/base")), changed.worktreesDirectory());
+        assertEquals(base.openChangedFilesInSkim(), changed.openChangedFilesInSkim());
+        assertEquals(base.languageServer(), changed.languageServer());
+    }
+
+    @Test
     void loadReturnsEmptyWhenTheConfigFileIsMissing(@TempDir Path dir) {
         UserConfig config = UserConfig.load(dir.resolve("config.json"));
 

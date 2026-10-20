@@ -1,0 +1,692 @@
+package app.drydock.mcp;
+
+import app.drydock.domain.SessionWorkspace;
+import app.drydock.domain.PrLink;
+import app.drydock.domain.AgentBinding;
+import app.drydock.agent.api.AgentKind;
+import app.drydock.config.UserConfig;
+import app.drydock.domain.ManagedAgentSession;
+import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.PrState;
+import app.drydock.domain.Repository;
+import app.drydock.domain.RepositoryId;
+import app.drydock.domain.RepositorySettings;
+import app.drydock.domain.SessionStatus;
+import app.drydock.domain.SshRemote;
+import app.drydock.git.GitCommandFailedException;
+import app.drydock.git.GitStatusService;
+import app.drydock.git.WorktreeService;
+import app.drydock.mcp.McpSessionContext.ExistingBranchWorktree;
+import app.drydock.mcp.McpSessionContext.RenameKind;
+import app.drydock.mcp.McpSessionContext.RenameOutcome;
+import app.drydock.review.AnnotationStore;
+import app.drydock.review.tour.TourStore;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+/**
+ * The headlessly testable half of {@link WorkspaceMcpSessionContext}: its path
+ * handling. Runs against real temporary Git repositories and real symlinks, in
+ * the style of {@code WorktreeServiceTest} -- the symlink behaviour this covers
+ * is unreachable from {@link McpToolRouter}'s tests, because their fake context
+ * returns real paths by contract.
+ *
+ * <p>NOT covered here (needs a running window): {@code startSession}, which
+ * delegates to {@code MainWorkspace.startAgentSession} and opens a tab.</p>
+ */
+class WorkspaceMcpSessionContextTest {
+
+    private final GitStatusService gitStatusService = new GitStatusService();
+    private final WorktreeService worktreeService = new WorktreeService();
+    private AnnotationStore annotationStore;
+    private TourStore tourStore;
+
+    /**
+     * The reclaim hand-back bound into the context. Defaults to success; a
+     * test that wants to exercise the failure path sets this before calling
+     * {@link #contextWith}.
+     */
+    private java.util.function.BiFunction<ManagedSessionId, String, CompletableFuture<Void>> reclaimer =
+            (id, newId) -> CompletableFuture.completedFuture(null);
+
+    @AfterEach
+    void tearDown() {
+        gitStatusService.close();
+        worktreeService.close();
+        if (annotationStore != null) {
+            annotationStore.close();
+        }
+        if (tourStore != null) {
+            tourStore.close();
+        }
+    }
+
+    // ---- realWorktreesOf ----------------------------------------------------
+
+    /**
+     * The half of {@code session_start}'s threat model that only this class can
+     * close: a symlink swapped in <em>under</em> a recorded worktree path. The
+     * entry must be reported as what the link now resolves to, so the router's
+     * exact-path comparison sees the swap, rather than as the recorded name,
+     * which would silently vouch for a directory git no longer points at.
+     */
+    @Test
+    void realWorktreesOfResolvesASymlinkSwappedUnderARecordedPath(@TempDir Path repoDir,
+                                                                  @TempDir Path worktreeParent,
+                                                                  @TempDir Path decoyParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path recorded = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/swap").get()
+                .toRealPath();
+        Path decoy = Files.createDirectory(decoyParent.resolve("decoy")).toRealPath();
+
+        // Swap the real worktree directory for a symlink pointing elsewhere.
+        // `git worktree list` keeps reporting the RECORDED path either way.
+        deleteRecursively(recorded);
+        Files.createSymbolicLink(recorded, decoy);
+
+        List<Path> resolved = contextFor(repo).realWorktreesOf(callerHandle(repo));
+
+        assertTrue(resolved.contains(decoy),
+                "the swapped link must be reported as its target: " + resolved);
+        assertFalse(resolved.contains(recorded),
+                "the recorded (now symlink) path must not be reported verbatim: " + resolved);
+    }
+
+    /** An honest worktree is reported at its real path, so a symlinked argument compares equal. */
+    @Test
+    void realWorktreesOfReportsRealPaths(@TempDir Path repoDir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/honest").get();
+
+        List<Path> resolved = contextFor(repo).realWorktreesOf(callerHandle(repo));
+
+        assertTrue(resolved.contains(worktree.toRealPath()), String.valueOf(resolved));
+    }
+
+    /**
+     * {@code git worktree list --porcelain}'s first stanza IS the main
+     * checkout, so it arrives in the same list as the real worktrees. It must
+     * not be reported: this list is {@code session_start}'s membership test,
+     * and an agent starting a session in the repository root would put a second
+     * {@code claude} in the tree the human is working in.
+     */
+    @Test
+    void realWorktreesOfExcludesTheMainCheckout(@TempDir Path repoDir, @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/real").get();
+
+        List<Path> resolved = contextFor(repo).realWorktreesOf(callerHandle(repo));
+
+        assertFalse(resolved.contains(repo.toRealPath()),
+                "the main checkout must not be offered as a worktree: " + resolved);
+        assertEquals(List.of(worktree.toRealPath()), resolved);
+    }
+
+    /** A recorded worktree whose directory is gone is no longer a member of anything. */
+    @Test
+    void realWorktreesOfSkipsAVanishedWorktree(@TempDir Path repoDir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/gone").get();
+        Path realWorktree = worktree.toRealPath();
+        deleteRecursively(worktree);
+
+        List<Path> resolved = contextFor(repo).realWorktreesOf(callerHandle(repo));
+
+        assertFalse(resolved.contains(realWorktree), String.valueOf(resolved));
+        assertFalse(resolved.contains(worktree), String.valueOf(resolved));
+    }
+
+    // ---- excerpt ------------------------------------------------------------
+
+    @Test
+    void excerptReturnsTheRequestedWindow(@TempDir Path repoDir) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Files.writeString(repo.resolve("lines.txt"), "one\ntwo\nthree\nfour\nfive\n");
+
+        Optional<String> excerpt = contextFor(repo).excerpt(caller(repo), "lines.txt", 3, 1);
+
+        assertEquals(Optional.of("two\nthree\nfour"), excerpt);
+    }
+
+    @Test
+    void excerptClampsTheWindowAtTheFileEdges(@TempDir Path repoDir) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Files.writeString(repo.resolve("lines.txt"), "one\ntwo\n");
+
+        assertEquals(Optional.of("one\ntwo"), contextFor(repo).excerpt(caller(repo), "lines.txt", 1, 5));
+    }
+
+    @Test
+    void excerptIsEmptyForAMissingFileOrAnOutOfRangeLine(@TempDir Path repoDir) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Files.writeString(repo.resolve("lines.txt"), "one\n");
+        WorkspaceMcpSessionContext context = contextFor(repo);
+
+        assertTrue(context.excerpt(caller(repo), "nope.txt", 1, 2).isEmpty());
+        assertTrue(context.excerpt(caller(repo), "lines.txt", 9, 2).isEmpty());
+        assertTrue(context.excerpt(caller(repo), "lines.txt", 0, 2).isEmpty());
+    }
+
+    /**
+     * The excerpt is a review aid, not a file-read tool: it never leaves the
+     * caller's worktree.
+     *
+     * <p>The {@code ../} case writes its bait at {@code repoDir.getParent()},
+     * i.e. exactly where {@code "../secret.txt"} resolves to. Without that the
+     * assertion would pass on the file simply not existing, and would keep
+     * passing with the containment check deleted.</p>
+     */
+    @Test
+    void excerptRefusesAPathThatEscapesTheWorktree(@TempDir Path repoDir, @TempDir Path outside) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Files.writeString(repoDir.getParent().resolve("secret.txt"), "climbed out\n");
+        Files.writeString(outside.resolve("secret.txt"), "top secret\n");
+        WorkspaceMcpSessionContext context = contextFor(repo);
+
+        assertTrue(context.excerpt(caller(repo), "../secret.txt", 1, 0).isEmpty());
+        assertTrue(context.excerpt(caller(repo), outside.resolve("secret.txt").toString(), 1, 0).isEmpty());
+    }
+
+    /** ...including through a symlink that lives inside the worktree but points out of it. */
+    @Test
+    void excerptRefusesASymlinkOutOfTheWorktree(@TempDir Path repoDir, @TempDir Path outside) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path secret = outside.resolve("secret.txt");
+        Files.writeString(secret, "top secret\n");
+        Files.createSymbolicLink(repo.resolve("link.txt"), secret);
+
+        assertTrue(contextFor(repo).excerpt(caller(repo), "link.txt", 1, 0).isEmpty());
+    }
+
+    // ---- sessions_list ------------------------------------------------------
+
+    /**
+     * A session's stored working directory is whatever path it was opened with,
+     * while {@code git worktree list} reports realpaths. On macOS {@code /var}
+     * is a symlink to {@code /private/var}, so keying the branch lookup
+     * lexically reported a null branch for essentially every session.
+     */
+    @Test
+    void sessionsListResolvesTheWorkingDirectoryBeforeMatchingItsBranch(@TempDir Path repoDir,
+                                                                        @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/named").get();
+        // Deliberately the UNRESOLVED path, exactly as a real session records it.
+        session = sessionIn(localRepository(repo), worktree);
+
+        List<McpSessionContext.SessionSummary> summaries = contextFor(repo).sessions();
+
+        assertEquals(1, summaries.size());
+        assertEquals(Optional.of("feat/named"), summaries.get(0).branch(),
+                "the branch must be found through the symlinked working directory");
+    }
+
+    // ---- repositories -------------------------------------------------------
+
+    /**
+     * A remote repository reports no git state, while a local one alongside it
+     * still does.
+     *
+     * <p>Named for what it actually checks: the empty fields alone do NOT prove
+     * the {@code ssh} probe was skipped, because {@code statusOf} swallows a
+     * failed probe into the same empty {@link Optional}. That the probe is
+     * skipped -- {@link GitStatusService} has no cache, so one status call per
+     * remote repository would open one {@code ssh} while the HTTP handler waits
+     * -- is enforced by the {@code isRemote()} branch in {@code repositories()}
+     * and is not what this test can distinguish.</p>
+     */
+    @Test
+    void remoteRepositoriesCarryNoGitStateWhileLocalOnesDo(@TempDir Path repoDir) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        SshRemote unreachable = new SshRemote("nobody@invalid.invalid", "/srv/app");
+        Repository remote = new Repository(RepositoryId.newId(), unreachable.placeholderRoot(), "remote-repo",
+                Instant.now(), Instant.now(), RepositorySettings.DEFAULT, unreachable);
+
+        List<McpSessionContext.RepoSummary> summaries =
+                contextWith(repo, List.of(localRepository(repo), remote)).repositories();
+
+        McpSessionContext.RepoSummary remoteSummary = summaries.stream()
+                .filter(McpSessionContext.RepoSummary::remote)
+                .findFirst()
+                .orElseThrow();
+        assertTrue(remoteSummary.branch().isEmpty());
+        assertTrue(remoteSummary.dirty().isEmpty());
+        assertTrue(remoteSummary.ahead().isEmpty());
+        assertTrue(remoteSummary.behind().isEmpty());
+
+        McpSessionContext.RepoSummary localSummary = summaries.stream()
+                .filter(summary -> !summary.remote())
+                .findFirst()
+                .orElseThrow();
+        assertEquals(Optional.of("main"), localSummary.branch(), "a local repository still reports git state");
+    }
+
+    // ---- one deadline per tool call -----------------------------------------
+
+    /**
+     * Each local repository used to get its own 20-second {@code join} slice,
+     * so N repositories could hold the HTTP connection for 20N seconds. One
+     * deadline now bounds the whole call, as it already does in {@code
+     * MainWorkspace.findWorktreeOwner}: an expiry fails the call rather than
+     * letting the next repository start a fresh slice.
+     */
+    @Test
+    void reposListFailsOnceItsSharedDeadlineIsGone(@TempDir Path repoDir) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        WorkspaceMcpSessionContext context = contextFor(repo);
+
+        assertFalse(context.repositories(System.nanoTime() + TimeUnit.SECONDS.toNanos(20)).isEmpty(),
+                "a live deadline must still answer");
+
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> context.repositories(System.nanoTime() - 1));
+        assertTrue(failure.getMessage().contains("did not respond in time"), failure.getMessage());
+    }
+
+    @Test
+    void sessionsListFailsOnceItsSharedDeadlineIsGone(@TempDir Path repoDir) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        WorkspaceMcpSessionContext context = contextFor(repo);
+
+        assertFalse(context.sessions(System.nanoTime() + TimeUnit.SECONDS.toNanos(20)).isEmpty(),
+                "a live deadline must still answer");
+
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> context.sessions(System.nanoTime() - 1));
+        assertTrue(failure.getMessage().contains("did not respond in time"), failure.getMessage());
+    }
+
+    // ---- joinAddBy: the four ways an add can end without a verdict -----------
+    //
+    // joinBy has three exits and two of them are expiry; every one of the four
+    // has to say "may exist", because the future being awaited is an already
+    // submitted `git worktree add` and the router refunds anything that is not
+    // McpWorktreeMayExistException.
+
+    private static final Path ADD_DIR = Path.of("/wt/drydock-feat-x");
+
+    @Test
+    void anAlreadyExpiredDeadlineMayHaveLeftAWorktreeBecauseTheAddWasSubmittedFirst() {
+        McpWorktreeMayExistException failure = assertThrows(McpWorktreeMayExistException.class,
+                () -> WorkspaceMcpSessionContext.joinAddBy(
+                        new CompletableFuture<Path>(), System.nanoTime() - 1, ADD_DIR));
+
+        assertTrue(failure.getMessage().contains(ADD_DIR.toString()), failure.getMessage());
+    }
+
+    @Test
+    void expiryDuringTheWaitMayHaveLeftAWorktree() {
+        assertThrows(McpWorktreeMayExistException.class,
+                () -> WorkspaceMcpSessionContext.joinAddBy(new CompletableFuture<Path>(),
+                        System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(200), ADD_DIR));
+    }
+
+    @Test
+    void anInterruptedWaitMayHaveLeftAWorktree() throws Exception {
+        AtomicReference<Throwable> caught = new AtomicReference<>();
+        Thread worker = new Thread(() -> {
+            try {
+                WorkspaceMcpSessionContext.joinAddBy(new CompletableFuture<Path>(),
+                        System.nanoTime() + TimeUnit.SECONDS.toNanos(30), ADD_DIR);
+            } catch (Throwable e) {
+                caught.set(e);
+            }
+        });
+        worker.start();
+        Thread.sleep(200);
+        worker.interrupt();
+        worker.join(10_000);
+
+        assertInstanceOf(McpWorktreeMayExistException.class, caught.get());
+    }
+
+    @Test
+    void aKilledAddMayHaveLeftAWorktreeEvenWrappedInACompletionException() {
+        GitCommandFailedException killed = new GitCommandFailedException(
+                List.of("git", "worktree", "add"), -1, "timed out after 15s (killed)",
+                GitCommandFailedException.Outcome.UNKNOWN);
+
+        assertThrows(McpWorktreeMayExistException.class, () -> WorkspaceMcpSessionContext.joinAddBy(
+                CompletableFuture.failedFuture(killed), liveDeadline(), ADD_DIR));
+        // supplyAsync hands the cause over unwrapped today; the moment the add
+        // is composed it would arrive wrapped, and an instanceof test that
+        // missed that would fall through to the refunding path.
+        assertThrows(McpWorktreeMayExistException.class, () -> WorkspaceMcpSessionContext.joinAddBy(
+                CompletableFuture.failedFuture(new CompletionException(killed)), liveDeadline(), ADD_DIR));
+    }
+
+    @Test
+    void aGitFailureWithAVerdictStaysAnOrdinaryFailureSoTheRouterRefunds() {
+        GitCommandFailedException known = new GitCommandFailedException(
+                List.of("git", "worktree", "add"), 128, "fatal: 'feat/x' already exists");
+
+        McpToolException failure = assertThrows(McpToolException.class, () -> WorkspaceMcpSessionContext.joinAddBy(
+                CompletableFuture.failedFuture(known), liveDeadline(), ADD_DIR));
+
+        assertFalse(failure instanceof McpWorktreeMayExistException, failure.getMessage());
+        assertEquals("git failed: fatal: 'feat/x' already exists", failure.getMessage());
+    }
+
+    /**
+     * The other half of the discriminator, end to end: a parent directory that
+     * cannot be created fails before any process is spawned, so nothing can
+     * exist and the charge must come back.
+     */
+    @Test
+    void aWorktreeParentThatCannotBeCreatedIsAnOrdinaryFailure(@TempDir Path repoDir,
+                                                               @TempDir Path worktreesParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path readOnly = Files.createDirectory(worktreesParent.resolve("read-only"));
+        Files.setPosixFilePermissions(readOnly, PosixFilePermissions.fromString("r-xr-xr-x"));
+        userConfig = worktreesIn(readOnly.resolve("worktrees"));
+        WorkspaceMcpSessionContext context = contextFor(repo);
+        try {
+            McpToolException failure = assertThrows(McpToolException.class,
+                    () -> context.createWorktree(callerHandle(repo), "feat/x", Optional.empty()));
+
+            assertFalse(failure instanceof McpWorktreeMayExistException, failure.getMessage());
+            // Pin that it failed for the reason under test, not on the way in.
+            assertTrue(failure.getMessage().startsWith("git failed: "), failure.getMessage());
+            assertTrue(failure.getMessage().contains(readOnly.toString()), failure.getMessage());
+        } finally {
+            Files.setPosixFilePermissions(readOnly, PosixFilePermissions.fromString("rwxr-xr-x"));
+        }
+    }
+
+    private static long liveDeadline() {
+        return System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+    }
+
+    // ---- createWorktreeOnExistingBranch --------------------------------------
+
+    @Test
+    void adoptingAFreeLocalBranchChecksItOutWithNoTracking(@TempDir Path repoDir, @TempDir Path worktrees)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        runGit(repo, "branch", "feat/login");
+        userConfig = worktreesIn(worktrees);
+
+        ExistingBranchWorktree created =
+                contextFor(repo).createWorktreeOnExistingBranch(callerHandle(repo), "feat/login");
+
+        assertEquals("feat/login", created.branch());
+        assertEquals(Optional.empty(), created.tracking());
+        assertTrue(Files.exists(created.path().resolve("README.md")), String.valueOf(created.path()));
+    }
+
+    /**
+     * The response's branch is the RESOLVED local name, not the argument --
+     * deliberately unlike the create path, which echoes what it was given.
+     * Here they differ, and the agent needs the name that now exists to hand
+     * to {@code session_start}.
+     */
+    @Test
+    void adoptingARemoteOnlyBranchMintsATrackingLocalBranchAndReportsBothNames(@TempDir Path tmp) throws Exception {
+        Path upstream = Files.createDirectory(tmp.resolve("upstream"));
+        initCommittedRepo(upstream);
+        runGit(upstream, "branch", "feat/login");
+        Path clone = tmp.resolve("clone");
+        runGit(tmp, "clone", upstream.toString(), clone.toString());
+        userConfig = worktreesIn(tmp.resolve("worktrees"));
+
+        ExistingBranchWorktree created =
+                contextFor(clone).createWorktreeOnExistingBranch(callerHandle(clone), "origin/feat/login");
+
+        assertEquals("feat/login", created.branch());
+        assertEquals(Optional.of("origin/feat/login"), created.tracking());
+        assertEquals("feat/login", gitOutput(created.path(), "rev-parse", "--abbrev-ref", "HEAD"));
+        assertEquals("origin", gitOutput(clone, "config", "branch.feat/login.remote"));
+    }
+
+    @Test
+    void aBranchAlreadyCheckedOutElsewhereIsRefusedAndNamesItsHolder(@TempDir Path repoDir, @TempDir Path worktrees)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        userConfig = worktreesIn(worktrees);
+
+        // "main" is checked out in the main checkout itself.
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> contextFor(repo).createWorktreeOnExistingBranch(callerHandle(repo), "main"));
+
+        assertEquals("'main' is already checked out in the worktree at " + repo.toRealPath() + ".",
+                failure.getMessage());
+    }
+
+    @Test
+    void anUnknownBranchIsRefusedAndSaysHowToCreateOne(@TempDir Path repoDir, @TempDir Path worktrees)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        userConfig = worktreesIn(worktrees);
+
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> contextFor(repo).createWorktreeOnExistingBranch(callerHandle(repo), "feat/nope"));
+
+        assertEquals("No branch named 'feat/nope' in this repository; omit existing to create it.",
+                failure.getMessage());
+    }
+
+    /**
+     * A branch literally named {@code origin/main}, pushed to origin, is listed
+     * as {@code origin/origin/main}; adopting it would mint local
+     * {@code refs/heads/origin/main}, which shadows the real remote for every
+     * short-name lookup thereafter.
+     */
+    @Test
+    void adoptingARemoteRefWhoseLocalNameWouldShadowARemoteIsRefused(@TempDir Path tmp) throws Exception {
+        Path upstream = Files.createDirectory(tmp.resolve("upstream"));
+        initCommittedRepo(upstream);
+        runGit(upstream, "branch", "origin/main");
+        Path clone = tmp.resolve("clone");
+        runGit(tmp, "clone", upstream.toString(), clone.toString());
+        userConfig = worktreesIn(tmp.resolve("worktrees"));
+
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> contextFor(clone).createWorktreeOnExistingBranch(callerHandle(clone), "origin/origin/main"));
+
+        assertEquals("Checking out 'origin/origin/main' would create the local branch 'origin/main', "
+                + "which shadows the remote 'origin'.", failure.getMessage());
+    }
+
+    @Test
+    void aRemoteRepositoryCannotAdoptABranch(@TempDir Path repoDir) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        SshRemote unreachable = new SshRemote("nobody@invalid.invalid", "/srv/app");
+        repository = new Repository(RepositoryId.newId(), unreachable.placeholderRoot(), "remote-repo",
+                Instant.now(), Instant.now(), RepositorySettings.DEFAULT, unreachable);
+        WorkspaceMcpSessionContext context = contextWith(repo, List.of(repository));
+
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> context.createWorktreeOnExistingBranch(callerHandle(repo), "main"));
+
+        assertEquals("Repository 'remote-repo' is remote; Drydock cannot create worktrees in it.",
+                failure.getMessage());
+    }
+
+    // ---- reclaimConversation ------------------------------------------------
+
+    @Test
+    void reclaimJoinsTheReclaimerAndReturns(@TempDir Path repoDir) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        java.util.concurrent.atomic.AtomicReference<String> rebound = new java.util.concurrent.atomic.AtomicReference<>();
+        reclaimer = (id, newId) -> {
+            rebound.set(newId);
+            return CompletableFuture.completedFuture(null);
+        };
+        WorkspaceMcpSessionContext context = contextFor(repo);
+
+        context.reclaimConversation(caller(repo), "new-conv");
+
+        assertEquals("new-conv", rebound.get());
+    }
+
+    @Test
+    void reclaimSurfacesTheReclaimersFailure(@TempDir Path repoDir) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        reclaimer = (id, newId) -> CompletableFuture.failedFuture(
+                new IllegalStateException("Conversation " + newId + " is already open in another session."));
+        WorkspaceMcpSessionContext context = contextFor(repo);
+
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> context.reclaimConversation(caller(repo), "new-conv"));
+
+        assertTrue(failure.getMessage().contains("already open"), failure.getMessage());
+    }
+
+    // ---- fixtures -----------------------------------------------------------
+
+    private Repository repository;
+    private ManagedAgentSession session;
+
+    /** Where new worktrees go; overridden by tests that must not write into the real home. */
+    private UserConfig userConfig = UserConfig.empty();
+
+    /**
+     * Only the worktrees directory matters to these tests; every other
+     * setting keeps its default. Built through one helper so a new component
+     * on the record is a one-line change here rather than six.
+     */
+    private static UserConfig worktreesIn(Path directory) {
+        UserConfig defaults = UserConfig.empty();
+        return new UserConfig(Optional.of(directory), defaults.openChangedFilesInSkim());
+    }
+
+    private Repository localRepository(Path root) throws IOException {
+        if (repository == null) {
+            repository = new Repository(RepositoryId.newId(), root.toRealPath(), "example",
+                    Instant.now(), Instant.now(), RepositorySettings.DEFAULT);
+        }
+        return repository;
+    }
+
+    private ManagedSessionId caller(Path root) throws IOException {
+        localRepository(root);
+        if (session == null) {
+            session = sessionIn(repository, root.toRealPath());
+        }
+        return session.id();
+    }
+
+    /** A handle for the caller's repository, as the router resolves one without a {@code repo} argument. */
+    private McpSessionContext.RepoHandle callerHandle(Path root) throws IOException {
+        caller(root);
+        return new McpSessionContext.RepoHandle(repository.displayName(), repository.root(), false);
+    }
+
+    private static ManagedAgentSession sessionIn(Repository owner, Path workingDirectory) {
+        Instant now = Instant.now();
+        return new ManagedAgentSession(
+                ManagedSessionId.newId(), owner.id(), "example session",
+                new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
+                new SessionWorkspace(workingDirectory, Optional.empty(), true),
+                SessionStatus.RUNNING, now, now, Optional.empty(),
+                PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty());
+    }
+
+    private WorkspaceMcpSessionContext contextFor(Path root) throws IOException {
+        return contextWith(root, List.of(localRepository(root)));
+    }
+
+    /** No providers discovered: display names fall back to the title-cased kind. */
+    private final app.drydock.agent.api.AgentRegistry agentRegistry =
+            new app.drydock.agent.api.AgentRegistry(List.of(), null);
+
+    private WorkspaceMcpSessionContext contextWith(Path root, List<Repository> repositories) throws IOException {
+        caller(root);
+        annotationStore = new AnnotationStore(root.resolve("annotations.json"));
+        tourStore = new TourStore(root.resolve("review-tours.json"));
+        return new WorkspaceMcpSessionContext(
+                () -> List.of(session),
+                () -> repositories,
+                annotationStore,
+                tourStore,
+                new app.drydock.review.ReviewScopeRegistry(),
+                agentRegistry,
+                new app.drydock.git.DiffService(),
+                gitStatusService,
+                worktreeService,
+                () -> userConfig,
+                (worktree, prompt) -> CompletableFuture.failedFuture(
+                        new UnsupportedOperationException("no window in this test")),
+                (id, title) -> CompletableFuture.completedFuture(new RenameOutcome(RenameKind.RENAMED, title)),
+                reclaimer,
+                (id, draft) -> CompletableFuture.failedFuture(
+                        new UnsupportedOperationException("no workspace in this test")),
+                (id, draft) -> CompletableFuture.failedFuture(
+                        new UnsupportedOperationException("no workspace in this test")),
+                pendingQuestions);
+    }
+
+    private final app.drydock.review.PendingQuestions pendingQuestions =
+            new app.drydock.review.PendingQuestions(null);
+
+    // ---- git helpers (mirrors WorktreeServiceTest) ---------------------------
+
+    private static Path initCommittedRepo(Path directory) throws Exception {
+        runGit(directory, "init", "--initial-branch=main");
+        runGit(directory, "config", "user.email", "test@example.com");
+        runGit(directory, "config", "user.name", "Test");
+        Files.writeString(directory.resolve("README.md"), "hello\n");
+        runGit(directory, "add", ".");
+        runGit(directory, "commit", "-m", "initial");
+        return directory;
+    }
+
+    /** As {@link #runGit}, returning the stripped output for an assertion. */
+    private static String gitOutput(Path workingDirectory, String... arguments) throws Exception {
+        List<String> command = new ArrayList<>(List.of("git"));
+        command.addAll(List.of(arguments));
+        Process process = new ProcessBuilder(command)
+                .directory(workingDirectory.toFile())
+                .redirectErrorStream(true)
+                .start();
+        String output = new String(process.getInputStream().readAllBytes());
+        if (process.waitFor() != 0) {
+            throw new IllegalStateException("git " + String.join(" ", arguments) + " failed: " + output);
+        }
+        return output.strip();
+    }
+
+    private static void runGit(Path workingDirectory, String... arguments) throws Exception {
+        List<String> command = new ArrayList<>(List.of("git"));
+        command.addAll(List.of(arguments));
+        Process process = new ProcessBuilder(command)
+                .directory(workingDirectory.toFile())
+                .redirectErrorStream(true)
+                .start();
+        String output = new String(process.getInputStream().readAllBytes());
+        if (process.waitFor() != 0) {
+            throw new IllegalStateException("git " + String.join(" ", arguments) + " failed: " + output);
+        }
+    }
+
+    private static void deleteRecursively(Path root) throws IOException {
+        try (var paths = Files.walk(root)) {
+            for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) {
+                Files.deleteIfExists(path);
+            }
+        }
+    }
+}
