@@ -3,9 +3,12 @@ package app.drydock.intellij.agent;
 import app.drydock.agent.spi.AgentProvider;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.Repository;
+import app.drydock.domain.RepositoryCatalog;
 import app.drydock.domain.SessionActivity;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.DrydockSessionsListener;
+import app.drydock.intellij.tasks.TaskNavigator;
 import app.drydock.ui.AgentLabels;
 
 import com.intellij.openapi.application.ApplicationActivationListener;
@@ -48,6 +51,7 @@ import java.awt.event.WindowEvent;
 import java.awt.event.WindowFocusListener;
 import java.beans.PropertyChangeListener;
 import java.beans.PropertyChangeSupport;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Objects;
@@ -95,6 +99,16 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
 
     /** Whether the session has a conversation to resume; see {@link AgentConsoles#hasConversation}. */
     private volatile boolean resumable;
+
+    /**
+     * Where the agent comes from, when this window hosts it from another
+     * worktree; empty for the window's own. Worked out off the EDT, since
+     * comparing a worktree with the window's project means resolving paths.
+     */
+    private volatile Optional<SessionPlace> hostedFrom = Optional.empty();
+
+    /** {@link #hostedFrom} as the tab title last showed it. EDT. */
+    private Optional<SessionPlace> paintedHostedFrom = Optional.empty();
 
     /** The resolved session; null until the catalog load completes. */
     private volatile ManagedAgentSession session;
@@ -226,6 +240,12 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
                 ManagedAgentSession found = failure == null ? findSession(plugin, file.sessionId()) : null;
                 resumeTokens = found != null ? estimateResumeTokens(plugin, found) : Optional.empty();
                 resumable = found != null && AgentConsoles.hasConversation(found);
+                hostedFrom = found != null ? hostedPlace(plugin, found) : Optional.empty();
+                if (hostedFrom.isPresent()) {
+                    file.putUserData(HostedTab.KEY, new HostedTab.Facts(project, hostedFrom.get()));
+                } else if (HostedTab.placeIn(file, project).isPresent()) {
+                    file.putUserData(HostedTab.KEY, null);
+                }
                 session = found;
                 if (found != null) {
                     everResolved = true;
@@ -259,6 +279,30 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
             // A cosmetic figure: an unreadable transcript shows a bare Resume.
             return Optional.empty();
         }
+    }
+
+    /**
+     * The agent's place when this window hosts it from another worktree:
+     * the running agent's own, else its row's repository with no branch (an
+     * idle row records none). Blocking path resolution: off the EDT.
+     */
+    private Optional<SessionPlace> hostedPlace(DrydockPluginService plugin, ManagedAgentSession found) {
+        Optional<Path> base = Optional.ofNullable(project.getBasePath())
+                .map(path -> RepositoryCatalog.canonicalize(Path.of(path)));
+        if (!HostedTab.isHosted(base, RepositoryCatalog.canonicalize(found.workingDirectory()))) {
+            return Optional.empty();
+        }
+        Optional<SessionPlace> running = AgentExecutionRegistry.getInstance().execution(found.id())
+                .map(AgentExecution::place);
+        if (running.isPresent()) {
+            return running;
+        }
+        String repository = plugin.stateStore().state().repositories().stream()
+                .filter(candidate -> candidate.id().equals(found.repositoryId()))
+                .map(Repository::displayName)
+                .findFirst()
+                .orElseGet(() -> String.valueOf(found.workingDirectory().getFileName()));
+        return Optional.of(new SessionPlace(repository, Optional.empty()));
     }
 
     private static ManagedAgentSession findSession(DrydockPluginService plugin, ManagedSessionId sessionId) {
@@ -351,7 +395,8 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
                 // own picker, so the button starts a fresh conversation on
                 // this same row instead.
                 resumable, resumeTokens,
-                DumbService.isDumb(project));
+                DumbService.isDumb(project),
+                hostedFrom.map(place -> execution.map(AgentExecution::place).orElse(place)));
 
         String stoppedLine = AgentStripText.stoppedFooter(
                 AgentStripText.displayStatus(current.status(), false),
@@ -371,6 +416,12 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
         // re-reads when asked; a status change has to say so or the dot stays
         // at whatever it was when the tab opened.
         FileEditorManagerEx.getInstanceEx(project).refreshIcons();
+        // The title too, when the tab's repo tag came or went: the platform
+        // reads it from a provider and caches it.
+        if (!hostedFrom.equals(paintedHostedFrom)) {
+            paintedHostedFrom = hostedFrom;
+            FileEditorManager.getInstance(project).updateFilePresentation(file);
+        }
     }
 
     /** The console {@link #stoppedPanel} was built around. */
@@ -470,6 +521,9 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
             // because the strip is the handoff's strip; wiring it to nothing
             // silently would be worse than saying so.
             case SHOW_CHANGES -> AgentConsoles.notImplementedYet(project, action);
+            // Moves the console into the agent's own window (F3): wired in
+            // the jump; until then, the plain switch to that window.
+            case OPEN_PROJECT_WINDOW -> TaskNavigator.switchTo(current);
         }
     }
 

@@ -326,7 +326,7 @@ public final class AgentConsoles {
     static void notImplementedYet(Project project, AgentConsoleStrip.StripAction action) {
         String what = switch (action) {
             case SHOW_CHANGES -> "The branch-vs-main review opens in the Commit tool window, which is not built yet.";
-            case STOP, RESUME, START, SESSION_MENU -> "";
+            case STOP, RESUME, START, OPEN_PROJECT_WINDOW, SESSION_MENU -> "";
         };
         Messages.showInfoMessage(project, what, "Drydock");
     }
