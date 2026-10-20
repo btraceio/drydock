@@ -134,7 +134,7 @@ class AgentStripTextTest {
 
         assertEquals("— stopped 5m ago · the agent exited · nothing restarts on its own —",
                 AgentStripText.stoppedFooter(SessionStatus.EXITED, Optional.of(stopped), now));
-        assertEquals("— stopped 5m ago · Drydock stopped it · nothing restarts on its own —",
+        assertEquals("— deactivated 5m ago · by Drydock · nothing restarts on its own —",
                 AgentStripText.stoppedFooter(SessionStatus.INACTIVE, Optional.of(stopped), now));
         assertEquals("— stopped earlier · the last launch failed · nothing restarts on its own —",
                 AgentStripText.stoppedFooter(SessionStatus.FAILED, Optional.empty(), now));

@@ -105,6 +105,9 @@ public final class SessionDots {
      * way, which is the part that is actually known.</p>
      */
     public static String statusWord(SessionStatus status, Optional<SessionActivity> activity) {
+        if (status == SessionStatus.STOPPING) {
+            return statusWord(status);
+        }
         if (SessionStatusFacet.of(status) != SessionStatusFacet.RUNNING) {
             return statusWord(status);
         }
@@ -126,10 +129,10 @@ public final class SessionDots {
                         case IDLE -> ": waiting at the prompt";
                         case UNKNOWN -> "";
                     };
-            case STOPPING -> "The agent process is being stopped";
+            case STOPPING -> "The agent is being deactivated";
             case IDLE -> "Not running: no live execution, and the session can be resumed";
             case EXITED -> "Not running: the agent process exited on its own";
-            case INACTIVE -> "Not running: Drydock stopped it, or the IDE restarted. Nothing restarts on its own";
+            case INACTIVE -> "Not running: Drydock deactivated it, or the IDE restarted. Nothing restarts on its own";
             case FAILED -> "The last launch or resume failed";
             case MISSING_WORKING_DIRECTORY -> "The session's working directory no longer exists";
             case UNSUPPORTED_AGENT -> "This Drydock build cannot run this session's agent";
@@ -147,7 +150,7 @@ public final class SessionDots {
         return switch (status) {
             case STARTING -> "Starting";
             case RUNNING -> "Running";
-            case STOPPING -> "Stopping";
+            case STOPPING -> "Deactivating";
             case IDLE, INACTIVE, EXITED -> "Not running";
             case FAILED -> "Failed";
             case MISSING_WORKING_DIRECTORY -> "Missing directory";

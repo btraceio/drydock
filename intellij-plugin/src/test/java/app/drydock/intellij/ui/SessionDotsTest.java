@@ -62,6 +62,12 @@ class SessionDotsTest {
     }
 
     @Test
+    void aStopInFlightUsesTheUserFacingDeactivateTerm() {
+        assertEquals("Deactivating", SessionDots.statusWord(SessionStatus.STOPPING, NONE));
+        assertEquals("The agent is being deactivated", SessionDots.tooltip(SessionStatus.STOPPING, NONE));
+    }
+
+    @Test
     void activityNeverRelabelsASessionOutsideTheRunningBand() {
         // A leftover activity state file must not label an exited session
         // "working" — activity is a property of a live process.

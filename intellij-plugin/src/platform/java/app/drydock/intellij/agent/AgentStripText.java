@@ -106,16 +106,17 @@ public final class AgentStripText {
             case FAILED -> "the last launch failed";
             case MISSING_WORKING_DIRECTORY -> "its directory is gone";
             case UNSUPPORTED_AGENT -> "this build cannot run its agent";
-            // INACTIVE is drydock's own stop: Stop, window close, or IDE quit.
+            // INACTIVE is drydock's own stop: Deactivate, window close, or IDE quit.
             // The three are not distinguished because the user already knows
             // which one they did, and the persisted row does not record it.
-            case INACTIVE -> "Drydock stopped it";
+            case INACTIVE -> "by Drydock";
             // IDLE has deliberately forgotten how the prior execution ended;
             // STARTING/RUNNING/STOPPING here are stale projections because
             // this footer is only rendered after the execution is gone.
             case IDLE, STARTING, RUNNING, STOPPING -> "no agent is running here";
         };
-        return "— stopped " + when + " · " + why + " · nothing restarts on its own —";
+        String event = status == SessionStatus.INACTIVE ? "deactivated" : "stopped";
+        return "— " + event + " " + when + " · " + why + " · nothing restarts on its own —";
     }
 
     /**

@@ -20,8 +20,8 @@ import java.awt.Component;
 import java.util.List;
 
 /**
- * "Stop n working agent(s)?", before a window close or an IDE quit stops
- * agents that are mid-task.
+ * "Deactivate n working agent(s)?", before a window close or an IDE quit
+ * deactivates agents that are mid-task.
  *
  * <p>Copy comes from {@link StopAgentsPlan}. "Don't ask again" is the
  * dialog's own do-not-ask option, remembered as an application setting
@@ -69,7 +69,7 @@ public final class StopAgentsDialog extends DialogWrapper {
         init();
         // After init(), not before: set on the action before the button
         // exists, the "&" is parsed as a mnemonic marker and the button read
-        // "Stop  Close".
+        // "Deactivate  Close".
         setOKButtonText(primaryLabel);
     }
 

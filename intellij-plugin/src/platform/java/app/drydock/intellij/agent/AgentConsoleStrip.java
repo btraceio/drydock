@@ -155,7 +155,7 @@ final class AgentConsoleStrip extends JPanel {
         primaryAction = running ? StripAction.STOP
                 : resumable ? StripAction.RESUME
                 : StripAction.START;
-        primary.setText(running ? "■ Stop" : AgentStripText.primaryLabel(resumable, estimatedTokens));
+        primary.setText(running ? "■ Deactivate" : AgentStripText.primaryLabel(resumable, estimatedTokens));
         // Nothing to resume for an agent this build cannot run: the resume
         // would pick a provider at random or fail at the command builder.
         primary.setEnabled(running || session.status() != SessionStatus.UNSUPPORTED_AGENT);
