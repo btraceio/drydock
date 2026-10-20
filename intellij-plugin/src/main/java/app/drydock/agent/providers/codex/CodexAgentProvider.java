@@ -12,6 +12,7 @@ import app.drydock.agent.api.McpDelivery;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdDiscovery;
 import app.drydock.agent.api.SessionIdStrategy;
+import app.drydock.agent.api.StdioMcpServer;
 import app.drydock.agent.api.SnapshotClaimDiscovery;
 import app.drydock.agent.providers.AgentCommands;
 import app.drydock.agent.providers.codex.internal.CodexExecutableLocator;
@@ -23,6 +24,7 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
 /**
  * OpenAI Codex CLI as an {@link AgentProvider}. DISCOVERED id strategy, no
@@ -135,7 +137,7 @@ public final class CodexAgentProvider implements AgentProvider {
         // did not answer --help or --version at all. An unverified argument
         // in a launch command is a launch that may fail outright, which is
         // worse than the user typing the task once.
-        return LaunchPlan.of(codexCommand(c.mcp(), c.readOnly()), false);
+        return LaunchPlan.of(codexCommand(c.mcp(), c.readOnly()) + stdioOverrides(c.stdioMcpServers()), false);
     }
 
     @Override
@@ -143,7 +145,7 @@ public final class CodexAgentProvider implements AgentProvider {
         if (r.remote().isPresent()) {
             return LaunchPlan.unsupported();
         }
-        String codex = codexCommand(r.mcp(), r.readOnly());
+        String codex = codexCommand(r.mcp(), r.readOnly()) + stdioOverrides(r.stdioMcpServers());
         if (r.agentSessionId().isPresent()) {
             return LaunchPlan.of(codex + " resume " + AgentCommands.shellQuote(r.agentSessionId().get()), false);
         }
@@ -200,6 +202,31 @@ public final class CodexAgentProvider implements AgentProvider {
                 + " -c " + AgentCommands.shellQuote(
                         "mcp_servers." + SERVER_NAME + ".env_http_headers={"
                                 + tomlString(TOKEN_HEADER) + "=" + tomlString(TOKEN_ENV_VAR) + "}");
+    }
+
+    /**
+     * One {@code -c} override per field of each stdio MCP server:
+     * {@code command}, {@code args} and {@code env} under
+     * {@code mcp_servers.<name>}. Like the other {@code -c} overrides these
+     * are global options and so must precede any subcommand. The values carry
+     * no credential, so unlike drydock's own token they may sit in argv.
+     */
+    private static String stdioOverrides(List<StdioMcpServer> servers) {
+        StringBuilder overrides = new StringBuilder();
+        for (StdioMcpServer server : servers) {
+            String prefix = "mcp_servers." + server.name() + ".";
+            overrides.append(" -c ").append(AgentCommands.shellQuote(prefix + "command=" + tomlString(server.command())));
+            overrides.append(" -c ").append(AgentCommands.shellQuote(prefix + "args=" + server.args().stream()
+                    .map(CodexAgentProvider::tomlString)
+                    .collect(Collectors.joining(", ", "[", "]"))));
+            if (!server.env().isEmpty()) {
+                overrides.append(" -c ").append(AgentCommands.shellQuote(prefix + "env=" + server.env().entrySet()
+                        .stream()
+                        .map(entry -> tomlString(entry.getKey()) + "=" + tomlString(entry.getValue()))
+                        .collect(Collectors.joining(", ", "{", "}"))));
+            }
+        }
+        return overrides.toString();
     }
 
     /**

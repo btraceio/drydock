@@ -4,17 +4,23 @@ import app.drydock.agent.api.AgentContext;
 import app.drydock.agent.api.CreateContext;
 import app.drydock.agent.api.McpAccess;
 import app.drydock.agent.api.ResumeContext;
+import app.drydock.agent.api.StdioMcpServer;
 import app.drydock.agent.providers.claude.internal.ClaudeExecutableLocator;
 import app.drydock.domain.SshRemote;
+import app.drydock.state.json.JsonParser;
+import app.drydock.state.json.JsonValue;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.Executors;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -144,5 +150,65 @@ class ClaudeAgentProviderMcpFlagTest {
         assertFalse(create.contains("/base/mcp/abc.json"), create);
         assertFalse(resume.contains("--mcp-config"), resume);
         assertFalse(resume.contains("/base/mcp/abc.json"), resume);
+    }
+
+    private static final StdioMcpServer IDE = new StdioMcpServer("jetbrains", "/jbr/bin/java",
+            List.of("-cp", "/ide/lib/a.jar:/ide/lib/b.jar", "com.intellij.mcpserver.stdio.McpStdioRunnerKt"),
+            Map.of("IJ_MCP_SERVER_PORT", "64342", "IJ_MCP_SERVER_PROJECT_PATH", "/wt/repo-task"));
+
+    /** The JSON Claude is handed inline, parsed back out of the shell-quoted argument. */
+    private static JsonValue.JsonObject inlineConfig(String command) throws Exception {
+        String marker = "--mcp-config '";
+        int start = command.indexOf(marker);
+        assertTrue(start >= 0, command);
+        int from = start + marker.length();
+        String json = command.substring(from, command.indexOf('\'', from));
+        return (JsonValue.JsonObject) JsonParser.parse(json);
+    }
+
+    private static void assertIdeServer(JsonValue.JsonObject config) {
+        JsonValue.JsonObject servers = (JsonValue.JsonObject) config.get("mcpServers");
+        JsonValue.JsonObject server = (JsonValue.JsonObject) servers.get("jetbrains");
+        assertEquals("/jbr/bin/java", ((JsonValue.JsonString) server.get("command")).value());
+        assertEquals(List.of("-cp", "/ide/lib/a.jar:/ide/lib/b.jar", "com.intellij.mcpserver.stdio.McpStdioRunnerKt"),
+                ((JsonValue.JsonArray) server.get("args")).elements().stream()
+                        .map(element -> ((JsonValue.JsonString) element).value()).toList());
+        JsonValue.JsonObject env = (JsonValue.JsonObject) server.get("env");
+        assertEquals("64342", ((JsonValue.JsonString) env.get("IJ_MCP_SERVER_PORT")).value());
+        assertEquals("/wt/repo-task", ((JsonValue.JsonString) env.get("IJ_MCP_SERVER_PROJECT_PATH")).value());
+    }
+
+    @Test
+    void createCommandHandsTheStdioServersOverAsAnInlineConfig(@TempDir Path dir) throws Exception {
+        String command = provider(dir, true)
+                .buildCreateCommand(create(NO_MCP).withStdioMcpServers(List.of(IDE))).command();
+
+        assertIdeServer(inlineConfig(command));
+    }
+
+    @Test
+    void resumeCommandHandsTheStdioServersOverToo(@TempDir Path dir) throws Exception {
+        String command = provider(dir, true)
+                .buildResumeCommand(resume(NO_MCP).withStdioMcpServers(List.of(IDE))).command();
+
+        assertIdeServer(inlineConfig(command));
+    }
+
+    @Test
+    void stdioServersNeedTheAdvertisedFlag(@TempDir Path dir) throws IOException {
+        String command = provider(dir, false)
+                .buildCreateCommand(create(NO_MCP).withStdioMcpServers(List.of(IDE))).command();
+
+        assertFalse(command.contains("--mcp-config"), command);
+    }
+
+    @Test
+    void remoteCommandsCarryNoStdioServers(@TempDir Path dir) throws IOException {
+        Optional<SshRemote> remote = Optional.of(new SshRemote("build-box", "/srv/repo"));
+        String command = provider(dir, true).buildCreateCommand(
+                new CreateContext("my session", "sid-1", Path.of("/tmp"), remote, NO_MCP)
+                        .withStdioMcpServers(List.of(IDE))).command();
+
+        assertFalse(command.contains("--mcp-config"), command);
     }
 }

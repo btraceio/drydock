@@ -8,11 +8,14 @@ import app.drydock.agent.api.McpAccess;
 import app.drydock.agent.api.McpDelivery;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdStrategy;
+import app.drydock.agent.api.StdioMcpServer;
 import app.drydock.agent.providers.codex.internal.CodexExecutableLocator;
 import app.drydock.domain.SshRemote;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ForkJoinPool;
 
@@ -244,5 +247,34 @@ class CodexAgentProviderTest {
         String with = provider().buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
                 Optional.empty(), Optional.empty(), false, false, Optional.of("Add a farewell method"))).command();
         assertEquals(without, with);
+    }
+
+    private static final StdioMcpServer IDE = new StdioMcpServer("jetbrains", "/jbr/bin/java",
+            List.of("-cp", "/ide/lib/a.jar:/ide/lib/b.jar", "com.intellij.mcpserver.stdio.McpStdioRunnerKt"),
+            Map.of("IJ_MCP_SERVER_PROJECT_PATH", "/wt/repo-task", "IJ_MCP_SERVER_PORT", "64342"));
+
+    private static final String IDE_OVERRIDES =
+            " -c 'mcp_servers.jetbrains.command=\"/jbr/bin/java\"'"
+            + " -c 'mcp_servers.jetbrains.args=[\"-cp\", \"/ide/lib/a.jar:/ide/lib/b.jar\","
+            + " \"com.intellij.mcpserver.stdio.McpStdioRunnerKt\"]'"
+            + " -c 'mcp_servers.jetbrains.env={\"IJ_MCP_SERVER_PORT\"=\"64342\","
+            + " \"IJ_MCP_SERVER_PROJECT_PATH\"=\"/wt/repo-task\"}'";
+
+    @Test
+    void createCarriesStdioServersAsConfigOverrides() {
+        String command = provider().buildCreateCommand(
+                new CreateContext("s", "x", Path.of("/repo"), Optional.empty(), Optional.empty())
+                        .withStdioMcpServers(List.of(IDE))).command();
+
+        assertTrue(command.endsWith(IDE_OVERRIDES), command);
+    }
+
+    @Test
+    void resumeCarriesStdioServersBeforeTheSubcommand() {
+        String command = provider().buildResumeCommand(
+                new ResumeContext(Optional.of("019f9072-abc"), Optional.empty(), Path.of("/repo"),
+                        Optional.empty(), Optional.empty()).withStdioMcpServers(List.of(IDE))).command();
+
+        assertTrue(command.endsWith(IDE_OVERRIDES + " resume '019f9072-abc'"), command);
     }
 }
