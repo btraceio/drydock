@@ -12,6 +12,24 @@ import java.util.Optional;
 /** One row of the Drydock tool window's tree, as {@link TaskTreeModel} decides it. */
 public sealed interface TaskNode {
 
+    /** Semantic folders under a registered project, and the optional active/inactive split under Sessions. */
+    enum SectionKind {
+        SESSIONS("Sessions"),
+        ACTIVE("Active"),
+        INACTIVE("Inactive"),
+        WORKTREES("Worktrees");
+
+        private final String label;
+
+        SectionKind(String label) {
+            this.label = label;
+        }
+
+        public String label() {
+            return label;
+        }
+    }
+
     /** The shared projects list cannot be changed; says why (malformed, unreadable entries, newer schema). */
     record ListProblem(String message) implements TaskNode {
         public ListProblem {
@@ -37,6 +55,17 @@ public sealed interface TaskNode {
         public ProjectRow {
             Objects.requireNonNull(project, "project");
             children = List.copyOf(children);
+        }
+    }
+
+    /** A semantic, non-actionable folder. Empty sections are never emitted by the model. */
+    record Section(SectionKind kind, List<TaskNode> children) implements TaskNode {
+        public Section {
+            Objects.requireNonNull(kind, "kind");
+            children = List.copyOf(children);
+            if (children.isEmpty()) {
+                throw new IllegalArgumentException("section must not be empty");
+            }
         }
     }
 

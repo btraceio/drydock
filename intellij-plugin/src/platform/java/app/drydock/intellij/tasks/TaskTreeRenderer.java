@@ -7,6 +7,7 @@ import app.drydock.intellij.agent.AgentStripText;
 import app.drydock.intellij.tasks.TaskNode.AddCurrentProject;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
+import app.drydock.intellij.tasks.TaskNode.Section;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
 import app.drydock.intellij.ui.SessionDots;
@@ -60,6 +61,11 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
                     append("  folder missing", SimpleTextAttributes.ERROR_ATTRIBUTES);
                 }
             }
+            case Section section -> {
+                setIcon(AllIcons.Nodes.Folder);
+                append(section.kind().label(), SimpleTextAttributes.REGULAR_ATTRIBUTES);
+                append("  " + itemCount(section), SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
+            }
             case WorktreeGroup group -> {
                 append("⑂ " + group.branch(), SimpleTextAttributes.GRAYED_ATTRIBUTES);
                 append("  " + group.tasks().size() + " tasks", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
@@ -72,6 +78,15 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
             case TaskRow task -> paintTask(task);
             default -> append(String.valueOf(node.getUserObject()));
         }
+    }
+
+    /** Entity count rather than immediate child count (Sessions may contain Active/Inactive folders). */
+    private static int itemCount(Section section) {
+        return section.children().stream().mapToInt(node -> switch (node) {
+            case Section nested -> itemCount(nested);
+            case WorktreeGroup group -> group.tasks().size();
+            default -> 1;
+        }).sum();
     }
 
     private void paintTask(TaskRow task) {

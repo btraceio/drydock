@@ -9,6 +9,8 @@ import app.drydock.git.WorktreeService.Worktree;
 import app.drydock.intellij.tasks.TaskNode.AddCurrentProject;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
+import app.drydock.intellij.tasks.TaskNode.Section;
+import app.drydock.intellij.tasks.TaskNode.SectionKind;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
 import app.drydock.projects.SharedProject;
@@ -26,7 +28,9 @@ import java.util.Set;
 
 /**
  * The shape of the Drydock tool window's tree, decided in one pure place:
- * registered projects, and under each its tasks, grouped by worktree.
+ * registered projects, and under each separate Sessions and sessionless
+ * Worktrees sections. Sessions split into Active and Inactive when both are
+ * present, and remain grouped by worktree within their activity band.
  *
  * <p>A task (an agent session) is placed by where it works, not by the
  * repository id it was recorded under: its working directory resolves to a
@@ -160,34 +164,54 @@ public final class TaskTreeModel {
     }
 
     private static List<TaskNode> children(Inputs in, Path main, List<TaskRow> tasks) {
-        Map<Path, List<TaskRow>> byWorktree = new LinkedHashMap<>();
-        for (TaskRow task : sorted(tasks)) {
-            if (matches(in.filter(), task)) {
-                byWorktree.computeIfAbsent(task.session().workingDirectory(), ignored -> new ArrayList<>()).add(task);
-            }
-        }
         List<TaskNode> children = new ArrayList<>();
-        // Groups follow their best task, so the sort of the tasks above
-        // already orders them.
-        byWorktree.forEach((worktree, rows) -> {
-            if (rows.size() == 1) {
-                children.add(rows.get(0));
+        List<TaskRow> visibleTasks = sorted(tasks).stream().filter(task -> matches(in.filter(), task)).toList();
+        if (!visibleTasks.isEmpty()) {
+            List<TaskRow> active = visibleTasks.stream().filter(TaskRow::running).toList();
+            List<TaskRow> inactive = visibleTasks.stream().filter(task -> !task.running()).toList();
+            List<TaskNode> sessionChildren = new ArrayList<>();
+            if (!active.isEmpty() && !inactive.isEmpty()) {
+                sessionChildren.add(new Section(SectionKind.ACTIVE, groupedByWorktree(active)));
+                sessionChildren.add(new Section(SectionKind.INACTIVE, groupedByWorktree(inactive)));
             } else {
-                children.add(new WorktreeGroup(worktree, rows.get(0).branch().orElse(String.valueOf(
-                        worktree.getFileName())), rows));
+                sessionChildren.addAll(groupedByWorktree(visibleTasks));
             }
-        });
+            children.add(new Section(SectionKind.SESSIONS, sessionChildren));
+        }
+
+        List<TaskNode> sessionlessWorktrees = new ArrayList<>();
         for (Worktree worktree : in.worktreesByMainRoot().getOrDefault(main, List.of())) {
-            if (worktree.mainCheckout() || worktree.prunable() || byWorktree.containsKey(worktree.path())
+            if (worktree.mainCheckout() || worktree.prunable()
                     || tasks.stream().anyMatch(task -> task.session().workingDirectory().equals(worktree.path()))) {
                 continue;
             }
             String branch = worktree.branch().orElse(String.valueOf(worktree.path().getFileName()));
             if (in.filter().isEmpty() || contains(branch, in.filter())) {
-                children.add(new IdleWorktree(worktree.path(), branch));
+                sessionlessWorktrees.add(new IdleWorktree(worktree.path(), branch));
             }
         }
+        if (!sessionlessWorktrees.isEmpty()) {
+            children.add(new Section(SectionKind.WORKTREES, sessionlessWorktrees));
+        }
         return children;
+    }
+
+    /** Groups multiple sessions sharing a worktree; the given order decides group order and task order. */
+    private static List<TaskNode> groupedByWorktree(List<TaskRow> tasks) {
+        Map<Path, List<TaskRow>> byWorktree = new LinkedHashMap<>();
+        for (TaskRow task : tasks) {
+            byWorktree.computeIfAbsent(task.session().workingDirectory(), ignored -> new ArrayList<>()).add(task);
+        }
+        List<TaskNode> grouped = new ArrayList<>();
+        byWorktree.forEach((worktree, rows) -> {
+            if (rows.size() == 1) {
+                grouped.add(rows.get(0));
+            } else {
+                grouped.add(new WorktreeGroup(worktree, rows.get(0).branch().orElse(String.valueOf(
+                        worktree.getFileName())), rows));
+            }
+        });
+        return grouped;
     }
 
     private static List<TaskRow> sorted(List<TaskRow> tasks) {

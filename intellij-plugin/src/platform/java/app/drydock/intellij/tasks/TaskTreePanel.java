@@ -7,6 +7,7 @@ import app.drydock.intellij.agent.SessionActivityListener;
 import app.drydock.intellij.tasks.TaskNode.AddCurrentProject;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
+import app.drydock.intellij.tasks.TaskNode.Section;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
 
@@ -363,6 +364,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         DefaultMutableTreeNode treeNode = new DefaultMutableTreeNode(node);
         switch (node) {
             case ProjectRow project -> project.children().forEach(
+                    child -> treeNode.add(treeNode(child, selected, toSelect)));
+            case Section section -> section.children().forEach(
                     child -> treeNode.add(treeNode(child, selected, toSelect)));
             case WorktreeGroup group -> group.tasks().forEach(
                     task -> treeNode.add(treeNode(task, selected, toSelect)));
