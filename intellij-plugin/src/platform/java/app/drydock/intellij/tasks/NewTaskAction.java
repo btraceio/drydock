@@ -1,7 +1,5 @@
 package app.drydock.intellij.tasks;
 
-import app.drydock.intellij.tasks.TaskNode.ProjectRow;
-
 import com.intellij.icons.AllIcons;
 import com.intellij.openapi.actionSystem.ActionUpdateThread;
 import com.intellij.openapi.actionSystem.AnActionEvent;
@@ -12,8 +10,10 @@ import org.jetbrains.annotations.NotNull;
 import java.util.Optional;
 
 /**
- * {@code ＋ New task} (⌃⌥N): for the project selected in the Drydock tool
- * window, or else this window's project.
+ * {@code ＋ New task} (⌃⌥N): always for this window's project. Row-relative
+ * creation belongs to the task tree's context menu; selection in the shared
+ * Drydock tree must not redirect the global shortcut or toolbar button to a
+ * different registered project.
  */
 public final class NewTaskAction extends DumbAwareAction {
 
@@ -27,9 +27,7 @@ public final class NewTaskAction extends DumbAwareAction {
         if (project == null || project.isDisposed()) {
             return;
         }
-        Optional<ProjectRow> selected = e.getData(TaskTreePanel.SELECTED_NODE) instanceof ProjectRow row
-                ? Optional.of(row) : Optional.empty();
-        TaskLauncher.open(project, selected.map(row -> row.project().root()), Optional.empty());
+        TaskLauncher.open(project, Optional.empty(), Optional.empty());
     }
 
     @Override

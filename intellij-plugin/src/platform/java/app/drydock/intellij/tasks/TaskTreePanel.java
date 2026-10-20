@@ -123,16 +123,12 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             }
         };
         contextActions.add(switchToTask);
-        AnAction newTaskAction = ActionManager.getInstance().getAction("Drydock.NewTask");
-        if (newTaskAction != null) {
-            contextActions.add(newTaskAction);
-        }
-        contextActions.add(new DumbAwareAction("New Task in This Worktree…",
-                "Start another agent in this task's worktree", AllIcons.General.Add) {
+        contextActions.add(new DumbAwareAction("New Task…",
+                "Start a task for this project or worktree", AllIcons.General.Add) {
             @Override
             public void update(@NotNull AnActionEvent e) {
                 Path root = e.getData(SELECTED_PROJECT_ROOT);
-                TaskActions.present(e, root != null && worktreeOf(e.getData(SELECTED_NODE), root).isPresent());
+                TaskActions.present(e, newTaskTarget(e.getData(SELECTED_NODE), root).isPresent());
             }
 
             @Override
@@ -143,8 +139,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             @Override
             public void actionPerformed(@NotNull AnActionEvent e) {
                 Path root = e.getData(SELECTED_PROJECT_ROOT);
-                worktreeOf(e.getData(SELECTED_NODE), root).ifPresent(fixed ->
-                        TaskLauncher.open(project, Optional.ofNullable(root), Optional.of(fixed)));
+                newTaskTarget(e.getData(SELECTED_NODE), root).ifPresent(target ->
+                        TaskLauncher.open(project, Optional.of(target.mainRoot()), target.fixedWorktree()));
             }
         });
         contextActions.addAll(TaskActions.taskActions());
@@ -154,6 +150,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         // to the selected task or project. They stay in place, greyed when
         // they do not apply (see TaskActions.shown).
         DefaultActionGroup toolbarActions = new DefaultActionGroup();
+        AnAction newTaskAction = ActionManager.getInstance().getAction("Drydock.NewTask");
         if (newTaskAction != null) {
             toolbarActions.add(newTaskAction);
         }
@@ -276,6 +273,33 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                     Optional.of(new NewTaskPlan.FixedWorktree(task.session().workingDirectory(), task.branch().get()));
             case null, default -> Optional.empty();
         };
+    }
+
+    /**
+     * The target of the tree's single context-menu New Task action. A
+     * project row targets that registered project, while a worktree row (or
+     * a task inside a linked worktree) additionally fixes the dialog to that
+     * worktree. A task in the main checkout still targets its registered
+     * project, but keeps the normal new-task choices so the main-checkout
+     * writer warning cannot be bypassed through EXISTING_WORKTREE mode.
+     *
+     * <p>The tool-window toolbar and global shortcut deliberately do not use
+     * this seam: they continue to target the currently open project.</p>
+     */
+    static Optional<NewTaskTarget> newTaskTarget(TaskNode node, Path mainRoot) {
+        if (mainRoot == null) {
+            return Optional.empty();
+        }
+        return switch (node) {
+            case ProjectRow ignored -> Optional.of(new NewTaskTarget(mainRoot, Optional.empty()));
+            case WorktreeGroup ignored -> Optional.of(new NewTaskTarget(mainRoot, worktreeOf(node, mainRoot)));
+            case IdleWorktree ignored -> Optional.of(new NewTaskTarget(mainRoot, worktreeOf(node, mainRoot)));
+            case TaskRow ignored -> Optional.of(new NewTaskTarget(mainRoot, worktreeOf(node, mainRoot)));
+            case null, default -> Optional.empty();
+        };
+    }
+
+    record NewTaskTarget(Path mainRoot, Optional<NewTaskPlan.FixedWorktree> fixedWorktree) {
     }
 
     private Optional<TaskNode> selected() {
