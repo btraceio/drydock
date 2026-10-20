@@ -98,8 +98,9 @@
                   topic="app.drydock.intellij.agent.SessionActivityListener"/>
     </applicationListeners>
     <actions>
-        <!-- Drydock is reached through its tool window, not a menu: this is
-             the one action outside it, so the shortcut works anywhere. -->
+        <!-- Drydock is reached through its tool window, not a menu: New Task
+             is outside it so the shortcut works anywhere, and New Task from
+             Branch so Git's branch menus can start one. -->
         <action id="Drydock.NewTask"
                 class="app.drydock.intellij.tasks.NewTaskAction"
                 text="New Task…"
@@ -109,6 +110,14 @@
                  and control). Not ⌥⌘N: on macOS that is Refactor | Inline in
                  an editor and Git's New Branch elsewhere. -->
             <keyboard-shortcut keymap="$default" first-keystroke="alt meta N"/>
+        </action>
+        <!-- Git's per-branch menu: the Log's Branches pane and the branches
+             popup both build it from Git.Branch. -->
+        <action id="Drydock.NewTaskFromBranch"
+                class="app.drydock.intellij.tasks.NewTaskFromBranchAction"
+                text="New Drydock Task from Branch…"
+                description="Start an agent on a new task from this branch">
+            <add-to-group group-id="Git.Branch" anchor="first"/>
         </action>
     </actions>
 </idea-plugin>
