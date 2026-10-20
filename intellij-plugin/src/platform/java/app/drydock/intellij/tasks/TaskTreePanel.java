@@ -5,6 +5,7 @@ import app.drydock.domain.SessionMode;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.DrydockSessionsListener;
 import app.drydock.intellij.agent.AgentConsoles;
+import app.drydock.intellij.agent.AgentExecutionListener;
 import app.drydock.intellij.agent.SessionActivityListener;
 import app.drydock.intellij.tasks.TaskNode.AddCurrentProject;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
@@ -304,6 +305,29 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         MessageBusConnection bus = ApplicationManager.getApplication().getMessageBus().connect(this);
         bus.subscribe(DrydockSessionsListener.TOPIC, (DrydockSessionsListener) () -> requestRebuild(true));
         bus.subscribe(SessionActivityListener.TOPIC, (SessionActivityListener) (id, activity) -> requestRebuild(false));
+        // Where an agent is shown changes nothing in the catalog: a move or a
+        // release only reaches the rows through the registry's own events.
+        bus.subscribe(AgentExecutionListener.TOPIC, new AgentExecutionListener() {
+            @Override
+            public void executionShown(ManagedSessionId sessionId, Project to) {
+                requestRebuild(false);
+            }
+
+            @Override
+            public void executionReleased(ManagedSessionId sessionId) {
+                requestRebuild(false);
+            }
+
+            @Override
+            public void executionStarted(ManagedSessionId sessionId) {
+                requestRebuild(false);
+            }
+
+            @Override
+            public void executionTerminated(ManagedSessionId sessionId, boolean stopRequested, Integer exitCode) {
+                requestRebuild(false);
+            }
+        });
         DrydockPluginService.getInstance().initialization().thenRun(() -> {
             // Initialization can finish after the tool window is gone; a
             // listener added then would outlive the panel.
