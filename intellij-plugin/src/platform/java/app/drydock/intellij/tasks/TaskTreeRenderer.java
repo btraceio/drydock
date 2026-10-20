@@ -31,11 +31,12 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
     static final Object LINK = new Object();
 
     /**
-     * Whether a click on a row with a link acts: a single click only on the
-     * link text, a double-click anywhere on the row. Pure.
+     * Whether a click on a row with a link acts: only the primary button, a
+     * single click only on the link text, and a double-click anywhere on the
+     * row. Pure.
      */
-    static boolean clickActs(boolean onLink, int clickCount) {
-        return clickCount == 2 || (onLink && clickCount == 1);
+    static boolean clickActs(boolean primaryButton, boolean onLink, int clickCount) {
+        return primaryButton && (clickCount == 2 || (onLink && clickCount == 1));
     }
 
     @Override

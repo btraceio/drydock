@@ -40,6 +40,7 @@ import com.intellij.util.ui.tree.TreeUtil;
 import org.jetbrains.annotations.NotNull;
 
 import javax.swing.JPanel;
+import javax.swing.SwingUtilities;
 import javax.swing.event.DocumentEvent;
 import javax.swing.tree.DefaultMutableTreeNode;
 import javax.swing.tree.DefaultTreeModel;
@@ -177,13 +178,15 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             public void mouseClicked(MouseEvent event) {
                 TreePath path = tree.getPathForLocation(event.getX(), event.getY());
                 Object node = path == null ? null : ((DefaultMutableTreeNode) path.getLastPathComponent()).getUserObject();
-                boolean acts = TaskTreeRenderer.clickActs(onLink(path, event), event.getClickCount());
+                boolean primaryButton = SwingUtilities.isLeftMouseButton(event);
+                boolean acts = TaskTreeRenderer.clickActs(
+                        primaryButton, onLink(path, event), event.getClickCount());
                 if (node instanceof AddCurrentProject add && acts) {
                     register(add);
                 } else if (node instanceof IdleWorktree idle && acts) {
                     TaskLauncher.open(project, projectRootOf(path),
                             Optional.of(new NewTaskPlan.FixedWorktree(idle.worktree(), idle.branch())));
-                } else if (node instanceof TaskRow task && event.getClickCount() == 2) {
+                } else if (node instanceof TaskRow task && primaryButton && event.getClickCount() == 2) {
                     TaskNavigator.switchTo(task.session());
                 }
             }
