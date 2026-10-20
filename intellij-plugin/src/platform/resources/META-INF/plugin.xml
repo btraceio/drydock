@@ -84,6 +84,8 @@
         <!-- "Claude needs you": the balloon raised when an agent starts
              waiting for the user (AttentionNotifier). -->
         <notificationGroup id="Drydock attention" displayType="BALLOON"/>
+        <!-- "<task> moved": a hosted agent's console went to its own window. -->
+        <notificationGroup id="Drydock moves" displayType="BALLOON"/>
 
         <postStartupActivity
                 implementation="app.drydock.intellij.startup.DrydockStartupActivity"/>

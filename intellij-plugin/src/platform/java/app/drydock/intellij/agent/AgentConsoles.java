@@ -2,11 +2,17 @@ package app.drydock.intellij.agent;
 
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.RepositoryCatalog;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.session.DrydockSessionService;
 import app.drydock.intellij.startup.DrydockStartupActivity;
+import app.drydock.intellij.tasks.TaskWindows;
 
 import com.intellij.ide.impl.ProjectUtil;
+import com.intellij.notification.Notification;
+import com.intellij.notification.NotificationAction;
+import com.intellij.notification.NotificationGroupManager;
+import com.intellij.notification.NotificationType;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.fileEditor.FileEditorManager;
@@ -18,9 +24,14 @@ import com.intellij.openapi.progress.ProgressIndicator;
 import com.intellij.openapi.progress.ProgressManager;
 import com.intellij.openapi.progress.Task;
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.project.ProjectManager;
 import com.intellij.openapi.ui.Messages;
+import com.intellij.openapi.util.text.StringUtil;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.openapi.wm.IdeFocusManager;
+import com.intellij.openapi.wm.ToolWindow;
+import com.intellij.openapi.wm.ToolWindowId;
+import com.intellij.openapi.wm.ToolWindowManager;
 import com.intellij.openapi.wm.WindowManager;
 import com.intellij.util.messages.MessageBusConnection;
 import org.jetbrains.annotations.NotNull;
@@ -29,6 +40,7 @@ import javax.swing.JFrame;
 
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
+import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
@@ -247,6 +259,100 @@ public final class AgentConsoles {
         }
         show(project, sessionId);
         focusConsole(project, sessionId);
+    }
+
+    /** Matches the plugin.xml notificationGroup id of the "moved" balloon. */
+    private static final String MOVES_GROUP = "Drydock moves";
+
+    /**
+     * "Open project window ↗" on a hosted tab (frame F3): opens or raises the
+     * agent's own worktree window and moves its console there — same process,
+     * history replayed. With {@code thenChanges}, then activates that window's
+     * Commit tool window ("Changes ↗"). The hosting tab closes, and a balloon
+     * in {@code host} confirms the move and offers to bring it back.
+     *
+     * <p>While the window opens the session is {@code moving}: the hosting
+     * tab says so and disables its strip, and closing the host meanwhile
+     * neither stops nor releases it. Every path clears that, including a
+     * window that does not open. EDT.</p>
+     */
+    public static void jumpToOwnWindow(Project host, ManagedSessionId sessionId, boolean thenChanges) {
+        AgentExecutionRegistry registry = AgentExecutionRegistry.getInstance();
+        Optional<AgentExecution> execution = registry.execution(sessionId);
+        if (execution.isEmpty()) {
+            return;
+        }
+        Path directory = execution.get().workingDirectory();
+        SessionPlace place = execution.get().place();
+        registry.markMoving(sessionId, true);
+        DrydockPluginService.getInstance().executor().execute(() -> {
+            Optional<Project> open;
+            try {
+                Path canonical = RepositoryCatalog.canonicalize(directory);
+                open = Arrays.stream(ProjectManager.getInstance().getOpenProjects())
+                        .filter(project -> !project.isDisposed() && project != host && project.getBasePath() != null)
+                        .filter(project -> RepositoryCatalog.canonicalize(Path.of(project.getBasePath())).equals(canonical))
+                        .findFirst();
+            } catch (RuntimeException e) {
+                LOG.log(Level.WARNING, () -> "Could not look for the window of " + directory + ": " + e);
+                open = Optional.empty();
+            }
+            Optional<Project> existing = open;
+            ApplicationManager.getApplication().invokeLater(() -> {
+                try {
+                    Project target = existing.filter(project -> !project.isDisposed())
+                            .orElseGet(() -> TaskWindows.openAsProject(directory));
+                    if (target == null || target.isDisposed()) {
+                        if (!host.isDisposed()) {
+                            Messages.showErrorDialog(host, "The window for " + place.label() + " did not open.",
+                                    "Drydock");
+                        }
+                        return;
+                    }
+                    if (registry.show(sessionId, target).isEmpty()) {
+                        return;   // the agent ended and nothing showed it
+                    }
+                    ProjectUtil.focusProjectWindow(target, true);
+                    show(target, sessionId);
+                    focusConsole(target, sessionId);
+                    if (thenChanges) {
+                        ToolWindow commit = ToolWindowManager.getInstance(target).getToolWindow(ToolWindowId.COMMIT);
+                        if (commit != null) {
+                            commit.activate(null);
+                        }
+                    }
+                    if (!host.isDisposed()) {
+                        announceMove(host, target, sessionId, place);
+                    }
+                } finally {
+                    registry.markMoving(sessionId, false);
+                }
+            }, ModalityState.nonModal());
+        });
+    }
+
+    /** The balloon in the window the agent left: where it went, and the way back. */
+    private static void announceMove(Project host, Project target, ManagedSessionId sessionId, SessionPlace place) {
+        String title = DrydockPluginService.getInstance().stateStore().state().sessions().stream()
+                .filter(session -> session.id().equals(sessionId))
+                .map(ManagedAgentSession::displayName)
+                .findFirst()
+                .orElse("The agent");
+        Notification notification = NotificationGroupManager.getInstance().getNotificationGroup(MOVES_GROUP)
+                .createNotification(StringUtil.escapeXmlEntities(JumpPlan.movedTitle(title)),
+                        StringUtil.escapeXmlEntities(JumpPlan.movedBody(place)), NotificationType.INFORMATION);
+        notification.addAction(NotificationAction.createSimpleExpiring("Go to window", () -> {
+            if (!target.isDisposed()) {
+                ProjectUtil.focusProjectWindow(target, true);
+            }
+        }));
+        notification.addAction(NotificationAction.createSimpleExpiring("Bring back here", () -> {
+            if (!host.isDisposed()) {
+                ProjectUtil.focusProjectWindow(host, true);
+                showHere(host, sessionId);
+            }
+        }));
+        notification.notify(host);
     }
 
     /**

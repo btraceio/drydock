@@ -8,7 +8,6 @@ import app.drydock.domain.RepositoryCatalog;
 import app.drydock.domain.SessionActivity;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.DrydockSessionsListener;
-import app.drydock.intellij.tasks.TaskNavigator;
 import app.drydock.ui.AgentLabels;
 
 import com.intellij.openapi.application.ApplicationActivationListener;
@@ -184,6 +183,13 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
                     // A session is shown in one window at a time; its console
                     // has moved, so this tab has nothing left to show.
                     closeLater();
+                }
+            }
+
+            @Override
+            public void executionMoving(ManagedSessionId sessionId, boolean moving) {
+                if (sessionId.equals(file.sessionId())) {
+                    refreshLater();
                 }
             }
 
@@ -396,7 +402,8 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
                 // this same row instead.
                 resumable, resumeTokens,
                 DumbService.isDumb(project),
-                hostedFrom.map(place -> execution.map(AgentExecution::place).orElse(place)));
+                hostedFrom.map(place -> execution.map(AgentExecution::place).orElse(place)),
+                AgentExecutionRegistry.getInstance().moving().contains(current.id()));
 
         String stoppedLine = AgentStripText.stoppedFooter(
                 AgentStripText.displayStatus(current.status(), false),
@@ -520,10 +527,16 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
             // The review surface lands in a later phase. The link exists now
             // because the strip is the handoff's strip; wiring it to nothing
             // silently would be worse than saying so.
-            case SHOW_CHANGES -> AgentConsoles.notImplementedYet(project, action);
-            // Moves the console into the agent's own window (F3): wired in
-            // the jump; until then, the plain switch to that window.
-            case OPEN_PROJECT_WINDOW -> TaskNavigator.switchTo(current);
+            // A hosted tab's Changes lives in the agent's own window, so it
+            // jumps there first (F3). A local one's review is not built yet.
+            case SHOW_CHANGES -> {
+                if (hostedFrom.isPresent()) {
+                    AgentConsoles.jumpToOwnWindow(project, current.id(), true);
+                } else {
+                    AgentConsoles.notImplementedYet(project, action);
+                }
+            }
+            case OPEN_PROJECT_WINDOW -> AgentConsoles.jumpToOwnWindow(project, current.id(), false);
         }
     }
 

@@ -143,11 +143,14 @@ final class AgentConsoleStrip extends JPanel {
      * @param hostedFrom       where the agent comes from, when this tab hosts
      *                         it from another worktree; adds the provenance
      *                         and the jump to its own window
+     * @param moving           whether the console is on its way to the
+     *                         agent's own window: the strip says so and its
+     *                         actions wait (typing still reaches the agent)
      */
     void update(ManagedAgentSession session, Optional<SessionActivity> activity, boolean running,
                 boolean readOnlyEnforced, String agentName, Duration age, Optional<Integer> changedFiles,
                 boolean resumable, Optional<Integer> estimatedTokens, boolean indexing,
-                Optional<SessionPlace> hostedFrom) {
+                Optional<SessionPlace> hostedFrom, boolean moving) {
         // The window, not the catalog, is the authority on what is alive in
         // it: a row left in the running band with nothing running here reads
         // as not running (see AgentStripText.displayStatus).
@@ -167,9 +170,12 @@ final class AgentConsoleStrip extends JPanel {
         changes.setVisible(running);
         // A hosted tab's Changes opens in the agent's own window (F2/F3).
         changes.setText(hostedFrom.isPresent() ? "Changes ↗" : "Changes");
-        provenance.setText(hostedFrom.map(SessionPlace::provenance).orElse(""));
+        provenance.setText(hostedFrom.map(place -> moving ? JumpPlan.opening(place) : place.provenance()).orElse(""));
         provenance.setVisible(hostedFrom.isPresent());
         openWindow.setVisible(hostedFrom.isPresent());
+        openWindow.setEnabled(!moving);
+        changes.setEnabled(!moving);
+        more.setEnabled(!moving);
 
         primaryAction = running ? StripAction.STOP
                 : resumable ? StripAction.RESUME
@@ -177,7 +183,7 @@ final class AgentConsoleStrip extends JPanel {
         primary.setText(running ? "■ Deactivate" : AgentStripText.primaryLabel(resumable, estimatedTokens));
         // Nothing to resume for an agent this build cannot run: the resume
         // would pick a provider at random or fail at the command builder.
-        primary.setEnabled(running || session.status() != SessionStatus.UNSUPPORTED_AGENT);
+        primary.setEnabled(!moving && (running || session.status() != SessionStatus.UNSUPPORTED_AGENT));
 
         revalidate();
         repaint();

@@ -32,6 +32,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -90,6 +91,8 @@ public final class AgentExecutionRegistry implements Disposable {
     private static final int INITIAL_ROWS = 30;
 
     private final Map<ManagedSessionId, AgentExecution> executions = new ConcurrentHashMap<>();
+    /** Sessions whose console is on its way to another window (a jump, while that window opens). */
+    private final Set<ManagedSessionId> moving = ConcurrentHashMap.newKeySet();
 
     public static AgentExecutionRegistry getInstance() {
         return ApplicationManager.getApplication().getService(AgentExecutionRegistry.class);
@@ -131,6 +134,23 @@ public final class AgentExecutionRegistry implements Disposable {
                 .filter(AgentExecution::isRunning)
                 .filter(execution -> execution.host().map(project::equals).orElse(false))
                 .map(AgentExecution::sessionId).toList();
+    }
+
+    /** Sessions on their way to another window; see {@link #markMoving}. */
+    public Set<ManagedSessionId> moving() {
+        return Set.copyOf(moving);
+    }
+
+    /**
+     * Marks {@code sessionId} as moving to another window, or no longer. A
+     * window closing meanwhile must neither stop nor release it: it is about
+     * to be shown elsewhere. Publishes {@code executionMoving}.
+     */
+    public void markMoving(ManagedSessionId sessionId, boolean isMoving) {
+        boolean changed = isMoving ? moving.add(sessionId) : moving.remove(sessionId);
+        if (changed) {
+            publish().executionMoving(sessionId, isMoving);
+        }
     }
 
     // ---- start -----------------------------------------------------------------

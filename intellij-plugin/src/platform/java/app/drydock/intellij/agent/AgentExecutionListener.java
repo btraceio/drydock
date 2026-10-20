@@ -54,4 +54,8 @@ public interface AgentExecutionListener {
     /** No window shows {@code sessionId} any more; its agent may still run. EDT. */
     default void executionReleased(ManagedSessionId sessionId) {
     }
+
+    /** {@code sessionId}'s console is on its way to another window ({@code true}), or that ended. */
+    default void executionMoving(ManagedSessionId sessionId, boolean moving) {
+    }
 }
