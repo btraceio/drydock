@@ -1,0 +1,71 @@
+name: IntelliJ plugin
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - intellij-plugin/**
+      - .github/workflows/intellij-plugin.yml
+  pull_request:
+    paths:
+      - intellij-plugin/**
+      - .github/workflows/intellij-plugin.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: intellij-plugin-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  build:
+    name: intellij-plugin test + buildPlugin
+    # The plugin is its own Gradle build (intellij-plugin/) with no native
+    # parts and no macOS-only tests, so a Linux runner is enough and is
+    # cheaper. The IDE it compiles and tests against (IU 2025.3.3) is
+    # resolved by the IntelliJ Platform Gradle Plugin, about 1.5 GB.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: intellij-plugin
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: false
+
+      # JBR 21 is the IDE's runtime and the build's toolchain floor.
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+          cache-dependency-path: |
+            intellij-plugin/*.gradle.kts
+            intellij-plugin/gradle/wrapper/gradle-wrapper.properties
+
+      # verifyPlugin is deliberately not run here: with recommended() it
+      # extracts ~4 GB per IDE version and exhausts the runner's disk. Run it
+      # locally before a release (see intellij-plugin in the README).
+      - name: Test and build
+        run: ./gradlew --no-daemon test buildPlugin
+
+      - name: Upload plugin zip
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: drydock-intellij-plugin
+          path: intellij-plugin/build/distributions/*.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload test results
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: intellij-plugin-test-results
+          path: |
+            intellij-plugin/build/reports/tests/test
+            intellij-plugin/build/test-results/test
+          retention-days: 7
