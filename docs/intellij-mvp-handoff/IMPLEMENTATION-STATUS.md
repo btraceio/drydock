@@ -377,6 +377,18 @@ DECISION.md, SPIKE-RESULTS.md). Plan, with its rulings R1–R10:
   - output was recoloured at every chunk boundary;
   - Stop & Close Window could close the hosting window.
 
+  Its six minor findings are fixed too, each with a test that failed
+  first, apart from the isRunning/attach race, which the always-attach
+  fix removed:
+  - a closed window was kept in memory by the agents it started;
+  - every console moved away from stayed reachable from the process;
+  - the close question listed agents mid-move;
+  - a refused jump could stick on "Opening…";
+  - `forget()` touched UI state off the EDT.
+
+  Typing into a hosted console and into a moved one was rechecked live
+  after the emulator change.
+
 **Not verified live:**
 - Needs-you balloons. Pi reports no activity, and no Claude agent was run.
 - Stopping an agent no window shows. The registry's platform test covers
@@ -389,7 +401,7 @@ DECISION.md, SPIKE-RESULTS.md). Plan, with its rulings R1–R10:
 
 **Gate:** `./gradlew --no-daemon test buildPlugin verifyPlugin` with the
 verifier pointed at the cached IDEs (temporary override; `recommended()`
-would not fit the disk) → BUILD SUCCESSFUL, 1931 tests, 0 failed.
+would not fit the disk) → BUILD SUCCESSFUL, 1938 tests, 0 failed.
 Verifier: IU-253.31033.145 Compatible, with no notes; IU-263.7031.23
 Compatible, 6 usages of deprecated API. The 263 notes are the console
 constructor and the tab tooltip override, which have no 2025.3
