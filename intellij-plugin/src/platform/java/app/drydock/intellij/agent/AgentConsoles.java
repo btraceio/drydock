@@ -6,6 +6,7 @@ import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.session.DrydockSessionService;
 import app.drydock.intellij.startup.DrydockStartupActivity;
 
+import com.intellij.ide.impl.ProjectUtil;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.fileEditor.FileEditorManager;
@@ -17,6 +18,7 @@ import com.intellij.openapi.progress.ProgressIndicator;
 import com.intellij.openapi.progress.ProgressManager;
 import com.intellij.openapi.progress.Task;
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.project.ProjectManager;
 import com.intellij.openapi.ui.Messages;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.openapi.wm.IdeFocusManager;
@@ -29,10 +31,12 @@ import javax.swing.JFrame;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Function;
+import java.util.function.Predicate;
 
 /**
  * Opening, focusing, and resuming a session's console tab.
@@ -175,6 +179,21 @@ public final class AgentConsoles {
                                       CompletableFuture<ManagedAgentSession>> launch) {
         Objects.requireNonNull(project, "project");
         Objects.requireNonNull(sessionId, "sessionId");
+        // One agent per session across the whole IDE, not just this window:
+        // AgentExecutionService only knows its own window, so Resume here
+        // while another window runs the session would start a second agent
+        // on the same conversation. Go to the running one instead.
+        Optional<Project> running = runningElsewhere(
+                Arrays.stream(ProjectManager.getInstance().getOpenProjects())
+                        .filter(open -> !open.isDisposed())
+                        .toList(),
+                project, open -> AgentExecutionService.getInstance(open).isRunning(sessionId));
+        if (running.isPresent()) {
+            ProjectUtil.focusProjectWindow(running.get(), true);
+            show(running.get(), sessionId);
+            focusConsole(running.get(), sessionId);
+            return;
+        }
         show(project, sessionId);
         ProgressManager.getInstance().run(new Task.Backgroundable(project, progressTitle, true) {
             @Override
@@ -191,6 +210,17 @@ public final class AgentConsoles {
                 }
             }
         });
+    }
+
+    /**
+     * The window, other than {@code here}, whose agent for the session is
+     * running, if any. Pure.
+     */
+    static <W> Optional<W> runningElsewhere(List<W> windows, W here, Predicate<W> runsSession) {
+        return windows.stream()
+                .filter(window -> !window.equals(here))
+                .filter(runsSession)
+                .findFirst();
     }
 
     /**
