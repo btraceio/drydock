@@ -253,13 +253,6 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
                 hostedFrom = found != null ? hostedPlace(plugin, found) : Optional.empty();
                 folderMissing = found != null && hostedFrom.isPresent()
                         && HostedLifecycle.folderGone(true, Files.isDirectory(found.workingDirectory()));
-                if (found != null && !everResolved && HostedLifecycle.closeRestoredTab(hostedFrom.isPresent(),
-                        AgentExecutionRegistry.getInstance().host(found.id()).map(project::equals).orElse(false),
-                        project.getLocationHash().equals(file.getUserData(AgentConsoles.OPENED_IN)))) {
-                    // Restored by the IDE from another worktree: hosted tabs
-                    // do not come back; the Drydock list offers Resume here.
-                    closeLater();
-                }
                 if (hostedFrom.isPresent()) {
                     file.putUserData(HostedTab.KEY, new HostedTab.Facts(project.getLocationHash(), hostedFrom.get()));
                 } else if (HostedTab.placeIn(file, project).isPresent()) {

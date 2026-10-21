@@ -323,7 +323,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                         && onLink(path, event)) {
                     hereLink(task);
                 } else if (node instanceof TaskRow task && primaryButton && event.getClickCount() == 2) {
-                    TaskNavigator.switchTo(task.session());
+                    activate(task);
                 } else if (node instanceof IssueRow issue && primaryButton && event.getClickCount() == 2) {
                     issue.issue().url().ifPresent(BrowserUtil::browse);
                 }
@@ -333,7 +333,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             @Override
             public void keyPressed(KeyEvent event) {
                 if (event.getKeyCode() == KeyEvent.VK_ENTER && selected().orElse(null) instanceof TaskRow task) {
-                    TaskNavigator.switchTo(task.session());
+                    activate(task);
                 }
             }
         });
@@ -789,6 +789,14 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 AgentConsoles.resumeOrStart(project, task.session());
             }
         });
+    }
+
+    /** The row's default gesture mirrors its primary toolbar action. EDT. */
+    private void activate(TaskRow task) {
+        switch (TaskActions.defaultActivation(task)) {
+            case SWITCH_TO_RUNNING -> TaskNavigator.switchTo(task.session());
+            case RESUME_HERE -> AgentConsoles.resumeOrStart(project, task.session());
+        }
     }
 
     private void register(AddCurrentProject add) {

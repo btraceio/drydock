@@ -2,6 +2,7 @@ package app.drydock.intellij.agent;
 
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.intellij.startup.DrydockStartupActivity;
+import app.drydock.intellij.tasks.TaskWindows;
 
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.project.ProjectManagerListener;
@@ -35,6 +36,7 @@ public final class AgentWindowCloseListener implements ProjectManagerListener {
 
     @Override
     public void projectClosing(@NotNull Project project) {
+        TaskWindows.windowClosing(project, AgentCloseConfirmation.isQuitting());
         AgentExecutionRegistry registry = AgentExecutionRegistry.getInstance();
         List<ManagedSessionId> running = registry.runningShownIn(project);
         Optional<CloseWindowPlan.Decision> decision = Optional.ofNullable(

@@ -60,6 +60,18 @@ class TaskActionsTest {
     }
 
     @Test
+    void defaultActivationResumesIdleTasksHereAndOnlyNavigatesToRunningTasks() {
+        assertEquals(TaskActions.DefaultActivation.RESUME_HERE,
+                TaskActions.defaultActivation(row(false, new TaskPlacement.Idle(false))));
+        assertEquals(TaskActions.DefaultActivation.RESUME_HERE,
+                TaskActions.defaultActivation(row(false, new TaskPlacement.Idle(true))));
+        assertEquals(TaskActions.DefaultActivation.SWITCH_TO_RUNNING,
+                TaskActions.defaultActivation(row(true, new TaskPlacement.OwnWindow())));
+        assertEquals(TaskActions.DefaultActivation.SWITCH_TO_RUNNING,
+                TaskActions.defaultActivation(row(true, new TaskPlacement.Here())));
+    }
+
+    @Test
     void destructiveRemovalQuestionSaysWhatIsLostAndWhatIsKept() {
         assertEquals("Remove 3 stale worktrees? This permanently deletes their folders and discards any "
                         + "uncommitted and untracked changes. Branches are kept.",

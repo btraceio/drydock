@@ -61,6 +61,8 @@ import java.util.function.Predicate;
  */
 final class TaskActions {
 
+    enum DefaultActivation { SWITCH_TO_RUNNING, RESUME_HERE }
+
     /**
      * How long Deactivate &amp; Close and Done wait for the agent to end: past the
      * execution's own two-second force-kill, with room to spare.
@@ -96,7 +98,7 @@ final class TaskActions {
                 task("Deactivate && Close Window", "Deactivate the agent and close its window", AllIcons.Actions.Close,
                         TaskActions::closesOwnWindow, (project, row) -> stop(project, row, true)),
                 // F5: moves an agent another window shows into this one.
-                task("Show Here", "Move this agent's console into this window", AllIcons.Actions.MoveTo2,
+                task("Show Here", "Move this agent's console into this window", AllIcons.Actions.Show,
                         row -> row.placement() instanceof TaskPlacement.OwnWindow
                                 || row.placement() instanceof TaskPlacement.OtherWindow,
                         (project, row) -> AgentConsoles.showHere(project, row.session().id())),
@@ -134,6 +136,11 @@ final class TaskActions {
      */
     static boolean resumesElsewhere(TaskRow row) {
         return !row.running() && row.placement() instanceof TaskPlacement.Idle idle && !idle.thisWindow();
+    }
+
+    /** Double-click/Enter follows the primary action: resume idle tasks here, focus running ones. */
+    static DefaultActivation defaultActivation(TaskRow row) {
+        return row.running() ? DefaultActivation.SWITCH_TO_RUNNING : DefaultActivation.RESUME_HERE;
     }
 
     private interface RowAction {
