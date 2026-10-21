@@ -48,8 +48,9 @@ final class AgentConsoleStrip extends JPanel {
      * a fresh conversation versus one resumed by id — and only one of them is
      * ever offered.
      */
-    enum StripAction { STOP, RESUME, START, TRANSFER, SHOW_CHANGES, OPEN_PROJECT_WINDOW, SESSION_MENU }
+    enum StripAction { STOP, RESUME, START, TRANSFER, RENAME, SHOW_CHANGES, OPEN_PROJECT_WINDOW, SESSION_MENU }
 
+    private final ActionLink title;
     private final JBLabel state = new JBLabel();
     private final JBLabel chip = new JBLabel();
     private final JBLabel secondary = new JBLabel();
@@ -68,6 +69,8 @@ final class AgentConsoleStrip extends JPanel {
         // The ActionListener overload explicitly: ActionLink also takes a
         // Kotlin Function1 of the same shape, and a bare lambda is ambiguous
         // between the two.
+        this.title = new ActionLink("",
+                (ActionListener) event -> onAction.accept(StripAction.RENAME));
         this.changes = new ActionLink("Changes",
                 (ActionListener) event -> onAction.accept(StripAction.SHOW_CHANGES));
         this.openWindow = new ActionLink("Open project window ↗",
@@ -83,7 +86,10 @@ final class AgentConsoleStrip extends JPanel {
                 JBUI.Borders.customLineBottom(JBColor.border()),
                 JBUI.Borders.empty(0, 10)));
 
-        state.setFont(state.getFont().deriveFont(Font.BOLD));
+        title.setFont(title.getFont().deriveFont(Font.BOLD));
+        title.setToolTipText("Rename session");
+        title.setMinimumSize(new Dimension(JBUI.scale(40), 0));
+        title.setMaximumSize(new Dimension(JBUI.scale(220), Integer.MAX_VALUE));
         chip.setFont(JBUI.Fonts.smallFont());
         chip.setBorder(JBUI.Borders.compound(
                 JBUI.Borders.customLine(JBColor.border(), 1),
@@ -93,6 +99,8 @@ final class AgentConsoleStrip extends JPanel {
         more.setToolTipText("Done with this session…");
         primary.addActionListener(event -> onAction.accept(primaryAction));
 
+        add(title);
+        add(Box.createHorizontalStrut(JBUI.scale(10)));
         add(state);
         add(Box.createHorizontalStrut(JBUI.scale(8)));
         add(chip);
@@ -168,6 +176,8 @@ final class AgentConsoleStrip extends JPanel {
         // it: a row left in the running band with nothing running here reads
         // as not running (see AgentStripText.displayStatus).
         SessionStatus shown = AgentStripText.displayStatus(session.status(), running);
+        title.setText(session.displayName());
+        title.setToolTipText("Rename \"" + session.displayName() + "\"");
         state.setIcon(SessionDots.dotIcon(shown, activity));
         state.setText(SessionDots.statusWord(shown, activity));
         state.setToolTipText(SessionDots.tooltip(shown, activity));

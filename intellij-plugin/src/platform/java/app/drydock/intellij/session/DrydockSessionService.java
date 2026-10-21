@@ -857,6 +857,48 @@ public final class DrydockSessionService implements AgentExecutionListener {
     }
 
     /**
+     * The human's explicit rename. Validation, sibling collision detection,
+     * pinning and replacement happen as one state transform on the plugin's
+     * background executor; the EDT only owns the prompt and progress UI.
+     */
+    public CompletableFuture<ManagedAgentSession> renameSession(ManagedSessionId sessionId, String requestedName) {
+        Objects.requireNonNull(sessionId, "sessionId");
+        Objects.requireNonNull(requestedName, "requestedName");
+        return initialization.thenApplyAsync(unused -> {
+            String title;
+            try {
+                title = PromptSafety.checkSessionTitle(requestedName);
+            } catch (McpToolException e) {
+                throw new IllegalArgumentException(e.getMessage(), e);
+            }
+            ManagedAgentSession[] renamed = new ManagedAgentSession[1];
+            stateStore.get().update(state -> {
+                ManagedAgentSession session = state.sessions().stream()
+                        .filter(existing -> existing.id().equals(sessionId))
+                        .findFirst()
+                        .orElseThrow(() -> new IllegalStateException("The session no longer exists"));
+                String comparable = PromptSafety.foldForComparison(title);
+                Optional<ManagedAgentSession> clash = state.sessions().stream()
+                        .filter(other -> !other.id().equals(sessionId))
+                        .filter(other -> other.repositoryId().equals(session.repositoryId()))
+                        .filter(other -> PromptSafety.foldForComparison(other.displayName())
+                                .equalsIgnoreCase(comparable))
+                        .findFirst();
+                if (clash.isPresent()) {
+                    throw new IllegalArgumentException("Another session in this project is already named \""
+                            + clash.get().displayName() + "\"");
+                }
+                renamed[0] = session.withDisplayName(title).withNamePinned(true);
+                return state.withSessions(state.sessions().stream()
+                        .map(existing -> existing.id().equals(sessionId) ? renamed[0] : existing)
+                        .toList());
+            });
+            DrydockSessionsListener.publishChanged();
+            return renamed[0];
+        }, executor);
+    }
+
+    /**
      * Whether a writing session is already live in {@code workingDirectory} —
      * the one-writer-per-worktree rule the new-session dialog warns about.
      *

@@ -113,6 +113,9 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
     /** {@link #hostedFrom} as the tab title last showed it. EDT. */
     private Optional<SessionPlace> paintedHostedFrom = Optional.empty();
 
+    /** The session name as the tab title last showed it. EDT. */
+    private String paintedTitle = "";
+
     /** The resolved session; null until the catalog load completes. */
     private volatile ManagedAgentSession session;
 
@@ -432,8 +435,9 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
         FileEditorManagerEx.getInstanceEx(project).refreshIcons();
         // The title too, when the tab's repo tag came or went: the platform
         // reads it from a provider and caches it.
-        if (!hostedFrom.equals(paintedHostedFrom)) {
+        if (!hostedFrom.equals(paintedHostedFrom) || !current.displayName().equals(paintedTitle)) {
             paintedHostedFrom = hostedFrom;
+            paintedTitle = current.displayName();
             FileEditorManager.getInstance(project).updateFilePresentation(file);
         }
     }
@@ -531,6 +535,7 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
             case RESUME -> AgentConsoles.resume(project, current.id());
             case START -> AgentConsoles.startFresh(project, current.id());
             case TRANSFER -> SessionTransfer.show(project, current, this::refreshLater);
+            case RENAME -> SessionRename.show(project, current);
             case SESSION_MENU -> SessionDone.show(project, current);
             case SHOW_CHANGES -> {
                 if (hostedFrom.isPresent()) {

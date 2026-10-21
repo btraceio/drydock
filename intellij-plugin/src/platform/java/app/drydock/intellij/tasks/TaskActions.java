@@ -9,6 +9,7 @@ import app.drydock.intellij.DrydockSessionsListener;
 import app.drydock.intellij.agent.AgentConsoles;
 import app.drydock.intellij.agent.AgentExecutionRegistry;
 import app.drydock.intellij.agent.SessionDone;
+import app.drydock.intellij.agent.SessionRename;
 import app.drydock.intellij.agent.SessionTransfer;
 import app.drydock.intellij.agent.StopAgentsDialog;
 import app.drydock.intellij.agent.StopAgentsPlan;
@@ -115,6 +116,8 @@ final class TaskActions {
                 task("Transfer to…", "Continue this live task with another installed agent",
                         AllIcons.Actions.Refresh, row -> SessionTransfer.available(row.session(), row.activity()),
                         (project, row) -> SessionTransfer.show(project, row.session())),
+                task("Rename…", "Rename this session", AllIcons.Actions.Edit, row -> true,
+                        (project, row) -> SessionRename.show(project, row.session())),
                 task("Done with This Task…", "Forget the task, and optionally remove its worktree",
                         AllIcons.Actions.Checked, row -> true, TaskActions::done),
                 removeWorktrees(),

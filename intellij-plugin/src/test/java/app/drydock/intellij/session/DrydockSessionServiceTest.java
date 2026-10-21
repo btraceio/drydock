@@ -1050,7 +1050,49 @@ class DrydockSessionServiceTest {
         harness.store.flush();
     }
 
-    // ---- delete ----------------------------------------------------------------
+    // ---- rename and delete -----------------------------------------------------
+
+    @Test
+    void humanRenameNormalizesAndPinsTheSessionName(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        DrydockSessionService service = harness.service(new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, true, null, harness.events));
+        ManagedAgentSession session = persistSession(harness, AgentKind.CLAUDE, "Generated name",
+                AgentBinding.unlaunched(AgentKind.CLAUDE), base, SessionStatus.INACTIVE,
+                Instant.parse("2026-08-12T10:00:00Z"));
+
+        ManagedAgentSession renamed = service.renameSession(session.id(), "  Human\u2003name  ")
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals("Human name", renamed.displayName());
+        assertTrue(renamed.namePinned(), "a later transcript refresh must not replace a human rename");
+        assertEquals("Human name", persisted(harness, session.id()).displayName());
+        assertTrue(persisted(harness, session.id()).namePinned());
+        harness.store.flush();
+    }
+
+    @Test
+    void humanRenameRefusesASiblingNameWithoutChangingEitherSession(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        DrydockSessionService service = harness.service(new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, true, null, harness.events));
+        ManagedAgentSession first = persistSession(harness, AgentKind.CLAUDE, "First",
+                AgentBinding.unlaunched(AgentKind.CLAUDE), base, SessionStatus.INACTIVE,
+                Instant.parse("2026-08-12T10:00:00Z"));
+        persistSession(harness, AgentKind.PI, "Existing name",
+                AgentBinding.unlaunched(AgentKind.PI), base, SessionStatus.INACTIVE,
+                Instant.parse("2026-08-12T10:00:01Z"));
+
+        ExecutionException failure = assertThrows(ExecutionException.class, () ->
+                service.renameSession(first.id(), " existing   NAME ")
+                        .get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+
+        assertTrue(failure.getCause() instanceof IllegalArgumentException);
+        assertTrue(failure.getCause().getMessage().contains("already named"));
+        assertEquals("First", persisted(harness, first.id()).displayName());
+        assertFalse(persisted(harness, first.id()).namePinned());
+        harness.store.flush();
+    }
 
     @Test
     void deleteForgetsActivityStateAndRemovesTheSession(@TempDir Path base) throws Exception {
