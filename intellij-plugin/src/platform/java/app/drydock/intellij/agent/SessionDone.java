@@ -188,20 +188,24 @@ public final class SessionDone {
                     return;
                 }
                 ApplicationManager.getApplication().invokeLater(() -> {
+                    closeConsoleTabs(session);
                     if (choice == Choice.FORGET) {
-                        // The row is gone; a tab saying so is noise, in any window.
-                        for (Project open : ProjectManager.getInstance().getOpenProjects()) {
-                            if (!open.isDisposed()) {
-                                FileEditorManager.getInstance(open)
-                                        .closeFile(AgentConsoleFileSystem.getInstance().fileFor(session.id()));
-                            }
-                        }
                         return;
                     }
                     closeWindowAndRemove(session, deleteBranch, resolved);
                 }, ModalityState.nonModal());
             }
         });
+    }
+
+    /** The forgotten session no longer has a useful editor, wherever it was hosted. EDT only. */
+    private static void closeConsoleTabs(ManagedAgentSession session) {
+        AgentConsoleFile file = AgentConsoleFileSystem.getInstance().fileFor(session.id());
+        for (Project open : ProjectManager.getInstance().getOpenProjects()) {
+            if (!open.isDisposed()) {
+                FileEditorManager.getInstance(open).closeFile(file);
+            }
+        }
     }
 
     private static void closeWindowAndRemove(ManagedAgentSession session, boolean deleteBranch, Resolved resolved) {
