@@ -4,7 +4,6 @@ import app.drydock.process.ProcessResult;
 import app.drydock.process.ProcessRunner;
 import app.drydock.process.ProcessTimeoutException;
 
-import java.io.File;
 import java.io.IOException;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
@@ -16,7 +15,6 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.regex.Pattern;
 
 /**
  * Checks a GitHub pull request out into its own worktree, so reviewing it
@@ -54,10 +52,6 @@ public final class PrCheckoutService implements AutoCloseable {
     /** A network fetch of a whole branch; long, but never unbounded. */
     private static final Duration CHECKOUT_TIMEOUT = Duration.ofMinutes(5);
     private static final Duration GIT_TIMEOUT = Duration.ofSeconds(60);
-
-    private static final List<Path> GH_FALLBACKS = List.of(
-            Path.of("/usr/local/bin/gh"),
-            Path.of("/opt/homebrew/bin/gh"));
 
     /** Why a checkout could not be made. Each is a distinct, actionable message. */
     public static final class PrCheckoutException extends RuntimeException {
@@ -218,24 +212,7 @@ public final class PrCheckoutService implements AutoCloseable {
     }
 
     private static Optional<Path> discoverGh() {
-        String pathEnv = System.getenv("PATH");
-        if (pathEnv != null) {
-            for (String dir : pathEnv.split(Pattern.quote(File.pathSeparator))) {
-                if (dir.isBlank()) {
-                    continue;
-                }
-                Path candidate = Path.of(dir).resolve("gh");
-                if (Files.isRegularFile(candidate) && Files.isExecutable(candidate)) {
-                    return Optional.of(candidate);
-                }
-            }
-        }
-        for (Path candidate : GH_FALLBACKS) {
-            if (Files.isRegularFile(candidate) && Files.isExecutable(candidate)) {
-                return Optional.of(candidate);
-            }
-        }
-        return Optional.empty();
+        return GhExecutableLocator.locate(System.getenv("PATH"));
     }
 
     @Override
