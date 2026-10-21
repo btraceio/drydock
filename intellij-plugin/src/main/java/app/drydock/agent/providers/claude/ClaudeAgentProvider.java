@@ -43,7 +43,10 @@ public final class ClaudeAgentProvider implements AgentProvider {
 
     static final String ENV_CLEANUP_PREFIX = "env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT"
             + " -u CLAUDE_CODE_EXECPATH -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION"
-            + " -u CLAUDE_EFFORT ";
+            + " -u CLAUDE_EFFORT LANG=en_US.UTF-8 CLAUDE_CODE_NO_FLICKER=1 ";
+
+    private static final String REMOTE_COMMAND_PREFIX = "exec env LANG=en_US.UTF-8"
+            + " CLAUDE_CODE_NO_FLICKER=1 claude";
 
     private final ClaudeExecutableLocator locator;
     private final HostBinaryLocator ddtoolLocator;
@@ -219,7 +222,8 @@ public final class ClaudeAgentProvider implements AgentProvider {
     @Override
     public LaunchPlan buildCreateCommand(CreateContext c) {
         if (c.remote().isPresent()) {
-            return LaunchPlan.of(SshCommandBuilder.interactiveSessionCommand(c.remote().get(), "exec claude"), false);
+            return LaunchPlan.of(
+                    SshCommandBuilder.interactiveSessionCommand(c.remote().get(), REMOTE_COMMAND_PREFIX), false);
         }
         ClaudeCapabilities caps = detectCaps();
         // Eval runs inside a container whose PATH has `claude` (installed by the
@@ -257,7 +261,7 @@ public final class ClaudeAgentProvider implements AgentProvider {
     @Override
     public LaunchPlan buildResumeCommand(ResumeContext r) {
         if (r.remote().isPresent()) {
-            String exec = "exec claude --resume";
+            String exec = REMOTE_COMMAND_PREFIX + " --resume";
             if (r.agentSessionId().isPresent()) {
                 exec += " " + SshCommandBuilder.posixQuote(r.agentSessionId().get());
             } else if (r.agentSessionName().isPresent()) {

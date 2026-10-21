@@ -47,7 +47,7 @@ class ClaudeAgentProviderTest {
 
     private static final String ENV = "env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT"
             + " -u CLAUDE_CODE_EXECPATH -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION"
-            + " -u CLAUDE_EFFORT ";
+            + " -u CLAUDE_EFFORT LANG=en_US.UTF-8 CLAUDE_CODE_NO_FLICKER=1 ";
 
     /** Force "not found" so capability detection yields the conservative all-false caps deterministically. */
     private ClaudeAgentProvider newProviderNoExecutable() {

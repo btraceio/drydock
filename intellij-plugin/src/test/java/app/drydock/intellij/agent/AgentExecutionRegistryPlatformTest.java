@@ -186,6 +186,14 @@ public class AgentExecutionRegistryPlatformTest extends BasePlatformTestCase {
                 && line.getStyleAt(at).getForeground().equals(line.getStyleAt(at + 2).getForeground()));
     }
 
+    public void testBareCarriageReturnRemainsATerminalCursorControl() throws Exception {
+        AgentExecution execution = start(List.of("/bin/sh", "-c", "printf 'ABCDE\\rZ'; sleep 30"));
+        TerminalExecutionConsole console = execution.console().orElseThrow();
+
+        waitFor(() -> text(console).contains("ZBCDE"));
+        assertFalse(text(console).contains("ABCDE\nZ"), text(console));
+    }
+
     private static TerminalLine lineContaining(TerminalExecutionConsole console, String text) {
         TerminalTextBuffer buffer = console.getTerminalWidget().getTerminalTextBuffer();
         for (int row = 0; row < buffer.getHeight(); row++) {
