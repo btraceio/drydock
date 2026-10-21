@@ -301,6 +301,7 @@ class WorktreeServiceTest {
             @TempDir Path repoDir, @TempDir Path worktreeParent) throws Exception {
         Path repo = initCommittedRepo(repoDir);
         Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/bulk").get();
+        Files.writeString(worktree.resolve("README.md"), "modified\n");
         Files.writeString(worktree.resolve("uncommitted.txt"), "expendable\n");
 
         service.removeDiscardingChanges(repo, worktree, Optional.empty()).get();
