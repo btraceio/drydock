@@ -46,6 +46,15 @@ class TaskActionsTest {
         assertFalse(TaskActions.closesOwnWindow(row(false, new TaskPlacement.Idle(true))));
     }
 
+    @Test
+    void resumingInItsOwnWindowIsOfferedOnlyForAnIdleTaskFromAnotherWorktree() {
+        // Resume itself resumes in this window, like New task; its own
+        // window is the explicit alternative, and only where it differs.
+        assertTrue(TaskActions.resumesElsewhere(row(false, new TaskPlacement.Idle(false))));
+        assertFalse(TaskActions.resumesElsewhere(row(false, new TaskPlacement.Idle(true))));
+        assertFalse(TaskActions.resumesElsewhere(row(true, new TaskPlacement.NotShown())));
+    }
+
     private static TaskNode.TaskRow row(boolean running, TaskPlacement placement) {
         ManagedAgentSession session = new ManagedAgentSession.Builder(ManagedSessionId.newId(), RepositoryId.newId(),
                 "Task", AgentBinding.unlaunched(AgentKind.PI, SessionMode.WRITES),

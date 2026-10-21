@@ -83,8 +83,14 @@ final class TaskActions {
                         row -> row.placement() instanceof TaskPlacement.OwnWindow
                                 || row.placement() instanceof TaskPlacement.OtherWindow,
                         (project, row) -> AgentConsoles.showHere(project, row.session().id())),
-                task("Resume", "Open the task and resume its conversation", AllIcons.Actions.Execute,
-                        row -> !row.running(), (project, row) -> TaskNavigator.switchTo(row.session(),
+                // Resume in this window, hosted when the task is another
+                // worktree's — as New task does; its own window is the
+                // explicit alternative.
+                task("Resume", "Resume the task's conversation in this window", AllIcons.Actions.Execute,
+                        row -> !row.running(), (project, row) -> AgentConsoles.resumeOrStart(project, row.session())),
+                task("Resume in Its Own Window", "Open the task's own window and resume its conversation there",
+                        AllIcons.Actions.MoveTo2, TaskActions::resumesElsewhere,
+                        (project, row) -> TaskNavigator.switchTo(row.session(),
                                 target -> AgentConsoles.resumeOrStart(target, row.session()))),
                 task("Done with This Task…", "Forget the task, and optionally remove its worktree",
                         AllIcons.Actions.Checked, row -> true, TaskActions::done),
@@ -101,6 +107,15 @@ final class TaskActions {
     static boolean closesOwnWindow(TaskRow row) {
         return row.running() && (row.placement() instanceof TaskPlacement.ThisWindow
                 || row.placement() instanceof TaskPlacement.OwnWindow);
+    }
+
+    /**
+     * Whether "Resume in Its Own Window" applies: an idle task from another
+     * worktree. For this window's own worktree its own window is this one,
+     * and plain Resume already does it. Pure.
+     */
+    static boolean resumesElsewhere(TaskRow row) {
+        return !row.running() && row.placement() instanceof TaskPlacement.Idle idle && !idle.thisWindow();
     }
 
     private interface RowAction {
