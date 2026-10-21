@@ -61,6 +61,22 @@ public class NewTaskDialogPlatformTest extends BasePlatformTestCase {
         assertEquals(preset.instructions(), choice.get().instructions());
     }
 
+    public void testProjectMainCheckoutEntryCannotCreateAWorktree() {
+        AtomicReference<NewTaskPlan.Choice> choice = new AtomicReference<>();
+
+        ApplicationManager.getApplication().invokeAndWait(() -> {
+            NewTaskDialog dialog = new NewTaskDialog(
+                    getProject(), inputs(), Optional.empty(), NewTaskPreset.mainCheckout());
+            try {
+                choice.set(dialog.choice());
+            } finally {
+                Disposer.dispose(dialog.getDisposable());
+            }
+        });
+
+        assertEquals(NewTaskPlan.WorkIn.MAIN_CHECKOUT, choice.get().workIn());
+    }
+
     private static NewTaskPlan.Inputs inputs() {
         Path root = Path.of("/tmp/profiler");
         SharedProject project = SharedProject.local(RepositoryId.newId(), root, "profiler", Instant.EPOCH);

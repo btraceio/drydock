@@ -131,6 +131,9 @@ final class NewTaskDialog extends DialogWrapper {
             readOnly.setSelected(true);
             mainCheckout.setSelected(true);
         }
+        if (preset.fixedWorkIn().orElse(null) == WorkIn.MAIN_CHECKOUT) {
+            mainCheckout.setSelected(true);
+        }
         setTitle("New task in " + inputs.repoName());
         ownWindow.setSelected(preset.openIn() == OpenIn.OWN_WINDOW);
         thisWindow.setSelected(preset.openIn() == OpenIn.THIS_WINDOW);
@@ -301,7 +304,7 @@ final class NewTaskDialog extends DialogWrapper {
         baseRow.add(changeBase);
 
         FormBuilder builder = FormBuilder.createFormBuilder();
-        if (inputs.fixedWorktree().isEmpty()) {
+        if (inputs.fixedWorktree().isEmpty() && preset.fixedWorkIn().isEmpty()) {
             builder.addLabeledComponent("Work in:", row(newWorktree, mainCheckout))
                     .addLabeledComponent("Branch:", branch)
                     .addLabeledComponent("From:", startRow)
@@ -330,9 +333,10 @@ final class NewTaskDialog extends DialogWrapper {
     /** Summary, warning, OK label, and the controls the mode allows. */
     private void refresh() {
         boolean fixed = inputs.fixedWorktree().isPresent();
-        newWorktree.setEnabled(preset.mode(readOnly.isSelected()) != SessionMode.READ_ONLY
+        newWorktree.setEnabled(preset.fixedWorkIn().isEmpty()
+                && preset.mode(readOnly.isSelected()) != SessionMode.READ_ONLY
                 && !fixed);
-        mainCheckout.setEnabled(!fixed);
+        mainCheckout.setEnabled(preset.fixedWorkIn().isEmpty() && !fixed);
         boolean worktree = workIn() == WorkIn.NEW_WORKTREE;
         branch.setEnabled(worktree);
         start.setEnabled(worktree);
@@ -358,6 +362,9 @@ final class NewTaskDialog extends DialogWrapper {
     }
 
     private WorkIn workIn() {
+        if (preset.fixedWorkIn().isPresent()) {
+            return preset.fixedWorkIn().get();
+        }
         if (inputs.fixedWorktree().isPresent()) {
             return WorkIn.EXISTING_WORKTREE;
         }

@@ -118,6 +118,11 @@ public final class TaskLauncher {
         open(from, mainRoot, fixed, NewTaskPreset.empty());
     }
 
+    /** Opens a task dialog fixed to a registered project's main checkout. */
+    static void openInMainCheckout(Project from, Path mainRoot) {
+        open(from, Optional.of(mainRoot), Optional.empty(), NewTaskPreset.mainCheckout());
+    }
+
     /** Opens a writable new-worktree task prefilled from a GitHub issue. */
     static void implement(Project from, Path mainRoot, OpenIssue issue) {
         open(from, Optional.of(mainRoot), Optional.empty(), NewTaskPreset.implement(issue));

@@ -19,6 +19,7 @@ import app.drydock.intellij.tasks.TaskNode.IssueRow;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.intellij.tasks.TaskNode.Section;
 import app.drydock.intellij.tasks.TaskNode.SectionKind;
+import app.drydock.intellij.tasks.TaskNode.StaleWorktrees;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
 import app.drydock.intellij.tasks.TaskTreeModel.ViewFilter;
@@ -61,6 +62,10 @@ class TaskTreeModelTest {
         final Map<ManagedSessionId, TaskTreeModel.Host> hosts = new HashMap<>();
         final Set<Path> missing = new HashSet<>();
         final Map<RepositoryId, Path> recordedRoots = new HashMap<>();
+        final Set<Path> worktreeContainers = new HashSet<>();
+        final Set<Path> issueContainers = new HashSet<>();
+        final Set<Path> openFolders = new HashSet<>();
+        final Map<Path, Instant> lastActivity = new HashMap<>();
         final Map<Path, IssueListing> issues = new HashMap<>();
         Optional<String> problem = Optional.empty();
         String filter = "";
@@ -69,6 +74,7 @@ class TaskTreeModelTest {
         In project(Path root) {
             projects.add(SharedProject.local(RepositoryId.newId(), root, root.getFileName().toString(), T));
             worktrees.computeIfAbsent(root, r -> new ArrayList<>()).add(main(root, "main"));
+            worktreeContainers.add(root);
             mainRootOf.put(root, root);
             return this;
         }
@@ -87,7 +93,9 @@ class TaskTreeModelTest {
 
         TaskTreeModel.Inputs build() {
             return new TaskTreeModel.Inputs(projects, sessions, worktrees, mainRootOf, currentMain, currentWorking,
-                    activity, running, hosts, missing, recordedRoots, issues, problem, filter, viewFilter);
+                    activity, running, hosts, missing, recordedRoots, worktreeContainers, issueContainers,
+                    openFolders, lastActivity, T,
+                    issues, problem, filter, viewFilter);
         }
     }
 
@@ -228,8 +236,25 @@ class TaskTreeModelTest {
 
         ProjectRow row = projectRow(TaskTreeModel.build(in.build()), BTRACE);
 
-        assertEquals(List.of(new IdleWorktree(idle, "old-experiment")), worktreeNodes(row));
+        assertEquals(List.of(new IdleWorktree(idle, "old-experiment", Optional.empty(), false, false)),
+                worktreeNodes(row));
         assertTrue(section(row, SectionKind.SESSIONS).isEmpty());
+    }
+
+    @Test
+    void unloadedWorktreesAndIssuesStayDeferredWhileSessionsArePresent() {
+        In in = new In().project(BTRACE);
+        in.sessions.add(session("Eager session", BTRACE));
+        in.worktrees.remove(BTRACE);
+        in.issueContainers.add(BTRACE);
+
+        ProjectRow row = projectRow(TaskTreeModel.build(in.build()), BTRACE);
+
+        assertEquals("Eager session", ((TaskRow) sessionNodes(row).getFirst()).session().displayName());
+        assertInstanceOf(TaskNode.Deferred.class,
+                section(row, SectionKind.WORKTREES).orElseThrow().children().getFirst());
+        assertInstanceOf(TaskNode.Deferred.class,
+                section(row, SectionKind.ISSUES).orElseThrow().children().getFirst());
     }
 
     @Test
@@ -243,8 +268,69 @@ class TaskTreeModelTest {
 
         ProjectRow row = projectRow(TaskTreeModel.build(in.build()), BTRACE);
 
-        assertEquals(List.of(new IdleWorktree(sessionless, "idle-work")), worktreeNodes(row));
+        assertEquals(List.of(new IdleWorktree(sessionless, "idle-work", Optional.empty(), false, false)),
+                worktreeNodes(row));
         assertEquals(Optional.of("active-work"), ((TaskRow) sessionNodes(row).get(0)).branch());
+    }
+
+    @Test
+    void confirmedRemovalDisappearsFromTheBuiltModelBeforeARescan() {
+        Path staleOne = Path.of("/wt/btrace-old-one");
+        Path staleTwo = Path.of("/wt/btrace-old-two");
+        Path recent = Path.of("/wt/btrace-recent");
+        In in = new In().project(BTRACE)
+                .worktree(BTRACE, staleOne, "old-one")
+                .worktree(BTRACE, staleTwo, "old-two")
+                .worktree(BTRACE, recent, "recent");
+        in.lastActivity.put(staleOne, T.minus(TaskTreeModel.STALE_AFTER).minusSeconds(1));
+        in.lastActivity.put(staleTwo, T.minus(TaskTreeModel.STALE_AFTER).minusSeconds(1));
+        in.lastActivity.put(recent, T);
+
+        List<TaskNode> visible = TaskTreeModel.withoutWorktrees(TaskTreeModel.build(in.build()),
+                Set.of(staleOne, recent));
+
+        ProjectRow row = projectRow(visible, BTRACE);
+        StaleWorktrees stale = assertInstanceOf(StaleWorktrees.class, worktreeNodes(row).get(0));
+        assertEquals(List.of(staleTwo), stale.worktrees().stream().map(IdleWorktree::worktree).toList());
+        assertEquals(List.of(staleTwo), row.inactiveWorktrees().stream().map(IdleWorktree::worktree).toList(),
+                "action inputs must lose the removed rows along with the presentation");
+    }
+
+    @Test
+    void inactiveWorktreesOlderThanSevenDaysAreGroupedAsStale() {
+        Path recent = Path.of("/wt/btrace-recent");
+        Path old = Path.of("/wt/btrace-old");
+        Path locked = Path.of("/wt/btrace-locked");
+        Path open = Path.of("/wt/btrace-open");
+        In in = new In().project(BTRACE)
+                .worktree(BTRACE, recent, "recent")
+                .worktree(BTRACE, old, "old")
+                .worktree(BTRACE, open, "open");
+        in.worktrees.get(BTRACE).add(new Worktree(locked, Optional.of("held"), false, false, false, true,
+                Optional.of("keep"), false));
+        in.mainRootOf.put(locked, BTRACE);
+        in.lastActivity.put(recent, T.minus(TaskTreeModel.STALE_AFTER));
+        in.lastActivity.put(old, T.minus(TaskTreeModel.STALE_AFTER).minusSeconds(1));
+        in.lastActivity.put(locked, T.minus(TaskTreeModel.STALE_AFTER).minusSeconds(1));
+        in.lastActivity.put(open, T.minus(TaskTreeModel.STALE_AFTER).minusSeconds(1));
+        in.openFolders.add(open);
+
+        ProjectRow row = projectRow(TaskTreeModel.build(in.build()), BTRACE);
+        List<TaskNode> worktrees = worktreeNodes(row);
+
+        assertEquals(new IdleWorktree(recent, "recent", Optional.of(T.minus(TaskTreeModel.STALE_AFTER)), false,
+                        false),
+                worktrees.get(0), "exactly seven days is not older than seven days");
+        assertEquals(new IdleWorktree(open, "open",
+                Optional.of(T.minus(TaskTreeModel.STALE_AFTER).minusSeconds(1)), false, true), worktrees.get(1),
+                "an open IDE project must never be swept into bulk stale deletion");
+        assertEquals(new IdleWorktree(locked, "held",
+                Optional.of(T.minus(TaskTreeModel.STALE_AFTER).minusSeconds(1)), true, false), worktrees.get(2),
+                "a deliberate git lock must never be swept into bulk stale deletion");
+        StaleWorktrees stale = assertInstanceOf(StaleWorktrees.class, worktrees.get(3));
+        assertEquals(List.of(old), stale.worktrees().stream().map(IdleWorktree::worktree).toList());
+        assertEquals(List.of(recent, old, open, locked), row.inactiveWorktrees().stream()
+                .map(IdleWorktree::worktree).toList(), "the project-level action must ignore the search/grouping");
     }
 
     @Test

@@ -9,6 +9,7 @@ import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
 import app.drydock.intellij.tasks.TaskNode.IssueRow;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.intellij.tasks.TaskNode.Section;
+import app.drydock.intellij.tasks.TaskNode.StaleWorktrees;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
 import app.drydock.intellij.ui.SessionDots;
@@ -67,15 +68,36 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
             case Section section -> {
                 setIcon(AllIcons.Nodes.Folder);
                 append(section.kind().label(), SimpleTextAttributes.REGULAR_ATTRIBUTES);
-                append("  " + itemCount(section), SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
+                if (section.children().stream().noneMatch(TaskNode.Deferred.class::isInstance)) {
+                    append("  " + itemCount(section), SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
+                }
             }
+            case TaskNode.Deferred deferred ->
+                    append(deferred.message(), SimpleTextAttributes.GRAYED_ATTRIBUTES);
             case WorktreeGroup group -> {
                 append("⑂ " + group.branch(), SimpleTextAttributes.GRAYED_ATTRIBUTES);
                 append("  " + group.tasks().size() + " tasks", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
             }
+            case StaleWorktrees stale -> {
+                setIcon(AllIcons.Nodes.Folder);
+                append("Stale", SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES);
+                append("  " + stale.worktrees().size() + (stale.worktrees().size() == 1
+                        ? " worktree" : " worktrees"), SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
+                append(" · ", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
+                append("Remove all…", SimpleTextAttributes.LINK_ATTRIBUTES, LINK);
+            }
             case IdleWorktree idle -> {
                 append("⑂ " + idle.branch(), SimpleTextAttributes.GRAYED_ATTRIBUTES);
-                append("  no task · ", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
+                append("  no task", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
+                idle.lastActivity().ifPresent(last -> append(" · " + AgentStripText.relativeAge(
+                        Duration.between(last, Instant.now())), SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES));
+                if (idle.locked()) {
+                    append(" · locked", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
+                }
+                if (idle.open()) {
+                    append(" · open", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
+                }
+                append(" · ", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
                 append("Start ▸", SimpleTextAttributes.LINK_ATTRIBUTES, LINK);
             }
             case IssueRow issue -> {
@@ -93,8 +115,13 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
 
     /** Entity count rather than immediate child count (Sessions may contain Active/Inactive folders). */
     private static int itemCount(Section section) {
+        if (section.children().stream().allMatch(TaskNode.Deferred.class::isInstance)) {
+            return 0;
+        }
         return section.children().stream().mapToInt(node -> switch (node) {
+            case TaskNode.Deferred ignored -> 0;
             case Section nested -> itemCount(nested);
+            case StaleWorktrees stale -> stale.worktrees().size();
             case WorktreeGroup group -> group.tasks().size();
             default -> 1;
         }).sum();

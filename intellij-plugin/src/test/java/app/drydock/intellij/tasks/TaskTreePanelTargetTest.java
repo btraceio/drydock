@@ -32,7 +32,7 @@ class TaskTreePanelTargetTest {
     void projectRowTargetsTheRegisteredProjectRatherThanTheWindowProject() {
         SharedProject registered = SharedProject.local(
                 RepositoryId.newId(), REGISTERED_ROOT, "profiling-backend", NOW);
-        ProjectRow row = new ProjectRow(registered, false, false, List.of(), 0);
+        ProjectRow row = new ProjectRow(registered, false, false, List.of(), List.of(), 0);
 
         assertEquals(Optional.of(new TaskTreePanel.NewTaskTarget(REGISTERED_ROOT, Optional.empty())),
                 TaskTreePanel.newTaskTarget(row, REGISTERED_ROOT));
@@ -40,7 +40,8 @@ class TaskTreePanelTargetTest {
 
     @Test
     void idleWorktreeTargetsThatExactWorktree() {
-        IdleWorktree row = new IdleWorktree(LINKED_WORKTREE, "fix-allocation-profile");
+        IdleWorktree row = new IdleWorktree(LINKED_WORKTREE, "fix-allocation-profile",
+                Optional.empty(), false, false);
         NewTaskPlan.FixedWorktree fixed = new NewTaskPlan.FixedWorktree(
                 LINKED_WORKTREE, "fix-allocation-profile");
 

@@ -85,4 +85,13 @@ class NewTaskPresetTest {
         assertEquals(Optional.empty(), ownWindow.fixedMode());
         assertEquals("", ownWindow.name());
     }
+
+    @Test
+    void projectMainCheckoutPresetCannotCreateAWorktree() {
+        NewTaskPreset preset = NewTaskPreset.mainCheckout();
+
+        assertEquals(Optional.of(NewTaskPlan.WorkIn.MAIN_CHECKOUT), preset.fixedWorkIn());
+        assertEquals(NewTaskPlan.OpenIn.THIS_WINDOW, preset.openIn());
+        assertEquals(Optional.empty(), preset.fixedMode());
+    }
 }

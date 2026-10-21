@@ -3,6 +3,7 @@ package app.drydock.intellij.tasks;
 import app.drydock.domain.SessionMode;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.intellij.tasks.NewTaskPlan.OpenIn;
+import app.drydock.intellij.tasks.NewTaskPlan.WorkIn;
 
 import java.util.Objects;
 import java.util.Optional;
@@ -13,17 +14,23 @@ import java.util.Optional;
  * another project's) unless the entry point asks for its own.
  */
 record NewTaskPreset(String name, Optional<String> instructions, Optional<SessionMode> fixedMode,
-                     boolean instructionsRequired, OpenIn openIn) {
+                     Optional<WorkIn> fixedWorkIn, boolean instructionsRequired, OpenIn openIn) {
 
     NewTaskPreset {
         Objects.requireNonNull(name, "name");
         Objects.requireNonNull(instructions, "instructions");
         Objects.requireNonNull(fixedMode, "fixedMode");
+        Objects.requireNonNull(fixedWorkIn, "fixedWorkIn");
         Objects.requireNonNull(openIn, "openIn");
     }
 
     static NewTaskPreset empty() {
-        return new NewTaskPreset("", Optional.empty(), Optional.empty(), false, OpenIn.THIS_WINDOW);
+        return new NewTaskPreset("", Optional.empty(), Optional.empty(), Optional.empty(), false, OpenIn.THIS_WINDOW);
+    }
+
+    static NewTaskPreset mainCheckout() {
+        return new NewTaskPreset("", Optional.empty(), Optional.empty(), Optional.of(WorkIn.MAIN_CHECKOUT), false,
+                OpenIn.THIS_WINDOW);
     }
 
     /**
@@ -33,7 +40,8 @@ record NewTaskPreset(String name, Optional<String> instructions, Optional<Sessio
      */
     static NewTaskPreset start(OpenIn openIn, SessionMode mode) {
         return new NewTaskPreset("", Optional.empty(),
-                mode == SessionMode.READ_ONLY ? Optional.of(SessionMode.READ_ONLY) : Optional.empty(), false, openIn);
+                mode == SessionMode.READ_ONLY ? Optional.of(SessionMode.READ_ONLY) : Optional.empty(),
+                Optional.empty(), false, openIn);
     }
 
     static NewTaskPreset implement(OpenIssue issue) {
@@ -80,7 +88,8 @@ record NewTaskPreset(String name, Optional<String> instructions, Optional<Sessio
                 - The pull request explains the behavior, design decisions, risks, and verification, and contains the
                   correct closing keyword for this issue; the work is not done merely because code was written.
                 """.formatted(reference));
-        return new NewTaskPreset(name, Optional.of(prompt.toString()), Optional.of(SessionMode.WRITES), true,
+        return new NewTaskPreset(name, Optional.of(prompt.toString()), Optional.of(SessionMode.WRITES),
+                Optional.empty(), true,
                 OpenIn.THIS_WINDOW);
     }
 
@@ -100,7 +109,8 @@ record NewTaskPreset(String name, Optional<String> instructions, Optional<Sessio
 
                 Do not modify files, create commits, or begin implementation. This task is analysis only.
                 """);
-        return new NewTaskPreset(name, Optional.of(prompt.toString()), Optional.of(SessionMode.READ_ONLY), true,
+        return new NewTaskPreset(name, Optional.of(prompt.toString()), Optional.of(SessionMode.READ_ONLY),
+                Optional.empty(), true,
                 OpenIn.THIS_WINDOW);
     }
 
