@@ -380,6 +380,32 @@ public final class DrydockSessionService implements AgentExecutionListener {
     }
 
     /**
+     * Restores an idle row to the conversation the provider recorded, or
+     * starts a fresh conversation only when there genuinely is no transcript.
+     *
+     * <p>The late bind must happen before this choice. IDE shutdown can stop
+     * the process and drain the executor before the termination listener has
+     * persisted a DISCOVERED provider's id. Deciding from the stale catalog
+     * row in the UI therefore turned a resumable Codex/Pi row into a fresh
+     * create. Keeping the choice here gives every caller the same restore
+     * backstop as {@link #resumeSession}.</p>
+     */
+    public CompletableFuture<ManagedAgentSession> resumeOrStartSession(ManagedSessionId sessionId) {
+        Objects.requireNonNull(sessionId, "sessionId");
+        return initialization
+                .thenApplyAsync(unused -> {
+                    ends.seedClaimedIdsOnce();
+                    ManagedAgentSession stored = requireSession(sessionId);
+                    return stored.agentSessionId().isPresent()
+                            ? stored
+                            : Optional.ofNullable(ends.lateBindAgentSessionId(sessionId)).orElse(stored);
+                }, executor)
+                .thenComposeAsync(session -> session.agentSessionId().isPresent() && !nothingRecordedUnder(session)
+                        ? resumePrepared(session)
+                        : launchFreshOnExistingRow(session), executor);
+    }
+
+    /**
      * Whether the provider confirms that no transcript exists for the
      * session's id. A provider that cannot tell answers false: an unknown is
      * treated as a conversation, never as permission to strand one. Blocking
@@ -412,25 +438,32 @@ public final class DrydockSessionService implements AgentExecutionListener {
         return initialization
                 .thenApplyAsync(unused -> {
                     ends.seedClaimedIdsOnce();
-                    ManagedAgentSession session = requireSession(sessionId);
-                    if (session.agentSessionId().isPresent()) {
-                        if (!nothingRecordedUnder(session)) {
-                            throw new IllegalStateException(
-                                    "Session " + sessionId + " has a conversation to resume; use resumeSession");
-                        }
-                        // An id with no transcript behind it (Claude is given
-                        // its id at launch; stopped before its first turn,
-                        // nothing was ever written). There is nothing to
-                        // strand, and the fresh conversation gets its own id.
-                        session = session.toBuilder()
-                                .binding(session.binding().withSessionId(Optional.empty()))
-                                .build();
-                    }
-                    return session.withStatus(SessionStatus.STARTING);
+                    return prepareFreshOnExistingRow(requireSession(sessionId));
                 }, executor)
                 // No task: it was only ever the create dialog's input, and is
                 // not kept on the row.
                 .thenComposeAsync(session -> launchPrepared(session, Optional.empty()), executor);
+    }
+
+    private CompletableFuture<ManagedAgentSession> launchFreshOnExistingRow(ManagedAgentSession session) {
+        return launchPrepared(prepareFreshOnExistingRow(session), Optional.empty());
+    }
+
+    private ManagedAgentSession prepareFreshOnExistingRow(ManagedAgentSession session) {
+        if (session.agentSessionId().isPresent()) {
+            if (!nothingRecordedUnder(session)) {
+                throw new IllegalStateException(
+                        "Session " + session.id() + " has a conversation to resume; use resumeSession");
+            }
+            // An id with no transcript behind it (Claude is given its id at
+            // launch; stopped before its first turn, nothing was ever
+            // written). There is nothing to strand, and the fresh
+            // conversation gets its own id.
+            session = session.toBuilder()
+                    .binding(session.binding().withSessionId(Optional.empty()))
+                    .build();
+        }
+        return session.withStatus(SessionStatus.STARTING);
     }
 
     /**

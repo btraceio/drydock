@@ -936,6 +936,28 @@ class DrydockSessionServiceTest {
         harness.store.flush();
     }
 
+    @Test
+    void restoreLateBindsBeforeChoosingResumeOrFreshStart(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingDiscovery discovery = new RecordingDiscovery(harness.events);
+        discovery.lateCandidates.add("codex-thread-recovered");
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.CODEX, SessionIdStrategy.DISCOVERED, discovery, true, false, null, harness.events);
+        DrydockSessionService service = harness.service(provider);
+        ManagedAgentSession idle = persistSession(harness, AgentKind.CODEX, "Recovered after quit",
+                AgentBinding.unlaunched(AgentKind.CODEX), base, SessionStatus.INACTIVE,
+                Instant.parse("2026-08-12T10:00:00Z"));
+
+        service.resumeOrStartSession(idle.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(Optional.of("codex-thread-recovered"),
+                persisted(harness, idle.id()).agentSessionId());
+        assertEquals(1, provider.resumeContexts.size(), "the recovered conversation must be resumed");
+        assertTrue(provider.createContexts.isEmpty(), "restore must not create a replacement conversation");
+        assertEquals(Optional.of("codex-thread-recovered"), provider.resumeContexts.getFirst().agentSessionId());
+        harness.store.flush();
+    }
+
     // ---- starting fresh on an existing row --------------------------------------
 
     /**

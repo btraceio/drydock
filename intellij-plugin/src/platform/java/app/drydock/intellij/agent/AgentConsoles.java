@@ -170,27 +170,19 @@ public final class AgentConsoles {
      * outside the strip (the Drydock tool window). EDT.
      */
     public static void resumeOrStart(Project project, ManagedAgentSession session) {
-        DrydockPluginService plugin = DrydockPluginService.getInstance();
-        plugin.executor().execute(() -> {
-            boolean resumable = hasConversation(session);
-            ApplicationManager.getApplication().invokeLater(() -> {
-                if (resumable) {
-                    resume(project, session.id());
-                } else {
-                    startFresh(project, session.id());
-                }
-            }, ModalityState.nonModal(), project.getDisposed());
-        });
+        start(project, session.id(), "Restoring Drydock session…", "restore",
+                sessions -> sessions.resumeOrStartSession(session.id()));
     }
 
     /**
-     * Shows the tab and starts a <em>fresh</em> conversation on this row — the
-     * action offered when the session has no recorded conversation to resume
-     * into. Same one-execution rule; a different agent command.
+     * Handles the strip's apparent fresh-start action. The strip is rendered
+     * from persisted state, so shutdown may have left it without the provider
+     * id even though a conversation exists. Re-run the restore backstop before
+     * deciding that a fresh launch is safe.
      */
     public static void startFresh(Project project, ManagedSessionId sessionId) {
-        start(project, sessionId, "Starting Drydock session…", "start",
-                sessions -> sessions.startSession(sessionId));
+        start(project, sessionId, "Restoring Drydock session…", "restore",
+                sessions -> sessions.resumeOrStartSession(sessionId));
     }
 
     private static void start(Project project, ManagedSessionId sessionId, String progressTitle,
