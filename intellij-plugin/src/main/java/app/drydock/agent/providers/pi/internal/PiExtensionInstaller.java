@@ -14,10 +14,9 @@ import java.util.Objects;
 import java.util.Set;
 
 /**
- * Writes an extension pi loads with {@code -e} -- the bridge
- * ({@link PiExtensionSource#SOURCE}, {@code <stateDirectory>/pi/drydock-mcp.ts})
- * or the IDE servers ({@link PiIdeMcpExtensionSource#SOURCE},
- * {@code drydock-ide-mcp.ts} beside it), or the one-shot initial prompt
+ * Writes an extension pi loads with {@code -e} -- native MCP registration
+ * ({@link PiMcpExtensionSource#SOURCE}, {@code <stateDirectory>/pi/drydock-mcp.ts}),
+ * eval routing ({@link PiEvalExtensionSource#SOURCE}), or the one-shot initial prompt
  * ({@link PiInitialPromptExtensionSource#SOURCE},
  * {@code drydock-initial-prompt.ts}) -- where the Pi launch command points
  * {@code -e}.
@@ -48,9 +47,9 @@ public final class PiExtensionInstaller {
     private final String fileName;
     private final String source;
 
-    /** The drydock bridge, {@code drydock-mcp.ts}. */
+    /** Native MCP registration, {@code drydock-mcp.ts}. */
     public PiExtensionInstaller(Path stateDirectory) {
-        this(stateDirectory, "drydock-mcp.ts", PiExtensionSource.SOURCE);
+        this(stateDirectory, "drydock-mcp.ts", PiMcpExtensionSource.SOURCE);
     }
 
     private PiExtensionInstaller(Path stateDirectory, String fileName, String source) {
@@ -59,9 +58,9 @@ public final class PiExtensionInstaller {
         this.source = source;
     }
 
-    /** The IDE's MCP servers, {@code drydock-ide-mcp.ts}, beside the bridge and under the same rules. */
-    public static PiExtensionInstaller ideMcp(Path stateDirectory) {
-        return new PiExtensionInstaller(stateDirectory, "drydock-ide-mcp.ts", PiIdeMcpExtensionSource.SOURCE);
+    /** Eval-account routing, independent of MCP. */
+    public static PiExtensionInstaller eval(Path stateDirectory) {
+        return new PiExtensionInstaller(stateDirectory, "drydock-eval.ts", PiEvalExtensionSource.SOURCE);
     }
 
     /** The one-shot initial-prompt submitter, {@code drydock-initial-prompt.ts}. */

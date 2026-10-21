@@ -24,7 +24,7 @@ class PiExtensionInstallerTest {
         Path written = new PiExtensionInstaller(state).install();
 
         assertEquals(state.resolve("pi").resolve("drydock-mcp.ts"), written);
-        assertEquals(PiExtensionSource.SOURCE, Files.readString(written));
+        assertEquals(PiMcpExtensionSource.SOURCE, Files.readString(written));
         assertEquals("rw-------", PosixFilePermissions.toString(Files.getPosixFilePermissions(written)));
         assertEquals("rwx------", PosixFilePermissions.toString(Files.getPosixFilePermissions(written.getParent())));
     }
@@ -37,7 +37,7 @@ class PiExtensionInstallerTest {
 
         installer.install();
 
-        assertEquals(PiExtensionSource.SOURCE, Files.readString(written));
+        assertEquals(PiMcpExtensionSource.SOURCE, Files.readString(written));
         try (var entries = Files.list(written.getParent())) {
             assertEquals(List.of("drydock-mcp.ts"),
                     entries.map(p -> p.getFileName().toString()).sorted().toList());
@@ -66,7 +66,7 @@ class PiExtensionInstallerTest {
         } finally {
             pool.shutdownNow();
         }
-        assertEquals(PiExtensionSource.SOURCE, Files.readString(state.resolve("pi").resolve("drydock-mcp.ts")));
+        assertEquals(PiMcpExtensionSource.SOURCE, Files.readString(state.resolve("pi").resolve("drydock-mcp.ts")));
     }
 
     @Test
@@ -82,16 +82,22 @@ class PiExtensionInstallerTest {
 
     @Test
     void theSourceIsAPlausibleExtension() {
-        assertTrue(PiExtensionSource.SOURCE.contains("export default"),
+        assertTrue(PiMcpExtensionSource.SOURCE.contains("registerMcpServer"),
                 "pi loads an extension by calling its default export");
+        assertTrue(PiMcpExtensionSource.SOURCE.contains("DRYDOCK_MCP_CONFIG"),
+                "the adapter must load the session-scoped HTTP config");
+        assertTrue(!PiMcpExtensionSource.SOURCE.contains("registerTool"),
+                "MCP tools belong to Pi's native client, not Drydock proxies");
+        assertTrue(!PiMcpExtensionSource.SOURCE.contains("fetch("),
+                "MCP transport belongs to Pi's native client");
     }
 
     @Test
-    void theIdeExtensionIsWrittenBesideTheBridgeOwnerOnly(@TempDir Path state) throws IOException {
-        Path written = PiExtensionInstaller.ideMcp(state).install();
+    void theEvalExtensionIsWrittenBesideMcpOwnerOnly(@TempDir Path state) throws IOException {
+        Path written = PiExtensionInstaller.eval(state).install();
 
-        assertEquals(state.resolve("pi").resolve("drydock-ide-mcp.ts"), written);
-        assertEquals(PiIdeMcpExtensionSource.SOURCE, Files.readString(written));
+        assertEquals(state.resolve("pi").resolve("drydock-eval.ts"), written);
+        assertEquals(PiEvalExtensionSource.SOURCE, Files.readString(written));
         assertEquals("rw-------", PosixFilePermissions.toString(Files.getPosixFilePermissions(written)));
     }
 

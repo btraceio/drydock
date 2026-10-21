@@ -12,8 +12,8 @@ import app.drydock.agent.api.StdioMcpServer;
 import app.drydock.agent.providers.HostBinaryLocator;
 import app.drydock.agent.providers.pi.internal.PiCapabilities;
 import app.drydock.agent.providers.pi.internal.PiExecutableLocator;
-import app.drydock.agent.providers.pi.internal.PiIdeMcpExtensionSource;
 import app.drydock.agent.providers.pi.internal.PiInitialPromptExtensionSource;
+import app.drydock.agent.providers.pi.internal.PiMcpExtensionSource;
 import app.drydock.domain.SshRemote;
 import app.drydock.state.json.JsonParser;
 import app.drydock.state.json.JsonValue;
@@ -24,7 +24,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
-import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
@@ -35,10 +34,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.logging.Handler;
-import java.util.logging.Level;
-import java.util.logging.LogRecord;
-import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -47,7 +42,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class PiAgentProviderTest {
 
     private PiAgentProvider provider() {
-        PiAgentProvider p = new PiAgentProvider(new PiExecutableLocator(Path.of("/nonexistent/pi")));
+        PiAgentProvider p = new PiAgentProvider(new PiExecutableLocator(Path.of("/nonexistent/pi")),
+                () -> PiCapabilities.of("1.3.0"));
         p.init(new AgentContext(Path.of("/tmp"), Path.of("/tmp/activity"), ForkJoinPool.commonPool()));
         return p;
     }
@@ -76,7 +72,7 @@ class PiAgentProviderTest {
                         Optional.empty(), Optional.empty(), true));
         String command = plan.command();
         assertTrue(command.contains("DRYDOCK_EVAL=1 "), command);
-        assertTrue(command.endsWith("pi"));
+        assertTrue(command.endsWith("pi -e '/tmp/pi/drydock-eval.ts'"), command);
     }
 
     @Test
@@ -148,10 +144,10 @@ class PiAgentProviderTest {
         assertTrue(p.idDiscovery().isPresent());
     }
 
-    /** A provider whose version gate and extension file are both satisfied, for the bridge cases. */
+    /** A supported provider whose native-MCP adapter can be installed. */
     private PiAgentProvider bridgeProvider(Path state) {
         PiAgentProvider p = new PiAgentProvider(new PiExecutableLocator(Path.of("/nonexistent/pi")),
-                () -> PiCapabilities.of("0.84.1"));
+                () -> PiCapabilities.of("1.3.0"));
         p.init(new AgentContext(state, state.resolve("activity"), ForkJoinPool.commonPool()));
         return p;
     }
@@ -182,7 +178,8 @@ class PiAgentProviderTest {
         HostBinaryLocator nodeLocator = new HostBinaryLocator("node", List.of()) {
             @Override protected Optional<Path> discover() { return Optional.of(fakeNode); }
         };
-        PiAgentProvider p = new PiAgentProvider(new PiExecutableLocator(fakePi), nodeLocator, null);
+        PiAgentProvider p = new PiAgentProvider(new PiExecutableLocator(fakePi), nodeLocator,
+                () -> PiCapabilities.of("1.3.0"));
         p.init(new AgentContext(Path.of("/tmp"), Path.of("/tmp/activity"), ForkJoinPool.commonPool()));
         String command = p.buildCreateCommand(
                 new CreateContext("S", "x", Path.of("/repo"), Optional.empty(), Optional.empty())).command();
@@ -211,7 +208,8 @@ class PiAgentProviderTest {
         HostBinaryLocator nodeLocator = new HostBinaryLocator("node", List.of()) {
             @Override protected Optional<Path> discover() { return Optional.of(fakeNode); }
         };
-        PiAgentProvider p = new PiAgentProvider(new PiExecutableLocator(fakePi), nodeLocator, null);
+        PiAgentProvider p = new PiAgentProvider(new PiExecutableLocator(fakePi), nodeLocator,
+                () -> PiCapabilities.of("1.3.0"));
         p.init(new AgentContext(Path.of("/tmp"), Path.of("/tmp/activity"), ForkJoinPool.commonPool()));
         String command = p.buildCreateCommand(
                 new CreateContext("S", "x", Path.of("/repo"), Optional.empty(), Optional.empty())).command();
@@ -236,7 +234,8 @@ class PiAgentProviderTest {
         HostBinaryLocator nodeLocator = new HostBinaryLocator("node", List.of()) {
             @Override protected Optional<Path> discover() { return Optional.of(fakeNode); }
         };
-        PiAgentProvider p = new PiAgentProvider(new PiExecutableLocator(fakePi), nodeLocator, null);
+        PiAgentProvider p = new PiAgentProvider(new PiExecutableLocator(fakePi), nodeLocator,
+                () -> PiCapabilities.of("1.3.0"));
         p.init(new AgentContext(Path.of("/tmp"), Path.of("/tmp/activity"), ForkJoinPool.commonPool()));
         String command = p.buildCreateCommand(
                 new CreateContext("S", "x", Path.of("/repo"), Optional.empty(), Optional.empty())).command();
@@ -254,7 +253,8 @@ class PiAgentProviderTest {
         HostBinaryLocator nodeLocator = new HostBinaryLocator("node", List.of()) {
             @Override protected Optional<Path> discover() { return Optional.of(fakeNode); }
         };
-        PiAgentProvider p = new PiAgentProvider(new PiExecutableLocator(fakePi), nodeLocator, null);
+        PiAgentProvider p = new PiAgentProvider(new PiExecutableLocator(fakePi), nodeLocator,
+                () -> PiCapabilities.of("1.3.0"));
         p.init(new AgentContext(Path.of("/tmp"), Path.of("/tmp/activity"), ForkJoinPool.commonPool()));
         String command = p.buildCreateCommand(
                 new CreateContext("S", "x", Path.of("/repo"), Optional.empty(), Optional.empty())).command();
@@ -276,7 +276,8 @@ class PiAgentProviderTest {
         HostBinaryLocator noNode = new HostBinaryLocator("node", List.of()) {
             @Override protected Optional<Path> discover() { return Optional.empty(); }
         };
-        PiAgentProvider p = new PiAgentProvider(new PiExecutableLocator(fakePi), noNode, null);
+        PiAgentProvider p = new PiAgentProvider(new PiExecutableLocator(fakePi), noNode,
+                () -> PiCapabilities.of("1.3.0"));
         p.init(new AgentContext(Path.of("/tmp"), Path.of("/tmp/activity"), ForkJoinPool.commonPool()));
         String command = p.buildCreateCommand(
                 new CreateContext("S", "x", Path.of("/repo"), Optional.empty(), Optional.empty())).command();
@@ -285,7 +286,7 @@ class PiAgentProviderTest {
     }
 
     @Test
-    void bridgeFlagsCarryTheConfigPathAndTheExtensionButNeverTheToken(@TempDir Path state) {
+    void nativeMcpFlagsCarryTheConfigPathAndTheAdapterButNeverTheToken(@TempDir Path state) {
         Path config = state.resolve("mcp").resolve("s1.json");
         LaunchPlan plan = bridgeProvider(state).buildCreateCommand(
                 new CreateContext("Session 1", "ignored-uuid", Path.of("/repo"),
@@ -299,7 +300,7 @@ class PiAgentProviderTest {
     }
 
     @Test
-    void bridgeFlagsSurviveAStateDirectoryContainingASpace(@TempDir Path parent) throws Exception {
+    void nativeMcpFlagsSurviveAStateDirectoryContainingASpace(@TempDir Path parent) throws Exception {
         Path state = Files.createDirectories(parent.resolve("Application Support").resolve("Drydock"));
         Path config = state.resolve("mcp").resolve("s1.json");
         String command = bridgeProvider(state).buildCreateCommand(
@@ -325,16 +326,39 @@ class PiAgentProviderTest {
     }
 
     @Test
-    void subFloorPiGetsNoFlagsEvenWithMcpAccess(@TempDir Path state) {
+    void preOnePiCannotLaunch(@TempDir Path state) {
         PiAgentProvider p = new PiAgentProvider(new PiExecutableLocator(Path.of("/nonexistent/pi")),
                 () -> PiCapabilities.of("0.79.10"));
         p.init(new AgentContext(state, state.resolve("activity"), ForkJoinPool.commonPool()));
 
-        String command = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
-                Optional.empty(), Optional.of(access(state.resolve("mcp").resolve("s1.json"))))).command();
+        LaunchPlan plan = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
+                Optional.empty(), Optional.of(access(state.resolve("mcp").resolve("s1.json")))));
 
-        assertTrue(command.endsWith("pi"), command);
-        assertFalse(command.contains("DRYDOCK_MCP_CONFIG"), command);
+        assertFalse(plan.supported());
+    }
+
+    @Test
+    void preOnePiIsUnavailableAndExplainsTheRequirement(@TempDir Path state) throws Exception {
+        Path executable = Files.createFile(state.resolve("pi"));
+        Files.setPosixFilePermissions(executable, PosixFilePermissions.fromString("rwxr-xr-x"));
+        PiAgentProvider p = new PiAgentProvider(new PiExecutableLocator(executable),
+                () -> PiCapabilities.of("0.99.0"));
+        p.init(new AgentContext(state, state.resolve("activity"), ForkJoinPool.commonPool()));
+
+        assertTrue(p.locateExecutable().isEmpty());
+        assertTrue(p.describeSearched().contains("Pi 1.x or newer is required"), p.describeSearched());
+        assertTrue(p.describeSearched().contains("0.99.0"), p.describeSearched());
+    }
+
+    @Test
+    void oneXPiIsAvailable(@TempDir Path state) throws Exception {
+        Path executable = Files.createFile(state.resolve("pi"));
+        Files.setPosixFilePermissions(executable, PosixFilePermissions.fromString("rwxr-xr-x"));
+        PiAgentProvider p = new PiAgentProvider(new PiExecutableLocator(executable),
+                () -> PiCapabilities.of("1.0.0"));
+        p.init(new AgentContext(state, state.resolve("activity"), ForkJoinPool.commonPool()));
+
+        assertEquals(Optional.of(executable), p.locateExecutable());
     }
 
     @Test
@@ -383,9 +407,9 @@ class PiAgentProviderTest {
                         .withStdioMcpServers(List.of(IDE))).command();
 
         assertIdeServer(inlineServers(command));
-        Path extension = state.resolve("pi").resolve("drydock-ide-mcp.ts");
+        Path extension = state.resolve("pi").resolve("drydock-mcp.ts");
         assertTrue(command.endsWith("pi -e '" + extension + "'"), command);
-        assertEquals(PiIdeMcpExtensionSource.SOURCE, Files.readString(extension));
+        assertEquals(PiMcpExtensionSource.SOURCE, Files.readString(extension));
         assertFalse(command.contains("DRYDOCK_MCP_CONFIG"), "no Drydock server was offered: " + command);
     }
 
@@ -396,12 +420,12 @@ class PiAgentProviderTest {
                         Optional.empty(), Optional.empty()).withStdioMcpServers(List.of(IDE))).command();
 
         assertIdeServer(inlineServers(command));
-        assertTrue(command.endsWith("-e '" + state.resolve("pi").resolve("drydock-ide-mcp.ts")
+        assertTrue(command.endsWith("-e '" + state.resolve("pi").resolve("drydock-mcp.ts")
                 + "' --session '019f9072-abc'"), command);
     }
 
     @Test
-    void theDrydockBridgeAndTheIdeServerLoadSideBySide(@TempDir Path state) throws Exception {
+    void theDrydockAndIdeServersShareOneNativeMcpAdapter(@TempDir Path state) throws Exception {
         Path config = state.resolve("mcp").resolve("s1.json");
         String command = mcpProvider(state, "1.3.0").buildCreateCommand(
                 new CreateContext("s", "x", Path.of("/repo"), Optional.empty(), Optional.of(access(config)))
@@ -409,18 +433,16 @@ class PiAgentProviderTest {
 
         assertTrue(command.startsWith("env -u PI_CODING_AGENT DRYDOCK_MCP_CONFIG='" + config + "' "), command);
         assertIdeServer(inlineServers(command));
-        assertTrue(command.endsWith("pi -e '" + state.resolve("pi").resolve("drydock-mcp.ts")
-                + "' -e '" + state.resolve("pi").resolve("drydock-ide-mcp.ts") + "'"), command);
+        assertTrue(command.endsWith("pi -e '" + state.resolve("pi").resolve("drydock-mcp.ts") + "'"), command);
     }
 
     @Test
-    void aPiWithoutNativeMcpGetsNoIdeServer(@TempDir Path state) {
-        String command = mcpProvider(state, "0.84.1").buildCreateCommand(
+    void aPreOnePiCannotLaunchWithAnIdeServer(@TempDir Path state) {
+        LaunchPlan plan = mcpProvider(state, "0.99.0").buildCreateCommand(
                 new CreateContext("s", "x", Path.of("/repo"), Optional.empty(), Optional.empty())
-                        .withStdioMcpServers(List.of(IDE))).command();
+                        .withStdioMcpServers(List.of(IDE)));
 
-        assertFalse(command.contains("DRYDOCK_STDIO_MCP_SERVERS"), command);
-        assertTrue(command.endsWith("pi"), command);
+        assertFalse(plan.supported());
     }
 
     /**
@@ -467,13 +489,13 @@ class PiAgentProviderTest {
     void aFailedProbeIsNotLatchedAndTheNextLaunchRetries(@TempDir Path state) {
         AtomicInteger calls = new AtomicInteger();
         PiAgentProvider p = new PiAgentProvider(new PiExecutableLocator(Path.of("/nonexistent/pi")),
-                () -> PiCapabilities.of(calls.incrementAndGet() == 1 ? "unknown" : "0.84.1"));
+                () -> PiCapabilities.of(calls.incrementAndGet() == 1 ? "unknown" : "1.3.0"));
         p.init(new AgentContext(state, state.resolve("activity"), ForkJoinPool.commonPool()));
         Path config = state.resolve("mcp").resolve("s1.json");
 
-        String firstAttempt = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
-                Optional.empty(), Optional.of(access(config)))).command();
-        assertTrue(firstAttempt.endsWith("pi"), "an \"unknown\" probe must not carry the bridge flags: " + firstAttempt);
+        LaunchPlan firstAttempt = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
+                Optional.empty(), Optional.of(access(config))));
+        assertFalse(firstAttempt.supported());
 
         String secondAttempt = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
                 Optional.empty(), Optional.of(access(config)))).command();
@@ -482,7 +504,7 @@ class PiAgentProviderTest {
     }
 
     /**
-     * F2: a version that parses but sits below the 0.80.3 floor is worth
+     * A version that parses but sits below the 1.0.0 floor is worth
      * memoising -- re-probing cannot change it. Unlike {@link
      * #aFailedProbeIsNotLatchedAndTheNextLaunchRetries}, the second call must
      * see the SAME degraded result even though the injected probe would
@@ -492,18 +514,17 @@ class PiAgentProviderTest {
     void aParsedSubFloorVersionIsMemoisedAndNotReprobed(@TempDir Path state) {
         AtomicInteger calls = new AtomicInteger();
         PiAgentProvider p = new PiAgentProvider(new PiExecutableLocator(Path.of("/nonexistent/pi")),
-                () -> PiCapabilities.of(calls.incrementAndGet() == 1 ? "0.79.10" : "0.84.1"));
+                () -> PiCapabilities.of(calls.incrementAndGet() == 1 ? "0.99.0" : "1.3.0"));
         p.init(new AgentContext(state, state.resolve("activity"), ForkJoinPool.commonPool()));
         Path config = state.resolve("mcp").resolve("s1.json");
 
-        String firstAttempt = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
-                Optional.empty(), Optional.of(access(config)))).command();
-        assertTrue(firstAttempt.endsWith("pi"), "0.79.10 is below the floor: " + firstAttempt);
+        LaunchPlan firstAttempt = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
+                Optional.empty(), Optional.of(access(config))));
+        assertFalse(firstAttempt.supported());
 
-        String secondAttempt = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
-                Optional.empty(), Optional.of(access(config)))).command();
-        assertTrue(secondAttempt.endsWith("pi"),
-                "a parsed sub-floor read must stay memoised, not re-probed: " + secondAttempt);
+        LaunchPlan secondAttempt = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
+                Optional.empty(), Optional.of(access(config))));
+        assertFalse(secondAttempt.supported());
         assertEquals(1, calls.get(), "the probe must run exactly once");
     }
 
@@ -518,13 +539,13 @@ class PiAgentProviderTest {
     void anUnparseableVersionIsNotLatchedAndTheNextLaunchRetries(@TempDir Path state) {
         AtomicInteger calls = new AtomicInteger();
         PiAgentProvider p = new PiAgentProvider(new PiExecutableLocator(Path.of("/nonexistent/pi")),
-                () -> PiCapabilities.of(calls.incrementAndGet() == 1 ? "v0.84.1" : "0.84.1"));
+                () -> PiCapabilities.of(calls.incrementAndGet() == 1 ? "v1.3.0" : "1.3.0"));
         p.init(new AgentContext(state, state.resolve("activity"), ForkJoinPool.commonPool()));
         Path config = state.resolve("mcp").resolve("s1.json");
 
-        String firstAttempt = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
-                Optional.empty(), Optional.of(access(config)))).command();
-        assertTrue(firstAttempt.endsWith("pi"), "an unparseable version must not carry the bridge flags: " + firstAttempt);
+        LaunchPlan firstAttempt = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
+                Optional.empty(), Optional.of(access(config))));
+        assertFalse(firstAttempt.supported());
 
         String secondAttempt = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
                 Optional.empty(), Optional.of(access(config)))).command();
@@ -597,91 +618,6 @@ class PiAgentProviderTest {
         assertTrue(next.contains(" -e '"),
                 "the memo must un-latch so the next launch reinstalls: " + next);
         assertTrue(Files.exists(installed), "the extension should be back on disk");
-    }
-
-    /** Captures what {@code PiAgentProvider} logs, following McpConfigWriterTest's idiom. */
-    private static List<LogRecord> recordWhile(Runnable body) {
-        Logger logger = Logger.getLogger(PiAgentProvider.class.getName());
-        List<LogRecord> published = new ArrayList<>();
-        Handler recorder = new Handler() {
-            @Override
-            public void publish(LogRecord record) {
-                published.add(record);
-            }
-
-            @Override
-            public void flush() {
-            }
-
-            @Override
-            public void close() {
-            }
-        };
-        logger.addHandler(recorder);
-        try {
-            body.run();
-        } finally {
-            logger.removeHandler(recorder);
-        }
-        return published;
-    }
-
-    /**
-     * A declined gate used to be completely silent: no log line, no banner,
-     * nothing in the command. A user on an old pi lost every drydock tool
-     * with no way to find out why. The level matters as much as the text --
-     * an old pi is an expected outcome, not a fault, so this must not shout.
-     */
-    @Test
-    void aSubFloorDeclineIsLoggedAtInfoAndNamesTheVersion(@TempDir Path state) {
-        PiAgentProvider p = new PiAgentProvider(new PiExecutableLocator(Path.of("/nonexistent/pi")),
-                () -> PiCapabilities.of("0.79.10"));
-        p.init(new AgentContext(state, state.resolve("activity"), ForkJoinPool.commonPool()));
-        Path config = state.resolve("mcp").resolve("s1.json");
-
-        List<LogRecord> published = recordWhile(() -> p.buildCreateCommand(
-                new CreateContext("s", "x", Path.of("/repo"), Optional.empty(), Optional.of(access(config)))));
-
-        LogRecord decline = published.stream()
-                .filter(r -> r.getMessage().contains("Pi bridge declined"))
-                .findFirst()
-                .orElseThrow(() -> new AssertionError("a declined gate must say so: " + published));
-        assertEquals(Level.INFO, decline.getLevel(),
-                "an old pi is expected, not a fault: " + decline.getMessage());
-        assertTrue(decline.getMessage().contains("0.79.10"),
-                "the log must name the version it read: " + decline.getMessage());
-        assertTrue(published.stream().noneMatch(r -> r.getLevel().intValue() >= Level.WARNING.intValue()),
-                "declining on an old pi must not warn: " + published);
-    }
-
-    /**
-     * The two decline conditions must not be conflated. "Read the version and
-     * it is too old" is a wholly different diagnosis from "could not read the
-     * version at all" -- the second is the case that also silently re-probes
-     * on every launch, so a reader who is told the wrong one will chase the
-     * wrong problem.
-     */
-    @Test
-    void anUnreadableVersionDeclineSaysSoRatherThanBlamingTheFloor(@TempDir Path state) {
-        PiAgentProvider p = new PiAgentProvider(new PiExecutableLocator(Path.of("/nonexistent/pi")),
-                () -> PiCapabilities.of("v0.84.1"));
-        p.init(new AgentContext(state, state.resolve("activity"), ForkJoinPool.commonPool()));
-        Path config = state.resolve("mcp").resolve("s1.json");
-
-        List<LogRecord> published = recordWhile(() -> p.buildCreateCommand(
-                new CreateContext("s", "x", Path.of("/repo"), Optional.empty(), Optional.of(access(config)))));
-
-        String message = published.stream()
-                .map(LogRecord::getMessage)
-                .filter(m -> m.contains("Pi bridge declined"))
-                .findFirst()
-                .orElseThrow(() -> new AssertionError("a declined gate must say so: " + published));
-        assertTrue(message.contains("could not be read"),
-                "an unparseable version must be reported as unreadable: " + message);
-        assertFalse(message.contains("below the 0.80.3 floor"),
-                "an unparseable version is not a too-old version: " + message);
-        assertTrue(message.contains("v0.84.1"),
-                "the log must quote what it actually read: " + message);
     }
 
     /** The task is handed to the one-shot extension, not Pi's startup parser. */

@@ -30,7 +30,9 @@ class PiPromptPtyPlatformTest {
     void multilineImplementationPromptReachesPiThroughTheLaunchEnvironment(@TempDir Path dir) throws Exception {
         Path captured = dir.resolve("captured.txt");
         Path fakePi = dir.resolve("pi");
-        Files.writeString(fakePi, "#!/bin/sh\nprintf '%s' \"$DRYDOCK_PI_INITIAL_PROMPT\""
+        Files.writeString(fakePi, "#!/bin/sh\n"
+                + "if [ \"$1\" = --version ]; then echo 1.3.0; exit 0; fi\n"
+                + "printf '%s' \"$DRYDOCK_PI_INITIAL_PROMPT\""
                 + " > \"${0%/*}/captured.txt\"\n");
         Files.setPosixFilePermissions(fakePi, PosixFilePermissions.fromString("rwxr-xr-x"));
         PiAgentProvider provider = new PiAgentProvider(new PiExecutableLocator(fakePi));
