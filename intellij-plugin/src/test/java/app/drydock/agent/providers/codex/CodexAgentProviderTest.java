@@ -47,7 +47,7 @@ class CodexAgentProviderTest {
                 new CreateContext("Session 1", "ignored-uuid", Path.of("/repo"), Optional.empty(), Optional.empty()));
         assertTrue(plan.supported());
         assertFalse(plan.sessionIdUsed());
-        assertTrue(plan.command().endsWith("codex"));   // env-scrub prefix (if any) + "codex"; no id, no --settings
+        assertTrue(plan.command().endsWith("codex --sandbox danger-full-access"), plan.command());
     }
 
     @Test
@@ -72,25 +72,26 @@ class CodexAgentProviderTest {
     }
 
     @Test
-    void aWritingSessionCarriesNoSandboxFlag() {
+    void aWritingSessionExplicitlyRunsWithFullAccess() {
         LaunchPlan plan = provider().buildCreateCommand(
                 new CreateContext("Session 1", "ignored-uuid", Path.of("/repo"), Optional.empty(),
                         Optional.empty(), false, false));
-        assertFalse(plan.command().contains("--sandbox"), plan.command());
+        assertTrue(plan.command().endsWith("codex --sandbox danger-full-access"), plan.command());
     }
 
     @Test
     void resumeByIdWhenKnown() {
         LaunchPlan plan = provider().buildResumeCommand(
                 new ResumeContext(Optional.of("019f9072-abc"), Optional.empty(), Path.of("/repo"), Optional.empty(), Optional.empty()));
-        assertTrue(plan.command().endsWith("codex resume '019f9072-abc'"));
+        assertTrue(plan.command().endsWith(
+                "codex --sandbox danger-full-access resume '019f9072-abc'"), plan.command());
     }
 
     @Test
     void resumeUsesPickerWhenIdUnknown() {
         LaunchPlan plan = provider().buildResumeCommand(
                 new ResumeContext(Optional.empty(), Optional.empty(), Path.of("/repo"), Optional.empty(), Optional.empty()));
-        assertTrue(plan.command().endsWith("codex resume"));   // picker; never --last
+        assertTrue(plan.command().endsWith("codex --sandbox danger-full-access resume"));
     }
 
     @Test
@@ -182,7 +183,7 @@ class CodexAgentProviderTest {
 
         assertFalse(command.contains("tok-abc"), command);
         assertFalse(command.contains("mcp_servers"), command);
-        assertTrue(command.endsWith("codex"), command);
+        assertTrue(command.endsWith("codex --sandbox danger-full-access"), command);
     }
 
     @Test
@@ -215,7 +216,7 @@ class CodexAgentProviderTest {
                 new CreateContext("s", "x", Path.of("/repo"), Optional.empty(), Optional.empty()));
 
         assertFalse(plan.command().contains("mcp_servers"), plan.command());
-        assertTrue(plan.command().endsWith("codex"), plan.command());
+        assertTrue(plan.command().endsWith("codex --sandbox danger-full-access"), plan.command());
     }
 
     @Test

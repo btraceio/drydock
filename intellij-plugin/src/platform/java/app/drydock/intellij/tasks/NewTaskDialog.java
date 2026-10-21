@@ -78,7 +78,7 @@ final class NewTaskDialog extends DialogWrapper {
     private final JBTextField name = new JBTextField();
     private final JBTextArea instructions = new JBTextArea(4, 40);
     private final Map<AgentKind, JBRadioButton> agentButtons = new LinkedHashMap<>();
-    private final JBRadioButton writes = new JBRadioButton("Writes", true);
+    private final JBRadioButton writes = new JBRadioButton("Full access", true);
     private final JBRadioButton readOnly = new JBRadioButton("Read-only");
     private final JBLabel summary = new JBLabel();
     private final HyperlinkLabel change = new HyperlinkLabel("Change…");
@@ -174,7 +174,7 @@ final class NewTaskDialog extends DialogWrapper {
         JPanel modes;
         if (preset.fixedMode().isPresent()) {
             modes = row(new JBLabel(preset.fixedMode().get() == SessionMode.WRITES
-                    ? "Writes" : "Read-only"));
+                    ? "Full access" : "Read-only"));
         } else {
             modes = row(writes, readOnly);
             group(writes, readOnly);
