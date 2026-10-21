@@ -362,6 +362,23 @@ class PiAgentProviderTest {
     }
 
     @Test
+    void anUnreadableStartupVersionDoesNotPermanentlyHidePi(@TempDir Path state) throws Exception {
+        Path executable = Files.createFile(state.resolve("pi"));
+        Files.setPosixFilePermissions(executable, PosixFilePermissions.fromString("rwxr-xr-x"));
+        AtomicInteger calls = new AtomicInteger();
+        PiAgentProvider p = new PiAgentProvider(new PiExecutableLocator(executable),
+                () -> PiCapabilities.of(calls.incrementAndGet() == 1 ? "unknown" : "1.3.0"));
+        p.init(new AgentContext(state, state.resolve("activity"), ForkJoinPool.commonPool()));
+
+        assertEquals(Optional.of(executable), p.locateExecutable(),
+                "a transient startup probe must not be frozen into AgentRegistry's availability cache");
+        assertTrue(p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
+                Optional.empty(), Optional.empty())).supported(),
+                "command construction must retry the unparseable probe");
+        assertEquals(2, calls.get());
+    }
+
+    @Test
     void noMcpAccessMeansNoFlagsEvenOnAModernPi(@TempDir Path state) {
         String command = bridgeProvider(state).buildCreateCommand(
                 new CreateContext("s", "x", Path.of("/repo"), Optional.empty(), Optional.empty())).command();

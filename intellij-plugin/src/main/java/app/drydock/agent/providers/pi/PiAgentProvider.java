@@ -162,7 +162,12 @@ public final class PiAgentProvider implements AgentProvider {
             return Optional.empty();
         }
         PiCapabilities found = currentCapabilities();
-        if (!found.supported()) {
+        // AgentRegistry caches this answer for the entire IDE run. An
+        // unreadable/transient probe is deliberately not memoised below, so
+        // hiding Pi here would defeat that retry: the picker could never
+        // reach buildCreateCommand to probe again. Only a parsed version
+        // that is genuinely below the supported floor is a stable refusal.
+        if (found.versionParsed() && !found.supported()) {
             unsupportedVersion = found.version();
             return Optional.empty();
         }
