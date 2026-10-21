@@ -537,16 +537,11 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
             case RESUME -> AgentConsoles.resume(project, current.id());
             case START -> AgentConsoles.startFresh(project, current.id());
             case SESSION_MENU -> SessionDone.show(project, current);
-            // The review surface lands in a later phase. The link exists now
-            // because the strip is the handoff's strip; wiring it to nothing
-            // silently would be worse than saying so.
-            // A hosted tab's Changes lives in the agent's own window, so it
-            // jumps there first (F3). A local one's review is not built yet.
             case SHOW_CHANGES -> {
                 if (hostedFrom.isPresent()) {
                     AgentConsoles.jumpToOwnWindow(project, current.id(), true);
                 } else {
-                    AgentConsoles.notImplementedYet(project, action);
+                    TaskChanges.show(project, current);
                 }
             }
             case OPEN_PROJECT_WINDOW -> AgentConsoles.jumpToOwnWindow(project, current.id(), false);

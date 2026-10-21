@@ -114,6 +114,23 @@ public final class DiffService implements AutoCloseable {
     }
 
     /**
+     * The commit where {@code HEAD} forked from {@code baseBranch}. Exposed
+     * for native diff consumers that need the same left-hand revision as
+     * {@link DiffScope#BRANCH_WORKING_TREE}, but let the IntelliJ diff viewer
+     * load each file's contents itself.
+     */
+    public CompletableFuture<String> mergeBase(Path checkoutRoot, String baseBranch) {
+        return CompletableFuture.supplyAsync(() -> mergeBaseBlocking(checkoutRoot, baseBranch), executor);
+    }
+
+    /** Background-thread form of {@link #mergeBase(Path, String)}. */
+    String mergeBaseBlocking(Path checkoutRoot, String baseBranch) {
+        Path git = locator.locate()
+                .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
+        return resolveMergeBase(git, checkoutRoot, baseBranch);
+    }
+
+    /**
      * Synchronous form, exposed package-private so tests can assert on the
      * thrown exception type directly instead of unwrapping a
      * {@code CompletionException}. Must never be called from the JavaFX
@@ -137,7 +154,7 @@ public final class DiffService implements AutoCloseable {
             // One revision, so git compares the WORKING TREE against it: the
             // branch's commits and its uncommitted edits in a single diff,
             // measured from the fork point as BASE's three dots are.
-            case BRANCH_WORKING_TREE -> mergeBase(git, checkoutRoot, baseBranch);
+            case BRANCH_WORKING_TREE -> resolveMergeBase(git, checkoutRoot, baseBranch);
         };
         // --end-of-options: a branch name that looks like an option must
         // reach git as a revision, never be parsed as a flag.
@@ -486,6 +503,15 @@ public final class DiffService implements AutoCloseable {
 
     // ---- process execution (shared ProcessRunner, git-flavored failure translation) ----
 
+    /** The commit {@code HEAD} forked from {@code baseBranch} at -- what {@code base...HEAD} measures from. */
+    private static String resolveMergeBase(Path git, Path checkoutRoot, String baseBranch) {
+        List<String> command = List.of(git.toString(), "-C", checkoutRoot.toString(),
+                "merge-base", "--end-of-options", baseBranch, "HEAD");
+        ProcessResult result = run(command);
+        failIfFailed(command, result, checkoutRoot);
+        return result.stdout().strip();
+    }
+
     /**
      * Throws for a failed git invocation, mapping "not a git repository" to
      * {@link NotAGitRepositoryException} whichever command hit it.
@@ -495,15 +521,6 @@ public final class DiffService implements AutoCloseable {
      * probe is the command that fails first, and it has to report that the
      * same way the diff used to.</p>
      */
-    /** The commit {@code HEAD} forked from {@code baseBranch} at -- what {@code base...HEAD} measures from. */
-    private static String mergeBase(Path git, Path checkoutRoot, String baseBranch) {
-        List<String> command = List.of(git.toString(), "-C", checkoutRoot.toString(),
-                "merge-base", "--end-of-options", baseBranch, "HEAD");
-        ProcessResult result = run(command);
-        failIfFailed(command, result, checkoutRoot);
-        return result.stdout().strip();
-    }
-
     private static void failIfFailed(List<String> command, ProcessResult result, Path checkoutRoot) {
         if (result.exitCode() == 0) {
             return;

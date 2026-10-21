@@ -85,6 +85,23 @@ class DiffServiceTest {
     }
 
     @Test
+    void mergeBaseExposesTheSameForkPointUsedByBranchWorkingTree(@TempDir Path repoDir) throws Exception {
+        Path repo = initCommittedRepo(repoDir, "one\n");
+        String fork = runGitOutput(repo, "rev-parse", "HEAD").strip();
+        runGit(repo, "checkout", "-b", "feat/change");
+        Files.writeString(repo.resolve("feature.txt"), "feature\n");
+        runGit(repo, "add", "feature.txt");
+        commit(repo, "feature");
+        runGit(repo, "checkout", "main");
+        Files.writeString(repo.resolve("main.txt"), "main\n");
+        runGit(repo, "add", "main.txt");
+        commit(repo, "main moves");
+        runGit(repo, "checkout", "feat/change");
+
+        assertEquals(fork, service.mergeBase(repo, "main").get());
+    }
+
+    @Test
     void baseScopeDiffsTheWholeBranchWithLineNumbers(@TempDir Path repoDir) throws Exception {
         Path repo = initCommittedRepo(repoDir, "one\ntwo\nthree\n");
         runGit(repo, "checkout", "-b", "feat/change");
@@ -238,6 +255,10 @@ class DiffServiceTest {
     }
 
     private static void runGit(Path repo, String... args) throws IOException, InterruptedException {
+        runGitOutput(repo, args);
+    }
+
+    private static String runGitOutput(Path repo, String... args) throws IOException, InterruptedException {
         java.util.List<String> command = new java.util.ArrayList<>();
         command.add("git");
         command.add("-C");
@@ -249,5 +270,6 @@ class DiffServiceTest {
         if (exitCode != 0) {
             throw new IOException("git " + String.join(" ", args) + " failed (exit " + exitCode + "): " + output);
         }
+        return output;
     }
 }

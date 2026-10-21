@@ -30,9 +30,6 @@ import com.intellij.openapi.util.Key;
 import com.intellij.openapi.util.text.StringUtil;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.openapi.wm.IdeFocusManager;
-import com.intellij.openapi.wm.ToolWindow;
-import com.intellij.openapi.wm.ToolWindowId;
-import com.intellij.openapi.wm.ToolWindowManager;
 import com.intellij.openapi.wm.WindowManager;
 import com.intellij.util.messages.MessageBusConnection;
 import org.jetbrains.annotations.NotNull;
@@ -328,10 +325,10 @@ public final class AgentConsoles {
                     show(target, sessionId);
                     focusConsole(target, sessionId);
                     if (thenChanges) {
-                        ToolWindow commit = ToolWindowManager.getInstance(target).getToolWindow(ToolWindowId.COMMIT);
-                        if (commit != null) {
-                            commit.activate(null);
-                        }
+                        DrydockPluginService.getInstance().stateStore().state().sessions().stream()
+                                .filter(session -> session.id().equals(sessionId))
+                                .findFirst()
+                                .ifPresent(session -> TaskChanges.show(target, session));
                     }
                     if (announce && !host.isDisposed()) {
                         announceMove(host, target, sessionId, place);
@@ -447,19 +444,6 @@ public final class AgentConsoles {
     public static void focusConsoleLater(Project project, ManagedSessionId sessionId) {
         ApplicationManager.getApplication().invokeLater(
                 () -> focusConsole(project, sessionId), ModalityState.nonModal(), project.getDisposed());
-    }
-
-    /**
-     * The strip's Changes link, whose surface lands in a later phase. It is
-     * present because the strip is the handoff's strip; saying so is better
-     * than a link that silently does nothing.
-     */
-    static void notImplementedYet(Project project, AgentConsoleStrip.StripAction action) {
-        String what = switch (action) {
-            case SHOW_CHANGES -> "The branch-vs-main review opens in the Commit tool window, which is not built yet.";
-            case STOP, RESUME, START, OPEN_PROJECT_WINDOW, SESSION_MENU -> "";
-        };
-        Messages.showInfoMessage(project, what, "Drydock");
     }
 
     private static String rootMessage(Throwable failure) {
