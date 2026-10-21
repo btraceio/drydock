@@ -128,9 +128,9 @@ public final class TaskLauncher {
         open(from, Optional.of(mainRoot), Optional.empty(), NewTaskPreset.implement(issue));
     }
 
-    /** Opens a read-only main-checkout task prefilled to analyze a GitHub issue. */
-    static void summarize(Project from, Path mainRoot, OpenIssue issue) {
-        open(from, Optional.of(mainRoot), Optional.empty(), NewTaskPreset.summarize(issue));
+    /** Opens a main-checkout task prefilled to validate and prioritize a GitHub issue. */
+    static void triage(Project from, Path mainRoot, OpenIssue issue) {
+        open(from, Optional.of(mainRoot), Optional.empty(), NewTaskPreset.triage(issue));
     }
 
     /** As {@link #open(Project, Optional, Optional)}, with the dialog preset ({@code Start ▸}'s menu, an issue). */

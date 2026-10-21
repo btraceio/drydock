@@ -93,24 +93,32 @@ record NewTaskPreset(String name, Optional<String> instructions, Optional<Sessio
                 OpenIn.THIS_WINDOW);
     }
 
-    static NewTaskPreset summarize(OpenIssue issue) {
+    static NewTaskPreset triage(OpenIssue issue) {
         String reference = "#" + issue.number();
-        String name = "Summarize " + reference + " " + issue.title();
-        StringBuilder prompt = new StringBuilder("Summarize GitHub issue ")
+        String name = "Triage " + reference + " " + issue.title();
+        StringBuilder prompt = new StringBuilder("Triage GitHub issue ")
                 .append(reference).append(": ").append(issue.title());
         issue.url().ifPresent(url -> prompt.append("\n\n").append(url));
         prompt.append("""
 
 
-                Read the issue and the relevant repository context, then provide a concise implementation-oriented
-                brief. Cover the problem and desired outcome, explicit acceptance criteria, important constraints and
-                dependencies, likely areas of the codebase involved, risks, and sensible next steps. Distinguish facts
-                from inferences. Call out ambiguity and unanswered questions instead of inventing requirements.
-
-                Do not modify files, create commits, or begin implementation. This task is analysis only.
+                Triage the report against the repository as it exists now:
+                1. Read the full issue and inspect the relevant current production control flow, data flow,
+                   configuration, and tests. Treat every behavioral statement in the report as an unverified claim.
+                2. Decide whether the report still applies to the current source shape and runtime behavior. Classify
+                   it as confirmed, partially applicable, stale, or uncertain, and cite the concrete source paths and
+                   evidence behind that conclusion. Distinguish observed facts from inferences and open questions.
+                3. Propose the smallest meaningful reproducer, including its prerequisites, exact steps, expected and
+                   actual results, and what it would prove or disprove. Before modifying files or running build or
+                   reproducer commands, ask the user for approval. If approved, build and run the reproducer, record
+                   the exact commands and results, and clean up generated artifacts unless the user asks to keep them.
+                4. Summarize the likely affected code, constraints, dependencies, risks, and sensible next steps.
+                   Do not implement the production fix or create commits unless the user separately approves that work.
+                5. End with an Impact-Likelihood-Workaround assessment: rate and justify each dimension from the
+                   available evidence, state confidence and remaining unknowns, then recommend an explicit priority.
                 """);
-        return new NewTaskPreset(name, Optional.of(prompt.toString()), Optional.of(SessionMode.READ_ONLY),
-                Optional.empty(), true,
+        return new NewTaskPreset(name, Optional.of(prompt.toString()), Optional.empty(),
+                Optional.of(WorkIn.MAIN_CHECKOUT), true,
                 OpenIn.THIS_WINDOW);
     }
 

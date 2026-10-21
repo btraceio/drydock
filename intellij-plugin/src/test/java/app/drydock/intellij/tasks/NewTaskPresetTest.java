@@ -55,22 +55,27 @@ class NewTaskPresetTest {
     }
 
     @Test
-    void githubIssueSummaryIsAnalysisOnly() {
+    void githubIssueTriageValidatesAndPrioritizesTheCurrentReport() {
         OpenIssue issue = new OpenIssue(42, "Fix allocation accounting",
                 Optional.of("https://github.com/acme/profiler/issues/42"), List.of(), List.of(), Optional.empty());
 
-        NewTaskPreset preset = NewTaskPreset.summarize(issue);
+        NewTaskPreset preset = NewTaskPreset.triage(issue);
 
-        assertEquals("Summarize #42 Fix allocation accounting", preset.name());
+        assertEquals("Triage #42 Fix allocation accounting", preset.name());
         String prompt = preset.instructions().orElseThrow();
-        assertTrue(prompt.startsWith("Summarize GitHub issue #42: Fix allocation accounting\n\n"
+        assertTrue(prompt.startsWith("Triage GitHub issue #42: Fix allocation accounting\n\n"
                 + "https://github.com/acme/profiler/issues/42"));
-        assertTrue(prompt.contains("Distinguish facts"));
-        assertTrue(prompt.contains("from inferences"));
-        assertTrue(prompt.contains("Do not modify files, create commits, or begin implementation"));
-        assertEquals(SessionMode.READ_ONLY, preset.mode(false));
+        assertTrue(prompt.contains("Treat every behavioral statement in the report as an unverified claim"));
+        assertTrue(prompt.contains("still applies to the current source shape"));
+        assertTrue(prompt.contains("Propose the smallest meaningful reproducer"));
+        assertTrue(prompt.contains("ask the user for approval"));
+        assertTrue(prompt.contains("build and run the reproducer"));
+        assertTrue(prompt.contains("Impact-Likelihood-Workaround assessment"));
+        assertTrue(prompt.contains("recommend an explicit priority"));
+        assertEquals(SessionMode.WRITES, preset.mode(false));
         assertEquals(SessionMode.READ_ONLY, preset.mode(true));
-        assertEquals(Optional.of(SessionMode.READ_ONLY), preset.fixedMode());
+        assertEquals(Optional.empty(), preset.fixedMode());
+        assertEquals(Optional.of(NewTaskPlan.WorkIn.MAIN_CHECKOUT), preset.fixedWorkIn());
         assertTrue(preset.instructionsRequired());
     }
 

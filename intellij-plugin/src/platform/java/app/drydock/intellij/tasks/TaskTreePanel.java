@@ -241,8 +241,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 }
             }
         };
-        AnAction summarize = new DumbAwareAction("Summarize…",
-                "Start a read-only task to analyze this issue", AllIcons.Actions.Show) {
+        AnAction triage = new DumbAwareAction("Triage…",
+                "Validate and prioritize this issue against the current source", AllIcons.Actions.Show) {
             @Override
             public void update(@NotNull AnActionEvent e) {
                 TaskActions.present(e, e.getData(SELECTED_NODE) instanceof IssueRow);
@@ -256,14 +256,14 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             @Override
             public void actionPerformed(@NotNull AnActionEvent e) {
                 if (e.getData(SELECTED_NODE) instanceof IssueRow issue) {
-                    TaskLauncher.summarize(project, issue.mainRoot(), issue.issue());
+                    TaskLauncher.triage(project, issue.mainRoot(), issue.issue());
                 }
             }
         };
         AnAction issueGithubSettings = githubSettingsAction(node -> node instanceof IssueRow);
 
         contextActions.add(implement);
-        contextActions.add(summarize);
+        contextActions.add(triage);
         contextActions.addSeparator();
         contextActions.add(openInGitHub);
         contextActions.add(issueGithubSettings);
