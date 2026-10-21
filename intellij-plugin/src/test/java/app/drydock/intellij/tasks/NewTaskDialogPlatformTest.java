@@ -3,6 +3,7 @@ package app.drydock.intellij.tasks;
 import app.drydock.agent.api.Agent;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.RepositoryId;
+import app.drydock.domain.SessionMode;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.projects.SharedProject;
 
@@ -38,6 +39,26 @@ public class NewTaskDialogPlatformTest extends BasePlatformTestCase {
 
         assertEquals(preset.instructions(), choice.get().instructions());
         assertEquals(AgentKind.PI, choice.get().agent());
+    }
+
+    public void testSummaryStartsReadOnlyInTheMainCheckout() {
+        OpenIssue issue = new OpenIssue(42, "Fix allocation accounting", Optional.empty(), List.of(), List.of(),
+                Optional.empty());
+        NewTaskPreset preset = NewTaskPreset.summarize(issue);
+        AtomicReference<NewTaskPlan.Choice> choice = new AtomicReference<>();
+
+        ApplicationManager.getApplication().invokeAndWait(() -> {
+            NewTaskDialog dialog = new NewTaskDialog(getProject(), inputs(), Optional.empty(), preset);
+            try {
+                choice.set(dialog.choice());
+            } finally {
+                Disposer.dispose(dialog.getDisposable());
+            }
+        });
+
+        assertEquals(SessionMode.READ_ONLY, choice.get().mode());
+        assertEquals(NewTaskPlan.WorkIn.MAIN_CHECKOUT, choice.get().workIn());
+        assertEquals(preset.instructions(), choice.get().instructions());
     }
 
     private static NewTaskPlan.Inputs inputs() {

@@ -48,9 +48,29 @@ class NewTaskPresetTest {
                 NewTaskPlan.folderFor(Path.of("/worktrees"), "profiler", branch));
         assertEquals(SessionMode.WRITES, preset.mode(false));
         assertEquals(SessionMode.WRITES, preset.mode(true), "the hidden read-only state cannot override the preset");
-        assertTrue(preset.writableOnly());
+        assertEquals(Optional.of(SessionMode.WRITES), preset.fixedMode());
         assertTrue(preset.instructionsRequired(),
                 "Implement must never degrade into an idle agent session");
         assertFalse(NewTaskPreset.empty().instructionsRequired());
+    }
+
+    @Test
+    void githubIssueSummaryIsAnalysisOnly() {
+        OpenIssue issue = new OpenIssue(42, "Fix allocation accounting",
+                Optional.of("https://github.com/acme/profiler/issues/42"), List.of(), List.of(), Optional.empty());
+
+        NewTaskPreset preset = NewTaskPreset.summarize(issue);
+
+        assertEquals("Summarize #42 Fix allocation accounting", preset.name());
+        String prompt = preset.instructions().orElseThrow();
+        assertTrue(prompt.startsWith("Summarize GitHub issue #42: Fix allocation accounting\n\n"
+                + "https://github.com/acme/profiler/issues/42"));
+        assertTrue(prompt.contains("Distinguish facts"));
+        assertTrue(prompt.contains("from inferences"));
+        assertTrue(prompt.contains("Do not modify files, create commits, or begin implementation"));
+        assertEquals(SessionMode.READ_ONLY, preset.mode(false));
+        assertEquals(SessionMode.READ_ONLY, preset.mode(true));
+        assertEquals(Optional.of(SessionMode.READ_ONLY), preset.fixedMode());
+        assertTrue(preset.instructionsRequired());
     }
 }

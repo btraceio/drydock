@@ -3,6 +3,7 @@ package app.drydock.intellij.tasks;
 import app.drydock.agent.api.Agent;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.config.UserConfig;
+import app.drydock.domain.SessionMode;
 import app.drydock.intellij.settings.DrydockConfigurable;
 import app.drydock.intellij.tasks.NewTaskPlan.Choice;
 import app.drydock.intellij.tasks.NewTaskPlan.OpenIn;
@@ -126,6 +127,10 @@ final class NewTaskDialog extends DialogWrapper {
         this.worktreeBase = inputs.worktreeBase();
         name.setText(preset.name());
         instructions.setText(preset.instructions().orElse(""));
+        if (preset.fixedMode().orElse(null) == SessionMode.READ_ONLY) {
+            readOnly.setSelected(true);
+            mainCheckout.setSelected(true);
+        }
         setTitle("New task in " + inputs.repoName());
         init();
         regenerate();
@@ -162,8 +167,9 @@ final class NewTaskDialog extends DialogWrapper {
         }
 
         JPanel modes;
-        if (preset.writableOnly()) {
-            modes = row(new JBLabel("Writes"));
+        if (preset.fixedMode().isPresent()) {
+            modes = row(new JBLabel(preset.fixedMode().get() == SessionMode.WRITES
+                    ? "Writes" : "Read-only"));
         } else {
             modes = row(writes, readOnly);
             group(writes, readOnly);
@@ -322,7 +328,8 @@ final class NewTaskDialog extends DialogWrapper {
     /** Summary, warning, OK label, and the controls the mode allows. */
     private void refresh() {
         boolean fixed = inputs.fixedWorktree().isPresent();
-        newWorktree.setEnabled(!readOnly.isSelected() && !fixed);
+        newWorktree.setEnabled(preset.mode(readOnly.isSelected()) != SessionMode.READ_ONLY
+                && !fixed);
         mainCheckout.setEnabled(!fixed);
         boolean worktree = workIn() == WorkIn.NEW_WORKTREE;
         branch.setEnabled(worktree);
@@ -352,7 +359,8 @@ final class NewTaskDialog extends DialogWrapper {
         if (inputs.fixedWorktree().isPresent()) {
             return WorkIn.EXISTING_WORKTREE;
         }
-        return readOnly.isSelected() || mainCheckout.isSelected() ? WorkIn.MAIN_CHECKOUT : WorkIn.NEW_WORKTREE;
+        return preset.mode(readOnly.isSelected()) == SessionMode.READ_ONLY
+                || mainCheckout.isSelected() ? WorkIn.MAIN_CHECKOUT : WorkIn.NEW_WORKTREE;
     }
 
     Choice choice() {

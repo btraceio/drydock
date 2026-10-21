@@ -114,6 +114,11 @@ public final class TaskLauncher {
         open(from, Optional.of(mainRoot), Optional.empty(), NewTaskPreset.implement(issue));
     }
 
+    /** Opens a read-only main-checkout task prefilled to analyze a GitHub issue. */
+    static void summarize(Project from, Path mainRoot, OpenIssue issue) {
+        open(from, Optional.of(mainRoot), Optional.empty(), NewTaskPreset.summarize(issue));
+    }
+
     private static void open(Project from, Optional<Path> mainRoot, Optional<FixedWorktree> fixed,
                              NewTaskPreset preset) {
         ProgressManager.getInstance().run(new Task.Backgroundable(from, "Preparing new task…", true) {

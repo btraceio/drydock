@@ -7,16 +7,17 @@ import java.util.Objects;
 import java.util.Optional;
 
 /** Optional values and constraints supplied by a task entry point. */
-record NewTaskPreset(String name, Optional<String> instructions, boolean writableOnly,
+record NewTaskPreset(String name, Optional<String> instructions, Optional<SessionMode> fixedMode,
                      boolean instructionsRequired) {
 
     NewTaskPreset {
         Objects.requireNonNull(name, "name");
         Objects.requireNonNull(instructions, "instructions");
+        Objects.requireNonNull(fixedMode, "fixedMode");
     }
 
     static NewTaskPreset empty() {
-        return new NewTaskPreset("", Optional.empty(), false, false);
+        return new NewTaskPreset("", Optional.empty(), Optional.empty(), false);
     }
 
     static NewTaskPreset implement(OpenIssue issue) {
@@ -63,10 +64,29 @@ record NewTaskPreset(String name, Optional<String> instructions, boolean writabl
                 - The pull request explains the behavior, design decisions, risks, and verification, and contains the
                   correct closing keyword for this issue; the work is not done merely because code was written.
                 """.formatted(reference));
-        return new NewTaskPreset(name, Optional.of(prompt.toString()), true, true);
+        return new NewTaskPreset(name, Optional.of(prompt.toString()), Optional.of(SessionMode.WRITES), true);
+    }
+
+    static NewTaskPreset summarize(OpenIssue issue) {
+        String reference = "#" + issue.number();
+        String name = "Summarize " + reference + " " + issue.title();
+        StringBuilder prompt = new StringBuilder("Summarize GitHub issue ")
+                .append(reference).append(": ").append(issue.title());
+        issue.url().ifPresent(url -> prompt.append("\n\n").append(url));
+        prompt.append("""
+
+
+                Read the issue and the relevant repository context, then provide a concise implementation-oriented
+                brief. Cover the problem and desired outcome, explicit acceptance criteria, important constraints and
+                dependencies, likely areas of the codebase involved, risks, and sensible next steps. Distinguish facts
+                from inferences. Call out ambiguity and unanswered questions instead of inventing requirements.
+
+                Do not modify files, create commits, or begin implementation. This task is analysis only.
+                """);
+        return new NewTaskPreset(name, Optional.of(prompt.toString()), Optional.of(SessionMode.READ_ONLY), true);
     }
 
     SessionMode mode(boolean readOnlySelected) {
-        return writableOnly || !readOnlySelected ? SessionMode.WRITES : SessionMode.READ_ONLY;
+        return fixedMode.orElse(readOnlySelected ? SessionMode.READ_ONLY : SessionMode.WRITES);
     }
 }

@@ -62,6 +62,7 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Predicate;
 
 /**
  * The Drydock tool window: every registered project and its tasks, live.
@@ -127,8 +128,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 }
             }
         };
-        contextActions.add(switchToTask);
-        contextActions.add(new DumbAwareAction("New Task…",
+        AnAction newTask = new DumbAwareAction("New Task…",
                 "Start a task for this project or worktree", AllIcons.General.Add) {
             @Override
             public void update(@NotNull AnActionEvent e) {
@@ -147,8 +147,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 newTaskTarget(e.getData(SELECTED_NODE), root).ifPresent(target ->
                         TaskLauncher.open(project, Optional.of(target.mainRoot()), target.fixedWorktree()));
             }
-        });
-        contextActions.add(new DumbAwareAction("Open in GitHub", "Open this issue in the browser",
+        };
+        AnAction openInGitHub = new DumbAwareAction("Open in GitHub", "Open this issue in the browser",
                 AllIcons.Vcs.Vendors.Github) {
             @Override
             public void update(@NotNull AnActionEvent e) {
@@ -167,8 +167,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                     issue.issue().url().ifPresent(BrowserUtil::browse);
                 }
             }
-        });
-        contextActions.add(new DumbAwareAction("Implement…",
+        };
+        AnAction implement = new DumbAwareAction("Implement…",
                 "Create a writable task and worktree for this issue", AllIcons.Actions.Execute) {
             @Override
             public void update(@NotNull AnActionEvent e) {
@@ -186,12 +186,12 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                     TaskLauncher.implement(project, issue.mainRoot(), issue.issue());
                 }
             }
-        });
-        contextActions.add(new DumbAwareAction("GitHub Settings…",
-                "Configure GitHub issues for this Drydock project", AllIcons.General.Settings) {
+        };
+        AnAction summarize = new DumbAwareAction("Summarize…",
+                "Start a read-only task to analyze this issue", AllIcons.Actions.Show) {
             @Override
             public void update(@NotNull AnActionEvent e) {
-                TaskActions.present(e, githubSettingsNode(e.getData(SELECTED_NODE)));
+                TaskActions.present(e, e.getData(SELECTED_NODE) instanceof IssueRow);
             }
 
             @Override
@@ -201,18 +201,22 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
             @Override
             public void actionPerformed(@NotNull AnActionEvent e) {
-                Path root = e.getData(SELECTED_PROJECT_ROOT);
-                if (root == null) {
-                    return;
+                if (e.getData(SELECTED_NODE) instanceof IssueRow issue) {
+                    TaskLauncher.summarize(project, issue.mainRoot(), issue.issue());
                 }
-                DrydockPluginService.getInstance().sharedProjects().byRoot(root).ifPresent(registered -> {
-                    if (new GitHubProjectSettingsDialog(project, registered).showAndGet()) {
-                        inputs.invalidateGitHub();
-                        requestRebuild(false);
-                    }
-                });
             }
-        });
+        };
+        AnAction issueGithubSettings = githubSettingsAction(node -> node instanceof IssueRow);
+
+        contextActions.add(implement);
+        contextActions.add(summarize);
+        contextActions.addSeparator();
+        contextActions.add(openInGitHub);
+        contextActions.add(issueGithubSettings);
+        contextActions.addSeparator();
+        contextActions.add(switchToTask);
+        contextActions.add(newTask);
+        contextActions.add(githubSettingsAction(TaskTreePanel::githubSettingsNode));
         contextActions.addAll(TaskActions.taskActions());
         PopupHandler.installPopupMenu(tree, contextActions, "Drydock.TaskTree.Popup");
 
@@ -369,14 +373,42 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             case WorktreeGroup ignored -> Optional.of(new NewTaskTarget(mainRoot, worktreeOf(node, mainRoot)));
             case IdleWorktree ignored -> Optional.of(new NewTaskTarget(mainRoot, worktreeOf(node, mainRoot)));
             case TaskRow ignored -> Optional.of(new NewTaskTarget(mainRoot, worktreeOf(node, mainRoot)));
-            case IssueRow ignored -> Optional.of(new NewTaskTarget(mainRoot, Optional.empty()));
+            case IssueRow ignored -> Optional.empty();
             case null, default -> Optional.empty();
         };
     }
 
     private static boolean githubSettingsNode(TaskNode node) {
-        return node instanceof ProjectRow || node instanceof IssueRow
-                || node instanceof Section section && section.kind() == SectionKind.ISSUES;
+        return node instanceof ProjectRow || node instanceof Section section && section.kind() == SectionKind.ISSUES;
+    }
+
+    private AnAction githubSettingsAction(Predicate<TaskNode> applies) {
+        return new DumbAwareAction("GitHub Settings…",
+                "Configure GitHub issues for this Drydock project", AllIcons.General.Settings) {
+            @Override
+            public void update(@NotNull AnActionEvent e) {
+                TaskActions.present(e, applies.test(e.getData(SELECTED_NODE)));
+            }
+
+            @Override
+            public @NotNull ActionUpdateThread getActionUpdateThread() {
+                return ActionUpdateThread.EDT;
+            }
+
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                Path root = e.getData(SELECTED_PROJECT_ROOT);
+                if (root == null) {
+                    return;
+                }
+                DrydockPluginService.getInstance().sharedProjects().byRoot(root).ifPresent(registered -> {
+                    if (new GitHubProjectSettingsDialog(project, registered).showAndGet()) {
+                        inputs.invalidateGitHub();
+                        requestRebuild(false);
+                    }
+                });
+            }
+        };
     }
 
     record NewTaskTarget(Path mainRoot, Optional<NewTaskPlan.FixedWorktree> fixedWorktree) {
