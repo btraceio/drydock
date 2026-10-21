@@ -341,11 +341,14 @@ DECISION.md, SPIKE-RESULTS.md). Plan, with its rulings R1–R10:
 - A cold jump opens the window through the File › Open path, so typing in
   the hosting tab waits for it (2–5 s).
 - File links carry no hover text.
-- Quitting from the Welcome screen, with no project window open, stops
-  agents no window shows **without** the quit question. With no window
-  there is no close handler to ask, and the only quit veto left is the
-  deprecated `ApplicationListener.canExitApplication`, which the MVP
-  avoids.
+- The quit question is asked from `ApplicationListener.canExitApplication`,
+  which is deprecated ("obsolete") with no replacement. It is the only veto
+  that runs when no project window is open; without it, quitting from the
+  Welcome screen stopped agents no window showed without asking. Plugin
+  Verifier does not flag the override (checked on IU-253 and IU-263).
+  Checked live: with the only window closed under "Keep running", ⌘Q on
+  the Welcome screen asked `Stop 1 working agent?` (listed `· not shown`);
+  Cancel kept the IDE and the agent, Stop & Quit stopped both.
 - Stop & Close Window applies only to an agent shown in its own window.
 
 **Verified live** (runIde on IU-2025.3.3, scratch repo
