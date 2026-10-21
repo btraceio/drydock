@@ -35,12 +35,11 @@ import java.util.stream.Collectors;
  * <p><b>A quit</b> stops every agent, as in the MVP (handoff surface 6):
  * agents at their prompt without asking, working ones after one question.</p>
  *
- * <p><b>Quit is one question, not one per window.</b> The platform has no
- * public, non-obsolete hook that can veto a quit ({@code
- * ApplicationListener.canExitApplication} is deprecated), but an exit closes
- * every project through this same handler. So during an exit the first
- * window asked shows one dialog listing every working agent in the IDE —
- * shown in a window or not — and records which sessions the user agreed to stop; the remaining
+ * <p><b>Quit is one question, not one per window.</b> {@link QuitConfirmation}
+ * asks it from the platform's (deprecated, replacement-less) quit veto, before
+ * any window is asked to close — which also covers a quit with no window open.
+ * It lists every working agent in the IDE, shown in a window or not, and
+ * records which sessions the user agreed to stop; the remaining
  * windows of the same exit find theirs already agreed and close silently.
  * The agreement expires after {@link #QUIT_APPROVAL_TTL}, so it cannot leak
  * into a later close of a session that was resumed since.</p>
@@ -151,8 +150,13 @@ public final class AgentCloseConfirmation implements ProjectCloseHandler {
         return rows;
     }
 
-    /** A quit: one question for every working agent in the IDE, shown in a window or not. */
-    private static boolean confirmQuit() {
+    /**
+     * A quit: one question for every working agent in the IDE, shown in a
+     * window or not. Asked by {@link QuitConfirmation} before any window is
+     * asked to close; a window's own check during the same quit finds it
+     * approved, and asks here itself only if that did not run. EDT.
+     */
+    static boolean confirmQuit() {
         List<Working> everywhere = working(AgentExecutionRegistry.getInstance().runningSessions());
         if (everywhere.isEmpty() || StopAgentsDialog.isSuppressed()) {
             return true;
