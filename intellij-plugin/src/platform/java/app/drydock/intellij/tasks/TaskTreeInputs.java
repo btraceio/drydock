@@ -70,7 +70,7 @@ final class TaskTreeInputs implements AutoCloseable {
         issueCache.clear();
     }
 
-    TaskTreeModel.Inputs gather(Project here, String filter) {
+    TaskTreeModel.Inputs gather(Project here, String filter, TaskTreeModel.ViewFilter viewFilter) {
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         List<SharedProject> projects = new ArrayList<>();
         Map<Path, List<Worktree>> byMain = new HashMap<>();
@@ -143,7 +143,7 @@ final class TaskTreeInputs implements AutoCloseable {
         }
         return new TaskTreeModel.Inputs(projects, sessions, byMain, mainRootOf, currentMain, currentWorking,
                 activity, running, missing, recordedRoots,
-                issues, plugin.sharedProjects().problem(), filter);
+                issues, plugin.sharedProjects().problem(), filter, viewFilter);
     }
 
     private CompletableFuture<IssueListing> issuesOf(Path root, Optional<String> repository) {

@@ -21,6 +21,7 @@ import app.drydock.intellij.tasks.TaskNode.Section;
 import app.drydock.intellij.tasks.TaskNode.SectionKind;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
+import app.drydock.intellij.tasks.TaskTreeModel.ViewFilter;
 import app.drydock.projects.SharedProject;
 
 import org.junit.jupiter.api.Test;
@@ -62,6 +63,7 @@ class TaskTreeModelTest {
         final Map<Path, IssueListing> issues = new HashMap<>();
         Optional<String> problem = Optional.empty();
         String filter = "";
+        ViewFilter viewFilter = ViewFilter.ALL;
 
         In project(Path root) {
             projects.add(SharedProject.local(RepositoryId.newId(), root, root.getFileName().toString(), T));
@@ -84,7 +86,7 @@ class TaskTreeModelTest {
 
         TaskTreeModel.Inputs build() {
             return new TaskTreeModel.Inputs(projects, sessions, worktrees, mainRootOf, currentMain, currentWorking,
-                    activity, running, missing, recordedRoots, issues, problem, filter);
+                    activity, running, missing, recordedRoots, issues, problem, filter, viewFilter);
         }
     }
 
@@ -272,6 +274,60 @@ class TaskTreeModelTest {
 
         IssueRow issue = assertInstanceOf(IssueRow.class, issueNodes(row).getFirst());
         assertEquals(9, issue.issue().number());
+    }
+
+    @Test
+    void activeViewContainsOnlyRunningSessions() {
+        Path idle = Path.of("/wt/btrace-idle");
+        In in = new In().project(BTRACE).worktree(BTRACE, idle, "unused-worktree");
+        ManagedAgentSession active = session("Running task", BTRACE);
+        in.sessions.addAll(List.of(active, session("Stopped task", BTRACE.resolve("stopped"))));
+        in.running.add(active.id());
+        in.issues.put(BTRACE, new IssueListing.Listed(List.of(
+                new OpenIssue(9, "Allocation regression", Optional.empty(), List.of(), List.of(), Optional.of(T)))));
+        in.viewFilter = ViewFilter.ACTIVE;
+
+        ProjectRow row = projectRow(TaskTreeModel.build(in.build()), BTRACE);
+
+        assertEquals(List.of("Running task"), sessionNodes(row).stream()
+                .map(TaskRow.class::cast).map(task -> task.session().displayName()).toList());
+        assertTrue(section(row, SectionKind.WORKTREES).isEmpty());
+        assertTrue(section(row, SectionKind.ISSUES).isEmpty());
+    }
+
+    @Test
+    void inactiveViewContainsOnlyStoppedSessionsAndHidesEmptyProjects() {
+        In in = new In().project(BTRACE).project(ALPHA).current(BTRACE, BTRACE);
+        ManagedAgentSession active = session("Running task", BTRACE);
+        in.sessions.addAll(List.of(active, session("Stopped task", ALPHA)));
+        in.running.add(active.id());
+        in.viewFilter = ViewFilter.INACTIVE;
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build());
+
+        assertEquals(List.of(ALPHA), projectRoots(nodes));
+        assertEquals(List.of("Stopped task"), sessionNodes(projectRow(nodes, ALPHA)).stream()
+                .map(TaskRow.class::cast).map(task -> task.session().displayName()).toList());
+    }
+
+    @Test
+    void issuesViewContainsOnlyIssuesAndComposesWithSearch() {
+        In in = new In().project(BTRACE).project(ALPHA);
+        in.sessions.add(session("Allocation session", BTRACE));
+        in.issues.put(BTRACE, new IssueListing.Listed(List.of(
+                new OpenIssue(9, "Allocation regression", Optional.empty(), List.of("profiling"), List.of(),
+                        Optional.of(T)),
+                new OpenIssue(10, "Documentation", Optional.empty(), List.of("docs"), List.of(), Optional.of(T)))));
+        in.viewFilter = ViewFilter.ISSUES;
+        in.filter = "profiling";
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build());
+
+        assertEquals(List.of(BTRACE), projectRoots(nodes));
+        ProjectRow row = projectRow(nodes, BTRACE);
+        assertTrue(section(row, SectionKind.SESSIONS).isEmpty());
+        assertEquals(List.of(9), issueNodes(row).stream().map(IssueRow.class::cast)
+                .map(issue -> issue.issue().number()).toList());
     }
 
     @Test

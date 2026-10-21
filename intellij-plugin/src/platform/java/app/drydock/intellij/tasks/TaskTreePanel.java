@@ -12,6 +12,7 @@ import app.drydock.intellij.tasks.TaskNode.Section;
 import app.drydock.intellij.tasks.TaskNode.SectionKind;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
+import app.drydock.intellij.tasks.TaskTreeModel.ViewFilter;
 
 import com.intellij.icons.AllIcons;
 import com.intellij.ide.BrowserUtil;
@@ -39,10 +40,13 @@ import com.intellij.ui.SimpleColoredComponent;
 import com.intellij.ui.treeStructure.Tree;
 import com.intellij.util.Alarm;
 import com.intellij.util.messages.MessageBusConnection;
+import com.intellij.util.ui.JBUI;
 import com.intellij.util.ui.tree.TreeUtil;
 import org.jetbrains.annotations.NotNull;
 
+import javax.swing.ButtonGroup;
 import javax.swing.JPanel;
+import javax.swing.JToggleButton;
 import javax.swing.SwingUtilities;
 import javax.swing.event.DocumentEvent;
 import javax.swing.tree.DefaultMutableTreeNode;
@@ -51,6 +55,7 @@ import javax.swing.tree.TreePath;
 
 import java.awt.BorderLayout;
 import java.awt.Component;
+import java.awt.FlowLayout;
 import java.awt.Rectangle;
 import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
@@ -62,6 +67,7 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Predicate;
 
 /**
@@ -90,9 +96,11 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     private final SearchTextField search = new SearchTextField(false);
     private final TaskTreeInputs inputs = new TaskTreeInputs();
     private final AtomicBoolean rebuildPending = new AtomicBoolean();
+    private final AtomicLong rebuildVersion = new AtomicLong();
     private final Alarm searchAlarm = new Alarm(Alarm.ThreadToUse.SWING_THREAD, this);
     private final DefaultActionGroup contextActions = new DefaultActionGroup();
     private volatile String filter = "";
+    private volatile ViewFilter viewFilter = ViewFilter.ALL;
     /** Guarded by {@code this}: subscribing after dispose() must undo itself. */
     private Runnable unsubscribeShared = () -> { };
     private volatile boolean disposed;
@@ -242,7 +250,10 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         toolbar.setTargetComponent(this);
         JPanel top = new JPanel(new BorderLayout());
         top.add(toolbar.getComponent(), BorderLayout.NORTH);
-        top.add(search, BorderLayout.SOUTH);
+        JPanel query = new JPanel(new BorderLayout());
+        query.add(search, BorderLayout.NORTH);
+        query.add(quickFilters(), BorderLayout.SOUTH);
+        top.add(query, BorderLayout.SOUTH);
         setToolbar(top);
 
         tree.addMouseListener(new MouseAdapter() {
@@ -382,6 +393,31 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         return node instanceof ProjectRow || node instanceof Section section && section.kind() == SectionKind.ISSUES;
     }
 
+    /** Compact, mutually exclusive filters; the text search narrows the selected view further. */
+    private JPanel quickFilters() {
+        JPanel filters = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 2));
+        ButtonGroup group = new ButtonGroup();
+        for (ViewFilter candidate : ViewFilter.values()) {
+            JToggleButton button = new JToggleButton(candidate.label(), candidate == viewFilter);
+            button.setMargin(JBUI.insets(2, 7));
+            button.setToolTipText(switch (candidate) {
+                case ALL -> "Show sessions, worktrees, and issues";
+                case ACTIVE -> "Show only sessions whose agent is running";
+                case INACTIVE -> "Show only sessions whose agent is not running";
+                case ISSUES -> "Show only open GitHub issues";
+            });
+            button.addActionListener(event -> {
+                if (viewFilter != candidate) {
+                    viewFilter = candidate;
+                    requestRebuild(false);
+                }
+            });
+            group.add(button);
+            filters.add(button);
+        }
+        return filters;
+    }
+
     private AnAction githubSettingsAction(Predicate<TaskNode> applies) {
         return new DumbAwareAction("GitHub Settings…",
                 "Configure GitHub issues for this Drydock project", AllIcons.General.Settings) {
@@ -430,28 +466,53 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         if (worktreesChanged) {
             inputs.invalidateWorktrees();
         }
+        rebuildVersion.incrementAndGet();
+        scheduleRebuild();
+    }
+
+    private void scheduleRebuild() {
         if (!rebuildPending.compareAndSet(false, true)) {
             return;
         }
+        long requestedVersion = rebuildVersion.get();
+        String requestedFilter = filter;
+        ViewFilter requestedViewFilter = viewFilter;
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         plugin.initialization().thenRunAsync(() -> {
-            rebuildPending.set(false);
             if (disposed || project.isDisposed()) {
                 return;
             }
-            List<TaskNode> nodes = TaskTreeModel.build(inputs.gather(project, filter));
-            ApplicationManager.getApplication().invokeLater(() -> apply(nodes), ModalityState.any(),
-                    project.getDisposed());
+            List<TaskNode> nodes = TaskTreeModel.build(
+                    inputs.gather(project, requestedFilter, requestedViewFilter));
+            ApplicationManager.getApplication().invokeLater(
+                    () -> finishRebuild(requestedVersion, requestedFilter, requestedViewFilter, nodes, null),
+                    ModalityState.any(), project.getDisposed());
         }, plugin.executor()).exceptionally(failure -> {
-            // Never silent: an empty tree with no reason given is the worst
-            // outcome this panel can have.
-            LOG.log(Level.WARNING, "Could not rebuild the Drydock task tree", failure);
+            ApplicationManager.getApplication().invokeLater(
+                    () -> finishRebuild(requestedVersion, requestedFilter, requestedViewFilter, List.of(), failure),
+                    ModalityState.any(), project.getDisposed());
             return null;
         });
     }
 
+    /** EDT: applies only the newest requested view, then schedules any request coalesced behind it. */
+    private void finishRebuild(long requestedVersion, String requestedFilter, ViewFilter requestedViewFilter,
+                               List<TaskNode> nodes, Throwable failure) {
+        if (failure != null) {
+            // Never silent: an empty tree with no reason given is the worst
+            // outcome this panel can have.
+            LOG.log(Level.WARNING, "Could not rebuild the Drydock task tree", failure);
+        } else if (requestedVersion == rebuildVersion.get() && !disposed && !project.isDisposed()) {
+            apply(nodes, requestedFilter, requestedViewFilter);
+        }
+        rebuildPending.set(false);
+        if (!disposed && !project.isDisposed() && requestedVersion != rebuildVersion.get()) {
+            scheduleRebuild();
+        }
+    }
+
     /** EDT: swaps in the new rows, keeping the selected task selected. */
-    private void apply(List<TaskNode> nodes) {
+    private void apply(List<TaskNode> nodes, String appliedFilter, ViewFilter appliedViewFilter) {
         Optional<ManagedSessionId> selectedSession = selected()
                 .filter(TaskRow.class::isInstance)
                 .map(node -> ((TaskRow) node).session().id());
@@ -461,13 +522,23 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             root.add(treeNode(node, selectedSession, toSelect));
         }
         ((DefaultTreeModel) tree.getModel()).setRoot(root);
-        tree.getEmptyText().setText(filter.isBlank()
-                ? "No projects yet. Start a task with ＋ to add this one."
-                : "No task or branch matches the search.");
+        tree.getEmptyText().setText(emptyText(appliedFilter, appliedViewFilter));
         TreeUtil.expandAll(tree);
         if (toSelect[0] != null) {
             tree.setSelectionPath(new TreePath(toSelect[0].getPath()));
         }
+    }
+
+    private static String emptyText(String appliedFilter, ViewFilter appliedViewFilter) {
+        if (!appliedFilter.isBlank()) {
+            return "Nothing in " + appliedViewFilter.label().toLowerCase() + " matches the search.";
+        }
+        return switch (appliedViewFilter) {
+            case ALL -> "No projects yet. Start a task with ＋ to add this one.";
+            case ACTIVE -> "No active sessions.";
+            case INACTIVE -> "No inactive sessions.";
+            case ISSUES -> "No open GitHub issues.";
+        };
     }
 
     private static DefaultMutableTreeNode treeNode(TaskNode node, Optional<ManagedSessionId> selected,
