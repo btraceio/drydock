@@ -131,13 +131,11 @@ public final class CodexAgentProvider implements AgentProvider {
         // to the eval account. See ManagedAgentSession.evalMode.
         // DISCOVERED: no id; no --settings
         //
-        // initialPrompt is deliberately NOT rendered. Codex documents a
-        // positional [PROMPT], but every flag here was read off the installed
-        // binary's --help, and on the machine this was built on that binary
-        // did not answer --help or --version at all. An unverified argument
-        // in a launch command is a launch that may fail outright, which is
-        // worse than the user typing the task once.
-        return LaunchPlan.of(codexCommand(c.mcp(), c.readOnly()) + stdioOverrides(c.stdioMcpServers()), false);
+        String command = codexCommand(c.mcp(), c.readOnly()) + stdioOverrides(c.stdioMcpServers());
+        if (c.initialPrompt().isPresent()) {
+            command += " -- " + AgentCommands.shellQuote(c.initialPrompt().get());
+        }
+        return LaunchPlan.of(command, false);
     }
 
     @Override
@@ -151,6 +149,14 @@ public final class CodexAgentProvider implements AgentProvider {
         }
         // Unknown id (or name) -> cwd-filtered picker. NEVER --last (same-cwd ambiguity).
         return LaunchPlan.of(codex + " resume", false);
+    }
+
+    @Override
+    public Optional<List<String>> buildTransferSummaryCommand(Path workingDirectory, String agentSessionId,
+                                                               String prompt) {
+        return locator.locate().map(executable -> List.of("/usr/bin/env", "-u", "CODEX_SANDBOX", "-u",
+                "CODEX_SANDBOX_NETWORK_DISABLED", executable.toString(), "exec",
+                "--sandbox", "read-only", "resume", agentSessionId, prompt));
     }
 
     /**

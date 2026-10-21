@@ -409,7 +409,8 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
                 resumable, resumeTokens,
                 DumbService.isDumb(project),
                 hostedFrom.map(place -> execution.map(AgentExecution::place).orElse(place)), folderMissing,
-                AgentExecutionRegistry.getInstance().moving().contains(current.id()));
+                AgentExecutionRegistry.getInstance().moving().contains(current.id()),
+                SessionTransfer.destination(current.id()));
 
         String stoppedLine = AgentStripText.stoppedFooter(
                 AgentStripText.displayStatus(current.status(), false),
@@ -529,6 +530,7 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
             case STOP -> AgentExecutionService.getInstance(project).stop(current.id());
             case RESUME -> AgentConsoles.resume(project, current.id());
             case START -> AgentConsoles.startFresh(project, current.id());
+            case TRANSFER -> SessionTransfer.show(project, current, this::refreshLater);
             case SESSION_MENU -> SessionDone.show(project, current);
             case SHOW_CHANGES -> {
                 if (hostedFrom.isPresent()) {

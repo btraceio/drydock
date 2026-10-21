@@ -9,6 +9,7 @@ import app.drydock.intellij.DrydockSessionsListener;
 import app.drydock.intellij.agent.AgentConsoles;
 import app.drydock.intellij.agent.AgentExecutionRegistry;
 import app.drydock.intellij.agent.SessionDone;
+import app.drydock.intellij.agent.SessionTransfer;
 import app.drydock.intellij.agent.StopAgentsDialog;
 import app.drydock.intellij.agent.StopAgentsPlan;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
@@ -111,6 +112,9 @@ final class TaskActions {
                         AllIcons.Actions.MoveTo2, TaskActions::resumesElsewhere,
                         (project, row) -> TaskNavigator.switchTo(row.session(),
                                 target -> AgentConsoles.resumeOrStart(target, row.session()))),
+                task("Transfer to…", "Continue this live task with another installed agent",
+                        AllIcons.Actions.Refresh, row -> SessionTransfer.available(row.session(), row.activity()),
+                        (project, row) -> SessionTransfer.show(project, row.session())),
                 task("Done with This Task…", "Forget the task, and optionally remove its worktree",
                         AllIcons.Actions.Checked, row -> true, TaskActions::done),
                 removeWorktrees(),
@@ -175,6 +179,9 @@ final class TaskActions {
      */
     static void stop(Project from, TaskRow row, boolean closeWindow) {
         ManagedSessionId id = row.session().id();
+        if (SessionTransfer.inProgress(id)) {
+            return;
+        }
         AgentExecutionRegistry registry = AgentExecutionRegistry.getInstance();
         if (!registry.isRunning(id)) {
             return;   // ended meanwhile
@@ -206,6 +213,9 @@ final class TaskActions {
      * the worktree sees what the agent left, not what it is still writing.
      */
     static void done(Project from, TaskRow row) {
+        if (SessionTransfer.inProgress(row.session().id())) {
+            return;
+        }
         AgentExecutionRegistry registry = AgentExecutionRegistry.getInstance();
         if (!registry.isRunning(row.session().id())) {
             SessionDone.show(from, row.session());

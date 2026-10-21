@@ -62,6 +62,10 @@ public final class SessionDone {
 
     /** Resolves, asks, and acts. {@code from} is the window the request came from. */
     public static void show(Project from, ManagedAgentSession session) {
+        if (SessionTransfer.inProgress(session.id())) {
+            Messages.showInfoMessage(from, "This session is being transferred.", "Drydock");
+            return;
+        }
         ProgressManager.getInstance().run(new Task.Backgroundable(from, "Checking worktree…", true) {
             @Override
             public void run(@NotNull ProgressIndicator indicator) {

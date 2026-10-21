@@ -180,6 +180,10 @@ public final class AgentConsoles {
                                       CompletableFuture<ManagedAgentSession>> launch) {
         Objects.requireNonNull(project, "project");
         Objects.requireNonNull(sessionId, "sessionId");
+        if (SessionTransfer.inProgress(sessionId)) {
+            Messages.showInfoMessage(project, "This session is being transferred.", "Drydock");
+            return;
+        }
         // One agent per session across the whole IDE: the registry knows
         // where it is shown, if anywhere, and a running one is gone to, never
         // started a second time.
@@ -245,7 +249,8 @@ public final class AgentConsoles {
      * history is replayed into the new console. EDT.
      */
     public static void showHere(Project project, ManagedSessionId sessionId) {
-        if (project.isDisposed() || AgentExecutionRegistry.getInstance().show(sessionId, project).isEmpty()) {
+        if (project.isDisposed() || SessionTransfer.inProgress(sessionId)
+                || AgentExecutionRegistry.getInstance().show(sessionId, project).isEmpty()) {
             return;
         }
         show(project, sessionId);
@@ -279,6 +284,9 @@ public final class AgentConsoles {
      */
     public static void jumpToOwnWindow(Project host, ManagedSessionId sessionId, boolean thenChanges,
                                        boolean announce) {
+        if (SessionTransfer.inProgress(sessionId)) {
+            return;
+        }
         AgentExecutionRegistry registry = AgentExecutionRegistry.getInstance();
         Optional<AgentExecution> execution = registry.execution(sessionId);
         if (execution.isEmpty()) {

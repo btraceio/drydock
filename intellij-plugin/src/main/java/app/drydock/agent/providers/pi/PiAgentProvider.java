@@ -26,6 +26,7 @@ import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonWriter;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.lang.System.Logger;
@@ -34,6 +35,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
@@ -215,7 +217,7 @@ public final class PiAgentProvider implements AgentProvider {
 
     @Override
     public LaunchPlan buildCreateCommand(CreateContext c) {
-        if (c.remote().isPresent() || !currentCapabilities().supported()) {
+        if (c.remote().isPresent() || !supportsLaunch(currentCapabilities())) {
             return LaunchPlan.unsupported();   // Pi declines remote
         }
         PiCommand pi = piCommand(c.mcp(), c.stdioMcpServers(), c.evalMode(), c.initialPrompt());
@@ -230,7 +232,7 @@ public final class PiAgentProvider implements AgentProvider {
 
     @Override
     public LaunchPlan buildResumeCommand(ResumeContext r) {
-        if (r.remote().isPresent() || !currentCapabilities().supported()) {
+        if (r.remote().isPresent() || !supportsLaunch(currentCapabilities())) {
             return LaunchPlan.unsupported();
         }
         String pi = piCommand(r.mcp(), r.stdioMcpServers(), r.evalMode(), Optional.empty()).command();
@@ -239,6 +241,48 @@ public final class PiAgentProvider implements AgentProvider {
         }
         // Unknown id -> picker. NEVER --continue/--last (same-cwd ambiguity).
         return LaunchPlan.of(pi + " --resume", false);
+    }
+
+    @Override
+    public Optional<List<String>> buildTransferSummaryCommand(Path workingDirectory, String agentSessionId,
+                                                               String prompt) {
+        return locator.locate().map(executable -> {
+            List<String> command = piProcessCommand(executable);
+            command.addAll(List.of("--session", agentSessionId, "--print", "--mode", "json",
+                    "--no-tools", "--", prompt));
+            return List.copyOf(command);
+        });
+    }
+
+    /**
+     * An argv-safe Pi prefix for background probes and transfer summaries.
+     *
+     * <p>A Node-script install is invoked through the resolved interpreter.
+     * A shell launcher must still be invoked as a shell script, but its final
+     * target commonly has an {@code /usr/bin/env node} shebang. Put the same
+     * resolved interpreter directory on PATH so that target also works from
+     * an IDE process carrying launchd's bare environment.</p>
+     */
+    private List<String> piProcessCommand(Path executable) {
+        List<String> command = new ArrayList<>(List.of("/usr/bin/env", "-u", "PI_CODING_AGENT"));
+        Optional<Path> node = nodeLocator.locate();
+        if (node.isPresent()) {
+            if (isNodeScript(executable)) {
+                command.add(node.get().toString());
+            } else {
+                command.add("PATH=" + pathWithNode(node.get()));
+            }
+        }
+        command.add(executable.toString());
+        return command;
+    }
+
+    private static String pathWithNode(Path node) {
+        String inherited = System.getenv("PATH");
+        if (inherited == null || inherited.isBlank()) {
+            inherited = "/usr/bin:/bin";
+        }
+        return node.toAbsolutePath().getParent() + File.pathSeparator + inherited;
     }
 
     /**
@@ -261,9 +305,10 @@ public final class PiAgentProvider implements AgentProvider {
      * JavaScript and dies on its first line, which took down every
      * managed-install launch (observed 2026-10-13 against pi 1.2.0).
      * Executing the file directly is correct for any shebang the kernel
-     * honours, and the launcher itself survives a bare PATH (it prepends
-     * pi's bundled node before exec), so dropping the prefix loses nothing
-     * there.
+     * honours. The launcher tries its managed Node installation first, but
+     * older/upgraded installs may no longer have that directory; in that
+     * case the resolved host Node directory is prepended to PATH instead of
+     * feeding the shell script to Node.
      *
      * <p>When the pi file is not a Node script, or either side is
      * unresolved, falls back to the {@code pi} path alone (or bare
@@ -276,10 +321,14 @@ public final class PiAgentProvider implements AgentProvider {
      */
     private String piBinary() {
         Optional<Path> pi = locator.locate();
-        if (pi.isPresent() && isNodeScript(pi.get())) {
+        if (pi.isPresent()) {
             Optional<Path> node = nodeLocator.locate();
-            if (node.isPresent()) {
+            if (node.isPresent() && isNodeScript(pi.get())) {
                 return AgentCommands.shellQuote(node.get().toString())
+                        + " " + AgentCommands.shellQuote(pi.get().toString());
+            }
+            if (node.isPresent()) {
+                return "PATH=" + AgentCommands.shellQuote(pathWithNode(node.get()))
                         + " " + AgentCommands.shellQuote(pi.get().toString());
             }
         }
@@ -450,17 +499,22 @@ public final class PiAgentProvider implements AgentProvider {
         if (pi.isEmpty()) {
             return "unknown";
         }
-        if (isNodeScript(pi.get())) {
-            Optional<Path> node = nodeLocator.locate();
-            if (node.isPresent()) {
-                return PiVersionProbe.probeCommand(List.of(node.get().toString(), pi.get().toString()));
-            }
-        }
-        return PiVersionProbe.probeCommand(List.of(pi.get().toString()));
+        return PiVersionProbe.probeCommand(piProcessCommand(pi.get()));
     }
 
     private PiCapabilities currentCapabilities() {
         return join(capabilitiesFuture(), PROBE_JOIN, PiCapabilities.of("unknown"));
+    }
+
+    /**
+     * Only a version that was parsed and found below the supported floor is
+     * a stable launch refusal. An unreadable probe is transient: Pi remains
+     * selectable and the command is allowed to start, rather than the picker
+     * offering it and the launch immediately contradicting that decision with
+     * "unsupported context".
+     */
+    private static boolean supportsLaunch(PiCapabilities capabilities) {
+        return !capabilities.versionParsed() || capabilities.supported();
     }
 
     /**

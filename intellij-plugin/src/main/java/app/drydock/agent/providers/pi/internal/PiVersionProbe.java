@@ -5,6 +5,8 @@ import app.drydock.process.ProcessRunner;
 import app.drydock.process.ProcessTimeoutException;
 
 import java.io.IOException;
+import java.lang.System.Logger;
+import java.lang.System.Logger.Level;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -16,6 +18,8 @@ import java.util.List;
  * Mirrors {@link app.drydock.agent.providers.codex.internal.CodexVersionProbe}.
  */
 public final class PiVersionProbe {
+
+    private static final Logger LOG = System.getLogger(PiVersionProbe.class.getName());
 
     /** Generous for a --version probe, but never unbounded. */
     private static final Duration PROCESS_TIMEOUT = Duration.ofSeconds(30);
@@ -42,14 +46,23 @@ public final class PiVersionProbe {
             ProcessResult result = ProcessRunner.run(
                     command, null, PROCESS_TIMEOUT);
             if (result.exitCode() != 0) {
+                LOG.log(Level.WARNING, () -> "Pi version probe exited " + result.exitCode()
+                        + ": " + ProcessRunner.excerpt(result.stderr()));
                 return "unknown";
             }
             String firstLine = result.stdout().lines().findFirst().orElse("");
-            return parseVersion(firstLine);
+            String version = parseVersion(firstLine);
+            if ("unknown".equals(version)) {
+                LOG.log(Level.WARNING, () -> "Pi version probe returned no usable version: "
+                        + ProcessRunner.excerpt(result.stdout()));
+            }
+            return version;
         } catch (IOException | ProcessTimeoutException e) {
+            LOG.log(Level.WARNING, "Could not probe the Pi version", e);
             return "unknown";
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            LOG.log(Level.WARNING, "Pi version probe was interrupted", e);
             return "unknown";
         }
     }

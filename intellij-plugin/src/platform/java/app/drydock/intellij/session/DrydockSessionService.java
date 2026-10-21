@@ -28,14 +28,21 @@ import app.drydock.intellij.agent.AgentConsoleHost;
 import app.drydock.intellij.agent.AgentExecutionListener;
 import app.drydock.intellij.mcp.IdeMcpServer;
 import app.drydock.intellij.project.ProjectRepositoryService;
+import app.drydock.mcp.McpToolException;
+import app.drydock.mcp.PromptSafety;
+import app.drydock.process.ProcessResult;
+import app.drydock.process.ProcessRunner;
 
+import java.io.IOException;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -101,6 +108,10 @@ import java.util.function.Supplier;
 public final class DrydockSessionService implements AgentExecutionListener {
 
     private static final Logger LOG = System.getLogger(DrydockSessionService.class.getName());
+    private static final Duration TRANSFER_SUMMARY_TIMEOUT = Duration.ofMinutes(5);
+    private static final int MAX_TRANSFER_OUTPUT = 256 * 1024;
+    private static final String TRANSFER_BEGIN = "DRYDOCK_TRANSFER_V1_BEGIN_";
+    private static final String TRANSFER_END = "DRYDOCK_TRANSFER_V1_END_";
 
     private final CompletableFuture<Void> initialization;
     private final Supplier<ApplicationStateStore> stateStore;
@@ -220,6 +231,201 @@ public final class DrydockSessionService implements AgentExecutionListener {
                 // production case): thenCompose on a completed source runs
                 // its function inline.
                 .thenComposeAsync(session -> launchPrepared(session, initialPrompt), executor);
+    }
+
+    /**
+     * Replaces a stopped session's provider while retaining its Drydock
+     * identity and UI placement.  The old binding is not changed until its
+     * exact provider conversation has produced a bounded, validated one-shot
+     * summary.  If the target cannot start, the old binding is restored so
+     * the original conversation remains resumable.
+     */
+    public CompletableFuture<ManagedAgentSession> transferStoppedSession(ManagedSessionId sessionId,
+                                                                          AgentKind targetKind) {
+        Objects.requireNonNull(sessionId, "sessionId");
+        Objects.requireNonNull(targetKind, "targetKind");
+        return initialization.thenComposeAsync(unused -> {
+            ManagedAgentSession source = requireSession(sessionId);
+            if (source.agentKind() == AgentKind.TERMINAL || targetKind == AgentKind.TERMINAL) {
+                throw new IllegalStateException("Terminal sessions cannot be transferred");
+            }
+            if (source.agentKind() == targetKind) {
+                throw new IllegalStateException("Choose a different agent");
+            }
+            String sourceId = source.agentSessionId().orElseThrow(() ->
+                    new IllegalStateException("The source agent has no exact conversation id"));
+            AgentProvider sourceProvider = registry.get().provider(source.agentKind()).orElseThrow(() ->
+                    new IllegalStateException("The source agent provider is not installed"));
+            if (!registry.get().isAvailable(targetKind)) {
+                throw new IllegalStateException("The target agent is not installed");
+            }
+            String summary = requestTransferSummary(source, sourceProvider, sourceId);
+            ManagedAgentSession switched = source.toBuilder()
+                    .binding(AgentBinding.unlaunched(targetKind, source.mode()))
+                    .status(SessionStatus.STARTING)
+                    .lastExitCode(Optional.empty())
+                    .build();
+            String initialPrompt = "You are taking over an existing Drydock task from "
+                    + kindName(source.agentKind()) + ". Continue from this transfer record:\n\n" + summary;
+            return launchReplacement(switched, Optional.of(initialPrompt));
+        }, executor);
+    }
+
+    /** Starts a replacement without persisting its binding until the console exists. */
+    private CompletableFuture<ManagedAgentSession> launchReplacement(ManagedAgentSession candidate,
+                                                                      Optional<String> initialPrompt) {
+        AgentProvider provider = registry.get().provider(candidate.agentKind()).orElseThrow(() ->
+                new IllegalStateException("The target agent provider is not installed"));
+        String generatedId = provider.idStrategy() == SessionIdStrategy.PRESET
+                ? UUID.randomUUID().toString() : "";
+        Optional<SessionIdDiscovery> discovery = provider.idStrategy() == SessionIdStrategy.DISCOVERED
+                ? provider.idDiscovery() : Optional.empty();
+        Object snapshot = discovery.map(value -> value.snapshot(candidate.workingDirectory())).orElse(null);
+        Instant launchedAt = Instant.now();
+        CreateContext context = new CreateContext(candidate.displayName(), generatedId,
+                candidate.workingDirectory(), Optional.empty(), Optional.empty(), false,
+                candidate.readOnly(), initialPrompt).withStdioMcpServers(stdioMcpServersFor(candidate.workingDirectory()));
+        LaunchPlan plan = provider.buildCreateCommand(context);
+        if (!plan.supported()) {
+            throw new IllegalStateException(kindName(provider.kind())
+                    + " cannot launch this session (unsupported context)");
+        }
+        boolean sessionIdUsed = !generatedId.isEmpty() && plan.sessionIdUsed()
+                && plan.command().contains(generatedId);
+        StartedLaunch started = new StartedLaunch(candidate, discovery, snapshot, launchedAt,
+                generatedId, sessionIdUsed,
+                consoles.startConsole(candidate.id(), candidate.workingDirectory(), plan));
+        return started.openFuture().handleAsync((ignored, failure) -> {
+            if (failure != null) {
+                throw wrap(unwrap(failure));
+            }
+            ManagedAgentSession running = candidate.withStatus(SessionStatus.RUNNING)
+                    .withLastOpenedAt(Instant.now());
+            if (started.sessionIdUsed()) {
+                running = running.withAgentSessionId(Optional.of(started.generatedId()));
+            }
+            persistUpdatedSession(running);
+            ends.lastLaunchedAt().put(candidate.id(), launchedAt);
+            scheduleDetachedDiscovery(started);
+            return running;
+        }, executor);
+    }
+
+    private String requestTransferSummary(ManagedAgentSession source, AgentProvider provider, String sourceId) {
+        String nonce = UUID.randomUUID().toString().replace("-", "");
+        String beginMarker = TRANSFER_BEGIN + nonce;
+        String endMarker = TRANSFER_END + nonce;
+        try {
+            String prompt = transferSummaryPrompt(beginMarker, endMarker, Optional.empty());
+            ProcessResult result = runTransferSummary(source, provider, sourceId, prompt);
+            try {
+                return parseTransferSummary(result.stdout(), beginMarker, endMarker);
+            } catch (IllegalStateException firstFailure) {
+                LOG.log(Level.INFO, () -> "Retrying transfer summary for " + source.id()
+                        + " after validation failure: " + firstFailure.getMessage());
+                String retry = transferSummaryPrompt(beginMarker, endMarker,
+                        Optional.of(firstFailure.getMessage()));
+                ProcessResult retried = runTransferSummary(source, provider, sourceId, retry);
+                return parseTransferSummary(retried.stdout(), beginMarker, endMarker);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new CompletionException(new IllegalStateException("Transfer was cancelled", e));
+        } catch (IOException e) {
+            throw new CompletionException(new IllegalStateException("Could not run the source agent", e));
+        }
+    }
+
+    private ProcessResult runTransferSummary(ManagedAgentSession source, AgentProvider provider,
+                                             String sourceId, String prompt)
+            throws IOException, InterruptedException {
+        List<String> command = provider.buildTransferSummaryCommand(source.workingDirectory(), sourceId, prompt)
+                .orElseThrow(() -> new IllegalStateException(
+                        kindName(source.agentKind()) + " does not support non-interactive transfer"));
+        ProcessResult result = ProcessRunner.run(command, new ProcessRunner.Options(
+                source.workingDirectory(), TRANSFER_SUMMARY_TIMEOUT, true, Map.of()), MAX_TRANSFER_OUTPUT);
+        if (result.exitCode() != 0) {
+            throw new IllegalStateException("The source agent could not create a transfer summary: "
+                    + ProcessRunner.excerpt(result.stderr()));
+        }
+        return result;
+    }
+
+    private static String transferSummaryPrompt(String beginMarker, String endMarker,
+                                                Optional<String> previousFailure) {
+        String correction = previousFailure.map(failure -> "The previous response was rejected because: "
+                + failure + " Rewrite it more concisely; do not repeat it verbatim. ").orElse("");
+        return correction
+                + "Prepare a concise handoff for another coding agent. Do not modify files or run tools. "
+                + "Every field value must be at most 1800 Unicode characters, including multiline bullets, "
+                + "and the whole record must be at most 7000 characters. "
+                + "Return only this exact structure (every field is required):\n"
+                + beginMarker + "\nGOAL: <current goal>\nCOMPLETED: <what is done>\n"
+                + "NEXT: <concrete next steps>\nRISKS: <constraints, failures, or none>\n" + endMarker;
+    }
+
+    static String parseTransferSummary(String output) {
+        return parseTransferSummary(output, TRANSFER_BEGIN, TRANSFER_END);
+    }
+
+    static String parseTransferSummary(String output, String beginMarker, String endMarker) {
+        if (output == null || output.isBlank()) {
+            throw new IllegalStateException("The source agent returned an empty transfer summary");
+        }
+        if (output.length() > MAX_TRANSFER_OUTPUT) {
+            throw new IllegalStateException("The source agent returned too much transfer output");
+        }
+        // JSON output modes escape line breaks. Unescaping these two common
+        // sequences is enough to expose the deliberately unique envelope;
+        // the payload remains plain text and is never interpreted as JSON.
+        String normalized = output.replace("\\r\\n", "\n").replace("\\n", "\n");
+        int begin = normalized.lastIndexOf(beginMarker);
+        int end = begin < 0 ? -1 : normalized.indexOf(endMarker, begin);
+        if (begin < 0 || end < 0) {
+            throw new IllegalStateException("The source agent returned an invalid transfer summary");
+        }
+        String summary = normalized.substring(begin, end + endMarker.length()).strip();
+        List<String> requiredFields = List.of("GOAL:", "COMPLETED:", "NEXT:", "RISKS:");
+        List<Integer> fieldOffsets = new ArrayList<>();
+        int searchFrom = 0;
+        for (String required : requiredFields) {
+            int field = summary.indexOf("\n" + required, searchFrom);
+            if (field < 0) {
+                throw new IllegalStateException("The transfer summary is missing " + required);
+            }
+            fieldOffsets.add(field);
+            searchFrom = field + required.length() + 1;
+        }
+        List<String> values = new ArrayList<>();
+        for (int index = 0; index < requiredFields.size(); index++) {
+            String required = requiredFields.get(index);
+            int field = fieldOffsets.get(index);
+            int valueStart = field + required.length() + 1;
+            int valueEnd = index + 1 < fieldOffsets.size()
+                    ? fieldOffsets.get(index + 1)
+                    : summary.indexOf("\n" + endMarker, valueStart);
+            if (valueEnd < 0) {
+                valueEnd = summary.length();
+            }
+            String value = summary.substring(valueStart, valueEnd).strip();
+            if (value.isBlank() || (value.startsWith("<") && value.endsWith(">"))) {
+                throw new IllegalStateException("The transfer summary has no value for " + required);
+            }
+            try {
+                values.add(PromptSafety.checkHandoffSlot(required, value));
+            } catch (McpToolException e) {
+                throw new IllegalStateException("Unsafe transfer summary: " + e.getMessage(), e);
+            }
+        }
+        try {
+            PromptSafety.checkHandoffRecordSize(values);
+        } catch (McpToolException e) {
+            throw new IllegalStateException("Unsafe transfer summary: " + e.getMessage(), e);
+        }
+        if (summary.length() > 32 * 1024) {
+            throw new IllegalStateException("The transfer summary is too large");
+        }
+        return summary;
     }
 
     private CompletableFuture<ManagedAgentSession> launchPrepared(ManagedAgentSession prepared,

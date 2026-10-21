@@ -466,6 +466,27 @@ public final class AgentExecutionRegistry implements Disposable {
         scheduleForceKill(sessionId, handler);
     }
 
+    /**
+     * Stops the complete PTY process tree immediately when a replacement
+     * must reopen the same provider conversation.
+     *
+     * <p>The ordinary stop path first asks pty4j to destroy its wrapper and
+     * force-kills the tree two seconds later. That is appropriate for a user
+     * deactivation, but not for transfer: the wrapper can report terminated
+     * while a Codex child still owns the thread-store writer. A subsequent
+     * {@code codex exec resume} then races that child and fails with an
+     * active-writer conflict. Transfer has already committed to replacing
+     * the process, so it kills the tree synchronously before waiting.</p>
+     */
+    void stopProcessTree(ManagedSessionId sessionId) {
+        Objects.requireNonNull(sessionId, "sessionId");
+        AgentExecution execution = executions.get(sessionId);
+        if (execution == null || !execution.isRunning() || !execution.requestStop()) {
+            return;
+        }
+        forceStop(execution.handler());
+    }
+
     /** Stops and drops a session's execution entirely, e.g. when the session is forgotten. */
     public void forget(ManagedSessionId sessionId) {
         stop(sessionId);

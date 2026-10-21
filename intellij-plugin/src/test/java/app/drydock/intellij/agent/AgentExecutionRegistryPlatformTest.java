@@ -10,6 +10,7 @@ import com.intellij.testFramework.fixtures.BasePlatformTestCase;
 import com.jediterm.terminal.model.TerminalLine;
 import com.jediterm.terminal.model.TerminalTextBuffer;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -156,6 +157,35 @@ public class AgentExecutionRegistryPlatformTest extends BasePlatformTestCase {
         Thread.sleep(200);
         assertEquals(1, ended.size());
         assertTrue(ended.get(0).stopRequested());
+    }
+
+    public void testReplacementStopKillsTheAgentChildBeforeTheWrapperReportsDone() throws Exception {
+        Path pidFile = Files.createTempFile("drydock-agent-child", ".pid");
+        long childPid = -1;
+        try {
+            start(List.of("/bin/sh", "-c",
+                    "sleep 30 & child=$!; printf '%s' \"$child\" > \"$1\"; wait",
+                    "drydock-test", pidFile.toString()));
+            waitFor(() -> {
+                try {
+                    return Files.size(pidFile) > 0;
+                } catch (java.io.IOException e) {
+                    return false;
+                }
+            });
+            childPid = Long.parseLong(Files.readString(pidFile));
+
+            registry.stopProcessTree(id);
+
+            long capturedChildPid = childPid;
+            waitFor(() -> !registry.isRunning(id)
+                    && ProcessHandle.of(capturedChildPid).map(handle -> !handle.isAlive()).orElse(true));
+        } finally {
+            if (childPid > 0) {
+                ProcessHandle.of(childPid).ifPresent(ProcessHandle::destroyForcibly);
+            }
+            Files.deleteIfExists(pidFile);
+        }
     }
 
     public void testShowingAFinishedAgentAttachesNoInput() throws Exception {

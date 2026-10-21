@@ -20,6 +20,7 @@ import app.drydock.state.json.JsonValue;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -95,6 +96,43 @@ class PiAgentProviderTest {
         LaunchPlan plan = provider().buildResumeCommand(
                 new ResumeContext(Optional.empty(), Optional.empty(), Path.of("/repo"), Optional.empty(), Optional.empty()));
         assertTrue(plan.command().endsWith("pi --resume"));   // picker; never --continue/--last
+    }
+
+    @Test
+    void transferSummaryUsesPrintJsonOnTheExactConversation(@TempDir Path dir) throws Exception {
+        Path executable = Files.writeString(dir.resolve("pi"), "#!/bin/sh\n");
+        assertTrue(executable.toFile().setExecutable(true));
+        HostBinaryLocator noNode = new HostBinaryLocator("node", List.of()) {
+            @Override protected Optional<Path> discover() { return Optional.empty(); }
+        };
+        PiAgentProvider provider = new PiAgentProvider(new PiExecutableLocator(executable), noNode,
+                () -> PiCapabilities.of("1.3.0"));
+        provider.init(new AgentContext(dir, dir.resolve("activity"), ForkJoinPool.commonPool()));
+
+        assertEquals(List.of("/usr/bin/env", "-u", "PI_CODING_AGENT", executable.toString(),
+                        "--session", "conversation-42", "--print", "--mode", "json", "--no-tools", "--",
+                        "summarize"),
+                provider.buildTransferSummaryCommand(dir, "conversation-42", "summarize").orElseThrow());
+    }
+
+    @Test
+    void transferSummaryPutsResolvedNodeOnPathForAShellLauncher(@TempDir Path dir) throws Exception {
+        Path nodeDirectory = Files.createDirectory(dir.resolve("node-bin"));
+        Path fakeNode = Files.createFile(nodeDirectory.resolve("node"));
+        Path executable = Files.writeString(dir.resolve("pi"), "#!/bin/sh\n");
+        assertTrue(executable.toFile().setExecutable(true));
+        HostBinaryLocator nodeLocator = new HostBinaryLocator("node", List.of()) {
+            @Override protected Optional<Path> discover() { return Optional.of(fakeNode); }
+        };
+        PiAgentProvider provider = new PiAgentProvider(new PiExecutableLocator(executable), nodeLocator,
+                () -> PiCapabilities.of("1.3.0"));
+        provider.init(new AgentContext(dir, dir.resolve("activity"), ForkJoinPool.commonPool()));
+
+        List<String> command = provider.buildTransferSummaryCommand(
+                dir, "conversation-42", "summarize").orElseThrow();
+
+        assertTrue(command.get(3).startsWith("PATH=" + nodeDirectory + File.pathSeparator), command.toString());
+        assertEquals(executable.toString(), command.get(4));
     }
 
     /**
@@ -512,7 +550,8 @@ class PiAgentProviderTest {
 
         LaunchPlan firstAttempt = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
                 Optional.empty(), Optional.of(access(config))));
-        assertFalse(firstAttempt.supported());
+        assertTrue(firstAttempt.supported(),
+                "an unknown probe must not turn a selectable local Pi into unsupported context");
 
         String secondAttempt = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
                 Optional.empty(), Optional.of(access(config)))).command();
@@ -537,7 +576,8 @@ class PiAgentProviderTest {
 
         LaunchPlan firstAttempt = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
                 Optional.empty(), Optional.of(access(config))));
-        assertFalse(firstAttempt.supported());
+        assertTrue(firstAttempt.supported(),
+                "an unparseable probe must not turn a selectable local Pi into unsupported context");
 
         LaunchPlan secondAttempt = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
                 Optional.empty(), Optional.of(access(config))));

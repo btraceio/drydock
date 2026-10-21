@@ -12,7 +12,9 @@ import app.drydock.agent.api.StdioMcpServer;
 import app.drydock.agent.providers.codex.internal.CodexExecutableLocator;
 import app.drydock.domain.SshRemote;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
@@ -89,6 +91,19 @@ class CodexAgentProviderTest {
         LaunchPlan plan = provider().buildResumeCommand(
                 new ResumeContext(Optional.empty(), Optional.empty(), Path.of("/repo"), Optional.empty(), Optional.empty()));
         assertTrue(plan.command().endsWith("codex resume"));   // picker; never --last
+    }
+
+    @Test
+    void transferSummaryUsesExecResumeWithTheExactConversation(@TempDir Path dir) throws Exception {
+        Path executable = Files.writeString(dir.resolve("codex"), "#!/bin/sh\n");
+        assertTrue(executable.toFile().setExecutable(true));
+        CodexAgentProvider provider = new CodexAgentProvider(new CodexExecutableLocator(executable));
+        provider.init(new AgentContext(dir, dir.resolve("activity"), ForkJoinPool.commonPool()));
+
+        assertEquals(List.of("/usr/bin/env", "-u", "CODEX_SANDBOX", "-u",
+                        "CODEX_SANDBOX_NETWORK_DISABLED", executable.toString(), "exec",
+                        "--sandbox", "read-only", "resume", "conversation-42", "summarize"),
+                provider.buildTransferSummaryCommand(dir, "conversation-42", "summarize").orElseThrow());
     }
 
     @Test
@@ -235,18 +250,13 @@ class CodexAgentProviderTest {
         assertFalse(plan.supported());
     }
 
-    /**
-     * Codex ignores the initial prompt: its positional-prompt contract has not
-     * been read off an installed binary, and an unverified argument is a
-     * launch that may fail. Pinned so that changes deliberately.
-     */
     @Test
-    void theInitialPromptIsNotRenderedUntilItsContractIsVerified() {
+    void theInitialPromptUsesCodexDocumentedPositionalPrompt() {
         String without = provider().buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
                 Optional.empty(), Optional.empty(), false, false)).command();
         String with = provider().buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
                 Optional.empty(), Optional.empty(), false, false, Optional.of("Add a farewell method"))).command();
-        assertEquals(without, with);
+        assertEquals(without + " -- 'Add a farewell method'", with);
     }
 
     private static final StdioMcpServer IDE = new StdioMcpServer("jetbrains", "/jbr/bin/java",

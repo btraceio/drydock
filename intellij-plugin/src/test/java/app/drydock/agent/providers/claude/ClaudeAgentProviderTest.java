@@ -107,6 +107,69 @@ class ClaudeAgentProviderTest {
     }
 
     @Test
+    void transferSummaryResumesTheExactConversationWithoutAPty(@org.junit.jupiter.api.io.TempDir Path dir)
+            throws Exception {
+        Path executable = Files.writeString(dir.resolve("claude"), "#!/bin/sh\n");
+        assertTrue(executable.toFile().setExecutable(true));
+        ClaudeAgentProvider provider = new ClaudeAgentProvider(
+                new ClaudeExecutableLocator(executable), null, noDdtool());
+        provider.init(new AgentContext(dir, dir.resolve("activity"), Executors.newVirtualThreadPerTaskExecutor()));
+
+        List<String> command = provider.buildTransferSummaryCommand(dir, "conversation-42", "summarize").orElseThrow();
+
+        assertEquals(executable.toString(), command.get(14));
+        assertEquals(List.of("--safe-mode", "--print", "--resume", "conversation-42", "--permission-mode", "plan",
+                        "--output-format", "json", "--", "summarize"),
+                command.subList(15, command.size()));
+    }
+
+    @Test
+    void transferSummaryMakesTheApiKeyHelperReachable(@org.junit.jupiter.api.io.TempDir Path dir)
+            throws Exception {
+        Path executable = Files.writeString(dir.resolve("claude"), "#!/bin/sh\n");
+        Path fakeDdtool = Files.createFile(dir.resolve("ddtool"));
+        assertTrue(executable.toFile().setExecutable(true));
+        HostBinaryLocator ddtool = new HostBinaryLocator("ddtool", List.of()) {
+            @Override protected Optional<Path> discover() { return Optional.of(fakeDdtool); }
+        };
+        ClaudeAgentProvider provider = new ClaudeAgentProvider(
+                new ClaudeExecutableLocator(executable), null, ddtool);
+        provider.init(new AgentContext(dir, dir.resolve("activity"),
+                Executors.newVirtualThreadPerTaskExecutor()));
+
+        List<String> command = provider.buildTransferSummaryCommand(
+                dir, "conversation-42", "summarize").orElseThrow();
+
+        assertTrue(command.stream().anyMatch(argument -> argument.startsWith("PATH=" + dir + ":")),
+                command.toString());
+        assertTrue(command.contains(executable.toString()), command.toString());
+    }
+
+    @Test
+    void everyLocalClaudeLaunchForcesAUtf8Locale() {
+        ClaudeAgentProvider provider = newProviderNoExecutable();
+
+        assertTrue(provider.buildCreateCommand(new CreateContext(
+                "Session 1", "uuid-1", Path.of("/tmp"), Optional.empty(), Optional.empty()))
+                .command().contains("LANG=en_US.UTF-8"));
+        assertTrue(provider.buildResumeCommand(new ResumeContext(
+                Optional.of("abc-123"), Optional.empty(), Path.of("/tmp"), Optional.empty(), Optional.empty()))
+                .command().contains("LANG=en_US.UTF-8"));
+    }
+
+    @Test
+    void everyLocalClaudeLaunchUsesTheStableFullscreenRenderer() {
+        ClaudeAgentProvider provider = newProviderNoExecutable();
+
+        assertTrue(provider.buildCreateCommand(new CreateContext(
+                "Session 1", "uuid-1", Path.of("/tmp"), Optional.empty(), Optional.empty()))
+                .command().contains("CLAUDE_CODE_NO_FLICKER=1"));
+        assertTrue(provider.buildResumeCommand(new ResumeContext(
+                Optional.of("abc-123"), Optional.empty(), Path.of("/tmp"), Optional.empty(), Optional.empty()))
+                .command().contains("CLAUDE_CODE_NO_FLICKER=1"));
+    }
+
+    @Test
     void claudeSupportsRemote() {
         assertTrue(newProviderNoExecutable().probeCapabilities().supportsRemote());
     }
