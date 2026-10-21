@@ -221,7 +221,7 @@ public class AgentExecutionRegistryPlatformTest extends BasePlatformTestCase {
         TerminalExecutionConsole console = execution.console().orElseThrow();
 
         waitFor(() -> text(console).contains("ZBCDE"));
-        assertFalse(text(console).contains("ABCDE\nZ"), text(console));
+        assertFalse(text(console), text(console).contains("ABCDE\nZ"));
     }
 
     private static TerminalLine lineContaining(TerminalExecutionConsole console, String text) {
