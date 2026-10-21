@@ -81,6 +81,13 @@
                     icon="/icons/drydock.svg"
                     factoryClass="app.drydock.intellij.tasks.DrydockToolWindowFactory"/>
 
+        <!-- A scope-aware directory tree for the selected session's files.
+             Kept on the left beside Project so the native diff editor can use
+             the full center area. -->
+        <toolWindow id="Drydock Changes" anchor="left" secondary="true"
+                    icon="/icons/drydock.svg"
+                    factoryClass="app.drydock.intellij.agent.TaskChangesToolWindowFactory"/>
+
         <!-- "Claude needs you": the balloon raised when an agent starts
              waiting for the user (AttentionNotifier). -->
         <notificationGroup id="Drydock attention" displayType="BALLOON"/>
