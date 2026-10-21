@@ -28,7 +28,7 @@ import java.util.Optional;
  * "This window is showing n working agents" (frame F4): asked when a window
  * that shows a working agent closes. Copy from {@link CloseWindowPlan}.
  *
- * <p>Three answers: Cancel keeps the window; Stop all &amp; Close; and the
+ * <p>Three answers: Cancel keeps the window; Deactivate all &amp; Close; and the
  * default, Keep running &amp; Close. "Don't ask again" remembers Keep
  * running, and only when the user chose it — stopping without asking is not
  * something a ticked box should make the default.</p>
@@ -85,7 +85,7 @@ final class CloseWindowDialog extends DialogWrapper {
 
     @Override
     protected Action @NotNull [] createActions() {
-        Action stopAll = new DialogWrapperAction("Stop all && Close") {
+        Action stopAll = new DialogWrapperAction("Deactivate all && Close") {
             @Override
             protected void doAction(ActionEvent event) {
                 close(STOP_ALL_EXIT_CODE);

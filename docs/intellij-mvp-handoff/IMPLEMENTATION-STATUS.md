@@ -349,9 +349,12 @@ DECISION.md, SPIKE-RESULTS.md). Plan, with its rulings R1–R10:
   Checked live: with the only window closed under "Keep running", ⌘Q on
   the Welcome screen asked `Stop 1 working agent?` (listed `· not shown`);
   Cancel kept the IDE and the agent, Stop & Quit stopped both.
-- Stop & Close Window applies only to an agent shown in its own window.
+- Deactivate & Close Window applies only to an agent shown in its own window.
 
-**Verified live** (runIde on IU-2025.3.3, scratch repo
+**Verified live** — before the branch was rebased onto #37, which renamed
+the user-facing "Stop" to "Deactivate"; the quotes below are the wording of
+the time, now `Deactivate n working agents?`, `Deactivate & Quit` and
+`Deactivate all & Close` (runIde on IU-2025.3.3, scratch repo
 `/private/tmp/mcpspike/repo`, its worktree `repo-pi-ide-mcp`, and the
 `demo` project; Pi on glm-5.3-flash):
 - `Resume here` hosted the task in the main checkout's window: tagged

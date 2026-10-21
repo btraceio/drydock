@@ -92,7 +92,7 @@ final class TaskActions {
     }
 
     /**
-     * Whether Stop &amp; Close Window applies: the agent runs, and the window
+     * Whether Deactivate &amp; Close Window applies: the agent runs, and the window
      * showing it is its own worktree's. A hosted agent's window belongs to
      * another project — closing it would close what the user is working in,
      * with whatever else it shows — and an agent no window shows has none to

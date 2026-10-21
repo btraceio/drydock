@@ -10,7 +10,7 @@ import java.util.Objects;
 import java.util.function.BooleanSupplier;
 
 /**
- * The one "Stop n working agents?" question of an IDE quit, asked before the
+ * The one "Deactivate n working agents?" question of an IDE quit, asked before the
  * quit can go ahead — for every working agent in the IDE, shown in a window or
  * not.
  *
