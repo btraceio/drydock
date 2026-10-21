@@ -3,6 +3,8 @@ package app.drydock.intellij.agent;
 import app.drydock.agent.spi.AgentProvider;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.Repository;
+import app.drydock.domain.RepositoryCatalog;
 import app.drydock.domain.SessionActivity;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.DrydockSessionsListener;
@@ -12,6 +14,7 @@ import com.intellij.openapi.application.ApplicationActivationListener;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.fileEditor.FileEditor;
+import com.intellij.openapi.fileEditor.FileEditorManager;
 import com.intellij.openapi.fileEditor.FileEditorState;
 import com.intellij.openapi.fileEditor.ex.FileEditorManagerEx;
 import com.intellij.openapi.project.DumbService;
@@ -19,6 +22,7 @@ import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.UserDataHolderBase;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.openapi.wm.IdeFrame;
+import com.intellij.terminal.TerminalExecutionConsole;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.util.messages.MessageBusConnection;
 import com.intellij.util.ui.JBUI;
@@ -46,6 +50,8 @@ import java.awt.event.WindowEvent;
 import java.awt.event.WindowFocusListener;
 import java.beans.PropertyChangeListener;
 import java.beans.PropertyChangeSupport;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Objects;
@@ -66,8 +72,8 @@ import java.util.concurrent.RejectedExecutionException;
  * so reopening a project or the IDE cannot resurrect an agent.</p>
  *
  * <p>Three sources drive a repaint, all of them pushed rather than polled:
- * the durable catalog ({@link DrydockSessionsListener}), this window's
- * executions ({@link AgentExecutionListener}), and live activity
+ * the durable catalog ({@link DrydockSessionsListener}), the agent's
+ * execution wherever it is shown ({@link AgentExecutionListener}), and live activity
  * ({@link SessionActivityListener}). Each hops to the EDT itself — subscribers
  * are called on the publisher's thread.</p>
  */
@@ -80,7 +86,6 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
     private final AgentConsoleFile file;
     private final PropertyChangeSupport propertyChange = new PropertyChangeSupport(this);
     private final MessageBusConnection applicationBus;
-    private final MessageBusConnection projectBus;
 
     private final JPanel root = new JPanel(new BorderLayout());
     private final AgentConsoleStrip strip;
@@ -94,6 +99,19 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
 
     /** Whether the session has a conversation to resume; see {@link AgentConsoles#hasConversation}. */
     private volatile boolean resumable;
+
+    /**
+     * Where the agent comes from, when this window hosts it from another
+     * worktree; empty for the window's own. Worked out off the EDT, since
+     * comparing a worktree with the window's project means resolving paths.
+     */
+    private volatile Optional<SessionPlace> hostedFrom = Optional.empty();
+
+    /** Whether a hosted tab's worktree folder is gone; the strip says so. */
+    private volatile boolean folderMissing;
+
+    /** {@link #hostedFrom} as the tab title last showed it. EDT. */
+    private Optional<SessionPlace> paintedHostedFrom = Optional.empty();
 
     /** The resolved session; null until the catalog load completes. */
     private volatile ManagedAgentSession session;
@@ -157,8 +175,35 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
                 }
             }
         });
-        projectBus = project.getMessageBus().connect(this);
-        projectBus.subscribe(AgentExecutionListener.TOPIC, new AgentExecutionListener() {
+        applicationBus.subscribe(AgentExecutionListener.TOPIC, new AgentExecutionListener() {
+            @Override
+            public void executionShown(ManagedSessionId sessionId, Project to) {
+                if (!sessionId.equals(file.sessionId())) {
+                    return;
+                }
+                if (to.equals(project)) {
+                    refreshLater();
+                } else {
+                    // A session is shown in one window at a time; its console
+                    // has moved, so this tab has nothing left to show.
+                    closeLater();
+                }
+            }
+
+            @Override
+            public void executionMoving(ManagedSessionId sessionId, boolean moving) {
+                if (sessionId.equals(file.sessionId())) {
+                    refreshLater();
+                }
+            }
+
+            @Override
+            public void executionReleased(ManagedSessionId sessionId) {
+                if (sessionId.equals(file.sessionId())) {
+                    refreshLater();
+                }
+            }
+
             @Override
             public void executionStarted(ManagedSessionId sessionId) {
                 if (sessionId.equals(file.sessionId())) {
@@ -176,6 +221,15 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
         reloadSession();
         ageTicker.setRepeats(true);
         ageTicker.start();
+    }
+
+    /** Closes this tab, later: never from inside the event that asked for it. */
+    private void closeLater() {
+        ApplicationManager.getApplication().invokeLater(() -> {
+            if (valid && !project.isDisposed()) {
+                FileEditorManager.getInstance(project).closeFile(file);
+            }
+        }, ModalityState.nonModal(), project.getDisposed());
     }
 
     // ---- session resolution --------------------------------------------------
@@ -196,6 +250,21 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
                 ManagedAgentSession found = failure == null ? findSession(plugin, file.sessionId()) : null;
                 resumeTokens = found != null ? estimateResumeTokens(plugin, found) : Optional.empty();
                 resumable = found != null && AgentConsoles.hasConversation(found);
+                hostedFrom = found != null ? hostedPlace(plugin, found) : Optional.empty();
+                folderMissing = found != null && hostedFrom.isPresent()
+                        && HostedLifecycle.folderGone(true, Files.isDirectory(found.workingDirectory()));
+                if (found != null && !everResolved && HostedLifecycle.closeRestoredTab(hostedFrom.isPresent(),
+                        AgentExecutionRegistry.getInstance().host(found.id()).map(project::equals).orElse(false),
+                        project.getLocationHash().equals(file.getUserData(AgentConsoles.OPENED_IN)))) {
+                    // Restored by the IDE from another worktree: hosted tabs
+                    // do not come back; the Drydock list offers Resume here.
+                    closeLater();
+                }
+                if (hostedFrom.isPresent()) {
+                    file.putUserData(HostedTab.KEY, new HostedTab.Facts(project.getLocationHash(), hostedFrom.get()));
+                } else if (HostedTab.placeIn(file, project).isPresent()) {
+                    file.putUserData(HostedTab.KEY, null);
+                }
                 session = found;
                 if (found != null) {
                     everResolved = true;
@@ -229,6 +298,30 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
             // A cosmetic figure: an unreadable transcript shows a bare Resume.
             return Optional.empty();
         }
+    }
+
+    /**
+     * The agent's place when this window hosts it from another worktree:
+     * the running agent's own, else its row's repository with no branch (an
+     * idle row records none). Blocking path resolution: off the EDT.
+     */
+    private Optional<SessionPlace> hostedPlace(DrydockPluginService plugin, ManagedAgentSession found) {
+        Optional<Path> base = Optional.ofNullable(project.getBasePath())
+                .map(path -> RepositoryCatalog.canonicalize(Path.of(path)));
+        if (!HostedTab.isHosted(base, RepositoryCatalog.canonicalize(found.workingDirectory()))) {
+            return Optional.empty();
+        }
+        Optional<SessionPlace> running = AgentExecutionRegistry.getInstance().execution(found.id())
+                .map(AgentExecution::place);
+        if (running.isPresent()) {
+            return running;
+        }
+        String repository = plugin.stateStore().state().repositories().stream()
+                .filter(candidate -> candidate.id().equals(found.repositoryId()))
+                .map(Repository::displayName)
+                .findFirst()
+                .orElseGet(() -> String.valueOf(found.workingDirectory().getFileName()));
+        return Optional.of(new SessionPlace(repository, Optional.empty()));
     }
 
     private static ManagedAgentSession findSession(DrydockPluginService plugin, ManagedSessionId sessionId) {
@@ -321,17 +414,20 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
                 // own picker, so the button starts a fresh conversation on
                 // this same row instead.
                 resumable, resumeTokens,
-                DumbService.isDumb(project));
+                DumbService.isDumb(project),
+                hostedFrom.map(place -> execution.map(AgentExecution::place).orElse(place)), folderMissing,
+                AgentExecutionRegistry.getInstance().moving().contains(current.id()));
 
         String stoppedLine = AgentStripText.stoppedFooter(
                 AgentStripText.displayStatus(current.status(), false),
                 Optional.of(current.lastOpenedAt()), Instant.now());
-        if (execution.isPresent() && running) {
-            showBody(execution.get().console().getComponent());
-        } else if (execution.isPresent()) {
+        Optional<TerminalExecutionConsole> console = execution.flatMap(AgentExecution::console);
+        if (console.isPresent() && running) {
+            showBody(console.get().getComponent());
+        } else if (console.isPresent()) {
             // Stopped in this window: the transcript is still here to read,
             // dimmed so it cannot be mistaken for a live agent.
-            showBody(stoppedView(execution.get(), stoppedLine));
+            showBody(stoppedView(console.get(), stoppedLine));
         } else {
             placeholder.setText(stoppedLine);
             showBody(placeholder);
@@ -340,10 +436,16 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
         // re-reads when asked; a status change has to say so or the dot stays
         // at whatever it was when the tab opened.
         FileEditorManagerEx.getInstanceEx(project).refreshIcons();
+        // The title too, when the tab's repo tag came or went: the platform
+        // reads it from a provider and caches it.
+        if (!hostedFrom.equals(paintedHostedFrom)) {
+            paintedHostedFrom = hostedFrom;
+            FileEditorManager.getInstance(project).updateFilePresentation(file);
+        }
     }
 
-    /** The execution {@link #stoppedPanel} was built around. */
-    private AgentExecution stoppedExecution;
+    /** The console {@link #stoppedPanel} was built around. */
+    private TerminalExecutionConsole stoppedConsole;
     private JPanel stoppedPanel;
     private final JBLabel stoppedFooter = new JBLabel("", SwingConstants.CENTER);
 
@@ -357,15 +459,15 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
      * layer also swallows keys and clicks, so nothing typed into a dead
      * agent looks as if it went somewhere.</p>
      */
-    private JComponent stoppedView(AgentExecution execution, String footer) {
-        if (stoppedExecution != execution) {
-            JLayer<JComponent> dimmed = new JLayer<>(execution.console().getComponent(), new DimmedLayer());
+    private JComponent stoppedView(TerminalExecutionConsole console, String footer) {
+        if (stoppedConsole != console) {
+            JLayer<JComponent> dimmed = new JLayer<>(console.getComponent(), new DimmedLayer());
             stoppedPanel = new JPanel(new BorderLayout());
             stoppedPanel.add(dimmed, BorderLayout.CENTER);
             stoppedFooter.setForeground(UIUtil.getContextHelpForeground());
             stoppedFooter.setBorder(JBUI.Borders.empty(8));
             stoppedPanel.add(stoppedFooter, BorderLayout.SOUTH);
-            stoppedExecution = execution;
+            stoppedConsole = console;
         }
         stoppedFooter.setText(footer);
         return stoppedPanel;
@@ -438,7 +540,16 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
             // The review surface lands in a later phase. The link exists now
             // because the strip is the handoff's strip; wiring it to nothing
             // silently would be worse than saying so.
-            case SHOW_CHANGES -> AgentConsoles.notImplementedYet(project, action);
+            // A hosted tab's Changes lives in the agent's own window, so it
+            // jumps there first (F3). A local one's review is not built yet.
+            case SHOW_CHANGES -> {
+                if (hostedFrom.isPresent()) {
+                    AgentConsoles.jumpToOwnWindow(project, current.id(), true);
+                } else {
+                    AgentConsoles.notImplementedYet(project, action);
+                }
+            }
+            case OPEN_PROJECT_WINDOW -> AgentConsoles.jumpToOwnWindow(project, current.id(), false);
         }
     }
 
@@ -462,7 +573,9 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
         // takes no input.
         AgentExecutionService executions = AgentExecutionService.getInstance(project);
         return executions.isRunning(file.sessionId())
-                ? executions.execution(file.sessionId()).orElseThrow().console().getPreferredFocusableComponent()
+                ? executions.execution(file.sessionId()).flatMap(AgentExecution::console)
+                        .<JComponent>map(TerminalExecutionConsole::getPreferredFocusableComponent)
+                        .orElse(strip.primaryButton())
                 : strip.primaryButton();
     }
 
@@ -519,7 +632,6 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
         ageTicker.stop();
         watchWindowFocus(null);
         applicationBus.disconnect();
-        projectBus.disconnect();
         // The console is NOT disposed here: it belongs to the execution, and
         // the execution survives this tab being closed. The execution service
         // disposes it when the window goes or the session is forgotten.

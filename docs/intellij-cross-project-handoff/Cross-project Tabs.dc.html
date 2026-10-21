@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>body{margin:0;background:#e4e5e9;color:#1e1f22;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}a{color:#3574f0}a:hover{color:#2557c4}</style>
+</helmet>
+<section style="display:flex;flex-direction:column;gap:28px;padding:32px 40px 60px;width:max-content">
+<div style="display:flex;flex-direction:column;gap:6px;max-width:900px">
+  <div style="font-size:22px;font-weight:600">Cross-project agent tabs</div>
+  <div style="font-size:14px;color:#5a5d68;line-height:1.5;text-wrap:pretty">Run and talk to agents from other projects and worktrees without leaving this window. A hosted tab shows where it comes from, and anything that needs the full project (Changes, file links, Finish) opens the owning window, and the console follows. Based on the spike: the process belongs to the app and windows only display it.</div>
+</div>
+
+<div style="display:flex;flex-wrap:wrap;gap:28px;align-items:flex-start">
+
+<!-- F1 -->
+<div id="F1" style="display:flex;flex-direction:column;gap:10px;width:760px">
+  <div style="display:flex;gap:10px;align-items:center"><span style="font-size:12px;font-weight:600;padding:2px 8px;border-radius:4px;background:#1e1f22;color:#fff">F1</span><span style="font-size:15px;font-weight:600">Start here</span></div>
+  <div style="height:440px;background:#fff;border:1px solid #c9ccd6;border-radius:10px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.08);display:flex;flex-direction:column;font-size:13px">
+    <div style="height:30px;flex:none;display:flex;align-items:center;gap:10px;padding:0 12px;border-bottom:1px solid #ebecf0;font-weight:600">Drydock<span style="flex:1"></span><span style="color:#818594;font-weight:400">⋮ —</span></div>
+    <div style="display:flex;flex-direction:column;padding:6px 0">
+      <div style="display:flex;align-items:center;gap:6px;padding:4px 12px;font-weight:600"><span style="color:#818594">⌄</span>java-profiler</div>
+      <div style="display:flex;align-items:center;gap:8px;padding:4px 12px 4px 38px"><span style="width:8px;height:8px;border-radius:50%;background:#3574f0;flex:none"></span>Finalize the rc-7 changeset<span style="color:#818594">jb/rc-7-tooling · this window · Pi</span></div>
+      <div style="display:flex;align-items:center;gap:8px;padding:4px 12px 4px 38px"><span style="width:8px;height:8px;border-radius:50%;background:#3574f0;flex:none"></span>Emit the native memory events as USDT<span style="color:#818594">emit-usdt · in its own window · Claude</span></div>
+      <div style="display:flex;align-items:center;gap:8px;padding:4px 12px 4px 38px;color:#1e1f22"><span style="color:#818594">⑂</span>pr-857<span style="color:#818594;font-size:12px">no task ·</span><a href="#F1" style="font-size:12px">Start ▸</a></div>
+      <div style="display:flex;align-items:center;gap:6px;padding:4px 12px;font-weight:600;margin-top:2px"><span style="color:#818594">⌄</span>dd-jmc</div>
+      <div style="display:flex;align-items:center;gap:8px;padding:4px 12px 4px 38px;background:#d5e1ff"><span style="color:#818594">⑂</span>fix/chunk_memory<span style="color:#818594;font-size:12px">no task ·</span><a href="#F1" style="font-size:12px;text-decoration:underline">Start ▸</a></div>
+      <div style="position:relative;height:0">
+        <div style="position:absolute;left:196px;top:2px;width:300px;background:#fff;border:1px solid #c9ccd6;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.16);padding:5px;display:flex;flex-direction:column;gap:1px;z-index:2">
+          <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:5px;background:#d5e1ff"><span style="flex:1"><b style="font-weight:500">Start in this window</b><div style="font-size:12px;color:#5a5d68">Tab opens here, tagged dd-jmc</div></span><span style="color:#818594;font-size:12px">⏎</span></div>
+          <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:5px"><span style="flex:1">Start in its own window<div style="font-size:12px;color:#5a5d68">Opens dd-jmc · fix/chunk_memory</div></span><span style="color:#818594;font-size:12px">⌥⏎</span></div>
+          <div style="height:1px;background:#ebecf0;margin:4px 6px"></div>
+          <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:5px;color:#5a5d68"><span style="flex:1">Read-only, in this window</span></div>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;padding:4px 12px 4px 38px"><span style="color:#818594">⑂</span>ci/tycho-4-0-10<span style="color:#818594;font-size:12px">no task ·</span><a href="#F1" style="font-size:12px">Start ▸</a></div>
+      <div style="display:flex;align-items:center;gap:8px;padding:4px 12px 4px 38px"><span style="color:#818594">⑂</span>fix/upstream-import-empty-files<span style="color:#818594;font-size:12px">no task ·</span><a href="#F1" style="font-size:12px">Start ▸</a></div>
+      <div style="display:flex;align-items:center;gap:6px;padding:4px 12px;font-weight:600;margin-top:2px"><span style="color:#818594">⌄</span>dd-trace-java</div>
+      <div style="display:flex;align-items:center;gap:8px;padding:4px 12px 4px 38px"><span style="width:8px;height:8px;border-radius:50%;background:#e8a33d;flex:none"></span>Trim the OTLP profile<span style="color:#818594">jb/rnd_otlp · here · Codex</span></div>
+    </div>
+  </div>
+  <div style="font-size:13px;color:#3d3f48;line-height:1.5;display:flex;flex-direction:column;gap:4px">
+    <div><b>Start ▸</b> on any worktree, in any project, opens the same menu. Enter (or a plain click on Start) starts the session <b>in this window</b>. ⌥ starts it in its own window, as the MVP does today.</div>
+    <div><b>Where a session is shown</b> replaces "this window" in the row meta: <code>this window</code> (its own worktree is open here), <code>here</code> (hosted in this window), <code>in its own window</code>, <code>in java-profiler window</code>, <code>not shown</code>.</div>
+  </div>
+</div>
+
+<!-- F2 -->
+<div id="F2" style="display:flex;flex-direction:column;gap:10px;width:900px">
+  <div style="display:flex;gap:10px;align-items:center"><span style="font-size:12px;font-weight:600;padding:2px 8px;border-radius:4px;background:#1e1f22;color:#fff">F2</span><span style="font-size:15px;font-weight:600">Hosted tab</span></div>
+  <div style="height:440px;background:#fff;border:1px solid #c9ccd6;border-radius:10px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.08);display:flex;flex-direction:column;font-size:13px">
+    <div style="height:36px;flex:none;display:flex;align-items:center;gap:14px;padding:0 12px;background:#f7f8fa;border-bottom:1px solid #ebecf0">
+      <span style="display:flex;align-items:center;gap:6px"><span style="font-size:11px;font-weight:600;background:#e8a33d;color:#fff;border-radius:4px;padding:2px 4px">JP</span>java-profiler ▾</span>
+      <span style="color:#5a5d68">⑂ jb/rc-7-tooling ▾</span>
+    </div>
+    <div style="height:34px;flex:none;display:flex;align-items:center;gap:4px;padding:0 8px;border-bottom:1px solid #ebecf0">
+      <span style="display:flex;align-items:center;gap:6px;padding:4px 10px;border-radius:5px;color:#5a5d68"><span style="width:7px;height:7px;border-radius:50%;background:#3574f0"></span>Finalize the rc-7 changeset</span>
+      <span style="display:flex;align-items:center;gap:6px;padding:4px 10px;border-radius:5px;background:#e9eaee;border:1px solid #c9ccd6"><span style="width:7px;height:7px;border-radius:50%;background:#3574f0"></span><span style="font-size:11px;padding:0 5px;border-radius:3px;background:#dfe9ff;color:#2557c4;font-weight:600">dd-jmc</span>Fix chunk memory growth<span style="color:#818594;font-size:11px">📌</span></span>
+      <span style="display:flex;align-items:center;gap:6px;padding:4px 10px;color:#5a5d68"><span style="color:#3574f0;font-size:11px;font-weight:600">M↓</span>README.md</span>
+    </div>
+    <div style="height:38px;flex:none;display:flex;align-items:center;gap:10px;padding:0 12px;background:#f2f3f5;border-bottom:1px solid #ebecf0">
+      <span style="width:8px;height:8px;border-radius:50%;background:#3574f0"></span><b>Running</b><span style="color:#818594">Pi · 12m</span>
+      <span style="width:1px;height:16px;background:#d4d6dc"></span>
+      <span style="display:flex;align-items:center;gap:6px;color:#3d3f48"><span style="color:#818594">from</span><b style="font-weight:500">dd-jmc</b><span style="color:#818594">⑂ fix/chunk_memory</span></span>
+      <span style="flex:1"></span>
+      <a href="#F3">Open project window ↗</a>
+      <a href="#F3">Changes ↗</a>
+      <span style="display:flex;align-items:center;gap:6px;padding:3px 10px;border:1px solid #c9ccd6;border-radius:5px;background:#fff">■ Stop</span>
+      <span style="color:#818594">⋯</span>
+    </div>
+    <div style="flex:1;background:#fff;padding:12px 16px;font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.7;color:#3d3f48;position:relative">
+      <div>Reading chunk allocator in</div>
+      <div><span style="text-decoration:underline;color:#2557c4;background:#eef3ff">core/org.openjdk.jmc.flightrecorder/src/main/java/…/ChunkStructure.java:212</span></div>
+      <div style="position:absolute;left:300px;top:52px;background:#fff;border:1px solid #c9ccd6;border-radius:6px;box-shadow:0 6px 18px rgba(0,0,0,.14);padding:6px 10px;font-family:-apple-system,system-ui,sans-serif;font-size:12px;color:#3d3f48">Opens in the dd-jmc · fix/chunk_memory window</div>
+      <div style="margin-top:22px">The buffer is retained by the parser cache after each chunk,</div>
+      <div>so peak memory scales with chunk count rather than chunk size.</div>
+      <div style="margin-top:12px;color:#c56ec9">GLM 5.3 Flash | think:high</div>
+      <div style="color:#818594">&gt; <span style="background:#1e1f22;color:#1e1f22">_</span></div>
+      <div style="position:absolute;left:16px;bottom:10px;color:#2c9a8a">dir dd-jmc-fix-chunk_memory | ⑂ fix/chunk_memory</div>
+    </div>
+  </div>
+  <div style="font-size:13px;color:#3d3f48;line-height:1.5;display:flex;flex-direction:column;gap:4px">
+    <div><b>Tab:</b> a repo chip before the agent title, only on hosted tabs. Sessions from this window's own worktree keep the plain tab. Hover shows <code>dd-jmc · fix/chunk_memory · hosted</code>.</div>
+    <div><b>Strip:</b> a <code>from &lt;repo&gt; ⑂ &lt;branch&gt;</code> group after status. <code>Open project window ↗</code> moves the console there (F3). <code>Changes ↗</code> does the same and opens Changes in that window. Finish isn't offered on a hosted tab; it lives with Changes.</div>
+    <div><b>File links</b> under a foreign worktree open in the owning window, never as a non-project file here. The hover says where they'll open.</div>
+    <div><b>Typing, Stop, ⋯</b> work exactly as on a local tab.</div>
+  </div>
+</div>
+
+<!-- F3 -->
+<div id="F3" style="display:flex;flex-direction:column;gap:10px;width:900px">
+  <div style="display:flex;gap:10px;align-items:center"><span style="font-size:12px;font-weight:600;padding:2px 8px;border-radius:4px;background:#1e1f22;color:#fff">F3</span><span style="font-size:15px;font-weight:600">Jump: the console follows</span></div>
+  <div style="display:flex;gap:16px">
+    <div style="flex:1;height:300px;background:#fff;border:1px solid #c9ccd6;border-radius:10px;overflow:hidden;display:flex;flex-direction:column;font-size:13px;position:relative">
+      <div style="height:32px;flex:none;display:flex;align-items:center;gap:8px;padding:0 12px;background:#f7f8fa;border-bottom:1px solid #ebecf0;color:#5a5d68"><b style="color:#1e1f22;font-weight:500">java-profiler</b> ⑂ jb/rc-7-tooling</div>
+      <div style="height:30px;flex:none;display:flex;align-items:center;gap:4px;padding:0 8px;border-bottom:1px solid #ebecf0">
+        <span style="display:flex;align-items:center;gap:6px;padding:3px 10px;border-radius:5px;background:#e9eaee;border:1px solid #c9ccd6"><span style="width:7px;height:7px;border-radius:50%;background:#3574f0"></span>Finalize the rc-7 changeset</span>
+        <span style="padding:3px 10px;color:#5a5d68">README.md</span>
+      </div>
+      <div style="flex:1;background:#fafafb"></div>
+      <div style="position:absolute;right:12px;bottom:12px;width:300px;background:#fff;border:1px solid #c9ccd6;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.14);padding:10px 12px;display:flex;flex-direction:column;gap:6px">
+        <div style="font-weight:600">Fix chunk memory growth moved</div>
+        <div style="color:#5a5d68;font-size:12px">Now in the dd-jmc · fix/chunk_memory window.</div>
+        <div style="display:flex;gap:14px;font-size:12px"><a href="#F3">Go to window</a><a href="#F2">Bring back here</a></div>
+      </div>
+    </div>
+    <div style="flex:1;height:300px;background:#fff;border:2px solid #3574f0;border-radius:10px;overflow:hidden;display:flex;flex-direction:column;font-size:13px">
+      <div style="height:32px;flex:none;display:flex;align-items:center;gap:8px;padding:0 12px;background:#f7f8fa;border-bottom:1px solid #ebecf0;color:#5a5d68"><b style="color:#1e1f22;font-weight:500">dd-jmc</b> ⑂ fix/chunk_memory</div>
+      <div style="height:30px;flex:none;display:flex;align-items:center;gap:4px;padding:0 8px;border-bottom:1px solid #ebecf0">
+        <span style="display:flex;align-items:center;gap:6px;padding:3px 10px;border-radius:5px;background:#e9eaee;border:1px solid #c9ccd6"><span style="width:7px;height:7px;border-radius:50%;background:#3574f0"></span>Fix chunk memory growth</span>
+        <span style="padding:3px 10px;color:#5a5d68">ChunkStructure.java</span>
+      </div>
+      <div style="height:30px;flex:none;display:flex;align-items:center;gap:8px;padding:0 12px;background:#f2f3f5;border-bottom:1px solid #ebecf0"><span style="width:7px;height:7px;border-radius:50%;background:#3574f0"></span><b>Running</b><span style="color:#818594">Pi · 12m</span><span style="flex:1"></span><a href="#F3">Changes</a><span style="padding:2px 8px;border:1px solid #c9ccd6;border-radius:5px">■ Stop</span></div>
+      <div style="flex:1;padding:10px 14px;font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1.7;color:#3d3f48">…same conversation, same process,<br>history replayed above.</div>
+    </div>
+  </div>
+  <div style="font-size:13px;color:#3d3f48;line-height:1.5;display:flex;flex-direction:column;gap:4px">
+    <div>The jump opens or raises the owning window and <b>moves</b> the session there: a new console in that window with the history replayed into it (spike variant b). The process isn't restarted. Its home tab is plain, with no chip.</div>
+    <div>The hosted tab closes and a balloon confirms the move. <code>Bring back here</code> moves it back. A session is shown in <b>one window at a time</b>. Showing it somewhere else moves it; it's never copied.</div>
+    <div>Timing from the spike: a warm jump to input takes about 10 ms. A cold one, when the window has to open, takes 2–5 s, so show the platform's open-project progress in the host while it opens.</div>
+  </div>
+</div>
+
+<!-- F4 -->
+<div id="F4" style="display:flex;flex-direction:column;gap:10px;width:620px">
+  <div style="display:flex;gap:10px;align-items:center"><span style="font-size:12px;font-weight:600;padding:2px 8px;border-radius:4px;background:#1e1f22;color:#fff">F4</span><span style="font-size:15px;font-weight:600">Closing a window that hosts agents</span></div>
+  <div style="background:#fff;border:1px solid #c9ccd6;border-radius:10px;box-shadow:0 12px 32px rgba(0,0,0,.14);padding:18px 20px;display:flex;flex-direction:column;gap:12px;font-size:13px">
+    <div style="font-weight:600;font-size:14px">This window is showing 3 working agents</div>
+    <div style="display:flex;flex-direction:column;gap:6px">
+      <div style="display:flex;gap:8px;align-items:center"><span style="width:8px;height:8px;border-radius:50%;background:#3574f0"></span>Finalize the rc-7 changeset<span style="color:#818594">java-profiler · this window</span></div>
+      <div style="display:flex;gap:8px;align-items:center"><span style="width:8px;height:8px;border-radius:50%;background:#3574f0"></span>Fix chunk memory growth<span style="color:#818594">dd-jmc · hosted</span></div>
+      <div style="display:flex;gap:8px;align-items:center"><span style="width:8px;height:8px;border-radius:50%;background:#e8a33d"></span>Trim the OTLP profile<span style="color:#818594">dd-trace-java · hosted · needs you</span></div>
+    </div>
+    <div style="color:#5a5d68;line-height:1.5">Agents that keep running stay in the Drydock list as <i>not shown</i>. Open them from any window.</div>
+    <div style="display:flex;gap:8px;align-items:center"><span style="color:#5a5d68;font-size:12px">☐ Don't ask again</span><span style="flex:1"></span><span style="padding:5px 12px;border:1px solid #c9ccd6;border-radius:5px">Cancel</span><span style="padding:5px 12px;border:1px solid #c9ccd6;border-radius:5px">Stop all &amp; Close</span><span style="padding:5px 12px;border-radius:5px;background:#3574f0;color:#fff">Keep running &amp; Close</span></div>
+  </div>
+  <div style="font-size:13px;color:#3d3f48;line-height:1.5;display:flex;flex-direction:column;gap:4px">
+    <div>This replaces the MVP's <code>Stop &lt;n&gt; working agents?</code> once ownership moves to the app. Closing a window no longer has to stop anything. The default becomes <b>Keep running</b>: the process stays alive, and the console is dropped and rebuilt from the replay buffer when it's shown again.</div>
+    <div>Quitting the IDE still asks once and stops everything (MVP §6, unchanged).</div>
+  </div>
+</div>
+
+<!-- F5 -->
+<div id="F5" style="display:flex;flex-direction:column;gap:10px;width:620px">
+  <div style="display:flex;gap:10px;align-items:center"><span style="font-size:12px;font-weight:600;padding:2px 8px;border-radius:4px;background:#1e1f22;color:#fff">F5</span><span style="font-size:15px;font-weight:600">Attention, and sessions that aren't shown</span></div>
+  <div style="background:#fff;border:1px solid #c9ccd6;border-radius:10px;overflow:hidden;font-size:13px;display:flex;flex-direction:column">
+    <div style="padding:6px 0;display:flex;flex-direction:column">
+      <div style="display:flex;align-items:center;gap:6px;padding:4px 12px;font-weight:600"><span style="color:#818594">⌄</span>dd-jmc</div>
+      <div style="display:flex;align-items:center;gap:8px;padding:4px 12px 4px 38px"><span style="width:8px;height:8px;border-radius:50%;background:#3574f0"></span>Fix chunk memory growth<span style="color:#818594">fix/chunk_memory · not shown · Pi</span><span style="flex:1"></span><a href="#F2" style="font-size:12px">Show here</a></div>
+      <div style="display:flex;align-items:center;gap:6px;padding:4px 12px;font-weight:600"><span style="color:#818594">⌄</span>dd-trace-java</div>
+      <div style="display:flex;align-items:center;gap:8px;padding:4px 12px 4px 38px;background:#fdf3e1"><span style="width:8px;height:8px;border-radius:50%;background:#e8a33d"></span>Trim the OTLP profile<span style="color:#818594">jb/rnd_otlp · not shown · needs you</span><span style="flex:1"></span><a href="#F2" style="font-size:12px">Show here</a></div>
+      <div style="display:flex;align-items:center;gap:8px;padding:4px 12px 4px 38px"><span style="width:8px;height:8px;border-radius:50%;border:1.5px solid #a8abb6;box-sizing:border-box"></span>Checkout cleanup<span style="color:#818594">checkout · idle · Codex</span><span style="flex:1"></span><a href="#F2" style="font-size:12px">Resume here</a></div>
+    </div>
+    <div style="border-top:1px solid #ebecf0;padding:12px;background:#fafafb;display:flex;justify-content:flex-end">
+      <div style="width:320px;background:#fff;border:1px solid #c9ccd6;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.14);padding:10px 12px;display:flex;flex-direction:column;gap:6px">
+        <div style="display:flex;gap:8px;align-items:center"><span style="width:8px;height:8px;border-radius:50%;background:#e8a33d"></span><b>Trim the OTLP profile needs you</b></div>
+        <div style="color:#5a5d68;font-size:12px">dd-trace-java · jb/rnd_otlp</div>
+        <div style="display:flex;gap:14px;font-size:12px"><a href="#F2">Show here</a><a href="#F3">Open project window</a></div>
+      </div>
+    </div>
+  </div>
+  <div style="font-size:13px;color:#3d3f48;line-height:1.5;display:flex;flex-direction:column;gap:4px">
+    <div><b>Attention</b> raises the window currently showing the session, and the balloon is labelled with the session's own <code>repo · branch</code>. If no window shows it, the balloon appears in the focused window with <code>Show here</code>.</div>
+    <div><b>Restart:</b> hosted tabs aren't restored. Sessions come back as idle rows with <code>Resume here</code>. Their own windows restore their own tabs, as in the MVP.</div>
+    <div><b>Running elsewhere:</b> clicking a row shown in another window raises that window (MVP fix 2). <code>Show here</code> in its context menu moves it.</div>
+  </div>
+</div>
+
+</div>
+
+<div style="display:flex;flex-direction:column;gap:8px;max-width:900px;font-size:13px;line-height:1.5;color:#3d3f48">
+  <div style="font-size:15px;font-weight:600;color:#1e1f22">Rules</div>
+  <div>1. The app owns the process. A window shows at most one console per session, and each session is shown in at most one window.</div>
+  <div>2. Anything that needs the project model (Changes, Finish, file navigation, run configurations) happens in the owning window. Hosted tabs link there, and the console moves with the jump.</div>
+  <div>3. Hosted sessions route IDE MCP calls to their own worktree (MVP fix 1). With no window open for it, those calls fail cleanly, and the agent uses Drydock's own usages tool, whose jdtls starts on its first query.</div>
+  <div>4. When a hosted agent's turn ends, Drydock refreshes any of its files open in this window. If its worktree folder disappears, the session is marked gone.</div>
+  <div>5. The one-writer-per-worktree rule is unchanged and doesn't depend on which window shows a session.</div>
+</div>
+</section>
+</x-dc>
+</body>
+</html>

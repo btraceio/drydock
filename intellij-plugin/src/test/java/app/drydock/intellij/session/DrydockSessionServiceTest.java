@@ -26,13 +26,16 @@ import app.drydock.domain.RepositorySettings;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.intellij.agent.AgentConsoleHost;
+import app.drydock.intellij.agent.AgentExecutionListener;
 import app.drydock.state.JsonApplicationStateRepository;
 
 
+import com.intellij.openapi.project.Project;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
+import java.lang.reflect.Field;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -676,6 +679,33 @@ class DrydockSessionServiceTest {
     }
 
     // ---- lifecycle events -------------------------------------------------------
+
+    @Test
+    void theEndRecorderPersistsAnEndAndHoldsNoWindow(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        DrydockSessionService service = harness.service(new RecordingProvider(
+                AgentKind.PI, SessionIdStrategy.DISCOVERED, null, true, false, null, harness.events));
+        ManagedAgentSession running = persistSession(harness, AgentKind.PI, "Kept running",
+                AgentBinding.unlaunched(AgentKind.PI), base, SessionStatus.RUNNING,
+                Instant.parse("2026-08-12T10:00:00Z"));
+
+        // The registry keeps this for as long as the agent lives, which can
+        // be long after the window that started it closed: it must persist
+        // the end on its own, and must not keep that window alive.
+        AgentExecutionListener recorder = service.endRecorder();
+        recorder.executionTerminated(running.id(), true, null);
+
+        assertEquals(SessionStatus.INACTIVE, persisted(harness, running.id()).status());
+        for (Field field : recorder.getClass().getDeclaredFields()) {
+            assertFalse(AgentConsoleHost.class.isAssignableFrom(field.getType()),
+                    "the recorder holds the window's console host: " + field);
+            assertFalse(Project.class.isAssignableFrom(field.getType()),
+                    "the recorder holds a project: " + field);
+            assertFalse(DrydockSessionService.class.isAssignableFrom(field.getType()),
+                    "the recorder holds the window's session service: " + field);
+        }
+        harness.store.flush();
+    }
 
     @Test
     void aTerminatedExecutionGoesIdleAndTheRowSurvives(@TempDir Path base) throws Exception {

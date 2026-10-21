@@ -10,7 +10,7 @@ import app.drydock.ui.AgentLabels;
 
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.project.ProjectCloseHandler;
-import com.intellij.openapi.project.ProjectManager;
+import com.intellij.openapi.util.Key;
 import org.jetbrains.annotations.NotNull;
 
 import java.lang.System.Logger;
@@ -24,16 +24,22 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
- * Asks before a window close or an IDE quit stops agents that are mid-task
- * (handoff surface 6). Agents at their prompt are stopped without asking;
- * the stopping itself stays where it was, in {@link AgentWindowCloseListener}.
+ * Asks before a window close or an IDE quit ends what its agents are doing.
  *
- * <p><b>Quit is one question, not one per window.</b> The platform has no
- * public, non-obsolete hook that can veto a quit ({@code
- * ApplicationListener.canExitApplication} is deprecated), but an exit closes
- * every project through this same handler. So during an exit the first
- * window asked shows one dialog listing the working agents of every open
- * window, and records which sessions the user agreed to stop; the remaining
+ * <p><b>A window close</b> (cross-project tabs, frame F4) asks only when the
+ * window shows an agent that is mid-task: keep them running — the default;
+ * they stay in the Drydock list as {@code not shown} — or stop them all. The
+ * answer is recorded on the project, and {@link AgentWindowCloseListener}
+ * applies it ({@link CloseWindowPlan#outcome}).</p>
+ *
+ * <p><b>A quit</b> stops every agent, as in the MVP (handoff surface 6):
+ * agents at their prompt without asking, working ones after one question.</p>
+ *
+ * <p><b>Quit is one question, not one per window.</b> {@link QuitConfirmation}
+ * asks it from the platform's (deprecated, replacement-less) quit veto, before
+ * any window is asked to close — which also covers a quit with no window open.
+ * It lists every working agent in the IDE, shown in a window or not, and
+ * records which sessions the user agreed to stop; the remaining
  * windows of the same exit find theirs already agreed and close silently.
  * The agreement expires after {@link #QUIT_APPROVAL_TTL}, so it cannot leak
  * into a later close of a session that was resumed since.</p>
@@ -47,7 +53,7 @@ import java.util.stream.Collectors;
  * user cancels in this dialog clears the mark at once; one cancelled
  * elsewhere expires after {@link #QUIT_WINDOW}.</p>
  *
- * <p>Everything read here is in memory — this window's executions, the
+ * <p>Everything read here is in memory — the registry, the
  * activity monitor, the catalog snapshot — because the platform asks on the
  * EDT. A failure inside drydock never blocks a close: it is logged and the
  * window closes, which only loses the confirmation.</p>
@@ -85,21 +91,39 @@ public final class AgentCloseConfirmation implements ProjectCloseHandler {
         return started != null && Instant.now().isBefore(started.plus(QUIT_WINDOW));
     }
 
-    /** A running agent that should not be stopped without asking. */
-    private record Working(ManagedAgentSession session, Optional<SessionActivity> activity, Project project) {
+    /** A running agent that should not be stopped without asking; {@code place} names where it is shown. */
+    private record Working(ManagedAgentSession session, Optional<SessionActivity> activity, String place) {
+    }
+
+    /** The close decision for a window, set here and read once by {@link AgentWindowCloseListener}. */
+    static final Key<CloseWindowPlan.Decision> DECISION = Key.create("drydock.closeWindow.decision");
+
+    /** Whether the close under way belongs to an IDE quit. */
+    static boolean isQuitting() {
+        return quitting();
     }
 
     @Override
     public boolean canClose(@NotNull Project project) {
         try {
-            List<Working> here = working(project);
-            if (here.isEmpty() || StopAgentsDialog.isSuppressed()) {
+            project.putUserData(DECISION, null);
+            if (quitting()) {
+                return confirmQuit();
+            }
+            AgentExecutionRegistry registry = AgentExecutionRegistry.getInstance();
+            List<Working> here = working(CloseWindowPlan.askedAbout(registry.runningShownIn(project),
+                    registry.moving()));
+            if (here.isEmpty()) {
                 return true;
             }
-            if (quitting()) {
-                return confirmQuit(here);
+            Optional<CloseWindowPlan.Decision> remembered = CloseWindowDialog.remembered();
+            if (remembered.isPresent()) {
+                project.putUserData(DECISION, remembered.get());
+                return true;
             }
-            return ask(project, here, Optional.of(ProjectIdentity.labelOf(project)), false);
+            Optional<CloseWindowPlan.Decision> decision = CloseWindowDialog.ask(project, rows(project, here));
+            decision.ifPresent(chosen -> project.putUserData(DECISION, chosen));
+            return decision.isPresent();
         } catch (RuntimeException e) {
             LOG.log(Level.WARNING, () -> "Could not check for working agents before closing "
                     + project.getName() + ": " + e);
@@ -107,18 +131,50 @@ public final class AgentCloseConfirmation implements ProjectCloseHandler {
         }
     }
 
-    private static boolean confirmQuit(List<Working> here) {
-        QuitApproval approved = quitApproval;
-        if (approved != null && approved.covers(here)) {
+    /** The close question's rows: dot, title, {@code <repo> · this window|hosted[ · needs you]}. */
+    private static List<CloseWindowDialog.Row> rows(Project project, List<Working> working) {
+        AgentConsoleFileSystem files = AgentConsoleFileSystem.getInstance();
+        List<CloseWindowDialog.Row> rows = new ArrayList<>();
+        for (Working agent : working) {
+            ManagedSessionId id = agent.session().id();
+            Optional<SessionPlace> hosted = HostedTab.placeIn(files.fileFor(id), project);
+            String repository = hosted.map(SessionPlace::repository)
+                    .or(() -> AgentExecutionRegistry.getInstance().execution(id)
+                            .map(execution -> execution.place().repository()))
+                    .orElseGet(() -> ProjectIdentity.labelOf(project));
+            rows.add(new CloseWindowDialog.Row(SessionDots.dotIcon(agent.session().status(), agent.activity()),
+                    agent.session().displayName(),
+                    CloseWindowPlan.row(repository, hosted.isPresent(),
+                            agent.activity().equals(Optional.of(SessionActivity.NEEDS_ATTENTION)))));
+        }
+        return rows;
+    }
+
+    /**
+     * A quit: one question for every working agent in the IDE, shown in a
+     * window or not. Asked by {@link QuitConfirmation} before any window is
+     * asked to close; a window's own check during the same quit finds it
+     * approved, and asks here itself only if that did not run. EDT.
+     */
+    static boolean confirmQuit() {
+        List<Working> everywhere = working(AgentExecutionRegistry.getInstance().runningSessions());
+        if (everywhere.isEmpty() || StopAgentsDialog.isSuppressed()) {
             return true;
         }
-        List<Working> everywhere = new ArrayList<>();
-        for (Project open : ProjectManager.getInstance().getOpenProjects()) {
-            if (!open.isDisposed()) {
-                everywhere.addAll(working(open));
-            }
+        QuitApproval approved = quitApproval;
+        if (approved != null && approved.covers(everywhere)) {
+            return true;
         }
-        if (!ask(null, everywhere, Optional.empty(), true)) {
+        DrydockPluginService plugin = DrydockPluginService.getInstance();
+        List<StopAgentsDialog.Row> rows = everywhere.stream()
+                .map(agent -> new StopAgentsDialog.Row(
+                        SessionDots.dotIcon(agent.session().status(), agent.activity()),
+                        StopAgentsPlan.row(agent.session().displayName(),
+                                AgentLabels.displayName(plugin.registry(), agent.session().agentKind()),
+                                Optional.of(agent.place()))))
+                .toList();
+        if (!new StopAgentsDialog(null, everywhere.size(), StopAgentsPlan.body(everywhere.size()), rows)
+                .showAndGet()) {
             // The quit is off; the next close is an ordinary one.
             quitStartedAt = null;
             return false;
@@ -129,40 +185,28 @@ public final class AgentCloseConfirmation implements ProjectCloseHandler {
         return true;
     }
 
-    /** Shows the dialog; {@code place} is the window's name, empty for a quit. */
-    private static boolean ask(Project project, List<Working> working, Optional<String> place, boolean quitting) {
+    /** Which of {@code running} are not known to be at their prompt. EDT-safe: memory only. */
+    private static List<Working> working(List<ManagedSessionId> running) {
         DrydockPluginService plugin = DrydockPluginService.getInstance();
-        List<StopAgentsDialog.Row> rows = working.stream()
-                .map(agent -> new StopAgentsDialog.Row(
-                        SessionDots.dotIcon(agent.session().status(), agent.activity()),
-                        StopAgentsPlan.row(agent.session().displayName(),
-                                AgentLabels.displayName(plugin.registry(), agent.session().agentKind()),
-                                // A quit lists every window's agents, so each
-                                // says which window it is in.
-                                quitting ? Optional.of(ProjectIdentity.labelOf(agent.project())) : Optional.empty())))
-                .toList();
-        return new StopAgentsDialog(project, working.size(), StopAgentsPlan.body(place, working.size()), rows,
-                quitting).showAndGet();
-    }
-
-    /** {@code project}'s running agents that are not known to be at their prompt. EDT-safe: memory only. */
-    private static List<Working> working(Project project) {
-        DrydockPluginService plugin = DrydockPluginService.getInstance();
-        if (!plugin.initialization().isDone() || plugin.initialization().isCompletedExceptionally()) {
+        if (running.isEmpty() || !plugin.initialization().isDone()
+                || plugin.initialization().isCompletedExceptionally()) {
             // Nothing can have started before the catalog loaded.
             return List.of();
         }
-        List<ManagedSessionId> running = AgentExecutionService.getInstance(project).runningSessions();
-        if (running.isEmpty()) {
-            return List.of();
-        }
+        AgentExecutionRegistry registry = AgentExecutionRegistry.getInstance();
         List<Working> working = new ArrayList<>();
         for (ManagedAgentSession session : plugin.stateStore().state().sessions()) {
-            if (running.contains(session.id())) {
-                Optional<SessionActivity> activity = plugin.activityMonitor().current(session.id());
-                if (StopAgentsPlan.isWorking(activity)) {
-                    working.add(new Working(session, activity, project));
-                }
+            if (!running.contains(session.id())) {
+                continue;
+            }
+            Optional<SessionActivity> activity = plugin.activityMonitor().current(session.id());
+            if (StopAgentsPlan.isWorking(activity)) {
+                String place = registry.host(session.id()).filter(window -> !window.isDisposed())
+                        .map(ProjectIdentity::labelOf)
+                        .orElseGet(() -> registry.execution(session.id())
+                                .map(execution -> execution.place().label() + " · not shown")
+                                .orElse("not shown"));
+                working.add(new Working(session, activity, place));
             }
         }
         return working;

@@ -5,11 +5,10 @@ import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.SessionStatus;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.agent.AgentConsoles;
-import app.drydock.intellij.agent.AgentExecutionService;
+import app.drydock.intellij.agent.AgentExecutionRegistry;
 import app.drydock.intellij.agent.SessionDone;
 import app.drydock.intellij.agent.StopAgentsDialog;
 import app.drydock.intellij.agent.StopAgentsPlan;
-import app.drydock.intellij.startup.DrydockStartupActivity;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
@@ -30,7 +29,6 @@ import org.jetbrains.annotations.NotNull;
 
 import javax.swing.Icon;
 
-import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.function.Predicate;
@@ -79,13 +77,45 @@ final class TaskActions {
                 task("Deactivate", "Deactivate this task's agent", AllIcons.Actions.Suspend, TaskRow::running,
                         (project, row) -> stop(project, row, false)),
                 task("Deactivate && Close Window", "Deactivate the agent and close its window", AllIcons.Actions.Close,
-                        TaskRow::running, (project, row) -> stop(project, row, true)),
-                task("Resume", "Open the task and resume its conversation", AllIcons.Actions.Execute,
-                        row -> !row.running(), (project, row) -> TaskNavigator.switchTo(row.session(),
+                        TaskActions::closesOwnWindow, (project, row) -> stop(project, row, true)),
+                // F5: moves an agent another window shows into this one.
+                task("Show Here", "Move this agent's console into this window", AllIcons.Actions.MoveTo2,
+                        row -> row.placement() instanceof TaskPlacement.OwnWindow
+                                || row.placement() instanceof TaskPlacement.OtherWindow,
+                        (project, row) -> AgentConsoles.showHere(project, row.session().id())),
+                // Resume in this window, hosted when the task is another
+                // worktree's — as New task does; its own window is the
+                // explicit alternative.
+                task("Resume", "Resume the task's conversation in this window", AllIcons.Actions.Execute,
+                        row -> !row.running(), (project, row) -> AgentConsoles.resumeOrStart(project, row.session())),
+                task("Resume in Its Own Window", "Open the task's own window and resume its conversation there",
+                        AllIcons.Actions.MoveTo2, TaskActions::resumesElsewhere,
+                        (project, row) -> TaskNavigator.switchTo(row.session(),
                                 target -> AgentConsoles.resumeOrStart(target, row.session()))),
                 task("Done with This Task…", "Forget the task, and optionally remove its worktree",
                         AllIcons.Actions.Checked, row -> true, TaskActions::done),
                 removeProject());
+    }
+
+    /**
+     * Whether Deactivate &amp; Close Window applies: the agent runs, and the window
+     * showing it is its own worktree's. A hosted agent's window belongs to
+     * another project — closing it would close what the user is working in,
+     * with whatever else it shows — and an agent no window shows has none to
+     * close. Pure.
+     */
+    static boolean closesOwnWindow(TaskRow row) {
+        return row.running() && (row.placement() instanceof TaskPlacement.ThisWindow
+                || row.placement() instanceof TaskPlacement.OwnWindow);
+    }
+
+    /**
+     * Whether "Resume in Its Own Window" applies: an idle task from another
+     * worktree. For this window's own worktree its own window is this one,
+     * and plain Resume already does it. Pure.
+     */
+    static boolean resumesElsewhere(TaskRow row) {
+        return !row.running() && row.placement() instanceof TaskPlacement.Idle idle && !idle.thisWindow();
     }
 
     private interface RowAction {
@@ -120,8 +150,8 @@ final class TaskActions {
      */
     static void stop(Project from, TaskRow row, boolean closeWindow) {
         ManagedSessionId id = row.session().id();
-        Optional<Project> owner = owner(id);
-        if (owner.isEmpty()) {
+        AgentExecutionRegistry registry = AgentExecutionRegistry.getInstance();
+        if (!registry.isRunning(id)) {
             return;   // ended meanwhile
         }
         if (StopAgentsPlan.isWorking(row.activity())) {
@@ -133,12 +163,13 @@ final class TaskActions {
                 return;
             }
         }
-        Project window = owner.get();
-        DrydockStartupActivity.sessions(window).stopSession(id);
-        if (closeWindow) {
-            whenStopped(window, id, () -> {
-                if (!window.isDisposed()) {
-                    ProjectManager.getInstance().closeAndDispose(window);
+        // The window showing it, if any: an agent no window shows still stops.
+        Optional<Project> window = registry.host(id).filter(project -> !project.isDisposed());
+        registry.stop(id);
+        if (closeWindow && window.isPresent()) {
+            whenStopped(from, id, () -> {
+                if (!window.get().isDisposed()) {
+                    ProjectManager.getInstance().closeAndDispose(window.get());
                 }
             });
         }
@@ -150,8 +181,8 @@ final class TaskActions {
      * the worktree sees what the agent left, not what it is still writing.
      */
     static void done(Project from, TaskRow row) {
-        Optional<Project> owner = owner(row.session().id());
-        if (owner.isEmpty()) {
+        AgentExecutionRegistry registry = AgentExecutionRegistry.getInstance();
+        if (!registry.isRunning(row.session().id())) {
             SessionDone.show(from, row.session());
             return;
         }
@@ -164,8 +195,8 @@ final class TaskActions {
                 return;
             }
         }
-        DrydockStartupActivity.sessions(owner.get()).stopSession(row.session().id());
-        whenStopped(owner.get(), row.session().id(), () -> SessionDone.show(from, row.session()));
+        registry.stop(row.session().id());
+        whenStopped(from, row.session().id(), () -> SessionDone.show(from, row.session()));
     }
 
     /**
@@ -218,27 +249,19 @@ final class TaskActions {
                 + " running.";
     }
 
-    /** The open window running {@code id}. In-memory, EDT-safe. */
-    private static Optional<Project> owner(ManagedSessionId id) {
-        return Arrays.stream(ProjectManager.getInstance().getOpenProjects())
-                .filter(project -> !project.isDisposed())
-                .filter(project -> AgentExecutionService.getInstance(project).isRunning(id))
-                .findFirst();
-    }
-
     /**
-     * Runs {@code then} on the EDT once {@code id} no longer runs in
-     * {@code window}; if it still runs after {@link #STOP_WAIT_MILLIS}, says
-     * so instead. Closing before the process has ended would make the
+     * Runs {@code then} on the EDT once {@code id}'s agent has ended; if it
+     * still runs after {@link #STOP_WAIT_MILLIS}, says so instead, in
+     * {@code from}. Closing before the process has ended would make the
      * window's own close confirmation list the agent being stopped, and Done
      * would read a worktree the agent is still writing.
      */
-    private static void whenStopped(Project window, ManagedSessionId id, Runnable then) {
+    private static void whenStopped(Project from, ManagedSessionId id, Runnable then) {
+        AgentExecutionRegistry registry = AgentExecutionRegistry.getInstance();
         DrydockPluginService.getInstance().executor().execute(() -> {
             long deadline = System.currentTimeMillis() + STOP_WAIT_MILLIS;
-            boolean running = true;
-            while (!window.isDisposed() && (running = AgentExecutionService.getInstance(window).isRunning(id))
-                    && System.currentTimeMillis() < deadline) {
+            boolean running;
+            while ((running = registry.isRunning(id)) && System.currentTimeMillis() < deadline) {
                 try {
                     Thread.sleep(STOP_POLL_MILLIS);
                 } catch (InterruptedException e) {
@@ -246,12 +269,12 @@ final class TaskActions {
                     return;
                 }
             }
-            boolean stillRunning = running && !window.isDisposed();
+            boolean stillRunning = running;
             ApplicationManager.getApplication().invokeLater(() -> {
                 if (stillRunning) {
                     // Never carry on regardless: closing would ask about the
                     // agent again, and Done would read a tree it still writes.
-                    Messages.showInfoMessage(window, StopAgentsPlan.notStoppedYet(taskName(id)), "Drydock");
+                    Messages.showInfoMessage(from, StopAgentsPlan.notStoppedYet(taskName(id)), "Drydock");
                     return;
                 }
                 then.run();

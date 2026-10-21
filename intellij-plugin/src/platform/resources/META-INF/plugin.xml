@@ -25,10 +25,16 @@
         <applicationService
                 serviceImplementation="app.drydock.intellij.DrydockPluginService"/>
 
-        <!-- The window's live executions. A declarative projectService (unlike
-             the session service) because its only constructor argument is the
-             project, and because the platform disposing it on project close is
-             exactly the stop-everything hook the model needs. -->
+        <!-- Every agent process in the IDE and the window showing it, if any
+             (cross-project tabs). The window's service below is a view of it. -->
+        <applicationService
+                serviceImplementation="app.drydock.intellij.agent.AgentExecutionRegistry"/>
+
+        <!-- The window's view of the agents it shows, and the parent of its
+             consoles. A declarative projectService (unlike the session
+             service) because its only constructor argument is the project,
+             and because the platform disposing it on project close is the
+             backstop that stops whatever the window still shows. -->
         <projectService
                 serviceImplementation="app.drydock.intellij.agent.AgentExecutionService"/>
 
@@ -78,6 +84,8 @@
         <!-- "Claude needs you": the balloon raised when an agent starts
              waiting for the user (AttentionNotifier). -->
         <notificationGroup id="Drydock attention" displayType="BALLOON"/>
+        <!-- "<task> moved": a hosted agent's console went to its own window. -->
+        <notificationGroup id="Drydock moves" displayType="BALLOON"/>
 
         <postStartupActivity
                 implementation="app.drydock.intellij.startup.DrydockStartupActivity"/>
@@ -96,6 +104,10 @@
         <!-- Every window's agents, so the "needs you" balloon can appear in
              whichever window the user is in. -->
         <listener class="app.drydock.intellij.agent.AttentionNotifier"
+                  topic="app.drydock.intellij.agent.SessionActivityListener"/>
+        <!-- A hosted agent's files, open as non-project files somewhere, are
+             refreshed when its turn ends: no window watches its worktree. -->
+        <listener class="app.drydock.intellij.agent.HostedFileRefresher"
                   topic="app.drydock.intellij.agent.SessionActivityListener"/>
     </applicationListeners>
     <actions>

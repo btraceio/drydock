@@ -2,11 +2,17 @@ package app.drydock.intellij.agent;
 
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.RepositoryCatalog;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.session.DrydockSessionService;
 import app.drydock.intellij.startup.DrydockStartupActivity;
+import app.drydock.intellij.tasks.TaskWindows;
 
 import com.intellij.ide.impl.ProjectUtil;
+import com.intellij.notification.Notification;
+import com.intellij.notification.NotificationAction;
+import com.intellij.notification.NotificationGroupManager;
+import com.intellij.notification.NotificationType;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.fileEditor.FileEditorManager;
@@ -20,8 +26,13 @@ import com.intellij.openapi.progress.Task;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.project.ProjectManager;
 import com.intellij.openapi.ui.Messages;
+import com.intellij.openapi.util.Key;
+import com.intellij.openapi.util.text.StringUtil;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.openapi.wm.IdeFocusManager;
+import com.intellij.openapi.wm.ToolWindow;
+import com.intellij.openapi.wm.ToolWindowId;
+import com.intellij.openapi.wm.ToolWindowManager;
 import com.intellij.openapi.wm.WindowManager;
 import com.intellij.util.messages.MessageBusConnection;
 import org.jetbrains.annotations.NotNull;
@@ -30,13 +41,15 @@ import javax.swing.JFrame;
 
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
+import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.function.Function;
-import java.util.function.Predicate;
 
 /**
  * Opening, focusing, and resuming a session's console tab.
@@ -51,6 +64,9 @@ import java.util.function.Predicate;
 public final class AgentConsoles {
 
     private static final Logger LOG = System.getLogger(AgentConsoles.class.getName());
+
+    /** The location hash of the window Drydock last opened a console tab in, this IDE run. */
+    static final Key<String> OPENED_IN = Key.create("drydock.consoleOpenedIn");
 
     private AgentConsoles() {
     }
@@ -69,6 +85,9 @@ public final class AgentConsoles {
         Objects.requireNonNull(project, "project");
         Objects.requireNonNull(sessionId, "sessionId");
         AgentConsoleFile file = AgentConsoleFileSystem.getInstance().fileFor(sessionId);
+        // Drydock opened it, in this window, in this IDE run: a tab without
+        // the mark was restored by the IDE (see HostedLifecycle).
+        file.putUserData(OPENED_IN, project.getLocationHash());
         // A preview tab is replaced by the next file the user clicks; a live
         // agent must not be evictable that way.
         file.putUserData(FileEditorManagerKeys.FORBID_PREVIEW_TAB, Boolean.TRUE);
@@ -115,13 +134,13 @@ public final class AgentConsoles {
         if (project.isDisposed()) {
             return;
         }
-        AgentExecutionService.getInstance(project).execution(sessionId).ifPresent(execution -> {
-            AgentConsoleFile file = AgentConsoleFileSystem.getInstance().fileFor(sessionId);
-            FileEditorManager.getInstance(project).openFile(file, true);
-            pin(project, file);
-            IdeFocusManager.getInstance(project)
-                    .requestFocus(execution.console().getPreferredFocusableComponent(), true);
-        });
+        AgentExecutionService.getInstance(project).execution(sessionId).flatMap(AgentExecution::console)
+                .ifPresent(console -> {
+                    AgentConsoleFile file = AgentConsoleFileSystem.getInstance().fileFor(sessionId);
+                    FileEditorManager.getInstance(project).openFile(file, true);
+                    pin(project, file);
+                    IdeFocusManager.getInstance(project).requestFocus(console.getPreferredFocusableComponent(), true);
+                });
     }
 
     /**
@@ -179,20 +198,25 @@ public final class AgentConsoles {
                                       CompletableFuture<ManagedAgentSession>> launch) {
         Objects.requireNonNull(project, "project");
         Objects.requireNonNull(sessionId, "sessionId");
-        // One agent per session across the whole IDE, not just this window:
-        // AgentExecutionService only knows its own window, so Resume here
-        // while another window runs the session would start a second agent
-        // on the same conversation. Go to the running one instead.
-        Optional<Project> running = runningElsewhere(
-                Arrays.stream(ProjectManager.getInstance().getOpenProjects())
-                        .filter(open -> !open.isDisposed())
-                        .toList(),
-                project, open -> AgentExecutionService.getInstance(open).isRunning(sessionId));
-        if (running.isPresent()) {
-            ProjectUtil.focusProjectWindow(running.get(), true);
-            show(running.get(), sessionId);
-            focusConsole(running.get(), sessionId);
-            return;
+        // One agent per session across the whole IDE: the registry knows
+        // where it is shown, if anywhere, and a running one is gone to, never
+        // started a second time.
+        AgentExecutionRegistry registry = AgentExecutionRegistry.getInstance();
+        Optional<Project> host = registry.host(sessionId).filter(open -> !open.isDisposed());
+        switch (decide(registry.isRunning(sessionId), host, project)) {
+            case RAISE_HOST -> {
+                ProjectUtil.focusProjectWindow(host.orElseThrow(), true);
+                show(host.get(), sessionId);
+                focusConsole(host.get(), sessionId);
+                return;
+            }
+            case SHOW_HERE -> {
+                showHere(project, sessionId);
+                return;
+            }
+            case START -> {
+                // below
+            }
         }
         show(project, sessionId);
         ProgressManager.getInstance().run(new Task.Backgroundable(project, progressTitle, true) {
@@ -212,15 +236,156 @@ public final class AgentConsoles {
         });
     }
 
+    /** What a Resume, Start or Show does, given where the agent is shown now. */
+    public enum ShowDecision {
+        /** It runs in another window: go there. */
+        RAISE_HOST,
+        /** It runs and no other window shows it: show it here. */
+        SHOW_HERE,
+        /** Nothing runs: start it. */
+        START
+    }
+
     /**
-     * The window, other than {@code here}, whose agent for the session is
-     * running, if any. Pure.
+     * Pure: {@code running} anywhere in the IDE, {@code host} the window
+     * showing it, {@code here} the window asking.
      */
-    static <W> Optional<W> runningElsewhere(List<W> windows, W here, Predicate<W> runsSession) {
-        return windows.stream()
-                .filter(window -> !window.equals(here))
-                .filter(runsSession)
-                .findFirst();
+    public static <W> ShowDecision decide(boolean running, Optional<W> host, W here) {
+        if (!running) {
+            return ShowDecision.START;
+        }
+        return host.filter(window -> !window.equals(here)).isPresent() ? ShowDecision.RAISE_HOST : ShowDecision.SHOW_HERE;
+    }
+
+    /**
+     * Shows a running (or just-ended) agent in {@code project}, moving it
+     * from whichever window showed it before — that window's tab closes. Its
+     * history is replayed into the new console. EDT.
+     */
+    public static void showHere(Project project, ManagedSessionId sessionId) {
+        if (project.isDisposed() || AgentExecutionRegistry.getInstance().show(sessionId, project).isEmpty()) {
+            return;
+        }
+        show(project, sessionId);
+        focusConsole(project, sessionId);
+    }
+
+    /** Matches the plugin.xml notificationGroup id of the "moved" balloon. */
+    private static final String MOVES_GROUP = "Drydock moves";
+
+    /**
+     * "Open project window ↗" on a hosted tab (frame F3): opens or raises the
+     * agent's own worktree window and moves its console there — same process,
+     * history replayed. With {@code thenChanges}, then activates that window's
+     * Commit tool window ("Changes ↗"). The hosting tab closes, and a balloon
+     * in {@code host} confirms the move and offers to bring it back.
+     *
+     * <p>While the window opens the session is {@code moving}: the hosting
+     * tab says so and disables its strip, and closing the host meanwhile
+     * neither stops nor releases it. Every path clears that, including a
+     * window that does not open. EDT.</p>
+     */
+    public static void jumpToOwnWindow(Project host, ManagedSessionId sessionId, boolean thenChanges) {
+        jumpToOwnWindow(host, sessionId, thenChanges, true);
+    }
+
+    /**
+     * As {@link #jumpToOwnWindow(Project, ManagedSessionId, boolean)};
+     * {@code announce} false for an agent {@code host} did not show (a
+     * needs-you balloon's "Open project window"), where "moved" would be
+     * untrue. EDT.
+     */
+    public static void jumpToOwnWindow(Project host, ManagedSessionId sessionId, boolean thenChanges,
+                                       boolean announce) {
+        AgentExecutionRegistry registry = AgentExecutionRegistry.getInstance();
+        Optional<AgentExecution> execution = registry.execution(sessionId);
+        if (execution.isEmpty()) {
+            return;
+        }
+        Path directory = execution.get().workingDirectory();
+        SessionPlace place = execution.get().place();
+        registry.markMoving(sessionId, true);
+        runOrUndo(DrydockPluginService.getInstance().executor(), () -> {
+            Optional<Project> open;
+            try {
+                Path canonical = RepositoryCatalog.canonicalize(directory);
+                open = Arrays.stream(ProjectManager.getInstance().getOpenProjects())
+                        .filter(project -> !project.isDisposed() && project != host && project.getBasePath() != null)
+                        .filter(project -> RepositoryCatalog.canonicalize(Path.of(project.getBasePath())).equals(canonical))
+                        .findFirst();
+            } catch (RuntimeException e) {
+                LOG.log(Level.WARNING, () -> "Could not look for the window of " + directory + ": " + e);
+                open = Optional.empty();
+            }
+            Optional<Project> existing = open;
+            ApplicationManager.getApplication().invokeLater(() -> {
+                try {
+                    Project target = existing.filter(project -> !project.isDisposed())
+                            .orElseGet(() -> TaskWindows.openAsProject(directory));
+                    if (target == null || target.isDisposed()) {
+                        if (!host.isDisposed()) {
+                            Messages.showErrorDialog(host, "The window for " + place.label() + " did not open.",
+                                    "Drydock");
+                        }
+                        return;
+                    }
+                    if (registry.show(sessionId, target).isEmpty()) {
+                        return;   // the agent ended and nothing showed it
+                    }
+                    ProjectUtil.focusProjectWindow(target, true);
+                    show(target, sessionId);
+                    focusConsole(target, sessionId);
+                    if (thenChanges) {
+                        ToolWindow commit = ToolWindowManager.getInstance(target).getToolWindow(ToolWindowId.COMMIT);
+                        if (commit != null) {
+                            commit.activate(null);
+                        }
+                    }
+                    if (announce && !host.isDisposed()) {
+                        announceMove(host, target, sessionId, place);
+                    }
+                } finally {
+                    registry.markMoving(sessionId, false);
+                }
+            }, ModalityState.nonModal());
+        }, () -> registry.markMoving(sessionId, false));
+    }
+
+    /**
+     * Submits {@code task}; when the executor refuses it (the IDE shutting
+     * down), runs {@code undo} instead, so whatever was marked in progress
+     * for the task does not stay marked. Pure apart from the two runnables.
+     */
+    static void runOrUndo(Executor executor, Runnable task, Runnable undo) {
+        try {
+            executor.execute(task);
+        } catch (RejectedExecutionException e) {
+            undo.run();
+        }
+    }
+
+    /** The balloon in the window the agent left: where it went, and the way back. */
+    private static void announceMove(Project host, Project target, ManagedSessionId sessionId, SessionPlace place) {
+        String title = DrydockPluginService.getInstance().stateStore().state().sessions().stream()
+                .filter(session -> session.id().equals(sessionId))
+                .map(ManagedAgentSession::displayName)
+                .findFirst()
+                .orElse("The agent");
+        Notification notification = NotificationGroupManager.getInstance().getNotificationGroup(MOVES_GROUP)
+                .createNotification(StringUtil.escapeXmlEntities(JumpPlan.movedTitle(title)),
+                        StringUtil.escapeXmlEntities(JumpPlan.movedBody(place)), NotificationType.INFORMATION);
+        notification.addAction(NotificationAction.createSimpleExpiring("Go to window", () -> {
+            if (!target.isDisposed()) {
+                ProjectUtil.focusProjectWindow(target, true);
+            }
+        }));
+        notification.addAction(NotificationAction.createSimpleExpiring("Bring back here", () -> {
+            if (!host.isDisposed()) {
+                ProjectUtil.focusProjectWindow(host, true);
+                showHere(host, sessionId);
+            }
+        }));
+        notification.notify(host);
     }
 
     /**
@@ -300,7 +465,7 @@ public final class AgentConsoles {
     static void notImplementedYet(Project project, AgentConsoleStrip.StripAction action) {
         String what = switch (action) {
             case SHOW_CHANGES -> "The branch-vs-main review opens in the Commit tool window, which is not built yet.";
-            case STOP, RESUME, START, SESSION_MENU -> "";
+            case STOP, RESUME, START, OPEN_PROJECT_WINDOW, SESSION_MENU -> "";
         };
         Messages.showInfoMessage(project, what, "Drydock");
     }

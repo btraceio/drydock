@@ -33,7 +33,7 @@ class NewTaskPlanTest {
     private static Choice choice(String name, Optional<String> instructions, SessionMode mode, WorkIn workIn,
                                  String branch, Path folder) {
         return new Choice(name, instructions, AgentKind.CLAUDE, mode, workIn, branch, "origin/main", folder,
-                OpenIn.NEW_WINDOW);
+                OpenIn.OWN_WINDOW);
     }
 
     @Test
@@ -166,7 +166,7 @@ class NewTaskPlanTest {
     @Test
     void refusesWhenNoAgentIsAvailable() {
         Choice noAgent = new Choice("T", Optional.empty(), null, SessionMode.WRITES, WorkIn.NEW_WORKTREE, "x",
-                "origin/main", Path.of("/b/x"), OpenIn.NEW_WINDOW);
+                "origin/main", Path.of("/b/x"), OpenIn.OWN_WINDOW);
 
         assertEquals(Optional.of("No agent is installed. Install Claude, Codex or pi to start a task."),
                 NewTaskPlan.refusal(inputs(Optional.empty(), false), noAgent, folder -> false));
@@ -185,5 +185,11 @@ class NewTaskPlanTest {
         assertEquals("ci-cd-pipeline-fix", NewTaskPlan.branchFor("CI/CD pipeline fix", Set.of()));
         assertEquals("fix-a-b-parser", NewTaskPlan.branchFor("Fix a/b parser", Set.of()));
         assertEquals("worktree", NewTaskPlan.branchFor("Worktree", Set.of()));
+    }
+
+    @Test
+    void theDialogDefaultsToThisWindow() {
+        assertEquals(OpenIn.THIS_WINDOW, NewTaskPreset.empty().openIn());
+        assertEquals(Optional.empty(), NewTaskPreset.empty().fixedMode());
     }
 }

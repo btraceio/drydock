@@ -5,8 +5,10 @@ import app.drydock.domain.SessionActivity;
 import java.util.Optional;
 
 /**
- * Every decision and string of the close/quit confirmation ("Deactivate n
- * working agents?"), as pure functions.
+ * Every decision and string of the quit confirmation ("Deactivate n
+ * working agents?") and of deactivating one task from the tool window, as
+ * pure functions. Closing a window asks a different question
+ * ({@link CloseWindowPlan}).
  *
  * <p>The decision worth pinning is which agents count as <em>working</em>.
  * The handoff asks before stopping an agent that is busy or needs the user,
@@ -33,14 +35,9 @@ public final class StopAgentsPlan {
                 : "Deactivate " + working + " working agents?";
     }
 
-    /**
-     * What closing does to them. {@code place} is the window's
-     * {@code <repo> · <branch>}; a quit names no window because it closes
-     * every one of them.
-     */
-    public static String body(Optional<String> place, int working) {
-        String what = place.map(name -> "Closing " + name).orElse("Quitting");
-        return what + (working == 1 ? " deactivates it mid-task." : " deactivates them mid-task.");
+    /** What quitting does to them. */
+    public static String body(int working) {
+        return working == 1 ? "Quitting deactivates it mid-task." : "Quitting deactivates them mid-task.";
     }
 
     /** One listed agent: {@code <title> · <Agent>}, plus its window on a quit. */
@@ -54,8 +51,8 @@ public final class StopAgentsPlan {
     }
 
     /** The default button names what it does. */
-    public static String primaryLabel(boolean quitting) {
-        return quitting ? "Deactivate & Quit" : "Deactivate & Close";
+    public static String primaryLabel() {
+        return "Deactivate & Quit";
     }
 
     /** Deactivating one task from the Drydock tool window: the default button. */
@@ -71,8 +68,8 @@ public final class StopAgentsPlan {
     }
 
     /**
-     * Where "Don't ask again" is remembered: one setting for the close and
-     * quit question, another for stopping one task from the tool window, so
+     * Where "Don't ask again" is remembered: one setting for the quit
+     * question, another for stopping one task from the tool window, so
      * silencing one never silences the other.
      */
     public static String dontAskKey(boolean fromTree) {

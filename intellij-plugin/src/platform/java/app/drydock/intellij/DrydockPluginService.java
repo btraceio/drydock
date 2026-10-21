@@ -5,6 +5,7 @@ import app.drydock.agent.api.Agent;
 import app.drydock.agent.api.AgentRegistry;
 import app.drydock.agent.api.AgentContext;
 import app.drydock.app.ApplicationStateStore;
+import app.drydock.intellij.agent.QuitConfirmation;
 import app.drydock.intellij.agent.SessionActivityMonitor;
 import app.drydock.domain.ApplicationState;
 import app.drydock.domain.ManagedAgentSession;
@@ -64,6 +65,10 @@ public final class DrydockPluginService implements Disposable {
 
     public DrydockPluginService() {
         this(defaultBaseDir(), SharedProjectsFile.defaultFile(), DrydockPluginService::seedFromApp);
+        // The quit question, for as long as the plugin is loaded. Here, not in
+        // plugin.xml: the quit veto is an ApplicationListener added through
+        // the application, not a message-bus topic.
+        QuitConfirmation.register(this);
     }
 
     /**

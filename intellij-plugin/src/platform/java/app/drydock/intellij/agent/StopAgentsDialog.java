@@ -20,8 +20,8 @@ import java.awt.Component;
 import java.util.List;
 
 /**
- * "Deactivate n working agent(s)?", before a window close or an IDE quit
- * deactivates agents that are mid-task.
+ * "Deactivate n working agent(s)?", before an IDE quit deactivates agents
+ * that are mid-task, or the tool window deactivates one.
  *
  * <p>Copy comes from {@link StopAgentsPlan}. "Don't ask again" is the
  * dialog's own do-not-ask option, remembered as an application setting
@@ -40,8 +40,9 @@ public final class StopAgentsDialog extends DialogWrapper {
     private final String body;
     private final List<Row> rows;
 
-    StopAgentsDialog(@Nullable Project project, int working, String body, List<Row> rows, boolean quitting) {
-        this(project, working, body, rows, StopAgentsPlan.primaryLabel(quitting), StopAgentsPlan.dontAskKey(false));
+    /** The quit question. */
+    StopAgentsDialog(@Nullable Project project, int working, String body, List<Row> rows) {
+        this(project, working, body, rows, StopAgentsPlan.primaryLabel(), StopAgentsPlan.dontAskKey(false));
     }
 
     private StopAgentsDialog(@Nullable Project project, int working, String body, List<Row> rows,

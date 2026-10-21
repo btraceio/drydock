@@ -35,41 +35,59 @@ class TaskLauncherTest {
 
     @Test
     void unregisteredProjectIsRegisteredFirst() {
-        Steps steps = TaskLauncher.plan(choice(SessionMode.WRITES, WorkIn.NEW_WORKTREE, OpenIn.NEW_WINDOW),
-                Optional.empty(), MAIN, false);
+        Steps steps = TaskLauncher.plan(choice(SessionMode.WRITES, WorkIn.NEW_WORKTREE, OpenIn.OWN_WINDOW),
+                Optional.empty(), MAIN, false, false);
 
         assertTrue(steps.registerFirst());
     }
 
     @Test
     void newWorktreeCreatesThenOpensNewWindow() {
-        Steps steps = TaskLauncher.plan(choice(SessionMode.WRITES, WorkIn.NEW_WORKTREE, OpenIn.NEW_WINDOW),
-                REGISTERED, MAIN, false);
+        Steps steps = TaskLauncher.plan(choice(SessionMode.WRITES, WorkIn.NEW_WORKTREE, OpenIn.OWN_WINDOW),
+                REGISTERED, MAIN, false, false);
 
-        assertEquals(new Steps(false, true, FOLDER, OpenIn.NEW_WINDOW, false), steps);
+        assertEquals(new Steps(false, true, FOLDER, OpenIn.OWN_WINDOW, false, false), steps);
     }
 
     @Test
-    void thisWindowReplacesCurrent() {
+    void thisWindowOnAnotherWorktreeHostsTheTask() {
         Steps steps = TaskLauncher.plan(choice(SessionMode.WRITES, WorkIn.NEW_WORKTREE, OpenIn.THIS_WINDOW),
-                REGISTERED, MAIN, false);
+                REGISTERED, MAIN, true, false);
 
-        assertEquals(OpenIn.THIS_WINDOW, steps.openIn());
+        assertTrue(steps.hosted());
         assertFalse(steps.reuseOpenWindow());
     }
 
     @Test
-    void mainCheckoutReusesOpenWindow() {
-        Steps steps = TaskLauncher.plan(choice(SessionMode.WRITES, WorkIn.MAIN_CHECKOUT, OpenIn.NEW_WINDOW),
-                REGISTERED, MAIN, true);
+    void thisWindowOnItsOwnWorktreeIsAPlainTab() {
+        Steps steps = TaskLauncher.plan(choice(SessionMode.WRITES, WorkIn.MAIN_CHECKOUT, OpenIn.THIS_WINDOW),
+                REGISTERED, MAIN, true, true);
 
-        assertEquals(new Steps(false, false, MAIN, OpenIn.NEW_WINDOW, true), steps);
+        assertFalse(steps.hosted());
+        assertFalse(steps.reuseOpenWindow());
+    }
+
+    @Test
+    void itsOwnWindowOpensOrReusesAWindow() {
+        Steps steps = TaskLauncher.plan(choice(SessionMode.WRITES, WorkIn.EXISTING_WORKTREE, OpenIn.OWN_WINDOW),
+                REGISTERED, MAIN, true, false);
+
+        assertTrue(steps.reuseOpenWindow());
+        assertFalse(steps.hosted());
+    }
+
+    @Test
+    void mainCheckoutReusesOpenWindow() {
+        Steps steps = TaskLauncher.plan(choice(SessionMode.WRITES, WorkIn.MAIN_CHECKOUT, OpenIn.OWN_WINDOW),
+                REGISTERED, MAIN, true, false);
+
+        assertEquals(new Steps(false, false, MAIN, OpenIn.OWN_WINDOW, true, false), steps);
     }
 
     @Test
     void existingWorktreeNeverCreates() {
-        Steps steps = TaskLauncher.plan(choice(SessionMode.WRITES, WorkIn.EXISTING_WORKTREE, OpenIn.NEW_WINDOW),
-                REGISTERED, MAIN, false);
+        Steps steps = TaskLauncher.plan(choice(SessionMode.WRITES, WorkIn.EXISTING_WORKTREE, OpenIn.OWN_WINDOW),
+                REGISTERED, MAIN, false, false);
 
         assertFalse(steps.createWorktree());
         assertEquals(FOLDER, steps.workingDirectory());
@@ -77,8 +95,8 @@ class TaskLauncherTest {
 
     @Test
     void readOnlyNeverCreates() {
-        Steps steps = TaskLauncher.plan(choice(SessionMode.READ_ONLY, WorkIn.MAIN_CHECKOUT, OpenIn.NEW_WINDOW),
-                REGISTERED, MAIN, false);
+        Steps steps = TaskLauncher.plan(choice(SessionMode.READ_ONLY, WorkIn.MAIN_CHECKOUT, OpenIn.OWN_WINDOW),
+                REGISTERED, MAIN, false, false);
 
         assertFalse(steps.createWorktree());
         assertEquals(MAIN, steps.workingDirectory());

@@ -1,36 +1,61 @@
 package app.drydock.intellij.agent;
 
+import app.drydock.intellij.agent.AgentConsoles.ShowDecision;
+
 import org.junit.jupiter.api.Test;
 
-import java.util.List;
 import java.util.Optional;
-import java.util.Set;
+import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/** Where Resume, Start and Show land, given where the agent is shown now. */
 class AgentConsolesTest {
 
     @Test
-    void aSessionRunningInAnotherWindowIsFoundThere() {
-        Optional<String> elsewhere = AgentConsoles.runningElsewhere(List.of("host", "owner"), "host",
-                Set.of("owner")::contains);
-
-        assertEquals(Optional.of("owner"), elsewhere);
+    void aSessionRunningInAnotherWindowRaisesThatWindow() {
+        assertEquals(ShowDecision.RAISE_HOST, AgentConsoles.decide(true, Optional.of("B"), "A"));
     }
 
     @Test
-    void aSessionRunningOnlyHereIsNotElsewhere() {
-        Optional<String> elsewhere = AgentConsoles.runningElsewhere(List.of("host", "owner"), "host",
-                Set.of("host")::contains);
-
-        assertEquals(Optional.empty(), elsewhere);
+    void aRunningSessionNoWindowShowsIsShownHere() {
+        assertEquals(ShowDecision.SHOW_HERE, AgentConsoles.decide(true, Optional.empty(), "A"));
     }
 
     @Test
-    void aSessionRunningNowhereIsNotElsewhere() {
-        Optional<String> elsewhere = AgentConsoles.runningElsewhere(List.of("host", "owner"), "host",
-                window -> false);
+    void aSessionAlreadyHereStaysHere() {
+        assertEquals(ShowDecision.SHOW_HERE, AgentConsoles.decide(true, Optional.of("A"), "A"));
+    }
 
-        assertEquals(Optional.empty(), elsewhere);
+    @Test
+    void aStoppedSessionStarts() {
+        assertEquals(ShowDecision.START, AgentConsoles.decide(false, Optional.of("B"), "A"));
+    }
+
+    @Test
+    void aJumpTheExecutorRefusesIsUndone() {
+        AtomicBoolean undone = new AtomicBoolean();
+        Executor shutDown = task -> {
+            throw new RejectedExecutionException("shut down");
+        };
+
+        AgentConsoles.runOrUndo(shutDown, () -> { }, () -> undone.set(true));
+
+        assertTrue(undone.get());
+    }
+
+    @Test
+    void aJumpTheExecutorTakesIsNotUndone() {
+        AtomicBoolean undone = new AtomicBoolean();
+        AtomicBoolean ran = new AtomicBoolean();
+
+        AgentConsoles.runOrUndo(Runnable::run, () -> ran.set(true), () -> undone.set(true));
+
+        assertTrue(ran.get());
+        assertFalse(undone.get());
     }
 }

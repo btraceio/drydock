@@ -88,8 +88,8 @@ final class NewTaskDialog extends DialogWrapper {
     private final JBTextField branch = new JBTextField();
     private final ComboBox<String> start = new ComboBox<>();
     private final TextFieldWithBrowseButton folder = new TextFieldWithBrowseButton();
-    private final JBRadioButton newWindow = new JBRadioButton("New window", true);
-    private final JBRadioButton thisWindow = new JBRadioButton("This window");
+    private final JBRadioButton thisWindow = new JBRadioButton("This window", true);
+    private final JBRadioButton ownWindow = new JBRadioButton("Its own window");
     private final JBLabel warning = new JBLabel();
     private final JBLabel base = new JBLabel();
 
@@ -132,6 +132,8 @@ final class NewTaskDialog extends DialogWrapper {
             mainCheckout.setSelected(true);
         }
         setTitle("New task in " + inputs.repoName());
+        ownWindow.setSelected(preset.openIn() == OpenIn.OWN_WINDOW);
+        thisWindow.setSelected(preset.openIn() == OpenIn.THIS_WINDOW);
         init();
         regenerate();
         refresh();
@@ -224,7 +226,7 @@ final class NewTaskDialog extends DialogWrapper {
 
     private JPanel detailsForm() {
         group(newWorktree, mainCheckout);
-        group(newWindow, thisWindow);
+        group(thisWindow, ownWindow);
         newWorktree.addActionListener(e -> refresh());
         mainCheckout.addActionListener(e -> refresh());
 
@@ -306,7 +308,7 @@ final class NewTaskDialog extends DialogWrapper {
                     .addLabeledComponent("Folder:", folder)
                     .addComponentToRightColumn(baseRow);
         }
-        return builder.addLabeledComponent("Open in:", row(newWindow, thisWindow)).getPanel();
+        return builder.addLabeledComponent("Open in:", row(thisWindow, ownWindow)).getPanel();
     }
 
     /** Branch and folder follow the name until the user edits them. */
@@ -384,7 +386,7 @@ final class NewTaskDialog extends DialogWrapper {
         return new Choice(name.getText().strip(), text.isBlank() ? Optional.empty() : Optional.of(text), agent,
                 preset.mode(readOnly.isSelected()), workIn, chosenBranch,
                 startPoint(), chosenFolder,
-                thisWindow.isSelected() ? OpenIn.THIS_WINDOW : OpenIn.NEW_WINDOW);
+                ownWindow.isSelected() ? OpenIn.OWN_WINDOW : OpenIn.THIS_WINDOW);
     }
 
     /** The immutable submission captured before the dialog closed. */

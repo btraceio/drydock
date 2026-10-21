@@ -5,7 +5,6 @@ import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.SessionActivity;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.agent.AttentionPlan.Ask;
-import app.drydock.intellij.project.ProjectIdentity;
 import app.drydock.ui.AgentLabels;
 
 import com.intellij.ide.impl.ProjectUtil;
@@ -16,7 +15,6 @@ import com.intellij.notification.NotificationType;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.project.Project;
-import com.intellij.openapi.project.ProjectManager;
 import com.intellij.openapi.wm.IdeFocusManager;
 import com.intellij.openapi.wm.IdeFrame;
 import com.intellij.ui.SystemNotifications;
@@ -32,7 +30,9 @@ import java.util.Set;
 /**
  * "Needs you": one balloon in the focused window when an agent starts waiting
  * for the user, and an OS notification when the IDE is not the active app
- * (handoff surface 4).
+ * (handoff surface 4). The balloon names the agent by its own worktree, and
+ * reaches agents no window shows, offering to show them (cross-project tabs,
+ * frame F5).
  *
  * <p>Arrivals within {@link #COALESCE_MILLIS} of each other collapse into one
  * notification ("2 agents need you"). A session the user is already looking
@@ -80,23 +80,26 @@ public final class AttentionNotifier implements SessionActivityListener {
         List<ManagedSessionId> arrived = List.copyOf(pending);
         pending.clear();
         DrydockPluginService plugin = DrydockPluginService.getInstance();
+        AgentExecutionRegistry registry = AgentExecutionRegistry.getInstance();
         List<Ask> asks = new ArrayList<>();
         List<Waiting> waiting = new ArrayList<>();
         for (ManagedSessionId sessionId : arrived) {
             if (!plugin.activityMonitor().current(sessionId).equals(Optional.of(SessionActivity.NEEDS_ATTENTION))) {
                 continue;   // answered, or acknowledged, while coalescing
             }
-            Optional<Project> owner = windowRunning(sessionId);
+            Optional<AgentExecution> execution = registry.execution(sessionId).filter(AgentExecution::isRunning);
             Optional<ManagedAgentSession> session = sessionOf(plugin, sessionId);
-            if (owner.isEmpty() || session.isEmpty()) {
+            if (execution.isEmpty() || session.isEmpty()) {
                 continue;
             }
-            if (AgentConsoles.isBeingViewed(owner.get(), sessionId)) {
+            Optional<Project> host = execution.get().host().filter(project -> !project.isDisposed());
+            if (host.isPresent() && AgentConsoles.isBeingViewed(host.get(), sessionId)) {
                 continue;   // the editor acknowledges it
             }
-            waiting.add(new Waiting(sessionId, owner.get()));
+            waiting.add(new Waiting(sessionId, host));
+            // Named by its own worktree: a hosted agent is not the host's.
             asks.add(new Ask(AgentLabels.displayName(plugin.registry(), session.get().agentKind()),
-                    session.get().displayName(), ProjectIdentity.labelOf(owner.get())));
+                    session.get().displayName(), execution.get().place().label()));
         }
         if (asks.isEmpty()) {
             return;
@@ -105,19 +108,37 @@ public final class AttentionNotifier implements SessionActivityListener {
                 .createNotification(AttentionPlan.title(asks), AttentionPlan.htmlBody(asks),
                         NotificationType.INFORMATION);
         Waiting first = waiting.get(0);
-        notification.addAction(NotificationAction.createSimpleExpiring("Raise window",
-                () -> raise(first.project(), first.sessionId())));
-        notification.addAction(NotificationAction.createSimpleExpiring("Snooze",
-                () -> waiting.forEach(entry -> plugin.activityMonitor().acknowledge(entry.sessionId()))));
+        Optional<Project> focused = focusedProject();
+        List<String> actions = AttentionPlan.actions(first.host().isPresent());
+        if (first.host().isPresent()) {
+            notification.addAction(NotificationAction.createSimpleExpiring(actions.get(0),
+                    () -> raise(first.host().get(), first.sessionId())));
+            notification.addAction(NotificationAction.createSimpleExpiring(actions.get(1),
+                    () -> waiting.forEach(entry -> plugin.activityMonitor().acknowledge(entry.sessionId()))));
+        } else {
+            // No window shows it: show it where the user is, or in its own.
+            notification.addAction(NotificationAction.createSimpleExpiring(actions.get(0), () -> focusedProject()
+                    .ifPresent(here -> {
+                        AgentConsoles.showHere(here, first.sessionId());
+                        plugin.activityMonitor().acknowledge(first.sessionId());
+                    })));
+            notification.addAction(NotificationAction.createSimpleExpiring(actions.get(1), () -> focusedProject()
+                    .ifPresent(here -> {
+                        AgentConsoles.jumpToOwnWindow(here, first.sessionId(), false, false);
+                        plugin.activityMonitor().acknowledge(first.sessionId());
+                    })));
+        }
         // "One balloon in the focused window": the window the user is in,
-        // not necessarily the one the agent lives in.
-        notification.notify(focusedProject().orElse(first.project()));
-        if (!ApplicationManager.getApplication().isActive()) {
+        // not necessarily the one the agent is shown in.
+        Optional<Project> target = focused.or(first::host);
+        target.ifPresent(notification::notify);
+        if (!ApplicationManager.getApplication().isActive() || target.isEmpty()) {
             SystemNotifications.getInstance().notify(GROUP, AttentionPlan.title(asks), AttentionPlan.plainBody(asks));
         }
     }
 
-    private record Waiting(ManagedSessionId sessionId, Project project) {
+    /** One waiting agent, and the window showing it, if any. */
+    private record Waiting(ManagedSessionId sessionId, Optional<Project> host) {
     }
 
     /** EDT: the agent's window to the front, its tab selected, the keyboard in its terminal. */
@@ -132,15 +153,6 @@ public final class AttentionNotifier implements SessionActivityListener {
         // can miss this: the tab was often already selected, and raising one
         // IDE window over another does not activate the application.
         DrydockPluginService.getInstance().activityMonitor().acknowledge(sessionId);
-    }
-
-    private static Optional<Project> windowRunning(ManagedSessionId sessionId) {
-        for (Project project : ProjectManager.getInstance().getOpenProjects()) {
-            if (!project.isDisposed() && AgentExecutionService.getInstance(project).isRunning(sessionId)) {
-                return Optional.of(project);
-            }
-        }
-        return Optional.empty();
     }
 
     private static Optional<ManagedAgentSession> sessionOf(DrydockPluginService plugin, ManagedSessionId sessionId) {

@@ -40,7 +40,19 @@ public final class AgentConsoleTabPresentation implements EditorTabTitleProvider
         // The RO suffix rather than a separate chip: a tab has one line of
         // text, and a read-only session must be distinguishable from the
         // writing one next to it in the same window.
-        return session.readOnly() ? session.displayName() + " · RO" : session.displayName();
+        String title = session.readOnly() ? session.displayName() + " · RO" : session.displayName();
+        // A hosted tab carries the agent's repo before its title (F2).
+        return HostedTab.placeIn((AgentConsoleFile) file, project)
+                .map(place -> HostedTab.title(place.repository(), title))
+                .orElse(title);
+    }
+
+    @Override
+    public String getEditorTabTooltipText(Project project, VirtualFile file) {
+        if (!(file instanceof AgentConsoleFile console)) {
+            return null;
+        }
+        return HostedTab.placeIn(console, project).map(HostedTab::tooltip).orElse(null);
     }
 
     @Override

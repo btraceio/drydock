@@ -4,7 +4,7 @@ import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.RepositoryCatalog;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.agent.AgentConsoles;
-import app.drydock.intellij.agent.AgentExecutionService;
+import app.drydock.intellij.agent.AgentExecutionRegistry;
 
 import com.intellij.ide.impl.ProjectUtil;
 import com.intellij.openapi.application.ApplicationManager;
@@ -20,7 +20,6 @@ import java.util.List;
 import java.util.Optional;
 import java.util.function.Consumer;
 import java.util.function.Function;
-import java.util.function.Predicate;
 
 /**
  * "Switch to this task", from the Drydock tool window: its window to the
@@ -34,14 +33,13 @@ public final class TaskNavigator {
     }
 
     /**
-     * The window a task lives in: the one whose execution service knows the
-     * session (it runs, or ran, there), else the one opened on the task's
-     * working directory. Pure; {@code canonicalBase} gives a window's
-     * canonical project directory.
+     * The window a task lives in: the one showing its agent, else the one
+     * opened on the task's working directory. Pure; {@code canonicalBase}
+     * gives a window's canonical project directory.
      */
-    static <W> Optional<W> windowFor(List<W> windows, Predicate<W> ownsExecution,
+    static <W> Optional<W> windowFor(List<W> windows, Optional<W> showing,
                                      Function<W, Optional<Path>> canonicalBase, Path canonicalWorkingDirectory) {
-        Optional<W> owner = windows.stream().filter(ownsExecution).findFirst();
+        Optional<W> owner = showing.filter(windows::contains);
         if (owner.isPresent()) {
             return owner;
         }
@@ -81,8 +79,7 @@ public final class TaskNavigator {
             List<Project> open = Arrays.stream(ProjectManager.getInstance().getOpenProjects())
                     .filter(project -> !project.isDisposed())
                     .toList();
-            Optional<Project> window = windowFor(open,
-                    project -> AgentExecutionService.getInstance(project).knownSessions().contains(session.id()),
+            Optional<Project> window = windowFor(open, AgentExecutionRegistry.getInstance().host(session.id()),
                     project -> Optional.ofNullable(project.getBasePath())
                             .map(base -> RepositoryCatalog.canonicalize(Path.of(base))),
                     directory);

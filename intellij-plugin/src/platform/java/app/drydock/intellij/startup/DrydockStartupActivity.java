@@ -3,7 +3,6 @@ package app.drydock.intellij.startup;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.project.ProjectIdentity;
 import app.drydock.intellij.project.ProjectRepositoryService;
-import app.drydock.intellij.agent.AgentExecutionListener;
 import app.drydock.intellij.agent.AgentExecutionService;
 import app.drydock.intellij.session.DrydockSessionService;
 
@@ -78,10 +77,6 @@ public final class DrydockStartupActivity implements ProjectActivity {
         this.repositories = new ProjectRepositoryService(plugin, plugin.executor());
         this.sessions = new DrydockSessionService(
                 plugin, AgentExecutionService.getInstance(project), repositories, plugin.executor());
-        // The session service is the persistence half of the execution
-        // events: a terminated process has to reach the catalog whether or
-        // not any console tab is open to see it.
-        project.getMessageBus().connect(project).subscribe(AgentExecutionListener.TOPIC, this.sessions);
         // The repository resolution chains the plugin service's
         // initialization internally; composing explicitly keeps both halves
         // of the pre-warm visible in one future. A null repository (default

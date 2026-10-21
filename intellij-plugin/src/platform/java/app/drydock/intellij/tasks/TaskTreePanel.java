@@ -1,8 +1,11 @@
 package app.drydock.intellij.tasks;
 
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.SessionMode;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.DrydockSessionsListener;
+import app.drydock.intellij.agent.AgentConsoles;
+import app.drydock.intellij.agent.AgentExecutionListener;
 import app.drydock.intellij.agent.SessionActivityListener;
 import app.drydock.intellij.tasks.TaskNode.AddCurrentProject;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
@@ -37,6 +40,7 @@ import com.intellij.ui.PopupHandler;
 import com.intellij.ui.ScrollPaneFactory;
 import com.intellij.ui.SearchTextField;
 import com.intellij.ui.SimpleColoredComponent;
+import com.intellij.ui.awt.RelativePoint;
 import com.intellij.ui.treeStructure.Tree;
 import com.intellij.util.Alarm;
 import com.intellij.util.messages.MessageBusConnection;
@@ -267,8 +271,10 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 if (node instanceof AddCurrentProject add && acts) {
                     register(add);
                 } else if (node instanceof IdleWorktree idle && acts) {
-                    TaskLauncher.open(project, projectRootOf(path),
-                            Optional.of(new NewTaskPlan.FixedWorktree(idle.worktree(), idle.branch())));
+                    startOn(path, idle, event);
+                } else if (node instanceof TaskRow task && primaryButton && event.getClickCount() == 1
+                        && onLink(path, event)) {
+                    hereLink(task);
                 } else if (node instanceof TaskRow task && primaryButton && event.getClickCount() == 2) {
                     TaskNavigator.switchTo(task.session());
                 } else if (node instanceof IssueRow issue && primaryButton && event.getClickCount() == 2) {
@@ -299,6 +305,29 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         MessageBusConnection bus = ApplicationManager.getApplication().getMessageBus().connect(this);
         bus.subscribe(DrydockSessionsListener.TOPIC, (DrydockSessionsListener) () -> requestRebuild(true));
         bus.subscribe(SessionActivityListener.TOPIC, (SessionActivityListener) (id, activity) -> requestRebuild(false));
+        // Where an agent is shown changes nothing in the catalog: a move or a
+        // release only reaches the rows through the registry's own events.
+        bus.subscribe(AgentExecutionListener.TOPIC, new AgentExecutionListener() {
+            @Override
+            public void executionShown(ManagedSessionId sessionId, Project to) {
+                requestRebuild(false);
+            }
+
+            @Override
+            public void executionReleased(ManagedSessionId sessionId) {
+                requestRebuild(false);
+            }
+
+            @Override
+            public void executionStarted(ManagedSessionId sessionId) {
+                requestRebuild(false);
+            }
+
+            @Override
+            public void executionTerminated(ManagedSessionId sessionId, boolean stopRequested, Integer exitCode) {
+                requestRebuild(false);
+            }
+        });
         DrydockPluginService.getInstance().initialization().thenRun(() -> {
             // Initialization can finish after the tool window is gone; a
             // listener added then would outlive the panel.
@@ -560,6 +589,51 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             }
         }
         return treeNode;
+    }
+
+    /**
+     * {@code Start ▸} on an idle worktree (F1): the menu, or with ⌥ held its
+     * own window straight away. Each opens New task fixed to the worktree,
+     * preset to the choice. EDT.
+     */
+    private void startOn(TreePath path, IdleWorktree idle, MouseEvent event) {
+        Optional<Path> root = projectRootOf(path);
+        NewTaskPlan.FixedWorktree fixed = new NewTaskPlan.FixedWorktree(idle.worktree(), idle.branch());
+        if (event.isAltDown()) {
+            TaskLauncher.open(project, root, Optional.of(fixed),
+                    NewTaskPreset.start(NewTaskPlan.OpenIn.OWN_WINDOW, SessionMode.WRITES));
+            return;
+        }
+        String repo = repoOf(path).orElse(idle.worktree().getFileName().toString());
+        // Lexical, not canonical: this is the EDT. A miss only offers "Start
+        // in this window", which does the same thing on the window's own worktree.
+        boolean ownWorktree = Optional.ofNullable(project.getBasePath())
+                .map(base -> Path.of(base).toAbsolutePath().normalize().equals(idle.worktree()))
+                .orElse(false);
+        StartMenu.show(new RelativePoint(event), StartMenu.items(repo, idle.branch(), ownWorktree),
+                item -> TaskLauncher.open(project, root, Optional.of(fixed),
+                        NewTaskPreset.start(item.openIn(), item.mode())));
+    }
+
+    /** The display name of the project row above {@code path}. */
+    private static Optional<String> repoOf(TreePath path) {
+        for (Object component : path.getPath()) {
+            if (((DefaultMutableTreeNode) component).getUserObject() instanceof ProjectRow row) {
+                return Optional.of(row.project().displayName());
+            }
+        }
+        return Optional.empty();
+    }
+
+    /** A row's inline link (F5): show a not-shown agent here, or resume an idle one here. EDT. */
+    private void hereLink(TaskRow task) {
+        TaskTreeRenderer.link(task).ifPresent(link -> {
+            if (task.placement() instanceof TaskPlacement.NotShown) {
+                AgentConsoles.showHere(project, task.session().id());
+            } else {
+                AgentConsoles.resumeOrStart(project, task.session());
+            }
+        });
     }
 
     private void register(AddCurrentProject add) {

@@ -48,11 +48,14 @@ final class AgentConsoleStrip extends JPanel {
      * a fresh conversation versus one resumed by id — and only one of them is
      * ever offered.
      */
-    enum StripAction { STOP, RESUME, START, SHOW_CHANGES, SESSION_MENU }
+    enum StripAction { STOP, RESUME, START, SHOW_CHANGES, OPEN_PROJECT_WINDOW, SESSION_MENU }
 
     private final JBLabel state = new JBLabel();
     private final JBLabel chip = new JBLabel();
     private final JBLabel secondary = new JBLabel();
+    /** {@code from <repo> ⑂ <branch>}: only on a tab hosted from another worktree. */
+    private final JBLabel provenance = new JBLabel();
+    private final ActionLink openWindow;
     private final ActionLink changes;
     private final JButton primary = new JButton();
     private final ActionLink more;
@@ -66,6 +69,8 @@ final class AgentConsoleStrip extends JPanel {
         // between the two.
         this.changes = new ActionLink("Changes",
                 (ActionListener) event -> onAction.accept(StripAction.SHOW_CHANGES));
+        this.openWindow = new ActionLink("Open project window ↗",
+                (ActionListener) event -> onAction.accept(StripAction.OPEN_PROJECT_WINDOW));
         this.more = new ActionLink("⋯",
                 (ActionListener) event -> onAction.accept(StripAction.SESSION_MENU));
 
@@ -81,6 +86,7 @@ final class AgentConsoleStrip extends JPanel {
                 JBUI.Borders.customLine(JBColor.border(), 1),
                 JBUI.Borders.empty(0, 4)));
         secondary.setForeground(UIUtil.getContextHelpForeground());
+        provenance.setForeground(UIUtil.getContextHelpForeground());
         more.setToolTipText("Done with this session…");
         primary.addActionListener(event -> onAction.accept(primaryAction));
 
@@ -89,7 +95,14 @@ final class AgentConsoleStrip extends JPanel {
         add(chip);
         add(Box.createHorizontalStrut(JBUI.scale(8)));
         add(secondary);
+        add(Box.createHorizontalStrut(JBUI.scale(12)));
+        add(provenance);
+        // A fixed gap as well as the glue: in a narrow editor the glue
+        // collapses, and the provenance ran straight into the link.
+        add(Box.createHorizontalStrut(JBUI.scale(10)));
         add(Box.createHorizontalGlue());
+        add(openWindow);
+        add(Box.createHorizontalStrut(JBUI.scale(10)));
         add(changes);
         add(Box.createHorizontalStrut(JBUI.scale(10)));
         add(primary);
@@ -130,10 +143,18 @@ final class AgentConsoleStrip extends JPanel {
      *                         Resume that could only reach a picker
      * @param estimatedTokens  the resume cost estimate, when known
      * @param indexing         whether the project is still in dumb mode
+     * @param hostedFrom       where the agent comes from, when this tab hosts
+     *                         it from another worktree; adds the provenance
+     *                         and the jump to its own window
+     * @param folderMissing    whether a hosted agent's worktree folder is gone
+     * @param moving           whether the console is on its way to the
+     *                         agent's own window: the strip says so and its
+     *                         actions wait (typing still reaches the agent)
      */
     void update(ManagedAgentSession session, Optional<SessionActivity> activity, boolean running,
                 boolean readOnlyEnforced, String agentName, Duration age, Optional<Integer> changedFiles,
-                boolean resumable, Optional<Integer> estimatedTokens, boolean indexing) {
+                boolean resumable, Optional<Integer> estimatedTokens, boolean indexing,
+                Optional<SessionPlace> hostedFrom, boolean folderMissing, boolean moving) {
         // The window, not the catalog, is the authority on what is alive in
         // it: a row left in the running band with nothing running here reads
         // as not running (see AgentStripText.displayStatus).
@@ -151,6 +172,15 @@ final class AgentConsoleStrip extends JPanel {
         // The handoff puts Changes on the running strip only; a stopped
         // session's review is reached from the Commit tool window instead.
         changes.setVisible(running);
+        // A hosted tab's Changes opens in the agent's own window (F2/F3).
+        changes.setText(hostedFrom.isPresent() ? "Changes ↗" : "Changes");
+        provenance.setText(hostedFrom.map(place -> moving ? JumpPlan.opening(place)
+                : place.provenance() + (folderMissing ? " · folder missing" : "")).orElse(""));
+        provenance.setVisible(hostedFrom.isPresent());
+        openWindow.setVisible(hostedFrom.isPresent());
+        openWindow.setEnabled(!moving);
+        changes.setEnabled(!moving);
+        more.setEnabled(!moving);
 
         primaryAction = running ? StripAction.STOP
                 : resumable ? StripAction.RESUME
@@ -158,7 +188,7 @@ final class AgentConsoleStrip extends JPanel {
         primary.setText(running ? "■ Deactivate" : AgentStripText.primaryLabel(resumable, estimatedTokens));
         // Nothing to resume for an agent this build cannot run: the resume
         // would pick a provider at random or fail at the command builder.
-        primary.setEnabled(running || session.status() != SessionStatus.UNSUPPORTED_AGENT);
+        primary.setEnabled(!moving && (running || session.status() != SessionStatus.UNSUPPORTED_AGENT));
 
         revalidate();
         repaint();

@@ -11,11 +11,12 @@ import app.drydock.git.GhCliService.IssueListing;
 import app.drydock.git.WorktreeService;
 import app.drydock.git.WorktreeService.Worktree;
 import app.drydock.intellij.DrydockPluginService;
-import app.drydock.intellij.agent.AgentExecutionService;
+import app.drydock.intellij.agent.AgentExecutionRegistry;
+import app.drydock.intellij.agent.HostedLifecycle;
+import app.drydock.intellij.project.ProjectIdentity;
 import app.drydock.projects.SharedProject;
 
 import com.intellij.openapi.project.Project;
-import com.intellij.openapi.project.ProjectManager;
 
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
@@ -117,11 +118,23 @@ final class TaskTreeInputs implements AutoCloseable {
             sessions.add(session.withWorkingDirectory(RepositoryCatalog.canonicalize(session.workingDirectory())));
             activity.put(session.id(), plugin.activityMonitor().current(session.id()));
         }
-        Set<ManagedSessionId> running = new HashSet<>();
-        for (Project project : ProjectManager.getInstance().getOpenProjects()) {
-            if (!project.isDisposed()) {
-                running.addAll(AgentExecutionService.getInstance(project).runningSessions());
+        // Every live agent, shown in a window or not, and the window that shows it.
+        AgentExecutionRegistry executions = AgentExecutionRegistry.getInstance();
+        Set<ManagedSessionId> running = new HashSet<>(executions.runningSessions());
+        Map<ManagedSessionId, TaskTreeModel.Host> hosts = new HashMap<>();
+        // A running agent whose worktree folder is gone is marked, never
+        // stopped unasked.
+        for (ManagedAgentSession session : sessions) {
+            if (running.contains(session.id())
+                    && HostedLifecycle.folderGone(true, Files.isDirectory(session.workingDirectory()))) {
+                missing.add(session.workingDirectory());
             }
+        }
+        for (ManagedSessionId id : running) {
+            executions.host(id).filter(window -> !window.isDisposed() && window.getBasePath() != null)
+                    .ifPresent(window -> hosts.put(id, new TaskTreeModel.Host(
+                            RepositoryCatalog.canonicalize(Path.of(window.getBasePath())),
+                            ProjectIdentity.of(window).map(ProjectIdentity::repository).orElseGet(window::getName))));
         }
         Map<RepositoryId, Path> recordedRoots = new HashMap<>();
         for (Repository repository : plugin.stateStore().state().repositories()) {
@@ -142,7 +155,7 @@ final class TaskTreeInputs implements AutoCloseable {
             }
         }
         return new TaskTreeModel.Inputs(projects, sessions, byMain, mainRootOf, currentMain, currentWorking,
-                activity, running, missing, recordedRoots,
+                activity, running, hosts, missing, recordedRoots,
                 issues, plugin.sharedProjects().problem(), filter, viewFilter);
     }
 

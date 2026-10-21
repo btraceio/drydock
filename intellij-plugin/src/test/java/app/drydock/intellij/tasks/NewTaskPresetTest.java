@@ -73,4 +73,16 @@ class NewTaskPresetTest {
         assertEquals(Optional.of(SessionMode.READ_ONLY), preset.fixedMode());
         assertTrue(preset.instructionsRequired());
     }
+
+    @Test
+    void startMenuPresetsTheWindowAndFixesOnlyReadOnly() {
+        NewTaskPreset readOnlyHere = NewTaskPreset.start(NewTaskPlan.OpenIn.THIS_WINDOW, SessionMode.READ_ONLY);
+        NewTaskPreset ownWindow = NewTaskPreset.start(NewTaskPlan.OpenIn.OWN_WINDOW, SessionMode.WRITES);
+
+        assertEquals(NewTaskPlan.OpenIn.THIS_WINDOW, readOnlyHere.openIn());
+        assertEquals(Optional.of(SessionMode.READ_ONLY), readOnlyHere.fixedMode());
+        assertEquals(NewTaskPlan.OpenIn.OWN_WINDOW, ownWindow.openIn());
+        assertEquals(Optional.empty(), ownWindow.fixedMode());
+        assertEquals("", ownWindow.name());
+    }
 }
