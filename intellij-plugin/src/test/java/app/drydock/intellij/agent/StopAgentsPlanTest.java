@@ -27,11 +27,11 @@ class StopAgentsPlanTest {
 
     @Test
     void theCopyCountsAndNamesTheWindow() {
-        assertEquals("Stop 1 working agent?", StopAgentsPlan.title(1));
-        assertEquals("Stop 2 working agents?", StopAgentsPlan.title(2));
-        assertEquals("Closing dd-scratch · add-a-shout stops it mid-task.",
+        assertEquals("Deactivate 1 working agent?", StopAgentsPlan.title(1));
+        assertEquals("Deactivate 2 working agents?", StopAgentsPlan.title(2));
+        assertEquals("Closing dd-scratch · add-a-shout deactivates it mid-task.",
                 StopAgentsPlan.body(Optional.of("dd-scratch · add-a-shout"), 1));
-        assertEquals("Quitting stops them mid-task.", StopAgentsPlan.body(Optional.empty(), 3));
+        assertEquals("Quitting deactivates them mid-task.", StopAgentsPlan.body(Optional.empty(), 3));
     }
 
     @Test
@@ -44,25 +44,25 @@ class StopAgentsPlanTest {
 
     @Test
     void theDefaultButtonNamesWhatItDoes() {
-        assertEquals("Stop & Close", StopAgentsPlan.primaryLabel(false));
-        assertEquals("Stop & Quit", StopAgentsPlan.primaryLabel(true));
+        assertEquals("Deactivate & Close", StopAgentsPlan.primaryLabel(false));
+        assertEquals("Deactivate & Quit", StopAgentsPlan.primaryLabel(true));
     }
 
     @Test
     void primaryLabelForTreeStop() {
-        assertEquals("Stop anyway", StopAgentsPlan.primaryLabelForTree(false));
+        assertEquals("Deactivate anyway", StopAgentsPlan.primaryLabelForTree(false));
     }
 
     @Test
     void primaryLabelForTreeClose() {
-        assertEquals("Stop & Close", StopAgentsPlan.primaryLabelForTree(true));
+        assertEquals("Deactivate & Close", StopAgentsPlan.primaryLabelForTree(true));
     }
 
     @Test
     void treeBodySaysWhatStoppingKeeps() {
-        assertEquals("Stopping ends it mid-task. Its conversation can be resumed later.",
+        assertEquals("Deactivating ends it mid-task. Its conversation can be resumed later.",
                 StopAgentsPlan.treeBody(false));
-        assertEquals("Stopping ends it mid-task and closes its window. Open files are saved and the worktree "
+        assertEquals("Deactivating ends it mid-task and closes its window. Open files are saved and the worktree "
                 + "stays.", StopAgentsPlan.treeBody(true));
     }
 
@@ -77,7 +77,7 @@ class StopAgentsPlanTest {
 
     @Test
     void anAgentThatDoesNotStopIsReportedNotIgnored() {
-        assertEquals("\"Add farewell\" has not stopped yet. Try again in a moment.",
+        assertEquals("\"Add farewell\" has not deactivated yet. Try again in a moment.",
                 StopAgentsPlan.notStoppedYet("Add farewell"));
     }
 }

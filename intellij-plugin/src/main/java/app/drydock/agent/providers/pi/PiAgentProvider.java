@@ -30,9 +30,11 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -72,8 +74,11 @@ public final class PiAgentProvider implements AgentProvider {
 
     private static final String CONFIG_ENV_VAR = "DRYDOCK_MCP_CONFIG";
 
-    /** Read by {@code PiIdeMcpExtensionSource}: the stdio MCP servers, as JSON. */
+    /** Read by the native-MCP registration adapter: stdio servers, as JSON. */
     private static final String STDIO_SERVERS_ENV_VAR = "DRYDOCK_STDIO_MCP_SERVERS";
+
+    /** Read once and removed by {@code PiInitialPromptExtensionSource}. */
+    private static final String INITIAL_PROMPT_ENV_VAR = "DRYDOCK_PI_INITIAL_PROMPT";
 
     /** Bounds a hung filesystem: a stuck write costs a tab its tools, never its launch. */
     private static final Duration INSTALL_JOIN = Duration.ofSeconds(5);
@@ -89,8 +94,10 @@ public final class PiAgentProvider implements AgentProvider {
     private PiConversationSource conversationSource;
     private SessionIdDiscovery idDiscovery;
     private PiExtensionInstaller installer;
-    private PiExtensionInstaller ideInstaller;
+    private PiExtensionInstaller evalInstaller;
+    private PiExtensionInstaller initialPromptInstaller;
     private ExecutorService background;
+    private volatile String unsupportedVersion;
 
     /**
      * Memoised on success only. Caching a failure would turn one timeout on a
@@ -102,7 +109,8 @@ public final class PiAgentProvider implements AgentProvider {
      */
     private final AtomicReference<CompletableFuture<PiCapabilities>> capabilities = new AtomicReference<>();
     private final AtomicReference<CompletableFuture<Path>> extensionFile = new AtomicReference<>();
-    private final AtomicReference<CompletableFuture<Path>> ideExtensionFile = new AtomicReference<>();
+    private final AtomicReference<CompletableFuture<Path>> evalExtensionFile = new AtomicReference<>();
+    private final AtomicReference<CompletableFuture<Path>> initialPromptExtensionFile = new AtomicReference<>();
 
     /** Public no-arg constructor required by {@link java.util.ServiceLoader}. */
     public PiAgentProvider() {
@@ -114,7 +122,7 @@ public final class PiAgentProvider implements AgentProvider {
         this(locator, new HostBinaryLocator("node", nodeFallbacks()), null);
     }
 
-    /** For tests: inject a version probe, so the bridge form can be exercised without a real pi. */
+    /** For tests: inject a version probe, so command construction does not require a real Pi install. */
     PiAgentProvider(PiExecutableLocator locator, Supplier<PiCapabilities> probe) {
         this(locator, new HostBinaryLocator("node", nodeFallbacks()), probe);
     }
@@ -142,24 +150,38 @@ public final class PiAgentProvider implements AgentProvider {
         this.conversationSource = new PiConversationSource(store);
         this.idDiscovery = new SnapshotClaimDiscovery(store);
         this.installer = new PiExtensionInstaller(ctx.stateDirectory());
-        this.ideInstaller = PiExtensionInstaller.ideMcp(ctx.stateDirectory());
+        this.evalInstaller = PiExtensionInstaller.eval(ctx.stateDirectory());
+        this.initialPromptInstaller = PiExtensionInstaller.initialPrompt(ctx.stateDirectory());
         this.background = ctx.backgroundExecutor();
     }
 
     @Override
     public Optional<Path> locateExecutable() {
-        return locator.locate();
+        Optional<Path> executable = locator.locate();
+        if (executable.isEmpty()) {
+            return Optional.empty();
+        }
+        PiCapabilities found = currentCapabilities();
+        if (!found.supported()) {
+            unsupportedVersion = found.version();
+            return Optional.empty();
+        }
+        unsupportedVersion = null;
+        return executable;
     }
 
     @Override
     public String describeSearched() {
+        if (unsupportedVersion != null) {
+            return "Pi 1.x or newer is required; found " + unsupportedVersion + " (" + locator.describeSearched() + ")";
+        }
         return locator.describeSearched();
     }
 
     /** Probes {@code pi --version} (blocking; off the FX thread per the SPI contract). */
     @Override
     public AgentCapabilities probeCapabilities() {
-        return new AgentCapabilities(false, true, PiVersionProbe.probe(locator.locate().orElse(null)));
+        return new AgentCapabilities(false, true, currentCapabilities().version());
     }
 
     @Override
@@ -180,14 +202,7 @@ public final class PiAgentProvider implements AgentProvider {
         return false;
     }
 
-    /**
-     * Pi has no MCP client of its own, and by design: its README says so
-     * outright ("No MCP. Build CLI tools with READMEs, or build an extension
-     * that adds MCP support"). This takes the second half of that sentence at
-     * its word — drydock ships the extension, and it reads the same owner-only
-     * JSON config Claude is handed, so the delivery really is
-     * {@code CONFIG_FILE} rather than a fourth kind.
-     */
+    /** Pi 1.x consumes the standard config through its native MCP client. */
     @Override
     public McpDelivery mcpDelivery() {
         return McpDelivery.CONFIG_FILE;
@@ -195,24 +210,25 @@ public final class PiAgentProvider implements AgentProvider {
 
     @Override
     public LaunchPlan buildCreateCommand(CreateContext c) {
-        if (c.remote().isPresent()) {
+        if (c.remote().isPresent() || !currentCapabilities().supported()) {
             return LaunchPlan.unsupported();   // Pi declines remote
         }
-        String pi = piCommand(c.mcp(), c.stdioMcpServers(), c.evalMode());
-        // pi [options] [--] [@files...] [messages...]: the task is the first
-        // message, after "--" so a leading dash cannot read as an option.
-        String withTask = c.initialPrompt()
-                .map(prompt -> pi + " -- " + AgentCommands.shellQuote(prompt))
-                .orElse(pi);
+        PiCommand pi = piCommand(c.mcp(), c.stdioMcpServers(), c.evalMode(), c.initialPrompt());
+        // The extension submits after Pi has mounted its UI and initialized
+        // the session. If its owner-only file could not be installed, retain
+        // the CLI positional form as a degraded but functional fallback.
+        String withTask = c.initialPrompt().isPresent() && !pi.initialPromptInjected()
+                ? pi.command() + " -- " + AgentCommands.shellQuote(c.initialPrompt().get())
+                : pi.command();
         return LaunchPlan.of(withTask, false);   // DISCOVERED: no id
     }
 
     @Override
     public LaunchPlan buildResumeCommand(ResumeContext r) {
-        if (r.remote().isPresent()) {
+        if (r.remote().isPresent() || !currentCapabilities().supported()) {
             return LaunchPlan.unsupported();
         }
-        String pi = piCommand(r.mcp(), r.stdioMcpServers(), r.evalMode());
+        String pi = piCommand(r.mcp(), r.stdioMcpServers(), r.evalMode(), Optional.empty()).command();
         if (r.agentSessionId().isPresent()) {
             return LaunchPlan.of(pi + " --session " + AgentCommands.shellQuote(r.agentSessionId().get()), false);
         }
@@ -310,28 +326,9 @@ public final class PiAgentProvider implements AgentProvider {
         return name == null ? "" : name.toString();   // "/" has no file name
     }
 
-    /**
-     * The {@code pi} invocation up to any subcommand: the env prefix, then one
-     * {@code -e} per extension the launch needs.
-     *
-     * <p>Two extensions, offered independently. Drydock's bridge needs
-     * {@code DRYDOCK_MCP_CONFIG}; its env var and its {@code -e} are omitted
-     * together -- a config path with no extension to read it, or an extension
-     * with no config to find, is worse than neither. The IDE extension needs
-     * {@code DRYDOCK_STDIO_MCP_SERVERS} and a pi with native MCP support
-     * (0.99.0), and is omitted the same way. Inside the IDE only the second is
-     * ever offered: there is no Drydock server there.</p>
-     *
-     * <p>When {@code eval} is set, {@code DRYDOCK_EVAL=1} is added to the
-     * {@code env} prefix: the bridge extension reads it and registers an
-     * Anthropic provider override carrying {@code x-target-account: eval}, so
-     * this session's model traffic is charged to the eval account. The flag
-     * is a non-secret boolean, so it rides the {@code env} argv like the path
-     * literals in {@link AgentCommands#envPrefix} rather than going through
-     * the credential-only {@code fromFiles} channel. The stdio servers ride it
-     * the same way: a command, a port and paths, no credential.</p>
-     */
-    private String piCommand(Optional<McpAccess> access, List<StdioMcpServer> stdioServers, boolean eval) {
+    /** Builds the Pi invocation and installs only the adapters this launch needs. */
+    private PiCommand piCommand(Optional<McpAccess> access, List<StdioMcpServer> stdioServers, boolean eval,
+                                Optional<String> initialPrompt) {
         Optional<Path> configFile = access.flatMap(McpAccess::credentialFile);
         // PI_SESSION_ID: the user's pi models.json sends `x-claude-code-session-id: $PI_SESSION_ID`
         // to omlx_proxy for per-session correlation, but pi does NOT set PI_SESSION_ID in its
@@ -340,52 +337,60 @@ public final class PiAgentProvider implements AgentProvider {
         // a fresh shell) fails provider auth. drydock sets it per launch -- a non-secret id,
         // so it rides the env argv like DRYDOCK_EVAL.
         String piSessionId = "PI_SESSION_ID=" + AgentCommands.shellQuote(java.util.UUID.randomUUID().toString()) + " ";
-        if (configFile.isEmpty() && stdioServers.isEmpty()) {
-            return evalEnvPrefix(eval) + piSessionId + piBinary();
-        }
-        // Start everything, then join everything: the cost is max(probe, writes),
-        // not the sum. Sequencing them would put up to 35 s in front of the first
-        // Pi tab of an app run, inside the stage that gates surface creation.
-        CompletableFuture<PiCapabilities> caps = capabilitiesFuture();
-        CompletableFuture<Path> bridge = configFile.isPresent() ? extensionFuture(extensionFile, installer) : null;
-        CompletableFuture<Path> ide = stdioServers.isEmpty() ? null : extensionFuture(ideExtensionFile, ideInstaller);
+        boolean hasMcp = configFile.isPresent() || !stdioServers.isEmpty();
+        CompletableFuture<Path> mcp = hasMcp ? extensionFuture(extensionFile, installer) : null;
+        CompletableFuture<Path> evalSetup = eval ? extensionFuture(evalExtensionFile, evalInstaller) : null;
+        CompletableFuture<Path> prompt = initialPrompt.isEmpty() ? null
+                : extensionFuture(initialPromptExtensionFile, initialPromptInstaller);
 
-        // Join ALL before branching, even when a gate is about to fail. An
-        // early return would leave an install running into a directory a test's
-        // @TempDir is about to delete, and in production would write a file no
-        // launch will read.
-        PiCapabilities probed = join(caps, PROBE_JOIN, PiCapabilities.of("unknown"));
-        Path bridgeExtension = bridge == null ? null : installed(extensionFile, bridge);
-        Path ideExtension = ide == null ? null : installed(ideExtensionFile, ide);
+        Path mcpExtension = mcp == null ? null : installed(extensionFile, mcp);
+        Path evalExtension = evalSetup == null ? null : installed(evalExtensionFile, evalSetup);
+        Path promptExtension = prompt == null ? null : installed(initialPromptExtensionFile, prompt);
 
-        boolean useBridge = configFile.isPresent() && probed.supportsBridge() && bridgeExtension != null;
-        if (configFile.isPresent() && !useBridge) {
-            LOG.log(Level.INFO, "Pi bridge declined for this launch (drydock tools unavailable): "
-                    + declineReason(probed, bridgeExtension));
+        boolean useMcp = hasMcp && mcpExtension != null;
+        if (hasMcp && !useMcp) {
+            LOG.log(Level.WARNING, "Pi MCP registration adapter could not be installed; launching without MCP servers");
         }
-        boolean useIde = !stdioServers.isEmpty() && probed.supportsMcpServers() && ideExtension != null;
-        if (!stdioServers.isEmpty() && !useIde) {
-            LOG.log(Level.INFO, "Pi IDE MCP servers declined for this launch: "
-                    + ideDeclineReason(probed, ideExtension));
+        boolean useEval = eval && evalExtension != null;
+        if (eval && !useEval) {
+            LOG.log(Level.WARNING, "Pi eval extension could not be installed; launching without eval routing");
+        }
+        boolean useInitialPrompt = initialPrompt.isPresent() && promptExtension != null;
+        if (initialPrompt.isPresent() && !useInitialPrompt) {
+            LOG.log(Level.WARNING, "Pi initial-prompt extension could not be installed; using CLI fallback");
         }
 
-        StringBuilder command = new StringBuilder(useBridge
+        StringBuilder command = new StringBuilder(useMcp && configFile.isPresent()
                 ? AgentCommands.envPrefix(ENV_SCRUB, Map.of(CONFIG_ENV_VAR, configFile.get()), Map.of())
-                        + evalEnvSuffix(eval)
-                : evalEnvPrefix(eval));
+                : AgentCommands.envPrefix(ENV_SCRUB));
+        if (useEval) {
+            command.append("DRYDOCK_EVAL=1 ");
+        }
         command.append(piSessionId);
-        if (useIde) {
+        if (useInitialPrompt) {
+            String encoded = Base64.getEncoder().encodeToString(
+                    initialPrompt.orElseThrow().getBytes(StandardCharsets.UTF_8));
+            command.append(INITIAL_PROMPT_ENV_VAR).append('=')
+                    .append(AgentCommands.shellQuote(encoded)).append(' ');
+        }
+        if (useMcp && !stdioServers.isEmpty()) {
             command.append(STDIO_SERVERS_ENV_VAR).append('=')
                     .append(AgentCommands.shellQuote(stdioServersJson(stdioServers))).append(' ');
         }
         command.append(piBinary());
-        if (useBridge) {
-            command.append(" -e ").append(AgentCommands.shellQuote(bridgeExtension.toString()));
+        if (useMcp) {
+            command.append(" -e ").append(AgentCommands.shellQuote(mcpExtension.toString()));
         }
-        if (useIde) {
-            command.append(" -e ").append(AgentCommands.shellQuote(ideExtension.toString()));
+        if (useEval) {
+            command.append(" -e ").append(AgentCommands.shellQuote(evalExtension.toString()));
         }
-        return command.toString();
+        if (useInitialPrompt) {
+            command.append(" -e ").append(AgentCommands.shellQuote(promptExtension.toString()));
+        }
+        return new PiCommand(command.toString(), useInitialPrompt);
+    }
+
+    private record PiCommand(String command, boolean initialPromptInjected) {
     }
 
     /**
@@ -394,7 +399,7 @@ public final class PiAgentProvider implements AgentProvider {
      * earlier in this app run and was memoised, whose file was since removed
      * or whose state directory was wiped. {@code pi -e <missing>} exits 1 and
      * takes the whole tab down with it, which is exactly the invariant this
-     * bridge must not violate. Degrade this one launch, and un-latch the memo
+     * extension must not violate. Degrade this one launch, and un-latch the memo
      * so the next launch reinstalls instead of repeating this same false
      * success forever.
      */
@@ -422,45 +427,10 @@ public final class PiAgentProvider implements AgentProvider {
         return JsonWriter.write(JsonValue.JsonObject.empty().put("mcpServers", entries)).strip();
     }
 
-    /** Names which of the IDE extension's two gate conditions declined, for the diagnostic log. */
-    private static String ideDeclineReason(PiCapabilities probed, Path ideExtension) {
-        StringBuilder reason = new StringBuilder();
-        if (!probed.supportsMcpServers()) {
-            reason.append(probed.versionParsed()
-                    ? "pi " + probed.version() + " predates native MCP support (0.99.0)"
-                    : "pi's version could not be read (probed as \"" + probed.version() + "\")");
-        }
-        if (ideExtension == null) {
-            if (reason.length() > 0) {
-                reason.append("; ");
-            }
-            reason.append("the IDE extension could not be installed");
-        }
-        return reason.toString();
-    }
-
-    /**
-     * The env prefix for a launch with no bridge extension: scrub vars, plus
-     * the eval flag when set.
-     */
-    private String evalEnvPrefix(boolean eval) {
-        return AgentCommands.envPrefix(ENV_SCRUB) + evalEnvSuffix(eval);
-    }
-
-    /**
-     * {@code DRYDOCK_EVAL=1 } to splice into an existing {@code env} prefix,
-     * or empty. {@link AgentCommands#envPrefix} always emits the literal
-     * {@code env} for Pi's non-empty scrub list, so the result is a valid
-     * {@code env VAR=value} assignment rather than a bare shell assignment.
-     */
-    private static String evalEnvSuffix(boolean eval) {
-        return eval ? "DRYDOCK_EVAL=1 " : "";
-    }
-
     private CompletableFuture<PiCapabilities> capabilitiesFuture() {
         Supplier<PiCapabilities> work = probe != null
                 ? probe
-                : () -> PiCapabilities.of(PiVersionProbe.probe(locator.locate().orElse(null)));
+                : () -> PiCapabilities.of(probeInstalledVersion());
         // A version that parsed and is simply below the floor is worth
         // keeping -- re-probing cannot change it. A version that did not
         // parse (including the probe's own "unknown") is not: it might be a
@@ -469,21 +439,23 @@ public final class PiAgentProvider implements AgentProvider {
         return memoised(capabilities, work, PiCapabilities::versionParsed);
     }
 
-    /** Names which of {@code piCommand}'s two gate conditions declined, for the F1 diagnostic log. */
-    private static String declineReason(PiCapabilities probed, Path bridgeExtension) {
-        StringBuilder reason = new StringBuilder();
-        if (!probed.supportsBridge()) {
-            reason.append(probed.versionParsed()
-                    ? "pi " + probed.version() + " is below the 0.80.3 floor"
-                    : "pi's version could not be read (probed as \"" + probed.version() + "\")");
+    /** Probes through the same interpreter choice used for an actual launch. */
+    private String probeInstalledVersion() {
+        Optional<Path> pi = locator.locate();
+        if (pi.isEmpty()) {
+            return "unknown";
         }
-        if (bridgeExtension == null) {
-            if (reason.length() > 0) {
-                reason.append("; ");
+        if (isNodeScript(pi.get())) {
+            Optional<Path> node = nodeLocator.locate();
+            if (node.isPresent()) {
+                return PiVersionProbe.probeCommand(List.of(node.get().toString(), pi.get().toString()));
             }
-            reason.append("the bridge extension could not be installed");
         }
-        return reason.toString();
+        return PiVersionProbe.probeCommand(List.of(pi.get().toString()));
+    }
+
+    private PiCapabilities currentCapabilities() {
+        return join(capabilitiesFuture(), PROBE_JOIN, PiCapabilities.of("unknown"));
     }
 
     /**
@@ -564,7 +536,7 @@ public final class PiAgentProvider implements AgentProvider {
             Thread.currentThread().interrupt();
             return fallback;
         } catch (ExecutionException | TimeoutException e) {
-            LOG.log(Level.WARNING, "Pi bridge setup unavailable; launching without drydock tools: "
+            LOG.log(Level.WARNING, "Pi extension setup unavailable; launching with reduced integration: "
                     + e.getMessage());
             return fallback;
         }

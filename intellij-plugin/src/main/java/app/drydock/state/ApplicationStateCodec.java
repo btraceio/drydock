@@ -70,7 +70,7 @@ import java.util.Set;
  *       "mode": "WRITES" | "READ_ONLY",
  *       "workingDirectory": "/absolute/normalized/path",
  *       "worktreeRoot": "/absolute/normalized/path" | null,
- *       "status": "INACTIVE" | "STARTING" | "RUNNING" | "EXITED" | "FAILED" | "MISSING_WORKING_DIRECTORY",
+ *       "status": "IDLE" | "STARTING" | "RUNNING" | "STOPPING" | "FAILED" | "MISSING_WORKING_DIRECTORY" | "UNSUPPORTED_AGENT" | "INACTIVE" | "EXITED",
  *       "createdAt": "<ISO-8601 instant>",
  *       "lastOpenedAt": "<ISO-8601 instant>",
  *       "lastExitCode": <int> | null,
@@ -188,7 +188,20 @@ import java.util.Set;
  * the reader dragged the tour's step panel to) is lenient the same way: absent,
  * not a number, non-finite or not positive decodes to 0, the default width; the
  * view clamps a stored value at the point of use rather than rewriting it here.
- * No version bump was needed and downgrades stay non-destructive.</p>
+ * No version bump was needed and downgrades stay non-destructive. The
+ * session {@code status} values were remapped by the execution-sessions
+ * migration (still within schemaVersion 2, see {@link
+ * #statusFromPersisted}): {@code toJson} writes whatever the in-memory
+ * status is (legacy {@code INACTIVE}/{@code EXITED} included, while older
+ * callers still produce them), while {@code fromJson} normalizes through
+ * that single seam — legacy {@code INACTIVE}/{@code EXITED} decode as
+ * {@link SessionStatus#IDLE}, and a persisted transient {@code STARTING}/
+ * {@code RUNNING}/{@code STOPPING} (written mid-run, read after a crash or
+ * restart, when no execution can still be live) decodes as {@code IDLE}
+ * too. No row is dropped by the migration; the durable error states
+ * {@code FAILED}, {@code MISSING_WORKING_DIRECTORY} and {@code
+ * UNSUPPORTED_AGENT} decode as themselves so failures stay visible.
+ * Unrecognized status values still fail the decode, exactly as before.</p>
  */
 public final class ApplicationStateCodec {
 
@@ -534,7 +547,7 @@ public final class ApplicationStateCodec {
             Optional<Path> worktreeRoot = optionalString(obj, "worktreeRoot").map(Path::of);
             SessionStatus status = parsedKind.isEmpty()
                     ? SessionStatus.UNSUPPORTED_AGENT
-                    : SessionStatus.valueOf(requireString(obj, "status"));
+                    : statusFromPersisted(requireString(obj, "status"));
             Instant createdAt = Instant.parse(requireString(obj, "createdAt"));
             Instant lastOpenedAt = Instant.parse(requireString(obj, "lastOpenedAt"));
             Optional<Integer> lastExitCode = obj.get("lastExitCode") instanceof JsonNumber n
@@ -582,6 +595,41 @@ public final class ApplicationStateCodec {
         } catch (IllegalArgumentException | DateTimeException e) {
             throw new StateDecodeException("Malformed session entry: " + e.getMessage());
         }
+    }
+
+    /**
+     * The single normalization seam between a persisted {@code status} wire
+     * value and the in-memory {@link SessionStatus} (the execution-sessions
+     * migration, plan T1). Decode-side only: {@link #toJson} writes whatever
+     * the in-memory status is.
+     *
+     * <ul>
+     * <li>Legacy durable states {@code INACTIVE} and {@code EXITED} decode
+     * to {@link SessionStatus#IDLE} — the durable no-process state — so
+     * every old state file stays readable without losing a row, an agent
+     * id, or a workspace (AC6).</li>
+     * <li>Transient execution projections {@code STARTING}, {@code RUNNING}
+     * and {@code STOPPING} are only true while this process owns the live
+     * execution; one that persisted survived a restart, so it decodes as
+     * {@code IDLE} rather than being trusted or silently dropping the
+     * row.</li>
+     * <li>{@code IDLE}, {@code FAILED}, {@code MISSING_WORKING_DIRECTORY} and
+     * {@code UNSUPPORTED_AGENT} are durable and decode as themselves —
+     * errors stay visible error states, and a failure keeps its identity.</li>
+     * <li>Anything else is malformed input and throws {@link
+     * StateDecodeException}, exactly as an unrecognized enum constant did
+     * before: a session's status is strict decode, unlike the cosmetic UI
+     * fields.</li>
+     * </ul>
+     */
+    static SessionStatus statusFromPersisted(String wire) {
+        return switch (wire) {
+            case "IDLE", "INACTIVE", "EXITED", "STARTING", "RUNNING", "STOPPING" -> SessionStatus.IDLE;
+            case "FAILED" -> SessionStatus.FAILED;
+            case "MISSING_WORKING_DIRECTORY" -> SessionStatus.MISSING_WORKING_DIRECTORY;
+            case "UNSUPPORTED_AGENT" -> SessionStatus.UNSUPPORTED_AGENT;
+            default -> throw new StateDecodeException("Unrecognized session status: " + wire);
+        };
     }
 
     private static Optional<ManagedSessionId> parseSessionId(String value) {

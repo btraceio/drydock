@@ -10,12 +10,18 @@ import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.domain.SshRemote;
+import app.drydock.git.GhCliService.IssueListing;
+import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.WorktreeService.Worktree;
 import app.drydock.intellij.tasks.TaskNode.AddCurrentProject;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
+import app.drydock.intellij.tasks.TaskNode.IssueRow;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
+import app.drydock.intellij.tasks.TaskNode.Section;
+import app.drydock.intellij.tasks.TaskNode.SectionKind;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
+import app.drydock.intellij.tasks.TaskTreeModel.ViewFilter;
 import app.drydock.projects.SharedProject;
 
 import org.junit.jupiter.api.Test;
@@ -54,8 +60,10 @@ class TaskTreeModelTest {
         final Set<ManagedSessionId> running = new HashSet<>();
         final Set<Path> missing = new HashSet<>();
         final Map<RepositoryId, Path> recordedRoots = new HashMap<>();
+        final Map<Path, IssueListing> issues = new HashMap<>();
         Optional<String> problem = Optional.empty();
         String filter = "";
+        ViewFilter viewFilter = ViewFilter.ALL;
 
         In project(Path root) {
             projects.add(SharedProject.local(RepositoryId.newId(), root, root.getFileName().toString(), T));
@@ -78,7 +86,7 @@ class TaskTreeModelTest {
 
         TaskTreeModel.Inputs build() {
             return new TaskTreeModel.Inputs(projects, sessions, worktrees, mainRootOf, currentMain, currentWorking,
-                    activity, running, missing, recordedRoots, problem, filter);
+                    activity, running, missing, recordedRoots, issues, problem, filter, viewFilter);
         }
     }
 
@@ -110,6 +118,28 @@ class TaskTreeModelTest {
     private static List<Path> projectRoots(List<TaskNode> nodes) {
         return nodes.stream().filter(ProjectRow.class::isInstance).map(node -> ((ProjectRow) node).project().root())
                 .toList();
+    }
+
+    private static Optional<Section> section(ProjectRow row, SectionKind kind) {
+        return row.children().stream().filter(Section.class::isInstance).map(Section.class::cast)
+                .filter(section -> section.kind() == kind).findFirst();
+    }
+
+    /** Session entities, flattening the optional Active/Inactive presentation folders. */
+    private static List<TaskNode> sessionNodes(ProjectRow row) {
+        List<TaskNode> children = section(row, SectionKind.SESSIONS).orElseThrow().children();
+        if (children.stream().allMatch(Section.class::isInstance)) {
+            return children.stream().map(Section.class::cast).flatMap(group -> group.children().stream()).toList();
+        }
+        return children;
+    }
+
+    private static List<TaskNode> worktreeNodes(ProjectRow row) {
+        return section(row, SectionKind.WORKTREES).orElseThrow().children();
+    }
+
+    private static List<TaskNode> issueNodes(ProjectRow row) {
+        return section(row, SectionKind.ISSUES).orElseThrow().children();
     }
 
     @Test
@@ -166,9 +196,11 @@ class TaskTreeModelTest {
 
         ProjectRow row = projectRow(TaskTreeModel.build(in.build()), DRYDOCK);
 
-        TaskRow task = assertInstanceOf(TaskRow.class, row.children().get(0));
+        TaskRow task = assertInstanceOf(TaskRow.class, sessionNodes(row).get(0));
         assertEquals(Optional.of("task-centric"), task.branch());
-        assertEquals(1, row.children().size());
+        assertEquals(1, sessionNodes(row).size());
+        assertTrue(section(row, SectionKind.WORKTREES).isEmpty(),
+                "a worktree with a session must not also appear under Worktrees");
     }
 
     @Test
@@ -180,7 +212,7 @@ class TaskTreeModelTest {
 
         ProjectRow row = projectRow(TaskTreeModel.build(in.build()), BTRACE);
 
-        WorktreeGroup group = assertInstanceOf(WorktreeGroup.class, row.children().get(0));
+        WorktreeGroup group = assertInstanceOf(WorktreeGroup.class, sessionNodes(row).get(0));
         assertEquals("add-jfr-events", group.branch());
         assertEquals(2, group.tasks().size());
     }
@@ -195,7 +227,107 @@ class TaskTreeModelTest {
 
         ProjectRow row = projectRow(TaskTreeModel.build(in.build()), BTRACE);
 
-        assertEquals(List.of(new IdleWorktree(idle, "old-experiment")), row.children());
+        assertEquals(List.of(new IdleWorktree(idle, "old-experiment")), worktreeNodes(row));
+        assertTrue(section(row, SectionKind.SESSIONS).isEmpty());
+    }
+
+    @Test
+    void worktreesSectionExcludesWorktreesThatHaveSessions() {
+        Path occupied = Path.of("/wt/btrace-active");
+        Path sessionless = Path.of("/wt/btrace-idle");
+        In in = new In().project(BTRACE)
+                .worktree(BTRACE, occupied, "active-work")
+                .worktree(BTRACE, sessionless, "idle-work");
+        in.sessions.add(session("Finished task", occupied));
+
+        ProjectRow row = projectRow(TaskTreeModel.build(in.build()), BTRACE);
+
+        assertEquals(List.of(new IdleWorktree(sessionless, "idle-work")), worktreeNodes(row));
+        assertEquals(Optional.of("active-work"), ((TaskRow) sessionNodes(row).get(0)).branch());
+    }
+
+    @Test
+    void issuesIncludeUnassignedItemsAndSortByMostRecentlyUpdated() {
+        In in = new In().project(BTRACE);
+        OpenIssue olderAssigned = new OpenIssue(4, "Assigned issue", Optional.of("https://example/4"),
+                List.of("bug"), List.of("somebody"), Optional.of(T));
+        OpenIssue newerUnassigned = new OpenIssue(9, "Unassigned issue", Optional.of("https://example/9"),
+                List.of("profiling"), List.of(), Optional.of(T.plusSeconds(60)));
+        in.issues.put(BTRACE, new IssueListing.Listed(List.of(olderAssigned, newerUnassigned)));
+
+        ProjectRow row = projectRow(TaskTreeModel.build(in.build()), BTRACE);
+
+        assertEquals(List.of(9, 4), issueNodes(row).stream()
+                .map(IssueRow.class::cast).map(issue -> issue.issue().number()).toList());
+    }
+
+    @Test
+    void issueSearchMatchesNumberTitleAndLabel() {
+        In in = new In().project(BTRACE);
+        in.issues.put(BTRACE, new IssueListing.Listed(List.of(
+                new OpenIssue(9, "Allocation regression", Optional.empty(), List.of("profiling"), List.of(),
+                        Optional.of(T)),
+                new OpenIssue(10, "Documentation", Optional.empty(), List.of("docs"), List.of(), Optional.of(T)))));
+        in.filter = "#9";
+
+        ProjectRow row = projectRow(TaskTreeModel.build(in.build()), BTRACE);
+
+        IssueRow issue = assertInstanceOf(IssueRow.class, issueNodes(row).getFirst());
+        assertEquals(9, issue.issue().number());
+    }
+
+    @Test
+    void activeViewContainsOnlyRunningSessions() {
+        Path idle = Path.of("/wt/btrace-idle");
+        In in = new In().project(BTRACE).worktree(BTRACE, idle, "unused-worktree");
+        ManagedAgentSession active = session("Running task", BTRACE);
+        in.sessions.addAll(List.of(active, session("Stopped task", BTRACE.resolve("stopped"))));
+        in.running.add(active.id());
+        in.issues.put(BTRACE, new IssueListing.Listed(List.of(
+                new OpenIssue(9, "Allocation regression", Optional.empty(), List.of(), List.of(), Optional.of(T)))));
+        in.viewFilter = ViewFilter.ACTIVE;
+
+        ProjectRow row = projectRow(TaskTreeModel.build(in.build()), BTRACE);
+
+        assertEquals(List.of("Running task"), sessionNodes(row).stream()
+                .map(TaskRow.class::cast).map(task -> task.session().displayName()).toList());
+        assertTrue(section(row, SectionKind.WORKTREES).isEmpty());
+        assertTrue(section(row, SectionKind.ISSUES).isEmpty());
+    }
+
+    @Test
+    void inactiveViewContainsOnlyStoppedSessionsAndHidesEmptyProjects() {
+        In in = new In().project(BTRACE).project(ALPHA).current(BTRACE, BTRACE);
+        ManagedAgentSession active = session("Running task", BTRACE);
+        in.sessions.addAll(List.of(active, session("Stopped task", ALPHA)));
+        in.running.add(active.id());
+        in.viewFilter = ViewFilter.INACTIVE;
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build());
+
+        assertEquals(List.of(ALPHA), projectRoots(nodes));
+        assertEquals(List.of("Stopped task"), sessionNodes(projectRow(nodes, ALPHA)).stream()
+                .map(TaskRow.class::cast).map(task -> task.session().displayName()).toList());
+    }
+
+    @Test
+    void issuesViewContainsOnlyIssuesAndComposesWithSearch() {
+        In in = new In().project(BTRACE).project(ALPHA);
+        in.sessions.add(session("Allocation session", BTRACE));
+        in.issues.put(BTRACE, new IssueListing.Listed(List.of(
+                new OpenIssue(9, "Allocation regression", Optional.empty(), List.of("profiling"), List.of(),
+                        Optional.of(T)),
+                new OpenIssue(10, "Documentation", Optional.empty(), List.of("docs"), List.of(), Optional.of(T)))));
+        in.viewFilter = ViewFilter.ISSUES;
+        in.filter = "profiling";
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build());
+
+        assertEquals(List.of(BTRACE), projectRoots(nodes));
+        ProjectRow row = projectRow(nodes, BTRACE);
+        assertTrue(section(row, SectionKind.SESSIONS).isEmpty());
+        assertEquals(List.of(9), issueNodes(row).stream().map(IssueRow.class::cast)
+                .map(issue -> issue.issue().number()).toList());
     }
 
     @Test
@@ -203,7 +335,7 @@ class TaskTreeModelTest {
         In in = new In().project(BTRACE).current(BTRACE, BTRACE);
         in.sessions.add(session("Explain the agent loader", BTRACE));
 
-        TaskRow row = (TaskRow) projectRow(TaskTreeModel.build(in.build()), BTRACE).children().get(0);
+        TaskRow row = (TaskRow) sessionNodes(projectRow(TaskTreeModel.build(in.build()), BTRACE)).get(0);
 
         assertEquals(Optional.of("main"), row.branch());
         assertTrue(row.isThisWindow());
@@ -257,8 +389,8 @@ class TaskTreeModelTest {
 
         ProjectRow row = projectRow(TaskTreeModel.build(in.build()), BTRACE);
 
-        assertEquals(1, row.children().size());
-        assertEquals(Optional.empty(), ((TaskRow) row.children().get(0)).branch());
+        assertEquals(1, sessionNodes(row).size());
+        assertEquals(Optional.empty(), ((TaskRow) sessionNodes(row).get(0)).branch());
     }
 
     @Test
@@ -272,8 +404,8 @@ class TaskTreeModelTest {
 
         ProjectRow row = projectRow(TaskTreeModel.build(in.build()), DRYDOCK);
 
-        assertEquals(1, row.children().size());
-        assertEquals(orphan.id(), ((TaskRow) row.children().get(0)).session().id());
+        assertEquals(1, sessionNodes(row).size());
+        assertEquals(orphan.id(), ((TaskRow) sessionNodes(row).get(0)).session().id());
     }
 
     @Test
@@ -307,7 +439,11 @@ class TaskTreeModelTest {
         in.running.addAll(List.of(running.id(), waiting.id()));
         in.activity.put(waiting.id(), Optional.of(SessionActivity.NEEDS_ATTENTION));
 
-        List<String> order = projectRow(TaskTreeModel.build(in.build()), ALPHA).children().stream()
+        ProjectRow project = projectRow(TaskTreeModel.build(in.build()), ALPHA);
+        Section sessions = section(project, SectionKind.SESSIONS).orElseThrow();
+        assertEquals(List.of(SectionKind.ACTIVE, SectionKind.INACTIVE), sessions.children().stream()
+                .map(Section.class::cast).map(Section::kind).toList());
+        List<String> order = sessionNodes(project).stream()
                 .map(node -> ((TaskRow) node).session().displayName()).toList();
 
         assertEquals(List.of("waiting", "running", "recent", "old"), order);

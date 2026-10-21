@@ -11,8 +11,10 @@ import com.intellij.openapi.progress.ProgressIndicator;
 import com.intellij.openapi.progress.ProgressManager;
 import com.intellij.openapi.progress.Task;
 import com.intellij.openapi.project.Project;
-import com.intellij.openapi.startup.StartupActivity;
+import com.intellij.openapi.startup.ProjectActivity;
 import com.intellij.openapi.util.Key;
+import kotlin.Unit;
+import kotlin.coroutines.Continuation;
 import org.jetbrains.annotations.NotNull;
 
 import java.lang.System.Logger;
@@ -46,7 +48,7 @@ import java.util.concurrent.TimeoutException;
  * task whose completion — success, failure, timeout, or the non-git early
  * return — always clears it.</p>
  */
-public final class DrydockStartupActivity implements StartupActivity {
+public final class DrydockStartupActivity implements ProjectActivity {
 
     private static final Logger LOG = System.getLogger(DrydockStartupActivity.class.getName());
 
@@ -126,7 +128,7 @@ public final class DrydockStartupActivity implements StartupActivity {
     }
 
     @Override
-    public void runActivity(@NotNull Project project) {
+    public Object execute(@NotNull Project project, @NotNull Continuation<? super Unit> continuation) {
         DrydockStartupActivity started = instance(project);
         // Visible progress for the warm-up (AC12): a cancellable background
         // task in the status bar; every exit path in awaitWarmup clears it.
@@ -139,6 +141,10 @@ public final class DrydockStartupActivity implements StartupActivity {
                 ProjectIdentity.resolve(project);
             }
         });
+        // The warm-up itself belongs to the background task above. This
+        // ProjectActivity only installs that visibly-progressing work, so it
+        // has nothing to suspend on and completes immediately.
+        return Unit.INSTANCE;
     }
 
     private void awaitWarmup() {

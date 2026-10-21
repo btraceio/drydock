@@ -131,11 +131,14 @@ class JsonApplicationStateRepositoryTest {
         Repository repo = sampleRepository(repoRoot);
         Path workingDirectory = Files.createDirectory(tempDir.resolve("session-working-dir"));
         Path worktreeRoot = Files.createDirectory(tempDir.resolve("session-worktree"));
+        // IDLE is the durable no-process state, so it round-trips as
+        // itself; the legacy statuses it replaced migrate at load (see
+        // loadMigratesLegacyAndTransientStatusesToIdle).
         ManagedAgentSession session = new ManagedAgentSession(
                 ManagedSessionId.newId(), repo.id(), "my session",
                 new AgentBinding(AgentKind.CLAUDE, Optional.of("claude-session-id-abc"), Optional.of("claude-session-name")),
                 new SessionWorkspace(workingDirectory, Optional.of(worktreeRoot), true),
-                SessionStatus.EXITED, Instant.parse("2026-01-03T00:00:00Z"), Instant.parse("2026-01-04T00:00:00Z"), Optional.of(1),
+                SessionStatus.IDLE, Instant.parse("2026-01-03T00:00:00Z"), Instant.parse("2026-01-04T00:00:00Z"), Optional.of(1),
                 PrLink.of(PrState.OPEN, Optional.of(128)), false, Optional.empty());
         ApplicationState state = new ApplicationState(List.of(repo), List.of(session), List.of(), WorkspaceUiState.empty(), List.of());
 
@@ -156,7 +159,7 @@ class JsonApplicationStateRepositoryTest {
                 ManagedSessionId.newId(), repo.id(), "bare session",
                 new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
                 new SessionWorkspace(workingDirectory, Optional.empty(), true),
-                SessionStatus.INACTIVE, Instant.parse("2026-01-03T00:00:00Z"), Instant.parse("2026-01-04T00:00:00Z"), Optional.empty(),
+                SessionStatus.IDLE, Instant.parse("2026-01-03T00:00:00Z"), Instant.parse("2026-01-04T00:00:00Z"), Optional.empty(),
                 PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty());
         ApplicationState state = new ApplicationState(List.of(repo), List.of(session), List.of(), WorkspaceUiState.empty(), List.of());
 
@@ -164,6 +167,52 @@ class JsonApplicationStateRepositoryTest {
         repository.save(state);
 
         assertEquals(state, repository.load());
+    }
+
+    @Test
+    void loadMigratesLegacyAndTransientStatusesToIdle() throws IOException {
+        // Execution-sessions migration, at the repository level: a legacy
+        // INACTIVE/EXITED row and a cold persisted transient
+        // STARTING/RUNNING/STOPPING row all decode as IDLE — the durable
+        // no-process state — while error statuses stay themselves. No row
+        // is dropped and identities survive (AC6).
+        Path repoRoot = Files.createDirectory(tempDir.resolve("repo-root"));
+        Repository repo = sampleRepository(repoRoot);
+        Path workingDirectory = Files.createDirectory(tempDir.resolve("session-working-dir"));
+        List<ManagedAgentSession> sessions = List.of(
+                sessionWithStatus(repo, workingDirectory, SessionStatus.INACTIVE),
+                sessionWithStatus(repo, workingDirectory, SessionStatus.EXITED),
+                sessionWithStatus(repo, workingDirectory, SessionStatus.STARTING),
+                sessionWithStatus(repo, workingDirectory, SessionStatus.RUNNING),
+                sessionWithStatus(repo, workingDirectory, SessionStatus.STOPPING),
+                sessionWithStatus(repo, workingDirectory, SessionStatus.FAILED));
+        ApplicationState state = new ApplicationState(List.of(repo), sessions, List.of(),
+                WorkspaceUiState.empty(), List.of());
+
+        JsonApplicationStateRepository repository = new JsonApplicationStateRepository(stateFile());
+        repository.save(state);
+
+        ApplicationState loaded = repository.load();
+
+        assertEquals(6, loaded.sessions().size(), "the migration must not drop a row");
+        for (int i = 0; i < 5; i++) {
+            assertEquals(SessionStatus.IDLE, loaded.sessions().get(i).status(), "row " + i);
+        }
+        assertEquals(SessionStatus.FAILED, loaded.sessions().get(5).status(), "errors stay error states");
+        for (int i = 0; i < 6; i++) {
+            assertEquals(state.sessions().get(i).id(), loaded.sessions().get(i).id());
+            assertEquals(state.sessions().get(i).binding(), loaded.sessions().get(i).binding());
+            assertEquals(state.sessions().get(i).workspace(), loaded.sessions().get(i).workspace());
+        }
+    }
+
+    private static ManagedAgentSession sessionWithStatus(Repository repo, Path workingDirectory, SessionStatus status) {
+        return new ManagedAgentSession(
+                ManagedSessionId.newId(), repo.id(), "migrating session",
+                new AgentBinding(AgentKind.CLAUDE, Optional.of("conv-of-" + status), Optional.empty()),
+                new SessionWorkspace(workingDirectory, Optional.empty(), true),
+                status, Instant.parse("2026-01-03T00:00:00Z"), Instant.parse("2026-01-04T00:00:00Z"), Optional.empty(),
+                PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty());
     }
 
     @Test
@@ -254,6 +303,9 @@ class JsonApplicationStateRepositoryTest {
         assertEquals(1, loaded.sessions().size());
         assertEquals(PrState.NONE, loaded.sessions().get(0).prState());
         assertTrue(loaded.sessions().get(0).prNumber().isEmpty());
+        // The legacy INACTIVE status decodes as IDLE (execution-sessions
+        // migration) while the lenient PR fields decode to NONE/empty.
+        assertEquals(SessionStatus.IDLE, loaded.sessions().get(0).status());
     }
 
     @Test

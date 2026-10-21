@@ -9,6 +9,7 @@ import app.drydock.domain.RepositoryId;
 import app.drydock.git.BranchListing;
 import app.drydock.git.BranchRef;
 import app.drydock.git.GitStatusService;
+import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.WorktreeService;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.actions.SessionDialogs;
@@ -105,10 +106,25 @@ public final class TaskLauncher {
      * worktree.
      */
     public static void open(Project from, Optional<Path> mainRoot, Optional<FixedWorktree> fixed) {
+        open(from, mainRoot, fixed, NewTaskPreset.empty());
+    }
+
+    /** Opens a writable new-worktree task prefilled from a GitHub issue. */
+    static void implement(Project from, Path mainRoot, OpenIssue issue) {
+        open(from, Optional.of(mainRoot), Optional.empty(), NewTaskPreset.implement(issue));
+    }
+
+    /** Opens a read-only main-checkout task prefilled to analyze a GitHub issue. */
+    static void summarize(Project from, Path mainRoot, OpenIssue issue) {
+        open(from, Optional.of(mainRoot), Optional.empty(), NewTaskPreset.summarize(issue));
+    }
+
+    private static void open(Project from, Optional<Path> mainRoot, Optional<FixedWorktree> fixed,
+                             NewTaskPreset preset) {
         ProgressManager.getInstance().run(new Task.Backgroundable(from, "Preparing new task…", true) {
             @Override
             public void run(@NotNull ProgressIndicator indicator) {
-                prepareAndShow(from, mainRoot, fixed, Optional.empty());
+                prepareAndShow(from, mainRoot, fixed, Optional.empty(), preset);
             }
         });
     }
@@ -137,10 +153,11 @@ public final class TaskLauncher {
                 }
                 switch (BranchTaskEntry.forRef(fullRefName, worktrees).orElse(null)) {
                     case BranchTaskEntry.InWorktree in ->
-                            prepareAndShow(from, Optional.of(repositoryRoot), Optional.of(in.worktree()), Optional.empty());
+                            prepareAndShow(from, Optional.of(repositoryRoot), Optional.of(in.worktree()), Optional.empty(),
+                                    NewTaskPreset.empty());
                     case BranchTaskEntry.StartFrom branchOff ->
                             prepareAndShow(from, Optional.of(repositoryRoot), Optional.empty(),
-                                    Optional.of(branchOff.startPoint()));
+                                    Optional.of(branchOff.startPoint()), NewTaskPreset.empty());
                     case null -> LOG.log(Level.DEBUG, "No task entry for " + fullRefName);
                 }
             }
@@ -149,16 +166,16 @@ public final class TaskLauncher {
 
     /** Off the EDT: resolves the dialog's inputs, then shows it; {@code start} overrides the default start point. */
     private static void prepareAndShow(Project from, Optional<Path> mainRoot, Optional<FixedWorktree> fixed,
-                                       Optional<String> start) {
+                                       Optional<String> start, NewTaskPreset preset) {
         Optional<NewTaskPlan.Inputs> inputs = prepare(from, mainRoot, fixed, start);
         if (inputs.isEmpty()) {
             return;
         }
         Optional<Supplier<Optional<String>>> refChooser = refChooser(inputs.get().project().root());
         ApplicationManager.getApplication().invokeLater(() -> {
-            NewTaskDialog dialog = new NewTaskDialog(from, inputs.get(), refChooser);
+            NewTaskDialog dialog = new NewTaskDialog(from, inputs.get(), refChooser, preset);
             if (dialog.showAndGet()) {
-                start(from, inputs.get(), dialog.choice());
+                start(from, inputs.get(), dialog.acceptedChoice());
             }
         }, ModalityState.nonModal());
     }

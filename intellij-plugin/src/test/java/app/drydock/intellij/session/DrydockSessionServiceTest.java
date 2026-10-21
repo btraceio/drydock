@@ -375,6 +375,23 @@ class DrydockSessionServiceTest {
     }
 
     @Test
+    void createHandsTheAcceptedTaskToTheProviderVerbatim(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.PI, SessionIdStrategy.DISCOVERED, null, true, false, null, harness.events);
+        DrydockSessionService service = harness.service(provider);
+        String task = "Implement issue #42.\n\nReview the issue's acceptance criteria and `Closes #42`.";
+
+        ManagedAgentSession prepared = service.prepareSession(base, AgentKind.PI, "Issue #42")
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        service.launchSession(prepared, Optional.of(task)).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(1, provider.createContexts.size());
+        assertEquals(Optional.of(task), provider.createContexts.get(0).initialPrompt());
+        harness.store.flush();
+    }
+
+    @Test
     void discoveredSessionSnapshotsBeforeTheSpawnAndDiscoversAfter(@TempDir Path base) throws Exception {
         Harness harness = harness(base);
         RecordingDiscovery discovery = new RecordingDiscovery(harness.events);

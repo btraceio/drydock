@@ -6,7 +6,9 @@ import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.agent.AgentStripText;
 import app.drydock.intellij.tasks.TaskNode.AddCurrentProject;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
+import app.drydock.intellij.tasks.TaskNode.IssueRow;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
+import app.drydock.intellij.tasks.TaskNode.Section;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
 import app.drydock.intellij.ui.SessionDots;
@@ -30,11 +32,12 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
     static final Object LINK = new Object();
 
     /**
-     * Whether a click on a row with a link acts: a single click only on the
-     * link text, a double-click anywhere on the row. Pure.
+     * Whether a click on a row with a link acts: only the primary button, a
+     * single click only on the link text, and a double-click anywhere on the
+     * row. Pure.
      */
-    static boolean clickActs(boolean onLink, int clickCount) {
-        return clickCount == 2 || (onLink && clickCount == 1);
+    static boolean clickActs(boolean primaryButton, boolean onLink, int clickCount) {
+        return primaryButton && (clickCount == 2 || (onLink && clickCount == 1));
     }
 
     @Override
@@ -60,6 +63,11 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
                     append("  folder missing", SimpleTextAttributes.ERROR_ATTRIBUTES);
                 }
             }
+            case Section section -> {
+                setIcon(AllIcons.Nodes.Folder);
+                append(section.kind().label(), SimpleTextAttributes.REGULAR_ATTRIBUTES);
+                append("  " + itemCount(section), SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
+            }
             case WorktreeGroup group -> {
                 append("⑂ " + group.branch(), SimpleTextAttributes.GRAYED_ATTRIBUTES);
                 append("  " + group.tasks().size() + " tasks", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
@@ -69,9 +77,26 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
                 append("  no task · ", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
                 append("Start ▸", SimpleTextAttributes.LINK_ATTRIBUTES, LINK);
             }
+            case IssueRow issue -> {
+                setIcon(AllIcons.Vcs.Vendors.Github);
+                append("#" + issue.issue().number() + " " + issue.issue().title());
+                if (!issue.issue().labels().isEmpty()) {
+                    append("  " + String.join(", ", issue.issue().labels()),
+                            SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
+                }
+            }
             case TaskRow task -> paintTask(task);
             default -> append(String.valueOf(node.getUserObject()));
         }
+    }
+
+    /** Entity count rather than immediate child count (Sessions may contain Active/Inactive folders). */
+    private static int itemCount(Section section) {
+        return section.children().stream().mapToInt(node -> switch (node) {
+            case Section nested -> itemCount(nested);
+            case WorktreeGroup group -> group.tasks().size();
+            default -> 1;
+        }).sum();
     }
 
     private void paintTask(TaskRow task) {

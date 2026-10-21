@@ -5,8 +5,8 @@ import app.drydock.domain.SessionActivity;
 import java.util.Optional;
 
 /**
- * Every decision and string of the close/quit confirmation ("Stop n working
- * agents?"), as pure functions.
+ * Every decision and string of the close/quit confirmation ("Deactivate n
+ * working agents?"), as pure functions.
  *
  * <p>The decision worth pinning is which agents count as <em>working</em>.
  * The handoff asks before stopping an agent that is busy or needs the user,
@@ -26,9 +26,11 @@ public final class StopAgentsPlan {
         return activity.orElse(SessionActivity.UNKNOWN) != SessionActivity.IDLE;
     }
 
-    /** {@code Stop 1 working agent?} / {@code Stop 3 working agents?} */
+    /** {@code Deactivate 1 working agent?} / {@code Deactivate 3 working agents?} */
     public static String title(int working) {
-        return working == 1 ? "Stop 1 working agent?" : "Stop " + working + " working agents?";
+        return working == 1
+                ? "Deactivate 1 working agent?"
+                : "Deactivate " + working + " working agents?";
     }
 
     /**
@@ -38,7 +40,7 @@ public final class StopAgentsPlan {
      */
     public static String body(Optional<String> place, int working) {
         String what = place.map(name -> "Closing " + name).orElse("Quitting");
-        return what + (working == 1 ? " stops it mid-task." : " stops them mid-task.");
+        return what + (working == 1 ? " deactivates it mid-task." : " deactivates them mid-task.");
     }
 
     /** One listed agent: {@code <title> · <Agent>}, plus its window on a quit. */
@@ -48,24 +50,24 @@ public final class StopAgentsPlan {
 
     /** The line under the list. */
     public static String footer() {
-        return "Agents waiting at the prompt are stopped without asking.";
+        return "Agents waiting at the prompt are deactivated without asking.";
     }
 
     /** The default button names what it does. */
     public static String primaryLabel(boolean quitting) {
-        return quitting ? "Stop & Quit" : "Stop & Close";
+        return quitting ? "Deactivate & Quit" : "Deactivate & Close";
     }
 
-    /** Stopping one task from the Drydock tool window: the default button. */
+    /** Deactivating one task from the Drydock tool window: the default button. */
     public static String primaryLabelForTree(boolean closing) {
-        return closing ? "Stop & Close" : "Stop anyway";
+        return closing ? "Deactivate & Close" : "Deactivate anyway";
     }
 
-    /** Stopping one task from the Drydock tool window: what it does, and what it keeps. */
+    /** Deactivating one task from the Drydock tool window: what it does, and what it keeps. */
     public static String treeBody(boolean closing) {
         return closing
-                ? "Stopping ends it mid-task and closes its window. Open files are saved and the worktree stays."
-                : "Stopping ends it mid-task. Its conversation can be resumed later.";
+                ? "Deactivating ends it mid-task and closes its window. Open files are saved and the worktree stays."
+                : "Deactivating ends it mid-task. Its conversation can be resumed later.";
     }
 
     /**
@@ -77,8 +79,8 @@ public final class StopAgentsPlan {
         return fromTree ? "drydock.stopTaskFromTree.dontAsk" : "drydock.stopWorkingAgents.dontAsk";
     }
 
-    /** When a stopped agent has not ended in time for what was to follow (closing its window, Done). */
+    /** When an agent has not deactivated in time for what was to follow (closing its window, Done). */
     public static String notStoppedYet(String taskName) {
-        return "\"" + taskName + "\" has not stopped yet. Try again in a moment.";
+        return "\"" + taskName + "\" has not deactivated yet. Try again in a moment.";
     }
 }

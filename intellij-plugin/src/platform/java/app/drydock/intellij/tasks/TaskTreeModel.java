@@ -5,15 +5,21 @@ import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionActivity;
+import app.drydock.git.GhCliService.IssueListing;
+import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.WorktreeService.Worktree;
 import app.drydock.intellij.tasks.TaskNode.AddCurrentProject;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
+import app.drydock.intellij.tasks.TaskNode.IssueRow;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
+import app.drydock.intellij.tasks.TaskNode.Section;
+import app.drydock.intellij.tasks.TaskNode.SectionKind;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
 import app.drydock.projects.SharedProject;
 
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -26,7 +32,9 @@ import java.util.Set;
 
 /**
  * The shape of the Drydock tool window's tree, decided in one pure place:
- * registered projects, and under each its tasks, grouped by worktree.
+ * registered projects, and under each separate Sessions and sessionless
+ * Worktrees sections. Sessions split into Active and Inactive when both are
+ * present, and remain grouped by worktree within their activity band.
  *
  * <p>A task (an agent session) is placed by where it works, not by the
  * repository id it was recorded under: its working directory resolves to a
@@ -43,6 +51,24 @@ import java.util.Set;
  * this class does no I/O.</p>
  */
 public final class TaskTreeModel {
+
+    /** Mutually exclusive quick views; text search is applied within the selected view. */
+    public enum ViewFilter {
+        ALL("All"),
+        ACTIVE("Active"),
+        INACTIVE("Inactive"),
+        ISSUES("Issues");
+
+        private final String label;
+
+        ViewFilter(String label) {
+            this.label = label;
+        }
+
+        public String label() {
+            return label;
+        }
+    }
 
     private TaskTreeModel() {
     }
@@ -62,7 +88,8 @@ public final class TaskTreeModel {
                          Optional<Path> currentMainRoot, Optional<Path> currentWorkingRoot,
                          Map<ManagedSessionId, Optional<SessionActivity>> activity, Set<ManagedSessionId> running,
                          Set<Path> missingFolders, Map<RepositoryId, Path> recordedRoots,
-                         Optional<String> listProblem, String filter) {
+                         Map<Path, IssueListing> issuesByMainRoot, Optional<String> listProblem, String filter,
+                         ViewFilter viewFilter) {
         public Inputs {
             projects = List.copyOf(projects);
             sessions = List.copyOf(sessions);
@@ -74,8 +101,33 @@ public final class TaskTreeModel {
             running = Set.copyOf(running);
             missingFolders = Set.copyOf(missingFolders);
             recordedRoots = Map.copyOf(recordedRoots);
+            issuesByMainRoot = Map.copyOf(issuesByMainRoot);
             Objects.requireNonNull(listProblem, "listProblem");
             filter = filter == null ? "" : filter.strip();
+            Objects.requireNonNull(viewFilter, "viewFilter");
+        }
+
+        /** Compatibility constructor for callers that want the unfiltered full tree. */
+        public Inputs(List<SharedProject> projects, List<ManagedAgentSession> sessions,
+                      Map<Path, List<Worktree>> worktreesByMainRoot, Map<Path, Path> mainRootOf,
+                      Optional<Path> currentMainRoot, Optional<Path> currentWorkingRoot,
+                      Map<ManagedSessionId, Optional<SessionActivity>> activity, Set<ManagedSessionId> running,
+                      Set<Path> missingFolders, Map<RepositoryId, Path> recordedRoots,
+                      Map<Path, IssueListing> issuesByMainRoot, Optional<String> listProblem, String filter) {
+            this(projects, sessions, worktreesByMainRoot, mainRootOf, currentMainRoot, currentWorkingRoot,
+                    activity, running, missingFolders, recordedRoots, issuesByMainRoot, listProblem, filter,
+                    ViewFilter.ALL);
+        }
+
+        /** Compatibility constructor for model callers with no GitHub issue input. */
+        public Inputs(List<SharedProject> projects, List<ManagedAgentSession> sessions,
+                      Map<Path, List<Worktree>> worktreesByMainRoot, Map<Path, Path> mainRootOf,
+                      Optional<Path> currentMainRoot, Optional<Path> currentWorkingRoot,
+                      Map<ManagedSessionId, Optional<SessionActivity>> activity, Set<ManagedSessionId> running,
+                      Set<Path> missingFolders, Map<RepositoryId, Path> recordedRoots,
+                      Optional<String> listProblem, String filter) {
+            this(projects, sessions, worktreesByMainRoot, mainRootOf, currentMainRoot, currentWorkingRoot,
+                    activity, running, missingFolders, recordedRoots, Map.of(), listProblem, filter, ViewFilter.ALL);
         }
     }
 
@@ -95,10 +147,14 @@ public final class TaskTreeModel {
         Optional<Path> current = in.currentMainRoot();
         if (current.isPresent() && local.stream().noneMatch(project -> project.root().equals(current.get()))) {
             Path root = current.get();
-            nodes.add(new AddCurrentProject(root, String.valueOf(root.getFileName())));
-            sorted(tasksByMain.getOrDefault(root, List.of())).stream()
+            List<TaskRow> visible = sorted(tasksByMain.getOrDefault(root, List.of())).stream()
+                    .filter(task -> visibleIn(in.viewFilter(), task))
                     .filter(task -> matches(in.filter(), task))
-                    .forEach(nodes::add);
+                    .toList();
+            if (in.viewFilter() == ViewFilter.ALL || !visible.isEmpty()) {
+                nodes.add(new AddCurrentProject(root, String.valueOf(root.getFileName())));
+                nodes.addAll(visible);
+            }
         }
 
         List<SharedProject> ordered = new ArrayList<>(local);
@@ -107,7 +163,8 @@ public final class TaskTreeModel {
         for (SharedProject project : ordered) {
             boolean thisWindow = project.root().equals(current.orElse(null));
             List<TaskNode> children = children(in, project.root(), tasksByMain.getOrDefault(project.root(), List.of()));
-            if (!in.filter().isEmpty() && children.isEmpty() && !thisWindow) {
+            if (children.isEmpty() && (in.viewFilter() != ViewFilter.ALL
+                    || !in.filter().isEmpty() && !thisWindow)) {
                 continue;
             }
             int running = (int) tasksByMain.getOrDefault(project.root(), List.of()).stream()
@@ -160,34 +217,90 @@ public final class TaskTreeModel {
     }
 
     private static List<TaskNode> children(Inputs in, Path main, List<TaskRow> tasks) {
-        Map<Path, List<TaskRow>> byWorktree = new LinkedHashMap<>();
-        for (TaskRow task : sorted(tasks)) {
-            if (matches(in.filter(), task)) {
-                byWorktree.computeIfAbsent(task.session().workingDirectory(), ignored -> new ArrayList<>()).add(task);
+        List<TaskNode> children = new ArrayList<>();
+        List<TaskRow> visibleTasks = sorted(tasks).stream()
+                .filter(task -> visibleIn(in.viewFilter(), task))
+                .filter(task -> matches(in.filter(), task))
+                .toList();
+        if (!visibleTasks.isEmpty()) {
+            List<TaskRow> active = visibleTasks.stream().filter(TaskRow::running).toList();
+            List<TaskRow> inactive = visibleTasks.stream().filter(task -> !task.running()).toList();
+            List<TaskNode> sessionChildren = new ArrayList<>();
+            if (!active.isEmpty() && !inactive.isEmpty()) {
+                sessionChildren.add(new Section(SectionKind.ACTIVE, groupedByWorktree(active)));
+                sessionChildren.add(new Section(SectionKind.INACTIVE, groupedByWorktree(inactive)));
+            } else {
+                sessionChildren.addAll(groupedByWorktree(visibleTasks));
+            }
+            children.add(new Section(SectionKind.SESSIONS, sessionChildren));
+        }
+
+        if (in.viewFilter() == ViewFilter.ALL) {
+            List<TaskNode> sessionlessWorktrees = new ArrayList<>();
+            for (Worktree worktree : in.worktreesByMainRoot().getOrDefault(main, List.of())) {
+                if (worktree.mainCheckout() || worktree.prunable()
+                        || tasks.stream().anyMatch(task -> task.session().workingDirectory().equals(worktree.path()))) {
+                    continue;
+                }
+                String branch = worktree.branch().orElse(String.valueOf(worktree.path().getFileName()));
+                if (in.filter().isEmpty() || contains(branch, in.filter())) {
+                    sessionlessWorktrees.add(new IdleWorktree(worktree.path(), branch));
+                }
+            }
+            if (!sessionlessWorktrees.isEmpty()) {
+                children.add(new Section(SectionKind.WORKTREES, sessionlessWorktrees));
             }
         }
-        List<TaskNode> children = new ArrayList<>();
-        // Groups follow their best task, so the sort of the tasks above
-        // already orders them.
+        if (in.viewFilter() == ViewFilter.ALL || in.viewFilter() == ViewFilter.ISSUES) {
+            issueChildren(in, main).ifPresent(issueChildren ->
+                    children.add(new Section(SectionKind.ISSUES, issueChildren)));
+        }
+        return children;
+    }
+
+    private static boolean visibleIn(ViewFilter filter, TaskRow task) {
+        return switch (filter) {
+            case ALL -> true;
+            case ACTIVE -> task.running();
+            case INACTIVE -> !task.running();
+            case ISSUES -> false;
+        };
+    }
+
+    private static Optional<List<TaskNode>> issueChildren(Inputs in, Path main) {
+        return switch (in.issuesByMainRoot().get(main)) {
+            case IssueListing.Listed listed -> {
+                List<TaskNode> rows = listed.issues().stream()
+                        .filter(issue -> matches(in.filter(), issue))
+                        .sorted(Comparator.comparing((OpenIssue issue) -> issue.updatedAt().orElse(Instant.EPOCH))
+                                .reversed())
+                        .map(issue -> (TaskNode) new IssueRow(main, issue))
+                        .toList();
+                yield rows.isEmpty() ? Optional.empty() : Optional.of(rows);
+            }
+            case IssueListing.Failed failed -> Optional.of(List.of(
+                    new TaskNode.ListProblem("GitHub issues: " + failed.message())));
+            case IssueListing.Unsupported ignored -> Optional.empty();
+            case null -> Optional.empty();
+        };
+    }
+
+    /** Groups multiple sessions sharing a worktree; the given order decides group order and task order. */
+    private static List<TaskNode> groupedByWorktree(List<TaskRow> tasks) {
+        Map<Path, List<TaskRow>> byWorktree = new LinkedHashMap<>();
+        for (TaskRow task : tasks) {
+            byWorktree.computeIfAbsent(task.session().workingDirectory(), ignored -> new ArrayList<>()).add(task);
+        }
+        List<TaskNode> grouped = new ArrayList<>();
         byWorktree.forEach((worktree, rows) -> {
             if (rows.size() == 1) {
-                children.add(rows.get(0));
+                grouped.add(rows.get(0));
             } else {
-                children.add(new WorktreeGroup(worktree, rows.get(0).branch().orElse(String.valueOf(
+                grouped.add(new WorktreeGroup(worktree, rows.get(0).branch().orElse(String.valueOf(
                         worktree.getFileName())), rows));
             }
         });
-        for (Worktree worktree : in.worktreesByMainRoot().getOrDefault(main, List.of())) {
-            if (worktree.mainCheckout() || worktree.prunable() || byWorktree.containsKey(worktree.path())
-                    || tasks.stream().anyMatch(task -> task.session().workingDirectory().equals(worktree.path()))) {
-                continue;
-            }
-            String branch = worktree.branch().orElse(String.valueOf(worktree.path().getFileName()));
-            if (in.filter().isEmpty() || contains(branch, in.filter())) {
-                children.add(new IdleWorktree(worktree.path(), branch));
-            }
-        }
-        return children;
+        return grouped;
     }
 
     private static List<TaskRow> sorted(List<TaskRow> tasks) {
@@ -208,6 +321,12 @@ public final class TaskTreeModel {
     private static boolean matches(String filter, TaskRow task) {
         return filter.isEmpty() || contains(task.session().displayName(), filter)
                 || task.branch().map(branch -> contains(branch, filter)).orElse(false);
+    }
+
+    private static boolean matches(String filter, OpenIssue issue) {
+        return filter.isEmpty() || contains(issue.title(), filter)
+                || contains("#" + issue.number(), filter)
+                || issue.labels().stream().anyMatch(label -> contains(label, filter));
     }
 
     private static boolean contains(String text, String filter) {

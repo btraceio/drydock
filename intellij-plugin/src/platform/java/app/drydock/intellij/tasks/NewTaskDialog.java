@@ -73,6 +73,7 @@ final class NewTaskDialog extends DialogWrapper {
     private final Project project;
     private final NewTaskPlan.Inputs inputs;
     private final Optional<Supplier<Optional<String>>> refChooser;
+    private final NewTaskPreset preset;
 
     private final JBTextField name = new JBTextField();
     private final JBTextArea instructions = new JBTextArea(4, 40);
@@ -102,15 +103,34 @@ final class NewTaskDialog extends DialogWrapper {
     private boolean updating;
 
     /**
+     * The exact values validated by the successful Start click. DialogWrapper
+     * disposes its peer before {@code showAndGet()} returns, so the caller must
+     * not reconstruct a choice from Swing fields after the modal has closed.
+     */
+    private Choice acceptedChoice;
+
+    /**
      * {@code refChooser} opens Git's own branch/tag picker when the
      * project's repository is open in some window; empty otherwise.
      */
     NewTaskDialog(Project project, NewTaskPlan.Inputs inputs, Optional<Supplier<Optional<String>>> refChooser) {
+        this(project, inputs, refChooser, NewTaskPreset.empty());
+    }
+
+    NewTaskDialog(Project project, NewTaskPlan.Inputs inputs, Optional<Supplier<Optional<String>>> refChooser,
+                  NewTaskPreset preset) {
         super(project, true);
         this.project = project;
         this.inputs = inputs;
         this.refChooser = refChooser;
+        this.preset = preset;
         this.worktreeBase = inputs.worktreeBase();
+        name.setText(preset.name());
+        instructions.setText(preset.instructions().orElse(""));
+        if (preset.fixedMode().orElse(null) == SessionMode.READ_ONLY) {
+            readOnly.setSelected(true);
+            mainCheckout.setSelected(true);
+        }
         setTitle("New task in " + inputs.repoName());
         init();
         regenerate();
@@ -146,10 +166,16 @@ final class NewTaskDialog extends DialogWrapper {
                     .ifPresent(button -> button.setSelected(true));
         }
 
-        JPanel modes = row(writes, readOnly);
-        group(writes, readOnly);
-        writes.addActionListener(e -> refresh());
-        readOnly.addActionListener(e -> refresh());
+        JPanel modes;
+        if (preset.fixedMode().isPresent()) {
+            modes = row(new JBLabel(preset.fixedMode().get() == SessionMode.WRITES
+                    ? "Writes" : "Read-only"));
+        } else {
+            modes = row(writes, readOnly);
+            group(writes, readOnly);
+            writes.addActionListener(e -> refresh());
+            readOnly.addActionListener(e -> refresh());
+        }
 
         JPanel summaryRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
         summary.setForeground(UIUtil.getContextHelpForeground());
@@ -302,7 +328,8 @@ final class NewTaskDialog extends DialogWrapper {
     /** Summary, warning, OK label, and the controls the mode allows. */
     private void refresh() {
         boolean fixed = inputs.fixedWorktree().isPresent();
-        newWorktree.setEnabled(!readOnly.isSelected() && !fixed);
+        newWorktree.setEnabled(preset.mode(readOnly.isSelected()) != SessionMode.READ_ONLY
+                && !fixed);
         mainCheckout.setEnabled(!fixed);
         boolean worktree = workIn() == WorkIn.NEW_WORKTREE;
         branch.setEnabled(worktree);
@@ -332,7 +359,8 @@ final class NewTaskDialog extends DialogWrapper {
         if (inputs.fixedWorktree().isPresent()) {
             return WorkIn.EXISTING_WORKTREE;
         }
-        return readOnly.isSelected() || mainCheckout.isSelected() ? WorkIn.MAIN_CHECKOUT : WorkIn.NEW_WORKTREE;
+        return preset.mode(readOnly.isSelected()) == SessionMode.READ_ONLY
+                || mainCheckout.isSelected() ? WorkIn.MAIN_CHECKOUT : WorkIn.NEW_WORKTREE;
     }
 
     Choice choice() {
@@ -354,9 +382,17 @@ final class NewTaskDialog extends DialogWrapper {
         };
         String text = instructions.getText();
         return new Choice(name.getText().strip(), text.isBlank() ? Optional.empty() : Optional.of(text), agent,
-                readOnly.isSelected() ? SessionMode.READ_ONLY : SessionMode.WRITES, workIn, chosenBranch,
+                preset.mode(readOnly.isSelected()), workIn, chosenBranch,
                 startPoint(), chosenFolder,
                 thisWindow.isSelected() ? OpenIn.THIS_WINDOW : OpenIn.NEW_WINDOW);
+    }
+
+    /** The immutable submission captured before the dialog closed. */
+    Choice acceptedChoice() {
+        if (acceptedChoice == null) {
+            throw new IllegalStateException("The task dialog has not accepted a choice");
+        }
+        return acceptedChoice;
     }
 
     @Override
@@ -378,11 +414,17 @@ final class NewTaskDialog extends DialogWrapper {
         ModalityState modality = ModalityState.stateForComponent(getContentPanel());
         ApplicationManager.getApplication().executeOnPooledThread(() -> {
             Optional<String> refusal = NewTaskPlan.refusal(inputs, choice, NewTaskDialog::occupied);
+            if (refusal.isEmpty() && preset.instructionsRequired() && choice.instructions().isEmpty()) {
+                refusal = Optional.of("Give the agent implementation instructions.");
+            }
+            Optional<String> finalRefusal = refusal;
             ApplicationManager.getApplication().invokeLater(() -> {
                 getOKAction().setEnabled(true);
-                if (refusal.isPresent()) {
-                    setErrorText(refusal.get(), folder);
+                if (finalRefusal.isPresent()) {
+                    setErrorText(finalRefusal.get(),
+                            preset.instructionsRequired() && choice.instructions().isEmpty() ? instructions : folder);
                 } else if (isShowing()) {
+                    acceptedChoice = choice;
                     close(OK_EXIT_CODE);
                 }
             }, modality);

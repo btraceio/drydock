@@ -2,6 +2,7 @@ package app.drydock.intellij.tasks;
 
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.SessionActivity;
+import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.projects.SharedProject;
 
 import java.nio.file.Path;
@@ -11,6 +12,25 @@ import java.util.Optional;
 
 /** One row of the Drydock tool window's tree, as {@link TaskTreeModel} decides it. */
 public sealed interface TaskNode {
+
+    /** Semantic folders under a registered project, and the optional active/inactive split under Sessions. */
+    enum SectionKind {
+        SESSIONS("Sessions"),
+        ACTIVE("Active"),
+        INACTIVE("Inactive"),
+        WORKTREES("Worktrees"),
+        ISSUES("Issues");
+
+        private final String label;
+
+        SectionKind(String label) {
+            this.label = label;
+        }
+
+        public String label() {
+            return label;
+        }
+    }
 
     /** The shared projects list cannot be changed; says why (malformed, unreadable entries, newer schema). */
     record ListProblem(String message) implements TaskNode {
@@ -40,6 +60,17 @@ public sealed interface TaskNode {
         }
     }
 
+    /** A semantic, non-actionable folder. Empty sections are never emitted by the model. */
+    record Section(SectionKind kind, List<TaskNode> children) implements TaskNode {
+        public Section {
+            Objects.requireNonNull(kind, "kind");
+            children = List.copyOf(children);
+            if (children.isEmpty()) {
+                throw new IllegalArgumentException("section must not be empty");
+            }
+        }
+    }
+
     /** A worktree with more than one task: {@code ⑂ <branch>} with its tasks beneath. */
     record WorktreeGroup(Path worktree, String branch, List<TaskRow> tasks) implements TaskNode {
         public WorktreeGroup {
@@ -64,6 +95,14 @@ public sealed interface TaskNode {
         public IdleWorktree {
             Objects.requireNonNull(worktree, "worktree");
             Objects.requireNonNull(branch, "branch");
+        }
+    }
+
+    /** One open GitHub issue belonging to the containing registered project. */
+    record IssueRow(Path mainRoot, OpenIssue issue) implements TaskNode {
+        public IssueRow {
+            Objects.requireNonNull(mainRoot, "mainRoot");
+            Objects.requireNonNull(issue, "issue");
         }
     }
 }

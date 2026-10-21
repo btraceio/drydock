@@ -15,7 +15,7 @@ import javax.swing.Icon;
 import java.util.Optional;
 
 /**
- * The agent console tab's label and dot.
+ * The agent console tab's label and status-colored Drydock mark.
  *
  * <p>Both have to come from here rather than from the editor: the platform
  * builds a tab's title through {@code EditorTabTitleProvider} and its icon
@@ -54,8 +54,8 @@ public final class AgentConsoleTabPresentation implements EditorTabTitleProvider
                 ? DrydockPluginService.getInstance().activityMonitor().current(session.id())
                 : Optional.empty();
         // Same correction as the strip's: a row stuck in the running band
-        // must not paint a live dot on a tab whose agent is not running.
-        return SessionDots.dotIcon(AgentStripText.displayStatus(session.status(), running), activity);
+        // must not paint a live color on a tab whose agent is not running.
+        return SessionDots.drydockIcon(AgentStripText.displayStatus(session.status(), running), activity);
     }
 
     /**

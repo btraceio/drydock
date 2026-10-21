@@ -7,6 +7,7 @@ import app.drydock.process.ProcessTimeoutException;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -27,9 +28,19 @@ public final class PiVersionProbe {
         if (piExecutable == null) {
             return "unknown";
         }
+        return probeCommand(List.of(piExecutable.toString()));
+    }
+
+    /** Returns the parsed version from an executable/interpreter command prefix. */
+    public static String probeCommand(List<String> commandPrefix) {
+        if (commandPrefix == null || commandPrefix.isEmpty()) {
+            return "unknown";
+        }
         try {
+            List<String> command = new ArrayList<>(commandPrefix);
+            command.add("--version");
             ProcessResult result = ProcessRunner.run(
-                    List.of(piExecutable.toString(), "--version"), null, PROCESS_TIMEOUT);
+                    command, null, PROCESS_TIMEOUT);
             if (result.exitCode() != 0) {
                 return "unknown";
             }

@@ -20,6 +20,21 @@ class SessionStatusFacetTest {
     }
 
     @Test
+    void idleIsIdle() {
+        assertEquals(SessionStatusFacet.IDLE, SessionStatusFacet.of(SessionStatus.IDLE));
+    }
+
+    /**
+     * A stop in flight still owns a live process (terminate, then
+     * force-kill): the row stays in the live band until the process is
+     * really gone, at which point the status itself becomes IDLE.
+     */
+    @Test
+    void stoppingIsRunningWhileTheProcessIsStillAlive() {
+        assertEquals(SessionStatusFacet.RUNNING, SessionStatusFacet.of(SessionStatus.STOPPING));
+    }
+
+    @Test
     void failedAndMissingDirectoryAreError() {
         assertEquals(SessionStatusFacet.ERROR, SessionStatusFacet.of(SessionStatus.FAILED));
         assertEquals(SessionStatusFacet.ERROR,

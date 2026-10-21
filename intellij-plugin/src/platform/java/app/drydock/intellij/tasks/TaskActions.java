@@ -36,11 +36,11 @@ import java.util.Optional;
 import java.util.function.Predicate;
 
 /**
- * What the Drydock tool window can do to a task: switch to it, stop it,
- * stop it and close its window, resume it.
+ * What the Drydock tool window can do to a task: switch to it, deactivate it,
+ * deactivate it and close its window, resume it.
  *
- * <p>Stopping asks first only when the agent is mid-task (not at its
- * prompt), and the question can always be answered "Stop anyway". Closing
+ * <p>Deactivating asks first only when the agent is mid-task (not at its
+ * prompt), and the question can always be answered "Deactivate anyway". Closing
  * a window loses nothing — IntelliJ saves open files and the worktree stays
  * on disk — so the close itself adds no question of its own; the window's
  * <em>other</em> working agents get the usual close confirmation.</p>
@@ -48,7 +48,7 @@ import java.util.function.Predicate;
 final class TaskActions {
 
     /**
-     * How long Stop &amp; Close and Done wait for the agent to end: past the
+     * How long Deactivate &amp; Close and Done wait for the agent to end: past the
      * execution's own two-second force-kill, with room to spare.
      */
     private static final long STOP_WAIT_MILLIS = 5_000;
@@ -76,9 +76,9 @@ final class TaskActions {
     /** The task and project actions, for the tree's context menu and the tool window's toolbar. */
     static List<AnAction> taskActions() {
         return List.of(
-                task("Stop", "Stop this task's agent", AllIcons.Actions.Suspend, TaskRow::running,
+                task("Deactivate", "Deactivate this task's agent", AllIcons.Actions.Suspend, TaskRow::running,
                         (project, row) -> stop(project, row, false)),
-                task("Stop && Close Window", "Stop the agent and close its window", AllIcons.Actions.Close,
+                task("Deactivate && Close Window", "Deactivate the agent and close its window", AllIcons.Actions.Close,
                         TaskRow::running, (project, row) -> stop(project, row, true)),
                 task("Resume", "Open the task and resume its conversation", AllIcons.Actions.Execute,
                         row -> !row.running(), (project, row) -> TaskNavigator.switchTo(row.session(),

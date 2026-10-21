@@ -7,67 +7,39 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PiCapabilitiesTest {
-
     @Test
-    void atAndAboveTheFloorSupportsTheBridge() {
-        assertTrue(PiCapabilities.of("0.80.3").supportsBridge());
-        assertTrue(PiCapabilities.of("0.84.1").supportsBridge());
-        assertTrue(PiCapabilities.of("0.80.10").supportsBridge());   // numeric, not lexical
-        assertTrue(PiCapabilities.of("1.0.0").supportsBridge());
+    void oneDotZeroAndNewerAreSupported() {
+        assertTrue(PiCapabilities.of("1.0.0").supported());
+        assertTrue(PiCapabilities.of("1.3.0").supported());
+        assertTrue(PiCapabilities.of("2.0.0").supported());
     }
 
     @Test
-    void belowTheFloorDoesNot() {
-        assertFalse(PiCapabilities.of("0.80.2").supportsBridge());
-        assertFalse(PiCapabilities.of("0.79.10").supportsBridge());  // verified working, deliberately unsupported
-        assertFalse(PiCapabilities.of("0.55.4").supportsBridge());
-        assertFalse(PiCapabilities.of("0.9.0").supportsBridge());
+    void preOneVersionsAreUnsupported() {
+        assertFalse(PiCapabilities.of("0.99.0").supported());
+        assertFalse(PiCapabilities.of("0.80.3").supported());
     }
 
     @Test
     void unknownAndJunkFailConservatively() {
-        assertFalse(PiCapabilities.of("unknown").supportsBridge());
-        assertFalse(PiCapabilities.of("").supportsBridge());
-        assertFalse(PiCapabilities.of(null).supportsBridge());
-        assertFalse(PiCapabilities.of("not.a.version").supportsBridge());
-        assertFalse(PiCapabilities.of("0.80").supportsBridge());     // too few components to judge
+        assertFalse(PiCapabilities.of("unknown").supported());
+        assertFalse(PiCapabilities.of("").supported());
+        assertFalse(PiCapabilities.of(null).supported());
+        assertFalse(PiCapabilities.of("not.a.version").supported());
+        assertFalse(PiCapabilities.of("1.0").supported());
     }
 
     @Test
     void prereleaseSuffixIsIgnoredForComparison() {
-        assertTrue(PiCapabilities.of("0.84.1-beta.2").supportsBridge());
-        assertFalse(PiCapabilities.of("0.80.2-rc1").supportsBridge());
+        assertTrue(PiCapabilities.of("1.0.0-beta.2").supported());
+        assertFalse(PiCapabilities.of("0.99.0-rc1").supported());
     }
 
     @Test
-    void versionIsCarriedThroughVerbatim() {
-        assertEquals("0.84.1", PiCapabilities.of("0.84.1").version());
+    void versionAndParseStateArePreserved() {
+        assertEquals("1.3.0", PiCapabilities.of("1.3.0").version());
         assertEquals("unknown", PiCapabilities.of(null).version());
-    }
-
-    @Test
-    void aParsedVersionIsMarkedParsedEvenBelowTheFloor() {
-        assertTrue(PiCapabilities.of("0.84.1").versionParsed());
-        assertTrue(PiCapabilities.of("0.79.10").versionParsed());   // below floor, but still a read version
-        assertTrue(PiCapabilities.of("0.80.2-rc1").versionParsed());
-    }
-
-    @Test
-    void anUnparseableVersionIsMarkedUnparsed() {
-        assertFalse(PiCapabilities.of("unknown").versionParsed());
-        assertFalse(PiCapabilities.of(null).versionParsed());
-        assertFalse(PiCapabilities.of("").versionParsed());
-        assertFalse(PiCapabilities.of("not.a.version").versionParsed());
-        assertFalse(PiCapabilities.of("0.80").versionParsed());       // too few components to judge
-        assertFalse(PiCapabilities.of("v0.84.1").versionParsed());    // stray prefix survives whitespace-token parsing
-    }
-
-    @Test
-    void nativeMcpServersArriveInZeroNinetyNine() {
-        assertTrue(PiCapabilities.of("0.99.0").supportsMcpServers());
-        assertTrue(PiCapabilities.of("1.3.0").supportsMcpServers());
-        assertFalse(PiCapabilities.of("0.98.9").supportsMcpServers());
-        assertFalse(PiCapabilities.of("0.84.1").supportsMcpServers());   // bridge yes, native MCP no
-        assertFalse(PiCapabilities.of("unknown").supportsMcpServers());
+        assertTrue(PiCapabilities.of("0.99.0").versionParsed());
+        assertFalse(PiCapabilities.of("v1.3.0").versionParsed());
     }
 }
