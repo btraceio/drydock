@@ -24,6 +24,7 @@
         <plugin id="com.intellij.platform.vcs"/>
         <module name="intellij.platform.vcs"/>
         <module name="intellij.platform.vcs.impl"/>
+        <module name="intellij.platform.vcs.impl.shared"/>
         <module name="intellij.platform.vcs.dvcs.impl"/>
     </dependencies>
     <!-- Optional: agents Drydock launches get the IDE's bundled MCP server,
@@ -108,6 +109,16 @@
 
         <postStartupActivity
                 implementation="app.drydock.intellij.startup.DrydockStartupActivity"/>
+
+        <!-- SPIKE (P2 spikes 1-2, throwaway): the Review tab experiment and
+             the CUSTOM_DIFF_COMPUTER diff decoration experiment. Both are
+             deleted once their live findings are recorded in the cairn
+             investigation. -->
+        <changesViewContent tabName="Drydock Review (Spike)"
+                            className="app.drydock.intellij.review.spike.SpikeReviewTabProvider"
+                            isInCommitToolWindow="true"/>
+        <diff.DiffExtension
+                implementation="app.drydock.intellij.review.spike.SpikeReviewDiffExtension"/>
     </extensions>
     <applicationListeners>
         <!-- projectClosing, not the service's dispose: a disposing project's
@@ -151,6 +162,14 @@
                 text="New Drydock Task from Branch…"
                 description="Start an agent on a new task from this branch">
             <add-to-group group-id="Git.Branch" anchor="first"/>
+        </action>
+        <!-- SPIKE (P2 spikes 1-2, throwaway): opens the CUSTOM_DIFF_COMPUTER
+             diff chain for the branch diff of the window's worktree. -->
+        <action id="Drydock.SpikeReviewDiff"
+                class="app.drydock.intellij.review.spike.SpikeReviewDiffAction"
+                text="Spike: Review Diff"
+                description="Spike: open the branch diff through Drydock's own hunk model">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
         </action>
     </actions>
 </idea-plugin>
