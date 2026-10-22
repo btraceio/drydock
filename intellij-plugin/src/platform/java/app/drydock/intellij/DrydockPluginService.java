@@ -74,7 +74,7 @@ public final class DrydockPluginService implements Disposable {
 
     public DrydockPluginService() {
         this(defaultBaseDir(), SharedProjectsFile.defaultFile(), DrydockPluginService::seedFromApp,
-                ReviewBackend::new, INIT_TIMEOUT);
+                DrydockPluginService::productionBackend, INIT_TIMEOUT);
         // The quit question, for as long as the plugin is loaded. Here, not in
         // plugin.xml: the quit veto is an ApplicationListener added through
         // the application, not a message-bus topic.
@@ -142,6 +142,36 @@ public final class DrydockPluginService implements Disposable {
     private volatile ReviewBackend reviewBackend;
     /** The thread initialization ran on; read by tests to prove init is off the EDT. */
     private volatile Thread initializationThread;
+
+    /** The system property the tree-sitter binding reads for the directory it extracts its native libraries to. */
+    static final String TREE_SITTER_LIB_PROPERTY = "tree-sitter-lib";
+
+    /**
+     * The production review backend, built after tree-sitter's native
+     * libraries are pointed at this IDE's own directory ({@link
+     * #useOwnTreeSitterLibraries}). The backend is what parses, so no
+     * library loads before this runs.
+     */
+    private static ReviewBackend productionBackend(Path baseDir, Supplier<List<ManagedAgentSession>> sessions,
+                                                   Supplier<List<Repository>> repositories, AgentRegistry registry) {
+        useOwnTreeSitterLibraries(Path.of(PathManager.getSystemPath()).resolve("drydock").resolve("tree-sitter"));
+        return new ReviewBackend(baseDir, sessions, repositories, registry);
+    }
+
+    /**
+     * Sets {@link #TREE_SITTER_LIB_PROPERTY} to {@code directory} unless it is
+     * already set. Without it the binding extracts to {@code ~/.tree-sitter},
+     * which the standalone app uses too, and it rewrites a library file in
+     * place when the bundled one differs: an app and a plugin that bundle
+     * different versions would overwrite a library the other has loaded. The
+     * property is JVM-wide, so it applies to every user of the binding in
+     * this IDE.
+     */
+    static void useOwnTreeSitterLibraries(Path directory) {
+        if (System.getProperty(TREE_SITTER_LIB_PROPERTY) == null) {
+            System.setProperty(TREE_SITTER_LIB_PROPERTY, directory.toString());
+        }
+    }
 
     private static Path defaultBaseDir() {
         // NOT StateDirectory: its per-code-source install id changes on every

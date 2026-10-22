@@ -227,4 +227,26 @@ class DrydockPluginServiceTest {
         assertFalse(backend.ready(), "a backend built after dispose must be closed");
         assertTrue(service.reviewBackend().isEmpty(), "a backend built after dispose must not be published");
     }
+
+    @Test
+    void treeSitterLibrariesGoToTheGivenDirectoryUnlessAlreadyConfigured(@TempDir Path dir) {
+        String before = System.getProperty(DrydockPluginService.TREE_SITTER_LIB_PROPERTY);
+        try {
+            System.clearProperty(DrydockPluginService.TREE_SITTER_LIB_PROPERTY);
+            DrydockPluginService.useOwnTreeSitterLibraries(dir.resolve("ours"));
+            assertEquals(dir.resolve("ours").toString(),
+                    System.getProperty(DrydockPluginService.TREE_SITTER_LIB_PROPERTY));
+
+            DrydockPluginService.useOwnTreeSitterLibraries(dir.resolve("other"));
+            assertEquals(dir.resolve("ours").toString(),
+                    System.getProperty(DrydockPluginService.TREE_SITTER_LIB_PROPERTY),
+                    "a directory already configured is kept");
+        } finally {
+            if (before == null) {
+                System.clearProperty(DrydockPluginService.TREE_SITTER_LIB_PROPERTY);
+            } else {
+                System.setProperty(DrydockPluginService.TREE_SITTER_LIB_PROPERTY, before);
+            }
+        }
+    }
 }
