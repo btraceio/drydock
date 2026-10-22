@@ -35,6 +35,7 @@ the `changesGroupingPolicy` EP for sections; PSI *replacing* tree-sitter.
 ## Open
 - `hyp-ide-inspections-as-evidence`: `CodeSmellDetector.findCodeSmells` runs on a background thread. Value vs noise is untested.
 - `q-split-mode-remote-dev`: risk only; cannot be checked offline.
+- Known issue, not fixed: a `startSession` that races a finished delete brings the row back. See `docs/known-issues.md`.
 
 ## Next step
 P1 "Review backbone" is implemented (2026-10-22) through the dev-process pipeline.
@@ -45,7 +46,9 @@ P1 "Review backbone" is implemented (2026-10-22) through the dev-process pipelin
   - `wf_a0822545-9a8`: 7 low findings. Fixes: `Error` leaked a claim; the `finish` contract; delete during launch is refused; access released when the launch command does not carry the credential; an ended agent is Refused, not NoTools; test gaps closed and checked by reintroducing each defect.
 - Gotchas: `find-p1-impl-gotchas`. Run Gradle with `JAVA_HOME=~/.sdkman/candidates/java/21.0.11-tem`.
 - Two test failures are pre-existing and also fail on a clean HEAD checkout: the flaky `testAReleasedAgentKeepsRunningAndIsNotShown`, and the app's `adoptingARemoteOnlyBranch…`.
-- Next: P2 (Review tab and finding inlays) after live spikes.
+- Live `runIde` check (2026-10-22): a Claude task loaded the `drydock` MCP server. But `submitPrompt` lost the start of the review prompt (729 of 2773 chars arrived), and the user had to press Enter. It is now written as a bracketed paste (`find-prompt-needs-bracketed-paste`); a repro against a real Claude TUI delivered 3085/3085 chars and submitted it.
+- Not run live yet: tree-sitter natives inside the IDE JVM. Retest on a task that has a change once the prompt fix lands.
+- Next: rerun the live check, then P2 (Review tab and finding inlays) after live spikes.
 
 Live spikes for later phases: Review tab and collab inlays (with the Kotlin adapter build); CUSTOM_DIFF_COMPUTER
 rendering; T2 PREDICT swap and BOTTOM_PANEL; tree-sitter natives in the IDE JVM; PTY prompt injection for all
