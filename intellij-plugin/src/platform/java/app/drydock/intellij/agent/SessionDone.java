@@ -186,7 +186,7 @@ public final class SessionDone {
                     if (choice == Choice.FORGET) {
                         return;
                     }
-                    closeWindowAndRemove(session, deleteBranch, resolved);
+                    removeWorktree(session, deleteBranch, resolved);
                 }, ModalityState.nonModal());
             }
         });
@@ -202,7 +202,7 @@ public final class SessionDone {
         }
     }
 
-    private static void closeWindowAndRemove(ManagedAgentSession session, boolean deleteBranch, Resolved resolved) {
+    private static void removeWorktree(ManagedAgentSession session, boolean deleteBranch, Resolved resolved) {
         Path directory = session.workingDirectory();
         Path mainCheckout = resolved.mainCheckout().orElseThrow();
         Optional<String> branch = deleteBranch ? resolved.inputs().branch() : Optional.empty();
