@@ -222,6 +222,11 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
         return annotationStore;
     }
 
+    /** For tests: the tour store. */
+    TourStore tourStore() {
+        return tourStore;
+    }
+
     /** For tests: the socket the server is bound to. */
     InetSocketAddress boundAddress() {
         return server.boundAddress();

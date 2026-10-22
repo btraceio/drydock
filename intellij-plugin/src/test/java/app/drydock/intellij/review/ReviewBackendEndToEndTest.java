@@ -18,6 +18,8 @@ import app.drydock.domain.SessionWorkspace;
 import app.drydock.process.ProcessResult;
 import app.drydock.process.ProcessRunner;
 import app.drydock.review.ReviewScope;
+import app.drydock.review.tour.TourRecord;
+import app.drydock.review.tour.TourStore;
 import app.drydock.state.JsonApplicationStateRepository;
 import app.drydock.state.json.JsonParser;
 import app.drydock.state.json.JsonValue;
@@ -46,10 +48,12 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -60,6 +64,7 @@ class ReviewBackendEndToEndTest {
 
     private static final String TOKEN_HEADER = "X-Drydock-Session-Token";
     private static final String FINDING_TEXT = "e2e-finding-marker-text";
+    private static final String TOUR_TEXT = "e2e-tour-marker-text";
 
     @TempDir
     Path base;
@@ -173,6 +178,57 @@ class ReviewBackendEndToEndTest {
         Path annotations = base.resolve("drydock").resolve("annotations.json");
         assertTrue(Files.exists(annotations));
         assertTrue(Files.readString(annotations).contains(FINDING_TEXT));
+    }
+
+    @Test
+    void closeFlushesAPostedTourToDisk() throws Exception {
+        JsonObject anchor = JsonObject.empty()
+                .put("file", new JsonString("src/A.java"))
+                .put("startKey", new JsonString("n1"))
+                .put("endKey", new JsonString("n4"));
+        JsonObject step = JsonObject.empty()
+                .put("id", new JsonString("s1"))
+                .put("title", new JsonString("Uppercase two, add four"))
+                .put("narrative", new JsonString(TOUR_TEXT))
+                .put("anchors", new JsonArray(List.of(anchor)))
+                .put("checks", new JsonArray(List.of(traceCheck("c1", "c1b"))));
+        callTool("review_tour", JsonObject.empty()
+                .put("scopeId", new JsonString(scope.id()))
+                .put("steps", new JsonArray(List.of(step))));
+
+        TourRecord posted = backend.tourStore().forScope(scope.id()).orElseThrow();
+
+        // No flushPendingSaves: close alone must write the tour.
+        backend.close();
+
+        // The background save is usually done by now even without a flush, so
+        // the file check alone cannot tell; a rejected write shows close()
+        // closed the store, and TourStore.close() flushes before it shuts down.
+        assertThrows(RejectedExecutionException.class, () -> backend.tourStore().put(posted));
+        Path tours = base.resolve("drydock").resolve("review-tours.json");
+        assertTrue(Files.exists(tours));
+        try (TourStore reopened = new TourStore(tours)) {
+            assertTrue(reopened.forScope(scope.id()).isPresent());
+        }
+        assertTrue(Files.readString(tours).contains(TOUR_TEXT));
+    }
+
+    private static JsonObject traceCheck(String id, String alternateId) {
+        JsonObject alternate = traceCheckBody(alternateId, "Which line was added at the end?", "four");
+        return traceCheckBody(id, "What does line two read now?", "TWO")
+                .put("alternates", new JsonArray(List.of(alternate)));
+    }
+
+    private static JsonObject traceCheckBody(String id, String prompt, String right) {
+        return JsonObject.empty()
+                .put("id", new JsonString(id))
+                .put("kind", new JsonString("trace"))
+                .put("prompt", new JsonString(prompt))
+                .put("choices", new JsonArray(List.of(
+                        JsonObject.empty().put("text", new JsonString(right)),
+                        JsonObject.empty().put("text", new JsonString("unchanged")))))
+                .put("answer", JsonNumber.of(0))
+                .put("explanation", new JsonString("The diff shows it."));
     }
 
     /** The tool result is JSON text inside {@code result.content[0].text}. */
