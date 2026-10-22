@@ -116,6 +116,13 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     private final Project project;
     private final Tree tree = new Tree(new DefaultTreeModel(new DefaultMutableTreeNode()));
     private final SearchTextField search = new SearchTextField(false);
+
+    {
+        // The /<project glob>/[items] scope is otherwise undiscoverable.
+        search.setToolTipText("Search tasks, worktrees, and issues. "
+                + "Optional project scope first: /<name glob>/ — e.g. /dry*/jfr "
+                + "searches jfr only within projects whose name matches dry*.");
+    }
     private final TaskTreeInputs inputs = new TaskTreeInputs();
     private final TaskTreeRefreshRequests refreshRequests = new TaskTreeRefreshRequests();
     private final Alarm searchAlarm = new Alarm(Alarm.ThreadToUse.SWING_THREAD, this);
