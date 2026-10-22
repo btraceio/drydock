@@ -194,12 +194,23 @@ public final class CodexAgentProvider implements AgentProvider {
      * Like {@code -c} it is placed before the subcommand -- verified against
      * the installed CLI in both the bare and the {@code resume} form -- so
      * create and resume get it from this one place.</p>
+     *
+     * <p>The writing side is also a correctness fix, not only a preference:
+     * codex's usual default ({@code sandbox_mode = workspace-write}) seats
+     * the agent's shell tool under a Seatbelt profile that allows raw
+     * sockets but has no {@code mach-lookup} rule for {@code
+     * com.apple.mDNSResponder} -- so macOS {@code getaddrinfo} fails with
+     * {@code EAI_NONAME} and every tool that resolves through the system
+     * resolver ({@code curl}, {@code gh}) reports "could not resolve host",
+     * while direct-UDP tools ({@code nslookup}, {@code dig}) keep working.
+     * Verified against the installed binary: the embedded profile contains
+     * no mDNSResponder rule. Codex's {@code
+     * sandbox_workspace_write.network_access = true} was considered and is
+     * insufficient: it only relaxes the socket rules inside the Seatbelt
+     * profile, while the missing {@code mach-lookup} rule is what breaks
+     * {@code getaddrinfo}, and no flag adds it.</p>
      */
     private String codexCommand(Optional<McpAccess> access, boolean readOnly) {
-        // Do not silently inherit ~/.codex/config.toml here. Drydock's mode
-        // picker is authoritative: Read-only is constrained, while the
-        // explicitly labelled Full access mode can also reach credentials,
-        // network services and paths outside the worktree when needed.
         String sandbox = readOnly ? " --sandbox read-only" : " --sandbox danger-full-access";
         Optional<Path> tokenFile = access.flatMap(McpAccess::credentialFile);
         if (access.isEmpty() || tokenFile.isEmpty()) {

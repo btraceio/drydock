@@ -47,7 +47,8 @@ class CodexAgentProviderTest {
                 new CreateContext("Session 1", "ignored-uuid", Path.of("/repo"), Optional.empty(), Optional.empty()));
         assertTrue(plan.supported());
         assertFalse(plan.sessionIdUsed());
-        assertTrue(plan.command().endsWith("codex --sandbox danger-full-access"), plan.command());
+        assertTrue(plan.command().endsWith("codex --sandbox danger-full-access"),
+                plan.command());   // env-scrub prefix (if any) + the explicit sandbox; no id, no --settings
     }
 
     @Test
@@ -73,6 +74,11 @@ class CodexAgentProviderTest {
 
     @Test
     void aWritingSessionExplicitlyRunsWithFullAccess() {
+        // Codex's default sandbox (the user config's sandbox_mode) seats the
+        // agent under a Seatbelt profile without an mDNSResponder mach-lookup
+        // rule, which breaks getaddrinfo for every tool that resolves through
+        // the system resolver -- so drydock does not leave the sandbox choice
+        // to the config.
         LaunchPlan plan = provider().buildCreateCommand(
                 new CreateContext("Session 1", "ignored-uuid", Path.of("/repo"), Optional.empty(),
                         Optional.empty(), false, false));
@@ -91,7 +97,7 @@ class CodexAgentProviderTest {
     void resumeUsesPickerWhenIdUnknown() {
         LaunchPlan plan = provider().buildResumeCommand(
                 new ResumeContext(Optional.empty(), Optional.empty(), Path.of("/repo"), Optional.empty(), Optional.empty()));
-        assertTrue(plan.command().endsWith("codex --sandbox danger-full-access resume"));
+        assertTrue(plan.command().endsWith("codex --sandbox danger-full-access resume"));   // picker; never --last
     }
 
     @Test
