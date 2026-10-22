@@ -47,7 +47,7 @@ P1 "Review backbone" is implemented (2026-10-22) through the dev-process pipelin
 - Gotchas: `find-p1-impl-gotchas`. Run Gradle with `JAVA_HOME=~/.sdkman/candidates/java/21.0.11-tem`.
 - Two test failures are pre-existing and also fail on a clean HEAD checkout: the flaky `testAReleasedAgentKeepsRunningAndIsNotShown`, and the app's `adoptingARemoteOnlyBranch…`.
 - Live `runIde` check (2026-10-22): a Claude task loaded the `drydock` MCP server. But `submitPrompt` lost the start of the review prompt (729 of 2773 chars arrived), and the user had to press Enter. It is now written as a bracketed paste (`find-prompt-needs-bracketed-paste`); a repro against a real Claude TUI delivered 3085/3085 chars and submitted it.
-- Not run live yet: tree-sitter natives inside the IDE JVM. Retest on a task that has a change once the prompt fix lands.
+- Live recheck after the fix: on a task with a 2-file change, Review Changes delivered the full prompt, which submitted itself. The agent posted 3 findings and a 3-step tour, accepted on the first try. Tree-sitter natives loaded in the IDE JVM (`~/.tree-sitter/lib/*.dylib`) without a crash.
 - Next: rerun the live check, then P2 (Review tab and finding inlays) after live spikes.
 
 Live spikes for later phases: Review tab and collab inlays (with the Kotlin adapter build); CUSTOM_DIFF_COMPUTER
