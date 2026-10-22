@@ -20,7 +20,8 @@ class ShellCommandAdapterTest {
     @Test
     void envPrefixedPiCommandStaysOneMinusCArgument() {
         List<String> argv = ShellCommandAdapter.shellArgv(LaunchPlan.of(PI_COMMAND, false), () -> "/bin/bash");
-        assertEquals(List.of("/bin/bash", "-l", "-i", "-c", PI_COMMAND), argv);
+        assertEquals(List.of("/bin/bash", "-l", "-i", "-c",
+                ShellCommandAdapter.DOGBREW_PATH_PREFIX + PI_COMMAND), argv);
     }
 
     @Test
@@ -38,13 +39,15 @@ class ShellCommandAdapterTest {
         assertEquals(List.of("/bin/zsh", "-l", "-i"),
                 ShellCommandAdapter.shellArgv(LaunchPlan.of(TerminalAgentProvider.SHELL_COMMAND, false), () -> null));
         // The ":-" form of ${SHELL:-/bin/zsh} also covers a set-but-empty SHELL.
-        assertEquals(List.of("/bin/zsh", "-l", "-i", "-c", "pi"),
+        assertEquals(List.of("/bin/zsh", "-l", "-i", "-c",
+                ShellCommandAdapter.DOGBREW_PATH_PREFIX + "pi"),
                 ShellCommandAdapter.shellArgv("pi", () -> ""));
     }
 
     @Test
     void stringOverloadWrapsARawCommand() {
-        assertEquals(List.of("/bin/bash", "-l", "-i", "-c", "pi --resume"),
+        assertEquals(List.of("/bin/bash", "-l", "-i", "-c",
+                ShellCommandAdapter.DOGBREW_PATH_PREFIX + "pi --resume"),
                 ShellCommandAdapter.shellArgv("pi --resume", () -> "/bin/bash"));
     }
 
@@ -52,7 +55,11 @@ class ShellCommandAdapterTest {
     void aGivenLaunchPlanMapsToTheExactTabArgv() {
         String command = "PATH='/opt/homebrew/bin' claude --session-id 'session-1'";
         List<String> argv = ShellCommandAdapter.shellArgv(LaunchPlan.of(command, true), () -> "/usr/local/bin/fish");
-        assertEquals(List.of("/usr/local/bin/fish", "-l", "-i", "-c", command), argv);
+        // The dogbrew prefix lands ahead of the plan's own PATH assignment:
+        // the last assignment before the command wins, so the plan's
+        // '/opt/homebrew/bin' would otherwise shadow the shim.
+        assertEquals(List.of("/usr/local/bin/fish", "-l", "-i", "-c",
+                ShellCommandAdapter.DOGBREW_PATH_PREFIX + command), argv);
     }
 
     @Test
@@ -62,6 +69,7 @@ class ShellCommandAdapterTest {
             expectedShell = "/bin/zsh";
         }
         List<String> argv = ShellCommandAdapter.shellArgv(LaunchPlan.of("pi", false));
-        assertEquals(List.of(expectedShell, "-l", "-i", "-c", "pi"), argv);
+        assertEquals(List.of(expectedShell, "-l", "-i", "-c",
+                ShellCommandAdapter.DOGBREW_PATH_PREFIX + "pi"), argv);
     }
 }
