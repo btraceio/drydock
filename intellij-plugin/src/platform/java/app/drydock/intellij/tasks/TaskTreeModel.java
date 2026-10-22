@@ -383,7 +383,6 @@ public final class TaskTreeModel {
             children.add(new Section(SectionKind.SESSIONS, sessionChildren));
         }
 
-<<<<<<< HEAD
         List<TaskNode> sessionlessWorktrees = new ArrayList<>();
         List<IdleWorktree> inactive = new ArrayList<>();
         List<IdleWorktree> stale = new ArrayList<>();
@@ -405,18 +404,6 @@ public final class TaskTreeModel {
                     stale.add(idle);
                 } else {
                     sessionlessWorktrees.add(idle);
-=======
-        if (in.viewFilter() == ViewFilter.ALL) {
-            List<TaskNode> sessionlessWorktrees = new ArrayList<>();
-            for (Worktree worktree : in.worktreesByMainRoot().getOrDefault(main, List.of())) {
-                if (worktree.mainCheckout() || worktree.prunable()
-                        || tasks.stream().anyMatch(task -> task.session().workingDirectory().equals(worktree.path()))) {
-                    continue;
-                }
-                String branch = worktree.branch().orElse(String.valueOf(worktree.path().getFileName()));
-                if (itemFilter.isEmpty() || contains(branch, itemFilter)) {
-                    sessionlessWorktrees.add(new IdleWorktree(worktree.path(), branch));
->>>>>>> dac5e63 (Search in the task tree scopes by project name with /glob/items)
                 }
             }
         }

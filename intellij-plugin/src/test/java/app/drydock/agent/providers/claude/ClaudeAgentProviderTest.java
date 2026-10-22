@@ -7,6 +7,7 @@ import app.drydock.agent.api.EvalTokenResolver;
 import app.drydock.agent.api.LaunchPlan;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdStrategy;
+import app.drydock.agent.providers.AgentCommands;
 import app.drydock.agent.providers.HostBinaryLocator;
 import app.drydock.agent.providers.claude.internal.ClaudeEvalContainer;
 import app.drydock.agent.providers.claude.internal.ClaudeEvalContainer.EvalSetup;
@@ -242,6 +243,11 @@ class ClaudeAgentProviderTest {
                 "PATH= must precede claude: " + command);
         assertTrue(command.contains(dir.toString()),
                 "ddtool's directory must be on the injected PATH: " + command);
+        // The tail defers to the launching shell's PATH (rc-repaired, dogbrew
+        // shims first) instead of a literal snapshot of the IDE's PATH, which
+        // as the last PATH assignment before claude would drop the shims.
+        assertTrue(command.contains(" PATH=" + AgentCommands.shellQuote(dir + ":") + "\"$PATH\" claude"),
+                "PATH= must be the literal ddtool dir followed by the deferred \"$PATH\": " + command);
     }
 
     /**
