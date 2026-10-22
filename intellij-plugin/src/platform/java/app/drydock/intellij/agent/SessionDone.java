@@ -35,7 +35,10 @@ import java.util.concurrent.TimeoutException;
 /**
  * "Done with this task…", from the strip's {@code ⋯} or the Drydock tool
  * window: forget the task, or forget it and remove its worktree — closing
- * the worktree's window first, whichever window that is.
+ * the task's session view (its console tab, in whichever window shows it),
+ * never an IDE project window: a window hosts more than this task, and
+ * closing it under the user's cursor was the old behavior that read as the
+ * IDE quitting a project they did not ask to close.
  *
  * <p>What a removal would lose is worked out before the dialog opens:
  * uncommitted and untracked files, and commits not merged. "Merged" counts
@@ -80,7 +83,7 @@ public final class SessionDone {
         });
     }
 
-    private record Resolved(SessionDoneDialog.Inputs inputs, Optional<Path> mainCheckout, Optional<Project> window) {
+    private record Resolved(SessionDoneDialog.Inputs inputs, Optional<Path> mainCheckout) {
     }
 
     private static Resolved resolve(ManagedAgentSession session) {
@@ -90,7 +93,6 @@ public final class SessionDone {
                 .filter(other -> WorktreeService.canonical(other.workingDirectory()).equals(directory))
                 .map(ManagedAgentSession::displayName)
                 .toList();
-        Optional<Project> window = windowOn(directory);
         try (WorktreeService worktrees = new WorktreeService(); GitStatusService git = new GitStatusService()) {
             List<Worktree> listed = worktrees.list(directory).get(QUERY_TIMEOUT_SECONDS, TimeUnit.SECONDS);
             Optional<Worktree> own = listed.stream()
@@ -110,16 +112,16 @@ public final class SessionDone {
                 risks = risks(git, worktrees, directory, mainCheckout.orElseThrow(), own.get(), branch,
                         session.prState() == PrState.MERGED);
             }
-            return new Resolved(new SessionDoneDialog.Inputs(risks, blocker, window.isPresent(),
-                    blocker.isEmpty() ? branch : Optional.empty()), mainCheckout, window);
+            return new Resolved(new SessionDoneDialog.Inputs(risks, blocker,
+                    blocker.isEmpty() ? branch : Optional.empty()), mainCheckout);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            return unknown("Interrupted while checking the worktree.", window);
+            return unknown("Interrupted while checking the worktree.");
         } catch (ExecutionException | TimeoutException | RuntimeException e) {
             // Never "clean" by default: a status that could not be read must
             // not become an offer to remove without a data-loss warning.
             LOG.log(Level.WARNING, () -> "Could not inspect the worktree of " + session.id() + ": " + e);
-            return unknown("Could not read the worktree's status: " + WorktreeErrors.visibleMessage(e), window);
+            return unknown("Could not read the worktree's status: " + WorktreeErrors.visibleMessage(e));
         }
     }
 
@@ -156,20 +158,9 @@ public final class SessionDone {
         }
     }
 
-    private static Resolved unknown(String reason, Optional<Project> window) {
+    private static Resolved unknown(String reason) {
         return new Resolved(new SessionDoneDialog.Inputs(new Risks(0, 0, 0, true), Optional.of(reason),
-                window.isPresent(), Optional.empty()), Optional.empty(), window);
-    }
-
-    /** The open window showing {@code directory}. Blocking (canonical paths): background only. */
-    private static Optional<Project> windowOn(Path directory) {
-        for (Project open : ProjectManager.getInstance().getOpenProjects()) {
-            if (!open.isDisposed() && open.getBasePath() != null
-                    && WorktreeService.canonical(Path.of(open.getBasePath())).equals(directory)) {
-                return Optional.of(open);
-            }
-        }
-        return Optional.empty();
+                Optional.empty()), Optional.empty());
     }
 
     private static void perform(Project from, ManagedAgentSession session, Choice choice, boolean deleteBranch,
@@ -188,6 +179,9 @@ public final class SessionDone {
                     return;
                 }
                 ApplicationManager.getApplication().invokeLater(() -> {
+                    // Both choices close only the task's session view (its
+                    // console tab, wherever it is shown); IDE project windows
+                    // stay open -- a window hosts more than this task.
                     closeConsoleTabs(session);
                     if (choice == Choice.FORGET) {
                         return;
@@ -212,13 +206,6 @@ public final class SessionDone {
         Path directory = session.workingDirectory();
         Path mainCheckout = resolved.mainCheckout().orElseThrow();
         Optional<String> branch = deleteBranch ? resolved.inputs().branch() : Optional.empty();
-        Optional<Project> window = resolved.window().filter(project -> !project.isDisposed());
-        if (window.isPresent() && !ProjectManager.getInstance().closeAndDispose(window.get())) {
-            // Vetoed, e.g. by its own close check. The task is already
-            // forgotten; the worktree stays, which loses nothing.
-            report(null, "The window stayed open, so " + directory + " was not removed.");
-            return;
-        }
         ProgressManager.getInstance().run(new Task.Backgroundable(null, "Removing worktree…", false) {
             @Override
             public void run(@NotNull ProgressIndicator indicator) {

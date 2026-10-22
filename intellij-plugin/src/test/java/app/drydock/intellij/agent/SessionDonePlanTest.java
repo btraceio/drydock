@@ -20,11 +20,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class SessionDonePlanTest {
 
     @Test
-    void removeDetailSaysWhatHappensToTheWindow() {
-        assertEquals("Removes the worktree folder and closes its window. The branch stays unless you tick below.",
-                SessionDonePlan.removeDetail(true));
+    void removeDetailNoLongerMentionsTheWindow() {
         assertEquals("Removes the worktree folder. The branch stays unless you tick below.",
-                SessionDonePlan.removeDetail(false));
+                SessionDonePlan.removeDetail());
     }
 
     @Test
