@@ -14,6 +14,7 @@ import app.drydock.agent.api.SessionIdStrategy;
 
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -103,6 +104,20 @@ public interface AgentProvider {
     LaunchPlan buildCreateCommand(CreateContext c);
 
     LaunchPlan buildResumeCommand(ResumeContext r);
+
+    /**
+     * A non-interactive argv that resumes the exact provider conversation and
+     * asks it for one transfer summary.  Unlike the interactive launch plans,
+     * this is an argument list for {@code ProcessRunner}: no shell expansion,
+     * no PTY, and no provider picker.  Providers that cannot do this return
+     * empty, which makes Transfer unavailable instead of risking the wrong
+     * conversation.
+     */
+    default Optional<List<String>> buildTransferSummaryCommand(Path workingDirectory,
+                                                                String agentSessionId,
+                                                                String prompt) {
+        return Optional.empty();
+    }
 
     SessionIdStrategy idStrategy();
 

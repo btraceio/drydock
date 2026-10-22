@@ -150,6 +150,10 @@ class ClaudeAgentProviderMcpFlagTest {
         assertFalse(create.contains("/base/mcp/abc.json"), create);
         assertFalse(resume.contains("--mcp-config"), resume);
         assertFalse(resume.contains("/base/mcp/abc.json"), resume);
+        assertTrue(create.contains("LANG=en_US.UTF-8"), create);
+        assertTrue(resume.contains("LANG=en_US.UTF-8"), resume);
+        assertTrue(create.contains("CLAUDE_CODE_NO_FLICKER=1"), create);
+        assertTrue(resume.contains("CLAUDE_CODE_NO_FLICKER=1"), resume);
     }
 
     private static final StdioMcpServer IDE = new StdioMcpServer("jetbrains", "/jbr/bin/java",

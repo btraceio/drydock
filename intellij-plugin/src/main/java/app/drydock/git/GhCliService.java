@@ -17,11 +17,11 @@ import java.io.File;
 import java.io.IOException;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -51,10 +51,6 @@ public final class GhCliService implements AutoCloseable {
 
     /** A network query, but bounded: a hung gh must not park the PR-chip future forever. */
     private static final Duration PROCESS_TIMEOUT = Duration.ofSeconds(15);
-
-    private static final List<Path> FALLBACK_LOCATIONS = List.of(
-            Path.of("/usr/local/bin/gh"),
-            Path.of("/opt/homebrew/bin/gh"));
 
     /** The bits of {@code gh pr view --json number,state,url} the app cares about. */
     public record PrInfo(int number, PrLifecycle state, Optional<String> url) {
@@ -303,12 +299,22 @@ public final class GhCliService implements AutoCloseable {
         }
         if (result.exitCode() != 0) {
             String excerpt = ProcessRunner.excerpt(result.stderr());
+            if (issuesDisabled(excerpt)) {
+                LOG.log(Level.DEBUG, "GitHub issues are disabled for the repository at {0}", root);
+                return new IssueListing.Unsupported();
+            }
             LOG.log(Level.WARNING, "gh issue list in " + root + " exited " + result.exitCode()
                     + (excerpt.isBlank() ? "" : ": " + excerpt));
             return new IssueListing.Failed(excerpt.isBlank()
                     ? "gh issue list exited " + result.exitCode() : excerpt);
         }
         return parseIssueListing(result.stdout());
+    }
+
+    /** GitHub's normal repository capability response, not an operational failure. */
+    static boolean issuesDisabled(String stderr) {
+        String message = stderr == null ? "" : stderr.toLowerCase(Locale.ROOT);
+        return message.contains("has disabled issues") || message.contains("issues are disabled");
     }
 
     /** The pure half of {@code gh issue list --json}. Malformed rows are skipped. */
@@ -396,27 +402,10 @@ public final class GhCliService implements AutoCloseable {
     }
 
     private static Optional<Path> discover() {
-        // The live PATH, not the frozen snapshot: on the late-merge path the
-        // snapshot holds the bare launchd PATH and discovery would stop at
-        // the shim in /usr/local/bin instead of a real gh further along.
-        String pathEnv = LoginShellEnvironment.currentRealPath();
-        if (pathEnv != null) {
-            for (String dir : pathEnv.split(Pattern.quote(File.pathSeparator))) {
-                if (dir.isBlank()) {
-                    continue;
-                }
-                Path candidate = Path.of(dir).resolve("gh");
-                if (Files.isRegularFile(candidate) && Files.isExecutable(candidate)) {
-                    return Optional.of(candidate);
-                }
-            }
-        }
-        for (Path candidate : FALLBACK_LOCATIONS) {
-            if (Files.isRegularFile(candidate) && Files.isExecutable(candidate)) {
-                return Optional.of(candidate);
-            }
-        }
-        return Optional.empty();
+        // After the preferred Dogbrew shim, use the live PATH rather than the
+        // frozen snapshot: on the late-merge path the snapshot still holds
+        // the bare launchd PATH and misses executables added by the login shell.
+        return GhExecutableLocator.locate(LoginShellEnvironment.currentRealPath());
     }
 
     @Override
@@ -440,7 +429,7 @@ public final class GhCliService implements AutoCloseable {
      * unavailable.</p>
      */
     private static ProcessResult runIn(Path workingDirectory, List<String> command) {
-        String livePath = LoginShellEnvironment.currentRealPath();
+        String livePath = pathWithFallbacks(LoginShellEnvironment.currentRealPath());
         try {
             if (livePath == null) {
                 return ProcessRunner.run(command, workingDirectory, PROCESS_TIMEOUT);
@@ -458,5 +447,25 @@ public final class GhCliService implements AutoCloseable {
             Thread.currentThread().interrupt();
             return null;
         }
+    }
+
+    /**
+     * Keeps the user's PATH order but makes known real-install locations
+     * reachable by wrappers encountered earlier on PATH. A shim that
+     * delegates to a later {@code gh} can otherwise exit with
+     * {@code exec: gh: not found}.
+     */
+    static String pathWithFallbacks(String path) {
+        LinkedHashSet<String> entries = new LinkedHashSet<>();
+        if (path != null) {
+            for (String entry : path.split(Pattern.quote(File.pathSeparator))) {
+                if (!entry.isBlank()) {
+                    entries.add(entry);
+                }
+            }
+        }
+        entries.add("/usr/local/bin");
+        entries.add("/opt/homebrew/bin");
+        return String.join(File.pathSeparator, entries);
     }
 }

@@ -53,6 +53,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -936,6 +937,28 @@ class DrydockSessionServiceTest {
         harness.store.flush();
     }
 
+    @Test
+    void restoreLateBindsBeforeChoosingResumeOrFreshStart(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingDiscovery discovery = new RecordingDiscovery(harness.events);
+        discovery.lateCandidates.add("codex-thread-recovered");
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.CODEX, SessionIdStrategy.DISCOVERED, discovery, true, false, null, harness.events);
+        DrydockSessionService service = harness.service(provider);
+        ManagedAgentSession idle = persistSession(harness, AgentKind.CODEX, "Recovered after quit",
+                AgentBinding.unlaunched(AgentKind.CODEX), base, SessionStatus.INACTIVE,
+                Instant.parse("2026-08-12T10:00:00Z"));
+
+        service.resumeOrStartSession(idle.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(Optional.of("codex-thread-recovered"),
+                persisted(harness, idle.id()).agentSessionId());
+        assertEquals(1, provider.resumeContexts.size(), "the recovered conversation must be resumed");
+        assertTrue(provider.createContexts.isEmpty(), "restore must not create a replacement conversation");
+        assertEquals(Optional.of("codex-thread-recovered"), provider.resumeContexts.getFirst().agentSessionId());
+        harness.store.flush();
+    }
+
     // ---- starting fresh on an existing row --------------------------------------
 
     /**
@@ -1027,7 +1050,49 @@ class DrydockSessionServiceTest {
         harness.store.flush();
     }
 
-    // ---- delete ----------------------------------------------------------------
+    // ---- rename and delete -----------------------------------------------------
+
+    @Test
+    void humanRenameNormalizesAndPinsTheSessionName(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        DrydockSessionService service = harness.service(new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, true, null, harness.events));
+        ManagedAgentSession session = persistSession(harness, AgentKind.CLAUDE, "Generated name",
+                AgentBinding.unlaunched(AgentKind.CLAUDE), base, SessionStatus.INACTIVE,
+                Instant.parse("2026-08-12T10:00:00Z"));
+
+        ManagedAgentSession renamed = service.renameSession(session.id(), "  Human\u2003name  ")
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals("Human name", renamed.displayName());
+        assertTrue(renamed.namePinned(), "a later transcript refresh must not replace a human rename");
+        assertEquals("Human name", persisted(harness, session.id()).displayName());
+        assertTrue(persisted(harness, session.id()).namePinned());
+        harness.store.flush();
+    }
+
+    @Test
+    void humanRenameRefusesASiblingNameWithoutChangingEitherSession(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        DrydockSessionService service = harness.service(new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, true, null, harness.events));
+        ManagedAgentSession first = persistSession(harness, AgentKind.CLAUDE, "First",
+                AgentBinding.unlaunched(AgentKind.CLAUDE), base, SessionStatus.INACTIVE,
+                Instant.parse("2026-08-12T10:00:00Z"));
+        persistSession(harness, AgentKind.PI, "Existing name",
+                AgentBinding.unlaunched(AgentKind.PI), base, SessionStatus.INACTIVE,
+                Instant.parse("2026-08-12T10:00:01Z"));
+
+        ExecutionException failure = assertThrows(ExecutionException.class, () ->
+                service.renameSession(first.id(), " existing   NAME ")
+                        .get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+
+        assertTrue(failure.getCause() instanceof IllegalArgumentException);
+        assertTrue(failure.getCause().getMessage().contains("already named"));
+        assertEquals("First", persisted(harness, first.id()).displayName());
+        assertFalse(persisted(harness, first.id()).namePinned());
+        harness.store.flush();
+    }
 
     @Test
     void deleteForgetsActivityStateAndRemovesTheSession(@TempDir Path base) throws Exception {
@@ -1151,5 +1216,133 @@ class DrydockSessionServiceTest {
         assertEquals(stored.workingDirectory().toString(), provider.resumeContexts.get(0).stdioMcpServers()
                 .get(0).env().get("IJ_MCP_SERVER_PROJECT_PATH"));
         harness.store.flush();
+    }
+
+    @Test
+    void transferSummaryParserAcceptsJsonEscapedEnvelope() {
+        String output = "{\"result\":\"noise\\nDRYDOCK_TRANSFER_V1_BEGIN_\\n"
+                + "GOAL: finish it\\nCOMPLETED: tests\\nNEXT: build\\nRISKS: none\\n"
+                + "DRYDOCK_TRANSFER_V1_END_\"}";
+
+        String parsed = DrydockSessionService.parseTransferSummary(output);
+
+        assertTrue(parsed.startsWith("DRYDOCK_TRANSFER_V1_BEGIN_\nGOAL:"));
+        assertTrue(parsed.endsWith("DRYDOCK_TRANSFER_V1_END_"));
+    }
+
+    @Test
+    void transferSummaryParserRejectsMissingFields() {
+        assertThrows(IllegalStateException.class, () -> DrydockSessionService.parseTransferSummary(
+                "DRYDOCK_TRANSFER_V1_BEGIN_\nGOAL: x\nDRYDOCK_TRANSFER_V1_END_"));
+    }
+
+    @Test
+    void transferSummaryParserAcceptsMultilineFieldValues() {
+        String output = "DRYDOCK_TRANSFER_V1_BEGIN_\n"
+                + "GOAL: finish it\n"
+                + "COMPLETED:\n- implementation\n- tests\n"
+                + "NEXT:\n1. build the plugin\n2. reinstall it\n"
+                + "RISKS:\n- none\n"
+                + "DRYDOCK_TRANSFER_V1_END_";
+
+        String parsed = DrydockSessionService.parseTransferSummary(output);
+
+        assertTrue(parsed.contains("NEXT:\n1. build the plugin\n2. reinstall it"));
+    }
+
+    @Test
+    void transferKeepsTheManagedIdentityAndCommitsTheTargetOnlyAfterOpen(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider sourceProvider = transferSource(harness.events);
+        RecordingProvider targetProvider = new RecordingProvider(
+                AgentKind.CODEX, SessionIdStrategy.DISCOVERED, null, true, false, null, harness.events);
+        DrydockSessionService service = harness.service(sourceProvider, targetProvider);
+        ManagedAgentSession source = persistSession(harness, AgentKind.CLAUDE, "Same task",
+                AgentBinding.unlaunched(AgentKind.CLAUDE).withSessionId(Optional.of("source-42")),
+                base, SessionStatus.INACTIVE, Instant.now());
+
+        ManagedAgentSession transferred = service.transferStoppedSession(source.id(), AgentKind.CODEX)
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(source.id(), transferred.id());
+        assertEquals(source.displayName(), transferred.displayName());
+        assertEquals(source.workspace(), transferred.workspace());
+        assertEquals(AgentKind.CODEX, persisted(harness, source.id()).agentKind());
+        assertTrue(persisted(harness, source.id()).agentSessionId().isEmpty());
+        assertEquals(source.id(), harness.consoles.opens.getFirst().sessionId());
+        assertTrue(targetProvider.createContexts.getFirst().initialPrompt().orElseThrow()
+                .contains("GOAL: goal"));
+        harness.store.flush();
+    }
+
+    @Test
+    void transferRetriesAnOversizedSummaryWithTheValidationFeedback(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        AtomicInteger attempts = new AtomicInteger();
+        RecordingProvider sourceProvider = new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, true, null, harness.events) {
+            @Override
+            public Optional<List<String>> buildTransferSummaryCommand(Path workingDirectory,
+                                                                       String agentSessionId,
+                                                                       String prompt) {
+                String completed = attempts.getAndIncrement() == 0 ? "x".repeat(2001) : "concise";
+                String answer = prompt.replace("<current goal>", "goal")
+                        .replace("<what is done>", completed)
+                        .replace("<concrete next steps>", "next")
+                        .replace("<constraints, failures, or none>", "none");
+                return Optional.of(List.of("/usr/bin/printf", "%s", answer));
+            }
+        };
+        RecordingProvider targetProvider = new RecordingProvider(
+                AgentKind.CODEX, SessionIdStrategy.DISCOVERED, null, true, false, null, harness.events);
+        DrydockSessionService service = harness.service(sourceProvider, targetProvider);
+        ManagedAgentSession source = persistSession(harness, AgentKind.CLAUDE, "Same task",
+                AgentBinding.unlaunched(AgentKind.CLAUDE).withSessionId(Optional.of("source-42")),
+                base, SessionStatus.INACTIVE, Instant.now());
+
+        ManagedAgentSession transferred = service.transferStoppedSession(source.id(), AgentKind.CODEX)
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(2, attempts.get());
+        assertEquals(AgentKind.CODEX, transferred.agentKind());
+        assertTrue(targetProvider.createContexts.getFirst().initialPrompt().orElseThrow()
+                .contains("COMPLETED: concise"));
+        harness.store.flush();
+    }
+
+    @Test
+    void failedTargetLaunchLeavesTheSourceBindingResumable(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider sourceProvider = transferSource(harness.events);
+        RecordingProvider targetProvider = new RecordingProvider(
+                AgentKind.CODEX, SessionIdStrategy.DISCOVERED, null, false, false, null, harness.events);
+        DrydockSessionService service = harness.service(sourceProvider, targetProvider);
+        AgentBinding sourceBinding = AgentBinding.unlaunched(AgentKind.CLAUDE)
+                .withSessionId(Optional.of("source-42"));
+        ManagedAgentSession source = persistSession(harness, AgentKind.CLAUDE, "Same task",
+                sourceBinding, base, SessionStatus.INACTIVE, Instant.now());
+
+        assertThrows(ExecutionException.class, () -> service.transferStoppedSession(source.id(), AgentKind.CODEX)
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+
+        assertEquals(sourceBinding, persisted(harness, source.id()).binding());
+        assertTrue(harness.consoles.opens.isEmpty());
+        harness.store.flush();
+    }
+
+    private static RecordingProvider transferSource(List<String> events) {
+        return new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, true, null, events) {
+            @Override
+            public Optional<List<String>> buildTransferSummaryCommand(Path workingDirectory,
+                                                                       String agentSessionId,
+                                                                       String prompt) {
+                String answer = prompt.replace("<current goal>", "goal")
+                        .replace("<what is done>", "completed")
+                        .replace("<concrete next steps>", "next")
+                        .replace("<constraints, failures, or none>", "none");
+                return Optional.of(List.of("/usr/bin/printf", "%s", answer));
+            }
+        };
     }
 }

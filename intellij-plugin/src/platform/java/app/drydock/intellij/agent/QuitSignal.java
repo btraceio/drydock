@@ -1,14 +1,16 @@
 package app.drydock.intellij.agent;
 
+import app.drydock.intellij.tasks.TaskWindows;
+
 import com.intellij.ide.AppLifecycleListener;
 
-/**
- * Tells {@link AgentCloseConfirmation} that the IDE has started to quit, so
- * the window closes that follow are answered with one dialog for all windows
- * rather than one per window. {@code appClosing()} is published before any
- * project is asked whether it may close.
- */
+/** Restores Drydock task windows at startup and marks the beginning of an IDE quit. */
 public final class QuitSignal implements AppLifecycleListener {
+
+    @Override
+    public void appStarted() {
+        TaskWindows.restoreRemembered();
+    }
 
     @Override
     public void appClosing() {

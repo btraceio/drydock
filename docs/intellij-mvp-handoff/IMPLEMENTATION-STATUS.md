@@ -8,7 +8,7 @@ where the design was deviated from on purpose.
 browser, keeping `support.js` next to it). Neither is edited — this file is
 the only place the implementation's own state is recorded.
 
-*Last updated: 2026-10-19, against `feat/intellij-mvp`, after the
+*Last updated: 2026-10-21, against `more-small-changes`, after the
 task-centric redesign (`docs/superpowers/specs/2026-10-19-intellij-task-tool-window-design.md`)
 replaced the handoff's entry points. See "Task tool window" below.*
 
@@ -39,12 +39,12 @@ Numbered as in the handoff's "Screens / views".
 | # | Surface | State |
 |---|---|---|
 | 1 | Agents ▾ widget + popup | **superseded** by the Drydock tool window (task-centric redesign) |
-| 2 | Agent editor tab | **partial** — tab (pinned, first, dot, `· RO`), strip (state word, RO chip, secondary line with a live age, Stop/Resume/Start, Changes, ⋯), the 50 %-dimmed stopped transcript with its footer, the status-bar breadcrumb named by the session title. Missing: file paths as hyperlinks, `<n> files changed`, and the `<repo> · <branch>` window title |
+| 2 | Agent editor tab | **partial** — tab (pinned, first, dot, `· RO`), strip (state word, RO chip, secondary line with a live age, Stop/Resume/Start, Changes, ⋯), the 50 %-dimmed stopped transcript with its footer, the status-bar breadcrumb named by the session title. Changes opens IntelliJ's native multi-file diff for the task's branch and working tree from their merge base (the main checkout shows its working tree). Missing: file paths as hyperlinks, `<n> files changed`, and the `<repo> · <branch>` window title |
 | 3 | New Agent Session dialog | **replaced** by **New task**: a task name (a label, never sent), optional instructions (the agent's first message only when given), agent, mode, and one generated summary line (`New branch <slug> from origin/main in <folder>`) with `Change…` for branch, start point (Git's own picker via Git4Idea), folder (base from Settings › Tools › Drydock, shared with the app), and new/this window |
 | 4 | Attention ("needs you") | **built, except the widget** — one balloon in the focused window (`Claude needs you` / `n agents need you`, `Raise window` · `Snooze`), an OS notification when the IDE is not active, and the needs-you state clears once the user is looking at the session. The amber Agents widget is surface 1. No prompt summary (the hook records only a state word) |
 | 5 | Resume and idle state | **built** — resume is by id, never `--continue`/`--last`; nothing auto-starts; `Resume · ~Nk tokens` from `ResumeCostEstimate` |
 | 6 | Close / quit confirmation | **built** — `Stop n working agent(s)?` on a window close, one dialog for all windows on quit (`Stop & Quit`), `Don't ask again` |
-| 7 | Review in the Commit tool window | **not built** (needs S4) |
+| 7 | Review in the Commit tool window | **not built** (needs S4); the strip's narrower Changes action opens a native diff window without findings or review state |
 | 8 | Finish ▾ | **not built** |
 | 9 | "Done with this task…" | **built** — from the strip or the tool window, for any task in any window. Says what removal would lose (uncommitted, untracked, commits not merged — a PR recorded MERGED counts as merged; the IDE's own `.idea`/`.iml` do not count), `Remove anyway`, and `Also delete branch` (ticked only when merged) |
 | 10 | Welcome screen Agents tab | **dropped** from the MVP by the redesign |
@@ -337,7 +337,8 @@ DECISION.md, SPIKE-RESULTS.md). Plan, with its rulings R1–R10:
   a name.
 - **R3:** no Welcome Agents tab.
 - **R5:** the repo chip is a text prefix.
-- **R6:** `Changes ↗` jumps, then activates the Commit tool window.
+- **R6:** `Changes ↗` jumps, then opens the same native task diff as the
+  owning window's Changes link.
 - A cold jump opens the window through the File › Open path, so typing in
   the hosting tab waits for it (2–5 s).
 - File links carry no hover text.

@@ -10,6 +10,7 @@ import com.intellij.testFramework.fixtures.BasePlatformTestCase;
 import com.jediterm.terminal.model.TerminalLine;
 import com.jediterm.terminal.model.TerminalTextBuffer;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -29,9 +30,9 @@ import java.util.function.BooleanSupplier;
  */
 public class AgentExecutionRegistryPlatformTest extends BasePlatformTestCase {
 
-    /** Prints numbered lines for a few seconds, then idles: a stand-in agent. */
+    /** Prints a replay-sized numbered payload, then idles: a stand-in agent. */
     private static final List<String> STREAMING = List.of("/bin/sh", "-c",
-            "i=0; while [ $i -lt 3000 ]; do i=$((i+1)); printf 'LINE %06d\\n' $i; sleep 0.002; done; sleep 30");
+            "i=0; while [ $i -lt 3000 ]; do i=$((i+1)); printf 'LINE %06d\\n' $i; done; sleep 30");
 
     /** What the starting window's session service would be told. */
     private record Ended(ManagedSessionId id, boolean stopRequested, Integer exitCode) {
@@ -143,7 +144,7 @@ public class AgentExecutionRegistryPlatformTest extends BasePlatformTestCase {
         assertTrue(registry.isRunning(id));
         assertTrue(registry.shownIn(getProject()).isEmpty());
         AgentExecution shown = registry.show(id, getProject()).orElseThrow();
-        waitFor(() -> text(shown.console().orElseThrow()).contains("LINE 000001"));
+        waitFor(() -> text(shown.console().orElseThrow()).contains("LINE 003000"));
     }
 
     public void testStoppingANotShownAgentStillReportsTheStop() throws Exception {
@@ -156,6 +157,35 @@ public class AgentExecutionRegistryPlatformTest extends BasePlatformTestCase {
         Thread.sleep(200);
         assertEquals(1, ended.size());
         assertTrue(ended.get(0).stopRequested());
+    }
+
+    public void testReplacementStopKillsTheAgentChildBeforeTheWrapperReportsDone() throws Exception {
+        Path pidFile = Files.createTempFile("drydock-agent-child", ".pid");
+        long childPid = -1;
+        try {
+            start(List.of("/bin/sh", "-c",
+                    "sleep 30 & child=$!; printf '%s' \"$child\" > \"$1\"; wait",
+                    "drydock-test", pidFile.toString()));
+            waitFor(() -> {
+                try {
+                    return Files.size(pidFile) > 0;
+                } catch (java.io.IOException e) {
+                    return false;
+                }
+            });
+            childPid = Long.parseLong(Files.readString(pidFile));
+
+            registry.stopProcessTree(id);
+
+            long capturedChildPid = childPid;
+            waitFor(() -> !registry.isRunning(id)
+                    && ProcessHandle.of(capturedChildPid).map(handle -> !handle.isAlive()).orElse(true));
+        } finally {
+            if (childPid > 0) {
+                ProcessHandle.of(childPid).ifPresent(ProcessHandle::destroyForcibly);
+            }
+            Files.deleteIfExists(pidFile);
+        }
     }
 
     public void testShowingAFinishedAgentAttachesNoInput() throws Exception {
@@ -184,6 +214,14 @@ public class AgentExecutionRegistryPlatformTest extends BasePlatformTestCase {
         assertEquals(line.getStyleAt(at + 2).getForeground(), line.getStyleAt(at + 3).getForeground());
         assertFalse(line.getStyleAt(at).getForeground() != null
                 && line.getStyleAt(at).getForeground().equals(line.getStyleAt(at + 2).getForeground()));
+    }
+
+    public void testBareCarriageReturnRemainsATerminalCursorControl() throws Exception {
+        AgentExecution execution = start(List.of("/bin/sh", "-c", "printf 'ABCDE\\rZ'; sleep 30"));
+        TerminalExecutionConsole console = execution.console().orElseThrow();
+
+        waitFor(() -> text(console).contains("ZBCDE"));
+        assertFalse(text(console), text(console).contains("ABCDE\nZ"));
     }
 
     private static TerminalLine lineContaining(TerminalExecutionConsole console, String text) {

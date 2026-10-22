@@ -155,7 +155,7 @@ public record ManagedAgentSession(
         return binding.sessionName();
     }
 
-    /** Whether this session's agent may edit files (see {@link SessionMode}). */
+    /** Whether this session is read-only or has full access (see {@link SessionMode}). */
     public SessionMode mode() {
         return binding.mode();
     }

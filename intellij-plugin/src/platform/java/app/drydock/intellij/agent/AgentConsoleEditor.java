@@ -113,6 +113,9 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
     /** {@link #hostedFrom} as the tab title last showed it. EDT. */
     private Optional<SessionPlace> paintedHostedFrom = Optional.empty();
 
+    /** The session name as the tab title last showed it. EDT. */
+    private String paintedTitle = "";
+
     /** The resolved session; null until the catalog load completes. */
     private volatile ManagedAgentSession session;
 
@@ -253,13 +256,6 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
                 hostedFrom = found != null ? hostedPlace(plugin, found) : Optional.empty();
                 folderMissing = found != null && hostedFrom.isPresent()
                         && HostedLifecycle.folderGone(true, Files.isDirectory(found.workingDirectory()));
-                if (found != null && !everResolved && HostedLifecycle.closeRestoredTab(hostedFrom.isPresent(),
-                        AgentExecutionRegistry.getInstance().host(found.id()).map(project::equals).orElse(false),
-                        project.getLocationHash().equals(file.getUserData(AgentConsoles.OPENED_IN)))) {
-                    // Restored by the IDE from another worktree: hosted tabs
-                    // do not come back; the Drydock list offers Resume here.
-                    closeLater();
-                }
                 if (hostedFrom.isPresent()) {
                     file.putUserData(HostedTab.KEY, new HostedTab.Facts(project.getLocationHash(), hostedFrom.get()));
                 } else if (HostedTab.placeIn(file, project).isPresent()) {
@@ -416,7 +412,8 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
                 resumable, resumeTokens,
                 DumbService.isDumb(project),
                 hostedFrom.map(place -> execution.map(AgentExecution::place).orElse(place)), folderMissing,
-                AgentExecutionRegistry.getInstance().moving().contains(current.id()));
+                AgentExecutionRegistry.getInstance().moving().contains(current.id()),
+                SessionTransfer.destination(current.id()));
 
         String stoppedLine = AgentStripText.stoppedFooter(
                 AgentStripText.displayStatus(current.status(), false),
@@ -438,8 +435,9 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
         FileEditorManagerEx.getInstanceEx(project).refreshIcons();
         // The title too, when the tab's repo tag came or went: the platform
         // reads it from a provider and caches it.
-        if (!hostedFrom.equals(paintedHostedFrom)) {
+        if (!hostedFrom.equals(paintedHostedFrom) || !current.displayName().equals(paintedTitle)) {
             paintedHostedFrom = hostedFrom;
+            paintedTitle = current.displayName();
             FileEditorManager.getInstance(project).updateFilePresentation(file);
         }
     }
@@ -536,17 +534,14 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
             case STOP -> AgentExecutionService.getInstance(project).stop(current.id());
             case RESUME -> AgentConsoles.resume(project, current.id());
             case START -> AgentConsoles.startFresh(project, current.id());
+            case TRANSFER -> SessionTransfer.show(project, current, this::refreshLater);
+            case RENAME -> SessionRename.show(project, current);
             case SESSION_MENU -> SessionDone.show(project, current);
-            // The review surface lands in a later phase. The link exists now
-            // because the strip is the handoff's strip; wiring it to nothing
-            // silently would be worse than saying so.
-            // A hosted tab's Changes lives in the agent's own window, so it
-            // jumps there first (F3). A local one's review is not built yet.
             case SHOW_CHANGES -> {
                 if (hostedFrom.isPresent()) {
                     AgentConsoles.jumpToOwnWindow(project, current.id(), true);
                 } else {
-                    AgentConsoles.notImplementedYet(project, action);
+                    TaskChanges.show(project, current);
                 }
             }
             case OPEN_PROJECT_WINDOW -> AgentConsoles.jumpToOwnWindow(project, current.id(), false);

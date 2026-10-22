@@ -3,6 +3,7 @@ package app.drydock.process;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
@@ -78,5 +79,16 @@ class ProcessRunnerTest {
 
         assertEquals(0, result.exitCode());
         assertTrue(result.stdout().contains("set-by-test"), result.stdout());
+    }
+
+    @Test
+    void boundedRunDrainsButRefusesOversizedOutput() {
+        ProcessRunner.Options options = new ProcessRunner.Options(
+                null, Duration.ofSeconds(5), true, Map.of());
+
+        IOException failure = assertThrows(IOException.class, () -> ProcessRunner.run(
+                List.of("/usr/bin/printf", "%s", "x".repeat(2048)), options, 1024));
+
+        assertTrue(failure.getMessage().contains("exceeded 1024 bytes"), failure.getMessage());
     }
 }

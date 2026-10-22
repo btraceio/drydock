@@ -9,13 +9,13 @@ import app.drydock.intellij.terminal.ShellCommandAdapter;
 import com.intellij.execution.ExecutionException;
 import com.intellij.execution.configurations.PtyCommandLine;
 import com.intellij.execution.process.KillableProcessHandler;
+import com.intellij.execution.process.NopProcessHandler;
 import com.intellij.execution.process.ProcessEvent;
 import com.intellij.execution.process.ProcessListener;
-import com.intellij.execution.ui.ConsoleViewContentType;
+import com.intellij.execution.process.ProcessOutputTypes;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
-import com.intellij.openapi.editor.markup.TextAttributes;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.Disposer;
 import com.intellij.openapi.util.Key;
@@ -91,15 +91,6 @@ public final class AgentExecutionRegistry implements Disposable {
     /** The PTY's size until a console lays itself out. */
     private static final int INITIAL_COLUMNS = 120;
     private static final int INITIAL_ROWS = 30;
-
-    /**
-     * The content type agent output is printed with: no attributes at all.
-     * The console wraps text printed with a coloured type in that colour and
-     * a reset, which recoloured a TUI's own colours at every chunk boundary;
-     * the platform's own process path prints with none.
-     */
-    private static final ConsoleViewContentType AGENT_OUTPUT =
-            new ConsoleViewContentType("DRYDOCK_AGENT_OUTPUT", new TextAttributes());
 
     private final Map<ManagedSessionId, AgentExecution> executions = new ConcurrentHashMap<>();
     /** Sessions whose console is on its way to another window (a jump, while that window opens). */
@@ -350,29 +341,35 @@ public final class AgentExecutionRegistry implements Disposable {
         Disposer.register(AgentExecutionService.getInstance(target), console);
         // Paths the agent prints open in its own worktree's window.
         console.addMessageFilter(new WorktreeFileLinks(execution.workingDirectory()));
-        // The console's terminal emulator is started for every console, even
-        // one showing an agent that has ended: without it the replayed
-        // transcript is queued and never drawn. The connector carries input
-        // and resizes; output comes through the router, never from the
-        // process directly, or every chunk would print twice. An ended
-        // agent's input goes nowhere, and its dimmed tab takes none anyway.
+        // Feed output through TerminalExecutionConsole's normal process path.
+        // Calling console.print() is not equivalent for a PTY: it treats CR
+        // and LF as document line separators and rewrites them to CRLF. A
+        // fullscreen TUI uses bare CR and LF as independent cursor controls,
+        // so that rewrite progressively tears its screen apart (most visibly
+        // after scrolling Claude's command palette).
         //
-        // Started on the widget rather than through attachToProcess, which
-        // does the same two calls but also adds a listener to the process
-        // handler that nothing ever removes: every console moved away from
-        // stayed reachable from the live process, screen buffer and all.
+        // A disposable proxy carries routed output while the real connector
+        // still owns input and resize. Attaching the console directly to the
+        // long-lived real handler would leave the platform's private listener
+        // retaining every console ever moved away from.
         ProcessHandlerTtyConnector tty = new ProcessHandlerTtyConnector(execution.handler(), StandardCharsets.UTF_8);
-        console.getTerminalWidget().createTerminalSession(tty);
-        console.getTerminalWidget().start();
+        NopProcessHandler output = new NopProcessHandler();
+        console.attachToProcess(output, tty, true);
+        output.startNotify();
         execution.shownIn(target, console);
         ProcessHandlerTtyConnector input = tty;
         // Set by the console's own disposal (a window closing, or a move):
         // a chunk arriving after it must not reach a disposed console.
         AtomicBoolean disposed = new AtomicBoolean();
-        Disposer.register(console, () -> disposed.set(true));
+        Disposer.register(console, () -> {
+            disposed.set(true);
+            if (!output.isProcessTerminated()) {
+                output.destroyProcess();
+            }
+        });
         execution.router().attach(text -> {
             if (!disposed.get()) {
-                console.print(text, AGENT_OUTPUT);
+                output.notifyTextAvailable(text, ProcessOutputTypes.STDOUT);
             }
         }, () -> {
             if (execution.isRunning()) {
@@ -467,6 +464,27 @@ public final class AgentExecutionRegistry implements Disposable {
         handler.setShouldKillProcessSoftly(false);
         handler.destroyProcess();
         scheduleForceKill(sessionId, handler);
+    }
+
+    /**
+     * Stops the complete PTY process tree immediately when a replacement
+     * must reopen the same provider conversation.
+     *
+     * <p>The ordinary stop path first asks pty4j to destroy its wrapper and
+     * force-kills the tree two seconds later. That is appropriate for a user
+     * deactivation, but not for transfer: the wrapper can report terminated
+     * while a Codex child still owns the thread-store writer. A subsequent
+     * {@code codex exec resume} then races that child and fails with an
+     * active-writer conflict. Transfer has already committed to replacing
+     * the process, so it kills the tree synchronously before waiting.</p>
+     */
+    void stopProcessTree(ManagedSessionId sessionId) {
+        Objects.requireNonNull(sessionId, "sessionId");
+        AgentExecution execution = executions.get(sessionId);
+        if (execution == null || !execution.isRunning() || !execution.requestStop()) {
+            return;
+        }
+        forceStop(execution.handler());
     }
 
     /** Stops and drops a session's execution entirely, e.g. when the session is forgotten. */

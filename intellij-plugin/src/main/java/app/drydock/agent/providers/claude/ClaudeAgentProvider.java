@@ -31,6 +31,7 @@ import app.drydock.state.json.JsonWriter;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
@@ -43,7 +44,10 @@ public final class ClaudeAgentProvider implements AgentProvider {
 
     static final String ENV_CLEANUP_PREFIX = "env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT"
             + " -u CLAUDE_CODE_EXECPATH -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION"
-            + " -u CLAUDE_EFFORT ";
+            + " -u CLAUDE_EFFORT LANG=en_US.UTF-8 CLAUDE_CODE_NO_FLICKER=1 ";
+
+    private static final String REMOTE_COMMAND_PREFIX = "exec env LANG=en_US.UTF-8"
+            + " CLAUDE_CODE_NO_FLICKER=1 claude";
 
     private final ClaudeExecutableLocator locator;
     private final HostBinaryLocator ddtoolLocator;
@@ -79,17 +83,24 @@ public final class ClaudeAgentProvider implements AgentProvider {
      * so this injection is skipped for eval launches.
      */
     private String ddtoolPathInjection() {
+        return ddtoolPathValue()
+                .map(value -> "PATH=" + AgentCommands.shellQuote(value) + " ")
+                .orElse("");
+    }
+
+    /** PATH value needed by a directly spawned Claude child, without shell quoting. */
+    private Optional<String> ddtoolPathValue() {
         Optional<Path> ddtool = ddtoolLocator.locate();
         if (ddtool.isEmpty() || ddtool.get().getParent() == null) {
-            return "";
+            return Optional.empty();
         }
         String dir = ddtool.get().getParent().toString();
         String realPath = LoginShellEnvironment.currentRealPath();
         if (realPath != null && pathContainsEntry(realPath, dir)) {
-            return "";
+            return Optional.empty();
         }
         String value = (realPath == null || realPath.isBlank()) ? dir : dir + ":" + realPath;
-        return "PATH=" + AgentCommands.shellQuote(value) + " ";
+        return Optional.of(value);
     }
 
     /** True if {@code pathEnv} (colon-separated) already contains {@code dir}. */
@@ -219,7 +230,8 @@ public final class ClaudeAgentProvider implements AgentProvider {
     @Override
     public LaunchPlan buildCreateCommand(CreateContext c) {
         if (c.remote().isPresent()) {
-            return LaunchPlan.of(SshCommandBuilder.interactiveSessionCommand(c.remote().get(), "exec claude"), false);
+            return LaunchPlan.of(
+                    SshCommandBuilder.interactiveSessionCommand(c.remote().get(), REMOTE_COMMAND_PREFIX), false);
         }
         ClaudeCapabilities caps = detectCaps();
         // Eval runs inside a container whose PATH has `claude` (installed by the
@@ -257,7 +269,7 @@ public final class ClaudeAgentProvider implements AgentProvider {
     @Override
     public LaunchPlan buildResumeCommand(ResumeContext r) {
         if (r.remote().isPresent()) {
-            String exec = "exec claude --resume";
+            String exec = REMOTE_COMMAND_PREFIX + " --resume";
             if (r.agentSessionId().isPresent()) {
                 exec += " " + SshCommandBuilder.posixQuote(r.agentSessionId().get());
             } else if (r.agentSessionName().isPresent()) {
@@ -291,6 +303,21 @@ public final class ClaudeAgentProvider implements AgentProvider {
                     r.mcp().flatMap(McpAccess::credentialFile)), false);
         }
         return LaunchPlan.of(inner, false);
+    }
+
+    @Override
+    public Optional<List<String>> buildTransferSummaryCommand(Path workingDirectory, String agentSessionId,
+                                                               String prompt) {
+        return locator.locate().map(executable -> {
+            List<String> command = new ArrayList<>(List.of(
+                    "/usr/bin/env", "-u", "CLAUDECODE", "-u", "CLAUDE_CODE_ENTRYPOINT",
+                    "-u", "CLAUDE_CODE_EXECPATH", "-u", "CLAUDE_CODE_SESSION_ID", "-u",
+                    "CLAUDE_CODE_CHILD_SESSION", "-u", "CLAUDE_EFFORT", "LANG=en_US.UTF-8"));
+            ddtoolPathValue().ifPresent(path -> command.add("PATH=" + path));
+            command.addAll(List.of(executable.toString(), "--safe-mode", "--print", "--resume", agentSessionId,
+                    "--permission-mode", "plan", "--output-format", "json", "--", prompt));
+            return List.copyOf(command);
+        });
     }
 
     @Override

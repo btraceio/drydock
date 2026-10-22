@@ -41,10 +41,10 @@ public class NewTaskDialogPlatformTest extends BasePlatformTestCase {
         assertEquals(AgentKind.PI, choice.get().agent());
     }
 
-    public void testSummaryStartsReadOnlyInTheMainCheckout() {
+    public void testTriageStartsWithFullAccessInTheMainCheckout() {
         OpenIssue issue = new OpenIssue(42, "Fix allocation accounting", Optional.empty(), List.of(), List.of(),
                 Optional.empty());
-        NewTaskPreset preset = NewTaskPreset.summarize(issue);
+        NewTaskPreset preset = NewTaskPreset.triage(issue);
         AtomicReference<NewTaskPlan.Choice> choice = new AtomicReference<>();
 
         ApplicationManager.getApplication().invokeAndWait(() -> {
@@ -56,9 +56,25 @@ public class NewTaskDialogPlatformTest extends BasePlatformTestCase {
             }
         });
 
-        assertEquals(SessionMode.READ_ONLY, choice.get().mode());
+        assertEquals(SessionMode.WRITES, choice.get().mode());
         assertEquals(NewTaskPlan.WorkIn.MAIN_CHECKOUT, choice.get().workIn());
         assertEquals(preset.instructions(), choice.get().instructions());
+    }
+
+    public void testProjectMainCheckoutEntryCannotCreateAWorktree() {
+        AtomicReference<NewTaskPlan.Choice> choice = new AtomicReference<>();
+
+        ApplicationManager.getApplication().invokeAndWait(() -> {
+            NewTaskDialog dialog = new NewTaskDialog(
+                    getProject(), inputs(), Optional.empty(), NewTaskPreset.mainCheckout());
+            try {
+                choice.set(dialog.choice());
+            } finally {
+                Disposer.dispose(dialog.getDisposable());
+            }
+        });
+
+        assertEquals(NewTaskPlan.WorkIn.MAIN_CHECKOUT, choice.get().workIn());
     }
 
     private static NewTaskPlan.Inputs inputs() {

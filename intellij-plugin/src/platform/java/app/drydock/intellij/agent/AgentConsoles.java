@@ -26,13 +26,9 @@ import com.intellij.openapi.progress.Task;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.project.ProjectManager;
 import com.intellij.openapi.ui.Messages;
-import com.intellij.openapi.util.Key;
 import com.intellij.openapi.util.text.StringUtil;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.openapi.wm.IdeFocusManager;
-import com.intellij.openapi.wm.ToolWindow;
-import com.intellij.openapi.wm.ToolWindowId;
-import com.intellij.openapi.wm.ToolWindowManager;
 import com.intellij.openapi.wm.WindowManager;
 import com.intellij.util.messages.MessageBusConnection;
 import org.jetbrains.annotations.NotNull;
@@ -65,9 +61,6 @@ public final class AgentConsoles {
 
     private static final Logger LOG = System.getLogger(AgentConsoles.class.getName());
 
-    /** The location hash of the window Drydock last opened a console tab in, this IDE run. */
-    static final Key<String> OPENED_IN = Key.create("drydock.consoleOpenedIn");
-
     private AgentConsoles() {
     }
 
@@ -85,9 +78,6 @@ public final class AgentConsoles {
         Objects.requireNonNull(project, "project");
         Objects.requireNonNull(sessionId, "sessionId");
         AgentConsoleFile file = AgentConsoleFileSystem.getInstance().fileFor(sessionId);
-        // Drydock opened it, in this window, in this IDE run: a tab without
-        // the mark was restored by the IDE (see HostedLifecycle).
-        file.putUserData(OPENED_IN, project.getLocationHash());
         // A preview tab is replaced by the next file the user clicks; a live
         // agent must not be evictable that way.
         file.putUserData(FileEditorManagerKeys.FORBID_PREVIEW_TAB, Boolean.TRUE);
@@ -170,27 +160,19 @@ public final class AgentConsoles {
      * outside the strip (the Drydock tool window). EDT.
      */
     public static void resumeOrStart(Project project, ManagedAgentSession session) {
-        DrydockPluginService plugin = DrydockPluginService.getInstance();
-        plugin.executor().execute(() -> {
-            boolean resumable = hasConversation(session);
-            ApplicationManager.getApplication().invokeLater(() -> {
-                if (resumable) {
-                    resume(project, session.id());
-                } else {
-                    startFresh(project, session.id());
-                }
-            }, ModalityState.nonModal(), project.getDisposed());
-        });
+        start(project, session.id(), "Restoring Drydock session…", "restore",
+                sessions -> sessions.resumeOrStartSession(session.id()));
     }
 
     /**
-     * Shows the tab and starts a <em>fresh</em> conversation on this row — the
-     * action offered when the session has no recorded conversation to resume
-     * into. Same one-execution rule; a different agent command.
+     * Handles the strip's apparent fresh-start action. The strip is rendered
+     * from persisted state, so shutdown may have left it without the provider
+     * id even though a conversation exists. Re-run the restore backstop before
+     * deciding that a fresh launch is safe.
      */
     public static void startFresh(Project project, ManagedSessionId sessionId) {
-        start(project, sessionId, "Starting Drydock session…", "start",
-                sessions -> sessions.startSession(sessionId));
+        start(project, sessionId, "Restoring Drydock session…", "restore",
+                sessions -> sessions.resumeOrStartSession(sessionId));
     }
 
     private static void start(Project project, ManagedSessionId sessionId, String progressTitle,
@@ -198,6 +180,10 @@ public final class AgentConsoles {
                                       CompletableFuture<ManagedAgentSession>> launch) {
         Objects.requireNonNull(project, "project");
         Objects.requireNonNull(sessionId, "sessionId");
+        if (SessionTransfer.inProgress(sessionId)) {
+            Messages.showInfoMessage(project, "This session is being transferred.", "Drydock");
+            return;
+        }
         // One agent per session across the whole IDE: the registry knows
         // where it is shown, if anywhere, and a running one is gone to, never
         // started a second time.
@@ -263,7 +249,8 @@ public final class AgentConsoles {
      * history is replayed into the new console. EDT.
      */
     public static void showHere(Project project, ManagedSessionId sessionId) {
-        if (project.isDisposed() || AgentExecutionRegistry.getInstance().show(sessionId, project).isEmpty()) {
+        if (project.isDisposed() || SessionTransfer.inProgress(sessionId)
+                || AgentExecutionRegistry.getInstance().show(sessionId, project).isEmpty()) {
             return;
         }
         show(project, sessionId);
@@ -297,6 +284,9 @@ public final class AgentConsoles {
      */
     public static void jumpToOwnWindow(Project host, ManagedSessionId sessionId, boolean thenChanges,
                                        boolean announce) {
+        if (SessionTransfer.inProgress(sessionId)) {
+            return;
+        }
         AgentExecutionRegistry registry = AgentExecutionRegistry.getInstance();
         Optional<AgentExecution> execution = registry.execution(sessionId);
         if (execution.isEmpty()) {
@@ -336,10 +326,10 @@ public final class AgentConsoles {
                     show(target, sessionId);
                     focusConsole(target, sessionId);
                     if (thenChanges) {
-                        ToolWindow commit = ToolWindowManager.getInstance(target).getToolWindow(ToolWindowId.COMMIT);
-                        if (commit != null) {
-                            commit.activate(null);
-                        }
+                        DrydockPluginService.getInstance().stateStore().state().sessions().stream()
+                                .filter(session -> session.id().equals(sessionId))
+                                .findFirst()
+                                .ifPresent(session -> TaskChanges.show(target, session));
                     }
                     if (announce && !host.isDisposed()) {
                         announceMove(host, target, sessionId, place);
@@ -455,19 +445,6 @@ public final class AgentConsoles {
     public static void focusConsoleLater(Project project, ManagedSessionId sessionId) {
         ApplicationManager.getApplication().invokeLater(
                 () -> focusConsole(project, sessionId), ModalityState.nonModal(), project.getDisposed());
-    }
-
-    /**
-     * The strip's Changes link, whose surface lands in a later phase. It is
-     * present because the strip is the handoff's strip; saying so is better
-     * than a link that silently does nothing.
-     */
-    static void notImplementedYet(Project project, AgentConsoleStrip.StripAction action) {
-        String what = switch (action) {
-            case SHOW_CHANGES -> "The branch-vs-main review opens in the Commit tool window, which is not built yet.";
-            case STOP, RESUME, START, OPEN_PROJECT_WINDOW, SESSION_MENU -> "";
-        };
-        Messages.showInfoMessage(project, what, "Drydock");
     }
 
     private static String rootMessage(Throwable failure) {

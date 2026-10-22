@@ -7,6 +7,8 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
+import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
@@ -56,6 +58,21 @@ class WorktreeServiceTest {
         assertFalse(discovered.mainCheckout());
         assertEquals(Optional.of("feat/outside"), discovered.branch());
         assertEquals(outside.toRealPath(), discovered.path().toRealPath());
+    }
+
+    @Test
+    void lastActivityIncludesModifiedAndUntrackedFiles(@TempDir Path repoDir) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path modified = repo.resolve("README.md");
+        Path untracked = repo.resolve("notes.txt");
+        Files.writeString(modified, "changed\n");
+        Files.writeString(untracked, "notes\n");
+        Instant newest = Instant.now().plusSeconds(60);
+        Files.setLastModifiedTime(untracked, FileTime.from(newest));
+
+        Instant activity = service.lastActivity(repo).get();
+
+        assertEquals(newest, activity);
     }
 
     @Test
@@ -280,6 +297,20 @@ class WorktreeServiceTest {
     }
 
     @Test
+    void discardChangesRemovalDeletesADirtyWorktreeButKeepsItsBranch(
+            @TempDir Path repoDir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/bulk").get();
+        Files.writeString(worktree.resolve("README.md"), "modified\n");
+        Files.writeString(worktree.resolve("uncommitted.txt"), "expendable\n");
+
+        service.removeDiscardingChanges(repo, worktree, Optional.empty()).get();
+
+        assertFalse(Files.exists(worktree));
+        assertTrue(runGitCapture(repo, "branch", "--list", "feat/bulk").contains("feat/bulk"));
+    }
+
+    @Test
     void forcedRemoveStillRefusesTheMainCheckout(@TempDir Path repoDir) throws Exception {
         Path repo = initCommittedRepo(repoDir);
 
@@ -315,6 +346,21 @@ class WorktreeServiceTest {
         assertFalse(Files.exists(worktree));
         assertEquals(1, service.list(repo).get().size());
         assertFalse(runGitCapture(repo, "branch", "--list", "feat/locked-force").contains("feat/locked-force"));
+    }
+
+    @Test
+    void discardChangesRemovalStillHonorsAWorktreeLock(
+            @TempDir Path repoDir, @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path worktree = gitStatusService.createWorktree(repo, worktreeParent.resolve("wt"), "feat/held-bulk").get();
+        runGit(repo, "worktree", "lock", "--reason", "initializing", worktree.toString());
+
+        CompletionException completion = assertThrows(CompletionException.class,
+                () -> service.removeDiscardingChanges(repo, worktree, Optional.empty()).join());
+
+        WorktreeLockedException locked = assertInstanceOf(WorktreeLockedException.class, completion.getCause());
+        assertEquals(Optional.of("initializing"), locked.lockReason());
+        assertTrue(Files.exists(worktree));
     }
 
     /**

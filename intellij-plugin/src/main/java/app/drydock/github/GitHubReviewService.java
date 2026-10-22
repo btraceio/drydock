@@ -1,5 +1,6 @@
 package app.drydock.github;
 
+import app.drydock.git.GhExecutableLocator;
 import app.drydock.github.GitHubReviewRequest.Comment;
 import app.drydock.github.GitHubReviewRequest.Event;
 import app.drydock.process.ProcessResult;
@@ -12,8 +13,6 @@ import app.drydock.state.json.JsonValue.JsonObject;
 import app.drydock.state.json.JsonValue.JsonString;
 import app.drydock.state.json.JsonWriter;
 
-import java.io.File;
-import java.util.ArrayList;
 import java.io.IOException;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
@@ -21,12 +20,12 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.regex.Pattern;
 
 /**
  * The only class that runs {@code gh} to post a PR review. Same
@@ -47,10 +46,6 @@ public final class GitHubReviewService implements AutoCloseable {
 
     /** Bounds the {@code gh auth status} probe behind {@link #unavailableReason}. */
     private static final Duration AUTH_TIMEOUT = Duration.ofSeconds(15);
-
-    private static final List<Path> FALLBACK_LOCATIONS = List.of(
-            Path.of("/usr/local/bin/gh"),
-            Path.of("/opt/homebrew/bin/gh"));
 
     /** What posting a review resolved to. Never a fourth, ambiguous outcome. */
     public sealed interface SubmitOutcome permits Posted, Rejected, Unavailable {
@@ -294,24 +289,7 @@ public final class GitHubReviewService implements AutoCloseable {
     }
 
     private static Optional<Path> discover() {
-        String pathEnv = System.getenv("PATH");
-        if (pathEnv != null) {
-            for (String dir : pathEnv.split(Pattern.quote(File.pathSeparator))) {
-                if (dir.isBlank()) {
-                    continue;
-                }
-                Path candidate = Path.of(dir).resolve("gh");
-                if (Files.isRegularFile(candidate) && Files.isExecutable(candidate)) {
-                    return Optional.of(candidate);
-                }
-            }
-        }
-        for (Path candidate : FALLBACK_LOCATIONS) {
-            if (Files.isRegularFile(candidate) && Files.isExecutable(candidate)) {
-                return Optional.of(candidate);
-            }
-        }
-        return Optional.empty();
+        return GhExecutableLocator.locate(System.getenv("PATH"));
     }
 
     @Override

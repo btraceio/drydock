@@ -5,26 +5,13 @@ import app.drydock.domain.SessionActivity;
 import java.util.Optional;
 
 /**
- * What happens to a hosted tab when the IDE restarts, when its agent's turn
- * ends, and when its worktree goes away (cross-project tabs, frame F5 and
- * the handoff's "Other rules"), as pure decisions.
+ * What happens to a hosted tab when its agent's turn ends and when its
+ * worktree goes away (cross-project tabs, frame F5 and the handoff's
+ * "Other rules"), as pure decisions.
  */
 public final class HostedLifecycle {
 
     private HostedLifecycle() {
-    }
-
-    /**
-     * Whether a console tab should close itself on first showing: hosted from
-     * another worktree, its agent not shown here, and not opened by Drydock
-     * in this window — which leaves exactly the tabs the IDE restored from the
-     * workspace file. Hosted tabs are not restored: after a restart the agent
-     * is not running, and the Drydock list's "Resume here" is the way back. A
-     * tab Drydock opened itself stays, because a new hosted task opens its
-     * tab before its agent is shown.
-     */
-    public static boolean closeRestoredTab(boolean hosted, boolean shownHere, boolean openedByDrydock) {
-        return hosted && !shownHere && !openedByDrydock;
     }
 
     /**

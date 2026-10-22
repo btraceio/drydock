@@ -1,6 +1,7 @@
 package app.drydock.process;
 
 import java.io.File;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.System.Logger;
@@ -72,6 +73,15 @@ public final class ProcessRunner {
 
     public static ProcessResult run(List<String> command, Options options)
             throws IOException, InterruptedException {
+        return run(command, options, Integer.MAX_VALUE);
+    }
+
+    /** As {@link #run(List, Options)}, but refuses output larger than {@code maxOutputBytes}. */
+    public static ProcessResult run(List<String> command, Options options, int maxOutputBytes)
+            throws IOException, InterruptedException {
+        if (maxOutputBytes <= 0) {
+            throw new IllegalArgumentException("maxOutputBytes must be positive");
+        }
         ProcessBuilder builder = new ProcessBuilder(command).redirectErrorStream(false);
         if (options.workingDirectory() != null) {
             builder.directory(options.workingDirectory().toFile());
@@ -80,18 +90,19 @@ public final class ProcessRunner {
             builder.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
         }
         builder.environment().putAll(options.environment());
-        return runBuilder(builder, command, options.timeout());
+        return runBuilder(builder, command, options.timeout(), maxOutputBytes);
     }
 
-    private static ProcessResult runBuilder(ProcessBuilder builder, List<String> command, Duration timeout)
+    private static ProcessResult runBuilder(ProcessBuilder builder, List<String> command, Duration timeout,
+                                            int maxOutputBytes)
             throws IOException, InterruptedException {
         Process process = builder.start();
 
         // Drain stdout and stderr concurrently: reading one stream fully
         // before the other risks a deadlock if the unread pipe's OS buffer
         // fills first.
-        StreamReader stdoutReader = new StreamReader(process.getInputStream());
-        StreamReader stderrReader = new StreamReader(process.getErrorStream());
+        StreamReader stdoutReader = new StreamReader(process.getInputStream(), maxOutputBytes);
+        StreamReader stderrReader = new StreamReader(process.getErrorStream(), maxOutputBytes);
         Thread stdoutThread = Thread.ofVirtual().start(stdoutReader);
         Thread stderrThread = Thread.ofVirtual().start(stderrReader);
 
@@ -111,6 +122,9 @@ public final class ProcessRunner {
             throw e;
         }
 
+        if (stdoutReader.exceeded() || stderrReader.exceeded()) {
+            throw new IOException("Process output exceeded " + maxOutputBytes + " bytes");
+        }
         return new ProcessResult(process.exitValue(), stdoutReader.result(), stderrReader.result());
     }
 
@@ -131,16 +145,31 @@ public final class ProcessRunner {
 
     private static final class StreamReader implements Runnable {
         private final InputStream stream;
+        private final int maxBytes;
         private volatile String result = "";
+        private volatile boolean exceeded;
 
-        StreamReader(InputStream stream) {
+        StreamReader(InputStream stream, int maxBytes) {
             this.stream = stream;
+            this.maxBytes = maxBytes;
         }
 
         @Override
         public void run() {
             try {
-                result = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+                ByteArrayOutputStream kept = new ByteArrayOutputStream(Math.min(maxBytes, 8192));
+                byte[] buffer = new byte[8192];
+                int read;
+                while ((read = stream.read(buffer)) >= 0) {
+                    int room = maxBytes - kept.size();
+                    if (room > 0) {
+                        kept.write(buffer, 0, Math.min(room, read));
+                    }
+                    if (read > room) {
+                        exceeded = true;
+                    }
+                }
+                result = kept.toString(StandardCharsets.UTF_8);
             } catch (IOException e) {
                 result = "";
                 LOG.log(Level.DEBUG, "Failed reading child process stream", e);
@@ -149,6 +178,10 @@ public final class ProcessRunner {
 
         String result() {
             return result;
+        }
+
+        boolean exceeded() {
+            return exceeded;
         }
     }
 }

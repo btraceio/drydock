@@ -9,32 +9,11 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** A hosted tab across a restart, the end of its agent's turn, and its worktree vanishing. */
+/** A hosted tab across the end of its agent's turn and its worktree vanishing. */
 class HostedLifecycleTest {
 
     private static final Optional<SessionActivity> BUSY = Optional.of(SessionActivity.BUSY);
     private static final Optional<SessionActivity> IDLE = Optional.of(SessionActivity.IDLE);
-
-    @Test
-    void aHostedTabTheIdeRestoredClosesItself() {
-        assertTrue(HostedLifecycle.closeRestoredTab(true, false, false));
-    }
-
-    @Test
-    void aHostedTabDrydockOpenedStaysEvenBeforeItsAgentIsShown() {
-        // A new hosted task opens its tab first and starts its agent after.
-        assertFalse(HostedLifecycle.closeRestoredTab(true, false, true));
-    }
-
-    @Test
-    void aTabShowingItsAgentStays() {
-        assertFalse(HostedLifecycle.closeRestoredTab(true, true, false));
-    }
-
-    @Test
-    void aWindowsOwnRestoredTabStays() {
-        assertFalse(HostedLifecycle.closeRestoredTab(false, false, false));
-    }
 
     @Test
     void aHostedTurnEndingRefreshes() {

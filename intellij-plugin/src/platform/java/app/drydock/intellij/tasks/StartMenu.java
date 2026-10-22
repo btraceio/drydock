@@ -44,13 +44,14 @@ final class StartMenu {
         Item readOnly = new Item("Read-only, in this window", Optional.empty(), OpenIn.THIS_WINDOW,
                 SessionMode.READ_ONLY);
         if (ownWorktree) {
-            return List.of(new Item("Start", Optional.empty(), OpenIn.THIS_WINDOW, SessionMode.WRITES), readOnly);
+            return List.of(new Item("Start with full access", Optional.empty(), OpenIn.THIS_WINDOW,
+                    SessionMode.WRITES), readOnly);
         }
         return List.of(
-                new Item("Start in this window", Optional.of("Tab opens here, tagged " + repo), OpenIn.THIS_WINDOW,
-                        SessionMode.WRITES),
-                new Item("Start in its own window", Optional.of("Opens " + repo + " · " + branch), OpenIn.OWN_WINDOW,
-                        SessionMode.WRITES),
+                new Item("Full access, in this window", Optional.of("Tab opens here, tagged " + repo),
+                        OpenIn.THIS_WINDOW, SessionMode.WRITES),
+                new Item("Full access, in its own window", Optional.of("Opens " + repo + " · " + branch),
+                        OpenIn.OWN_WINDOW, SessionMode.WRITES),
                 readOnly);
     }
 

@@ -62,6 +62,10 @@ public final class SessionDone {
 
     /** Resolves, asks, and acts. {@code from} is the window the request came from. */
     public static void show(Project from, ManagedAgentSession session) {
+        if (SessionTransfer.inProgress(session.id())) {
+            Messages.showInfoMessage(from, "This session is being transferred.", "Drydock");
+            return;
+        }
         ProgressManager.getInstance().run(new Task.Backgroundable(from, "Checking worktree…", true) {
             @Override
             public void run(@NotNull ProgressIndicator indicator) {
@@ -184,14 +188,8 @@ public final class SessionDone {
                     return;
                 }
                 ApplicationManager.getApplication().invokeLater(() -> {
+                    closeConsoleTabs(session);
                     if (choice == Choice.FORGET) {
-                        // The row is gone; a tab saying so is noise, in any window.
-                        for (Project open : ProjectManager.getInstance().getOpenProjects()) {
-                            if (!open.isDisposed()) {
-                                FileEditorManager.getInstance(open)
-                                        .closeFile(AgentConsoleFileSystem.getInstance().fileFor(session.id()));
-                            }
-                        }
                         return;
                     }
                     closeWindowAndRemove(session, deleteBranch, resolved);
@@ -200,11 +198,19 @@ public final class SessionDone {
         });
     }
 
+    /** The forgotten session no longer has a useful editor, wherever it was hosted. EDT only. */
+    private static void closeConsoleTabs(ManagedAgentSession session) {
+        AgentConsoleFile file = AgentConsoleFileSystem.getInstance().fileFor(session.id());
+        for (Project open : ProjectManager.getInstance().getOpenProjects()) {
+            if (!open.isDisposed()) {
+                FileEditorManager.getInstance(open).closeFile(file);
+            }
+        }
+    }
+
     private static void closeWindowAndRemove(ManagedAgentSession session, boolean deleteBranch, Resolved resolved) {
         Path directory = session.workingDirectory();
         Path mainCheckout = resolved.mainCheckout().orElseThrow();
-        Risks risks = resolved.inputs().risks();
-        boolean dirty = risks.uncommitted() + risks.untracked() > 0;
         Optional<String> branch = deleteBranch ? resolved.inputs().branch() : Optional.empty();
         Optional<Project> window = resolved.window().filter(project -> !project.isDisposed());
         if (window.isPresent() && !ProjectManager.getInstance().closeAndDispose(window.get())) {
@@ -217,10 +223,15 @@ public final class SessionDone {
             @Override
             public void run(@NotNull ProgressIndicator indicator) {
                 try (WorktreeService worktrees = new WorktreeService()) {
-                    // The dialog has already said what --force discards.
-                    (dirty
-                            ? worktrees.removeForced(mainCheckout, directory, branch)
-                            : worktrees.remove(mainCheckout, directory, branch))
+                    // Choosing "Forget + remove worktree" authorizes deleting
+                    // the folder. Always use the lock-preserving force mode:
+                    // the status shown in the dialog is only a snapshot, and
+                    // intentionally omits IntelliJ's own .idea/.iml files.
+                    // Selecting the plain path from that filtered snapshot
+                    // made those files (or a later edit) turn the confirmed
+                    // removal into WorktreeNotCleanException. A deliberate
+                    // worktree lock remains a blocker.
+                    worktrees.removeDiscardingChanges(mainCheckout, directory, branch)
                             .get(REMOVE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
                     // The task tree rebuilt when the row was forgotten, before
                     // the folder was gone, and listed it as an idle worktree.

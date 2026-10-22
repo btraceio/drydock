@@ -12,7 +12,9 @@ import app.drydock.agent.api.StdioMcpServer;
 import app.drydock.agent.providers.codex.internal.CodexExecutableLocator;
 import app.drydock.domain.SshRemote;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
@@ -45,7 +47,7 @@ class CodexAgentProviderTest {
                 new CreateContext("Session 1", "ignored-uuid", Path.of("/repo"), Optional.empty(), Optional.empty()));
         assertTrue(plan.supported());
         assertFalse(plan.sessionIdUsed());
-        assertTrue(plan.command().endsWith("codex"));   // env-scrub prefix (if any) + "codex"; no id, no --settings
+        assertTrue(plan.command().endsWith("codex --sandbox danger-full-access"), plan.command());
     }
 
     @Test
@@ -70,25 +72,39 @@ class CodexAgentProviderTest {
     }
 
     @Test
-    void aWritingSessionCarriesNoSandboxFlag() {
+    void aWritingSessionExplicitlyRunsWithFullAccess() {
         LaunchPlan plan = provider().buildCreateCommand(
                 new CreateContext("Session 1", "ignored-uuid", Path.of("/repo"), Optional.empty(),
                         Optional.empty(), false, false));
-        assertFalse(plan.command().contains("--sandbox"), plan.command());
+        assertTrue(plan.command().endsWith("codex --sandbox danger-full-access"), plan.command());
     }
 
     @Test
     void resumeByIdWhenKnown() {
         LaunchPlan plan = provider().buildResumeCommand(
                 new ResumeContext(Optional.of("019f9072-abc"), Optional.empty(), Path.of("/repo"), Optional.empty(), Optional.empty()));
-        assertTrue(plan.command().endsWith("codex resume '019f9072-abc'"));
+        assertTrue(plan.command().endsWith(
+                "codex --sandbox danger-full-access resume '019f9072-abc'"), plan.command());
     }
 
     @Test
     void resumeUsesPickerWhenIdUnknown() {
         LaunchPlan plan = provider().buildResumeCommand(
                 new ResumeContext(Optional.empty(), Optional.empty(), Path.of("/repo"), Optional.empty(), Optional.empty()));
-        assertTrue(plan.command().endsWith("codex resume"));   // picker; never --last
+        assertTrue(plan.command().endsWith("codex --sandbox danger-full-access resume"));
+    }
+
+    @Test
+    void transferSummaryUsesExecResumeWithTheExactConversation(@TempDir Path dir) throws Exception {
+        Path executable = Files.writeString(dir.resolve("codex"), "#!/bin/sh\n");
+        assertTrue(executable.toFile().setExecutable(true));
+        CodexAgentProvider provider = new CodexAgentProvider(new CodexExecutableLocator(executable));
+        provider.init(new AgentContext(dir, dir.resolve("activity"), ForkJoinPool.commonPool()));
+
+        assertEquals(List.of("/usr/bin/env", "-u", "CODEX_SANDBOX", "-u",
+                        "CODEX_SANDBOX_NETWORK_DISABLED", executable.toString(), "exec",
+                        "--sandbox", "read-only", "resume", "conversation-42", "summarize"),
+                provider.buildTransferSummaryCommand(dir, "conversation-42", "summarize").orElseThrow());
     }
 
     @Test
@@ -167,7 +183,7 @@ class CodexAgentProviderTest {
 
         assertFalse(command.contains("tok-abc"), command);
         assertFalse(command.contains("mcp_servers"), command);
-        assertTrue(command.endsWith("codex"), command);
+        assertTrue(command.endsWith("codex --sandbox danger-full-access"), command);
     }
 
     @Test
@@ -200,7 +216,7 @@ class CodexAgentProviderTest {
                 new CreateContext("s", "x", Path.of("/repo"), Optional.empty(), Optional.empty()));
 
         assertFalse(plan.command().contains("mcp_servers"), plan.command());
-        assertTrue(plan.command().endsWith("codex"), plan.command());
+        assertTrue(plan.command().endsWith("codex --sandbox danger-full-access"), plan.command());
     }
 
     @Test
@@ -235,18 +251,13 @@ class CodexAgentProviderTest {
         assertFalse(plan.supported());
     }
 
-    /**
-     * Codex ignores the initial prompt: its positional-prompt contract has not
-     * been read off an installed binary, and an unverified argument is a
-     * launch that may fail. Pinned so that changes deliberately.
-     */
     @Test
-    void theInitialPromptIsNotRenderedUntilItsContractIsVerified() {
+    void theInitialPromptUsesCodexDocumentedPositionalPrompt() {
         String without = provider().buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
                 Optional.empty(), Optional.empty(), false, false)).command();
         String with = provider().buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
                 Optional.empty(), Optional.empty(), false, false, Optional.of("Add a farewell method"))).command();
-        assertEquals(without, with);
+        assertEquals(without + " -- 'Add a farewell method'", with);
     }
 
     private static final StdioMcpServer IDE = new StdioMcpServer("jetbrains", "/jbr/bin/java",

@@ -58,4 +58,11 @@ class GhCliIssueListingTest {
         assertFalse(GhCliService.validRepository("team/repo/extra/path"));
         assertFalse(GhCliService.validRepository("team/repo with spaces"));
     }
+
+    @Test
+    void aRepositoryWithIssuesDisabledIsNotPresentedAsAnError() {
+        assertTrue(GhCliService.issuesDisabled("the 'acme/api' repository has disabled issues"));
+        assertTrue(GhCliService.issuesDisabled("Issues are disabled for this repository"));
+        assertFalse(GhCliService.issuesDisabled("HTTP 503: service unavailable"));
+    }
 }

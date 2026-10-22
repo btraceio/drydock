@@ -3,16 +3,23 @@ package app.drydock.intellij.tasks;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.SessionStatus;
+import app.drydock.git.WorktreeService;
 import app.drydock.intellij.DrydockPluginService;
+import app.drydock.intellij.DrydockSessionsListener;
 import app.drydock.intellij.agent.AgentConsoles;
 import app.drydock.intellij.agent.AgentExecutionRegistry;
 import app.drydock.intellij.agent.SessionDone;
+import app.drydock.intellij.agent.SessionRename;
+import app.drydock.intellij.agent.SessionTransfer;
 import app.drydock.intellij.agent.StopAgentsDialog;
 import app.drydock.intellij.agent.StopAgentsPlan;
+import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
+import app.drydock.intellij.tasks.TaskNode.StaleWorktrees;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
 import app.drydock.intellij.ui.SessionDots;
+import app.drydock.intellij.worktree.WorktreeErrors;
 import app.drydock.ui.AgentLabels;
 
 import com.intellij.icons.AllIcons;
@@ -23,14 +30,25 @@ import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.project.DumbAwareAction;
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.progress.ProgressIndicator;
+import com.intellij.openapi.progress.ProgressManager;
+import com.intellij.openapi.progress.Task;
 import com.intellij.openapi.project.ProjectManager;
 import com.intellij.openapi.ui.Messages;
 import org.jetbrains.annotations.NotNull;
 
 import javax.swing.Icon;
 
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Predicate;
 
 /**
@@ -45,12 +63,15 @@ import java.util.function.Predicate;
  */
 final class TaskActions {
 
+    enum DefaultActivation { SWITCH_TO_RUNNING, RESUME_HERE }
+
     /**
      * How long Deactivate &amp; Close and Done wait for the agent to end: past the
      * execution's own two-second force-kill, with room to spare.
      */
     private static final long STOP_WAIT_MILLIS = 5_000;
     private static final long STOP_POLL_MILLIS = 100;
+    private static final long REMOVE_TIMEOUT_SECONDS = 120;
 
     private TaskActions() {
     }
@@ -79,7 +100,7 @@ final class TaskActions {
                 task("Deactivate && Close Window", "Deactivate the agent and close its window", AllIcons.Actions.Close,
                         TaskActions::closesOwnWindow, (project, row) -> stop(project, row, true)),
                 // F5: moves an agent another window shows into this one.
-                task("Show Here", "Move this agent's console into this window", AllIcons.Actions.MoveTo2,
+                task("Show Here", "Move this agent's console into this window", AllIcons.Actions.Show,
                         row -> row.placement() instanceof TaskPlacement.OwnWindow
                                 || row.placement() instanceof TaskPlacement.OtherWindow,
                         (project, row) -> AgentConsoles.showHere(project, row.session().id())),
@@ -92,8 +113,14 @@ final class TaskActions {
                         AllIcons.Actions.MoveTo2, TaskActions::resumesElsewhere,
                         (project, row) -> TaskNavigator.switchTo(row.session(),
                                 target -> AgentConsoles.resumeOrStart(target, row.session()))),
+                task("Transfer to…", "Continue this live task with another installed agent",
+                        AllIcons.Actions.Refresh, row -> SessionTransfer.available(row.session(), row.activity()),
+                        (project, row) -> SessionTransfer.show(project, row.session())),
+                task("Rename…", "Rename this session", AllIcons.Actions.Edit, row -> true,
+                        (project, row) -> SessionRename.show(project, row.session())),
                 task("Done with This Task…", "Forget the task, and optionally remove its worktree",
                         AllIcons.Actions.Checked, row -> true, TaskActions::done),
+                removeWorktrees(),
                 removeProject());
     }
 
@@ -116,6 +143,11 @@ final class TaskActions {
      */
     static boolean resumesElsewhere(TaskRow row) {
         return !row.running() && row.placement() instanceof TaskPlacement.Idle idle && !idle.thisWindow();
+    }
+
+    /** Double-click/Enter follows the primary action: resume idle tasks here, focus running ones. */
+    static DefaultActivation defaultActivation(TaskRow row) {
+        return row.running() ? DefaultActivation.SWITCH_TO_RUNNING : DefaultActivation.RESUME_HERE;
     }
 
     private interface RowAction {
@@ -150,6 +182,9 @@ final class TaskActions {
      */
     static void stop(Project from, TaskRow row, boolean closeWindow) {
         ManagedSessionId id = row.session().id();
+        if (SessionTransfer.inProgress(id)) {
+            return;
+        }
         AgentExecutionRegistry registry = AgentExecutionRegistry.getInstance();
         if (!registry.isRunning(id)) {
             return;   // ended meanwhile
@@ -181,6 +216,9 @@ final class TaskActions {
      * the worktree sees what the agent left, not what it is still writing.
      */
     static void done(Project from, TaskRow row) {
+        if (SessionTransfer.inProgress(row.session().id())) {
+            return;
+        }
         AgentExecutionRegistry registry = AgentExecutionRegistry.getInstance();
         if (!registry.isRunning(row.session().id())) {
             SessionDone.show(from, row.session());
@@ -207,7 +245,7 @@ final class TaskActions {
      */
     private static AnAction removeProject() {
         return new DumbAwareAction("Remove from Drydock", "Take this project off Drydock's list; nothing on disk "
-                + "changes", AllIcons.General.Remove) {
+                + "changes", AllIcons.Actions.Close) {
             @Override
             public void update(@NotNull AnActionEvent e) {
                 present(e, e.getData(TaskTreePanel.SELECTED_NODE) instanceof ProjectRow);
@@ -247,6 +285,168 @@ final class TaskActions {
     static String removeQuestion(String repo, int running) {
         return "Remove " + repo + " from Drydock? " + running + (running == 1 ? " agent keeps" : " agents keep")
                 + " running.";
+    }
+
+    /** Removes one idle row, a stale group, or every inactive worktree under a project. */
+    private static AnAction removeWorktrees() {
+        return new DumbAwareAction("Remove Inactive Worktrees…",
+                "Remove inactive worktree folders; branches are kept", AllIcons.General.Remove) {
+            @Override
+            public void update(@NotNull AnActionEvent e) {
+                List<TaskNode> selected = selectedNodes(e);
+                List<IdleWorktree> targets = removable(selected);
+                present(e, !targets.isEmpty() && e.getData(TaskTreePanel.SELECTED_PROJECT_ROOT) != null
+                        && e.getData(TaskTreePanel.WORKTREE_REMOVAL_UI) != null);
+                e.getPresentation().setText(removalActionName(selected));
+            }
+
+            @Override
+            public @NotNull ActionUpdateThread getActionUpdateThread() {
+                return ActionUpdateThread.EDT;
+            }
+
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                Project project = e.getProject();
+                Path root = e.getData(TaskTreePanel.SELECTED_PROJECT_ROOT);
+                TaskTreePanel.WorktreeRemovalUi removalUi = e.getData(TaskTreePanel.WORKTREE_REMOVAL_UI);
+                List<TaskNode> selected = selectedNodes(e);
+                List<IdleWorktree> targets = removable(selected);
+                if (project == null || root == null || removalUi == null || targets.isEmpty()) {
+                    return;
+                }
+                confirmAndRemove(project, root, targets,
+                        selected.size() == 1 && selected.get(0) instanceof StaleWorktrees, removalUi);
+            }
+        };
+    }
+
+    /** EDT entry point shared by the action and the stale row's visible link. */
+    static void confirmAndRemove(Project project, Path root, List<IdleWorktree> targets, boolean staleOnly,
+                                 TaskTreePanel.WorktreeRemovalUi removalUi) {
+        String question = removalQuestion(targets.size(), staleOnly);
+        if (Messages.showOkCancelDialog(project, question, "Remove Worktrees",
+                removalButton(targets.size()), "Cancel", AllIcons.General.Warning) == Messages.OK) {
+            removeInBackground(project, root, targets, removalUi);
+        }
+    }
+
+    static List<IdleWorktree> removable(TaskNode node) {
+        return switch (node) {
+            case ProjectRow row -> row.inactiveWorktrees().stream()
+                    .filter(worktree -> !worktree.locked() && !worktree.open()).toList();
+            case StaleWorktrees stale -> stale.worktrees();
+            case IdleWorktree idle when !idle.locked() && !idle.open() -> List.of(idle);
+            case null, default -> List.of();
+        };
+    }
+
+    /** All selected targets, with parent/child selection overlaps removed. */
+    static List<IdleWorktree> removable(List<TaskNode> nodes) {
+        if (nodes == null || nodes.isEmpty()) {
+            return List.of();
+        }
+        Map<Path, IdleWorktree> unique = new LinkedHashMap<>();
+        for (TaskNode node : nodes) {
+            List<IdleWorktree> targets = removable(node);
+            if (targets.isEmpty()) {
+                // A mixed selection must not silently act on just its
+                // removable subset.
+                return List.of();
+            }
+            targets.forEach(target -> unique.putIfAbsent(target.worktree(), target));
+        }
+        return List.copyOf(unique.values());
+    }
+
+    private static List<TaskNode> selectedNodes(AnActionEvent event) {
+        List<TaskNode> selected = event.getData(TaskTreePanel.SELECTED_NODES);
+        if (selected != null) {
+            return selected;
+        }
+        TaskNode lead = event.getData(TaskTreePanel.SELECTED_NODE);
+        return lead == null ? List.of() : List.of(lead);
+    }
+
+    static String removalActionName(TaskNode node) {
+        if (node instanceof IdleWorktree) {
+            return "Remove Worktree…";
+        }
+        if (node instanceof StaleWorktrees) {
+            return "Remove Stale Worktrees…";
+        }
+        return "Remove Inactive Worktrees…";
+    }
+
+    static String removalActionName(List<TaskNode> nodes) {
+        return nodes != null && nodes.size() == 1
+                ? removalActionName(nodes.get(0))
+                : "Remove Worktrees…";
+    }
+
+    static String removalQuestion(int count, boolean staleOnly) {
+        String kind = staleOnly ? "stale" : "inactive";
+        return "Remove " + count + " " + kind + (count == 1 ? " worktree" : " worktrees") + "? "
+                + "This permanently deletes " + (count == 1 ? "its folder" : "their folders")
+                + " and discards any uncommitted and untracked changes. Branches are kept.";
+    }
+
+    static String removalButton(int count) {
+        return count == 1 ? "Remove" : "Remove " + count;
+    }
+
+    private static void removeInBackground(Project project, Path root, List<IdleWorktree> targets,
+                                           TaskTreePanel.WorktreeRemovalUi removalUi) {
+        ProgressManager.getInstance().run(new Task.Backgroundable(project, "Removing worktrees…", false) {
+            @Override
+            public void run(@NotNull ProgressIndicator indicator) {
+                List<String> failures = new ArrayList<>();
+                List<Path> removed = new ArrayList<>();
+                try (WorktreeService worktrees = new WorktreeService()) {
+                    for (int i = 0; i < targets.size(); i++) {
+                        IdleWorktree target = targets.get(i);
+                        indicator.setText("Removing " + target.branch());
+                        indicator.setFraction((double) i / targets.size());
+                        try {
+                            // The confirmation explicitly accepts discarded
+                            // local changes. Branches intentionally survive.
+                            worktrees.removeDiscardingChanges(root, target.worktree(), Optional.empty())
+                                    .get(REMOVE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                            removed.add(target.worktree());
+                        } catch (InterruptedException ex) {
+                            Thread.currentThread().interrupt();
+                            failures.add(target.branch() + ": interrupted");
+                            break;
+                        } catch (ExecutionException | TimeoutException | RuntimeException ex) {
+                            failures.add(target.branch() + ": " + WorktreeErrors.visibleMessage(ex));
+                        }
+                    }
+                } finally {
+                    try {
+                        if (!removed.isEmpty() && !project.isDisposed()) {
+                            indicator.setText("Updating task list…");
+                            indicator.setFraction(1);
+                            Set<Path> removedPaths = Set.copyOf(removed);
+                            // Keep the progress task alive until the rows it
+                            // removed are gone from the visible tree. The
+                            // authoritative rescan below can take several
+                            // seconds because it also probes activity.
+                            ApplicationManager.getApplication().invokeAndWait(
+                                    () -> removalUi.worktreesRemoved(removedPaths), ModalityState.any());
+                        }
+                    } finally {
+                        // Some removals may have succeeded before a later one
+                        // failed; always converge the tree on the on-disk state.
+                        DrydockSessionsListener.publishChanged();
+                    }
+                }
+                if (!failures.isEmpty()) {
+                    ApplicationManager.getApplication().invokeLater(() -> Messages.showErrorDialog(project,
+                            "Some worktrees could not be removed:\n" + String.join("\n", failures), "Drydock"),
+                            ModalityState.nonModal(), project.getDisposed());
+                }
+            }
+        });
     }
 
     /**

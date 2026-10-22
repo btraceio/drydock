@@ -21,8 +21,9 @@ package app.drydock.app;
  *
  * <p>{@link #currentRealPath()} keeps the original name and contract ("the
  * PATH a session child will actually inherit") for the four call sites that
- * locate {@code claude}/{@code gh}/{@code git}; inside the IDE that is simply
- * the IDE's {@code PATH}.
+ * locate {@code claude}/{@code gh}/{@code git}. This core source set cannot
+ * depend on IntelliJ APIs, so tool-specific callers remain responsible for
+ * adding any known fallback locations their wrappers need.
  */
 public final class LoginShellEnvironment {
 
@@ -30,9 +31,7 @@ public final class LoginShellEnvironment {
     }
 
     /**
-     * The PATH a spawned session child will actually inherit. Inside IntelliJ
-     * that is the IDE process's environment; the IDE is responsible for
-     * having repaired it (terminal PATH / shell-path settings).
+     * The PATH inherited by {@code ProcessBuilder} children of the IDE JVM.
      */
     public static String currentRealPath() {
         return System.getenv("PATH");

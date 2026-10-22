@@ -78,7 +78,7 @@ final class NewTaskDialog extends DialogWrapper {
     private final JBTextField name = new JBTextField();
     private final JBTextArea instructions = new JBTextArea(4, 40);
     private final Map<AgentKind, JBRadioButton> agentButtons = new LinkedHashMap<>();
-    private final JBRadioButton writes = new JBRadioButton("Writes", true);
+    private final JBRadioButton writes = new JBRadioButton("Full access", true);
     private final JBRadioButton readOnly = new JBRadioButton("Read-only");
     private final JBLabel summary = new JBLabel();
     private final HyperlinkLabel change = new HyperlinkLabel("Change…");
@@ -131,6 +131,9 @@ final class NewTaskDialog extends DialogWrapper {
             readOnly.setSelected(true);
             mainCheckout.setSelected(true);
         }
+        if (preset.fixedWorkIn().orElse(null) == WorkIn.MAIN_CHECKOUT) {
+            mainCheckout.setSelected(true);
+        }
         setTitle("New task in " + inputs.repoName());
         ownWindow.setSelected(preset.openIn() == OpenIn.OWN_WINDOW);
         thisWindow.setSelected(preset.openIn() == OpenIn.THIS_WINDOW);
@@ -171,7 +174,7 @@ final class NewTaskDialog extends DialogWrapper {
         JPanel modes;
         if (preset.fixedMode().isPresent()) {
             modes = row(new JBLabel(preset.fixedMode().get() == SessionMode.WRITES
-                    ? "Writes" : "Read-only"));
+                    ? "Full access" : "Read-only"));
         } else {
             modes = row(writes, readOnly);
             group(writes, readOnly);
@@ -301,7 +304,7 @@ final class NewTaskDialog extends DialogWrapper {
         baseRow.add(changeBase);
 
         FormBuilder builder = FormBuilder.createFormBuilder();
-        if (inputs.fixedWorktree().isEmpty()) {
+        if (inputs.fixedWorktree().isEmpty() && preset.fixedWorkIn().isEmpty()) {
             builder.addLabeledComponent("Work in:", row(newWorktree, mainCheckout))
                     .addLabeledComponent("Branch:", branch)
                     .addLabeledComponent("From:", startRow)
@@ -330,9 +333,10 @@ final class NewTaskDialog extends DialogWrapper {
     /** Summary, warning, OK label, and the controls the mode allows. */
     private void refresh() {
         boolean fixed = inputs.fixedWorktree().isPresent();
-        newWorktree.setEnabled(preset.mode(readOnly.isSelected()) != SessionMode.READ_ONLY
+        newWorktree.setEnabled(preset.fixedWorkIn().isEmpty()
+                && preset.mode(readOnly.isSelected()) != SessionMode.READ_ONLY
                 && !fixed);
-        mainCheckout.setEnabled(!fixed);
+        mainCheckout.setEnabled(preset.fixedWorkIn().isEmpty() && !fixed);
         boolean worktree = workIn() == WorkIn.NEW_WORKTREE;
         branch.setEnabled(worktree);
         start.setEnabled(worktree);
@@ -358,6 +362,9 @@ final class NewTaskDialog extends DialogWrapper {
     }
 
     private WorkIn workIn() {
+        if (preset.fixedWorkIn().isPresent()) {
+            return preset.fixedWorkIn().get();
+        }
         if (inputs.fixedWorktree().isPresent()) {
             return WorkIn.EXISTING_WORKTREE;
         }

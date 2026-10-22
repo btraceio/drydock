@@ -131,13 +131,11 @@ public final class CodexAgentProvider implements AgentProvider {
         // to the eval account. See ManagedAgentSession.evalMode.
         // DISCOVERED: no id; no --settings
         //
-        // initialPrompt is deliberately NOT rendered. Codex documents a
-        // positional [PROMPT], but every flag here was read off the installed
-        // binary's --help, and on the machine this was built on that binary
-        // did not answer --help or --version at all. An unverified argument
-        // in a launch command is a launch that may fail outright, which is
-        // worse than the user typing the task once.
-        return LaunchPlan.of(codexCommand(c.mcp(), c.readOnly()) + stdioOverrides(c.stdioMcpServers()), false);
+        String command = codexCommand(c.mcp(), c.readOnly()) + stdioOverrides(c.stdioMcpServers());
+        if (c.initialPrompt().isPresent()) {
+            command += " -- " + AgentCommands.shellQuote(c.initialPrompt().get());
+        }
+        return LaunchPlan.of(command, false);
     }
 
     @Override
@@ -151,6 +149,14 @@ public final class CodexAgentProvider implements AgentProvider {
         }
         // Unknown id (or name) -> cwd-filtered picker. NEVER --last (same-cwd ambiguity).
         return LaunchPlan.of(codex + " resume", false);
+    }
+
+    @Override
+    public Optional<List<String>> buildTransferSummaryCommand(Path workingDirectory, String agentSessionId,
+                                                               String prompt) {
+        return locator.locate().map(executable -> List.of("/usr/bin/env", "-u", "CODEX_SANDBOX", "-u",
+                "CODEX_SANDBOX_NETWORK_DISABLED", executable.toString(), "exec",
+                "--sandbox", "read-only", "resume", agentSessionId, prompt));
     }
 
     /**
@@ -180,15 +186,21 @@ public final class CodexAgentProvider implements AgentProvider {
      * credential. {@code SessionManager} always mints one when MCP is wired,
      * so this is a guard, not an expected path.</p>
      *
-     * <p>{@code readOnly} adds {@code --sandbox read-only}, which is where a
-     * read-only Codex session's enforcement actually comes from: the sandbox
-     * refuses the writes rather than the model being asked to abstain.
+     * <p>{@code readOnly} selects {@code --sandbox read-only}; otherwise the
+     * user's explicit Full access choice selects {@code --sandbox
+     * danger-full-access}. This never inherits a possibly contradictory
+     * default from {@code config.toml}. The read-only sandbox refuses writes
+     * rather than merely asking the model to abstain.
      * Like {@code -c} it is placed before the subcommand -- verified against
      * the installed CLI in both the bare and the {@code resume} form -- so
      * create and resume get it from this one place.</p>
      */
     private String codexCommand(Optional<McpAccess> access, boolean readOnly) {
-        String sandbox = readOnly ? " --sandbox read-only" : "";
+        // Do not silently inherit ~/.codex/config.toml here. Drydock's mode
+        // picker is authoritative: Read-only is constrained, while the
+        // explicitly labelled Full access mode can also reach credentials,
+        // network services and paths outside the worktree when needed.
+        String sandbox = readOnly ? " --sandbox read-only" : " --sandbox danger-full-access";
         Optional<Path> tokenFile = access.flatMap(McpAccess::credentialFile);
         if (access.isEmpty() || tokenFile.isEmpty()) {
             return AgentCommands.envPrefix(ENV_SCRUB) + codexBinary() + sandbox;

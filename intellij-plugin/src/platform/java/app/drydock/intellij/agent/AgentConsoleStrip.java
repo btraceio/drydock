@@ -48,8 +48,9 @@ final class AgentConsoleStrip extends JPanel {
      * a fresh conversation versus one resumed by id — and only one of them is
      * ever offered.
      */
-    enum StripAction { STOP, RESUME, START, SHOW_CHANGES, OPEN_PROJECT_WINDOW, SESSION_MENU }
+    enum StripAction { STOP, RESUME, START, TRANSFER, RENAME, SHOW_CHANGES, OPEN_PROJECT_WINDOW, SESSION_MENU }
 
+    private final ActionLink title;
     private final JBLabel state = new JBLabel();
     private final JBLabel chip = new JBLabel();
     private final JBLabel secondary = new JBLabel();
@@ -57,6 +58,7 @@ final class AgentConsoleStrip extends JPanel {
     private final JBLabel provenance = new JBLabel();
     private final ActionLink openWindow;
     private final ActionLink changes;
+    private final ActionLink transfer;
     private final JButton primary = new JButton();
     private final ActionLink more;
 
@@ -67,10 +69,14 @@ final class AgentConsoleStrip extends JPanel {
         // The ActionListener overload explicitly: ActionLink also takes a
         // Kotlin Function1 of the same shape, and a bare lambda is ambiguous
         // between the two.
+        this.title = new ActionLink("",
+                (ActionListener) event -> onAction.accept(StripAction.RENAME));
         this.changes = new ActionLink("Changes",
                 (ActionListener) event -> onAction.accept(StripAction.SHOW_CHANGES));
         this.openWindow = new ActionLink("Open project window ↗",
                 (ActionListener) event -> onAction.accept(StripAction.OPEN_PROJECT_WINDOW));
+        this.transfer = new ActionLink("Transfer to…",
+                (ActionListener) event -> onAction.accept(StripAction.TRANSFER));
         this.more = new ActionLink("⋯",
                 (ActionListener) event -> onAction.accept(StripAction.SESSION_MENU));
 
@@ -80,7 +86,10 @@ final class AgentConsoleStrip extends JPanel {
                 JBUI.Borders.customLineBottom(JBColor.border()),
                 JBUI.Borders.empty(0, 10)));
 
-        state.setFont(state.getFont().deriveFont(Font.BOLD));
+        title.setFont(title.getFont().deriveFont(Font.BOLD));
+        title.setToolTipText("Rename session");
+        title.setMinimumSize(new Dimension(JBUI.scale(40), 0));
+        title.setMaximumSize(new Dimension(JBUI.scale(220), Integer.MAX_VALUE));
         chip.setFont(JBUI.Fonts.smallFont());
         chip.setBorder(JBUI.Borders.compound(
                 JBUI.Borders.customLine(JBColor.border(), 1),
@@ -90,6 +99,8 @@ final class AgentConsoleStrip extends JPanel {
         more.setToolTipText("Done with this session…");
         primary.addActionListener(event -> onAction.accept(primaryAction));
 
+        add(title);
+        add(Box.createHorizontalStrut(JBUI.scale(10)));
         add(state);
         add(Box.createHorizontalStrut(JBUI.scale(8)));
         add(chip);
@@ -104,6 +115,8 @@ final class AgentConsoleStrip extends JPanel {
         add(openWindow);
         add(Box.createHorizontalStrut(JBUI.scale(10)));
         add(changes);
+        add(Box.createHorizontalStrut(JBUI.scale(10)));
+        add(transfer);
         add(Box.createHorizontalStrut(JBUI.scale(10)));
         add(primary);
         add(Box.createHorizontalStrut(JBUI.scale(10)));
@@ -150,15 +163,21 @@ final class AgentConsoleStrip extends JPanel {
      * @param moving           whether the console is on its way to the
      *                         agent's own window: the strip says so and its
      *                         actions wait (typing still reaches the agent)
+     * @param transferTarget   destination agent while an in-place transfer
+     *                         owns the session, including the gap with no
+     *                         running process
      */
     void update(ManagedAgentSession session, Optional<SessionActivity> activity, boolean running,
                 boolean readOnlyEnforced, String agentName, Duration age, Optional<Integer> changedFiles,
                 boolean resumable, Optional<Integer> estimatedTokens, boolean indexing,
-                Optional<SessionPlace> hostedFrom, boolean folderMissing, boolean moving) {
+                Optional<SessionPlace> hostedFrom, boolean folderMissing, boolean moving,
+                Optional<String> transferTarget) {
         // The window, not the catalog, is the authority on what is alive in
         // it: a row left in the running band with nothing running here reads
         // as not running (see AgentStripText.displayStatus).
         SessionStatus shown = AgentStripText.displayStatus(session.status(), running);
+        title.setText(session.displayName());
+        title.setToolTipText("Rename \"" + session.displayName() + "\"");
         state.setIcon(SessionDots.dotIcon(shown, activity));
         state.setText(SessionDots.statusWord(shown, activity));
         state.setToolTipText(SessionDots.tooltip(shown, activity));
@@ -180,15 +199,20 @@ final class AgentConsoleStrip extends JPanel {
         openWindow.setVisible(hostedFrom.isPresent());
         openWindow.setEnabled(!moving);
         changes.setEnabled(!moving);
+        boolean transferring = transferTarget.isPresent();
+        transfer.setVisible(!transferring && running && SessionTransfer.available(session, activity));
+        transfer.setEnabled(!moving);
         more.setEnabled(!moving);
 
         primaryAction = running ? StripAction.STOP
                 : resumable ? StripAction.RESUME
                 : StripAction.START;
-        primary.setText(running ? "■ Deactivate" : AgentStripText.primaryLabel(resumable, estimatedTokens));
+        primary.setText(transferTarget.map(target -> "Transferring to " + target + "…")
+                .orElseGet(() -> running ? "■ Deactivate" : AgentStripText.primaryLabel(resumable, estimatedTokens)));
         // Nothing to resume for an agent this build cannot run: the resume
         // would pick a provider at random or fail at the command builder.
-        primary.setEnabled(!moving && (running || session.status() != SessionStatus.UNSUPPORTED_AGENT));
+        primary.setEnabled(!transferring && !moving
+                && (running || session.status() != SessionStatus.UNSUPPORTED_AGENT));
 
         revalidate();
         repaint();

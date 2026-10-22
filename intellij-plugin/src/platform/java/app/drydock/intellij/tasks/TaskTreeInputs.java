@@ -17,11 +17,13 @@ import app.drydock.intellij.project.ProjectIdentity;
 import app.drydock.projects.SharedProject;
 
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.project.ProjectManager;
 
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -29,6 +31,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CompletableFuture;
@@ -57,6 +60,7 @@ final class TaskTreeInputs implements AutoCloseable {
     private final WorktreeService worktrees = new WorktreeService();
     private final GhCliService github = new GhCliService();
     private final Map<Path, List<Worktree>> worktreeCache = new ConcurrentHashMap<>();
+    private final Map<Path, Instant> activityCache = new ConcurrentHashMap<>();
     private final Map<IssueKey, CachedIssues> issueCache = new ConcurrentHashMap<>();
 
     private record IssueKey(Path root, Optional<String> repository) { }
@@ -65,18 +69,22 @@ final class TaskTreeInputs implements AutoCloseable {
 
     void invalidateWorktrees() {
         worktreeCache.clear();
+        activityCache.clear();
     }
 
     void invalidateGitHub() {
         issueCache.clear();
     }
 
-    TaskTreeModel.Inputs gather(Project here, String filter, TaskTreeModel.ViewFilter viewFilter) {
+    TaskTreeModel.Inputs gather(Project here, String filter, TaskTreeModel.ViewFilter viewFilter,
+                                Set<Path> requestedWorktrees, Set<Path> requestedIssues) {
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         List<SharedProject> projects = new ArrayList<>();
         Map<Path, List<Worktree>> byMain = new HashMap<>();
         Map<Path, Path> mainRootOf = new HashMap<>();
         Map<Path, CompletableFuture<IssueListing>> issueRequests = new LinkedHashMap<>();
+        Set<Path> worktreeContainers = new HashSet<>();
+        Set<Path> issueContainers = new HashSet<>();
         Set<Path> missing = new HashSet<>();
         for (SharedProject project : plugin.sharedProjects().projects()) {
             if (project.isRemote()) {
@@ -90,27 +98,24 @@ final class TaskTreeInputs implements AutoCloseable {
                 missing.add(root);
                 continue;
             }
+            mainRootOf.put(root, root);
+            worktreeContainers.add(root);
             GitHubProjectSettings githubSettings = GitHubProjectSettings.load(project.id());
             if (githubSettings.issuesEnabled()) {
-                issueRequests.put(root, issuesOf(root, githubSettings.repository()));
+                issueContainers.add(root);
+                if (requestedIssues.contains(root)) {
+                    issueRequests.put(root, issuesOf(root, githubSettings.repository()));
+                }
             }
-            List<Worktree> list = worktreesOf(root);
-            byMain.put(root, list);
-            list.forEach(worktree -> mainRootOf.put(worktree.path(), root));
-            mainRootOf.put(root, root);
+            if (requestedWorktrees.contains(root)) {
+                List<Worktree> list = worktreesOf(root);
+                byMain.put(root, list);
+                list.forEach(worktree -> mainRootOf.put(worktree.path(), root));
+            }
         }
 
         Optional<Path> currentWorking = Optional.ofNullable(here.getBasePath())
                 .map(base -> RepositoryCatalog.canonicalize(Path.of(base)));
-        Optional<Path> currentMain = currentWorking.flatMap(working -> Optional.ofNullable(mainRootOf.get(working))
-                .or(() -> mainOf(working)));
-        currentMain.ifPresent(main -> {
-            if (!byMain.containsKey(main)) {
-                List<Worktree> list = worktreesOf(main);
-                byMain.put(main, list);
-                list.forEach(worktree -> mainRootOf.put(worktree.path(), main));
-            }
-        });
 
         List<ManagedAgentSession> sessions = new ArrayList<>();
         Map<ManagedSessionId, Optional<SessionActivity>> activity = new HashMap<>();
@@ -122,6 +127,12 @@ final class TaskTreeInputs implements AutoCloseable {
         AgentExecutionRegistry executions = AgentExecutionRegistry.getInstance();
         Set<ManagedSessionId> running = new HashSet<>(executions.runningSessions());
         Map<ManagedSessionId, TaskTreeModel.Host> hosts = new HashMap<>();
+        Set<Path> openFolders = new HashSet<>();
+        for (Project open : ProjectManager.getInstance().getOpenProjects()) {
+            if (!open.isDisposed() && open.getBasePath() != null) {
+                openFolders.add(RepositoryCatalog.canonicalize(Path.of(open.getBasePath())));
+            }
+        }
         // A running agent whose worktree folder is gone is marked, never
         // stopped unasked.
         for (ManagedAgentSession session : sessions) {
@@ -142,6 +153,20 @@ final class TaskTreeInputs implements AutoCloseable {
                 recordedRoots.put(repository.id(), RepositoryCatalog.canonicalize(repository.root()));
             }
         }
+        Optional<Path> currentMain = currentWorking.flatMap(working -> {
+            Path known = mainRootOf.get(working);
+            if (known != null) {
+                return Optional.of(known);
+            }
+            return sessions.stream()
+                    .filter(session -> session.workingDirectory().equals(working))
+                    .map(session -> recordedRoots.get(session.repositoryId()))
+                    .filter(Objects::nonNull)
+                    .findFirst()
+                    // An unregistered main checkout is its own project. This
+                    // keeps the Add row without enumerating any worktrees.
+                    .or(() -> Optional.of(working));
+        });
         Map<Path, IssueListing> issues = new HashMap<>();
         for (Map.Entry<Path, CompletableFuture<IssueListing>> entry : issueRequests.entrySet()) {
             try {
@@ -155,7 +180,8 @@ final class TaskTreeInputs implements AutoCloseable {
             }
         }
         return new TaskTreeModel.Inputs(projects, sessions, byMain, mainRootOf, currentMain, currentWorking,
-                activity, running, hosts, missing, recordedRoots,
+                activity, running, hosts, missing, recordedRoots, worktreeContainers, issueContainers,
+                openFolders, Map.copyOf(activityCache), Instant.now(),
                 issues, plugin.sharedProjects().problem(), filter, viewFilter);
     }
 
@@ -175,11 +201,26 @@ final class TaskTreeInputs implements AutoCloseable {
     private List<Worktree> worktreesOf(Path root) {
         return worktreeCache.computeIfAbsent(root, key -> {
             try {
-                return worktrees.list(key).get(GIT_TIMEOUT_SECONDS, TimeUnit.SECONDS).stream()
+                List<Worktree> listed = worktrees.list(key).get(GIT_TIMEOUT_SECONDS, TimeUnit.SECONDS).stream()
                         .map(worktree -> new Worktree(RepositoryCatalog.canonicalize(worktree.path()),
                                 worktree.branch(), worktree.mainCheckout(), worktree.detached(), worktree.prunable(),
                                 worktree.locked(), worktree.lockReason(), worktree.merged()))
                         .toList();
+                for (Worktree worktree : listed) {
+                    if (worktree.mainCheckout() || worktree.prunable()) {
+                        continue;
+                    }
+                    try {
+                        activityCache.put(worktree.path(), worktrees.lastActivity(worktree.path())
+                                .get(GIT_TIMEOUT_SECONDS, TimeUnit.SECONDS));
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    } catch (ExecutionException | TimeoutException | RuntimeException e) {
+                        LOG.log(Level.DEBUG, () -> "No activity time for " + worktree.path() + ": " + e);
+                    }
+                }
+                return listed;
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return List.of();
@@ -188,10 +229,6 @@ final class TaskTreeInputs implements AutoCloseable {
                 return List.of();
             }
         });
-    }
-
-    private Optional<Path> mainOf(Path directory) {
-        return worktreesOf(directory).stream().filter(Worktree::mainCheckout).map(Worktree::path).findFirst();
     }
 
     @Override

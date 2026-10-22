@@ -13,6 +13,7 @@ import app.drydock.intellij.tasks.TaskNode.IssueRow;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.intellij.tasks.TaskNode.Section;
 import app.drydock.intellij.tasks.TaskNode.SectionKind;
+import app.drydock.intellij.tasks.TaskNode.StaleWorktrees;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
 import app.drydock.intellij.tasks.TaskTreeModel.ViewFilter;
@@ -45,7 +46,6 @@ import com.intellij.ui.treeStructure.Tree;
 import com.intellij.util.Alarm;
 import com.intellij.util.messages.MessageBusConnection;
 import com.intellij.util.ui.JBUI;
-import com.intellij.util.ui.tree.TreeUtil;
 import org.jetbrains.annotations.NotNull;
 
 import javax.swing.ButtonGroup;
@@ -53,8 +53,11 @@ import javax.swing.JPanel;
 import javax.swing.JToggleButton;
 import javax.swing.SwingUtilities;
 import javax.swing.event.DocumentEvent;
+import javax.swing.event.TreeExpansionEvent;
+import javax.swing.event.TreeWillExpandListener;
 import javax.swing.tree.DefaultMutableTreeNode;
 import javax.swing.tree.DefaultTreeModel;
+import javax.swing.tree.ExpandVetoException;
 import javax.swing.tree.TreePath;
 
 import java.awt.BorderLayout;
@@ -68,10 +71,11 @@ import java.awt.event.MouseEvent;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Predicate;
 
 /**
@@ -88,8 +92,19 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     /** The selected row, for the tool window's actions. */
     public static final DataKey<TaskNode> SELECTED_NODE = DataKey.create("drydock.task.node");
 
+    /** Every selected row; bulk actions must not collapse this to the lead selection. */
+    public static final DataKey<List<TaskNode>> SELECTED_NODES = DataKey.create("drydock.task.nodes");
+
     /** The main checkout of the project the selected row belongs to. */
     public static final DataKey<Path> SELECTED_PROJECT_ROOT = DataKey.create("drydock.task.projectRoot");
+
+    /** Updates the visible tree as successful worktree removals complete. */
+    static final DataKey<WorktreeRemovalUi> WORKTREE_REMOVAL_UI = DataKey.create("drydock.task.worktreeRemovalUi");
+
+    @FunctionalInterface
+    interface WorktreeRemovalUi {
+        void worktreesRemoved(Set<Path> removed);
+    }
 
     private static final Logger LOG = System.getLogger(TaskTreePanel.class.getName());
 
@@ -99,12 +114,17 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     private final Tree tree = new Tree(new DefaultTreeModel(new DefaultMutableTreeNode()));
     private final SearchTextField search = new SearchTextField(false);
     private final TaskTreeInputs inputs = new TaskTreeInputs();
-    private final AtomicBoolean rebuildPending = new AtomicBoolean();
-    private final AtomicLong rebuildVersion = new AtomicLong();
+    private final TaskTreeRefreshRequests refreshRequests = new TaskTreeRefreshRequests();
     private final Alarm searchAlarm = new Alarm(Alarm.ThreadToUse.SWING_THREAD, this);
     private final DefaultActionGroup contextActions = new DefaultActionGroup();
     private volatile String filter = "";
     private volatile ViewFilter viewFilter = ViewFilter.ALL;
+    private List<TaskNode> displayedNodes = List.of();
+    private String displayedFilter = "";
+    private ViewFilter displayedViewFilter = ViewFilter.ALL;
+    /** Main roots whose lazy containers the user has opened in this panel. EDT only. */
+    private final Set<Path> requestedWorktrees = ConcurrentHashMap.newKeySet();
+    private final Set<Path> requestedIssues = ConcurrentHashMap.newKeySet();
     /** Guarded by {@code this}: subscribing after dispose() must undo itself. */
     private Runnable unsubscribeShared = () -> { };
     private volatile boolean disposed;
@@ -160,6 +180,28 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                         TaskLauncher.open(project, Optional.of(target.mainRoot()), target.fixedWorktree()));
             }
         };
+        AnAction newTaskInMain = new DumbAwareAction("New Task in Main Checkout…",
+                "Start an agent in this project's main checkout without creating a branch or worktree",
+                AllIcons.General.Add) {
+            @Override
+            public void update(@NotNull AnActionEvent e) {
+                TaskActions.present(e, e.getData(SELECTED_NODE) instanceof ProjectRow
+                        && e.getData(SELECTED_PROJECT_ROOT) != null);
+            }
+
+            @Override
+            public @NotNull ActionUpdateThread getActionUpdateThread() {
+                return ActionUpdateThread.EDT;
+            }
+
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                Path root = e.getData(SELECTED_PROJECT_ROOT);
+                if (root != null && e.getData(SELECTED_NODE) instanceof ProjectRow) {
+                    TaskLauncher.openInMainCheckout(project, root);
+                }
+            }
+        };
         AnAction openInGitHub = new DumbAwareAction("Open in GitHub", "Open this issue in the browser",
                 AllIcons.Vcs.Vendors.Github) {
             @Override
@@ -199,8 +241,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 }
             }
         };
-        AnAction summarize = new DumbAwareAction("Summarize…",
-                "Start a read-only task to analyze this issue", AllIcons.Actions.Show) {
+        AnAction triage = new DumbAwareAction("Triage…",
+                "Validate and prioritize this issue against the current source", AllIcons.Actions.Show) {
             @Override
             public void update(@NotNull AnActionEvent e) {
                 TaskActions.present(e, e.getData(SELECTED_NODE) instanceof IssueRow);
@@ -214,20 +256,21 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             @Override
             public void actionPerformed(@NotNull AnActionEvent e) {
                 if (e.getData(SELECTED_NODE) instanceof IssueRow issue) {
-                    TaskLauncher.summarize(project, issue.mainRoot(), issue.issue());
+                    TaskLauncher.triage(project, issue.mainRoot(), issue.issue());
                 }
             }
         };
         AnAction issueGithubSettings = githubSettingsAction(node -> node instanceof IssueRow);
 
         contextActions.add(implement);
-        contextActions.add(summarize);
+        contextActions.add(triage);
         contextActions.addSeparator();
         contextActions.add(openInGitHub);
         contextActions.add(issueGithubSettings);
         contextActions.addSeparator();
         contextActions.add(switchToTask);
         contextActions.add(newTask);
+        contextActions.add(newTaskInMain);
         contextActions.add(githubSettingsAction(TaskTreePanel::githubSettingsNode));
         contextActions.addAll(TaskActions.taskActions());
         PopupHandler.installPopupMenu(tree, contextActions, "Drydock.TaskTree.Popup");
@@ -272,11 +315,15 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                     register(add);
                 } else if (node instanceof IdleWorktree idle && acts) {
                     startOn(path, idle, event);
+                } else if (node instanceof StaleWorktrees stale && acts) {
+                    projectRootOf(path).ifPresent(root ->
+                            TaskActions.confirmAndRemove(project, root, stale.worktrees(), true,
+                                    TaskTreePanel.this::worktreesRemoved));
                 } else if (node instanceof TaskRow task && primaryButton && event.getClickCount() == 1
                         && onLink(path, event)) {
                     hereLink(task);
                 } else if (node instanceof TaskRow task && primaryButton && event.getClickCount() == 2) {
-                    TaskNavigator.switchTo(task.session());
+                    activate(task);
                 } else if (node instanceof IssueRow issue && primaryButton && event.getClickCount() == 2) {
                     issue.issue().url().ifPresent(BrowserUtil::browse);
                 }
@@ -286,8 +333,34 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             @Override
             public void keyPressed(KeyEvent event) {
                 if (event.getKeyCode() == KeyEvent.VK_ENTER && selected().orElse(null) instanceof TaskRow task) {
-                    TaskNavigator.switchTo(task.session());
+                    activate(task);
                 }
+            }
+        });
+        tree.addTreeWillExpandListener(new TreeWillExpandListener() {
+            @Override
+            public void treeWillExpand(TreeExpansionEvent event) throws ExpandVetoException {
+                Object component = event.getPath().getLastPathComponent();
+                if (!(component instanceof DefaultMutableTreeNode node)
+                        || !(node.getUserObject() instanceof Section section)) {
+                    return;
+                }
+                Path root = projectRootOf(event.getPath()).orElse(null);
+                if (root == null) {
+                    return;
+                }
+                boolean requested = switch (section.kind()) {
+                    case WORKTREES -> requestedWorktrees.add(root);
+                    case ISSUES -> requestedIssues.add(root);
+                    default -> false;
+                };
+                if (requested) {
+                    requestRebuild(false);
+                }
+            }
+
+            @Override
+            public void treeWillCollapse(TreeExpansionEvent event) throws ExpandVetoException {
             }
         });
 
@@ -349,8 +422,13 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
     @Override
     public void uiDataSnapshot(@NotNull DataSink sink) {
+        sink.set(WORKTREE_REMOVAL_UI, this::worktreesRemoved);
         selected().ifPresent(node -> sink.set(SELECTED_NODE, node));
-        projectRootOf(tree.getSelectionPath()).ifPresent(root -> sink.set(SELECTED_PROJECT_ROOT, root));
+        List<TaskNode> selected = selectedNodes();
+        if (!selected.isEmpty()) {
+            sink.set(SELECTED_NODES, selected);
+        }
+        selectedProjectRoot().ifPresent(root -> sink.set(SELECTED_PROJECT_ROOT, root));
     }
 
     /** Whether {@code event} landed on the link text of the row at {@code path}. EDT. */
@@ -487,23 +565,54 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         return node.getUserObject() instanceof TaskNode taskNode ? Optional.of(taskNode) : Optional.empty();
     }
 
-    /** Schedules one rebuild; {@code worktreesChanged} re-lists worktrees instead of using the cache. */
-    public void requestRebuild(boolean worktreesChanged) {
+    private List<TaskNode> selectedNodes() {
+        TreePath[] paths = tree.getSelectionPaths();
+        if (paths == null) {
+            return List.of();
+        }
+        return Arrays.stream(paths)
+                .map(TreePath::getLastPathComponent)
+                .filter(DefaultMutableTreeNode.class::isInstance)
+                .map(DefaultMutableTreeNode.class::cast)
+                .map(DefaultMutableTreeNode::getUserObject)
+                .filter(TaskNode.class::isInstance)
+                .map(TaskNode.class::cast)
+                .toList();
+    }
+
+    /** A root only when the complete selection belongs to one repository. */
+    private Optional<Path> selectedProjectRoot() {
+        TreePath[] paths = tree.getSelectionPaths();
+        if (paths == null || paths.length == 0) {
+            return Optional.empty();
+        }
+        Path root = projectRootOf(paths[0]).orElse(null);
+        if (root == null) {
+            return Optional.empty();
+        }
+        for (int i = 1; i < paths.length; i++) {
+            if (!projectRootOf(paths[i]).filter(root::equals).isPresent()) {
+                return Optional.empty();
+            }
+        }
+        return Optional.of(root);
+    }
+
+    /** Schedules one rebuild; {@code changedWorktrees} re-lists worktrees instead of using the cache. */
+    public void requestRebuild(boolean changedWorktrees) {
         if (disposed) {
             return;
         }
-        if (worktreesChanged) {
-            inputs.invalidateWorktrees();
-        }
-        rebuildVersion.incrementAndGet();
+        refreshRequests.request(changedWorktrees);
         scheduleRebuild();
     }
 
     private void scheduleRebuild() {
-        if (!rebuildPending.compareAndSet(false, true)) {
+        Optional<TaskTreeRefreshRequests.Pass> requested = refreshRequests.beginPass();
+        if (requested.isEmpty()) {
             return;
         }
-        long requestedVersion = rebuildVersion.get();
+        long requestedVersion = requested.get().version();
         String requestedFilter = filter;
         ViewFilter requestedViewFilter = viewFilter;
         DrydockPluginService plugin = DrydockPluginService.getInstance();
@@ -511,8 +620,15 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             if (disposed || project.isDisposed()) {
                 return;
             }
+            if (requested.get().worktreesChanged()) {
+                // Invalidate only after any earlier scan has finished. If a
+                // removal arrives during a scan, rebuildVersion schedules a
+                // follow-up pass and this flag survives until that pass.
+                inputs.invalidateWorktrees();
+            }
             List<TaskNode> nodes = TaskTreeModel.build(
-                    inputs.gather(project, requestedFilter, requestedViewFilter));
+                    inputs.gather(project, requestedFilter, requestedViewFilter,
+                            Set.copyOf(requestedWorktrees), Set.copyOf(requestedIssues)));
             ApplicationManager.getApplication().invokeLater(
                     () -> finishRebuild(requestedVersion, requestedFilter, requestedViewFilter, nodes, null),
                     ModalityState.any(), project.getDisposed());
@@ -531,17 +647,20 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             // Never silent: an empty tree with no reason given is the worst
             // outcome this panel can have.
             LOG.log(Level.WARNING, "Could not rebuild the Drydock task tree", failure);
-        } else if (requestedVersion == rebuildVersion.get() && !disposed && !project.isDisposed()) {
+        } else if (requestedVersion == refreshRequests.version() && !disposed && !project.isDisposed()) {
             apply(nodes, requestedFilter, requestedViewFilter);
         }
-        rebuildPending.set(false);
-        if (!disposed && !project.isDisposed() && requestedVersion != rebuildVersion.get()) {
+        refreshRequests.finishPass();
+        if (!disposed && !project.isDisposed() && requestedVersion != refreshRequests.version()) {
             scheduleRebuild();
         }
     }
 
     /** EDT: swaps in the new rows, keeping the selected task selected. */
     private void apply(List<TaskNode> nodes, String appliedFilter, ViewFilter appliedViewFilter) {
+        displayedNodes = List.copyOf(nodes);
+        displayedFilter = appliedFilter;
+        displayedViewFilter = appliedViewFilter;
         Optional<ManagedSessionId> selectedSession = selected()
                 .filter(TaskRow.class::isInstance)
                 .map(node -> ((TaskRow) node).session().id());
@@ -552,10 +671,44 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         }
         ((DefaultTreeModel) tree.getModel()).setRoot(root);
         tree.getEmptyText().setText(emptyText(appliedFilter, appliedViewFilter));
-        TreeUtil.expandAll(tree);
+        expandEagerAndRequested(root, new TreePath(root.getPath()), null);
         if (toSelect[0] != null) {
             tree.setSelectionPath(new TreePath(toSelect[0].getPath()));
         }
+    }
+
+    /** Sessions stay eager; worktree and issue containers expand only after the user opened them. */
+    private void expandEagerAndRequested(DefaultMutableTreeNode node, TreePath path, Path projectRoot) {
+        Object value = node.getUserObject();
+        Path root = value instanceof ProjectRow row ? row.project().root() : projectRoot;
+        boolean expand = switch (value) {
+            case null -> false;
+            case ProjectRow ignored -> true;
+            case WorktreeGroup ignored -> true;
+            case StaleWorktrees ignored -> true;
+            case Section section -> switch (section.kind()) {
+                case SESSIONS, ACTIVE, INACTIVE -> true;
+                case WORKTREES -> root != null && requestedWorktrees.contains(root);
+                case ISSUES -> root != null && requestedIssues.contains(root);
+            };
+            default -> false;
+        };
+        if (expand) {
+            tree.expandPath(path);
+        }
+        for (int i = 0; i < node.getChildCount(); i++) {
+            DefaultMutableTreeNode child = (DefaultMutableTreeNode) node.getChildAt(i);
+            expandEagerAndRequested(child, path.pathByAddingChild(child), root);
+        }
+    }
+
+    /** EDT: hides confirmed removals before the slower authoritative rescan finishes. */
+    private void worktreesRemoved(Set<Path> removed) {
+        ApplicationManager.getApplication().assertIsDispatchThread();
+        if (disposed || project.isDisposed() || removed.isEmpty()) {
+            return;
+        }
+        apply(TaskTreeModel.withoutWorktrees(displayedNodes, removed), displayedFilter, displayedViewFilter);
     }
 
     private static String emptyText(String appliedFilter, ViewFilter appliedViewFilter) {
@@ -578,6 +731,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                     child -> treeNode.add(treeNode(child, selected, toSelect)));
             case Section section -> section.children().forEach(
                     child -> treeNode.add(treeNode(child, selected, toSelect)));
+            case StaleWorktrees stale -> stale.worktrees().forEach(
+                    worktree -> treeNode.add(treeNode(worktree, selected, toSelect)));
             case WorktreeGroup group -> group.tasks().forEach(
                     task -> treeNode.add(treeNode(task, selected, toSelect)));
             case TaskRow task -> {
@@ -634,6 +789,14 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 AgentConsoles.resumeOrStart(project, task.session());
             }
         });
+    }
+
+    /** The row's default gesture mirrors its primary toolbar action. EDT. */
+    private void activate(TaskRow task) {
+        switch (TaskActions.defaultActivation(task)) {
+            case SWITCH_TO_RUNNING -> TaskNavigator.switchTo(task.session());
+            case RESUME_HERE -> AgentConsoles.resumeOrStart(project, task.session());
+        }
     }
 
     private void register(AddCurrentProject add) {

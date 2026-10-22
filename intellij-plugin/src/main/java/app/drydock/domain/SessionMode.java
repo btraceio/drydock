@@ -3,7 +3,8 @@ package app.drydock.domain;
 import java.util.Optional;
 
 /**
- * Whether a session's agent is allowed to change the working tree.
+ * Whether a session's agent is constrained to reading or receives full host
+ * access.
  *
  * <p>A worktree holds at most one {@link #WRITES} session by default; the
  * rest are {@link #READ_ONLY} companions reading the same tree. Two writers
@@ -12,7 +13,7 @@ import java.util.Optional;
  *
  * <p>Enforcement is the agent CLI's, not drydock's: the mode travels into
  * {@code CreateContext}/{@code ResumeContext} and each provider renders it
- * with its own flag (Claude plan mode, the Codex read-only sandbox). A
+ * with its own flag (Claude plan mode, explicit Codex sandbox modes). A
  * provider whose CLI has no read-only mode runs the agent unrestricted and
  * says so in the UI — {@code READ_ONLY} is then a statement of intent, not
  * a guarantee, and must never be presented as one.</p>
@@ -23,7 +24,7 @@ import java.util.Optional;
  */
 public enum SessionMode {
 
-    /** The agent may edit files. The default for a session in its own worktree. */
+    /** The agent has full host access. The default for a session in its own worktree. */
     WRITES,
 
     /** The agent is asked not to edit files, as far as its CLI can be told. */

@@ -10,6 +10,7 @@ import java.lang.System.Logger.Level;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -309,6 +310,20 @@ public final class WorktreeService implements AutoCloseable {
     }
 
     /**
+     * Removes with one {@code --force}: uncommitted work is discarded, but
+     * a deliberate worktree lock is still honored. This is the bulk-cleanup
+     * path after a user accepted local-change loss, not lock removal.
+     */
+    public CompletableFuture<Void> removeDiscardingChanges(Path repositoryRoot, Path worktreePath,
+                                                            Optional<String> branch) {
+        return CompletableFuture.supplyAsync(() -> {
+            removeBlocking(repositoryRoot, worktreePath, branch, ForceMode.DIRTY);
+            notifyWorktreeRemoved(repositoryRoot, worktreePath);
+            return null;
+        }, executor);
+    }
+
+    /**
      * Clears the repository's stale worktree entries ({@code git worktree
      * prune}): an entry is prunable when its directory is already gone from
      * disk, so pruning touches git metadata only -- never a working tree,
@@ -361,6 +376,79 @@ public final class WorktreeService implements AutoCloseable {
         return CompletableFuture.supplyAsync(() -> uncommittedChangesBlocking(worktree), executor);
     }
 
+    /**
+     * Best-effort answer to when a worktree last gained meaningful content:
+     * the newest of its HEAD commit, root-directory timestamp, and every
+     * modified, deleted, or untracked path. This deliberately does not use
+     * the index timestamp: a read-only {@code git status} may refresh the
+     * index and would make an untouched tree look newly active.
+     *
+     * <p>The query is bounded and runs on this service's executor. Callers
+     * should treat a failed future as "age unknown", never as stale.</p>
+     */
+    public CompletableFuture<Instant> lastActivity(Path worktree) {
+        return CompletableFuture.supplyAsync(() -> lastActivityBlocking(worktree), executor);
+    }
+
+    /** Synchronous form of {@link #lastActivity}, package-private for tests. */
+    Instant lastActivityBlocking(Path worktree) {
+        Path git = locator.locate()
+                .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
+        Path root = worktree.toAbsolutePath().normalize();
+        Instant latest = modifiedAt(root);
+
+        List<String> logCommand = List.of(
+                git.toString(), "-C", root.toString(),
+                "log", "-1", "--format=%ct", "HEAD");
+        ProcessResult log = run(logCommand);
+        if (log.exitCode() != 0) {
+            throw new GitCommandFailedException(logCommand, log.exitCode(), ProcessRunner.excerpt(log.stderr()));
+        }
+        try {
+            latest = later(latest, Instant.ofEpochSecond(Long.parseLong(log.stdout().strip())));
+        } catch (NumberFormatException e) {
+            throw new GitCommandFailedException(logCommand, log.exitCode(), "invalid commit timestamp");
+        }
+
+        List<String> changedCommand = List.of(
+                git.toString(), "-C", root.toString(),
+                "ls-files", "-m", "-o", "-d", "--exclude-standard", "-z");
+        ProcessResult changed = run(changedCommand);
+        if (changed.exitCode() != 0) {
+            throw new GitCommandFailedException(changedCommand, changed.exitCode(),
+                    ProcessRunner.excerpt(changed.stderr()));
+        }
+        for (String relative : changed.stdout().split("\u0000", -1)) {
+            if (relative.isEmpty()) {
+                continue;
+            }
+            Path candidate = root.resolve(relative).normalize();
+            if (!candidate.startsWith(root)) {
+                continue;
+            }
+            // A deleted path has no timestamp. Its closest surviving parent
+            // records the removal and is the conservative activity signal.
+            while (!Files.exists(candidate) && !candidate.equals(root)) {
+                candidate = candidate.getParent();
+            }
+            latest = later(latest, modifiedAt(candidate));
+        }
+        return latest;
+    }
+
+    private static Instant modifiedAt(Path path) {
+        try {
+            return Files.getLastModifiedTime(path).toInstant();
+        } catch (IOException e) {
+            throw new GitCommandFailedException(List.of("stat", path.toString()), -1,
+                    e.getMessage() == null ? "could not read modification time" : e.getMessage());
+        }
+    }
+
+    private static Instant later(Instant left, Instant right) {
+        return left.isAfter(right) ? left : right;
+    }
+
     /** Synchronous form of {@link #uncommittedChanges}, package-private for tests. */
     List<String> uncommittedChangesBlocking(Path worktree) {
         Path git = locator.locate()
@@ -385,6 +473,12 @@ public final class WorktreeService implements AutoCloseable {
 
     /** Synchronous form of {@link #remove}/{@link #removeForced}, package-private for tests. */
     void removeBlocking(Path repositoryRoot, Path worktreePath, Optional<String> branch, boolean force) {
+        removeBlocking(repositoryRoot, worktreePath, branch, force ? ForceMode.ALL : ForceMode.NONE);
+    }
+
+    private enum ForceMode { NONE, DIRTY, ALL }
+
+    private void removeBlocking(Path repositoryRoot, Path worktreePath, Optional<String> branch, ForceMode force) {
         Path git = locator.locate()
                 .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
 
@@ -414,11 +508,16 @@ public final class WorktreeService implements AutoCloseable {
             // already the state on disk. Treat it as success and fall through
             // to the branch-delete step so the caller can refresh the UI to
             // mirror reality instead of stranding a row that no longer exists.
-        } else if (force) {
+        } else if (force == ForceMode.ALL) {
             // User-confirmed destructive delete: double-force overrides both
             // uncommitted work and a lock -- a single --force discards the
             // former but git still refuses a locked worktree without the second.
             forceRemove(git, repositoryRoot, normalizedTarget);
+        } else if (force == ForceMode.DIRTY) {
+            if (targetEntry.get().locked()) {
+                throw new WorktreeLockedException(normalizedTarget, targetEntry.get().lockReason());
+            }
+            forceRemoveDirty(git, repositoryRoot, normalizedTarget);
         } else {
             List<String> removeCommand = List.of(
                     git.toString(), "-C", repositoryRoot.toString(),
@@ -816,6 +915,17 @@ public final class WorktreeService implements AutoCloseable {
         ProcessResult forced = run(command);
         if (forced.exitCode() != 0) {
             throw new GitCommandFailedException(command, forced.exitCode(), ProcessRunner.excerpt(forced.stderr()));
+        }
+    }
+
+    /** One force discards dirt but intentionally cannot override a lock. */
+    private static void forceRemoveDirty(Path git, Path repositoryRoot, Path worktree) {
+        List<String> command = List.of(
+                git.toString(), "-C", repositoryRoot.toString(),
+                "worktree", "remove", "--force", worktree.toString());
+        ProcessResult result = run(command);
+        if (result.exitCode() != 0) {
+            throw new GitCommandFailedException(command, result.exitCode(), ProcessRunner.excerpt(result.stderr()));
         }
     }
 

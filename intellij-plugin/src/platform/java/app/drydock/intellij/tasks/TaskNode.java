@@ -6,6 +6,7 @@ import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.projects.SharedProject;
 
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -53,10 +54,11 @@ public sealed interface TaskNode {
      * depend on what the search box shows.
      */
     record ProjectRow(SharedProject project, boolean folderMissing, boolean isThisWindow, List<TaskNode> children,
-                      int running) implements TaskNode {
+                      List<IdleWorktree> inactiveWorktrees, int running) implements TaskNode {
         public ProjectRow {
             Objects.requireNonNull(project, "project");
             children = List.copyOf(children);
+            inactiveWorktrees = List.copyOf(inactiveWorktrees);
         }
     }
 
@@ -71,12 +73,29 @@ public sealed interface TaskNode {
         }
     }
 
+    /** A lazy container's single child until opening it starts the background read. */
+    record Deferred(String message) implements TaskNode {
+        public Deferred {
+            Objects.requireNonNull(message, "message");
+        }
+    }
+
     /** A worktree with more than one task: {@code ⑂ <branch>} with its tasks beneath. */
     record WorktreeGroup(Path worktree, String branch, List<TaskRow> tasks) implements TaskNode {
         public WorktreeGroup {
             Objects.requireNonNull(worktree, "worktree");
             Objects.requireNonNull(branch, "branch");
             tasks = List.copyOf(tasks);
+        }
+    }
+
+    /** Inactive worktrees whose last known content activity is older than the stale threshold. */
+    record StaleWorktrees(List<IdleWorktree> worktrees) implements TaskNode {
+        public StaleWorktrees {
+            worktrees = List.copyOf(worktrees);
+            if (worktrees.isEmpty()) {
+                throw new IllegalArgumentException("a stale group must not be empty");
+            }
         }
     }
 
@@ -102,10 +121,12 @@ public sealed interface TaskNode {
     }
 
     /** A worktree found on disk with no task: offers {@code Start ▸}. */
-    record IdleWorktree(Path worktree, String branch) implements TaskNode {
+    record IdleWorktree(Path worktree, String branch, Optional<Instant> lastActivity, boolean locked, boolean open)
+            implements TaskNode {
         public IdleWorktree {
             Objects.requireNonNull(worktree, "worktree");
             Objects.requireNonNull(branch, "branch");
+            Objects.requireNonNull(lastActivity, "lastActivity");
         }
     }
 
