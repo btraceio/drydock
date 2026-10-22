@@ -1982,4 +1982,82 @@ class DrydockSessionServiceTest {
         assertTrue(harness.consoles.opens.isEmpty());
         harness.store.flush();
     }
+
+    private static ManagedAgentSession transferableClaudeRow(Harness harness, Path base) {
+        return persistSession(harness, AgentKind.CLAUDE, "Same task",
+                AgentBinding.unlaunched(AgentKind.CLAUDE).withSessionId(Optional.of("source-42")),
+                base, SessionStatus.INACTIVE, Instant.now());
+    }
+
+    private static RecordingProvider codexTarget(Harness harness) {
+        RecordingProvider target = new RecordingProvider(
+                AgentKind.CODEX, SessionIdStrategy.DISCOVERED, null, true, false, null, harness.events);
+        target.delivery = McpDelivery.COMMAND_LINE;
+        return target;
+    }
+
+    @Test
+    void aTransferPassesTheGrantedMcpAccessToTheTarget(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider target = codexTarget(harness);
+        RecordingAccess access = RecordingAccess.granting();
+        DrydockSessionService service = harness.service(access, transferSource(harness.events), target);
+        ManagedAgentSession source = transferableClaudeRow(harness, base);
+
+        service.transferStoppedSession(source.id(), AgentKind.CODEX).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(List.of(McpDelivery.COMMAND_LINE), access.requested);
+        assertTrue(target.createContexts.getFirst().mcp().isPresent());
+        assertTrue(access.released.isEmpty());
+        harness.store.flush();
+    }
+
+    @Test
+    void aTransferWhoseTargetCommandDoesNotUseTheCredentialReleasesIt(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider target = codexTarget(harness);
+        RecordingAccess access = RecordingAccess.grantingWithFile(base.resolve("mcp").resolve("s.token"));
+        DrydockSessionService service = harness.service(access, transferSource(harness.events), target);
+        ManagedAgentSession source = transferableClaudeRow(harness, base);
+
+        service.transferStoppedSession(source.id(), AgentKind.CODEX).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(List.of(source.id()), access.released);
+        harness.store.flush();
+    }
+
+    @Test
+    void aTransferWhileTheSessionHasALiveExecutionIsRefusedBeforeAnythingRuns(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider target = codexTarget(harness);
+        RecordingAccess access = RecordingAccess.granting();
+        DrydockSessionService service = harness.service(access, transferSource(harness.events), target);
+        ManagedAgentSession source = transferableClaudeRow(harness, base);
+        harness.liveExecution = id -> id.equals(source.id());
+
+        ExecutionException refused = assertThrows(ExecutionException.class,
+                () -> service.transferStoppedSession(source.id(), AgentKind.CODEX).get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+
+        assertTrue(refused.getCause() instanceof IllegalStateException, String.valueOf(refused.getCause()));
+        assertTrue(access.requested.isEmpty());
+        assertTrue(target.createContexts.isEmpty());
+        assertEquals(AgentKind.CLAUDE, persisted(harness, source.id()).agentKind());
+        harness.store.flush();
+    }
+
+    @Test
+    void aCompletedTransferEndsItsClaim(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider target = codexTarget(harness);
+        DrydockSessionService service = harness.service(RecordingAccess.granting(), transferSource(harness.events),
+                target);
+        ManagedAgentSession source = transferableClaudeRow(harness, base);
+        service.transferStoppedSession(source.id(), AgentKind.CODEX).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        harness.consoles.stopped.add(source.id());
+
+        assertEquals(SessionStatus.RUNNING,
+                service.startSession(source.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS).status());
+        assertEquals(2, target.createContexts.size());
+        harness.store.flush();
+    }
 }

@@ -260,36 +260,57 @@ public final class DrydockSessionService implements AgentExecutionListener {
      * exact provider conversation has produced a bounded, validated one-shot
      * summary.  If the target cannot start, the old binding is restored so
      * the original conversation remains resumable.
+     *
+     * <p>The transfer claims the session for its whole run, summary
+     * included: the summary runs the source conversation, and a resume at
+     * the same time would run it twice. It completes exceptionally, doing
+     * nothing, while the session has a running agent or another launch in
+     * flight.</p>
      */
     public CompletableFuture<ManagedAgentSession> transferStoppedSession(ManagedSessionId sessionId,
                                                                           AgentKind targetKind) {
         Objects.requireNonNull(sessionId, "sessionId");
         Objects.requireNonNull(targetKind, "targetKind");
         return initialization.thenComposeAsync(unused -> {
-            ManagedAgentSession source = requireSession(sessionId);
-            if (source.agentKind() == AgentKind.TERMINAL || targetKind == AgentKind.TERMINAL) {
-                throw new IllegalStateException("Terminal sessions cannot be transferred");
+            if (!claims.tryClaim(sessionId)) {
+                throw launchRefused(sessionId);
             }
-            if (source.agentKind() == targetKind) {
-                throw new IllegalStateException("Choose a different agent");
+            CompletableFuture<ManagedAgentSession> transferred;
+            try {
+                transferred = transferClaimed(sessionId, targetKind);
+            } catch (RuntimeException | Error e) {
+                endClaim(sessionId);
+                throw e;
             }
-            String sourceId = source.agentSessionId().orElseThrow(() ->
-                    new IllegalStateException("The source agent has no exact conversation id"));
-            AgentProvider sourceProvider = registry.get().provider(source.agentKind()).orElseThrow(() ->
-                    new IllegalStateException("The source agent provider is not installed"));
-            if (!registry.get().isAvailable(targetKind)) {
-                throw new IllegalStateException("The target agent is not installed");
-            }
-            String summary = requestTransferSummary(source, sourceProvider, sourceId);
-            ManagedAgentSession switched = source.toBuilder()
-                    .binding(AgentBinding.unlaunched(targetKind, source.mode()))
-                    .status(SessionStatus.STARTING)
-                    .lastExitCode(Optional.empty())
-                    .build();
-            String initialPrompt = "You are taking over an existing Drydock task from "
-                    + kindName(source.agentKind()) + ". Continue from this transfer record:\n\n" + summary;
-            return launchReplacement(switched, Optional.of(initialPrompt));
+            return transferred.whenComplete((ignored, ex) -> endClaim(sessionId));
         }, executor);
+    }
+
+    private CompletableFuture<ManagedAgentSession> transferClaimed(ManagedSessionId sessionId,
+                                                                   AgentKind targetKind) {
+        ManagedAgentSession source = requireSession(sessionId);
+        if (source.agentKind() == AgentKind.TERMINAL || targetKind == AgentKind.TERMINAL) {
+            throw new IllegalStateException("Terminal sessions cannot be transferred");
+        }
+        if (source.agentKind() == targetKind) {
+            throw new IllegalStateException("Choose a different agent");
+        }
+        String sourceId = source.agentSessionId().orElseThrow(() ->
+                new IllegalStateException("The source agent has no exact conversation id"));
+        AgentProvider sourceProvider = registry.get().provider(source.agentKind()).orElseThrow(() ->
+                new IllegalStateException("The source agent provider is not installed"));
+        if (!registry.get().isAvailable(targetKind)) {
+            throw new IllegalStateException("The target agent is not installed");
+        }
+        String summary = requestTransferSummary(source, sourceProvider, sourceId);
+        ManagedAgentSession switched = source.toBuilder()
+                .binding(AgentBinding.unlaunched(targetKind, source.mode()))
+                .status(SessionStatus.STARTING)
+                .lastExitCode(Optional.empty())
+                .build();
+        String initialPrompt = "You are taking over an existing Drydock task from "
+                + kindName(source.agentKind()) + ". Continue from this transfer record:\n\n" + summary;
+        return launchReplacement(switched, Optional.of(initialPrompt));
     }
 
     /** Starts a replacement without persisting its binding until the console exists. */
@@ -303,10 +324,12 @@ public final class DrydockSessionService implements AgentExecutionListener {
                 ? provider.idDiscovery() : Optional.empty();
         Object snapshot = discovery.map(value -> value.snapshot(candidate.workingDirectory())).orElse(null);
         Instant launchedAt = Instant.now();
+        Optional<McpAccess> access = mcpAccessFor(candidate.id(), provider);
         CreateContext context = new CreateContext(candidate.displayName(), generatedId,
-                candidate.workingDirectory(), Optional.empty(), Optional.empty(), false,
+                candidate.workingDirectory(), Optional.empty(), access, false,
                 candidate.readOnly(), initialPrompt).withStdioMcpServers(stdioMcpServersFor(candidate.workingDirectory()));
         LaunchPlan plan = provider.buildCreateCommand(context);
+        releaseIfUnused(candidate.id(), access, plan);
         if (!plan.supported()) {
             throw new IllegalStateException(kindName(provider.kind())
                     + " cannot launch this session (unsupported context)");
