@@ -56,6 +56,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -250,7 +251,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
                 // thread whenever the gate is already complete (the common
                 // production case): thenCompose on a completed source runs
                 // its function inline.
-                .thenComposeAsync(session -> launchPrepared(session, initialPrompt), executor);
+                .thenComposeAsync(session -> launchPrepared(session, initialPrompt, false), executor);
     }
 
     /**
@@ -448,8 +449,15 @@ public final class DrydockSessionService implements AgentExecutionListener {
         return summary;
     }
 
+    /**
+     * @param rowMustExist true for a fresh start on an existing row ({@link
+     *                     #startSession}, {@link #resumeOrStartSession}): the
+     *                     row was read before the claim, so a delete may have
+     *                     removed it since, and the launch must not add it back
+     */
     private CompletableFuture<ManagedAgentSession> launchPrepared(ManagedAgentSession prepared,
-                                                                  Optional<String> initialPrompt) {
+                                                                  Optional<String> initialPrompt,
+                                                                  boolean rowMustExist) {
         // Claimed before anything is persisted or minted: a refused launch
         // must not touch the row, the token or the credential file of the
         // agent that already holds the session.
@@ -464,7 +472,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
                             + ") provider is registered; cannot launch session"));
             StartedLaunch started;
             try {
-                started = startLaunch(prepared, provider, initialPrompt);
+                started = startLaunch(prepared, provider, initialPrompt, rowMustExist);
             } catch (RuntimeException failure) {
                 // The session row exists from here on (persistNewSession ran),
                 // so the failure must be visible in the persisted state too.
@@ -499,12 +507,19 @@ public final class DrydockSessionService implements AgentExecutionListener {
 
     /** Everything that must happen before the process spawns. */
     private StartedLaunch startLaunch(ManagedAgentSession prepared, AgentProvider provider,
-                                      Optional<String> initialPrompt) {
-        // Upsert, not insert: the same create path serves a brand-new session
-        // and a fresh conversation started on a row that already exists
-        // ({@link #startSession}). Inserting unconditionally would give the
-        // second case a duplicate row.
-        persistSession(prepared);
+                                      Optional<String> initialPrompt, boolean rowMustExist) {
+        if (rowMustExist) {
+            // A fresh start read the row before it claimed the session; a
+            // delete that finished in between removed it, and an upsert here
+            // would bring the forgotten task back.
+            if (!replaceExistingSession(prepared)) {
+                throw new IllegalStateException("Session " + prepared.id() + " was forgotten before it started");
+            }
+        } else {
+            // Upsert, not insert: a relaunch of the same prepared session
+            // finds its row already there.
+            persistSession(prepared);
+        }
         String generatedId = provider.idStrategy() == SessionIdStrategy.PRESET
                 ? UUID.randomUUID().toString()
                 : "";
@@ -742,11 +757,11 @@ public final class DrydockSessionService implements AgentExecutionListener {
                 }, executor)
                 // No task: it was only ever the create dialog's input, and is
                 // not kept on the row.
-                .thenComposeAsync(session -> launchPrepared(session, Optional.empty()), executor);
+                .thenComposeAsync(session -> launchPrepared(session, Optional.empty(), true), executor);
     }
 
     private CompletableFuture<ManagedAgentSession> launchFreshOnExistingRow(ManagedAgentSession session) {
-        return launchPrepared(prepareFreshOnExistingRow(session), Optional.empty());
+        return launchPrepared(prepareFreshOnExistingRow(session), Optional.empty(), true);
     }
 
     private ManagedAgentSession prepareFreshOnExistingRow(ManagedAgentSession session) {
@@ -1138,6 +1153,22 @@ public final class DrydockSessionService implements AgentExecutionListener {
             return state.withSessions(updated);
         });
         DrydockSessionsListener.publishChanged();
+    }
+
+    /** Replaces {@code session}'s row; false, changing nothing, when the row is gone. */
+    private boolean replaceExistingSession(ManagedAgentSession session) {
+        AtomicBoolean replaced = new AtomicBoolean();
+        stateStore.get().update(state -> {
+            if (findIn(state, session.id()) == null) {
+                return state;
+            }
+            replaced.set(true);
+            return withReplacedSession(state, session);
+        });
+        if (replaced.get()) {
+            DrydockSessionsListener.publishChanged();
+        }
+        return replaced.get();
     }
 
     private void persistUpdatedSession(ManagedAgentSession session) {

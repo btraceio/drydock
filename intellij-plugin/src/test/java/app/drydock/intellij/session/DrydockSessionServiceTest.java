@@ -43,6 +43,7 @@ import java.lang.reflect.Field;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -50,6 +51,7 @@ import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.AbstractExecutorService;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -290,6 +292,37 @@ class DrydockSessionServiceTest {
             events.add("forget");
             forgotten.add(sessionId);
         }
+    }
+
+    /** Runs submitted tasks only when the test steps it, one at a time, in submission order. */
+    static final class SteppedExecutorService extends AbstractExecutorService {
+
+        private final Deque<Runnable> queued = new ConcurrentLinkedDeque<>();
+        private volatile boolean terminated;
+
+        /** Runs the oldest queued task; false when none is queued. */
+        boolean runNext() {
+            Runnable next = queued.pollFirst();
+            if (next == null) {
+                return false;
+            }
+            next.run();
+            return true;
+        }
+
+        /** Runs queued tasks, including ones they queue, until none is left. */
+        void runAll() {
+            while (runNext()) {
+                // keep stepping
+            }
+        }
+
+        @Override public void execute(Runnable command) { queued.addLast(command); }
+        @Override public void shutdown() { terminated = true; }
+        @Override public List<Runnable> shutdownNow() { terminated = true; return List.of(); }
+        @Override public boolean isShutdown() { return terminated; }
+        @Override public boolean isTerminated() { return terminated; }
+        @Override public boolean awaitTermination(long timeout, TimeUnit unit) { return terminated; }
     }
 
     /** Determinism: every submitted task runs inline on the submitting thread. */
@@ -1919,5 +1952,34 @@ class DrydockSessionServiceTest {
         } finally {
             executor.shutdown();
         }
+    }
+
+    @Test
+    void aStartWhoseRowIsDeletedBeforeItsClaimFailsAndLeavesTheRowDeleted(@TempDir Path base) throws Exception {
+        SteppedExecutorService executor = new SteppedExecutorService();
+        Harness harness = concurrentHarness(base, executor);
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, false, null, harness.events);
+        provider.delivery = McpDelivery.CONFIG_FILE;
+        RecordingAccess access = RecordingAccess.granting();
+        DrydockSessionService service = harness.service(access, provider);
+        ManagedAgentSession idle = persistSession(harness, AgentKind.CLAUDE, "Row",
+                new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
+                base, SessionStatus.EXITED, Instant.parse("2026-08-12T10:00:00Z"));
+
+        CompletableFuture<ManagedAgentSession> started = service.startSession(idle.id());
+        assertTrue(executor.runNext(), "the stage that reads the row");
+        // What a delete that finished in this window leaves: the row gone, no claim held.
+        harness.store.update(state -> state.withSessions(List.of()));
+        executor.runAll();
+
+        ExecutionException failed = assertThrows(ExecutionException.class,
+                () -> started.get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+        assertTrue(failed.getCause() instanceof IllegalStateException, String.valueOf(failed.getCause()));
+        assertNull(persistedOrNull(harness, idle.id()), "the forgotten row stays forgotten");
+        assertTrue(provider.createContexts.isEmpty());
+        assertTrue(access.requested.isEmpty(), "nothing was minted");
+        assertTrue(harness.consoles.opens.isEmpty());
+        harness.store.flush();
     }
 }

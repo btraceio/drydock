@@ -35,7 +35,6 @@ the `changesGroupingPolicy` EP for sections; PSI *replacing* tree-sitter.
 ## Open
 - `hyp-ide-inspections-as-evidence`: `CodeSmellDetector.findCodeSmells` runs on a background thread. Value vs noise is untested.
 - `q-split-mode-remote-dev`: risk only; cannot be checked offline.
-- Known issue, not fixed: a `startSession` that races a finished delete brings the row back. See `docs/known-issues.md`.
 
 ## Next step
 P1 "Review backbone" is implemented (2026-10-22) through the dev-process pipeline.
