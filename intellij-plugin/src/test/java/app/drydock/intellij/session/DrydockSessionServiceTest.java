@@ -1272,6 +1272,7 @@ class DrydockSessionServiceTest {
         assertEquals(source.id(), harness.consoles.opens.getFirst().sessionId());
         assertTrue(targetProvider.createContexts.getFirst().initialPrompt().orElseThrow()
                 .contains("GOAL: goal"));
+        harness.store.flush();
     }
 
     @Test
@@ -1306,6 +1307,7 @@ class DrydockSessionServiceTest {
         assertEquals(AgentKind.CODEX, transferred.agentKind());
         assertTrue(targetProvider.createContexts.getFirst().initialPrompt().orElseThrow()
                 .contains("COMPLETED: concise"));
+        harness.store.flush();
     }
 
     @Test
@@ -1325,6 +1327,7 @@ class DrydockSessionServiceTest {
 
         assertEquals(sourceBinding, persisted(harness, source.id()).binding());
         assertTrue(harness.consoles.opens.isEmpty());
+        harness.store.flush();
     }
 
     private static RecordingProvider transferSource(List<String> events) {
