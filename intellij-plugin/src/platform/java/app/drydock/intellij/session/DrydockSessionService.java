@@ -6,10 +6,12 @@ import app.drydock.agent.api.AgentRegistry;
 import app.drydock.agent.api.ConversationSource;
 import app.drydock.agent.api.CreateContext;
 import app.drydock.agent.api.LaunchPlan;
+import app.drydock.agent.api.McpAccess;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdDiscovery;
 import app.drydock.agent.api.SessionIdStrategy;
 import app.drydock.agent.api.StdioMcpServer;
+import app.drydock.agent.providers.AgentCommands;
 import app.drydock.agent.spi.AgentProvider;
 import app.drydock.app.ApplicationStateStore;
 import app.drydock.domain.AgentBinding;
@@ -26,8 +28,11 @@ import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.DrydockSessionsListener;
 import app.drydock.intellij.agent.AgentConsoleHost;
 import app.drydock.intellij.agent.AgentExecutionListener;
+import app.drydock.intellij.agent.AgentExecutionRegistry;
+import app.drydock.intellij.agent.LaunchClaims;
 import app.drydock.intellij.mcp.IdeMcpServer;
 import app.drydock.intellij.project.ProjectRepositoryService;
+import app.drydock.intellij.review.SessionMcpAccess;
 import app.drydock.mcp.McpToolException;
 import app.drydock.mcp.PromptSafety;
 import app.drydock.process.ProcessResult;
@@ -59,10 +64,11 @@ import java.util.function.Supplier;
  * lean port of the app tree's {@code SessionManager.launchNewSession} and
  * {@code SessionManager.resumeSession}/{@code adoptConversation} (R6 — the
  * 1615-LOC FX-bound class is deliberately NOT extracted), against the same
- * core SPI. Everything the MVP does not exercise is absent by design: MCP
- * config minting, remote launches, diagnostic command overrides, eval
- * marking, id late-binding ({@code SessionIdDiscovery.resolve}) and the
- * handoff paths.
+ * core SPI. Drydock MCP access is minted per launch through
+ * {@link SessionMcpAccess} and released when the agent ends
+ * ({@link SessionEnds}), when a launch fails before reaching a process, and
+ * when the session is forgotten. Remote launches, diagnostic command
+ * overrides, eval marking and the handoff paths are absent by design.
  *
  * <p>Threading (AC7/AC12): every blocking step — the pre-spawn id-store
  * snapshot (disk I/O), {@code buildCreateCommand} (may probe capabilities),
@@ -126,6 +132,14 @@ public final class DrydockSessionService implements AgentExecutionListener {
      * a launch; a broken lookup degrades to no IDE tools.
      */
     private final Function<Path, List<StdioMcpServer>> stdioMcpServers;
+    /** Mints and revokes each launch's Drydock MCP credentials. */
+    private final SessionMcpAccess mcpAccess;
+
+    /**
+     * The application-wide launch claims; every launch holds its session's
+     * claim from before it mints until its future completes.
+     */
+    private final LaunchClaims claims;
 
     /** The end-of-agent half: persistence, late id binding, and the id bookkeeping both halves share. */
     private final SessionEnds ends;
@@ -133,7 +147,8 @@ public final class DrydockSessionService implements AgentExecutionListener {
     public DrydockSessionService(DrydockPluginService plugin, AgentConsoleHost consoles,
             ProjectRepositoryService repos, ExecutorService executor) {
         this(plugin.initialization(), plugin::stateStore, plugin::registry, plugin::watcher,
-                repos::repositoryIdFor, consoles, executor, IdeMcpServer::forWorktree);
+                repos::repositoryIdFor, consoles, executor, IdeMcpServer::forWorktree, plugin.reviewAccess(),
+                AgentExecutionRegistry.getInstance().launchClaims());
     }
 
     /**
@@ -146,7 +161,8 @@ public final class DrydockSessionService implements AgentExecutionListener {
             Supplier<AgentRegistry> registry, Supplier<SessionActivityWatcher> watcher,
             Function<Path, CompletableFuture<RepositoryId>> repositoryIdFor,
             AgentConsoleHost consoles, ExecutorService executor,
-            Function<Path, List<StdioMcpServer>> stdioMcpServers) {
+            Function<Path, List<StdioMcpServer>> stdioMcpServers, SessionMcpAccess mcpAccess,
+            LaunchClaims claims) {
         this.initialization = Objects.requireNonNull(initialization, "initialization");
         this.stateStore = Objects.requireNonNull(stateStore, "stateStore");
         this.registry = Objects.requireNonNull(registry, "registry");
@@ -155,7 +171,9 @@ public final class DrydockSessionService implements AgentExecutionListener {
         this.consoles = Objects.requireNonNull(consoles, "consoles");
         this.executor = Objects.requireNonNull(executor, "executor");
         this.stdioMcpServers = Objects.requireNonNull(stdioMcpServers, "stdioMcpServers");
-        this.ends = new SessionEnds(stateStore, registry, executor);
+        this.mcpAccess = Objects.requireNonNull(mcpAccess, "mcpAccess");
+        this.claims = Objects.requireNonNull(claims, "claims");
+        this.ends = new SessionEnds(stateStore, registry, executor, mcpAccess, claims);
     }
 
     // ---- create flow ---------------------------------------------------------
@@ -206,6 +224,8 @@ public final class DrydockSessionService implements AgentExecutionListener {
      * (AC11 — an error naming the agent, no tab opened), open the terminal
      * tab, then persist RUNNING. The returned future completes with the
      * RUNNING session or exceptionally after the FAILED status is persisted.
+     * It also completes exceptionally, persisting nothing, when the session
+     * has a running agent or another launch in flight.
      */
     public CompletableFuture<ManagedAgentSession> launchSession(ManagedAgentSession prepared) {
         return launchSession(prepared, Optional.empty());
@@ -430,20 +450,51 @@ public final class DrydockSessionService implements AgentExecutionListener {
 
     private CompletableFuture<ManagedAgentSession> launchPrepared(ManagedAgentSession prepared,
                                                                   Optional<String> initialPrompt) {
-        AgentKind kind = prepared.agentKind();
-        AgentProvider provider = registry.get().provider(kind)
-                .orElseThrow(() -> new IllegalStateException(
-                        "No " + kind + " (" + kind.persistedName() + ") provider is registered; cannot launch session"));
-        StartedLaunch started;
-        try {
-            started = startLaunch(prepared, provider, initialPrompt);
-        } catch (RuntimeException failure) {
-            // The session row exists from here on (persistNewSession ran),
-            // so the failure must be visible in the persisted state too.
-            persistFailedBestEffort(prepared);
-            throw failure;
+        // Claimed before anything is persisted or minted: a refused launch
+        // must not touch the row, the token or the credential file of the
+        // agent that already holds the session.
+        if (!claims.tryClaim(prepared.id())) {
+            throw launchRefused(prepared.id());
         }
-        return started.openFuture().handleAsync((ignored, ex) -> finalizeCreate(started, ex), executor);
+        CompletableFuture<ManagedAgentSession> launched;
+        try {
+            AgentKind kind = prepared.agentKind();
+            AgentProvider provider = registry.get().provider(kind)
+                    .orElseThrow(() -> new IllegalStateException("No " + kind + " (" + kind.persistedName()
+                            + ") provider is registered; cannot launch session"));
+            StartedLaunch started;
+            try {
+                started = startLaunch(prepared, provider, initialPrompt);
+            } catch (RuntimeException failure) {
+                // The session row exists from here on (persistNewSession ran),
+                // so the failure must be visible in the persisted state too.
+                persistFailedBestEffort(prepared);
+                throw failure;
+            }
+            launched = started.openFuture().handleAsync((ignored, ex) -> finalizeCreate(started, ex), executor);
+        } catch (RuntimeException | Error e) {
+            endClaim(prepared.id());
+            throw e;
+        }
+        // The claim ends when the console open-future completes, with no
+        // timeout. AgentExecutionRegistry.start completes that future on every
+        // path of its invokeLater runnable (disposed host, RuntimeException,
+        // success); the only way it stays pending is an invokeLater that never
+        // runs, which happens at application shutdown, when no further launch
+        // can start.
+        return launched.whenComplete((ignored, ex) -> endClaim(prepared.id()));
+    }
+
+    /**
+     * Ends {@code id}'s launch claim and releases its MCP access unless the
+     * session has a live execution; see {@link LaunchClaims#finish}.
+     */
+    private void endClaim(ManagedSessionId id) {
+        claims.finish(id, () -> releaseMcpAccess(id));
+    }
+
+    private static IllegalStateException launchRefused(ManagedSessionId id) {
+        return new IllegalStateException("Session " + id + " already has a running agent or a launch in progress");
     }
 
     /** Everything that must happen before the process spawns. */
@@ -468,10 +519,12 @@ public final class DrydockSessionService implements AgentExecutionListener {
         Object snapshot = discovery.map(d -> d.snapshot(cwd)).orElse(null);
         Instant launchedAt = Instant.now();
         ends.lastLaunchedAt().put(prepared.id(), launchedAt);
+        Optional<McpAccess> access = mcpAccessFor(prepared.id(), provider);
         CreateContext ctx = new CreateContext(prepared.displayName(), generatedId, cwd,
-                Optional.empty(), Optional.empty(), false, prepared.readOnly(), initialPrompt)
+                Optional.empty(), access, false, prepared.readOnly(), initialPrompt)
                 .withStdioMcpServers(stdioMcpServersFor(cwd));
         LaunchPlan plan = provider.buildCreateCommand(ctx);
+        releaseIfUnused(prepared.id(), access, plan);
         if (!plan.supported()) {
             // AC11: name the agent, open nothing.
             throw new IllegalStateException(
@@ -551,6 +604,46 @@ public final class DrydockSessionService implements AgentExecutionListener {
         }
     }
 
+    /**
+     * The Drydock MCP access for a launch of {@code id}, or empty when the
+     * access service declines or throws. A failure is logged without the
+     * credentials and never fails the launch.
+     */
+    private Optional<McpAccess> mcpAccessFor(ManagedSessionId id, AgentProvider provider) {
+        try {
+            return mcpAccess.accessFor(id, provider.mcpDelivery());
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, () -> "Launching " + id + " without Drydock MCP access: " + e);
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * Revokes {@code id}'s MCP access when {@code plan} does not carry its
+     * credential file. A provider can drop the Drydock server from the
+     * command, for example when Claude's probe finds no {@code --mcp-config}
+     * or Pi's MCP extension fails to install. Every provider puts the file
+     * into the command as {@link AgentCommands#shellQuote}, so its absence
+     * means the agent never reaches the server, and the session must not
+     * report that it holds access.
+     */
+    private void releaseIfUnused(ManagedSessionId id, Optional<McpAccess> access, LaunchPlan plan) {
+        Optional<Path> file = access.flatMap(McpAccess::credentialFile);
+        if (file.isPresent() && !plan.command().contains(AgentCommands.shellQuote(file.get().toString()))) {
+            LOG.log(Level.INFO, () -> "Launch of " + id + " does not use Drydock MCP access; releasing it");
+            releaseMcpAccess(id);
+        }
+    }
+
+    /** Revokes {@code id}'s MCP access; a failure is logged and swallowed. */
+    private void releaseMcpAccess(ManagedSessionId id) {
+        try {
+            mcpAccess.release(id);
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, () -> "Releasing Drydock MCP access for " + id + " failed: " + e);
+        }
+    }
+
     private List<StdioMcpServer> stdioMcpServersFor(Path workingDirectory) {
         try {
             return stdioMcpServers.apply(workingDirectory);
@@ -576,7 +669,8 @@ public final class DrydockSessionService implements AgentExecutionListener {
      * {@link SessionStatus#MISSING_WORKING_DIRECTORY} when its working
      * directory is gone, or exceptionally (after persisting FAILED) when the
      * provider refuses the resume (AC11 naming the agent) or the tab cannot
-     * open.</p>
+     * open. It also completes exceptionally, persisting nothing, when the
+     * session has a running agent or another launch in flight.</p>
      */
     public CompletableFuture<ManagedAgentSession> resumeSession(ManagedSessionId sessionId) {
         Objects.requireNonNull(sessionId, "sessionId");
@@ -699,6 +793,25 @@ public final class DrydockSessionService implements AgentExecutionListener {
         if (prepared.status() == SessionStatus.UNSUPPORTED_AGENT) {
             return CompletableFuture.completedFuture(prepared);
         }
+        // Claimed before the late bind, the persist and the mint: a refused
+        // resume must not touch the row, the token or the credential file of
+        // the agent that already holds the session.
+        if (!claims.tryClaim(prepared.id())) {
+            throw launchRefused(prepared.id());
+        }
+        CompletableFuture<ManagedAgentSession> resumed;
+        try {
+            resumed = resumeClaimed(prepared);
+        } catch (RuntimeException | Error e) {
+            endClaim(prepared.id());
+            throw e;
+        }
+        // Same claim lifetime as in launchPrepared: ends when the open-future
+        // completes; pending only if invokeLater is dropped at shutdown.
+        return resumed.whenComplete((ignored, ex) -> endClaim(prepared.id()));
+    }
+
+    private CompletableFuture<ManagedAgentSession> resumeClaimed(ManagedAgentSession prepared) {
         // Backstop for the binding that normally happens at termination: an
         // IDE killed outright, or a crash, never ran that, and without this
         // the session would resume into the provider's picker forever. Only
@@ -718,12 +831,15 @@ public final class DrydockSessionService implements AgentExecutionListener {
                         + session.agentKind().persistedName() + ") provider is registered; cannot resume session"));
         LaunchPlan plan;
         try {
-            // No remote, no MCP, never eval (spec non-goals): the provider's
-            // own no-id branch is what a session without an id gets (AC21).
+            // No remote and never eval; Drydock MCP access is minted for this
+            // launch when available. The provider's own no-id branch is what a
+            // session without an id gets (AC21).
+            Optional<McpAccess> access = mcpAccessFor(session.id(), provider);
             ResumeContext ctx = new ResumeContext(session.agentSessionId(), session.agentSessionName(),
-                    session.workingDirectory(), Optional.empty(), Optional.empty(), false, session.readOnly())
+                    session.workingDirectory(), Optional.empty(), access, false, session.readOnly())
                     .withStdioMcpServers(stdioMcpServersFor(session.workingDirectory()));
             plan = provider.buildResumeCommand(ctx);
+            releaseIfUnused(session.id(), access, plan);
         } catch (RuntimeException failure) {
             persistFailedBestEffort(session);
             throw failure;
@@ -734,7 +850,16 @@ public final class DrydockSessionService implements AgentExecutionListener {
             throw new IllegalStateException(
                     kindName(provider.kind()) + " cannot resume this session (unsupported context)");
         }
-        return consoles.startConsole(session.id(), session.workingDirectory(), plan)
+        CompletableFuture<Void> open;
+        try {
+            open = consoles.startConsole(session.id(), session.workingDirectory(), plan);
+        } catch (RuntimeException failure) {
+            // A synchronous throw never reaches finalizeResume; the claim's
+            // end, when resumePrepared rethrows, releases the access minted above.
+            persistFailedBestEffort(session);
+            throw failure;
+        }
+        return open
                 .handleAsync((ignored, ex) -> finalizeResume(session, ex), executor);
     }
 
@@ -757,6 +882,9 @@ public final class DrydockSessionService implements AgentExecutionListener {
      */
     private ManagedAgentSession adoptConversation(Repository repository, AgentKind kind,
             ConversationSource.Conversation conversation, String displayName) {
+        // Persisting before resumePrepared's tryClaim is safe: an existing row
+        // is returned unchanged, and a new row has a freshly minted id, so it
+        // cannot yet have a live execution or a claim.
         String agentSessionId = conversation.sessionId();
         ManagedAgentSession[] result = new ManagedAgentSession[1];
         stateStore.get().update(state -> {
@@ -828,7 +956,8 @@ public final class DrydockSessionService implements AgentExecutionListener {
      * Forgets a session: its execution is stopped and discarded, the activity
      * watcher drops its state, and the row leaves the catalog. This is the
      * <em>only</em> path that removes a row — a stopped process, a closed tab,
-     * a closed window and an IDE restart all leave it.
+     * a closed window and an IDE restart all leave it. The future fails while
+     * a launch of the session is in progress.
      *
      * <p>The agent's own conversation history on disk is never touched. The
      * row is drydock's bookkeeping; the transcript is the user's record of
@@ -840,19 +969,36 @@ public final class DrydockSessionService implements AgentExecutionListener {
         return initialization
                 .thenApplyAsync(unused -> requireSession(sessionId), executor)
                 .thenComposeAsync(session -> {
-                    consoles.forgetConsole(sessionId);
-                    CompletableFuture<Void> forgotten = session.agentSessionId()
-                            .map(id -> watcher.get().forget(id))
-                            .orElseGet(() -> CompletableFuture.completedFuture(null));
-                    // watcher.forget runs on the watcher's own executor; hop
-                    // back here before mutating the state.
-                    return forgotten.thenRunAsync(() -> {
-                        stateStore.get().update(state ->
-                                state.withSessions(state.sessions().stream()
-                                        .filter(existing -> !existing.id().equals(sessionId))
-                                        .toList()));
-                        DrydockSessionsListener.publishChanged();
-                    }, executor);
+                    // A launch in flight may not have registered its
+                    // execution yet, so forgetConsole could not stop it.
+                    // Refuse instead; the claim also keeps a launch from
+                    // starting while the row is removed.
+                    if (!claims.tryClaimForRemoval(sessionId)) {
+                        throw new IllegalStateException(
+                                "a launch of this task is in progress; try again when it ends");
+                    }
+                    CompletableFuture<Void> removed;
+                    try {
+                        consoles.forgetConsole(sessionId);
+                        CompletableFuture<Void> forgotten = session.agentSessionId()
+                                .map(id -> watcher.get().forget(id))
+                                .orElseGet(() -> CompletableFuture.completedFuture(null));
+                        // watcher.forget runs on the watcher's own executor; hop
+                        // back here before mutating the state.
+                        removed = forgotten.thenRunAsync(() -> {
+                            stateStore.get().update(state ->
+                                    state.withSessions(state.sessions().stream()
+                                            .filter(existing -> !existing.id().equals(sessionId))
+                                            .toList()));
+                            DrydockSessionsListener.publishChanged();
+                        }, executor);
+                    } catch (RuntimeException | Error e) {
+                        endClaim(sessionId);
+                        throw e;
+                    }
+                    // forgetConsole dropped the execution, so ending the
+                    // claim releases the access.
+                    return removed.whenComplete((ignored, ex) -> endClaim(sessionId));
                 }, executor);
     }
 

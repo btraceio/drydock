@@ -1,6 +1,7 @@
 package app.drydock.intellij;
 
 import app.drydock.agent.api.AgentKind;
+import app.drydock.agent.api.McpDelivery;
 import app.drydock.app.ApplicationStateStore;
 import app.drydock.domain.AgentBinding;
 import app.drydock.domain.ApplicationState;
@@ -10,6 +11,7 @@ import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.domain.WorkspaceUiState;
+import app.drydock.intellij.review.ReviewBackend;
 import app.drydock.state.JsonApplicationStateRepository;
 
 import org.junit.jupiter.api.Test;
@@ -17,13 +19,16 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -160,5 +165,66 @@ class DrydockPluginServiceTest {
         service.dispose();
         service.initialization().get(5, TimeUnit.SECONDS);
         assertTrue(service.executor().isShutdown());
+    }
+
+    @Test
+    void initializationStartsTheReviewBackendOffTheTestThread(@TempDir Path base) throws Exception {
+        DrydockPluginService service = new DrydockPluginService(base);
+        service.initialization().get(60, TimeUnit.SECONDS);
+        try {
+            ReviewBackend backend = service.reviewBackend().orElseThrow();
+            assertTrue(backend.ready());
+            assertNotSame(Thread.currentThread(), service.initializationThread());
+            service.dispose();
+            assertFalse(backend.ready(), "dispose must close the backend");
+        } finally {
+            service.dispose();
+        }
+    }
+
+    @Test
+    void aBackendThatCannotBeBuiltLeavesInitHealthy(@TempDir Path base) throws Exception {
+        DrydockPluginService service = new DrydockPluginService(base, (dir, sessions, repositories, registry) -> {
+            throw new IllegalStateException("no backend");
+        });
+        try {
+            service.initialization().get(60, TimeUnit.SECONDS);
+
+            assertTrue(service.reviewBackend().isEmpty());
+            assertNotNull(service.stateStore());
+            assertTrue(service.reviewAccess()
+                    .accessFor(ManagedSessionId.newId(), McpDelivery.CONFIG_FILE).isEmpty());
+        } finally {
+            service.dispose();
+        }
+    }
+
+    @Test
+    void aBackendBuiltAfterDisposeTimedOutIsClosed(@TempDir Path base) throws Exception {
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch proceed = new CountDownLatch(1);
+        AtomicReference<ReviewBackend> built = new AtomicReference<>();
+        DrydockPluginService service = new DrydockPluginService(base, (dir, sessions, repositories, registry) -> {
+            entered.countDown();
+            try {
+                proceed.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            ReviewBackend backend = new ReviewBackend(dir, sessions, repositories, registry);
+            built.set(backend);
+            return backend;
+        }, Duration.ofMillis(200));
+        assertTrue(entered.await(60, TimeUnit.SECONDS));
+
+        service.dispose();
+        proceed.countDown();
+        // Init may fail once the executor is shut down; that is tolerated.
+        service.initialization().handle((value, error) -> null).get(60, TimeUnit.SECONDS);
+
+        ReviewBackend backend = built.get();
+        assertNotNull(backend, "the factory must have built a backend");
+        assertFalse(backend.ready(), "a backend built after dispose must be closed");
+        assertTrue(service.reviewBackend().isEmpty(), "a backend built after dispose must not be published");
     }
 }

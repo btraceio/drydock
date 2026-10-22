@@ -95,6 +95,12 @@ public final class AgentExecutionRegistry implements Disposable {
     private final Map<ManagedSessionId, AgentExecution> executions = new ConcurrentHashMap<>();
     /** Sessions whose console is on its way to another window (a jump, while that window opens). */
     private final Set<ManagedSessionId> moving = ConcurrentHashMap.newKeySet();
+    private final LaunchClaims launchClaims = new LaunchClaims(this::isRunning);
+
+    /** The launch claims every session launch in this IDE goes through; see {@link LaunchClaims}. */
+    public LaunchClaims launchClaims() {
+        return launchClaims;
+    }
 
     public static AgentExecutionRegistry getInstance() {
         return ApplicationManager.getApplication().getService(AgentExecutionRegistry.class);

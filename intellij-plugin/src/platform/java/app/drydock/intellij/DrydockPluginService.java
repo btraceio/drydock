@@ -4,14 +4,20 @@ import app.drydock.activity.SessionActivityWatcher;
 import app.drydock.agent.api.Agent;
 import app.drydock.agent.api.AgentRegistry;
 import app.drydock.agent.api.AgentContext;
+import app.drydock.agent.api.McpAccess;
+import app.drydock.agent.api.McpDelivery;
 import app.drydock.app.ApplicationStateStore;
 import app.drydock.intellij.agent.QuitConfirmation;
 import app.drydock.intellij.agent.SessionActivityMonitor;
 import app.drydock.domain.ApplicationState;
 import app.drydock.domain.ManagedAgentSession;
+import app.drydock.domain.Repository;
+import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.SessionStatus;
 import app.drydock.git.WorktreeService;
 import app.drydock.intellij.projects.SharedProjectsService;
+import app.drydock.intellij.review.ReviewBackend;
+import app.drydock.intellij.review.SessionMcpAccess;
 import app.drydock.projects.SharedProject;
 import app.drydock.projects.SharedProjectsFile;
 import app.drydock.projects.SharedProjectsSeed;
@@ -25,6 +31,7 @@ import java.io.IOException;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -34,15 +41,17 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 
 /**
  * The application-scoped Drydock service: the single owner of the plugin's
- * background executor, persisted state, agent registry, and activity
- * watcher. Deliberately not {@code @State}-annotated — persistence goes
- * through the core single writer ({@link ApplicationStateStore}), not the
- * IDE's component state machinery, so the plugin and the standalone app
- * share one state format and one writer discipline.
+ * background executor, persisted state, agent registry, activity
+ * watcher, and review backend. Deliberately not {@code @State}-annotated —
+ * persistence goes through the core single writer
+ * ({@link ApplicationStateStore}), not the IDE's component state
+ * machinery, so the plugin and the standalone app share one state format and
+ * one writer discipline.
  *
  * <p>The constructor must stay cheap and EDT-safe (the platform may
  * instantiate the service on the dispatch thread): it only computes paths,
@@ -57,14 +66,15 @@ public final class DrydockPluginService implements Disposable {
     private static final Logger LOG = System.getLogger(DrydockPluginService.class.getName());
 
     /** Bounded wait for init during disposal and for tests; generous next to the store's own flush timeout. */
-    private static final long INIT_TIMEOUT_SECONDS = 30;
+    private static final Duration INIT_TIMEOUT = Duration.ofSeconds(30);
 
     public static DrydockPluginService getInstance() {
         return ApplicationManager.getApplication().getService(DrydockPluginService.class);
     }
 
     public DrydockPluginService() {
-        this(defaultBaseDir(), SharedProjectsFile.defaultFile(), DrydockPluginService::seedFromApp);
+        this(defaultBaseDir(), SharedProjectsFile.defaultFile(), DrydockPluginService::seedFromApp,
+                ReviewBackend::new, INIT_TIMEOUT);
         // The quit question, for as long as the plugin is loaded. Here, not in
         // plugin.xml: the quit veto is an ApplicationListener added through
         // the application, not a message-bus topic.
@@ -77,11 +87,34 @@ public final class DrydockPluginService implements Disposable {
      * touch the user's real {@code ~/.drydock/projects.json}.
      */
     DrydockPluginService(Path baseDir) {
-        this(baseDir, baseDir.resolve("projects.json"), List::of);
+        this(baseDir, baseDir.resolve("projects.json"), List::of, ReviewBackend::new, INIT_TIMEOUT);
     }
 
-    private DrydockPluginService(Path baseDir, Path sharedProjectsFile, Supplier<List<SharedProject>> appSeed) {
+    /** Test seam: as {@link #DrydockPluginService(Path)}, with the review backend built by {@code backends}. */
+    DrydockPluginService(Path baseDir, BackendFactory backends) {
+        this(baseDir, baseDir.resolve("projects.json"), List::of, backends, INIT_TIMEOUT);
+    }
+
+    /**
+     * Test seam: as {@link #DrydockPluginService(Path, BackendFactory)}, with {@link #dispose()} waiting at most
+     * {@code initTimeout} for initialization.
+     */
+    DrydockPluginService(Path baseDir, BackendFactory backends, Duration initTimeout) {
+        this(baseDir, baseDir.resolve("projects.json"), List::of, backends, initTimeout);
+    }
+
+    /** Builds the review backend; {@code ReviewBackend::new} fits it. */
+    @FunctionalInterface
+    interface BackendFactory {
+        ReviewBackend create(Path baseDir, Supplier<List<ManagedAgentSession>> sessions,
+                             Supplier<List<Repository>> repositories, AgentRegistry registry);
+    }
+
+    private DrydockPluginService(Path baseDir, Path sharedProjectsFile, Supplier<List<SharedProject>> appSeed,
+                                BackendFactory backends, Duration initTimeout) {
         this.baseDir = baseDir;
+        this.initTimeout = initTimeout;
+        this.backends = backends;
         this.sharedProjects = new SharedProjectsService(new SharedProjectsFile(sharedProjectsFile), appSeed,
                 Executors.newSingleThreadScheduledExecutor(runnable -> {
                     Thread thread = new Thread(runnable, "drydock-shared-projects");
@@ -97,12 +130,16 @@ public final class DrydockPluginService implements Disposable {
     private final SharedProjectsService sharedProjects;
     private final JsonApplicationStateRepository repository;
     private final ExecutorService executor;
+    private final BackendFactory backends;
+    private final Duration initTimeout;
+    private final AtomicBoolean disposed = new AtomicBoolean();
     private final CompletableFuture<Void> initialization;
 
     private volatile ApplicationStateStore stateStore;
     private volatile AgentRegistry registry;
     private volatile SessionActivityWatcher watcher;
     private volatile SessionActivityMonitor activityMonitor;
+    private volatile ReviewBackend reviewBackend;
     /** The thread initialization ran on; read by tests to prove init is off the EDT. */
     private volatile Thread initializationThread;
 
@@ -154,6 +191,39 @@ public final class DrydockPluginService implements Disposable {
     }
 
     /**
+     * The review backend. Callers must await {@link #initialization()}
+     * first; empty when the backend could not be built. A present backend
+     * can still be not {@link ReviewBackend#ready()} (it is kept even when
+     * its start failed), so callers must check {@code ready()}.
+     */
+    public Optional<ReviewBackend> reviewBackend() {
+        return Optional.ofNullable(reviewBackend);
+    }
+
+    /**
+     * Session MCP credentials, delegating to the review backend read at call
+     * time. Usable before initialization completes: until the backend exists,
+     * {@code accessFor} gives empty and {@code release} does nothing.
+     */
+    public SessionMcpAccess reviewAccess() {
+        return new SessionMcpAccess() {
+            @Override
+            public Optional<McpAccess> accessFor(ManagedSessionId sessionId, McpDelivery delivery) {
+                ReviewBackend backend = reviewBackend;
+                return backend == null ? Optional.empty() : backend.accessFor(sessionId, delivery);
+            }
+
+            @Override
+            public void release(ManagedSessionId sessionId) {
+                ReviewBackend backend = reviewBackend;
+                if (backend != null) {
+                    backend.release(sessionId);
+                }
+            }
+        };
+    }
+
+    /**
      * The registered projects shared with the standalone app: what the
      * Drydock tool window lists. Usable at once; its first read completes
      * shortly after the service starts.
@@ -187,6 +257,31 @@ public final class DrydockPluginService implements Disposable {
         return initializationThread;
     }
 
+    /**
+     * Publishes {@code backend} unless {@link #dispose()} has started, in which case it closes the backend.
+     */
+    private void publishOrClose(ReviewBackend backend) {
+        if (disposed.get()) {
+            closeLate(backend);
+            return;
+        }
+        reviewBackend = backend;
+        // dispose() sets disposed before it reads reviewBackend; this writes
+        // reviewBackend before it reads disposed. Both are volatile, so at least
+        // one side sees the other and closes the backend.
+        if (disposed.get()) {
+            closeLate(backend);
+        }
+    }
+
+    private static void closeLate(ReviewBackend backend) {
+        try {
+            backend.close();
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, "Could not close the Drydock review backend built after disposal", e);
+        }
+    }
+
     private void initialize() {
         initializationThread = Thread.currentThread();
         // forRepository loads state.json on first use — blocking file I/O,
@@ -196,6 +291,14 @@ public final class DrydockPluginService implements Disposable {
         registry = AgentRegistry.create(
                 new AgentContext(baseDir, baseDir.resolve("activity"), executor),
                 DrydockPluginService.class.getClassLoader());
+        try {
+            ReviewBackend backend = backends.create(baseDir,
+                    () -> stateStore.state().sessions(), () -> stateStore.state().repositories(), registry);
+            backend.start();
+            publishOrClose(backend);
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, "Drydock review backend unavailable; sessions launch without Drydock tools", e);
+        }
         watcher = new SessionActivityWatcher(baseDir.resolve("activity"), executor);
         installActivityReporters();
         activityMonitor = new SessionActivityMonitor(this::stateStore, this::watcher, executor);
@@ -248,11 +351,12 @@ public final class DrydockPluginService implements Disposable {
 
     @Override
     public void dispose() {
+        disposed.set(true);
         // Init may still be running (early disposal); the flush below must
         // not race the normalization update, so wait for init first — bounded,
         // because disposal must not hang on a wedged init.
         try {
-            initialization.get(INIT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            initialization.get(initTimeout.toNanos(), TimeUnit.NANOSECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } catch (ExecutionException | TimeoutException e) {
@@ -271,6 +375,14 @@ public final class DrydockPluginService implements Disposable {
             theWatcher.close();
         }
         sharedProjects.stop();
+        ReviewBackend theBackend = reviewBackend;
+        if (theBackend != null) {
+            try {
+                theBackend.close();
+            } catch (RuntimeException e) {
+                LOG.log(Level.WARNING, "Could not close the Drydock review backend", e);
+            }
+        }
         ApplicationStateStore theStore = stateStore;
         if (theStore != null) {
             theStore.flush();
