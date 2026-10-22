@@ -229,8 +229,11 @@ public final class McpToolRouter {
                         "id", "note"),
                 descriptor("review_scope",
                         "Reads a review scope: its identity, the changed files, and the diff hunks with "
-                                + "stable line keys. Paged -- pass the returned cursor to continue. Every "
-                                + "anchor in review_finding is one of these line keys.",
+                                + "stable line keys. In the identity, worktree is the checkout whose changes "
+                                + "are reviewed (null when the scope has no checkout); repoRoot is the "
+                                + "repository's main checkout, not where the changes are. Paged -- pass the "
+                                + "returned cursor to continue. Every anchor in review_finding is one of "
+                                + "these line keys.",
                         JsonObject.empty()
                                 .put("scopeId", schemaString("Review scope handle to read."))
                                 .put("cursor", schemaString("Resume token from a previous page. Omit to start."))
