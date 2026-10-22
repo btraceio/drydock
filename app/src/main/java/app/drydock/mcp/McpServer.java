@@ -222,6 +222,48 @@ public final class McpServer implements AutoCloseable {
      */
     private static final Duration REJECTED_ROW_INTERVAL = Duration.ofSeconds(10);
 
+    /**
+     * Injected into the hosted agent's system prompt by the client. This
+     * is the only thing that makes a tool get called without the agent
+     * already hunting for one -- a tool description is read at selection
+     * time, not at the moment the agent learns what its work is. Only the
+     * paragraphs for tools the router serves are sent; a router that serves
+     * neither {@code session_rename} nor {@code session_handoff} sends no
+     * instructions.
+     */
+    static final String RENAME_INSTRUCTIONS = """
+            Drydock hosts this session in a tab a human is watching. As soon as you know what \
+            the work actually is, call session_rename with a short title naming the work -- not \
+            the branch. Re-title it if the work turns out to be something else. Two refusals are \
+            normal and both explain themselves: if the human has named the session, leave it \
+            alone; if another session here already has that title, pick one that tells them apart.\
+            """;
+
+    static final String HANDOFF_INSTRUCTIONS = """
+            Keep session_handoff current as you work. This session may be handed to a different \
+            agent at any moment, and that brief is all your successor gets -- write it for them, \
+            not for the human, and especially record what you RULED OUT and why, which they \
+            cannot recover from the code.\
+            """;
+
+    /**
+     * The handshake instructions for {@code router}: the rename paragraph when
+     * it serves {@code session_rename} and the handoff paragraph when it serves
+     * {@code session_handoff}, joined by a blank line; empty when it serves
+     * neither.
+     */
+    static Optional<String> instructionsFor(McpToolRouter router) {
+        boolean rename = router.serves("session_rename");
+        boolean handoff = router.serves("session_handoff");
+        if (rename && handoff) {
+            return Optional.of(RENAME_INSTRUCTIONS + "\n\n" + HANDOFF_INSTRUCTIONS);
+        }
+        if (rename) {
+            return Optional.of(RENAME_INSTRUCTIONS);
+        }
+        return handoff ? Optional.of(HANDOFF_INSTRUCTIONS) : Optional.empty();
+    }
+
     private final class McpHandler implements HttpHandler {
 
         @Override
@@ -459,33 +501,17 @@ public final class McpServer implements AutoCloseable {
             return text.getBytes(StandardCharsets.UTF_8).length;
         }
 
-        /**
-         * Injected into the hosted agent's system prompt by the client. This
-         * is the only thing that makes a tool get called without the agent
-         * already hunting for one -- a tool description is read at selection
-         * time, not at the moment the agent learns what its work is.
-         */
-        private static final String INSTRUCTIONS = """
-                Drydock hosts this session in a tab a human is watching. As soon as you know what \
-                the work actually is, call session_rename with a short title naming the work -- not \
-                the branch. Re-title it if the work turns out to be something else. Two refusals are \
-                normal and both explain themselves: if the human has named the session, leave it \
-                alone; if another session here already has that title, pick one that tells them apart.
-
-                Keep session_handoff current as you work. This session may be handed to a different \
-                agent at any moment, and that brief is all your successor gets -- write it for them, \
-                not for the human, and especially record what you RULED OUT and why, which they \
-                cannot recover from the code.\
-                """;
-
         private JsonValue initializeResult(JsonValue params) {
-            return JsonObject.empty()
+            JsonObject result = JsonObject.empty()
                     .put("protocolVersion", new JsonString(negotiatedProtocolVersion(params)))
                     .put("capabilities", JsonObject.empty().put("tools", JsonObject.empty()))
                     .put("serverInfo", JsonObject.empty()
                             .put("name", new JsonString("drydock"))
-                            .put("version", new JsonString("1.0.0")))
-                    .put("instructions", new JsonString(INSTRUCTIONS));
+                            .put("version", new JsonString("1.0.0")));
+            Optional<String> instructions = instructionsFor(router);
+            return instructions.isPresent()
+                    ? result.put("instructions", new JsonString(instructions.get()))
+                    : result;
         }
 
         /**

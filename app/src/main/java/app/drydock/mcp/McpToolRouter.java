@@ -101,6 +101,20 @@ public final class McpToolRouter {
     private final McpSessionContext context;
     private final McpSessionRegistry registry;
     private final Function<UnifiedDiff, ChangeGraph> graphBuilder;
+    private final Set<String> allowedTools;
+
+    /** The ten {@code review_*} tools, for a router that serves review only. */
+    public static final Set<String> REVIEW_TOOLS = Set.of(
+            "review_comments", "review_reply", "review_scope", "review_tour", "review_check",
+            "review_finding", "review_answer", "review_ask_answer", "review_state",
+            "review_recheck");
+
+    /** Every tool name {@link #call} dispatches, advertised or not. */
+    private static final Set<String> ALL_TOOLS = Set.of(
+            "review_comments", "review_reply", "review_scope", "review_tour", "review_check",
+            "review_finding", "review_answer", "review_ask_answer", "review_state",
+            "review_recheck", "worktree_create", "session_start", "session_rename",
+            "session_reclaim", "session_handoff", "repos_list", "sessions_list");
 
     /**
      * One scope's change graph and out-of-diff caller scan, keyed by the diff
@@ -135,7 +149,20 @@ public final class McpToolRouter {
     }
 
     public McpToolRouter(McpSessionContext context, McpSessionRegistry registry) {
-        this(context, registry, ChangeGraph::of);
+        this(context, registry, ChangeGraph::of, ALL_TOOLS);
+    }
+
+    /**
+     * Builds a router that serves only {@code allowedTools}: {@link
+     * #toolDescriptors()} lists just the allowed tools that have a descriptor,
+     * and {@link #call} answers any other name with the same "Unknown tool"
+     * error as a name that does not exist.
+     *
+     * @throws IllegalArgumentException if a name is not a tool {@link #call} dispatches
+     */
+    public McpToolRouter(McpSessionContext context, McpSessionRegistry registry,
+                         Set<String> allowedTools) {
+        this(context, registry, ChangeGraph::of, allowedTools);
     }
 
     /**
@@ -147,12 +174,37 @@ public final class McpToolRouter {
      */
     McpToolRouter(McpSessionContext context, McpSessionRegistry registry,
                   Function<UnifiedDiff, ChangeGraph> graphBuilder) {
+        this(context, registry, graphBuilder, ALL_TOOLS);
+    }
+
+    private McpToolRouter(McpSessionContext context, McpSessionRegistry registry,
+                          Function<UnifiedDiff, ChangeGraph> graphBuilder,
+                          Set<String> allowedTools) {
         this.context = context;
         this.registry = registry;
         this.graphBuilder = graphBuilder;
+        this.allowedTools = Set.copyOf(allowedTools);
+        for (String name : this.allowedTools) {
+            if (!ALL_TOOLS.contains(name)) {
+                throw new IllegalArgumentException("Not a tool of this router: " + name);
+            }
+        }
+    }
+
+    /** Whether {@link #call} serves {@code tool}: true only for a name in this router's allowed set. */
+    public boolean serves(String tool) {
+        return allowedTools.contains(tool);
     }
 
     public List<JsonValue> toolDescriptors() {
+        return allDescriptors().stream()
+                .filter(d -> d instanceof JsonObject o
+                        && o.members().get("name") instanceof JsonString n
+                        && allowedTools.contains(n.value()))
+                .toList();
+    }
+
+    private List<JsonValue> allDescriptors() {
         return List.of(
                 descriptor("review_comments",
                         "Lists the open (OPEN or SENT) review threads of every review scope this session "
@@ -368,6 +420,9 @@ public final class McpToolRouter {
     }
 
     public JsonValue call(ManagedSessionId caller, String tool, JsonValue arguments) throws McpToolException {
+        if (!allowedTools.contains(tool)) {
+            throw new McpToolException("Unknown tool: " + tool);
+        }
         return switch (tool) {
             case "review_comments" -> reviewComments(caller, arguments);
             case "review_reply" -> reviewReply(caller, arguments);
