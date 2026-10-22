@@ -14,6 +14,18 @@
          settings; the console renders wrong without it. -->
     <depends>org.jetbrains.plugins.terminal</depends>
     <depends>Git4Idea</depends>
+    <!-- From 2026.3 VcsUtil, CurrentContentRevision, ShowDiffAction and the
+         DVCS repository manager live in content modules of the bundled
+         Version Control plugin. A plugin sees a content module's classes only
+         through a module dependency; depending on Git4Idea is not enough, and
+         the Plugin Verifier resolves the modules only with their plugin
+         listed too. -->
+    <dependencies>
+        <plugin id="com.intellij.platform.vcs"/>
+        <module name="intellij.platform.vcs"/>
+        <module name="intellij.platform.vcs.impl"/>
+        <module name="intellij.platform.vcs.dvcs.impl"/>
+    </dependencies>
     <!-- Optional: agents Drydock launches get the IDE's bundled MCP server,
          routed to their own worktree, when it is installed and running
          (app.drydock.intellij.mcp.IdeMcpServer). -->
@@ -104,8 +116,9 @@
              nothing running. -->
         <listener class="app.drydock.intellij.agent.AgentWindowCloseListener"
                   topic="com.intellij.openapi.project.ProjectManagerListener"/>
-        <!-- Marks the start of a quit for AgentCloseConfirmation, so a quit
-             asks once for every window. -->
+        <!-- Reopens the task windows remembered at the last quit when the IDE
+             starts, and marks the start of a quit for AgentCloseConfirmation,
+             so a quit asks once for every window. -->
         <listener class="app.drydock.intellij.agent.QuitSignal"
                   topic="com.intellij.ide.AppLifecycleListener"/>
         <!-- Every window's agents, so the "needs you" balloon can appear in

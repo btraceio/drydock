@@ -169,15 +169,15 @@ or stops a running one. It shares the project list with the standalone app
 (`~/.drydock/projects.json`), so a project registered in one shows up in the
 other.
 
-It needs IntelliJ IDEA **2025.3 or newer** with the bundled Git and Terminal
-plugins enabled, and at least one agent CLI (`claude`, `codex` or `pi`) on
-your `PATH`.
+It needs IntelliJ IDEA **2026.3 or newer** (an EAP build until 2026.3 ships)
+with the bundled Git and Terminal plugins enabled, and at least one agent CLI
+(`claude`, `codex` or `pi`) on your `PATH`.
 
 **Get the plugin zip** — either download the `drydock-intellij-plugin`
 artifact from the latest *IntelliJ plugin* workflow run on the repository's
 Actions tab (unzip the download once; inside is the plugin zip), or build it
 yourself (no submodules or Zig needed; Gradle fetches the IDE it builds
-against):
+against, and compiles with a JDK 25 it finds installed):
 
 ```bash
 cd intellij-plugin
@@ -193,8 +193,8 @@ Tools → Drydock*.
 To try it without touching your own IDE, `./gradlew runIde` starts a sandbox
 IDE with the plugin installed and a project list of its own under
 `build/sandbox-projects/`. Before a release, also run `./gradlew verifyPlugin`
-(the Plugin Verifier; it downloads several IDE versions, ~4 GB each, so check
-your free disk first).
+(the Plugin Verifier; it downloads the IDE builds it checks, ~4 GB each, so
+check your free disk first).
 
 ## Releasing
 
