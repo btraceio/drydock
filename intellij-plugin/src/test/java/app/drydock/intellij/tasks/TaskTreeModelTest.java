@@ -458,6 +458,139 @@ class TaskTreeModelTest {
     }
 
     @Test
+    void scopedSearchShowsOnlyGlobMatchingProjectsWhole() {
+        In in = new In().project(BTRACE).project(ALPHA);
+        in.sessions.add(session("Sampling events", BTRACE));
+        in.sessions.add(session("Sampling in alpha", ALPHA));
+        in.filter = "/btr/";
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build());
+
+        assertEquals(List.of(BTRACE), projectRoots(nodes));
+        // The item filter is empty inside the matched project: everything shows.
+        assertEquals(List.of("Sampling events"), sessionNames(nodes, BTRACE));
+    }
+
+    @Test
+    void scopedSearchWithItemFilterFiltersInsideTheMatchingProjectsOnly() {
+        In in = new In().project(BTRACE).project(ALPHA);
+        in.sessions.add(session("Sampling events", BTRACE));
+        in.sessions.add(session("Sampling in alpha", ALPHA));
+        in.filter = "/btr/sampling";
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build());
+
+        // Alpha's task matches the item text but its project is out of scope.
+        assertEquals(List.of(BTRACE), projectRoots(nodes));
+        assertEquals(List.of("Sampling events"), sessionNames(nodes, BTRACE));
+    }
+
+    @Test
+    void unclosedScopeFiltersProjectsOnly() {
+        In in = new In().project(BTRACE).project(ALPHA);
+        in.sessions.add(session("Sampling events", BTRACE));
+        in.filter = "/btr";
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build());
+
+        assertEquals(List.of(BTRACE), projectRoots(nodes));
+        assertEquals(List.of("Sampling events"), sessionNames(nodes, BTRACE));
+    }
+
+    @Test
+    void globWildcardsMatchProjectNames() {
+        In in = new In().project(BTRACE).project(ALPHA);
+        in.filter = "/b*ce/";
+
+        assertEquals(List.of(BTRACE), projectRoots(TaskTreeModel.build(in.build())));
+    }
+
+    @Test
+    void questionMarkGlobMatchesExactlyOneCharacter() {
+        In in = new In().project(BTRACE).project(ALPHA);
+        in.filter = "/b?race/";
+
+        assertEquals(List.of(BTRACE), projectRoots(TaskTreeModel.build(in.build())));
+    }
+
+    @Test
+    void aLoneSlashIsAnEmptyGlobMatchingEveryProject() {
+        In in = new In().project(BTRACE).project(ALPHA);
+        in.sessions.add(session("Sampling events", BTRACE));
+        in.sessions.add(session("Sampling in alpha", ALPHA));
+        in.filter = "/";
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build());
+
+        assertEquals(Set.of(BTRACE, ALPHA), Set.copyOf(projectRoots(nodes)));
+        assertEquals(List.of("Sampling events"), sessionNames(nodes, BTRACE));
+        assertEquals(List.of("Sampling in alpha"), sessionNames(nodes, ALPHA));
+    }
+
+    @Test
+    void anEmptyGlobWithAnItemFilterFiltersItemsInEveryProject() {
+        In in = new In().project(BTRACE).project(ALPHA);
+        in.sessions.add(session("Allocation events", BTRACE));
+        in.sessions.add(session("Sampling events", BTRACE));
+        in.sessions.add(session("Allocation in alpha", ALPHA));
+        in.sessions.add(session("Sampling in alpha", ALPHA));
+        in.filter = "//alloc";
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build());
+
+        assertEquals(Set.of(BTRACE, ALPHA), Set.copyOf(projectRoots(nodes)));
+        assertEquals(List.of("Allocation events"), sessionNames(nodes, BTRACE));
+        assertEquals(List.of("Allocation in alpha"), sessionNames(nodes, ALPHA));
+    }
+
+    @Test
+    void scopedSearchComposesWithTheActiveView() {
+        In in = new In().project(BTRACE).project(ALPHA);
+        ManagedAgentSession runningBtrace = session("Running btrace", BTRACE);
+        ManagedAgentSession runningAlpha = session("Running alpha", ALPHA);
+        in.sessions.addAll(List.of(runningBtrace, session("Stopped btrace", BTRACE.resolve("stopped")),
+                runningAlpha));
+        in.running.addAll(List.of(runningBtrace.id(), runningAlpha.id()));
+        in.viewFilter = ViewFilter.ACTIVE;
+        in.filter = "/btr/";
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build());
+
+        // Alpha has a running session but is out of scope; btrace's stopped one is out of view.
+        assertEquals(List.of(BTRACE), projectRoots(nodes));
+        assertEquals(List.of("Running btrace"), sessionNames(nodes, BTRACE));
+    }
+
+    @Test
+    void plainSearchMatchingAProjectNameShowsTheWholeProject() {
+        Path other = Path.of("/wt/btrace-other");
+        In in = new In().project(BTRACE).project(ALPHA).worktree(BTRACE, other, "other");
+        in.sessions.add(session("Sampling events", BTRACE));
+        in.sessions.add(session("Unrelated", other));
+        in.filter = "btrace";
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build());
+
+        // Alpha matches neither by name nor by items, so it stays hidden.
+        assertEquals(List.of(BTRACE), projectRoots(nodes));
+        // Both sessions show: the project name matched, so the whole project is the answer.
+        assertEquals(List.of("Sampling events", "Unrelated"), sessionNames(nodes, BTRACE));
+    }
+
+    @Test
+    void scopeMatchingIsCaseInsensitive() {
+        In in = new In().project(BTRACE);
+        in.filter = "/BTR/";
+
+        assertEquals(List.of(BTRACE), projectRoots(TaskTreeModel.build(in.build())));
+    }
+
+    private static List<String> sessionNames(List<TaskNode> nodes, Path root) {
+        return sessionNodes(projectRow(nodes, root)).stream()
+                .map(TaskRow.class::cast).map(task -> task.session().displayName()).toList();
+    }
+
+    @Test
     void aProjectCountsItsRunningTasksEvenWhenTheSearchHidesThem() {
         In in = new In().project(BTRACE).current(BTRACE, BTRACE);
         ManagedAgentSession hidden = session("Unrelated work", BTRACE.resolve("a"));

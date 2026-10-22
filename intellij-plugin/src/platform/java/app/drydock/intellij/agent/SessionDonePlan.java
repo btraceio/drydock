@@ -18,7 +18,7 @@ public final class SessionDonePlan {
     public enum Choice {
         /** Remove the row only; the worktree and its branch stay. */
         FORGET,
-        /** Remove the row, close this window, and remove its worktree. The branch stays. */
+        /** Remove the row and the worktree. The branch stays. */
         FORGET_AND_REMOVE
     }
 
@@ -61,9 +61,8 @@ public final class SessionDonePlan {
     }
 
     /** Under "Forget + remove worktree". */
-    public static String removeDetail(boolean windowOpen) {
-        return "Removes the worktree folder" + (windowOpen ? " and closes its window" : "")
-                + ". The branch stays unless you tick below.";
+    public static String removeDetail() {
+        return "Removes the worktree folder. The branch stays unless you tick below.";
     }
 
     /** {@code 3 uncommitted files, 1 untracked file, 2 commits not merged}; empty when nothing would be lost. */

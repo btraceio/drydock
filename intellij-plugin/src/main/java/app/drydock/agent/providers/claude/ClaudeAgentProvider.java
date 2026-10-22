@@ -73,23 +73,46 @@ public final class ClaudeAgentProvider implements AgentProvider {
      * -- the Finder/Dock launch case where the login-shell merge was slow
      * or never completed, so the inherited PATH is still launchd's bare
      * {@code /usr/bin:/bin}. Prepends {@code ddtool}'s directory to the
-     * live (post-merge) PATH, so the helper resolves even from a bare PATH.
+     * launching shell's PATH, so the helper resolves even from a bare PATH.
      *
-     * <p>Empty when {@code ddtool} is already on the inherited PATH (the
+     * <p>The emitted form is {@code PATH='<dir>:'"$PATH"}: the directory is a
+     * single-quoted literal, and the tail is a double-quoted {@code $PATH}
+     * the shell expands at run time. The expansion is deferred on purpose:
+     * the shell's PATH -- already repaired by the user's rc files and
+     * prefixed with the dogbrew shims by {@code ShellCommandAdapter} -- is
+     * the authoritative one. A literal snapshot of the IDE's PATH here would
+     * be the last PATH assignment before claude, so it would silently drop
+     * the shims (and anything else the rc files added).
+     *
+     * <p>Empty when {@code ddtool} is already on the IDE's inherited PATH (the
      * common case, merge or no), so the launch never overrides a working
-     * PATH -- claude and its bash-tool children keep the full shell PATH.
-     * Only the eval container strips {@code apiKeyHelper} outright (it has
-     * no {@code ddtool} and receives the token as {@code ANTHROPIC_API_KEY}),
-     * so this injection is skipped for eval launches.
+     * PATH. Note that guard checks the IDE's frozen environment, not the
+     * launching shell's PATH that the injection extends. Only the eval
+     * container strips {@code apiKeyHelper} outright (it has no {@code
+     * ddtool} and receives the token as {@code ANTHROPIC_API_KEY}), so this
+     * injection is skipped for eval launches.
      */
     private String ddtoolPathInjection() {
-        return ddtoolPathValue()
-                .map(value -> "PATH=" + AgentCommands.shellQuote(value) + " ")
+        return ddtoolDir()
+                .map(dir -> "PATH=" + AgentCommands.shellQuote(dir + ":") + "\"$PATH\" ")
                 .orElse("");
     }
 
-    /** PATH value needed by a directly spawned Claude child, without shell quoting. */
+    /**
+     * PATH value needed by a directly spawned Claude child, without shell
+     * quoting. Unlike the shell-embedded injection, there is no launching
+     * shell to defer to, so the frozen IDE PATH rides along after ddtool's
+     * directory.
+     */
     private Optional<String> ddtoolPathValue() {
+        return ddtoolDir().map(dir -> {
+            String realPath = LoginShellEnvironment.currentRealPath();
+            return (realPath == null || realPath.isBlank()) ? dir : dir + ":" + realPath;
+        });
+    }
+
+    /** ddtool's directory, when the injection or container override is needed at all. */
+    private Optional<String> ddtoolDir() {
         Optional<Path> ddtool = ddtoolLocator.locate();
         if (ddtool.isEmpty() || ddtool.get().getParent() == null) {
             return Optional.empty();
@@ -99,8 +122,7 @@ public final class ClaudeAgentProvider implements AgentProvider {
         if (realPath != null && pathContainsEntry(realPath, dir)) {
             return Optional.empty();
         }
-        String value = (realPath == null || realPath.isBlank()) ? dir : dir + ":" + realPath;
-        return Optional.of(value);
+        return Optional.of(dir);
     }
 
     /** True if {@code pathEnv} (colon-separated) already contains {@code dir}. */

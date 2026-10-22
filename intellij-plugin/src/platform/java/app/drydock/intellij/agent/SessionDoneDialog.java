@@ -36,7 +36,7 @@ final class SessionDoneDialog extends DialogWrapper {
     private static final int WIDTH = 460;
 
     /** Resolved off the EDT before the dialog opens. {@code branch} is the worktree's, when it has one. */
-    record Inputs(Risks risks, Optional<String> removalBlocker, boolean windowOpen, Optional<String> branch) {
+    record Inputs(Risks risks, Optional<String> removalBlocker, Optional<String> branch) {
     }
 
     private final Inputs inputs;
@@ -73,7 +73,7 @@ final class SessionDoneDialog extends DialogWrapper {
         root.add(option(forget, SessionDonePlan.forgetDetail()));
         root.add(Box.createVerticalStrut(JBUI.scale(10)));
         root.add(option(remove, inputs.removalBlocker()
-                .orElseGet(() -> SessionDonePlan.removeDetail(inputs.windowOpen()))));
+                .orElseGet(SessionDonePlan::removeDetail)));
 
         SessionDonePlan.riskLine(inputs.risks()).ifPresent(line -> {
             // Wrapped at the dialog's width: as one plain line, adding the

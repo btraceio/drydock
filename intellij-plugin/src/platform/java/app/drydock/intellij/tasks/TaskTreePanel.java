@@ -37,6 +37,7 @@ import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.Messages;
 import com.intellij.openapi.ui.SimpleToolWindowPanel;
 import com.intellij.ui.DocumentAdapter;
+import com.intellij.ui.JBColor;
 import com.intellij.ui.PopupHandler;
 import com.intellij.ui.ScrollPaneFactory;
 import com.intellij.ui.SearchTextField;
@@ -46,6 +47,8 @@ import com.intellij.ui.treeStructure.Tree;
 import com.intellij.util.Alarm;
 import com.intellij.util.messages.MessageBusConnection;
 import com.intellij.util.ui.JBUI;
+import com.intellij.util.ui.UIUtil;
+import com.intellij.util.ui.tree.TreeUtil;
 import org.jetbrains.annotations.NotNull;
 
 import javax.swing.ButtonGroup;
@@ -113,6 +116,16 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     private final Project project;
     private final Tree tree = new Tree(new DefaultTreeModel(new DefaultMutableTreeNode()));
     private final SearchTextField search = new SearchTextField(false);
+
+    {
+        // The /<project glob>/[items] scope is otherwise undiscoverable. On
+        // the inner editor: hover lands there, and it never reads the
+        // SearchTextField wrapper's tooltip.
+        search.getTextEditor().setToolTipText("Search tasks, worktrees, and issues; "
+                + "a plain search that matches a project name shows that project with all its entries. "
+                + "Optional project scope first: /<name glob>/ — e.g. /dry*/jfr "
+                + "searches jfr only within projects whose name matches dry*.");
+    }
     private final TaskTreeInputs inputs = new TaskTreeInputs();
     private final TaskTreeRefreshRequests refreshRequests = new TaskTreeRefreshRequests();
     private final Alarm searchAlarm = new Alarm(Alarm.ThreadToUse.SWING_THREAD, this);
@@ -500,7 +513,19 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         return node instanceof ProjectRow || node instanceof Section section && section.kind() == SectionKind.ISSUES;
     }
 
-    /** Compact, mutually exclusive filters; the text search narrows the selected view further. */
+    /**
+     * Compact, mutually exclusive filters; the text search narrows the
+     * selected view further.
+     *
+     * <p>The selected filter is painted through the {@code
+     * JButton.backgroundColor} client property, not left to the LaF's focus
+     * outline: DarculaToggleButtonUI paints no selected background at all
+     * (its paint path fills the plain button gradient whatever {@code
+     * isSelected()} says), so the only visible "on" state is the focus
+     * ring — which disappears the moment focus moves to the editor, leaving
+     * no way to tell which filter is on. The client property gives a
+     * persistent selected background that follows the theme.
+     */
     private JPanel quickFilters() {
         JPanel filters = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 2));
         ButtonGroup group = new ButtonGroup();
@@ -518,11 +543,32 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                     viewFilter = candidate;
                     requestRebuild(false);
                 }
+                // ButtonGroup clears the model of the previously selected
+                // button without firing its action listener; refresh the
+                // painted state of every chip from its model.
+                for (Component sibling : filters.getComponents()) {
+                    if (sibling instanceof JToggleButton toggle) {
+                        paintSelectedState(toggle);
+                    }
+                }
             });
+            paintSelectedState(button);
             group.add(button);
             filters.add(button);
         }
         return filters;
+    }
+
+    /**
+     * A theme-aware, focus-independent background for the selected chip.
+     * {@code JButton.backgroundColor} is what DarculaButtonUI.getBackground
+     * reads before any LaF gradient — with it set, the fill is the same in
+     * the focused and the unfocused window.
+     */
+    private static void paintSelectedState(JToggleButton button) {
+        button.putClientProperty("JButton.backgroundColor", button.isSelected()
+                ? JBColor.namedColor("ToggleButton.selectedBackground", UIUtil.getListSelectionBackground(true))
+                : null);
     }
 
     private AnAction githubSettingsAction(Predicate<TaskNode> applies) {
