@@ -30,9 +30,9 @@ import java.util.function.BooleanSupplier;
  */
 public class AgentExecutionRegistryPlatformTest extends BasePlatformTestCase {
 
-    /** Prints numbered lines for a few seconds, then idles: a stand-in agent. */
+    /** Prints a replay-sized numbered payload, then idles: a stand-in agent. */
     private static final List<String> STREAMING = List.of("/bin/sh", "-c",
-            "i=0; while [ $i -lt 3000 ]; do i=$((i+1)); printf 'LINE %06d\\n' $i; sleep 0.002; done; sleep 30");
+            "i=0; while [ $i -lt 3000 ]; do i=$((i+1)); printf 'LINE %06d\\n' $i; done; sleep 30");
 
     /** What the starting window's session service would be told. */
     private record Ended(ManagedSessionId id, boolean stopRequested, Integer exitCode) {
@@ -144,7 +144,7 @@ public class AgentExecutionRegistryPlatformTest extends BasePlatformTestCase {
         assertTrue(registry.isRunning(id));
         assertTrue(registry.shownIn(getProject()).isEmpty());
         AgentExecution shown = registry.show(id, getProject()).orElseThrow();
-        waitFor(() -> text(shown.console().orElseThrow()).contains("LINE 000001"));
+        waitFor(() -> text(shown.console().orElseThrow()).contains("LINE 003000"));
     }
 
     public void testStoppingANotShownAgentStillReportsTheStop() throws Exception {
