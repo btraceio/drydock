@@ -454,6 +454,32 @@ class OutOfDiffFanInTest {
     }
 
     /**
+     * A changed constructor matches its own unchanged {@code class} line: that
+     * line declares the symbol and calls nothing, so it is dropped, while a
+     * call on another unchanged line of the same file is kept.
+     */
+    @Test
+    void aDeclarationLineInsideAChangedFileIsNotAUse() {
+        OutOfDiffFanIn.Occurrence classLine = new OutOfDiffFanIn.Occurrence("src/Greeter.java", 1,
+                "public class Greeter {", true);
+        OutOfDiffFanIn.Occurrence call = new OutOfDiffFanIn.Occurrence("src/Greeter.java", 20,
+                "        return new Greeter(\"Hi\");", true);
+        OutOfDiffFanIn.Result result = OutOfDiffFanIn.classified(Map.of("Greeter", List.of(classLine, call)));
+
+        assertEquals(Map.of("Greeter", List.of(call)), result.bySymbol());
+    }
+
+    /** A changed file whose only matches are declarations of the symbol lists nothing for it. */
+    @Test
+    void aChangedFileWithOnlyDeclarationLinesListsNothing() {
+        OutOfDiffFanIn.Result result = OutOfDiffFanIn.classified(Map.of("Greeter", List.of(
+                new OutOfDiffFanIn.Occurrence("src/Greeter.java", 1, "public class Greeter {", true))));
+
+        assertEquals(Map.of(), result.bySymbol());
+        assertEquals(0, result.occurrences("Greeter"));
+    }
+
+    /**
      * Past the attribution cap the rows are noise, not signal: the symbol
      * leaves bySymbol and its count moves to suppressedCounts, where
      * occurrences() still reports it so the signature flag survives.
