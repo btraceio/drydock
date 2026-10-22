@@ -24,6 +24,8 @@ import com.intellij.terminal.TerminalExecutionConsole;
 import com.jediterm.core.util.TermSize;
 import org.jetbrains.annotations.NotNull;
 
+import java.io.IOException;
+import java.io.OutputStream;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.charset.StandardCharsets;
@@ -40,6 +42,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 
 /**
  * Every live agent process in the IDE, and which window — if any — shows
@@ -95,6 +98,12 @@ public final class AgentExecutionRegistry implements Disposable {
     private final Map<ManagedSessionId, AgentExecution> executions = new ConcurrentHashMap<>();
     /** Sessions whose console is on its way to another window (a jump, while that window opens). */
     private final Set<ManagedSessionId> moving = ConcurrentHashMap.newKeySet();
+    private final LaunchClaims launchClaims = new LaunchClaims(this::isRunning);
+
+    /** The launch claims every session launch in this IDE goes through; see {@link LaunchClaims}. */
+    public LaunchClaims launchClaims() {
+        return launchClaims;
+    }
 
     public static AgentExecutionRegistry getInstance() {
         return ApplicationManager.getApplication().getService(AgentExecutionRegistry.class);
@@ -445,6 +454,85 @@ public final class AgentExecutionRegistry implements Disposable {
                 executions.remove(execution.sessionId(), execution);
             }
         }
+    }
+
+    // ---- prompt ----------------------------------------------------------------
+
+    /** Opens a bracketed paste: the terminal sequence a TUI reads as the start of pasted text. */
+    static final String PASTE_START = "\u001b[200~";
+    /** Closes a bracketed paste. */
+    static final String PASTE_END = "\u001b[201~";
+
+    /**
+     * Types {@code prompt} into {@code sessionId}'s agent and submits it with a
+     * carriage return, written to the process input in one call as {@link
+     * #framed}.
+     *
+     * <p>The prompt goes in as a bracketed paste. Written bare, a long prompt
+     * arrives as one burst, which Claude Code's TUI takes for a paste: it kept
+     * only the last part of the text, and the carriage return did not always
+     * submit it. Claude, Codex and Pi turn bracketed paste on at startup.</p>
+     *
+     * <p>Refuses, writing nothing, a prompt containing {@code '\n'}, {@code
+     * '\r'} or ESC (an ESC could end the paste early), and a session with no
+     * live process or no process input.
+     * There is no busy check: the line is written whatever the agent is doing.
+     * The outcome is {@link PromptOutcome#FAILED} when the write throws or when
+     * the process is found ended right after the write. On a PTY neither check
+     * is complete: pty4j's stream ignores the result of the native write, so a
+     * failed or short write does not throw, and {@code flush()} does nothing.
+     * {@link PromptOutcome#DELIVERED} means the bytes were handed to the
+     * process input of a process that was still running right after, not that
+     * the agent read them.</p>
+     *
+     * <p>Blocking write to the PTY: call off the EDT (the plugin executor).</p>
+     */
+    public PromptOutcome submitPrompt(ManagedSessionId sessionId, String prompt) {
+        Objects.requireNonNull(sessionId, "sessionId");
+        Objects.requireNonNull(prompt, "prompt");
+        if (prompt.indexOf('\n') >= 0 || prompt.indexOf('\r') >= 0) {
+            LOG.log(Level.WARNING, "Refusing a multi-line prompt for {0}", sessionId);
+            return PromptOutcome.REFUSED;
+        }
+        if (prompt.indexOf('\u001b') >= 0) {
+            LOG.log(Level.WARNING, "Refusing a prompt with an escape character for {0}", sessionId);
+            return PromptOutcome.REFUSED;
+        }
+        AgentExecution execution = executions.get(sessionId);
+        if (execution == null || !execution.isRunning()) {
+            return PromptOutcome.REFUSED;
+        }
+        OutputStream in = execution.handler().getProcessInput();
+        if (in == null) {
+            return PromptOutcome.REFUSED;
+        }
+        return writePrompt(sessionId, in, framed(prompt), execution::isRunning);
+    }
+
+    /** {@code prompt} as a bracketed paste followed by a carriage return, in UTF-8. */
+    static byte[] framed(String prompt) {
+        return (PASTE_START + prompt + PASTE_END + "\r").getBytes(StandardCharsets.UTF_8);
+    }
+
+    /**
+     * Writes and flushes {@code line}; {@link PromptOutcome#FAILED} when the
+     * write throws (logged without the prompt text) or when
+     * {@code stillRunning} is false after the write returned.
+     */
+    static PromptOutcome writePrompt(ManagedSessionId sessionId, OutputStream in, byte[] line,
+                                     BooleanSupplier stillRunning) {
+        try {
+            in.write(line);
+            in.flush();
+        } catch (IOException e) {
+            LOG.log(Level.WARNING, () -> "Could not write a prompt to " + sessionId + ": " + e);
+            return PromptOutcome.FAILED;
+        }
+        if (!stillRunning.getAsBoolean()) {
+            LOG.log(Level.WARNING, "{0}''s agent ended while a prompt was written to it", sessionId);
+            return PromptOutcome.FAILED;
+        }
+        return PromptOutcome.DELIVERED;
     }
 
     // ---- stop / forget ---------------------------------------------------------

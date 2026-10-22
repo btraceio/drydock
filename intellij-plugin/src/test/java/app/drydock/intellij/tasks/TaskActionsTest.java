@@ -51,6 +51,12 @@ class TaskActionsTest {
     }
 
     @Test
+    void reviewChangesIsOfferedOnlyForARunningTask() {
+        assertTrue(TaskActions.reviewsChanges(row(true, new TaskPlacement.ThisWindow())));
+        assertFalse(TaskActions.reviewsChanges(row(false, new TaskPlacement.Idle(true))));
+    }
+
+    @Test
     void resumingInItsOwnWindowIsOfferedOnlyForAnIdleTaskFromAnotherWorktree() {
         // Resume itself resumes in this window, like New task; its own
         // window is the explicit alternative, and only where it differs.

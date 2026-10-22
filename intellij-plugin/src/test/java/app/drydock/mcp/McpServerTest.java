@@ -149,6 +149,50 @@ class McpServerTest {
         assertTrue(instructions.contains("session_rename"), instructions);
     }
 
+    /** The text the full router sent before instructions depended on the served tools. */
+    private static final String GOLDEN_INSTRUCTIONS = """
+            Drydock hosts this session in a tab a human is watching. As soon as you know what \
+            the work actually is, call session_rename with a short title naming the work -- not \
+            the branch. Re-title it if the work turns out to be something else. Two refusals are \
+            normal and both explain themselves: if the human has named the session, leave it \
+            alone; if another session here already has that title, pick one that tells them apart.
+
+            Keep session_handoff current as you work. This session may be handed to a different \
+            agent at any moment, and that brief is all your successor gets -- write it for them, \
+            not for the human, and especially record what you RULED OUT and why, which they \
+            cannot recover from the code.\
+            """;
+
+    @Test
+    void theFullRouterKeepsTodaysInstructions() {
+        assertEquals(Optional.of(GOLDEN_INSTRUCTIONS),
+                McpServer.instructionsFor(new McpToolRouter(context, registry)));
+    }
+
+    @Test
+    void aReviewOnlyRouterSendsNoInstructions() throws Exception {
+        McpToolRouter reviewOnly = new McpToolRouter(context, registry, McpToolRouter.REVIEW_TOOLS);
+        assertEquals(Optional.empty(), McpServer.instructionsFor(reviewOnly));
+
+        try (McpServer reviewServer = new McpServer(registry, reviewOnly)) {
+            reviewServer.start();
+            HttpResponse<String> response = client.send(
+                    HttpRequest.newBuilder(URI.create(reviewServer.endpointUrl()))
+                            .timeout(Duration.ofSeconds(5))
+                            .header("Content-Type", "application/json")
+                            .header(TOKEN_HEADER, token)
+                            .POST(HttpRequest.BodyPublishers.ofString("""
+                                    {"jsonrpc":"2.0","id":28,"method":"initialize","params":{}}"""))
+                            .build(),
+                    HttpResponse.BodyHandlers.ofString());
+
+            assertEquals(200, response.statusCode());
+            assertFalse(response.body().contains("instructions"), response.body());
+            assertFalse(response.body().contains("session_rename"), response.body());
+            assertFalse(response.body().contains("session_handoff"), response.body());
+        }
+    }
+
     /**
      * The MCP spec has the server answer with the client's requested version
      * when it supports it -- and has the client disconnect when it does not

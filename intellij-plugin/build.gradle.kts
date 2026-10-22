@@ -32,8 +32,9 @@ version = "0.1.0"
 
 java {
     toolchain {
-        // IntelliJ 2025.x runs on JBR 21; the extracted core must fit inside it.
-        languageVersion.set(JavaLanguageVersion.of(21))
+        // IntelliJ 2026.3 runs on JBR 25 and its class files are version 69,
+        // which a JDK 21 compiler cannot read.
+        languageVersion.set(JavaLanguageVersion.of(25))
     }
 }
 
@@ -128,10 +129,23 @@ dependencies {
     "testRuntimeOnly"("org.junit.platform:junit-platform-launcher")
 
     intellijPlatform {
-        intellijIdeaUltimate("2025.3.3") // build 253.31033.145, verified local IU
+        // 2026.3 EAP: its terminal renders agent TUIs (Claude, Codex, Pi)
+        // correctly, where 2025.3's did not. since-build follows, so 263.
+        intellijIdeaUltimate("263.7031.23")
         bundledPlugin("org.jetbrains.plugins.terminal")
         // The New task dialog's start-point picker is Git's own (GitRefDialog).
         bundledPlugin("Git4Idea")
+        // From 2026.3 VCS classes ship as modules: the core types (Change,
+        // ContentRevision, VcsException) in the platform's
+        // intellij.platform.vcs.core and .shared, and VcsUtil, ShowDiffAction and the DVCS
+        // repository manager in the bundled Version Control plugin. plugin.xml
+        // declares the same modules for the runtime classloader.
+        bundledPlugin("com.intellij.platform.vcs")
+        bundledModule("intellij.platform.vcs.core")
+        bundledModule("intellij.platform.vcs.shared")
+        bundledModule("intellij.platform.vcs")
+        bundledModule("intellij.platform.vcs.impl")
+        bundledModule("intellij.platform.vcs.dvcs.impl")
         // Optional at runtime (plugin.xml): IdeMcpServer routes the IDE's
         // bundled MCP server to each launched agent's worktree.
         bundledPlugin("com.intellij.mcpServer")
@@ -207,10 +221,10 @@ fun Test.withGitHostIsolation() {
 
 tasks.withType<JavaCompile>().configureEach {
     options.encoding = "UTF-8"
-    // JBR 21 is the floor for IntelliJ 2025.x: the extracted core must not use
+    // JBR 25 is the floor for IntelliJ 2026.3: the extracted core must not use
     // anything newer, or the port silently depends on a runtime the IDE can
     // never provide.
-    options.release.set(21)
+    options.release.set(25)
 }
 
 tasks.test {

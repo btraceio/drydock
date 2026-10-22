@@ -9,11 +9,13 @@ import app.drydock.agent.api.ConversationSource;
 import app.drydock.agent.api.CreateContext;
 import app.drydock.agent.api.LaunchPlan;
 import app.drydock.agent.api.ActivityReporter;
+import app.drydock.agent.api.McpAccess;
 import app.drydock.agent.api.McpDelivery;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdDiscovery;
 import app.drydock.agent.api.SessionIdStrategy;
 import app.drydock.agent.api.StdioMcpServer;
+import app.drydock.agent.providers.AgentCommands;
 import app.drydock.agent.providers.terminal.TerminalAgentProvider;
 import app.drydock.agent.spi.AgentProvider;
 import app.drydock.app.ApplicationStateStore;
@@ -27,6 +29,8 @@ import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.intellij.agent.AgentConsoleHost;
 import app.drydock.intellij.agent.AgentExecutionListener;
+import app.drydock.intellij.agent.LaunchClaims;
+import app.drydock.intellij.review.SessionMcpAccess;
 import app.drydock.state.JsonApplicationStateRepository;
 
 
@@ -39,6 +43,7 @@ import java.lang.reflect.Field;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -46,6 +51,7 @@ import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.AbstractExecutorService;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -55,11 +61,13 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
+import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -91,6 +99,12 @@ class DrydockSessionServiceTest {
         final List<CreateContext> createContexts = new CopyOnWriteArrayList<>();
         final List<ResumeContext> resumeContexts = new CopyOnWriteArrayList<>();
         final List<Thread> threads = new CopyOnWriteArrayList<>();
+        /** What {@link #mcpDelivery()} reports; NONE unless a test sets it. */
+        volatile McpDelivery delivery = McpDelivery.NONE;
+        /** When set, the command carries the access's credential file the way the real providers do. */
+        volatile boolean wiresMcp;
+        /** When set, both command builders throw it. */
+        volatile Error buildError;
 
         RecordingProvider(AgentKind kind, SessionIdStrategy strategy, SessionIdDiscovery discovery,
                 boolean supported, boolean sessionIdUsed, String command, List<String> events) {
@@ -111,18 +125,8 @@ class DrydockSessionServiceTest {
             this.gate = gate;
         }
 
-        @Override public AgentKind kind() { return kind; }
-        @Override public String displayName() { return "Fake " + kind; }
-        @Override public void init(AgentContext ctx) { }
-        @Override public Optional<Path> locateExecutable() { return Optional.of(Path.of("/bin/true")); }
-        @Override public String describeSearched() { return "PATH"; }
-        @Override public AgentCapabilities probeCapabilities() { return new AgentCapabilities(true, true, "1.0"); }
-        @Override public boolean supportsRemote() { return false; }
-        @Override public McpDelivery mcpDelivery() { return McpDelivery.NONE; }
-
-        @Override public LaunchPlan buildCreateCommand(CreateContext c) {
-            threads.add(Thread.currentThread());
-            createContexts.add(c);
+        /** Signals {@code arrived}, then blocks until {@code gate} opens; both are optional. */
+        private void awaitGate() {
             if (arrived != null) {
                 arrived.countDown();
             }
@@ -134,12 +138,37 @@ class DrydockSessionServiceTest {
                     throw new IllegalStateException("interrupted while gated", e);
                 }
             }
+        }
+
+        @Override public AgentKind kind() { return kind; }
+        @Override public String displayName() { return "Fake " + kind; }
+        @Override public void init(AgentContext ctx) { }
+        @Override public Optional<Path> locateExecutable() { return Optional.of(Path.of("/bin/true")); }
+        @Override public String describeSearched() { return "PATH"; }
+        @Override public AgentCapabilities probeCapabilities() { return new AgentCapabilities(true, true, "1.0"); }
+        @Override public boolean supportsRemote() { return false; }
+        @Override public McpDelivery mcpDelivery() { return delivery; }
+
+        @Override public LaunchPlan buildCreateCommand(CreateContext c) {
+            threads.add(Thread.currentThread());
+            createContexts.add(c);
+            awaitGate();
+            if (buildError != null) {
+                throw buildError;
+            }
             if (!supported) {
                 return LaunchPlan.unsupported();
             }
             String built = command != null ? command
                     : "fake-agent --session '" + c.sessionId() + "' --name '" + c.displayName() + "'";
-            return LaunchPlan.of(built, sessionIdUsed);
+            return LaunchPlan.of(built + mcpFlag(c.mcp()), sessionIdUsed);
+        }
+
+        private String mcpFlag(Optional<McpAccess> mcp) {
+            return wiresMcp
+                    ? mcp.flatMap(McpAccess::credentialFile)
+                            .map(file -> " --mcp-config " + AgentCommands.shellQuote(file.toString())).orElse("")
+                    : "";
         }
 
         /**
@@ -148,10 +177,14 @@ class DrydockSessionServiceTest {
          */
         @Override public LaunchPlan buildResumeCommand(ResumeContext r) {
             resumeContexts.add(r);
-            if (r.agentSessionId().isPresent()) {
-                return LaunchPlan.of("fake --session '" + r.agentSessionId().get() + "'", false);
+            awaitGate();
+            if (buildError != null) {
+                throw buildError;
             }
-            return LaunchPlan.of("fake --resume", false);
+            if (r.agentSessionId().isPresent()) {
+                return LaunchPlan.of("fake --session '" + r.agentSessionId().get() + "'" + mcpFlag(r.mcp()), false);
+            }
+            return LaunchPlan.of("fake --resume" + mcpFlag(r.mcp()), false);
         }
         @Override public SessionIdStrategy idStrategy() { return strategy; }
         @Override public Optional<ConversationSource> conversations() { return Optional.empty(); }
@@ -231,6 +264,8 @@ class DrydockSessionServiceTest {
         final List<Open> opens = new CopyOnWriteArrayList<>();
         final List<ManagedSessionId> stopped = new CopyOnWriteArrayList<>();
         final List<ManagedSessionId> forgotten = new CopyOnWriteArrayList<>();
+        /** When set, {@link #startConsole} throws it synchronously instead of returning a future. */
+        volatile RuntimeException startFailure;
 
         record Open(ManagedSessionId sessionId, Path workingDirectory, LaunchPlan plan) { }
 
@@ -241,6 +276,9 @@ class DrydockSessionServiceTest {
         @Override public CompletableFuture<Void> startConsole(
                 ManagedSessionId sessionId, Path workingDirectory, LaunchPlan plan) {
             events.add("open");
+            if (startFailure != null) {
+                throw startFailure;
+            }
             opens.add(new Open(sessionId, workingDirectory, plan));
             return CompletableFuture.completedFuture(null);
         }
@@ -254,6 +292,37 @@ class DrydockSessionServiceTest {
             events.add("forget");
             forgotten.add(sessionId);
         }
+    }
+
+    /** Runs submitted tasks only when the test steps it, one at a time, in submission order. */
+    static final class SteppedExecutorService extends AbstractExecutorService {
+
+        private final Deque<Runnable> queued = new ConcurrentLinkedDeque<>();
+        private volatile boolean terminated;
+
+        /** Runs the oldest queued task; false when none is queued. */
+        boolean runNext() {
+            Runnable next = queued.pollFirst();
+            if (next == null) {
+                return false;
+            }
+            next.run();
+            return true;
+        }
+
+        /** Runs queued tasks, including ones they queue, until none is left. */
+        void runAll() {
+            while (runNext()) {
+                // keep stepping
+            }
+        }
+
+        @Override public void execute(Runnable command) { queued.addLast(command); }
+        @Override public void shutdown() { terminated = true; }
+        @Override public List<Runnable> shutdownNow() { terminated = true; return List.of(); }
+        @Override public boolean isShutdown() { return terminated; }
+        @Override public boolean isTerminated() { return terminated; }
+        @Override public boolean awaitTermination(long timeout, TimeUnit unit) { return terminated; }
     }
 
     /** Determinism: every submitted task runs inline on the submitting thread. */
@@ -278,6 +347,14 @@ class DrydockSessionServiceTest {
         final List<String> events = new CopyOnWriteArrayList<>();
         final FakeConsoleHost consoles = new FakeConsoleHost(events);
         final ExecutorService executor;
+        /**
+         * By default an execution is live once {@code consoles} opened it and
+         * has neither stopped nor forgotten it; a forget drops the execution,
+         * as {@code AgentExecutionRegistry.forget} does.
+         */
+        Predicate<ManagedSessionId> liveExecution = id ->
+                consoles.opens.stream().anyMatch(open -> open.sessionId().equals(id))
+                        && !consoles.stopped.contains(id) && !consoles.forgotten.contains(id);
 
         private Harness(Path base, Repository repository, ExecutorService executor) {
             this.base = base;
@@ -293,13 +370,70 @@ class DrydockSessionServiceTest {
 
         DrydockSessionService service(Function<Path, List<StdioMcpServer>> stdioMcpServers,
                                       AgentProvider... providers) {
+            return service(stdioMcpServers, SessionMcpAccess.none(), providers);
+        }
+
+        DrydockSessionService service(SessionMcpAccess mcpAccess, AgentProvider... providers) {
+            return service(path -> List.of(), mcpAccess, providers);
+        }
+
+        DrydockSessionService service(Function<Path, List<StdioMcpServer>> stdioMcpServers,
+                                      SessionMcpAccess mcpAccess, AgentProvider... providers) {
             AgentRegistry registry = new AgentRegistry(List.of(providers),
                     new AgentContext(base, base.resolve("activity"), executor));
             SessionActivityWatcher watcher = new SessionActivityWatcher(base.resolve("activity"), executor);
             Function<Path, CompletableFuture<RepositoryId>> resolver =
                     path -> CompletableFuture.completedFuture(repository.id());
             return new DrydockSessionService(CompletableFuture.completedFuture(null),
-                    () -> store, () -> registry, () -> watcher, resolver, consoles, executor, stdioMcpServers);
+                    () -> store, () -> registry, () -> watcher, resolver, consoles, executor, stdioMcpServers,
+                    mcpAccess, new LaunchClaims(id -> liveExecution.test(id)));
+        }
+    }
+
+    /** Records every call; answers {@code accessFor} with {@code answer}, or throws when {@code failure} is set. */
+    private static final class RecordingAccess implements SessionMcpAccess {
+
+        final List<McpDelivery> requested = new CopyOnWriteArrayList<>();
+        final List<ManagedSessionId> released = new CopyOnWriteArrayList<>();
+        private final Optional<McpAccess> answer;
+        private final RuntimeException failure;
+
+        RecordingAccess(Optional<McpAccess> answer, RuntimeException failure) {
+            this.answer = answer;
+            this.failure = failure;
+        }
+
+        static RecordingAccess granting() {
+            return new RecordingAccess(Optional.of(new McpAccess("http://endpoint.invalid/mcp", "tok", Optional.empty())),
+                    null);
+        }
+
+        /** Grants access with a credential file, as {@code ReviewBackend} does. */
+        static RecordingAccess grantingWithFile(Path file) {
+            return new RecordingAccess(Optional.of(new McpAccess("http://endpoint.invalid/mcp", "tok",
+                    Optional.of(file))), null);
+        }
+
+        static RecordingAccess declining() {
+            return new RecordingAccess(Optional.empty(), null);
+        }
+
+        static RecordingAccess throwing() {
+            return new RecordingAccess(Optional.empty(), new IllegalStateException("boom"));
+        }
+
+        @Override
+        public Optional<McpAccess> accessFor(ManagedSessionId sessionId, McpDelivery delivery) {
+            requested.add(delivery);
+            if (failure != null) {
+                throw failure;
+            }
+            return answer;
+        }
+
+        @Override
+        public void release(ManagedSessionId sessionId) {
+            released.add(sessionId);
         }
     }
 
@@ -602,6 +736,9 @@ class DrydockSessionServiceTest {
         assertEquals(SessionStatus.RUNNING, recorded.status());
         // The resume went through the with-id path.
         assertEquals(Optional.of("conv-7"), provider.resumeContexts.get(0).agentSessionId());
+        // The first execution ends before the second pick: a session whose
+        // console is still live refuses a second start.
+        harness.consoles.stopped.add(resumed.id());
         // Picking the same conversation again reuses the row instead of
         // creating a duplicate (one row per conversation).
         ManagedAgentSession again = service.resumeConversation(harness.repository, AgentKind.PI,
@@ -1344,5 +1481,583 @@ class DrydockSessionServiceTest {
                 return Optional.of(List.of("/usr/bin/printf", "%s", answer));
             }
         };
+    }
+
+    // ---- Drydock MCP access (AC6, release half of AC7) -------------------------
+
+    private static RecordingProvider claudeProvider(Harness harness, boolean supported) {
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, supported, true, null, harness.events);
+        provider.delivery = McpDelivery.CONFIG_FILE;
+        return provider;
+    }
+
+    private static ManagedAgentSession exitedClaudeRow(Harness harness, Path base) {
+        return persistSession(harness, AgentKind.CLAUDE, "Row",
+                new AgentBinding(AgentKind.CLAUDE, Optional.of("claude-conv-1"), Optional.empty()),
+                base, SessionStatus.EXITED, Instant.parse("2026-08-12T10:00:00Z"));
+    }
+
+    @Test
+    void createPassesTheGrantedMcpAccessToTheProvider(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = claudeProvider(harness, true);
+        RecordingAccess access = RecordingAccess.granting();
+        DrydockSessionService service = harness.service(access, provider);
+
+        ManagedAgentSession prepared = service.prepareSession(base, AgentKind.CLAUDE, "S")
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        service.launchSession(prepared).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(List.of(McpDelivery.CONFIG_FILE), access.requested);
+        assertTrue(provider.createContexts.get(0).mcp().isPresent());
+        assertTrue(access.released.isEmpty());
+        harness.store.flush();
+    }
+
+    @Test
+    void createAsksForTheProvidersDeliveryAsIs(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = claudeProvider(harness, true);
+        provider.delivery = McpDelivery.NONE;
+        RecordingAccess access = RecordingAccess.declining();
+        DrydockSessionService service = harness.service(access, provider);
+
+        ManagedAgentSession prepared = service.prepareSession(base, AgentKind.CLAUDE, "S")
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        service.launchSession(prepared).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(List.of(McpDelivery.NONE), access.requested);
+        assertTrue(provider.createContexts.get(0).mcp().isEmpty());
+        harness.store.flush();
+    }
+
+    @Test
+    void createStillRunsWhenMcpAccessIsDeclinedOrThrows(@TempDir Path base) throws Exception {
+        for (RecordingAccess access : List.of(RecordingAccess.declining(), RecordingAccess.throwing())) {
+            Harness harness = harness(Files.createDirectories(base.resolve("h" + access.hashCode())));
+            RecordingProvider provider = claudeProvider(harness, true);
+            DrydockSessionService service = harness.service(access, provider);
+
+            ManagedAgentSession prepared = service.prepareSession(base, AgentKind.CLAUDE, "S")
+                    .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            ManagedAgentSession running = service.launchSession(prepared).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+            assertEquals(SessionStatus.RUNNING, running.status());
+            assertTrue(provider.createContexts.get(0).mcp().isEmpty());
+            harness.store.flush();
+        }
+    }
+
+    @Test
+    void resumePassesTheGrantedMcpAccessToTheProvider(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = claudeProvider(harness, true);
+        RecordingAccess access = RecordingAccess.granting();
+        DrydockSessionService service = harness.service(access, provider);
+        ManagedAgentSession stored = exitedClaudeRow(harness, base);
+
+        service.resumeSession(stored.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(List.of(McpDelivery.CONFIG_FILE), access.requested);
+        assertTrue(provider.resumeContexts.get(0).mcp().isPresent());
+        assertTrue(access.released.isEmpty());
+        harness.store.flush();
+    }
+
+    @Test
+    void resumeStillRunsWhenMcpAccessIsDeclinedOrThrows(@TempDir Path base) throws Exception {
+        for (RecordingAccess access : List.of(RecordingAccess.declining(), RecordingAccess.throwing())) {
+            Harness harness = harness(Files.createDirectories(base.resolve("h" + access.hashCode())));
+            RecordingProvider provider = claudeProvider(harness, true);
+            DrydockSessionService service = harness.service(access, provider);
+            ManagedAgentSession stored = exitedClaudeRow(harness, base);
+
+            ManagedAgentSession resumed = service.resumeSession(stored.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+            assertEquals(SessionStatus.RUNNING, resumed.status());
+            assertTrue(provider.resumeContexts.get(0).mcp().isEmpty());
+            harness.store.flush();
+        }
+    }
+
+    @Test
+    void theProductionEndPathReleasesTheSessionsMcpAccess(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = claudeProvider(harness, true);
+        RecordingAccess access = RecordingAccess.granting();
+        DrydockSessionService service = harness.service(access, provider);
+        ManagedAgentSession stored = exitedClaudeRow(harness, base);
+
+        service.endRecorder().executionTerminated(stored.id(), true, null);
+
+        assertEquals(List.of(stored.id()), access.released);
+        harness.store.flush();
+    }
+
+    @Test
+    void aTerminationIsNotReleasedWhileANewExecutionOfTheSessionIsRunning(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = claudeProvider(harness, true);
+        RecordingAccess access = RecordingAccess.granting();
+        ManagedAgentSession stored = exitedClaudeRow(harness, base);
+        harness.liveExecution = id -> id.equals(stored.id());
+        DrydockSessionService service = harness.service(access, provider);
+
+        service.endRecorder().executionTerminated(stored.id(), false, 0);
+
+        assertTrue(access.released.isEmpty());
+        harness.store.flush();
+    }
+
+    @Test
+    void aResumeWhoseConsoleStartThrowsSynchronouslyReleasesTheMintedAccess(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = claudeProvider(harness, true);
+        RecordingAccess access = RecordingAccess.granting();
+        DrydockSessionService service = harness.service(access, provider);
+        ManagedAgentSession stored = exitedClaudeRow(harness, base);
+        harness.consoles.startFailure = new IllegalStateException("console start failed");
+
+        assertThrows(Exception.class, () -> service.resumeSession(stored.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+
+        assertEquals(List.of(stored.id()), access.released);
+        harness.consoles.startFailure = null;
+        assertEquals(SessionStatus.RUNNING,
+                service.resumeSession(stored.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS).status(),
+                "the failed resume ended its claim");
+        harness.store.flush();
+    }
+
+    @Test
+    void forgettingASessionReleasesItsMcpAccess(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = claudeProvider(harness, true);
+        RecordingAccess access = RecordingAccess.granting();
+        DrydockSessionService service = harness.service(access, provider);
+        ManagedAgentSession stored = exitedClaudeRow(harness, base);
+
+        service.deleteSession(stored.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(List.of(stored.id()), access.released);
+        harness.store.flush();
+    }
+
+    @Test
+    void anUnsupportedCreatePlanReleasesTheMintedAccess(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = claudeProvider(harness, false);
+        RecordingAccess access = RecordingAccess.granting();
+        DrydockSessionService service = harness.service(access, provider);
+
+        ManagedAgentSession prepared = service.prepareSession(base, AgentKind.CLAUDE, "S")
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        assertThrows(ExecutionException.class,
+                () -> service.launchSession(prepared).get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+
+        assertEquals(List.of(prepared.id()), access.released);
+        harness.store.flush();
+    }
+
+    private static Harness concurrentHarness(Path base, ExecutorService executor) {
+        Repository repository = new Repository(RepositoryId.newId(), base, "repo",
+                Instant.parse("2026-08-12T10:00:00Z"), Instant.parse("2026-08-12T10:00:00Z"),
+                RepositorySettings.DEFAULT);
+        Harness harness = new Harness(base, repository, executor);
+        harness.store.update(state -> state.withRepositories(List.of(repository)));
+        return harness;
+    }
+
+    private static RecordingProvider gatedClaudeProvider(Harness harness, CountDownLatch arrived,
+                                                         CountDownLatch gate) {
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, true, null, harness.events, arrived, gate);
+        provider.delivery = McpDelivery.CONFIG_FILE;
+        return provider;
+    }
+
+    @Test
+    void aResumeWhileTheSessionHasALiveExecutionIsRefusedBeforeAnythingHappens(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = claudeProvider(harness, true);
+        RecordingAccess access = RecordingAccess.granting();
+        DrydockSessionService service = harness.service(access, provider);
+        ManagedAgentSession stored = exitedClaudeRow(harness, base);
+        harness.liveExecution = id -> id.equals(stored.id());
+
+        ExecutionException refused = assertThrows(ExecutionException.class,
+                () -> service.resumeSession(stored.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+
+        assertTrue(refused.getCause() instanceof IllegalStateException, String.valueOf(refused.getCause()));
+        assertTrue(access.requested.isEmpty());
+        assertTrue(access.released.isEmpty());
+        assertTrue(harness.consoles.opens.isEmpty());
+        assertEquals(SessionStatus.EXITED, persisted(harness, stored.id()).status());
+        harness.store.flush();
+    }
+
+    @Test
+    void aSecondResumeWhileTheFirstIsInFlightIsRefused(@TempDir Path base) throws Exception {
+        ExecutorService executor = Executors.newCachedThreadPool();
+        try {
+            Harness harness = concurrentHarness(base, executor);
+            CountDownLatch arrived = new CountDownLatch(1);
+            CountDownLatch gate = new CountDownLatch(1);
+            RecordingProvider provider = gatedClaudeProvider(harness, arrived, gate);
+            RecordingAccess access = RecordingAccess.granting();
+            DrydockSessionService service = harness.service(access, provider);
+            ManagedAgentSession stored = exitedClaudeRow(harness, base);
+
+            CompletableFuture<ManagedAgentSession> first = service.resumeSession(stored.id());
+            assertTrue(arrived.await(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+            ExecutionException refused = assertThrows(ExecutionException.class,
+                    () -> service.resumeSession(stored.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+            gate.countDown();
+
+            assertTrue(refused.getCause() instanceof IllegalStateException, String.valueOf(refused.getCause()));
+            assertEquals(SessionStatus.RUNNING, first.get(TIMEOUT_SECONDS, TimeUnit.SECONDS).status());
+            assertEquals(1, harness.consoles.opens.size());
+            assertEquals(1, access.requested.size());
+            assertTrue(access.released.isEmpty());
+            harness.store.flush();
+        } finally {
+            executor.shutdown();
+        }
+    }
+
+    @Test
+    void aTerminationRacingAnInFlightResumeDoesNotRevokeItsToken(@TempDir Path base) throws Exception {
+        ExecutorService executor = Executors.newCachedThreadPool();
+        try {
+            Harness harness = concurrentHarness(base, executor);
+            CountDownLatch arrived = new CountDownLatch(1);
+            CountDownLatch gate = new CountDownLatch(1);
+            RecordingProvider provider = gatedClaudeProvider(harness, arrived, gate);
+            RecordingAccess access = RecordingAccess.granting();
+            DrydockSessionService service = harness.service(access, provider);
+            ManagedAgentSession stored = exitedClaudeRow(harness, base);
+
+            CompletableFuture<ManagedAgentSession> resumed = service.resumeSession(stored.id());
+            assertTrue(arrived.await(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+            assertEquals(1, access.requested.size(), "the token is minted before the command build");
+            service.endRecorder().executionTerminated(stored.id(), false, 0);
+            gate.countDown();
+            resumed.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+            assertTrue(access.released.isEmpty());
+            harness.store.flush();
+        } finally {
+            executor.shutdown();
+        }
+    }
+
+    @Test
+    void aResumeWhoseExecutionIsNotLiveAtCompletionReleasesExactlyOnce(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = claudeProvider(harness, true);
+        RecordingAccess access = RecordingAccess.granting();
+        DrydockSessionService service = harness.service(access, provider);
+        ManagedAgentSession stored = exitedClaudeRow(harness, base);
+        harness.liveExecution = id -> false;
+
+        ManagedAgentSession resumed = service.resumeSession(stored.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(SessionStatus.RUNNING, resumed.status());
+        assertEquals(List.of(stored.id()), access.released);
+        harness.store.flush();
+    }
+
+    @Test
+    void aSecondStartWhileTheFirstIsInFlightIsRefusedWithoutPersistingFailure(@TempDir Path base) throws Exception {
+        ExecutorService executor = Executors.newCachedThreadPool();
+        try {
+            Harness harness = concurrentHarness(base, executor);
+            CountDownLatch arrived = new CountDownLatch(1);
+            CountDownLatch gate = new CountDownLatch(1);
+            RecordingProvider provider = gatedClaudeProvider(harness, arrived, gate);
+            RecordingAccess access = RecordingAccess.granting();
+            DrydockSessionService service = harness.service(access, provider);
+            ManagedAgentSession idle = persistSession(harness, AgentKind.CLAUDE, "Row",
+                    new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
+                    base, SessionStatus.EXITED, Instant.parse("2026-08-12T10:00:00Z"));
+
+            CompletableFuture<ManagedAgentSession> first = service.startSession(idle.id());
+            assertTrue(arrived.await(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+            ExecutionException refused = assertThrows(ExecutionException.class,
+                    () -> service.startSession(idle.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+
+            assertTrue(refused.getCause() instanceof IllegalStateException, String.valueOf(refused.getCause()));
+            assertEquals(SessionStatus.STARTING, persisted(harness, idle.id()).status(),
+                    "the loser leaves the winner's STARTING row alone");
+            gate.countDown();
+            assertEquals(SessionStatus.RUNNING, first.get(TIMEOUT_SECONDS, TimeUnit.SECONDS).status());
+            assertEquals(1, provider.createContexts.size());
+            assertTrue(access.released.isEmpty());
+            harness.store.flush();
+        } finally {
+            executor.shutdown();
+        }
+    }
+
+    @Test
+    void aCompletedCreateEndsItsClaim(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        // No id recorded, so the row stays startable rather than resumable.
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, false, null, harness.events);
+        provider.delivery = McpDelivery.CONFIG_FILE;
+        DrydockSessionService service = harness.service(RecordingAccess.granting(), provider);
+        ManagedAgentSession prepared = service.prepareSession(base, AgentKind.CLAUDE, "S")
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        service.launchSession(prepared).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        harness.consoles.stopped.add(prepared.id());
+
+        assertEquals(SessionStatus.RUNNING,
+                service.startSession(prepared.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS).status());
+        assertEquals(2, provider.createContexts.size());
+        harness.store.flush();
+    }
+
+    @Test
+    void anErrorWhileBuildingACreateCommandEndsItsClaim(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = claudeProvider(harness, true);
+        RecordingAccess access = RecordingAccess.granting();
+        DrydockSessionService service = harness.service(access, provider);
+        ManagedAgentSession prepared = service.prepareSession(base, AgentKind.CLAUDE, "S")
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        provider.buildError = new AssertionError("provider broke");
+
+        ExecutionException failed = assertThrows(ExecutionException.class,
+                () -> service.launchSession(prepared).get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+
+        assertTrue(failed.getCause() instanceof AssertionError, String.valueOf(failed.getCause()));
+        assertEquals(List.of(prepared.id()), access.released);
+        provider.buildError = null;
+        assertEquals(SessionStatus.RUNNING,
+                service.launchSession(prepared).get(TIMEOUT_SECONDS, TimeUnit.SECONDS).status());
+        harness.store.flush();
+    }
+
+    @Test
+    void anErrorWhileBuildingAResumeCommandEndsItsClaim(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = claudeProvider(harness, true);
+        RecordingAccess access = RecordingAccess.granting();
+        DrydockSessionService service = harness.service(access, provider);
+        ManagedAgentSession stored = exitedClaudeRow(harness, base);
+        provider.buildError = new AssertionError("provider broke");
+
+        assertThrows(ExecutionException.class,
+                () -> service.resumeSession(stored.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+
+        assertEquals(List.of(stored.id()), access.released);
+        provider.buildError = null;
+        assertEquals(SessionStatus.RUNNING,
+                service.resumeSession(stored.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS).status());
+        harness.store.flush();
+    }
+
+    @Test
+    void aCreateCommandWithoutTheCredentialFileReleasesTheAccess(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = claudeProvider(harness, true);
+        RecordingAccess access = RecordingAccess.grantingWithFile(base.resolve("mcp").resolve("s.json"));
+        DrydockSessionService service = harness.service(access, provider);
+        ManagedAgentSession prepared = service.prepareSession(base, AgentKind.CLAUDE, "S")
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        ManagedAgentSession running = service.launchSession(prepared).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(SessionStatus.RUNNING, running.status());
+        assertEquals(List.of(prepared.id()), access.released);
+        harness.store.flush();
+    }
+
+    @Test
+    void aCreateCommandCarryingTheCredentialFileKeepsTheAccess(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = claudeProvider(harness, true);
+        provider.wiresMcp = true;
+        RecordingAccess access = RecordingAccess.grantingWithFile(base.resolve("mcp dir").resolve("s.json"));
+        DrydockSessionService service = harness.service(access, provider);
+        ManagedAgentSession prepared = service.prepareSession(base, AgentKind.CLAUDE, "S")
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        service.launchSession(prepared).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertTrue(access.released.isEmpty());
+        harness.store.flush();
+    }
+
+    @Test
+    void aResumeCommandWithoutTheCredentialFileReleasesTheAccess(@TempDir Path base) throws Exception {
+        for (boolean wires : List.of(false, true)) {
+            Harness harness = harness(Files.createDirectories(base.resolve("wires-" + wires)));
+            RecordingProvider provider = claudeProvider(harness, true);
+            provider.wiresMcp = wires;
+            RecordingAccess access = RecordingAccess.grantingWithFile(base.resolve("mcp").resolve("s.json"));
+            DrydockSessionService service = harness.service(access, provider);
+            ManagedAgentSession stored = exitedClaudeRow(harness, base);
+
+            service.resumeSession(stored.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+            assertEquals(wires ? List.of() : List.of(stored.id()), access.released, "wires=" + wires);
+            harness.store.flush();
+        }
+    }
+
+    @Test
+    void forgettingARunningSessionStopsItAndReleasesItsMcpAccess(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = claudeProvider(harness, true);
+        RecordingAccess access = RecordingAccess.granting();
+        DrydockSessionService service = harness.service(access, provider);
+        ManagedAgentSession stored = exitedClaudeRow(harness, base);
+        service.resumeSession(stored.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        assertTrue(access.released.isEmpty());
+
+        service.deleteSession(stored.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(List.of(stored.id()), harness.consoles.forgotten);
+        assertEquals(List.of(stored.id()), access.released);
+        assertNull(persistedOrNull(harness, stored.id()));
+        harness.store.flush();
+    }
+
+    @Test
+    void forgettingASessionWhileItsLaunchIsInFlightIsRefused(@TempDir Path base) throws Exception {
+        ExecutorService executor = Executors.newCachedThreadPool();
+        try {
+            Harness harness = concurrentHarness(base, executor);
+            CountDownLatch arrived = new CountDownLatch(1);
+            CountDownLatch gate = new CountDownLatch(1);
+            RecordingProvider provider = gatedClaudeProvider(harness, arrived, gate);
+            RecordingAccess access = RecordingAccess.granting();
+            DrydockSessionService service = harness.service(access, provider);
+            ManagedAgentSession stored = exitedClaudeRow(harness, base);
+
+            CompletableFuture<ManagedAgentSession> resumed = service.resumeSession(stored.id());
+            assertTrue(arrived.await(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+            ExecutionException refused = assertThrows(ExecutionException.class,
+                    () -> service.deleteSession(stored.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+            gate.countDown();
+
+            assertTrue(refused.getCause() instanceof IllegalStateException, String.valueOf(refused.getCause()));
+            assertEquals(SessionStatus.RUNNING, resumed.get(TIMEOUT_SECONDS, TimeUnit.SECONDS).status());
+            assertTrue(harness.consoles.forgotten.isEmpty());
+            assertTrue(access.released.isEmpty());
+            assertEquals(SessionStatus.RUNNING, persisted(harness, stored.id()).status());
+            harness.store.flush();
+        } finally {
+            executor.shutdown();
+        }
+    }
+
+    @Test
+    void aStartWhoseRowIsDeletedBeforeItsClaimFailsAndLeavesTheRowDeleted(@TempDir Path base) throws Exception {
+        SteppedExecutorService executor = new SteppedExecutorService();
+        Harness harness = concurrentHarness(base, executor);
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, false, null, harness.events);
+        provider.delivery = McpDelivery.CONFIG_FILE;
+        RecordingAccess access = RecordingAccess.granting();
+        DrydockSessionService service = harness.service(access, provider);
+        ManagedAgentSession idle = persistSession(harness, AgentKind.CLAUDE, "Row",
+                new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
+                base, SessionStatus.EXITED, Instant.parse("2026-08-12T10:00:00Z"));
+
+        CompletableFuture<ManagedAgentSession> started = service.startSession(idle.id());
+        assertTrue(executor.runNext(), "the stage that reads the row");
+        // What a delete that finished in this window leaves: the row gone, no claim held.
+        harness.store.update(state -> state.withSessions(List.of()));
+        executor.runAll();
+
+        ExecutionException failed = assertThrows(ExecutionException.class,
+                () -> started.get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+        assertTrue(failed.getCause() instanceof IllegalStateException, String.valueOf(failed.getCause()));
+        assertNull(persistedOrNull(harness, idle.id()), "the forgotten row stays forgotten");
+        assertTrue(provider.createContexts.isEmpty());
+        assertTrue(access.requested.isEmpty(), "nothing was minted");
+        assertTrue(harness.consoles.opens.isEmpty());
+        harness.store.flush();
+    }
+
+    private static ManagedAgentSession transferableClaudeRow(Harness harness, Path base) {
+        return persistSession(harness, AgentKind.CLAUDE, "Same task",
+                AgentBinding.unlaunched(AgentKind.CLAUDE).withSessionId(Optional.of("source-42")),
+                base, SessionStatus.INACTIVE, Instant.now());
+    }
+
+    private static RecordingProvider codexTarget(Harness harness) {
+        RecordingProvider target = new RecordingProvider(
+                AgentKind.CODEX, SessionIdStrategy.DISCOVERED, null, true, false, null, harness.events);
+        target.delivery = McpDelivery.COMMAND_LINE;
+        return target;
+    }
+
+    @Test
+    void aTransferPassesTheGrantedMcpAccessToTheTarget(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider target = codexTarget(harness);
+        RecordingAccess access = RecordingAccess.granting();
+        DrydockSessionService service = harness.service(access, transferSource(harness.events), target);
+        ManagedAgentSession source = transferableClaudeRow(harness, base);
+
+        service.transferStoppedSession(source.id(), AgentKind.CODEX).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(List.of(McpDelivery.COMMAND_LINE), access.requested);
+        assertTrue(target.createContexts.getFirst().mcp().isPresent());
+        assertTrue(access.released.isEmpty());
+        harness.store.flush();
+    }
+
+    @Test
+    void aTransferWhoseTargetCommandDoesNotUseTheCredentialReleasesIt(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider target = codexTarget(harness);
+        RecordingAccess access = RecordingAccess.grantingWithFile(base.resolve("mcp").resolve("s.token"));
+        DrydockSessionService service = harness.service(access, transferSource(harness.events), target);
+        ManagedAgentSession source = transferableClaudeRow(harness, base);
+
+        service.transferStoppedSession(source.id(), AgentKind.CODEX).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(List.of(source.id()), access.released);
+        harness.store.flush();
+    }
+
+    @Test
+    void aTransferWhileTheSessionHasALiveExecutionIsRefusedBeforeAnythingRuns(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider target = codexTarget(harness);
+        RecordingAccess access = RecordingAccess.granting();
+        DrydockSessionService service = harness.service(access, transferSource(harness.events), target);
+        ManagedAgentSession source = transferableClaudeRow(harness, base);
+        harness.liveExecution = id -> id.equals(source.id());
+
+        ExecutionException refused = assertThrows(ExecutionException.class,
+                () -> service.transferStoppedSession(source.id(), AgentKind.CODEX).get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+
+        assertTrue(refused.getCause() instanceof IllegalStateException, String.valueOf(refused.getCause()));
+        assertTrue(access.requested.isEmpty());
+        assertTrue(target.createContexts.isEmpty());
+        assertEquals(AgentKind.CLAUDE, persisted(harness, source.id()).agentKind());
+        harness.store.flush();
+    }
+
+    @Test
+    void aCompletedTransferEndsItsClaim(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider target = codexTarget(harness);
+        DrydockSessionService service = harness.service(RecordingAccess.granting(), transferSource(harness.events),
+                target);
+        ManagedAgentSession source = transferableClaudeRow(harness, base);
+        service.transferStoppedSession(source.id(), AgentKind.CODEX).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        harness.consoles.stopped.add(source.id());
+
+        assertEquals(SessionStatus.RUNNING,
+                service.startSession(source.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS).status());
+        assertEquals(2, target.createContexts.size());
+        harness.store.flush();
     }
 }

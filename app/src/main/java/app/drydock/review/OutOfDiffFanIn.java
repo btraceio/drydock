@@ -75,10 +75,12 @@ import java.util.logging.Logger;
  * declaration of the symbol (its own field, method, type or local of that
  * name -- {@link #looksLikeDeclaration}, a line-lexical probe, no parse)
  * is dropped whole for that symbol: its occurrences are uses of its own
- * symbol, not callers of the change's. Occurrences <em>inside</em> changed
- * files are never dropped this way -- an unedited call site in an edited
- * file is exactly where a signature change breaks, and the change graph,
- * not a heuristic, says what those files declare.</p>
+ * symbol, not callers of the change's. A changed file is never dropped
+ * whole this way -- an unedited call site in an edited file is exactly
+ * where a signature change breaks. Only its lines that themselves look like
+ * a declaration of the symbol are dropped, one line at a time: a declaration
+ * is not a call site, and without this a changed constructor lists its own
+ * unchanged {@code class} line as its one use.</p>
  *
  * <p><b>Too-common symbols are counted, not listed.</b> A symbol whose
  * occurrences survive the drop but still number more than {@link
@@ -408,7 +410,8 @@ public final class OutOfDiffFanIn {
 
     /**
      * Turns the raw per-symbol occurrence lists of one scan into a {@link
-     * Result}: self-declaring files dropped per symbol, and symbols too
+     * Result}: self-declaring files dropped per symbol, declaration lines in
+     * changed files dropped one by one, and symbols too
      * common to list moved to {@link Result#suppressedCounts}. Separated
      * from {@link #scan} so the filtering is testable without a git spawn,
      * exactly like {@link #parse}.
@@ -426,7 +429,10 @@ public final class OutOfDiffFanIn {
             }
             List<Occurrence> kept = new ArrayList<>();
             for (Occurrence occurrence : occurrences) {
-                if (occurrence.inChangedFile() || !selfDeclaring.contains(occurrence.file())) {
+                boolean keep = occurrence.inChangedFile()
+                        ? !probe.matches(occurrence.text())
+                        : !selfDeclaring.contains(occurrence.file());
+                if (keep) {
                     kept.add(occurrence);
                 }
             }

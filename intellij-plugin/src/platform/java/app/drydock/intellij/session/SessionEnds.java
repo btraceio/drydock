@@ -10,6 +10,8 @@ import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.SessionStatus;
 import app.drydock.intellij.DrydockSessionsListener;
 import app.drydock.intellij.agent.AgentExecutionListener;
+import app.drydock.intellij.agent.LaunchClaims;
+import app.drydock.intellij.review.SessionMcpAccess;
 
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
@@ -44,6 +46,8 @@ final class SessionEnds implements AgentExecutionListener {
     private final Supplier<ApplicationStateStore> stateStore;
     private final Supplier<AgentRegistry> registry;
     private final ExecutorService executor;
+    private final SessionMcpAccess mcpAccess;
+    private final LaunchClaims claims;
 
     /**
      * Agent session ids already bound to a persisted session, or claimed by
@@ -66,10 +70,13 @@ final class SessionEnds implements AgentExecutionListener {
     private final Map<ManagedSessionId, Instant> lastLaunchedAt = new ConcurrentHashMap<>();
 
     SessionEnds(Supplier<ApplicationStateStore> stateStore, Supplier<AgentRegistry> registry,
-                ExecutorService executor) {
+                ExecutorService executor, SessionMcpAccess mcpAccess,
+                LaunchClaims claims) {
         this.stateStore = Objects.requireNonNull(stateStore, "stateStore");
         this.registry = Objects.requireNonNull(registry, "registry");
         this.executor = Objects.requireNonNull(executor, "executor");
+        this.mcpAccess = Objects.requireNonNull(mcpAccess, "mcpAccess");
+        this.claims = Objects.requireNonNull(claims, "claims");
     }
 
     Set<String> claimedAgentSessionIds() {
@@ -93,10 +100,29 @@ final class SessionEnds implements AgentExecutionListener {
     /**
      * The session's process ended; the row goes idle and stays. See
      * {@link DrydockSessionService#executionTerminated}.
+     *
+     * <p>First, unless a live execution or a launch claim holds the session
+     * (see below), the session's Drydock MCP access is released, inline on the
+     * thread that delivered the process event (which does the credential file
+     * deletes). It is not queued: minting is idempotent per session, so a
+     * queued release could revoke the token of an immediate Resume.</p>
+     *
+     * <p>The release is skipped while the session has a running execution or
+     * a launch that holds its claim in {@link LaunchClaims}. A launch claims
+     * before it mints, and this check and the release run under the claims'
+     * lock, so a launch either claims after the release and mints a fresh
+     * token, or claimed before the check and keeps its token. A skipped
+     * release is done when that launch's claim ends with no live execution,
+     * or by the end of the execution that is running.</p>
      */
     @Override
     public void executionTerminated(ManagedSessionId id, boolean stopRequested, Integer exitCode) {
         Objects.requireNonNull(id, "id");
+        try {
+            claims.releaseIfIdle(id, () -> mcpAccess.release(id));
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, () -> "Releasing Drydock MCP access for " + id + " failed: " + e);
+        }
         SessionStatus ended = stopRequested ? SessionStatus.INACTIVE : SessionStatus.EXITED;
         stateStore.get().update(state -> {
             ManagedAgentSession existing = DrydockSessionService.findIn(state, id);
