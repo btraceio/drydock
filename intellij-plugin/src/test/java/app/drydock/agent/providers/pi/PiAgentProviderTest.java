@@ -576,8 +576,8 @@ class PiAgentProviderTest {
 
         LaunchPlan firstAttempt = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
                 Optional.empty(), Optional.of(access(config))));
-        assertTrue(firstAttempt.supported(),
-                "an unparseable probe must not turn a selectable local Pi into unsupported context");
+        assertFalse(firstAttempt.supported(),
+                "a parsed version below the supported floor must remain unsupported");
 
         LaunchPlan secondAttempt = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
                 Optional.empty(), Optional.of(access(config))));
@@ -602,7 +602,8 @@ class PiAgentProviderTest {
 
         LaunchPlan firstAttempt = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
                 Optional.empty(), Optional.of(access(config))));
-        assertFalse(firstAttempt.supported());
+        assertTrue(firstAttempt.supported(),
+                "an unparseable probe must not turn a selectable local Pi into unsupported context");
 
         String secondAttempt = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
                 Optional.empty(), Optional.of(access(config)))).command();
