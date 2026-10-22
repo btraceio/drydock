@@ -118,8 +118,11 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     private final SearchTextField search = new SearchTextField(false);
 
     {
-        // The /<project glob>/[items] scope is otherwise undiscoverable.
-        search.setToolTipText("Search tasks, worktrees, and issues. "
+        // The /<project glob>/[items] scope is otherwise undiscoverable. On
+        // the inner editor: hover lands there, and it never reads the
+        // SearchTextField wrapper's tooltip.
+        search.getTextEditor().setToolTipText("Search tasks, worktrees, and issues; "
+                + "a plain search that matches a project name shows that project with all its entries. "
                 + "Optional project scope first: /<name glob>/ — e.g. /dry*/jfr "
                 + "searches jfr only within projects whose name matches dry*.");
     }
