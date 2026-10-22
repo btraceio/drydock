@@ -7,6 +7,8 @@ import app.drydock.intellij.agent.PromptOutcome;
 import app.drydock.review.ReviewInstructions;
 import app.drydock.review.ReviewScope;
 
+import java.lang.System.Logger;
+import java.lang.System.Logger.Level;
 import java.time.Duration;
 import java.util.Optional;
 import java.util.concurrent.CancellationException;
@@ -30,6 +32,8 @@ import java.util.function.Supplier;
  * and nothing is written to its agent.</p>
  */
 public final class ReviewRequest {
+
+    private static final Logger LOG = System.getLogger(ReviewRequest.class.getName());
 
     /** Default bound, in seconds, on the wait for the initialization future. */
     static final long INIT_WAIT_SECONDS = 30;
@@ -122,9 +126,15 @@ public final class ReviewRequest {
      * {@link Refused} when the agent is not running, and {@link NoTools} when
      * the session holds no MCP access, before it resolves a scope. The
      * running check comes first because an ended agent's access is already
-     * released. Blocks; never throws.
+     * released. Logs the outcome, never the prompt. Blocks; never throws.
      */
     public Outcome request(ManagedAgentSession session) {
+        Outcome outcome = outcome(session);
+        LOG.log(Level.INFO, "Review Changes for session {0}: {1}", session.id(), outcome);
+        return outcome;
+    }
+
+    private Outcome outcome(ManagedAgentSession session) {
         try {
             try {
                 initialization.get(initWait.toNanos(), TimeUnit.NANOSECONDS);
