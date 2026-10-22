@@ -24,6 +24,8 @@ import com.intellij.terminal.TerminalExecutionConsole;
 import com.jediterm.core.util.TermSize;
 import org.jetbrains.annotations.NotNull;
 
+import java.io.IOException;
+import java.io.OutputStream;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.charset.StandardCharsets;
@@ -40,6 +42,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 
 /**
  * Every live agent process in the IDE, and which window — if any — shows
@@ -451,6 +454,65 @@ public final class AgentExecutionRegistry implements Disposable {
                 executions.remove(execution.sessionId(), execution);
             }
         }
+    }
+
+    // ---- prompt ----------------------------------------------------------------
+
+    /**
+     * Types {@code prompt} into {@code sessionId}'s agent and submits it with a
+     * carriage return, written to the process input in one call.
+     *
+     * <p>Refuses, writing nothing, a prompt containing {@code '\n'} or
+     * {@code '\r'}, and a session with no live process or no process input.
+     * There is no busy check: the line is written whatever the agent is doing.
+     * The outcome is {@link PromptOutcome#FAILED} when the write throws or when
+     * the process is found ended right after the write. On a PTY neither check
+     * is complete: pty4j's stream ignores the result of the native write, so a
+     * failed or short write does not throw, and {@code flush()} does nothing.
+     * {@link PromptOutcome#DELIVERED} means the bytes were handed to the
+     * process input of a process that was still running right after, not that
+     * the agent read them.</p>
+     *
+     * <p>Blocking write to the PTY: call off the EDT (the plugin executor).</p>
+     */
+    public PromptOutcome submitPrompt(ManagedSessionId sessionId, String prompt) {
+        Objects.requireNonNull(sessionId, "sessionId");
+        Objects.requireNonNull(prompt, "prompt");
+        if (prompt.indexOf('\n') >= 0 || prompt.indexOf('\r') >= 0) {
+            LOG.log(Level.WARNING, "Refusing a multi-line prompt for {0}", sessionId);
+            return PromptOutcome.REFUSED;
+        }
+        AgentExecution execution = executions.get(sessionId);
+        if (execution == null || !execution.isRunning()) {
+            return PromptOutcome.REFUSED;
+        }
+        OutputStream in = execution.handler().getProcessInput();
+        if (in == null) {
+            return PromptOutcome.REFUSED;
+        }
+        return writePrompt(sessionId, in, (prompt + "\r").getBytes(StandardCharsets.UTF_8),
+                execution::isRunning);
+    }
+
+    /**
+     * Writes and flushes {@code line}; {@link PromptOutcome#FAILED} when the
+     * write throws (logged without the prompt text) or when
+     * {@code stillRunning} is false after the write returned.
+     */
+    static PromptOutcome writePrompt(ManagedSessionId sessionId, OutputStream in, byte[] line,
+                                     BooleanSupplier stillRunning) {
+        try {
+            in.write(line);
+            in.flush();
+        } catch (IOException e) {
+            LOG.log(Level.WARNING, () -> "Could not write a prompt to " + sessionId + ": " + e);
+            return PromptOutcome.FAILED;
+        }
+        if (!stillRunning.getAsBoolean()) {
+            LOG.log(Level.WARNING, "{0}''s agent ended while a prompt was written to it", sessionId);
+            return PromptOutcome.FAILED;
+        }
+        return PromptOutcome.DELIVERED;
     }
 
     // ---- stop / forget ---------------------------------------------------------

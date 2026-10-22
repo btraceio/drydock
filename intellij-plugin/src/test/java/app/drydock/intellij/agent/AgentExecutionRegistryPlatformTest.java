@@ -10,6 +10,10 @@ import com.intellij.testFramework.fixtures.BasePlatformTestCase;
 import com.jediterm.terminal.model.TerminalLine;
 import com.jediterm.terminal.model.TerminalTextBuffer;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -275,6 +279,64 @@ public class AgentExecutionRegistryPlatformTest extends BasePlatformTestCase {
         waitFor(() -> !ended.isEmpty());
         Thread.sleep(200);
         assertEquals(List.of(new Ended(id, false, 3)), ended);
+    }
+
+    /** Echoes each input line as {@code GOT[line]} until EOF, then idles. */
+    private static final List<String> READS_A_LINE = List.of("/bin/sh", "-c",
+            "while read line; do printf 'GOT[%s]\\n' \"$line\"; done; sleep 30");
+
+    public void testAPromptReachesARunningAgentAsOneSubmittedLine() throws Exception {
+        AgentExecution execution = start(List.of("/bin/sh", "-c",
+                "read line; printf 'GOT[%s]\\n' \"$line\"; sleep 30"));
+
+        assertEquals(PromptOutcome.DELIVERED, registry.submitPrompt(id, "hello review"));
+
+        TerminalExecutionConsole console = execution.console().orElseThrow();
+        waitFor(() -> text(console).contains("GOT[hello review]"));
+    }
+
+    public void testAPromptToASessionWithNoAgentIsRefused() {
+        assertEquals(PromptOutcome.REFUSED, registry.submitPrompt(ManagedSessionId.newId(), "hello"));
+    }
+
+    public void testAMultiLinePromptIsRefusedAndNothingIsWritten() throws Exception {
+        AgentExecution execution = start(READS_A_LINE);
+
+        assertEquals(PromptOutcome.REFUSED, registry.submitPrompt(id, "a\nb"));
+        assertEquals(PromptOutcome.REFUSED, registry.submitPrompt(id, "a\rb"));
+        assertEquals(PromptOutcome.DELIVERED, registry.submitPrompt(id, "after"));
+
+        TerminalExecutionConsole console = execution.console().orElseThrow();
+        waitFor(() -> text(console).contains("GOT[after]"));
+        // "GOT[a" would also match "GOT[after]"; a leaked half-line would echo as "GOT[a]" or "GOT[b]".
+        assertFalse(text(console).contains("GOT[a]"));
+        assertFalse(text(console).contains("GOT[b]"));
+    }
+
+    public void testWritePromptDeliversWhileTheProcessIsStillRunning() {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] line = "hi\r".getBytes(StandardCharsets.UTF_8);
+
+        assertEquals(PromptOutcome.DELIVERED,
+                AgentExecutionRegistry.writePrompt(id, out, line, () -> true));
+        assertEquals("hi\r", out.toString(StandardCharsets.UTF_8));
+    }
+
+    public void testWritePromptFailsWhenTheProcessEndedAfterTheWrite() {
+        assertEquals(PromptOutcome.FAILED, AgentExecutionRegistry.writePrompt(
+                id, new ByteArrayOutputStream(), new byte[] {'x'}, () -> false));
+    }
+
+    public void testWritePromptFailsWhenTheWriteThrows() {
+        OutputStream broken = new OutputStream() {
+            @Override
+            public void write(int b) throws IOException {
+                throw new IOException("broken pipe");
+            }
+        };
+
+        assertEquals(PromptOutcome.FAILED,
+                AgentExecutionRegistry.writePrompt(id, broken, new byte[] {'x'}, () -> true));
     }
 
     public void testTheWindowServiceAnswersOnlyForWhatItShows() throws Exception {

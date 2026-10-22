@@ -13,6 +13,7 @@ import app.drydock.intellij.agent.SessionRename;
 import app.drydock.intellij.agent.SessionTransfer;
 import app.drydock.intellij.agent.StopAgentsDialog;
 import app.drydock.intellij.agent.StopAgentsPlan;
+import app.drydock.intellij.review.ReviewRequest;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.intellij.tasks.TaskNode.StaleWorktrees;
@@ -28,6 +29,9 @@ import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
+import com.intellij.openapi.progress.ProgressIndicator;
+import com.intellij.openapi.progress.ProgressManager;
+import com.intellij.openapi.progress.Task;
 import com.intellij.openapi.project.DumbAwareAction;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.progress.ProgressIndicator;
@@ -53,7 +57,8 @@ import java.util.function.Predicate;
 
 /**
  * What the Drydock tool window can do to a task: switch to it, deactivate it,
- * deactivate it and close its window, resume it.
+ * ask its agent to review its changes, deactivate it and close its window,
+ * resume it.
  *
  * <p>Deactivating asks first only when the agent is mid-task (not at its
  * prompt), and the question can always be answered "Deactivate anyway". Closing
@@ -97,6 +102,8 @@ final class TaskActions {
         return List.of(
                 task("Deactivate", "Deactivate this task's agent", AllIcons.Actions.Suspend, TaskRow::running,
                         (project, row) -> stop(project, row, false)),
+                task("Review Changes", "Ask this task's agent to review its changes", AllIcons.Actions.Diff,
+                        TaskActions::reviewsChanges, TaskActions::reviewChanges),
                 task("Deactivate && Close Window", "Deactivate the agent and close its window", AllIcons.Actions.Close,
                         TaskActions::closesOwnWindow, (project, row) -> stop(project, row, true)),
                 // F5: moves an agent another window shows into this one.
@@ -122,6 +129,34 @@ final class TaskActions {
                         AllIcons.Actions.Checked, row -> true, TaskActions::done),
                 removeWorktrees(),
                 removeProject());
+    }
+
+    /** Whether Review Changes applies: the agent runs, whatever its mode. Pure. */
+    static boolean reviewsChanges(TaskRow row) {
+        return row.running();
+    }
+
+    /**
+     * Asks {@code row}'s agent to review its changes. EDT. The request runs
+     * under a background progress that ends when it returns; any outcome but
+     * a sent prompt is shown in a warning dialog on the EDT.
+     */
+    static void reviewChanges(Project from, TaskRow row) {
+        ProgressManager.getInstance().run(new Task.Backgroundable(from, "Starting review…", false) {
+            @Override
+            public void run(@NotNull ProgressIndicator indicator) {
+                DrydockPluginService plugin = DrydockPluginService.getInstance();
+                AgentExecutionRegistry executions = AgentExecutionRegistry.getInstance();
+                ReviewRequest request = ReviewRequest.forBackend(plugin.initialization(), plugin::reviewBackend,
+                        executions::isRunning, kind -> plugin.registry().supportsSubagents(kind),
+                        executions::submitPrompt);
+                ReviewRequest.Outcome outcome = request.request(row.session());
+                ReviewRequest.message(row.session().displayName(), outcome).ifPresent(message ->
+                        ApplicationManager.getApplication().invokeLater(
+                                () -> Messages.showWarningDialog(from, message, "Drydock"),
+                                ModalityState.nonModal(), from.getDisposed()));
+            }
+        });
     }
 
     /**
