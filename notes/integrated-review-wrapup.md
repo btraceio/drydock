@@ -43,7 +43,7 @@ P1 "Review backbone" is implemented (2026-10-22) through the dev-process pipelin
 - Two in-depth review workflows ran after the build; every confirmed finding is fixed:
   - `wf_aa0140fc-beb`: 7 findings. Fixes: `LaunchClaims`, `holdsAccess` and NoTools, instructions name only served tools, late backend closed on dispose, honest `PromptOutcome`, scope refused while another running session holds it.
   - `wf_a0822545-9a8`: 7 low findings. Fixes: `Error` leaked a claim; the `finish` contract; delete during launch is refused; access released when the launch command does not carry the credential; an ended agent is Refused, not NoTools; test gaps closed and checked by reintroducing each defect.
-- Gotchas: `find-p1-impl-gotchas`. Run Gradle with `JAVA_HOME=~/.sdkman/candidates/java/21.0.11-tem`.
+- Gotchas: `find-p1-impl-gotchas`. Run Gradle with `JAVA_HOME=~/.sdkman/candidates/java/25.0.2-tem` (the plugin targets 2026.3, JBR 25).
 - Two test failures are pre-existing and also fail on a clean HEAD checkout: the flaky `testAReleasedAgentKeepsRunningAndIsNotShown`, and the app's `adoptingARemoteOnlyBranch…`.
 - Live `runIde` check (2026-10-22): a Claude task loaded the `drydock` MCP server. But `submitPrompt` lost the start of the review prompt (729 of 2773 chars arrived), and the user had to press Enter. It is now written as a bracketed paste (`find-prompt-needs-bracketed-paste`); a repro against a real Claude TUI delivered 3085/3085 chars and submitted it.
 - Live recheck after the fix: on a task with a 2-file change, Review Changes delivered the full prompt, which submitted itself. The agent posted 3 findings and a 3-step tour, accepted on the first try. Tree-sitter natives loaded in the IDE JVM (`~/.tree-sitter/lib/*.dylib`) without a crash.
@@ -55,6 +55,7 @@ P1 "Review backbone" is implemented (2026-10-22) through the dev-process pipelin
   - A Start that races a finished delete fails instead of bringing the row back.
   - Review Changes logs its outcome.
   - The plugin extracts tree-sitter natives to `<IDE system path>/drydock/tree-sitter`, not the shared `~/.tree-sitter`.
+- Rebased onto main (#39). The transfer flow now takes the launch claim and gets MCP access. The plugin targets IntelliJ IDEA 2026.3 (EAP 263): its terminal renders agent TUIs correctly, and the VCS classes it needs are declared as module dependencies (`find-vcs-moved-to-plugin-in-263`).
 - Next: open the P1 PR, then P2 (Review tab and finding inlays), starting with live spikes 1 and 2.
 
 Live spikes for later phases: Review tab and collab inlays (with the Kotlin adapter build); CUSTOM_DIFF_COMPUTER
