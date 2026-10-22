@@ -458,12 +458,24 @@ public final class AgentExecutionRegistry implements Disposable {
 
     // ---- prompt ----------------------------------------------------------------
 
+    /** Opens a bracketed paste: the terminal sequence a TUI reads as the start of pasted text. */
+    static final String PASTE_START = "\u001b[200~";
+    /** Closes a bracketed paste. */
+    static final String PASTE_END = "\u001b[201~";
+
     /**
      * Types {@code prompt} into {@code sessionId}'s agent and submits it with a
-     * carriage return, written to the process input in one call.
+     * carriage return, written to the process input in one call as {@link
+     * #framed}.
      *
-     * <p>Refuses, writing nothing, a prompt containing {@code '\n'} or
-     * {@code '\r'}, and a session with no live process or no process input.
+     * <p>The prompt goes in as a bracketed paste. Written bare, a long prompt
+     * arrives as one burst, which Claude Code's TUI takes for a paste: it kept
+     * only the last part of the text, and the carriage return did not always
+     * submit it. Claude, Codex and Pi turn bracketed paste on at startup.</p>
+     *
+     * <p>Refuses, writing nothing, a prompt containing {@code '\n'}, {@code
+     * '\r'} or ESC (an ESC could end the paste early), and a session with no
+     * live process or no process input.
      * There is no busy check: the line is written whatever the agent is doing.
      * The outcome is {@link PromptOutcome#FAILED} when the write throws or when
      * the process is found ended right after the write. On a PTY neither check
@@ -482,6 +494,10 @@ public final class AgentExecutionRegistry implements Disposable {
             LOG.log(Level.WARNING, "Refusing a multi-line prompt for {0}", sessionId);
             return PromptOutcome.REFUSED;
         }
+        if (prompt.indexOf('\u001b') >= 0) {
+            LOG.log(Level.WARNING, "Refusing a prompt with an escape character for {0}", sessionId);
+            return PromptOutcome.REFUSED;
+        }
         AgentExecution execution = executions.get(sessionId);
         if (execution == null || !execution.isRunning()) {
             return PromptOutcome.REFUSED;
@@ -490,8 +506,12 @@ public final class AgentExecutionRegistry implements Disposable {
         if (in == null) {
             return PromptOutcome.REFUSED;
         }
-        return writePrompt(sessionId, in, (prompt + "\r").getBytes(StandardCharsets.UTF_8),
-                execution::isRunning);
+        return writePrompt(sessionId, in, framed(prompt), execution::isRunning);
+    }
+
+    /** {@code prompt} as a bracketed paste followed by a carriage return, in UTF-8. */
+    static byte[] framed(String prompt) {
+        return (PASTE_START + prompt + PASTE_END + "\r").getBytes(StandardCharsets.UTF_8);
     }
 
     /**
