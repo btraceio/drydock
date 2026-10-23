@@ -35,10 +35,17 @@ public final class ReviewRequest {
 
     private static final Logger LOG = System.getLogger(ReviewRequest.class.getName());
 
-    /** Default bound, in seconds, on the wait for the initialization future. */
-    static final long INIT_WAIT_SECONDS = 30;
-    /** Default bound, in seconds, on the wait for the scope future. */
-    static final long SCOPE_WAIT_SECONDS = 30;
+    /**
+     * Default bound, in seconds, on the wait for the initialization future.
+     * Public because {@code app.drydock.intellij.tasks.PullRequestReview}, in another
+     * package, waits on the same bound while it resolves a review prompt.
+     */
+    public static final long INIT_WAIT_SECONDS = 30;
+    /**
+     * Default bound, in seconds, on the wait for the scope future.
+     * Public for the same reason as {@link #INIT_WAIT_SECONDS}.
+     */
+    public static final long SCOPE_WAIT_SECONDS = 30;
 
     /** Resolves the review scope of a session. */
     public interface ScopeSource {
