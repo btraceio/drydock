@@ -333,6 +333,17 @@ to the session the Changes link came from. When no such session exists, the
 scope is minted unbound (Q7). Base and head come from the same resolution,
 so the agent and the tab diff the same base.
 
+A `pr-<n>` checkout's base privileges the PR's declared `baseRefName` when
+the review prompt's resolver can name the pull request
+(`SessionReviewScopeResolver` consults the `PrLookup` the backend wires,
+aliased to `pr-<n>` branches so an ordinary branch spends no gh round trip);
+a failed or empty lookup falls back to the fork-point heuristic, same scope
+id. A PR review session opens the tab itself once its agent takes the
+review request (`PullRequestReview`, through `ReviewTabOpener`) — except
+under a custom review prompt, which bypasses Drydock's review tools
+entirely (Q16). A second "Review…" click on a live PR joins the running
+review session instead of re-checking out.
+
 ### Rows and marks
 
 - One row per file of the scope's review diff, sorted by path. The tab hides
@@ -484,6 +495,7 @@ the `changesViewContent` visibility predicate is re-evaluated (Q8).
 | IDE-noise filter hides real material, or misses some | Missed review, or noise | Filter untracked only (AC5). The agent's `review_scope` still lists these files (no core filter). Recorded as a known difference. |
 | The plugin becomes a verdict writer | `review_recheck` becomes reachable with plugin-written bases | Commit ids only, refusal when unresolved (AC9, AC11) |
 | Finding drift: an agent fixes code and keys move | A finding row points at a wrong line or at none | Drift hint (AC7); read-only diff; migration out of scope (`integrated-review/find-finding-anchor-drift-gap`) |
+| Worktree-path orphaning: the scope id is an HMAC of the worktree path and PR number, so a changed `worktreesDirectory` config, a moved home, or a renamed repository mints a new id | A PR's findings and verdicts silently orphan under the old id; the new scope reads empty | Same bug class as the base/head variant the `ReviewScopeRegistry.Identity` javadoc documents (identity now excludes base and head, but the path stays in it). Accepted known behavior; no migration in P2 |
 | The visibility predicate is evaluated once | The tab is missing in a window that gains a session, or shown in a non-Drydock window | Q8 default; AC24 |
 | Retiring Drydock Changes drops its "Uncommitted vs HEAD" scope | Users lose a view that shipped in #39 | Q1; main-checkout sessions still get `WORKING_TREE` |
 | Large diffs (`MAX_UNTRACKED` skip, `DiffService.java:42-43,177-180`; huge files) | Slow snapshot, large documents | Background assembly; snapshot texts per file on demand at selection, not for the whole tree |
@@ -522,7 +534,9 @@ the `changesViewContent` visibility predicate is re-evaluated (Q8).
   `assumed: yes, through predicateClassName, from in-memory state only
   (a session's checkout equals the project base path). If AC24 shows the
   predicate is not re-evaluated, register it always and show the empty
-  state instead.`
+  state instead. A tab stranded in NO_SESSION by the window-before-session
+  ordering now re-runs its load when the session catalog changes; the
+  predicate's own re-evaluation remains the AC24 live check.`
 - **Q9.** Save unsaved documents before computing the diff? — `assumed: yes
   for user-triggered loads (Changes link, refresh action), on the EDT before
   the background work. Not for event-driven refreshes.`
@@ -541,5 +555,13 @@ the `changesViewContent` visibility predicate is re-evaluated (Q8).
   verdicts. AUTO_APPROVED and CHANGES stay.`
 - **Q15.** Tab name? — `assumed: "Drydock Review" (it is also the key for
   getToolWindowIdFor and selectContent).`
+- **Q16.** What does the tab show for a PR review running with a custom
+  review prompt (which bypasses Drydock's review tools)? — `DECIDED by the
+  user (2026-10-23): keep it silent. The tab resolves the checkout's scope
+  normally and shows the PR diff with every row unreviewed and no
+  findings; the PR review flow does not open the tab for such sessions, so
+  the state is only reached by opening it by hand. An explanatory status
+  or hiding the tab would need a way for the tab to know the session runs
+  outside Drydock's tools.`
 
 No question blocks the spec.
