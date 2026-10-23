@@ -24,6 +24,7 @@
         <plugin id="com.intellij.platform.vcs"/>
         <module name="intellij.platform.vcs"/>
         <module name="intellij.platform.vcs.impl"/>
+        <module name="intellij.platform.vcs.impl.shared"/>
         <module name="intellij.platform.vcs.dvcs.impl"/>
     </dependencies>
     <!-- Optional: agents Drydock launches get the IDE's bundled MCP server,
@@ -93,13 +94,6 @@
                     icon="/icons/drydock.svg"
                     factoryClass="app.drydock.intellij.tasks.DrydockToolWindowFactory"/>
 
-        <!-- A scope-aware directory tree for the selected session's files.
-             Kept on the left beside Project so the native diff editor can use
-             the full center area. -->
-        <toolWindow id="Drydock Changes" anchor="left" secondary="true"
-                    icon="/icons/drydock.svg"
-                    factoryClass="app.drydock.intellij.agent.TaskChangesToolWindowFactory"/>
-
         <!-- "Claude needs you": the balloon raised when an agent starts
              waiting for the user (AttentionNotifier). -->
         <notificationGroup id="Drydock attention" displayType="BALLOON"/>
@@ -108,6 +102,23 @@
 
         <postStartupActivity
                 implementation="app.drydock.intellij.startup.DrydockStartupActivity"/>
+
+        <!-- The Review tab (P2): Drydock's own review marks over the
+             checkout's diff. The host tool window is resolved from the tab
+             name at runtime, never hard-coded: with isInCommitToolWindow
+             set it lands in the Commit tool window, or in the Version
+             Control window when the Commit one is disabled. The predicate
+             hides the tab in windows no Drydock session covers (Q8).
+             Deliberately no <module> element for intellij.platform.diff /
+             intellij.platform.diff.impl: they are internal-visibility
+             product modules on 2026.3 and stay compile-only in
+             build.gradle.kts, resolved at runtime through
+             intellij.platform.vcs.impl. -->
+        <changesViewContent tabName="Drydock Review"
+                            className="app.drydock.intellij.review.ReviewTabProvider"
+                            predicateClassName="app.drydock.intellij.review.ReviewTabVisibility"
+                            isInCommitToolWindow="true"/>
+
     </extensions>
     <applicationListeners>
         <!-- projectClosing, not the service's dispose: a disposing project's

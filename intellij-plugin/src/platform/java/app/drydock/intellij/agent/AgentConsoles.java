@@ -4,6 +4,7 @@ import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.RepositoryCatalog;
 import app.drydock.intellij.DrydockPluginService;
+import app.drydock.intellij.review.ReviewTabOpener;
 import app.drydock.intellij.session.DrydockSessionService;
 import app.drydock.intellij.startup.DrydockStartupActivity;
 import app.drydock.intellij.tasks.TaskWindows;
@@ -329,7 +330,7 @@ public final class AgentConsoles {
                         DrydockPluginService.getInstance().stateStore().state().sessions().stream()
                                 .filter(session -> session.id().equals(sessionId))
                                 .findFirst()
-                                .ifPresent(session -> TaskChanges.show(target, session));
+                                .ifPresent(session -> ReviewTabOpener.open(target, Optional.of(session)));
                     }
                     if (announce && !host.isDisposed()) {
                         announceMove(host, target, sessionId, place);

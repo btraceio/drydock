@@ -15,8 +15,12 @@ import app.drydock.domain.RepositorySettings;
 import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
+import app.drydock.git.DiffService;
+import app.drydock.git.GitStatusService;
+import app.drydock.git.UnifiedDiff;
 import app.drydock.process.ProcessResult;
 import app.drydock.process.ProcessRunner;
+import app.drydock.review.HunkIds;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.tour.TourRecord;
 import app.drydock.review.tour.TourStore;
@@ -213,6 +217,38 @@ class ReviewBackendEndToEndTest {
         assertTrue(Files.readString(tours).contains(TOUR_TEXT));
     }
 
+    /** AC10: an agent's {@code review_recheck} finds the verdict the plugin's mark-reviewed command wrote. */
+    @Test
+    void anAgentsRecheckFindsAPluginMarkedVerdictWhereBeforeItRefused() throws Exception {
+        // The mark-reviewed command over the backend's own diff service and
+        // annotation store; the git status service dates the verdict with
+        // real commits. T13 injects these from the backend in production.
+        try (GitStatusService git = new GitStatusService()) {
+            ReviewVerdictCommands commands =
+                    new ReviewVerdictCommands(backend.diffService(), git, backend.annotationStore(), executor);
+            UnifiedDiff.FileDiff file = backend.diffService()
+                    .diff(scope.diffRoot(), scope.diffScope(), scope.base(), DiffService.REVIEW_CONTEXT_LINES)
+                    .get(30, TimeUnit.SECONDS).files().stream()
+                    .filter(candidate -> candidate.path().equals("src/A.java"))
+                    .findFirst().orElseThrow();
+            String hunkId = HunkIds.hunkId("src/A.java", 0);
+
+            // Before the mark: the hunk carries no verdict, so a recheck of it
+            // is refused -- the wire contract an agent sees.
+            String before = callToolRefused("review_recheck", recheckArgs(hunkId));
+            assertTrue(before.contains("no verdict"), before);
+
+            assertEquals(new ReviewVerdictCommands.Result.Ok(),
+                    commands.markReviewed(scope, file).get(30, TimeUnit.SECONDS));
+
+            // After the mark: the same call over the same wire finds the
+            // verdict and records the assessment.
+            JsonValue stored = callTool("review_recheck", recheckArgs(hunkId));
+            assertEquals(scope.id(), str(stored, "scopeId"));
+            assertEquals(1, ((JsonNumber) field(stored, "assessments")).asInt());
+        }
+    }
+
     private static JsonObject traceCheck(String id, String alternateId) {
         JsonObject alternate = traceCheckBody(alternateId, "Which line was added at the end?", "four");
         return traceCheckBody(id, "What does line two read now?", "TWO")
@@ -238,6 +274,25 @@ class ReviewBackendEndToEndTest {
         String text = str(array(field(result, "content")).get(0), "text");
         assertFalse(((JsonBoolean) field(result, "isError")).value(), text);
         return JsonParser.parse(text);
+    }
+
+    /** A tool call that is refused: asserts the refusal and returns its message. */
+    private String callToolRefused(String name, JsonObject arguments) throws Exception {
+        JsonValue result = rpc("tools/call", JsonObject.empty()
+                .put("name", new JsonString(name)).put("arguments", arguments));
+        assertTrue(((JsonBoolean) field(result, "isError")).value(), "the call should have been refused");
+        return str(array(field(result, "content")).get(0), "text");
+    }
+
+    /** One {@code review_recheck} assessment of {@code hunkId}, unaffected. */
+    private JsonObject recheckArgs(String hunkId) {
+        JsonObject assessment = JsonObject.empty()
+                .put("hunkId", new JsonString(hunkId))
+                .put("affected", new JsonBoolean(false))
+                .put("why", new JsonString("re-checked"));
+        return JsonObject.empty()
+                .put("scopeId", new JsonString(scope.id()))
+                .put("assessments", new JsonArray(List.of(assessment)));
     }
 
     private JsonValue rpc(String method, JsonObject params) throws Exception {

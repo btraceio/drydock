@@ -8,8 +8,10 @@ import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
+import app.drydock.git.GhCliService;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.NotAGitRepositoryException;
+import app.drydock.git.ReviewBase;
 import app.drydock.git.WorktreeService;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
@@ -25,7 +27,10 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -150,6 +155,68 @@ class SessionReviewScopeResolverTest {
         assertFalse(registry.isAddressableBy(second.id(), a.id()));
     }
 
+    @Test
+    void aPrCheckoutResolvesAgainstTheDeclaredBaseWhenTheLookupNamesThePullRequest(
+            @TempDir Path repoDir, @TempDir Path wtParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path wt = linkedWorktree(repo, wtParent, "pr-12");
+        // The declared base must be a branch git can resolve here (the same
+        // rule reviewBase applies to the heuristic's candidates).
+        runGit(repo, "branch", "feature-parent", "main");
+        ManagedAgentSession session = session(wt);
+        SessionReviewScopeResolver withPr = new SessionReviewScopeResolver(worktrees, git, registry,
+                () -> List.copyOf(known),
+                (root, branch) -> CompletableFuture.completedFuture(Optional.of(
+                        new GhCliService.OpenPullRequest(12, "A PR", "pr-12", "feature-parent",
+                                false, Optional.empty(), Optional.empty()))));
+
+        ReviewScope scope = withPr.resolve(session).get();
+
+        assertEquals("feature-parent", scope.base());
+        assertEquals(Optional.of(ReviewBase.Origin.PULL_REQUEST), scope.baseOrigin());
+        assertEquals(12, scope.pr().orElseThrow().number());
+        assertEquals(session.id(), scope.sessionId().orElseThrow());
+    }
+
+    @Test
+    void aPrCheckoutWithoutALookupOrWithAnEmptyOneKeepsTheForkPointBase(
+            @TempDir Path repoDir, @TempDir Path wtParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path wt = linkedWorktree(repo, wtParent, "pr-12");
+        ManagedAgentSession session = session(wt);
+
+        // The 4-arg constructor: no lookup wired at all.
+        ReviewScope scopeless = resolver.resolve(session).get();
+        assertEquals(Optional.of(ReviewBase.Origin.FORKED_FROM), scopeless.baseOrigin());
+
+        // A lookup wired but answering "no PR" mints the same identity and
+        // the same fork-point base.
+        SessionReviewScopeResolver withEmpty = new SessionReviewScopeResolver(worktrees, git, registry,
+                () -> List.copyOf(known),
+                (root, branch) -> CompletableFuture.completedFuture(Optional.empty()));
+        ReviewScope scope = withEmpty.resolve(session).get();
+        assertEquals(scopeless.id(), scope.id());
+        assertEquals(Optional.of(ReviewBase.Origin.FORKED_FROM), scope.baseOrigin());
+    }
+
+    @Test
+    void theLookupIsNotConsultedForAnOrdinaryBranch(
+            @TempDir Path repoDir, @TempDir Path wtParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path wt = linkedWorktree(repo, wtParent, "feat");
+        ManagedAgentSession session = session(wt);
+        AtomicInteger lookups = new AtomicInteger();
+        SessionReviewScopeResolver withPr = new SessionReviewScopeResolver(worktrees, git, registry,
+                () -> List.copyOf(known), (root, branch) -> {
+                    lookups.incrementAndGet();
+                    return CompletableFuture.completedFuture(Optional.empty());
+                });
+
+        withPr.resolve(session).get();
+
+        assertEquals(1, lookups.get());
+    }
+
     private static ManagedAgentSession session(Path dir) {
         return session(dir, SessionStatus.INACTIVE);
     }
@@ -176,8 +243,13 @@ class SessionReviewScopeResolverTest {
     }
 
     private static Path linkedWorktree(Path repo, Path parent) throws IOException, InterruptedException {
+        return linkedWorktree(repo, parent, "feat");
+    }
+
+    private static Path linkedWorktree(Path repo, Path parent, String branch)
+            throws IOException, InterruptedException {
         Path wt = parent.resolve("wt");
-        runGit(repo, "worktree", "add", "-b", "feat", wt.toString());
+        runGit(repo, "worktree", "add", "-b", branch, wt.toString());
         Files.writeString(wt.resolve("change.txt"), "change\n");
         runGit(wt, "add", "change.txt");
         runGit(wt, "commit", "-m", "wt change");

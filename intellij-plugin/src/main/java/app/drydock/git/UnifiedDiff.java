@@ -1,6 +1,7 @@
 package app.drydock.git;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.OptionalInt;
 
 /**
@@ -22,6 +23,10 @@ public record UnifiedDiff(List<FileDiff> files) {
      * an untracked file is the only way to get a new-file kind with nothing
      * staged -- but nothing enforces it, and it is exactly the kind of
      * coincidence a refactor breaks silently.</p>
+     *
+     * <p>{@code oldPath} carries the pre-image path of a rename (the
+     * {@code rename from} path, so the left side of a review diff can be read
+     * where the file used to live); it is empty for every other kind.</p>
      */
     public record FileDiff(
             String path,
@@ -30,8 +35,17 @@ public record UnifiedDiff(List<FileDiff> files) {
             int deletions,
             boolean staged,
             boolean untracked,
-            List<Hunk> hunks
+            List<Hunk> hunks,
+            Optional<String> oldPath
     ) {
+        /**
+         * Legacy form for callers that do not track renames: identical to
+         * the canonical constructor with no pre-image path.
+         */
+        public FileDiff(String path, String kind, int insertions, int deletions,
+                        boolean staged, boolean untracked, List<Hunk> hunks) {
+            this(path, kind, insertions, deletions, staged, untracked, hunks, Optional.empty());
+        }
     }
 
     /** One {@code @@ -a,b +c,d @@} hunk: its raw header line plus the parsed line rows. */

@@ -145,7 +145,16 @@ dependencies {
         bundledModule("intellij.platform.vcs.shared")
         bundledModule("intellij.platform.vcs")
         bundledModule("intellij.platform.vcs.impl")
+        bundledModule("intellij.platform.vcs.impl.shared")
         bundledModule("intellij.platform.vcs.dvcs.impl")
+        // COMPILE-ONLY: com.intellij.diff ships as internal-visibility product
+        // modules in 2026.3 (visibility="internal"), so plugin.xml must NOT
+        // declare them -- the plugin would be refused at load. The classes
+        // are expected to stay reachable at runtime through the public
+        // intellij.platform.vcs.impl module, which depends on diff.impl.
+        // Whether that holds live is exactly what the spike tests.
+        bundledModule("intellij.platform.diff")
+        bundledModule("intellij.platform.diff.impl")
         // Optional at runtime (plugin.xml): IdeMcpServer routes the IDE's
         // bundled MCP server to each launched agent's worktree.
         bundledPlugin("com.intellij.mcpServer")

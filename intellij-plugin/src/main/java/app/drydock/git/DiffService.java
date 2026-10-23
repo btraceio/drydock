@@ -16,6 +16,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -392,6 +393,7 @@ public final class DiffService implements AutoCloseable {
 
         String path = null;
         String kind = null;
+        String renameFrom = null;
         List<UnifiedDiff.Hunk> hunks = null;
         List<UnifiedDiff.Line> lines = null;
         String hunkHeader = null;
@@ -408,10 +410,12 @@ public final class DiffService implements AutoCloseable {
                         hunks.add(new UnifiedDiff.Hunk(hunkHeader, List.copyOf(lines)));
                     }
                     files.add(new UnifiedDiff.FileDiff(path, kind == null ? "M" : kind, insertions, deletions,
-                            stagedPaths.contains(path), untrackedPaths.contains(path), List.copyOf(hunks)));
+                            stagedPaths.contains(path), untrackedPaths.contains(path), List.copyOf(hunks),
+                            Optional.ofNullable(renameFrom)));
                 }
                 path = parseDiffGitPath(line);
                 kind = null;
+                renameFrom = null;
                 hunks = new ArrayList<>();
                 lines = new ArrayList<>();
                 hunkHeader = null;
@@ -423,7 +427,16 @@ public final class DiffService implements AutoCloseable {
                 kind = "A";
             } else if (line.startsWith("deleted file mode")) {
                 kind = "D";
-            } else if (line.startsWith("rename from") || line.startsWith("rename to")) {
+            } else if (line.startsWith("rename from")) {
+                kind = "R";
+                // The pre-image path of the rename: everything after the
+                // literal prefix, kept verbatim exactly as parseDiffGitPath
+                // keeps the b-side path (git C-quotes a special path in
+                // either position, and neither is unquoted here).
+                if (line.length() > "rename from ".length()) {
+                    renameFrom = line.substring("rename from ".length());
+                }
+            } else if (line.startsWith("rename to")) {
                 kind = "R";
             } else if (line.startsWith("+++ b/")) {
                 // The post-image path is authoritative (handles renames).
@@ -458,7 +471,8 @@ public final class DiffService implements AutoCloseable {
                 hunks.add(new UnifiedDiff.Hunk(hunkHeader, List.copyOf(lines)));
             }
             files.add(new UnifiedDiff.FileDiff(path, kind == null ? "M" : kind, insertions, deletions,
-                    stagedPaths.contains(path), untrackedPaths.contains(path), List.copyOf(hunks)));
+                    stagedPaths.contains(path), untrackedPaths.contains(path), List.copyOf(hunks),
+                    Optional.ofNullable(renameFrom)));
         }
         return new UnifiedDiff(List.copyOf(files));
     }
