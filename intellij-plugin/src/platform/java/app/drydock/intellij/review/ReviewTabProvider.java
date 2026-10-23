@@ -10,6 +10,7 @@ import app.drydock.git.NotAGitRepositoryException;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.git.WorktreeService;
 import app.drydock.intellij.DrydockPluginService;
+import app.drydock.intellij.DrydockSessionsListener;
 import app.drydock.intellij.agent.SessionActivityListener;
 import app.drydock.review.AnnotationStore;
 import app.drydock.review.ReviewScope;
@@ -668,6 +669,32 @@ final class ReviewTabProvider implements ChangesViewContentProvider {
         });
         ApplicationManager.getApplication().getMessageBus().connect(parent)
                 .subscribe(SessionActivityListener.TOPIC, (SessionActivityListener) this::activityChanged);
+        // The PR-review flow opens a worktree's window before its session
+        // registers, so a tab opened in that gap renders NO_SESSION and
+        // nothing else re-ran the load: the coverage check reads the
+        // in-memory session list, which nothing else in the tab watches.
+        // The catalog's change topic is exactly that gap's signal -- a
+        // stranded NO_SESSION re-runs the load (which finds the session and
+        // proceeds); a tab already showing a scope ignores the event, since
+        // its live updates come from the store and activity listeners.
+        ApplicationManager.getApplication().getMessageBus().connect(parent)
+                .subscribe(DrydockSessionsListener.TOPIC, this::sessionCatalogChanged);
+    }
+
+    /** The durable session catalog changed (any thread): maybe a stranded NO_SESSION can now load. */
+    private void sessionCatalogChanged() {
+        onEdt(() -> {
+            if (disposed.get()) {
+                return;
+            }
+            // lastState is EDT-confined; reading it here keeps the check
+            // against the same value renderStatus wrote. Re-running a load
+            // that is not stranded is harmless but wasteful, so only the
+            // stranded state re-runs it.
+            if (lastState == ReviewTabStatus.NO_SESSION) {
+                submitLoad();
+            }
+        });
     }
 
     /** VFS listener (EDT or a write-action thread): memory only, then a debounced reload. */
