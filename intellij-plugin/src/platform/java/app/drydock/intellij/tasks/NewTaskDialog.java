@@ -55,13 +55,15 @@ import java.util.function.Supplier;
 import java.util.stream.Stream;
 
 /**
- * New task: a name, optional instructions, an agent and a mode. Everything
- * else — branch, start point, folder, window — is generated and folded into
- * one summary line; {@code Change…} unfolds it for the rare edit.
+ * New task: a description, an agent and a mode; the task name is inferred
+ * from the description (a preset's name wins when the entry point supplies
+ * one). Everything else — branch, start point, folder, window — is generated
+ * and folded into one summary line; {@code Change…} unfolds it for the rare
+ * edit.
  *
  * <p>The decisions are {@link NewTaskPlan}'s; this class only lays them
- * out and keeps the generated values following the name until the user
- * edits them.</p>
+ * out and keeps the generated values following the inferred name until the
+ * user edits them.</p>
  */
 final class NewTaskDialog extends DialogWrapper {
 
@@ -75,7 +77,6 @@ final class NewTaskDialog extends DialogWrapper {
     private final Optional<Supplier<Optional<String>>> refChooser;
     private final NewTaskPreset preset;
 
-    private final JBTextField name = new JBTextField();
     private final JBTextArea instructions = new JBTextArea(4, 40);
     private final Map<AgentKind, JBRadioButton> agentButtons = new LinkedHashMap<>();
     private final JBRadioButton writes = new JBRadioButton("Full access", true);
@@ -125,7 +126,6 @@ final class NewTaskDialog extends DialogWrapper {
         this.refChooser = refChooser;
         this.preset = preset;
         this.worktreeBase = inputs.worktreeBase();
-        name.setText(preset.name());
         instructions.setText(preset.instructions().orElse(""));
         if (preset.fixedMode().orElse(null) == SessionMode.READ_ONLY) {
             readOnly.setSelected(true);
@@ -138,6 +138,7 @@ final class NewTaskDialog extends DialogWrapper {
         ownWindow.setSelected(preset.openIn() == OpenIn.OWN_WINDOW);
         thisWindow.setSelected(preset.openIn() == OpenIn.THIS_WINDOW);
         init();
+        setResizable(true);
         regenerate();
         refresh();
     }
@@ -198,7 +199,7 @@ final class NewTaskDialog extends DialogWrapper {
         warning.setIcon(AllIcons.General.Warning);
         warning.setVisible(false);
 
-        name.getDocument().addDocumentListener(new DocumentAdapter() {
+        instructions.getDocument().addDocumentListener(new DocumentAdapter() {
             @Override
             protected void textChanged(@NotNull DocumentEvent e) {
                 regenerate();
@@ -207,7 +208,6 @@ final class NewTaskDialog extends DialogWrapper {
         });
 
         JPanel form = FormBuilder.createFormBuilder()
-                .addLabeledComponent("Task:", name)
                 .addLabeledComponent("What should the agent do?", ScrollPaneFactory.createScrollPane(instructions),
                         true)
                 .addLabeledComponent("Agent:", agents)
@@ -223,7 +223,7 @@ final class NewTaskDialog extends DialogWrapper {
                 return new Dimension(Math.max(natural.width, JBUI.scale(WIDTH)), natural.height);
             }
         };
-        root.add(form, BorderLayout.NORTH);
+        root.add(form, BorderLayout.CENTER);
         return root;
     }
 
@@ -314,12 +314,16 @@ final class NewTaskDialog extends DialogWrapper {
         return builder.addLabeledComponent("Open in:", row(thisWindow, ownWindow)).getPanel();
     }
 
-    /** Branch and folder follow the name until the user edits them. */
+    /**
+     * Branch and folder follow the inferred name until the user edits them.
+     * The name itself is never shown here: it labels the task in the tree and
+     * on its tab, and reaches this dialog's output only through {@link #choice()}.
+     */
     private void regenerate() {
         updating = true;
         try {
             if (!branchEdited) {
-                branch.setText(NewTaskPlan.branchFor(name.getText(), inputs.takenBranches()));
+                branch.setText(NewTaskPlan.branchFor(taskName(), inputs.takenBranches()));
             }
             if (!folderEdited) {
                 folder.setText(NewTaskPlan.folderFor(worktreeBase, inputs.repoName(),
@@ -390,10 +394,15 @@ final class NewTaskDialog extends DialogWrapper {
             case NEW_WORKTREE -> Path.of(folder.getText().strip().isEmpty() ? "." : folder.getText().strip());
         };
         String text = instructions.getText();
-        return new Choice(name.getText().strip(), text.isBlank() ? Optional.empty() : Optional.of(text), agent,
+        return new Choice(taskName(), text.isBlank() ? Optional.empty() : Optional.of(text), agent,
                 preset.mode(readOnly.isSelected()), workIn, chosenBranch,
                 startPoint(), chosenFolder,
                 ownWindow.isSelected() ? OpenIn.OWN_WINDOW : OpenIn.THIS_WINDOW);
+    }
+
+    /** Diagnostic-only: types into the description, through the real document listener. */
+    void diagSetInstructions(String text) {
+        instructions.setText(text);
     }
 
     /** The immutable submission captured before the dialog closed. */
@@ -406,10 +415,14 @@ final class NewTaskDialog extends DialogWrapper {
 
     @Override
     protected @Nullable ValidationInfo doValidate() {
+        if (preset.name().isEmpty() && instructions.getText().isBlank()) {
+            // Without a description there is nothing to infer a name from.
+            return new ValidationInfo("Describe what the agent should do.", instructions);
+        }
         // Folder occupancy is a disk read; it is checked on OK only, not on
         // every keystroke.
         return NewTaskPlan.refusal(inputs, choice(), ignored -> false)
-                .map(message -> new ValidationInfo(message, name.getText().isBlank() ? name : branch))
+                .map(message -> new ValidationInfo(message, branch))
                 .orElse(null);
     }
 
@@ -450,9 +463,14 @@ final class NewTaskDialog extends DialogWrapper {
         return String.valueOf(typed != null ? typed : start.getSelectedItem()).strip();
     }
 
+    /** The preset's name when the entry point supplies one; otherwise the name inferred from the description. */
+    private String taskName() {
+        return preset.name().isEmpty() ? NewTaskPlan.nameFor(instructions.getText()) : preset.name();
+    }
+
     @Override
     public @Nullable JComponent getPreferredFocusedComponent() {
-        return name;
+        return instructions;
     }
 
     private static boolean occupied(Path directory) {

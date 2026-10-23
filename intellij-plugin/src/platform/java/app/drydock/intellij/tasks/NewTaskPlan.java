@@ -74,12 +74,70 @@ public final class NewTaskPlan {
     /** Used when a name leaves nothing usable for a branch ({@code "!!!"}, an emoji). */
     private static final String FALLBACK_BRANCH = "task";
 
+    /** The label used when the description leaves nothing usable for a name. */
+    private static final String FALLBACK_NAME = "New task";
+
+    /** A task label longer than this is cut at a word boundary. */
+    private static final int NAME_LIMIT = 60;
+
     private NewTaskPlan() {
     }
 
     /** Agents the dialog offers: the coding agents, not a plain terminal. */
     public static boolean offersAgent(AgentKind kind) {
         return kind != AgentKind.TERMINAL;
+    }
+
+    /**
+     * The task's label, inferred from the description: its first non-blank
+     * line with markdown markers stripped, whitespace collapsed, and cut at
+     * a word boundary. The name is a label for people and is never sent to
+     * the agent; text without a usable word becomes {@code New task}.
+     */
+    public static String nameFor(String instructions) {
+        if (instructions == null) {
+            return FALLBACK_NAME;
+        }
+        String line = "";
+        for (String candidate : instructions.split("\\n", -1)) {
+            String stripped = stripMarkdown(candidate).strip();
+            if (!stripped.isEmpty()) {
+                line = stripped;
+                break;
+            }
+        }
+        if (!usable(line)) {
+            return FALLBACK_NAME;
+        }
+        String name = line.length() <= NAME_LIMIT ? line : cutAtWord(line);
+        String unpunctuated = name.replaceAll("[\\s.,:;!?—–-]+$", "");
+        return unpunctuated.isEmpty() ? name : unpunctuated;
+    }
+
+    /** Repeats so nested markers go too: {@code "- ## Title"} loses both. */
+    private static String stripMarkdown(String line) {
+        String stripped = line.stripLeading();
+        while (true) {
+            String next = stripped.replaceFirst("^(#{1,6}|[-*+]|\\d+[.)]|>)\\s+", "");
+            if (next.equals(stripped)) {
+                return stripped;
+            }
+            stripped = next;
+        }
+    }
+
+    /** {@code "!!!"} and emoji-only lines label nothing. */
+    private static boolean usable(String line) {
+        return line.chars().anyMatch(Character::isLetterOrDigit);
+    }
+
+    private static String cutAtWord(String line) {
+        int cut = line.lastIndexOf(' ', NAME_LIMIT);
+        if (cut < NAME_LIMIT / 2) {
+            // One long word survives whole rather than vanishing.
+            return line.substring(0, NAME_LIMIT).strip();
+        }
+        return line.substring(0, cut);
     }
 
     /** The first three words of the name as a branch, made unique against {@code taken}. */
@@ -131,7 +189,9 @@ public final class NewTaskPlan {
      */
     public static Optional<String> refusal(Inputs in, Choice choice, Predicate<Path> folderOccupied) {
         if (choice.name().isBlank()) {
-            return Optional.of("Give the task a name.");
+            // The dialog derives the name from the description, so a blank
+            // name can only mean a blank description.
+            return Optional.of("Describe what the agent should do.");
         }
         if (choice.agent() == null) {
             // Checked here, not after: the launch would otherwise create the
