@@ -13,6 +13,7 @@ import app.drydock.intellij.actions.SessionDialogs;
 import app.drydock.intellij.agent.AgentConsoles;
 import app.drydock.intellij.agent.AgentExecutionRegistry;
 import app.drydock.intellij.review.ReviewRequest;
+import app.drydock.intellij.review.ReviewTabOpener;
 import app.drydock.intellij.settings.PullRequestReviewPrompt;
 import app.drydock.intellij.startup.DrydockStartupActivity;
 
@@ -180,14 +181,26 @@ public final class PullRequestReview {
                 }
                 AgentConsoles.focusConsoleLater(target, started.id());
                 if (custom.isEmpty()) {
-                    sendDrydockReviewPrompt(target, started);
+                    ReviewRequest.Outcome outcome = sendDrydockReviewPrompt(target, started);
+                    if (outcome instanceof ReviewRequest.Sent) {
+                        // The review is the session's one job, so its own
+                        // window's Review tab is where the human watches it:
+                        // open it as soon as the agent has taken the request,
+                        // through the same sanctioned opener the Changes link
+                        // uses (placeholder, background mint, host resolved).
+                        // A custom prompt bypasses Drydock's review tools
+                        // entirely, so there is nothing for the tab to show.
+                        ApplicationManager.getApplication().invokeLater(
+                                () -> ReviewTabOpener.open(target, Optional.of(started)),
+                                ModalityState.nonModal(), target.getDisposed());
+                    }
                 }
             }
         });
     }
 
-    /** Asks the freshly started session to review its changes with Drydock's review tools. Blocks. */
-    private static void sendDrydockReviewPrompt(Project project, ManagedAgentSession session) {
+    /** Asks a freshly started session to review its changes with Drydock's review tools. Blocks. */
+    private static ReviewRequest.Outcome sendDrydockReviewPrompt(Project project, ManagedAgentSession session) {
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         AgentExecutionRegistry executions = AgentExecutionRegistry.getInstance();
         ReviewRequest request = ReviewRequest.forBackend(plugin.initialization(), plugin::reviewBackend,
@@ -198,6 +211,7 @@ public final class PullRequestReview {
                 ApplicationManager.getApplication().invokeLater(
                         () -> Messages.showWarningDialog(project, message, "Drydock"),
                         ModalityState.nonModal(), project.getDisposed()));
+        return outcome;
     }
 
     /** The open window showing {@code directory}, compared canonically. EDT. */
