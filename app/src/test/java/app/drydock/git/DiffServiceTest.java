@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
+import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.CompletionException;
@@ -82,6 +83,58 @@ class DiffServiceTest {
         assertEquals(Set.of("README.md", "committed.txt", "staged.txt", "untracked.txt"), paths,
                 "branch commits + unstaged + staged + untracked, and NOT main's later upstream.txt");
         assertTrue(fileByPath(diff, "staged.txt").staged(), "staging is still reported");
+    }
+
+    @Test
+    void mergeBaseExposesTheSameForkPointUsedByBranchWorkingTree(@TempDir Path repoDir) throws Exception {
+        Path repo = initCommittedRepo(repoDir, "one\n");
+        String fork = runGitOutput(repo, "rev-parse", "HEAD").strip();
+        runGit(repo, "checkout", "-b", "feat/change");
+        Files.writeString(repo.resolve("feature.txt"), "feature\n");
+        runGit(repo, "add", "feature.txt");
+        commit(repo, "feature");
+        runGit(repo, "checkout", "main");
+        Files.writeString(repo.resolve("main.txt"), "main\n");
+        runGit(repo, "add", "main.txt");
+        commit(repo, "main moves");
+        runGit(repo, "checkout", "feat/change");
+
+        assertEquals(fork, service.mergeBase(repo, "main").get());
+    }
+
+    /**
+     * A file that is {@code git mv}-renamed and edited in the same commit
+     * keeps its pre-image path reachable (spec AC14): {@code path()} stays
+     * the post-image path, {@code kind()} is {@code "R"}, and
+     * {@code oldPath()} names where the file used to live -- in both scopes
+     * that measure from the fork point. An ordinary modification alongside
+     * it carries no pre-image path.
+     */
+    @Test
+    void renameEditedInTheSameCommitCarriesItsPreImagePath(@TempDir Path repoDir) throws Exception {
+        Path repo = initCommittedRepo(repoDir, "one\ntwo\nthree\n");
+        Files.writeString(repo.resolve("other.txt"), "other original\n");
+        runGit(repo, "add", "other.txt");
+        commit(repo, "add other file");
+        runGit(repo, "checkout", "-b", "feat/rename");
+        runGit(repo, "mv", "README.md", "RENAMED.md");
+        Files.writeString(repo.resolve("RENAMED.md"), "one\ntwo\nthree\nfour\n");
+        Files.writeString(repo.resolve("other.txt"), "other original\nother edited\n");
+        runGit(repo, "add", "-A");
+        commit(repo, "rename and edit");
+
+        for (DiffScope scope : new DiffScope[] {DiffScope.BASE, DiffScope.BRANCH_WORKING_TREE}) {
+            UnifiedDiff diff = service.diff(repo, scope, "main").get();
+
+            UnifiedDiff.FileDiff renamed = fileByPath(diff, "RENAMED.md");
+            assertEquals("R", renamed.kind(), scope + ": renamed file is kind R");
+            assertEquals(Optional.of("README.md"), renamed.oldPath(), scope + ": pre-image path");
+            assertFalse(renamed.hunks().isEmpty(), scope + ": the rename was edited too");
+
+            UnifiedDiff.FileDiff other = fileByPath(diff, "other.txt");
+            assertEquals("M", other.kind(), scope + ": ordinary modification stays M");
+            assertEquals(Optional.empty(), other.oldPath(), scope + ": no pre-image path");
+        }
     }
 
     @Test
@@ -238,6 +291,10 @@ class DiffServiceTest {
     }
 
     private static void runGit(Path repo, String... args) throws IOException, InterruptedException {
+        runGitOutput(repo, args);
+    }
+
+    private static String runGitOutput(Path repo, String... args) throws IOException, InterruptedException {
         java.util.List<String> command = new java.util.ArrayList<>();
         command.add("git");
         command.add("-C");
@@ -249,5 +306,6 @@ class DiffServiceTest {
         if (exitCode != 0) {
             throw new IOException("git " + String.join(" ", args) + " failed (exit " + exitCode + "): " + output);
         }
+        return output;
     }
 }
