@@ -2,6 +2,7 @@ package app.drydock.intellij.review;
 
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.SessionStatusFacet;
+import app.drydock.git.GhCliService;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.NotAGitRepositoryException;
 import app.drydock.git.WorktreeService;
@@ -29,10 +30,15 @@ import java.util.function.Supplier;
  * WORKING_TREE} only when the checkout equals that root, so passing the
  * catalog's root would mint {@code WORKING_TREE} for every linked worktree.</p>
  *
- * <p>The pull request is left empty. A {@code pr-<n>} branch still carries
- * its PR ref, because {@code forCheckout} derives it from the branch name.
- * Never blocks the caller: git runs on the executors of the services passed
- * to the constructor.</p>
+ * <p>The pull request comes from the {@link PrLookup} handed to the
+ * constructor when it can name one for the checkout's branch: a {@code
+ * pr-<n>} checkout whose PR carries a declared base then diffs against that
+ * base instead of the fork-point heuristic (a stacked PR against the
+ * default branch would otherwise diff the whole stack). An absent or failed
+ * lookup degrades to the empty pull request, and {@code forCheckout} still
+ * derives the ref from the branch name -- the same identity, only the base
+ * falls back. Never blocks the caller: git runs on the executors of the
+ * services passed to the constructor.</p>
  */
 public final class SessionReviewScopeResolver {
 
@@ -40,14 +46,36 @@ public final class SessionReviewScopeResolver {
     private final SessionReviewScopes scopes;
     private final ReviewScopeRegistry registry;
     private final Supplier<List<ManagedAgentSession>> sessions;
+    private final PrLookup pullRequestOf;
 
     public SessionReviewScopeResolver(WorktreeService worktrees, GitStatusService git,
                                       ReviewScopeRegistry registry,
                                       Supplier<List<ManagedAgentSession>> sessions) {
+        this(worktrees, git, registry, sessions, null);
+    }
+
+    /**
+     * @param pullRequestOf the open pull request a checkout's branch carries,
+     *                      if any -- consulted for the declared base. Null
+     *                      means no lookup: every checkout resolves PR-less,
+     *                      the pre-3a behavior.
+     */
+    public SessionReviewScopeResolver(WorktreeService worktrees, GitStatusService git,
+                                      ReviewScopeRegistry registry,
+                                      Supplier<List<ManagedAgentSession>> sessions,
+                                      PrLookup pullRequestOf) {
         this.worktrees = Objects.requireNonNull(worktrees, "worktrees");
         this.registry = Objects.requireNonNull(registry, "registry");
         this.sessions = Objects.requireNonNull(sessions, "sessions");
+        this.pullRequestOf = pullRequestOf;
         this.scopes = new SessionReviewScopes(git, registry);
+    }
+
+    /** The open pull request a checkout's branch carries, if the caller can name one. */
+    @FunctionalInterface
+    public interface PrLookup {
+        CompletableFuture<Optional<GhCliService.OpenPullRequest>> of(Path repositoryRoot,
+                                                                     Optional<String> branch);
     }
 
     /**
@@ -70,9 +98,14 @@ public final class SessionReviewScopeResolver {
                     .orElseThrow(() -> new IllegalStateException(checkout + " is not in a git repository"));
             Worktree own = ownEntry(listed, checkout);
             refuseIfHeldByRunningSession(session, main, own);
-            return scopes.forCheckout(main.path(), own.path(), own.branch(),
-                    Optional.of(session.id()), Optional.empty());
-        }).thenApply(SessionReviewScopes.Scopes::local);
+            CompletableFuture<Optional<GhCliService.OpenPullRequest>> pullRequest =
+                    pullRequestOf == null
+                            ? CompletableFuture.completedFuture(Optional.<GhCliService.OpenPullRequest>empty())
+                            : pullRequestOf.of(main.path(), own.branch());
+            return pullRequest.thenCompose(found -> scopes.forCheckout(main.path(), own.path(), own.branch(),
+                            Optional.of(session.id()), found))
+                    .thenApply(SessionReviewScopes.Scopes::local);
+        });
     }
 
     /**

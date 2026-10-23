@@ -8,7 +8,9 @@ import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.Repository;
 import app.drydock.git.DiffService;
+import app.drydock.git.GhCliService;
 import app.drydock.git.GitStatusService;
+import app.drydock.git.PrCheckoutService;
 import app.drydock.git.WorktreeService;
 import app.drydock.mcp.McpConfigWriter;
 import app.drydock.mcp.McpServer;
@@ -19,6 +21,7 @@ import app.drydock.mcp.WorkspaceMcpSessionContext;
 import app.drydock.review.AnnotationStore;
 import app.drydock.review.PendingQuestions;
 import app.drydock.review.ReviewScopeRegistry;
+import app.drydock.review.SessionReviewScopes;
 import app.drydock.review.tour.TourStore;
 
 import java.io.IOException;
@@ -59,6 +62,7 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
     private final McpConfigWriter configWriter;
     private final McpServer server;
     private final SessionReviewScopeResolver scopeResolver;
+    private final GhCliService pullRequests;
     private final AtomicBoolean closed = new AtomicBoolean();
     /** Package-private so tests can replace it; production uses {@link McpConfigWriter}. */
     CredentialWriter credentialWriter;
@@ -103,8 +107,35 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
                 pendingQuestions);
         McpToolRouter router = new McpToolRouter(context, mcpRegistry, McpToolRouter.REVIEW_TOOLS);
         server = new McpServer(mcpRegistry, router);
+        pullRequests = new GhCliService();
         scopeResolver = new SessionReviewScopeResolver(worktreeService, gitStatusService,
-                scopeRegistry, sessions);
+                scopeRegistry, sessions, this::pullRequestCarriedBy);
+    }
+
+    /**
+     * The open PR a checkout's branch carries, if the branch is one of the
+     * {@code pr-<n>} aliases {@link PrCheckoutService} checks PRs out under.
+     * Alias-gated on purpose: an ordinary branch never carries a PR ref in
+     * its local scope's identity, so asking gh for it would spend a network
+     * round trip on a base the scope never uses. A failed listing (no gh,
+     * no auth, gh down) degrades to no PR: the declared base is an
+     * improvement, never a requirement -- the fork-point heuristic stays
+     * the fallback and the review still starts.
+     */
+    private CompletableFuture<Optional<GhCliService.OpenPullRequest>> pullRequestCarriedBy(
+            Path repositoryRoot, Optional<String> branch) {
+        if (branch.flatMap(name -> PrCheckoutService.pullRequestNumberOf(name)).isEmpty()) {
+            return CompletableFuture.completedFuture(Optional.empty());
+        }
+        return pullRequests.openPullRequests(repositoryRoot, Optional.empty())
+                .thenApply(listing -> listing instanceof GhCliService.PullRequestListing.Listed listed
+                        ? SessionReviewScopes.pullRequestCarriedBy(listed.pullRequests(), branch)
+                        : Optional.<GhCliService.OpenPullRequest>empty())
+                .exceptionally(failure -> {
+                    LOG.log(Level.WARNING, "Could not list the pull requests of " + repositoryRoot
+                            + "; the review base falls back to the fork point", failure);
+                    return Optional.empty();
+                });
     }
 
     private static <T> CompletableFuture<T> notServed(String tool) {
@@ -205,7 +236,8 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
             return;
         }
         ready = false;
-        closeEach(List.of(server, annotationStore, tourStore, diffService, gitStatusService, worktreeService));
+        closeEach(List.of(server, annotationStore, tourStore, diffService, gitStatusService,
+                worktreeService, pullRequests));
     }
 
     static void closeEach(List<AutoCloseable> steps) {
