@@ -54,6 +54,7 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
     private final DiffService diffService;
     private final GitStatusService gitStatusService;
     private final WorktreeService worktreeService;
+    private final ReviewScopeRegistry scopeRegistry;
     private final McpSessionRegistry mcpRegistry;
     private final McpConfigWriter configWriter;
     private final McpServer server;
@@ -68,7 +69,7 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
         Path stateFile = baseDir.resolve("state.json");
         annotationStore = new AnnotationStore(AnnotationStore.siblingOf(stateFile));
         tourStore = new TourStore(TourStore.siblingOf(stateFile));
-        ReviewScopeRegistry scopeRegistry = new ReviewScopeRegistry(annotationStore.scopeIdSecret());
+        scopeRegistry = new ReviewScopeRegistry(annotationStore.scopeIdSecret());
         diffService = new DiffService();
         gitStatusService = new GitStatusService();
         worktreeService = new WorktreeService();
@@ -215,6 +216,16 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
                 LOG.log(Level.WARNING, "Closing " + step.getClass().getSimpleName() + " failed", e);
             }
         }
+    }
+
+    /** For tests: the scope registry. Package-private; the Review tab (T13) is wired through it. */
+    ReviewScopeRegistry scopeRegistry() {
+        return scopeRegistry;
+    }
+
+    /** For tests: the diff service. Package-private; the Review tab (T13) is wired through it. */
+    DiffService diffService() {
+        return diffService;
     }
 
     /** For tests: the annotation store. */

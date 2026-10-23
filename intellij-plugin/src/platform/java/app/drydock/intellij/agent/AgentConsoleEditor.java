@@ -8,6 +8,7 @@ import app.drydock.domain.RepositoryCatalog;
 import app.drydock.domain.SessionActivity;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.DrydockSessionsListener;
+import app.drydock.intellij.review.ReviewTabOpener;
 import app.drydock.ui.AgentLabels;
 
 import com.intellij.openapi.application.ApplicationActivationListener;
@@ -541,7 +542,7 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
                 if (hostedFrom.isPresent()) {
                     AgentConsoles.jumpToOwnWindow(project, current.id(), true);
                 } else {
-                    TaskChanges.show(project, current);
+                    ReviewTabOpener.open(project, Optional.of(current));
                 }
             }
             case OPEN_PROJECT_WINDOW -> AgentConsoles.jumpToOwnWindow(project, current.id(), false);

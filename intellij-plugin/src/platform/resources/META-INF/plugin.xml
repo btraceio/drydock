@@ -94,13 +94,6 @@
                     icon="/icons/drydock.svg"
                     factoryClass="app.drydock.intellij.tasks.DrydockToolWindowFactory"/>
 
-        <!-- A scope-aware directory tree for the selected session's files.
-             Kept on the left beside Project so the native diff editor can use
-             the full center area. -->
-        <toolWindow id="Drydock Changes" anchor="left" secondary="true"
-                    icon="/icons/drydock.svg"
-                    factoryClass="app.drydock.intellij.agent.TaskChangesToolWindowFactory"/>
-
         <!-- "Claude needs you": the balloon raised when an agent starts
              waiting for the user (AttentionNotifier). -->
         <notificationGroup id="Drydock attention" displayType="BALLOON"/>
@@ -110,15 +103,22 @@
         <postStartupActivity
                 implementation="app.drydock.intellij.startup.DrydockStartupActivity"/>
 
-        <!-- SPIKE (P2 spikes 1-2, throwaway): the Review tab experiment and
-             the CUSTOM_DIFF_COMPUTER diff decoration experiment. Both are
-             deleted once their live findings are recorded in the cairn
-             investigation. -->
-        <changesViewContent tabName="Drydock Review (Spike)"
-                            className="app.drydock.intellij.review.spike.SpikeReviewTabProvider"
+        <!-- The Review tab (P2): Drydock's own review marks over the
+             checkout's diff. The host tool window is resolved from the tab
+             name at runtime, never hard-coded: with isInCommitToolWindow
+             set it lands in the Commit tool window, or in the Version
+             Control window when the Commit one is disabled. The predicate
+             hides the tab in windows no Drydock session covers (Q8).
+             Deliberately no <module> element for intellij.platform.diff /
+             intellij.platform.diff.impl: they are internal-visibility
+             product modules on 2026.3 and stay compile-only in
+             build.gradle.kts, resolved at runtime through
+             intellij.platform.vcs.impl. -->
+        <changesViewContent tabName="Drydock Review"
+                            className="app.drydock.intellij.review.ReviewTabProvider"
+                            predicateClassName="app.drydock.intellij.review.ReviewTabVisibility"
                             isInCommitToolWindow="true"/>
-        <diff.DiffExtension
-                implementation="app.drydock.intellij.review.spike.SpikeReviewDiffExtension"/>
+
     </extensions>
     <applicationListeners>
         <!-- projectClosing, not the service's dispose: a disposing project's
@@ -162,14 +162,6 @@
                 text="New Drydock Task from Branch…"
                 description="Start an agent on a new task from this branch">
             <add-to-group group-id="Git.Branch" anchor="first"/>
-        </action>
-        <!-- SPIKE (P2 spikes 1-2, throwaway): opens the CUSTOM_DIFF_COMPUTER
-             diff chain for the branch diff of the window's worktree. -->
-        <action id="Drydock.SpikeReviewDiff"
-                class="app.drydock.intellij.review.spike.SpikeReviewDiffAction"
-                text="Spike: Review Diff"
-                description="Spike: open the branch diff through Drydock's own hunk model">
-            <add-to-group group-id="ToolsMenu" anchor="last"/>
         </action>
     </actions>
 </idea-plugin>
