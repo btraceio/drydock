@@ -1,6 +1,7 @@
 package app.drydock.intellij.settings;
 
 import app.drydock.config.UserConfig;
+import app.drydock.intellij.settings.PullRequestReviewPrompt;
 
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
@@ -18,6 +19,7 @@ import org.jetbrains.annotations.Nullable;
 import javax.swing.JComponent;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
+import javax.swing.JTextField;
 
 import java.awt.BorderLayout;
 import java.nio.file.Path;
@@ -36,6 +38,9 @@ public final class DrydockConfigurable implements Configurable {
     private TextFieldWithBrowseButton baseField;
     /** What the file holds, as last loaded or applied; null until loaded. */
     private String loaded;
+    private JTextField reviewPromptField;
+    /** The saved template, as last loaded or applied; null until loaded. */
+    private String loadedPrompt;
 
     /** The folder new worktrees go under: the configured one, else {@code <home>/dev/wt}. */
     public static Path effectiveBase(Optional<Path> configured, Path home) {
@@ -69,9 +74,15 @@ public final class DrydockConfigurable implements Configurable {
             baseField.setText(loaded);
             baseField.setEnabled(true);
         }, ModalityState.any()));
+        reviewPromptField = new JTextField();
+        loadedPrompt = PullRequestReviewPrompt.load().orElse("");
+        reviewPromptField.setText(loadedPrompt);
         JPanel form = FormBuilder.createFormBuilder()
                 .addLabeledComponent("Worktree folder:", baseField)
                 .addComponentToRightColumn(hint)
+                .addSeparator()
+                .addLabeledComponent("Pull-request review prompt:", reviewPromptField)
+                .addComponentToRightColumn(reviewPromptHint())
                 .getPanel();
         JPanel panel = new JPanel(new BorderLayout());
         panel.setBorder(JBUI.Borders.empty(4));
@@ -81,25 +92,31 @@ public final class DrydockConfigurable implements Configurable {
 
     @Override
     public boolean isModified() {
-        return loaded != null && !baseField.getText().strip().equals(loaded);
+        return (loaded != null && !baseField.getText().strip().equals(loaded))
+                || (loadedPrompt != null && !reviewPromptField.getText().strip().equals(loadedPrompt));
     }
 
     @Override
     public void apply() throws ConfigurationException {
-        String text = baseField.getText().strip();
-        Optional<String> refusal = refusal(text);
-        if (refusal.isPresent()) {
-            throw new ConfigurationException(refusal.get());
-        }
-        Optional<Path> base = text.isEmpty() ? Optional.empty() : Optional.of(Path.of(text));
-        UserConfig.updateAsync(config -> config.withWorktreesDirectory(base)).whenComplete((ignored, failure) -> {
-            if (failure != null) {
-                ApplicationManager.getApplication().invokeLater(() -> Messages.showErrorDialog(
-                        "Could not save the worktree folder to ~/.drydock/config.json: " + failure.getMessage(),
-                        "Drydock"), ModalityState.nonModal());
+        if (loaded != null) {
+            String text = baseField.getText().strip();
+            Optional<String> refusal = refusal(text);
+            if (refusal.isPresent()) {
+                throw new ConfigurationException(refusal.get());
             }
-        });
-        loaded = text;
+            Optional<Path> base = text.isEmpty() ? Optional.empty() : Optional.of(Path.of(text));
+            UserConfig.updateAsync(config -> config.withWorktreesDirectory(base)).whenComplete((ignored, failure) -> {
+                if (failure != null) {
+                    ApplicationManager.getApplication().invokeLater(() -> Messages.showErrorDialog(
+                            "Could not save the worktree folder to ~/.drydock/config.json: " + failure.getMessage(),
+                            "Drydock"), ModalityState.nonModal());
+                }
+            });
+            loaded = text;
+        }
+        String prompt = reviewPromptField.getText().strip();
+        PullRequestReviewPrompt.save(prompt.isEmpty() ? Optional.empty() : Optional.of(prompt));
+        loadedPrompt = prompt;
     }
 
     /** Why the worktree folder text cannot be saved: it must be a full path, or empty for the default. Pure. */
@@ -115,10 +132,22 @@ public final class DrydockConfigurable implements Configurable {
         if (loaded != null) {
             baseField.setText(loaded);
         }
+        if (loadedPrompt != null) {
+            reviewPromptField.setText(loadedPrompt);
+        }
     }
 
     @Override
     public void disposeUIResources() {
         baseField = null;
+        reviewPromptField = null;
+    }
+
+    private static JLabel reviewPromptHint() {
+        JLabel hint = new JLabel("<html>Sent to the agent a pull request's Review starts, replacing Drydock's "
+                + "own review flow. <i>$PR$</i> becomes the pull-request number,<br>e.g. <code>/sphinx review pr "
+                + "$PR$</code>. The command must exist in the target harness. Empty uses Drydock's review.</html>");
+        hint.setForeground(UIUtil.getContextHelpForeground());
+        return hint;
     }
 }

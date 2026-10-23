@@ -3,6 +3,7 @@ package app.drydock.intellij.tasks;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.SessionActivity;
 import app.drydock.git.GhCliService.OpenIssue;
+import app.drydock.git.GhCliService.OpenPullRequest;
 import app.drydock.projects.SharedProject;
 
 import java.nio.file.Path;
@@ -20,7 +21,8 @@ public sealed interface TaskNode {
         ACTIVE("Active"),
         INACTIVE("Inactive"),
         WORKTREES("Worktrees"),
-        ISSUES("Issues");
+        ISSUES("Issues"),
+        PULL_REQUESTS("Pull Requests");
 
         private final String label;
 
@@ -135,6 +137,19 @@ public sealed interface TaskNode {
         public IssueRow {
             Objects.requireNonNull(mainRoot, "mainRoot");
             Objects.requireNonNull(issue, "issue");
+        }
+    }
+
+    /**
+     * One open pull request belonging to the containing registered project:
+     * not a draft, and not already checked out in one of the repository's
+     * worktrees (a checked-out PR is its worktree's row, the same rule the
+     * standalone app's sidebar follows).
+     */
+    record PullRequestRow(Path mainRoot, OpenPullRequest pullRequest) implements TaskNode {
+        public PullRequestRow {
+            Objects.requireNonNull(mainRoot, "mainRoot");
+            Objects.requireNonNull(pullRequest, "pullRequest");
         }
     }
 }

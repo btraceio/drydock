@@ -7,11 +7,15 @@ import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionActivity;
 import app.drydock.git.GhCliService.IssueListing;
 import app.drydock.git.GhCliService.OpenIssue;
+import app.drydock.git.GhCliService.OpenPullRequest;
+import app.drydock.git.GhCliService.PullRequestListing;
 import app.drydock.git.WorktreeService.Worktree;
 import app.drydock.intellij.tasks.TaskNode.AddCurrentProject;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
 import app.drydock.intellij.tasks.TaskNode.IssueRow;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
+import app.drydock.review.RepositoryPullRequests;
+import app.drydock.intellij.tasks.TaskNode.PullRequestRow;
 import app.drydock.intellij.tasks.TaskNode.Section;
 import app.drydock.intellij.tasks.TaskNode.SectionKind;
 import app.drydock.intellij.tasks.TaskNode.StaleWorktrees;
@@ -160,8 +164,12 @@ public final class TaskTreeModel {
                          Map<ManagedSessionId, Host> hosts, Set<Path> missingFolders,
                          Map<RepositoryId, Path> recordedRoots,
                          Set<Path> worktreeContainers, Set<Path> issueContainers,
+                         Set<Path> pullRequestContainers,
                          Set<Path> openFolders, Map<Path, Instant> lastActivity, Instant now,
-                         Map<Path, IssueListing> issuesByMainRoot, Optional<String> listProblem, String filter,
+                         Map<Path, IssueListing> issuesByMainRoot,
+                         Map<Path, PullRequestListing> pullRequestsByMainRoot,
+                         Map<Path, List<Worktree>> pullRequestDedupWorktrees,
+                         Optional<String> listProblem, String filter,
                          ViewFilter viewFilter) {
         public Inputs {
             projects = List.copyOf(projects);
@@ -177,10 +185,13 @@ public final class TaskTreeModel {
             recordedRoots = Map.copyOf(recordedRoots);
             worktreeContainers = Set.copyOf(worktreeContainers);
             issueContainers = Set.copyOf(issueContainers);
+            pullRequestContainers = Set.copyOf(pullRequestContainers);
             openFolders = Set.copyOf(openFolders);
             lastActivity = Map.copyOf(lastActivity);
             Objects.requireNonNull(now, "now");
             issuesByMainRoot = Map.copyOf(issuesByMainRoot);
+            pullRequestsByMainRoot = Map.copyOf(pullRequestsByMainRoot);
+            pullRequestDedupWorktrees = Map.copyOf(pullRequestDedupWorktrees);
             Objects.requireNonNull(listProblem, "listProblem");
             filter = filter == null ? "" : filter.strip();
             Objects.requireNonNull(viewFilter, "viewFilter");
@@ -195,8 +206,8 @@ public final class TaskTreeModel {
                       Map<Path, IssueListing> issuesByMainRoot, Optional<String> listProblem, String filter) {
             this(projects, sessions, worktreesByMainRoot, mainRootOf, currentMainRoot, currentWorkingRoot,
                     activity, running, Map.of(), missingFolders, recordedRoots,
-                    worktreesByMainRoot.keySet(), issuesByMainRoot.keySet(), Set.of(), Map.of(), Instant.EPOCH,
-                    issuesByMainRoot, listProblem, filter, ViewFilter.ALL);
+                    worktreesByMainRoot.keySet(), issuesByMainRoot.keySet(), Set.of(), Set.of(), Map.of(), Instant.EPOCH,
+                    issuesByMainRoot, Map.of(), Map.of(), listProblem, filter, ViewFilter.ALL);
         }
 
         /** Compatibility constructor for model callers with no GitHub issue input. */
@@ -208,8 +219,8 @@ public final class TaskTreeModel {
                       Optional<String> listProblem, String filter) {
             this(projects, sessions, worktreesByMainRoot, mainRootOf, currentMainRoot, currentWorkingRoot,
                     activity, running, Map.of(), missingFolders, recordedRoots,
-                    worktreesByMainRoot.keySet(), Set.of(), Set.of(), Map.of(), Instant.EPOCH,
-                    Map.of(), listProblem, filter, ViewFilter.ALL);
+                    worktreesByMainRoot.keySet(), Set.of(), Set.of(), Set.of(), Map.of(), Instant.EPOCH,
+                    Map.of(), Map.of(), Map.of(), listProblem, filter, ViewFilter.ALL);
         }
     }
 
@@ -426,6 +437,15 @@ public final class TaskTreeModel {
                         children.add(new Section(SectionKind.ISSUES, issueChildren)));
             }
         }
+        if (in.viewFilter() == ViewFilter.ALL) {
+            if (in.pullRequestContainers().contains(main) && !in.pullRequestsByMainRoot().containsKey(main)) {
+                children.add(new Section(SectionKind.PULL_REQUESTS,
+                        List.of(new TaskNode.Deferred("Loading pull requests…"))));
+            } else {
+                pullRequestChildren(in, main, itemFilter).ifPresent(pullRequestChildren ->
+                        children.add(new Section(SectionKind.PULL_REQUESTS, pullRequestChildren)));
+            }
+        }
         return new Children(List.copyOf(children), List.copyOf(inactive));
     }
 
@@ -435,6 +455,31 @@ public final class TaskTreeModel {
             case ACTIVE -> task.running();
             case INACTIVE -> !task.running();
             case ISSUES -> false;
+        };
+    }
+
+    /**
+     * The project's open, non-draft pull requests that no local worktree
+     * already holds -- the same rule the standalone app's sidebar applies
+     * (via {@link RepositoryPullRequests#selectable}, which also excludes
+     * drafts). Newest first; gh's own order is repository-dependent.
+     */
+    private static Optional<List<TaskNode>> pullRequestChildren(Inputs in, Path main, String itemFilter) {
+        return switch (in.pullRequestsByMainRoot().get(main)) {
+            case PullRequestListing.Listed listed -> {
+                List<TaskNode> rows = RepositoryPullRequests.selectable(
+                                listed.pullRequests(), in.pullRequestDedupWorktrees().getOrDefault(main, List.of()))
+                        .stream()
+                        .filter(pullRequest -> matches(itemFilter, pullRequest))
+                        .sorted(Comparator.comparingInt(OpenPullRequest::number).reversed())
+                        .map(pullRequest -> (TaskNode) new PullRequestRow(main, pullRequest))
+                        .toList();
+                yield rows.isEmpty() ? Optional.empty() : Optional.of(rows);
+            }
+            case PullRequestListing.Failed failed -> Optional.of(List.of(
+                    new TaskNode.ListProblem("GitHub pull requests: " + failed.message())));
+            case PullRequestListing.Unsupported ignored -> Optional.empty();
+            case null -> Optional.empty();
         };
     }
 
@@ -498,6 +543,12 @@ public final class TaskTreeModel {
         return filter.isEmpty() || contains(issue.title(), filter)
                 || contains("#" + issue.number(), filter)
                 || issue.labels().stream().anyMatch(label -> contains(label, filter));
+    }
+
+    private static boolean matches(String filter, OpenPullRequest pullRequest) {
+        return filter.isEmpty() || contains(pullRequest.title(), filter)
+                || contains("#" + pullRequest.number(), filter)
+                || contains(pullRequest.headRefName(), filter);
     }
 
     private static boolean contains(String text, String filter) {

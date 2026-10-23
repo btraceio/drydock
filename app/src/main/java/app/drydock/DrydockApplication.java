@@ -356,7 +356,8 @@ public final class DrydockApplication extends Application {
         diffService = new DiffService();
         searchService = new SessionSearchService();
         ghCliService = new GhCliService();
-        RepositoryPullRequests repositoryPullRequests = new RepositoryPullRequests(ghCliService::openPullRequests);
+        RepositoryPullRequests repositoryPullRequests = new RepositoryPullRequests(
+                root -> ghCliService.openPullRequests(root, Optional.empty()));
         gitHubReviewService = new GitHubReviewService();
         Path stateDir = stateRepository.stateFile().getParent();
         Path activityDir = stateDir.resolve("activity");

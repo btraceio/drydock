@@ -12,11 +12,14 @@ import app.drydock.domain.SessionWorkspace;
 import app.drydock.domain.SshRemote;
 import app.drydock.git.GhCliService.IssueListing;
 import app.drydock.git.GhCliService.OpenIssue;
+import app.drydock.git.GhCliService.OpenPullRequest;
+import app.drydock.git.GhCliService.PullRequestListing;
 import app.drydock.git.WorktreeService.Worktree;
 import app.drydock.intellij.tasks.TaskNode.AddCurrentProject;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
 import app.drydock.intellij.tasks.TaskNode.IssueRow;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
+import app.drydock.intellij.tasks.TaskNode.PullRequestRow;
 import app.drydock.intellij.tasks.TaskNode.Section;
 import app.drydock.intellij.tasks.TaskNode.SectionKind;
 import app.drydock.intellij.tasks.TaskNode.StaleWorktrees;
@@ -64,9 +67,12 @@ class TaskTreeModelTest {
         final Map<RepositoryId, Path> recordedRoots = new HashMap<>();
         final Set<Path> worktreeContainers = new HashSet<>();
         final Set<Path> issueContainers = new HashSet<>();
+        final Set<Path> pullRequestContainers = new HashSet<>();
         final Set<Path> openFolders = new HashSet<>();
         final Map<Path, Instant> lastActivity = new HashMap<>();
         final Map<Path, IssueListing> issues = new HashMap<>();
+        final Map<Path, PullRequestListing> pullRequests = new HashMap<>();
+        final Map<Path, List<Worktree>> pullRequestDedupWorktrees = new HashMap<>();
         Optional<String> problem = Optional.empty();
         String filter = "";
         ViewFilter viewFilter = ViewFilter.ALL;
@@ -94,8 +100,8 @@ class TaskTreeModelTest {
         TaskTreeModel.Inputs build() {
             return new TaskTreeModel.Inputs(projects, sessions, worktrees, mainRootOf, currentMain, currentWorking,
                     activity, running, hosts, missing, recordedRoots, worktreeContainers, issueContainers,
-                    openFolders, lastActivity, T,
-                    issues, problem, filter, viewFilter);
+                    pullRequestContainers, openFolders, lastActivity, T,
+                    issues, pullRequests, pullRequestDedupWorktrees, problem, filter, viewFilter);
         }
     }
 
@@ -149,6 +155,14 @@ class TaskTreeModelTest {
 
     private static List<TaskNode> issueNodes(ProjectRow row) {
         return section(row, SectionKind.ISSUES).orElseThrow().children();
+    }
+
+    private static List<TaskNode> pullRequestNodes(ProjectRow row) {
+        return section(row, SectionKind.PULL_REQUESTS).orElseThrow().children();
+    }
+
+    private static OpenPullRequest pullRequest(int number, String title, String headBranch, boolean draft) {
+        return new OpenPullRequest(number, title, headBranch, "main", draft, Optional.empty(), Optional.empty());
     }
 
     @Test
@@ -681,5 +695,102 @@ class TaskTreeModelTest {
                 .map(node -> ((TaskRow) node).session().displayName()).toList();
 
         assertEquals(List.of("waiting", "running", "recent", "old"), order);
+    }
+
+    @Test
+    void pullRequestsExcludeDraftsAndCheckedOutOnesNewestFirst() {
+        In in = new In().project(DRYDOCK).worktree(DRYDOCK, Path.of("/wt/drydock-feature"), "feature/taken");
+        in.pullRequestContainers.add(DRYDOCK);
+        in.pullRequests.put(DRYDOCK, new PullRequestListing.Listed(List.of(
+                pullRequest(12, "Old one", "feature/old", false),
+                pullRequest(40, "New one", "feature/new", false),
+                pullRequest(41, "A draft", "feature/draft", true),
+                pullRequest(42, "Already local", "feature/taken", false))));
+        in.pullRequestDedupWorktrees.put(DRYDOCK, List.of(linked(Path.of("/wt/drydock-feature"), "feature/taken")));
+
+        List<TaskNode> rows = pullRequestNodes(projectRow(TaskTreeModel.build(in.build()), DRYDOCK));
+
+        assertEquals(List.of(40, 12), rows.stream().map(PullRequestRow.class::cast)
+                .map(row -> row.pullRequest().number()).toList());
+    }
+
+    @Test
+    void aCheckedOutPrBranchIsRecognisedAsItsPullRequest() {
+        In in = new In().project(DRYDOCK);
+        in.pullRequestContainers.add(DRYDOCK);
+        in.pullRequests.put(DRYDOCK, new PullRequestListing.Listed(List.of(
+                pullRequest(7, "Checked out under pr-7", "feature/x", false))));
+        // The worktree holds the pr-<n> branch a drydock checkout creates,
+        // not the PR's own head branch.
+        in.pullRequestDedupWorktrees.put(DRYDOCK, List.of(linked(Path.of("/wt/drydock-pr-7"), "pr-7")));
+
+        ProjectRow row = projectRow(TaskTreeModel.build(in.build()), DRYDOCK);
+
+        assertTrue(section(row, SectionKind.PULL_REQUESTS).isEmpty());
+    }
+
+    @Test
+    void pullRequestSearchMatchesNumberTitleAndBranch() {
+        List<OpenPullRequest> pullRequests = List.of(
+                pullRequest(9, "Number-only row", "feature/number-only", false),
+                pullRequest(10, "Branch-only row", "feature/branch-probe", false),
+                pullRequest(11, "Title probe row", "feature/title-only", false),
+                pullRequest(12, "Unrelated", "feature/unrelated", false));
+
+        assertEquals(List.of(9), pullRequestNumbersMatching("#9", pullRequests));
+        assertEquals(List.of(10), pullRequestNumbersMatching("branch-probe", pullRequests));
+        assertEquals(List.of(11), pullRequestNumbersMatching("Title probe", pullRequests));
+        // A filter that matches nothing hides the project row entirely
+        // (the same rule tasks follow), so no project row is the answer.
+        In none = new In().project(DRYDOCK);
+        none.pullRequestContainers.add(DRYDOCK);
+        none.pullRequests.put(DRYDOCK, new PullRequestListing.Listed(pullRequests));
+        none.filter = "missing";
+        assertEquals(List.of(), projectRoots(TaskTreeModel.build(none.build())));
+    }
+
+    private static List<Integer> pullRequestNumbersMatching(String filter, List<OpenPullRequest> pullRequests) {
+        In in = new In().project(DRYDOCK);
+        in.pullRequestContainers.add(DRYDOCK);
+        in.pullRequests.put(DRYDOCK, new PullRequestListing.Listed(pullRequests));
+        in.filter = filter;
+
+        return pullRequestNodes(projectRow(TaskTreeModel.build(in.build()), DRYDOCK)).stream()
+                .map(PullRequestRow.class::cast)
+                .map(row -> row.pullRequest().number())
+                .toList();
+    }
+
+    @Test
+    void unloadedPullRequestsStayDeferredWhileSessionsArePresent() {
+        In in = new In().project(DRYDOCK);
+        in.pullRequestContainers.add(DRYDOCK);
+        in.sessions.add(session("A task", DRYDOCK));
+
+        List<TaskNode> children = section(projectRow(TaskTreeModel.build(in.build()), DRYDOCK),
+                SectionKind.PULL_REQUESTS).orElseThrow().children();
+
+        assertEquals(List.of(new TaskNode.Deferred("Loading pull requests…")), children);
+    }
+
+    @Test
+    void failedPullRequestListingIsAProblemRowInsideItsSection() {
+        In in = new In().project(DRYDOCK);
+        in.pullRequestContainers.add(DRYDOCK);
+        in.pullRequests.put(DRYDOCK, new PullRequestListing.Failed("gh pr list exited 1"));
+
+        List<TaskNode> children = pullRequestNodes(projectRow(TaskTreeModel.build(in.build()), DRYDOCK));
+
+        assertEquals(List.of(new TaskNode.ListProblem("GitHub pull requests: gh pr list exited 1")), children);
+    }
+
+    @Test
+    void unsupportedPullRequestListingGetsNoSection() {
+        In in = new In().project(DRYDOCK);
+        in.pullRequestContainers.add(DRYDOCK);
+        in.pullRequests.put(DRYDOCK, new PullRequestListing.Unsupported());
+
+        assertTrue(section(projectRow(TaskTreeModel.build(in.build()), DRYDOCK),
+                SectionKind.PULL_REQUESTS).isEmpty());
     }
 }
