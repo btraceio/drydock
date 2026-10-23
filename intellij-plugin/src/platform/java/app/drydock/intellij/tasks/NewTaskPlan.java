@@ -171,9 +171,17 @@ public final class NewTaskPlan {
                 : "A writing agent in the main checkout shares the tree with your own edits.");
     }
 
-    /** What the agent is told on start: the instructions, or nothing. Never the name. */
+    /**
+     * Prepended to the New task dialog's instructions: the agent must
+     * clarify and settle the exact requirements before it writes code, not
+     * run off with a half-specified prompt.
+     */
+    private static final String CLARIFY_FIRST = "Before writing any code, thoroughly clarify this request: "
+            + "brainstorm to pin down the exact requirements, and confirm them before implementing.\n\n";
+
+    /** What the agent is told on start: the instructions behind a clarify-first directive, or nothing. Never the name. */
     public static Optional<String> initialPrompt(Choice choice) {
-        return choice.instructions().filter(text -> !text.isBlank());
+        return choice.instructions().filter(text -> !text.isBlank()).map(CLARIFY_FIRST::concat);
     }
 
     public static String primaryLabel(boolean warned) {

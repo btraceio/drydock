@@ -96,11 +96,13 @@ class NewTaskPlanTest {
     }
 
     @Test
-    void initialPromptIsInstructionsVerbatim() {
+    void initialPromptPrependsClarifyFirst() {
         Choice choice = choice("Farewell", Optional.of("Add farewell() to Greeter.\nKeep it short."),
                 SessionMode.WRITES, WorkIn.NEW_WORKTREE, "farewell", Path.of("/b/drydock-farewell"));
 
-        assertEquals(Optional.of("Add farewell() to Greeter.\nKeep it short."), NewTaskPlan.initialPrompt(choice));
+        String prompt = NewTaskPlan.initialPrompt(choice).orElseThrow();
+        assertTrue(prompt.startsWith("Before writing any code"), prompt);
+        assertTrue(prompt.endsWith("Add farewell() to Greeter.\nKeep it short."), prompt);
     }
 
     @Test
