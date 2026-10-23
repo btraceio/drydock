@@ -1,9 +1,20 @@
 package app.drydock.intellij.tasks;
 
 import app.drydock.agent.api.AgentKind;
-
+import app.drydock.domain.AgentBinding;
+import app.drydock.domain.ManagedAgentSession;
+import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.RepositoryId;
+import app.drydock.domain.SessionMode;
+import app.drydock.domain.SessionStatus;
+import app.drydock.domain.SessionWorkspace;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 
@@ -44,5 +55,35 @@ class PullRequestReviewTest {
     @Test
     void nothingAvailableYieldsEmpty() {
         assertTrue(select(Optional.empty()).isEmpty());
+    }
+
+    @Test
+    void aRunningSessionOnTheWorktreeIsJoined(@TempDir Path dir) throws Exception {
+        assertTrue(PullRequestReview.runningSessionFor(
+                List.of(session(dir, SessionStatus.RUNNING)), dir).isPresent());
+    }
+
+    @Test
+    void anEndedSessionOnTheWorktreeIsNotJoined(@TempDir Path dir) {
+        assertTrue(PullRequestReview.runningSessionFor(
+                List.of(session(dir, SessionStatus.INACTIVE)), dir).isEmpty());
+    }
+
+    @Test
+    void aSessionOnAnotherDirectoryIsNotJoined(@TempDir Path dir, @TempDir Path other) {
+        assertTrue(PullRequestReview.runningSessionFor(
+                List.of(session(other, SessionStatus.RUNNING)), dir).isEmpty());
+    }
+
+    @Test
+    void aGoneWorktreeJoinsNothing(@TempDir Path dir) {
+        assertTrue(PullRequestReview.runningSessionFor(
+                List.of(session(dir, SessionStatus.RUNNING)), dir.resolve("missing")).isEmpty());
+    }
+
+    private static ManagedAgentSession session(Path directory, SessionStatus status) {
+        return new ManagedAgentSession.Builder(ManagedSessionId.newId(), RepositoryId.newId(),
+                "Review #12", AgentBinding.unlaunched(AgentKind.PI, SessionMode.WRITES),
+                SessionWorkspace.inRepository(directory), Instant.EPOCH).status(status).build();
     }
 }

@@ -5,6 +5,7 @@ import app.drydock.config.UserConfig;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.Repository;
 import app.drydock.domain.SessionMode;
+import app.drydock.domain.SessionStatusFacet;
 import app.drydock.git.GhCliService.OpenPullRequest;
 import app.drydock.git.PrCheckoutService;
 import app.drydock.git.WorktreeNaming;
@@ -30,7 +31,10 @@ import org.jetbrains.annotations.NotNull;
 
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -43,6 +47,12 @@ import java.util.function.Predicate;
  * Reviews an open pull request, end to end: the {@code pr-<n>} worktree
  * beside the repository's other worktrees, {@code gh pr checkout} into it,
  * a new agent session there, and the review prompt.
+ *
+ * <p>A re-review reuses what the first one built: a RUNNING review session
+ * for the same worktree is joined (window and console focused, nothing
+ * relaunched), and an ended review's worktree is re-entered as it stands
+ * -- a fresh checkout would refuse the existing directory and the scope
+ * resolver would refuse a held checkout.</p>
  *
  * <p>The prompt is Drydock's own review flow (resolve the session's review
  * scope, send {@code ReviewInstructions#forScope}) unless a custom
@@ -128,24 +138,85 @@ public final class PullRequestReview {
             return;
         }
 
-        Path worktree;
-        try (PrCheckoutService checkout = new PrCheckoutService()) {
-            Path base = WorktreeNaming.defaultDirectory(Path.of(System.getProperty("user.home")),
-                    UserConfig.load().worktreesDirectory(), repositoryName,
-                    PrCheckoutService.localBranchFor(pullRequest.number()));
-            worktree = checkout.checkout(mainRoot, base, pullRequest.number())
-                    .get(CHECKOUT_AWAIT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return;
-        } catch (ExecutionException | TimeoutException | RuntimeException e) {
-            LOG.log(Level.WARNING, "Could not check out PR #" + pullRequest.number() + " of " + mainRoot, e);
-            report(from, "Could not check out PR #" + pullRequest.number() + ": " + cause(e));
+        Path base = WorktreeNaming.defaultDirectory(Path.of(System.getProperty("user.home")),
+                UserConfig.load().worktreesDirectory(), repositoryName,
+                PrCheckoutService.localBranchFor(pullRequest.number()));
+
+        // A second "Review…" click reuses what the first one built. A
+        // checkout refuses to touch an existing directory, and the scope
+        // resolver refuses a checkout held by a RUNNING session, so without
+        // this the re-click was a guaranteed error dialog. A running review
+        // session is joined (its window and console focused, nothing
+        // re-launched); a worktree whose review has ended is re-entered as
+        // it stands -- the resolver rebinds its scope to the new session.
+        Optional<ManagedAgentSession> running = runningSessionFor(plugin.stateStore().state().sessions(),
+                base);
+        if (running.isPresent()) {
+            joinRunningReview(from, base, running.get());
             return;
         }
 
-        ApplicationManager.getApplication().invokeLater(() -> openAndLaunch(from, mainRoot, worktree,
+        Path worktree = base;
+        if (!Files.isDirectory(base)) {
+            try (PrCheckoutService checkout = new PrCheckoutService()) {
+                worktree = checkout.checkout(mainRoot, base, pullRequest.number())
+                        .get(CHECKOUT_AWAIT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            } catch (ExecutionException | TimeoutException | RuntimeException e) {
+                LOG.log(Level.WARNING, "Could not check out PR #" + pullRequest.number() + " of " + mainRoot, e);
+                report(from, "Could not check out PR #" + pullRequest.number() + ": " + cause(e));
+                return;
+            }
+        }
+
+        Path reused = worktree;
+        ApplicationManager.getApplication().invokeLater(() -> openAndLaunch(from, mainRoot, reused,
                 pullRequest, agent.get()), ModalityState.nonModal(), from.getDisposed());
+    }
+
+    /** EDT: brings the running review's window and console to the front; nothing is relaunched. */
+    private void joinRunningReview(Project from, Path worktree, ManagedAgentSession running) {
+        ApplicationManager.getApplication().invokeLater(() -> {
+            Project target = windowOn(worktree).orElseGet(() -> TaskWindows.openAsProject(worktree));
+            if (target == null || target.isDisposed()) {
+                report(from, "The review of " + running.displayName() + " is running in " + worktree
+                        + ", but its window did not open. Open it with File › Open to join it.");
+                return;
+            }
+            AgentConsoles.focusConsoleLater(target, running.id());
+        }, ModalityState.nonModal(), from.getDisposed());
+    }
+
+    /**
+     * The RUNNING session whose working directory is {@code worktree}, by
+     * real path (macOS lists {@code /private/var/…} where a temporary
+     * directory is {@code /var/…}), the same comparison the scope resolver
+     * applies. A session on any other directory, or one that has ended, is
+     * not a review to join. Pure lookup; never touches git or the EDT.
+     */
+    static Optional<ManagedAgentSession> runningSessionFor(List<ManagedAgentSession> sessions,
+                                                           Path worktree) {
+        Path real;
+        try {
+            real = worktree.toRealPath();
+        } catch (IOException e) {
+            return Optional.empty(); // the checkout to reuse is gone
+        }
+        for (ManagedAgentSession session : sessions) {
+            if (SessionStatusFacet.of(session.status()) != SessionStatusFacet.RUNNING) {
+                continue;
+            }
+            try {
+                if (session.workingDirectory().toRealPath().equals(real)) {
+                    return Optional.of(session);
+                }
+            } catch (IOException e) {
+                continue; // a session whose directory is gone is not joinable
+            }
+        }
+        return Optional.empty();
     }
 
     /** EDT: opens (or reuses) the worktree's window, then starts the session and hands it the prompt. */
