@@ -22,20 +22,32 @@ import java.util.regex.Pattern;
  * Checks a GitHub pull request out into its own worktree, so reviewing it
  * never disturbs the main checkout (Review handoff §6, the checkout gate).
  *
- * <p><strong>The handoff's literal command does not exist.</strong> It gives
- * the sequence as {@code gh pr checkout <n> --worktree}; {@code gh} has no
- * such flag (checked against 2.96: {@code gh pr checkout} takes
- * {@code --branch}, {@code --detach}, {@code --force} and
- * {@code --recurse-submodules}, and always operates on the working tree it
- * is run in). Running it in the repository root would therefore move the
- * <em>main checkout</em> onto the PR branch -- exactly what a reviewer must
- * not have happen to them mid-task.</p>
+ * <p><strong>The handoff's literal command does not exist as a flow.</strong> It gives
+ * the sequence as {@code gh pr checkout <n> --worktree}. That flag exists only
+ * since gh 2.102 (verified against 2.102.0; as late as 2.96 {@code gh pr
+ * checkout} took only {@code --branch}, {@code --detach}, {@code --force} and
+ * {@code --recurse-submodules}, and always operated on the working tree it
+ * ran in). The two-step form is kept so the flow works on older gh too, and
+ * because it makes the failure cleanup ours: a half-made checkout is removed
+ * here, before the failure is reported.</p>
  *
- * <p>What this does instead, to the same end:</p>
+ * <p>{@code gh} runs with {@code --force} because the local branch is
+ * drydock's scratch space, not the user's: an earlier review of the same PR
+ * leaves {@code pr-<n>} behind when its worktree is removed, and a PR whose
+ * head moved by a rebase has diverged from that stale branch by the time it
+ * is re-reviewed. Without {@code --force}, gh syncs the existing branch with
+ * {@code git merge --ff-only} and dies with "Not possible to
+ * fast-forward" — a review that can never start again. With it, gh does
+ * {@code git reset --hard} to the PR's current head, which is what reviewing
+ * "the PR as it is now" means. Nothing is reset under a live worktree: the
+ * path above was just verified absent, and if some other worktree still has
+ * {@code pr-<n>} checked out, git refuses the checkout before any reset.</p>
+ *
+ * <p>What this does, to the reviewer's end:</p>
  * <ol>
  *   <li>{@code git worktree add --detach <dir>} -- a new working tree at the
  *       current commit, main checkout untouched;</li>
- *   <li>{@code gh pr checkout <n> --branch <local>} run <em>inside</em> that
+ *   <li>{@code gh pr checkout <n> --branch <local> --force} run <em>inside</em> that
  *       worktree, where {@code gh} resolves the repository from the working
  *       directory and checks the PR out there.</li>
  * </ol>
@@ -164,7 +176,7 @@ public final class PrCheckoutService implements AutoCloseable {
         String branch = localBranchFor(prNumber);
         try {
             ProcessResult checkedOut = run(List.of(gh.toString(), "pr", "checkout",
-                    String.valueOf(prNumber), "--branch", branch), worktree, CHECKOUT_TIMEOUT);
+                    String.valueOf(prNumber), "--branch", branch, "--force"), worktree, CHECKOUT_TIMEOUT);
             if (checkedOut.exitCode() == 0) {
                 return worktree;
             }

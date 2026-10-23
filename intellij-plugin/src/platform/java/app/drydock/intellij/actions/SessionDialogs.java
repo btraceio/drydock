@@ -29,6 +29,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.Function;
 
 /**
  * Starting an agent session in a window: the agent preselection, and the
@@ -125,13 +126,34 @@ public final class SessionDialogs {
     public static CompletableFuture<ManagedAgentSession> launchSession(Project project, Path workingDirectory,
             Path repositoryRoot, AgentKind kind, String displayName, SessionMode mode, Optional<String> task,
             boolean freshWindow) {
+        return launchSession(project, workingDirectory, repositoryRoot, kind, displayName, mode,
+                session -> CompletableFuture.completedFuture(task), freshWindow);
+    }
+
+    /**
+     * As above, with the first message resolved from the minted session
+     * rather than fixed in advance — it may name things only that session
+     * knows, such as its review scope. The resolver runs before the agent
+     * spawns, so its result travels as the launch's initial prompt (the same
+     * channel a task typed into a dialog uses), not as text typed into the
+     * console after the fact: a prompt typed into a terminal the harness has
+     * not started reading yet is swallowed, while the launch's own prompt is
+     * the harness's to consume when it is ready. The resolver blocks while it
+     * resolves; it runs on the launch chain, off the EDT. It must not throw:
+     * a failure to resolve a prompt means starting the session without one,
+     * and the caller tells the human why.
+     */
+    public static CompletableFuture<ManagedAgentSession> launchSession(Project project, Path workingDirectory,
+            Path repositoryRoot, AgentKind kind, String displayName, SessionMode mode,
+            Function<ManagedAgentSession, CompletableFuture<Optional<String>>> prompt, boolean freshWindow) {
         return DrydockStartupActivity.sessions(project)
                 .prepareSession(workingDirectory, repositoryRoot, kind, displayName, mode)
                 .thenApply(session -> {
                     showConsoleTab(project, session.id(), freshWindow);
                     return session;
                 })
-                .thenCompose(session -> DrydockStartupActivity.sessions(project).launchSession(session, task));
+                .thenCompose(session -> prompt.apply(session).thenCompose(initial ->
+                        DrydockStartupActivity.sessions(project).launchSession(session, initial)));
     }
 
     /**

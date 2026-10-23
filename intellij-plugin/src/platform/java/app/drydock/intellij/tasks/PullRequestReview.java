@@ -9,14 +9,18 @@ import app.drydock.domain.SessionStatusFacet;
 import app.drydock.git.GhCliService.OpenPullRequest;
 import app.drydock.git.PrCheckoutService;
 import app.drydock.git.WorktreeNaming;
+import app.drydock.git.WorktreeService;
 import app.drydock.intellij.DrydockPluginService;
+import app.drydock.intellij.DrydockSessionsListener;
 import app.drydock.intellij.actions.SessionDialogs;
 import app.drydock.intellij.agent.AgentConsoles;
-import app.drydock.intellij.agent.AgentExecutionRegistry;
+import app.drydock.intellij.review.ReviewBackend;
 import app.drydock.intellij.review.ReviewRequest;
 import app.drydock.intellij.review.ReviewTabOpener;
 import app.drydock.intellij.settings.PullRequestReviewPrompt;
 import app.drydock.intellij.startup.DrydockStartupActivity;
+import app.drydock.review.ReviewInstructions;
+import app.drydock.review.ReviewScope;
 
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
@@ -24,7 +28,6 @@ import com.intellij.openapi.progress.ProgressIndicator;
 import com.intellij.openapi.progress.ProgressManager;
 import com.intellij.openapi.progress.Task;
 import com.intellij.openapi.project.Project;
-import com.intellij.openapi.project.ProjectManager;
 import com.intellij.openapi.ui.Messages;
 
 import org.jetbrains.annotations.NotNull;
@@ -38,10 +41,14 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.Function;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 
 /**
  * Reviews an open pull request, end to end: the {@code pr-<n>} worktree
@@ -49,18 +56,35 @@ import java.util.function.Predicate;
  * a new agent session there, and the review prompt.
  *
  * <p>A re-review reuses what the first one built: a RUNNING review session
- * for the same worktree is joined (window and console focused, nothing
- * relaunched), and an ended review's worktree is re-entered as it stands
- * -- a fresh checkout would refuse the existing directory and the scope
- * resolver would refuse a held checkout.</p>
+ * for the same worktree is joined (its console moves into this window,
+ * nothing relaunched), and an ended review's worktree is re-entered as it
+ * stands -- a fresh checkout would refuse the existing directory and the
+ * scope resolver would refuse a held checkout.</p>
  *
- * <p>The prompt is Drydock's own review flow (resolve the session's review
- * scope, send {@code ReviewInstructions#forScope}) unless a custom
- * pull-request review prompt is configured in Settings › Tools › Drydock —
- * then that template, with {@code $PR$} replaced by the pull-request
- * number, is typed at the agent as its first message instead, and Drydock's
- * review tools are not involved at all. Whether the harness knows the
- * command is the harness's business.</p>
+ * <p>The console is a tab in the window the Review gesture came from — the
+ * same default the New task flow uses ({@code OpenIn.THIS_WINDOW}); the
+ * worktree's own project window is an explicit choice there, and none is
+ * offered here. Hosting also keeps the review out of a freshly opened
+ * window, where the IDE's README-on-first-open and the project import fight
+ * the console for focus and can leave the harness unreachable behind them
+ * (seen in the 2026-10-23 idea.log: two "Cannot focus editor" warnings with
+ * the README composite current, and the review prompt typed into the PTY
+ * while the harness was still booting — written, never read).</p>
+ *
+ * <p>The prompt is resolved BEFORE the agent spawns and travels as the
+ * launch's initial prompt — the same channel a task typed into the New task
+ * dialog uses, which the harness consumes whenever it is ready. A prompt
+ * typed into the console after a spawn, by contrast, races the harness's
+ * boot and can be swallowed whole. Two sources, in order: a custom
+ * pull-request review prompt configured in Settings › Tools › Drydock, with
+ * {@code $PR$} replaced by the pull-request number — the harness's business
+ * to understand, and Drydock's review tools are not involved at all;
+ * otherwise Drydock's own review flow — the session's review scope is
+ * resolved and bound while the session is minted (it does not exist before,
+ * and its agent may already be reading the prompt after), and
+ * {@code ReviewInstructions#forScope} for it is the first message. When the
+ * scope or the review service cannot be read, the session still starts, and
+ * the human is told why there is no review running in it.</p>
  *
  * <p>The session runs in WRITES mode in both cases: a reviewer's agent
  * builds, runs tests, and dispatches subagents, and a read-only sandbox
@@ -75,8 +99,22 @@ public final class PullRequestReview {
     /** Bounded waits, mirroring the New task flow's generous launch bound. */
     private static final long LAUNCH_TIMEOUT_SECONDS = 60;
 
+    /**
+     * What the launch future can legitimately take before the agent spawns:
+     * the launch itself plus the prompt resolver's own bounds — scope
+     * resolution (init wait + scope wait) runs INSIDE the launch chain, so a
+     * slow-but-healthy review backend would otherwise consume the launch
+     * budget, the flow would be reported as timed out while still succeeding,
+     * and the resolver's failure message would never be evaluated.
+     */
+    private static final long START_TIMEOUT_SECONDS =
+            LAUNCH_TIMEOUT_SECONDS + ReviewRequest.INIT_WAIT_SECONDS + ReviewRequest.SCOPE_WAIT_SECONDS;
+
     /** Above PrCheckoutService's five-minute gh checkout timeout, with room for cleanup. */
     private static final long CHECKOUT_AWAIT_TIMEOUT_SECONDS = TimeUnit.MINUTES.toSeconds(5) + 30;
+
+    /** Bound on removing an abandoned review worktree, as TaskActions and SessionDone use. */
+    private static final long REMOVE_TIMEOUT_SECONDS = 120;
 
     /** Materializations in flight, by {@code <root>#<number>}; a second click is refused. */
     private final Set<String> inFlight = ConcurrentHashMap.newKeySet();
@@ -152,7 +190,7 @@ public final class PullRequestReview {
         Optional<ManagedAgentSession> running = runningSessionFor(plugin.stateStore().state().sessions(),
                 base);
         if (running.isPresent()) {
-            joinRunningReview(from, base, running.get());
+            joinRunningReview(from, running.get());
             return;
         }
 
@@ -172,20 +210,19 @@ public final class PullRequestReview {
         }
 
         Path reused = worktree;
+        // No expiry on the window: openAndLaunch must run even when `from` is gone, to
+        // clean up the worktree it would otherwise leave behind.
         ApplicationManager.getApplication().invokeLater(() -> openAndLaunch(from, mainRoot, reused,
-                pullRequest, agent.get()), ModalityState.nonModal(), from.getDisposed());
+                pullRequest, agent.get()), ModalityState.nonModal());
     }
 
-    /** EDT: brings the running review's window and console to the front; nothing is relaunched. */
-    private void joinRunningReview(Project from, Path worktree, ManagedAgentSession running) {
+    /** EDT: moves the running review's console into this window; nothing is relaunched. */
+    private void joinRunningReview(Project from, ManagedAgentSession running) {
         ApplicationManager.getApplication().invokeLater(() -> {
-            Project target = windowOn(worktree).orElseGet(() -> TaskWindows.openAsProject(worktree));
-            if (target == null || target.isDisposed()) {
-                report(from, "The review of " + running.displayName() + " is running in " + worktree
-                        + ", but its window did not open. Open it with File › Open to join it.");
-                return;
+            if (from.isDisposed()) {
+                return; // the review keeps running in its hosting window; nothing to join here
             }
-            AgentConsoles.focusConsoleLater(target, running.id());
+            AgentConsoles.showHere(from, running.id());
         }, ModalityState.nonModal(), from.getDisposed());
     }
 
@@ -219,82 +256,231 @@ public final class PullRequestReview {
         return Optional.empty();
     }
 
-    /** EDT: opens (or reuses) the worktree's window, then starts the session and hands it the prompt. */
+    /** EDT: hosts the review console as a tab in this window, then starts the session with its prompt. */
     private void openAndLaunch(Project from, Path mainRoot, Path worktree, OpenPullRequest pullRequest,
                                AgentKind agent) {
-        Project target = windowOn(worktree).orElseGet(() -> TaskWindows.openAsProject(worktree));
-        if (target == null || target.isDisposed()) {
-            report(from, "The worktree " + worktree + " is ready, but its window did not open. "
-                    + "Open it with File › Open and start the review there.");
+        if (from.isDisposed()) {
+            // The window the gesture came from is gone: nothing will host the review, so
+            // its freshly checked-out worktree must not stay behind as an orphan.
+            LOG.log(Level.INFO, "The window was closed while PR #{0} was being checked out; removing {1}",
+                    pullRequest.number(), worktree);
+            abandon(mainRoot, worktree, pullRequest.number());
             return;
         }
         String displayName = "Review #" + pullRequest.number() + " " + pullRequest.title();
         Optional<String> custom = PullRequestReviewPrompt.load().map(template ->
                 PullRequestReviewPrompt.render(template, pullRequest.number()));
-        var launch = SessionDialogs.launchSession(target, worktree, mainRoot, agent, displayName,
-                SessionMode.WRITES, custom, true);
-        ProgressManager.getInstance().run(new Task.Backgroundable(target,
+        ReviewPrompt prompt = custom.map(ReviewPrompt::fixed)
+                .orElseGet(() -> ReviewPrompt.drydockReview(agent));
+        var launch = SessionDialogs.launchSession(from, worktree, mainRoot, agent, displayName,
+                SessionMode.WRITES, prompt::resolve, false);
+        ProgressManager.getInstance().run(new Task.Backgroundable(from,
                 "Starting review of PR #" + pullRequest.number() + "…", false) {
             @Override
             public void run(@NotNull ProgressIndicator indicator) {
                 ManagedAgentSession started;
                 try {
-                    started = launch.get(LAUNCH_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                    started = launch.get(START_TIMEOUT_SECONDS, TimeUnit.SECONDS);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     return;
                 } catch (ExecutionException e) {
-                    SessionDialogs.reportLaunchFailure(target, "start the review session", e);
+                    SessionDialogs.reportLaunchFailure(from, "start the review session", e);
                     return;
                 } catch (TimeoutException e) {
-                    LOG.log(Level.WARNING, "The review session did not start within {0}s", LAUNCH_TIMEOUT_SECONDS);
+                    LOG.log(Level.WARNING, "The review session did not start within {0}s", START_TIMEOUT_SECONDS);
                     return;
                 }
-                AgentConsoles.focusConsoleLater(target, started.id());
-                if (custom.isEmpty()) {
-                    ReviewRequest.Outcome outcome = sendDrydockReviewPrompt(target, started);
-                    if (outcome instanceof ReviewRequest.Sent) {
-                        // The review is the session's one job, so its own
-                        // window's Review tab is where the human watches it:
-                        // open it as soon as the agent has taken the request,
-                        // through the same sanctioned opener the Changes link
-                        // uses (placeholder, background mint, host resolved).
-                        // A custom prompt bypasses Drydock's review tools
-                        // entirely, so there is nothing for the tab to show.
+                AgentConsoles.focusConsoleLater(from, started.id());
+                // The prompt rode on the launch; only its absence needs a word.
+                Optional<String> absence = prompt.userMessage(displayName, holdsAccess(started));
+                absence.ifPresent(message ->
                         ApplicationManager.getApplication().invokeLater(
-                                () -> ReviewTabOpener.open(target, Optional.of(started)),
-                                ModalityState.nonModal(), target.getDisposed());
-                    }
+                                () -> Messages.showWarningDialog(from, message, "Drydock"),
+                                ModalityState.nonModal(), from.getDisposed()));
+                if (custom.isEmpty() && absence.isEmpty()) {
+                    // The review is armed: the Drydock instruction rode the
+                    // launch and the session holds the review tools. Its
+                    // console's window's Review tab is where the human watches
+                    // it, through the same sanctioned opener the Changes link
+                    // uses (placeholder, background mint, host resolved). A
+                    // custom prompt bypasses Drydock's review tools entirely,
+                    // so there is nothing for the tab to show.
+                    ApplicationManager.getApplication().invokeLater(
+                            () -> ReviewTabOpener.open(from, Optional.of(started)),
+                            ModalityState.nonModal(), from.getDisposed());
                 }
             }
         });
     }
 
-    /** Asks a freshly started session to review its changes with Drydock's review tools. Blocks. */
-    private static ReviewRequest.Outcome sendDrydockReviewPrompt(Project project, ManagedAgentSession session) {
-        DrydockPluginService plugin = DrydockPluginService.getInstance();
-        AgentExecutionRegistry executions = AgentExecutionRegistry.getInstance();
-        ReviewRequest request = ReviewRequest.forBackend(plugin.initialization(), plugin::reviewBackend,
-                executions::isRunning, kind -> plugin.registry().supportsSubagents(kind),
-                executions::submitPrompt);
-        ReviewRequest.Outcome outcome = request.request(session);
-        ReviewRequest.message(session.displayName(), outcome).ifPresent(message ->
-                ApplicationManager.getApplication().invokeLater(
-                        () -> Messages.showWarningDialog(project, message, "Drydock"),
-                        ModalityState.nonModal(), project.getDisposed()));
-        return outcome;
+    /** Whether the started session holds the review backend's MCP access — false when the backend is absent. */
+    private static boolean holdsAccess(ManagedAgentSession started) {
+        return DrydockPluginService.getInstance().reviewBackend()
+                .map(backend -> backend.holdsAccess(started.id())).orElse(false);
     }
 
-    /** The open window showing {@code directory}, compared canonically. EDT. */
-    private static Optional<Project> windowOn(Path directory) {
-        Path wanted = directory.toAbsolutePath().normalize();
-        for (Project open : ProjectManager.getInstance().getOpenProjects()) {
-            if (!open.isDisposed() && open.getBasePath() != null
-                    && Path.of(open.getBasePath()).toAbsolutePath().normalize().equals(wanted)) {
-                return Optional.of(open);
+    /**
+     * The review's first message, and why there was none.
+     *
+     * <p>The resolver runs on the launch chain between minting the session
+     * and spawning its agent (see {@code SessionDialogs.launchSession}), so
+     * its result is the launch's initial prompt. {@link #resolve} never throws,
+     * never completes exceptionally, and never blocks the launch indefinitely:
+     * every failure is recorded as a {@code complaint} and yields an empty
+     * prompt — a session without a review beats no session, and the human is
+     * told what did not resolve once the session is up.</p>
+     *
+     * <p>Package-private for tests; see {@code PullRequestReviewTest}.</p>
+     */
+    static final class ReviewPrompt {
+
+        private ReviewPrompt() { }
+
+        /** Resolved without the session: the custom template needs only the PR number. */
+        static ReviewPrompt fixed(String prompt) {
+            ReviewPrompt p = new ReviewPrompt();
+            p.needsTools = false;
+            p.resolver = session -> CompletableFuture.completedFuture(Optional.of(prompt));
+            return p;
+        }
+
+        /**
+         * Drydock's review instruction, resolved from the session's freshly bound scope.
+         * Every plugin-service lookup is deferred to resolution, inside a lambda.
+         */
+        static ReviewPrompt drydockReview(AgentKind agent) {
+            return drydockReview(agent,
+                    () -> DrydockPluginService.getInstance().initialization(),
+                    () -> DrydockPluginService.getInstance().reviewBackend(),
+                    kind -> DrydockPluginService.getInstance().registry().supportsSubagents(kind),
+                    command -> DrydockPluginService.getInstance().executor().execute(command));
+        }
+
+        /** As {@link #drydockReview(AgentKind)}, with the plugin service's parts supplied; package-private for tests. */
+        static ReviewPrompt drydockReview(AgentKind agent,
+                                          Supplier<? extends CompletableFuture<?>> initialization,
+                                          Supplier<Optional<ReviewBackend>> backend,
+                                          Predicate<AgentKind> supportsSubagents,
+                                          Executor executor) {
+            ReviewPrompt p = new ReviewPrompt();
+            p.needsTools = true;
+            p.resolver = session -> CompletableFuture.supplyAsync(
+                    () -> p.drydockInstruction(agent, session, initialization, backend, supportsSubagents), executor);
+            return p;
+        }
+
+        private Function<ManagedAgentSession, CompletableFuture<Optional<String>>> resolver;
+        /** Whether the prompt (when there is one) addresses Drydock's review tools. */
+        private boolean needsTools;
+        /** Why no Drydock prompt was resolved; null when one was (or a custom one rides instead). */
+        private volatile ReviewRequest.Outcome complaint;
+
+        /**
+         * See {@code SessionDialogs.launchSession}'s {@code prompt} parameter. Blocks while resolving.
+         * Never throws and never completes exceptionally: a failure is a complaint and an empty prompt.
+         */
+        CompletableFuture<Optional<String>> resolve(ManagedAgentSession session) {
+            CompletableFuture<Optional<String>> resolving;
+            try {
+                resolving = resolver.apply(session);
+            } catch (RuntimeException e) {
+                // e.g. the plugin service or its executor is gone mid-launch
+                return CompletableFuture.completedFuture(noPrompt(new ReviewRequest.Failed(PullRequestReview.cause(e))));
+            }
+            return resolving.exceptionally(e -> noPrompt(new ReviewRequest.Failed(PullRequestReview.cause(e))));
+        }
+
+        /** What to tell the human once the session is up, or empty when the review is properly armed. */
+        Optional<String> userMessage(String taskName, boolean holdsAccess) {
+            if (complaint != null) {
+                return ReviewRequest.message(taskName, complaint);
+            }
+            // A Drydock prompt names review tools the session must hold; one
+            // launched without them runs the instruction into a wall. (A
+            // custom prompt is the harness's business — no check.)
+            if (needsTools && !holdsAccess) {
+                return ReviewRequest.message(taskName, new ReviewRequest.NoTools());
+            }
+            return Optional.empty();
+        }
+
+        /**
+         * Off the EDT: the backend's scope for {@code session}, as the agent's first message.
+         * Never throws a RuntimeException.
+         */
+        private Optional<String> drydockInstruction(AgentKind agent, ManagedAgentSession session,
+                                                    Supplier<? extends CompletableFuture<?>> initialization,
+                                                    Supplier<Optional<ReviewBackend>> backend,
+                                                    Predicate<AgentKind> supportsSubagents) {
+            try {
+                initialization.get().get(ReviewRequest.INIT_WAIT_SECONDS, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return noPrompt(new ReviewRequest.NotReady());
+            } catch (TimeoutException | ExecutionException | RuntimeException e) {
+                return noPrompt(new ReviewRequest.NotReady());
+            }
+            Optional<ReviewBackend> found;
+            try {
+                found = backend.get();
+            } catch (RuntimeException e) {
+                return noPrompt(new ReviewRequest.NotReady());
+            }
+            return found.filter(ReviewBackend::ready)
+                    .map(b -> instruction(agent, session, b, supportsSubagents))
+                    .orElseGet(() -> noPrompt(new ReviewRequest.NotReady()));
+        }
+
+        private Optional<String> instruction(AgentKind agent, ManagedAgentSession session, ReviewBackend backend,
+                                             Predicate<AgentKind> supportsSubagents) {
+            try {
+                ReviewScope scope = backend.scopeResolver().resolve(session)
+                        .get(ReviewRequest.SCOPE_WAIT_SECONDS, TimeUnit.SECONDS);
+                return Optional.of(ReviewInstructions.forScope(scope.id(), supportsSubagents.test(agent)));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return noPrompt(new ReviewRequest.Failed(PullRequestReview.cause(e)));
+            } catch (TimeoutException | ExecutionException | RuntimeException e) {
+                return noPrompt(new ReviewRequest.Failed(PullRequestReview.cause(e)));
             }
         }
-        return Optional.empty();
+
+        /** Records why there is no prompt and answers with none. */
+        private Optional<String> noPrompt(ReviewRequest.Outcome outcome) {
+            complaint = outcome;
+            return Optional.empty();
+        }
+    }
+
+    /** Removes the unused review worktree off the EDT; tells the user when it stays. Never force-removes. */
+    private static void abandon(Path mainRoot, Path worktree, int number) {
+        ApplicationManager.getApplication().executeOnPooledThread(() -> {
+            try (WorktreeService worktrees = new WorktreeService()) {
+                // Non-forced: local changes are never discarded. The pr-<n> branch is kept.
+                worktrees.remove(mainRoot, worktree, Optional.empty())
+                        .get(REMOVE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                LOG.log(Level.INFO, "Removed the unused review worktree {0}", worktree);
+                // Other windows' task trees may still list it as an idle row.
+                DrydockSessionsListener.publishChanged();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                leftBehind(worktree, number, "interrupted");
+            } catch (ExecutionException | TimeoutException | RuntimeException e) {
+                LOG.log(Level.WARNING, "Could not remove the unused review worktree " + worktree, e);
+                leftBehind(worktree, number, cause(e));
+            }
+        });
+    }
+
+    /** App-level error dialog: the source project is gone, so it has no project to expire with. */
+    private static void leftBehind(Path worktree, int number, String why) {
+        String message = "The window was closed while PR #" + number + " was being checked out, and its"
+                + " worktree could not be removed (" + why + "):\n" + worktree
+                + "\nRemove it from the task tree's worktree list, or with `git worktree remove`,"
+                + " before reviewing the PR again.";
+        ApplicationManager.getApplication().invokeLater(
+                () -> Messages.showErrorDialog((Project) null, message, "Drydock"), ModalityState.nonModal());
     }
 
     private static void report(Project project, String message) {
