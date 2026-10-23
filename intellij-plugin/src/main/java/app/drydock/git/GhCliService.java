@@ -216,19 +216,27 @@ public final class GhCliService implements AutoCloseable {
     }
 
     /** Every open pull request in {@code root}, drafts included (see {@link PullRequestListing}). */
-    public CompletableFuture<PullRequestListing> openPullRequests(Path root) {
-        return CompletableFuture.supplyAsync(() -> openPullRequestsBlocking(root), executor);
+    public CompletableFuture<PullRequestListing> openPullRequests(Path root, Optional<String> repository) {
+        return CompletableFuture.supplyAsync(() -> openPullRequestsBlocking(root, repository), executor);
     }
 
-    PullRequestListing openPullRequestsBlocking(Path root) {
+    PullRequestListing openPullRequestsBlocking(Path root, Optional<String> repository) {
         Path gh = locate().orElse(null);
         if (gh == null) {
             return new PullRequestListing.Unsupported();
         }
-        ProcessResult result = runIn(root, List.of(gh.toString(), "pr", "list",
+        if (repository.filter(value -> !validRepository(value)).isPresent()) {
+            return new PullRequestListing.Failed("The configured GitHub repository is not OWNER/REPO or HOST/OWNER/REPO");
+        }
+        List<String> command = new ArrayList<>(List.of(gh.toString(), "pr", "list",
                 "--state", "open",
                 "--limit", String.valueOf(PR_LIST_LIMIT),
                 "--json", "number,title,headRefName,baseRefName,isDraft,author,url"));
+        repository.ifPresent(value -> {
+            command.add("--repo");
+            command.add(value);
+        });
+        ProcessResult result = runIn(root, command);
         if (result == null) {
             return new PullRequestListing.Failed("gh did not run to completion");
         }

@@ -1778,7 +1778,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         if (installed != candidate) {
             return installed.listing();
         }
-        ghCliService.openPullRequests(repositoryRoot).whenComplete((result, failure) -> {
+        ghCliService.openPullRequests(repositoryRoot, Optional.empty()).whenComplete((result, failure) -> {
             if (failure != null) {
                 LOG.log(Level.WARNING, "Could not list pull requests in " + repositoryRoot, failure);
             } else if (result instanceof GhCliService.PullRequestListing.Listed listed) {

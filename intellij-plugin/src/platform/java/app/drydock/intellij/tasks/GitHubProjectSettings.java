@@ -9,7 +9,7 @@ import java.util.Objects;
 import java.util.Optional;
 
 /** Non-secret GitHub presentation settings for one registered Drydock project. */
-record GitHubProjectSettings(boolean issuesEnabled, Optional<String> repository) {
+record GitHubProjectSettings(boolean issuesEnabled, boolean pullRequestsEnabled, Optional<String> repository) {
 
     private static final String PREFIX = "drydock.github.";
 
@@ -23,6 +23,7 @@ record GitHubProjectSettings(boolean issuesEnabled, Optional<String> repository)
         String prefix = prefix(id);
         return new GitHubProjectSettings(
                 properties.getBoolean(prefix + ".issuesEnabled", true),
+                properties.getBoolean(prefix + ".pullRequestsEnabled", true),
                 Optional.ofNullable(properties.getValue(prefix + ".repository")));
     }
 
@@ -30,6 +31,7 @@ record GitHubProjectSettings(boolean issuesEnabled, Optional<String> repository)
         PropertiesComponent properties = PropertiesComponent.getInstance();
         String prefix = prefix(id);
         properties.setValue(prefix + ".issuesEnabled", issuesEnabled, true);
+        properties.setValue(prefix + ".pullRequestsEnabled", pullRequestsEnabled, true);
         properties.setValue(prefix + ".repository", repository.orElse(null));
     }
 

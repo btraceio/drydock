@@ -84,13 +84,8 @@ public final class SessionDialogs {
             String displayName, SessionMode mode, Optional<String> task, boolean freshWindow) {
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         String agentName = AgentLabels.displayName(plugin.registry(), kind);
-        CompletableFuture<ManagedAgentSession> launch =
-                DrydockStartupActivity.sessions(project).prepareSession(workingDirectory, repositoryRoot, kind, displayName, mode)
-                        .thenApply(session -> {
-                            showConsoleTab(project, session.id(), freshWindow);
-                            return session;
-                        })
-                        .thenCompose(session -> DrydockStartupActivity.sessions(project).launchSession(session, task));
+        CompletableFuture<ManagedAgentSession> launch = launchSession(project, workingDirectory, repositoryRoot,
+                kind, displayName, mode, task, freshWindow);
         ProgressManager.getInstance().run(new Task.Backgroundable(project,
                 "Starting " + agentName + " session…", true) {
             @Override
@@ -113,6 +108,33 @@ public final class SessionDialogs {
     }
 
     /**
+     * The launch half of {@link #launchNewSession}, without the progress
+     * wrapper: prepares the session, opens its console tab as soon as it has
+     * an id, and starts the agent with {@code task} as its first message.
+     * Callers that only start a session use {@code launchNewSession}; callers
+     * that must act on the started session (the pull-request review sends its
+     * prompt once the agent is up) chain on the returned future instead.
+     *
+     * @param repositoryRoot the main checkout the task belongs to; recorded
+     *                    on the session (see {@code DrydockSessionService
+     *                    .prepareSession(Path, Path, ...)})
+     * @param freshWindow whether {@code project} is a window Drydock has just
+     *                    opened for this session, where the IDE's
+     *                    README-on-first-open is still to come
+     */
+    public static CompletableFuture<ManagedAgentSession> launchSession(Project project, Path workingDirectory,
+            Path repositoryRoot, AgentKind kind, String displayName, SessionMode mode, Optional<String> task,
+            boolean freshWindow) {
+        return DrydockStartupActivity.sessions(project)
+                .prepareSession(workingDirectory, repositoryRoot, kind, displayName, mode)
+                .thenApply(session -> {
+                    showConsoleTab(project, session.id(), freshWindow);
+                    return session;
+                })
+                .thenCompose(session -> DrydockStartupActivity.sessions(project).launchSession(session, task));
+    }
+
+    /**
      * Opens the session's console tab on the EDT, without waiting for it: the
      * editor renders its Not-running state immediately and swaps to the live
      * console when the execution starts, which it learns from
@@ -129,7 +151,7 @@ public final class SessionDialogs {
     }
 
     /** The launch/resume failure the user sees (AC11): names the action's agent, keeps the cause's own words. */
-    private static void reportLaunchFailure(Project project, String what, Throwable failure) {
+    public static void reportLaunchFailure(Project project, String what, Throwable failure) {
         Throwable cause = failure.getCause() != null ? failure.getCause() : failure;
         LOG.log(Level.WARNING, "Could not " + what + ": " + cause);
         ApplicationManager.getApplication().invokeLater(

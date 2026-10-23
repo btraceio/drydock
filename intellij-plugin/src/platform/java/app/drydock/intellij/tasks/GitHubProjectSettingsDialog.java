@@ -24,6 +24,7 @@ final class GitHubProjectSettingsDialog extends DialogWrapper {
 
     private final SharedProject registered;
     private final JBCheckBox issues = new JBCheckBox("Show all open issues");
+    private final JBCheckBox pullRequests = new JBCheckBox("Show all open pull requests");
     private final JBTextField repository = new JBTextField();
 
     GitHubProjectSettingsDialog(Project project, SharedProject registered) {
@@ -31,6 +32,7 @@ final class GitHubProjectSettingsDialog extends DialogWrapper {
         this.registered = registered;
         GitHubProjectSettings settings = GitHubProjectSettings.load(registered.id());
         issues.setSelected(settings.issuesEnabled());
+        pullRequests.setSelected(settings.pullRequestsEnabled());
         repository.setText(settings.repository().orElse(""));
         repository.getEmptyText().setText("Auto-detect from this project's git remote");
         setTitle("GitHub — " + registered.displayName());
@@ -46,6 +48,7 @@ final class GitHubProjectSettingsDialog extends DialogWrapper {
         repositoryHint.setForeground(UIUtil.getContextHelpForeground());
         JPanel form = FormBuilder.createFormBuilder()
                 .addComponent(issues)
+                .addComponent(pullRequests)
                 .addLabeledComponent("Repository:", repository)
                 .addComponentToRightColumn(repositoryHint)
                 .addSeparator()
@@ -65,7 +68,7 @@ final class GitHubProjectSettingsDialog extends DialogWrapper {
 
     @Override
     protected void doOKAction() {
-        new GitHubProjectSettings(issues.isSelected(), Optional.of(repository.getText()))
+        new GitHubProjectSettings(issues.isSelected(), pullRequests.isSelected(), Optional.of(repository.getText()))
                 .save(registered.id());
         super.doOKAction();
     }

@@ -8,6 +8,7 @@ import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionActivity;
 import app.drydock.git.GhCliService;
 import app.drydock.git.GhCliService.IssueListing;
+import app.drydock.git.GhCliService.PullRequestListing;
 import app.drydock.git.WorktreeService;
 import app.drydock.git.WorktreeService.Worktree;
 import app.drydock.intellij.DrydockPluginService;
@@ -62,10 +63,15 @@ final class TaskTreeInputs implements AutoCloseable {
     private final Map<Path, List<Worktree>> worktreeCache = new ConcurrentHashMap<>();
     private final Map<Path, Instant> activityCache = new ConcurrentHashMap<>();
     private final Map<IssueKey, CachedIssues> issueCache = new ConcurrentHashMap<>();
+    private final Map<PullRequestKey, CachedPullRequests> pullRequestCache = new ConcurrentHashMap<>();
 
     private record IssueKey(Path root, Optional<String> repository) { }
 
+    private record PullRequestKey(Path root, Optional<String> repository) { }
+
     private record CachedIssues(long expiresAt, CompletableFuture<IssueListing> listing) { }
+
+    private record CachedPullRequests(long expiresAt, CompletableFuture<PullRequestListing> listing) { }
 
     void invalidateWorktrees() {
         worktreeCache.clear();
@@ -74,17 +80,32 @@ final class TaskTreeInputs implements AutoCloseable {
 
     void invalidateGitHub() {
         issueCache.clear();
+        pullRequestCache.clear();
+    }
+
+    /** Forgets {@code root}'s cached issue listing, so the next gather re-queries it. */
+    void invalidateIssues(Path root) {
+        issueCache.keySet().removeIf(key -> key.root().equals(root));
+    }
+
+    /** Forgets {@code root}'s cached pull-request listing, so the next gather re-queries it. */
+    void invalidatePullRequests(Path root) {
+        pullRequestCache.keySet().removeIf(key -> key.root().equals(root));
     }
 
     TaskTreeModel.Inputs gather(Project here, String filter, TaskTreeModel.ViewFilter viewFilter,
-                                Set<Path> requestedWorktrees, Set<Path> requestedIssues) {
+                                Set<Path> requestedWorktrees, Set<Path> requestedIssues,
+                                Set<Path> requestedPullRequests) {
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         List<SharedProject> projects = new ArrayList<>();
         Map<Path, List<Worktree>> byMain = new HashMap<>();
         Map<Path, Path> mainRootOf = new HashMap<>();
         Map<Path, CompletableFuture<IssueListing>> issueRequests = new LinkedHashMap<>();
+        Map<Path, CompletableFuture<PullRequestListing>> pullRequestRequests = new LinkedHashMap<>();
         Set<Path> worktreeContainers = new HashSet<>();
         Set<Path> issueContainers = new HashSet<>();
+        Set<Path> pullRequestContainers = new HashSet<>();
+        Map<Path, List<Worktree>> pullRequestDedupWorktrees = new HashMap<>();
         Set<Path> missing = new HashSet<>();
         for (SharedProject project : plugin.sharedProjects().projects()) {
             if (project.isRemote()) {
@@ -105,6 +126,18 @@ final class TaskTreeInputs implements AutoCloseable {
                 issueContainers.add(root);
                 if (requestedIssues.contains(root)) {
                     issueRequests.put(root, issuesOf(root, githubSettings.repository()));
+                }
+            }
+            if (githubSettings.pullRequestsEnabled()) {
+                pullRequestContainers.add(root);
+                if (requestedPullRequests.contains(root)) {
+                    pullRequestRequests.put(root, pullRequestsOf(root, githubSettings.repository()));
+                    // Dedup needs the worktree list even when the user has never
+                    // opened the Worktrees section (byMain is filled lazily), but
+                    // only once pull requests themselves have been requested.
+                    if (!byMain.containsKey(root)) {
+                        pullRequestDedupWorktrees.put(root, worktreesOf(root));
+                    }
                 }
             }
             if (requestedWorktrees.contains(root)) {
@@ -179,10 +212,23 @@ final class TaskTreeInputs implements AutoCloseable {
                 issues.put(entry.getKey(), new IssueListing.Failed("GitHub issue lookup did not complete"));
             }
         }
+        Map<Path, PullRequestListing> pullRequests = new HashMap<>();
+        for (Map.Entry<Path, CompletableFuture<PullRequestListing>> entry : pullRequestRequests.entrySet()) {
+            try {
+                pullRequests.put(entry.getKey(), entry.getValue().get(GITHUB_TIMEOUT_SECONDS, TimeUnit.SECONDS));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            } catch (ExecutionException | TimeoutException | RuntimeException e) {
+                LOG.log(Level.DEBUG, () -> "No GitHub pull requests for " + entry.getKey() + ": " + e);
+                pullRequests.put(entry.getKey(),
+                        new PullRequestListing.Failed("GitHub pull-request lookup did not complete"));
+            }
+        }
         return new TaskTreeModel.Inputs(projects, sessions, byMain, mainRootOf, currentMain, currentWorking,
                 activity, running, hosts, missing, recordedRoots, worktreeContainers, issueContainers,
-                openFolders, Map.copyOf(activityCache), Instant.now(),
-                issues, plugin.sharedProjects().problem(), filter, viewFilter);
+                pullRequestContainers, openFolders, Map.copyOf(activityCache), Instant.now(),
+                issues, pullRequests, pullRequestDedupWorktrees, plugin.sharedProjects().problem(), filter, viewFilter);
     }
 
     private CompletableFuture<IssueListing> issuesOf(Path root, Optional<String> repository) {
@@ -195,6 +241,30 @@ final class TaskTreeInputs implements AutoCloseable {
         CompletableFuture<IssueListing> listing = github.openIssues(root, repository);
         issueCache.put(key, new CachedIssues(now + ISSUE_CACHE_NANOS, listing));
         return listing;
+    }
+
+    private CompletableFuture<PullRequestListing> pullRequestsOf(Path root, Optional<String> repository) {
+        PullRequestKey key = new PullRequestKey(root, repository);
+        long now = System.nanoTime();
+        CachedPullRequests cached = pullRequestCache.get(key);
+        if (cached != null && cached.expiresAt() > now && !failed(cached.listing())) {
+            return cached.listing();
+        }
+        CompletableFuture<PullRequestListing> listing = github.openPullRequests(root, repository);
+        pullRequestCache.put(key, new CachedPullRequests(now + ISSUE_CACHE_NANOS, listing));
+        return listing;
+    }
+
+    /**
+     * A failed listing is never served from the cache: the tree rebuilds on
+     * every session or activity event, so a transient {@code gh} failure is
+     * retried on the next pass instead of pinning the error for a minute and
+     * leaving the section a dead "GitHub pull requests: …" row.
+     */
+    private static boolean failed(CompletableFuture<PullRequestListing> listing) {
+        // openPullRequestsBlocking never completes exceptionally (every
+        // failure becomes a Failed listing), so join on a done future is safe.
+        return listing.isDone() && listing.join() instanceof PullRequestListing.Failed;
     }
 
     /** {@code root}'s worktrees, canonical paths; empty when git cannot list them. */
