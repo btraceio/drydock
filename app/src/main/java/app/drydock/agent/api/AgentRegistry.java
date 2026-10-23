@@ -34,6 +34,7 @@ public final class AgentRegistry {
     private final Map<AgentKind, Boolean> availability = new EnumMap<>(AgentKind.class);
     private final Map<AgentKind, Boolean> remoteCapability = new EnumMap<>(AgentKind.class);
     private final Map<AgentKind, Boolean> subagentCapability = new EnumMap<>(AgentKind.class);
+    private final Map<AgentKind, List<String>> modelSuggestionsCache = new EnumMap<>(AgentKind.class);
 
     /** Discovers providers via ServiceLoader. Call off the FX thread (probes executables). */
     public static AgentRegistry create(AgentContext ctx) {
@@ -170,6 +171,29 @@ public final class AgentRegistry {
      */
     public boolean supportsSubagents(AgentKind kind) {
         return subagentCapability.getOrDefault(kind, false);
+    }
+
+    /**
+     * The model ids {@code kind}'s harness can be launched with, for the
+     * start-session modal's model picker. Delegates to the provider's
+     * {@link AgentProvider#modelSuggestions()}, which may block (Pi spawns a
+     * {@code pi --list-models} subprocess), so callers MUST run this off the
+     * FX thread -- typically a virtual thread that fills the picker while it
+     * is already usable. Cached per registry: the catalog is a snapshot of a
+     * CLI that changes on upgrade, not per keystroke, and one app run re-opening
+     * the modal many times should not re-pay the subprocess each time.
+     */
+    public synchronized List<String> modelSuggestions(AgentKind kind) {
+        return modelSuggestionsCache.computeIfAbsent(kind, k -> provider(k)
+                .map(p -> {
+                    try {
+                        return List.copyOf(p.modelSuggestions());
+                    } catch (RuntimeException e) {
+                        LOG.log(Level.WARNING, () -> "Model catalog probe failed for " + k + ": " + e);
+                        return List.<String>of();
+                    }
+                })
+                .orElse(List.of()));
     }
 
     /**

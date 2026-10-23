@@ -143,9 +143,39 @@ class SessionManagerTest {
         Repository repo = someRepository();
         ApplicationState state = ApplicationState.empty().withRepositories(List.of(repo));
 
-        ApplicationState updated = SessionManager.repoWithLastUsedAgent(state, repo.id(), AgentKind.CODEX);
+        ApplicationState updated = SessionManager.repoWithLastUsedAgent(state, repo.id(), AgentKind.CODEX,
+                Optional.empty());
 
         assertEquals(Optional.of(AgentKind.CODEX), updated.repositories().get(0).settings().lastUsedAgent());
+    }
+
+    @Test
+    void lastUsedModelTransformRecordsTheModelForItsHarness() {
+        Repository repo = someRepository();
+        ApplicationState state = ApplicationState.empty().withRepositories(List.of(repo));
+
+        ApplicationState updated = SessionManager.repoWithLastUsedAgent(state, repo.id(), AgentKind.PI,
+                Optional.of("ai-gw-bedrock/bedrock/openai.gpt-5.4"));
+
+        RepositorySettings settings = updated.repositories().get(0).settings();
+        assertEquals(Optional.of("ai-gw-bedrock/bedrock/openai.gpt-5.4"), settings.lastUsedModel(AgentKind.PI));
+        // Another harness's memory is untouched by this launch -- the model
+        // spaces are disjoint (a claude alias means nothing to pi).
+        assertTrue(settings.lastUsedModel(AgentKind.CLAUDE).isEmpty());
+    }
+
+    @Test
+    void launchWithoutAModelLeavesTheRememberedModelAlone() {
+        Repository repo = someRepository().withSettings(
+                RepositorySettings.DEFAULT.withLastUsedModel(AgentKind.PI, Optional.of("pi-model")));
+        ApplicationState state = ApplicationState.empty().withRepositories(List.of(repo));
+
+        // A fresh-conversation start (startFreshConversation) passes model=empty:
+        // it picked no model, so it must not clear what the human last picked.
+        ApplicationState updated = SessionManager.repoWithLastUsedAgent(state, repo.id(), AgentKind.PI,
+                Optional.empty());
+
+        assertEquals(Optional.of("pi-model"), updated.repositories().get(0).settings().lastUsedModel(AgentKind.PI));
     }
 
     @Test

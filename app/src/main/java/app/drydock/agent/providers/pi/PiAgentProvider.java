@@ -18,6 +18,7 @@ import app.drydock.agent.providers.HostBinaryLocator;
 import app.drydock.agent.providers.pi.internal.PiCapabilities;
 import app.drydock.agent.providers.pi.internal.PiExecutableLocator;
 import app.drydock.agent.providers.pi.internal.PiExtensionInstaller;
+import app.drydock.agent.providers.pi.internal.PiModelCatalog;
 import app.drydock.agent.providers.pi.internal.PiSessionStore;
 import app.drydock.agent.providers.pi.internal.PiVersionProbe;
 import app.drydock.agent.spi.AgentProvider;
@@ -176,7 +177,18 @@ public final class PiAgentProvider implements AgentProvider {
         if (c.remote().isPresent()) {
             return LaunchPlan.unsupported();   // Pi declines remote
         }
-        return LaunchPlan.of(piCommand(c.mcp(), c.evalMode()), false);   // DISCOVERED: no id
+        return LaunchPlan.of(piCommand(c.mcp(), c.evalMode()) + modelFlag(c.model()), false);   // DISCOVERED: no id
+    }
+
+    /** {@code pi} is the one harness whose CLI can enumerate its models ({@code pi --list-models}). */
+    @Override
+    public List<String> modelSuggestions() {
+        return PiModelCatalog.list(locator.locate().orElse(null));
+    }
+
+    /** {@code --model <m>} for a picked starting model; empty for the harness's own default. */
+    private static String modelFlag(Optional<String> model) {
+        return model.map(m -> " --model " + AgentCommands.shellQuote(m)).orElse("");
     }
 
     @Override

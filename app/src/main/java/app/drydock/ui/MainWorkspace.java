@@ -148,6 +148,7 @@ import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
 import java.util.function.DoubleSupplier;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
@@ -927,14 +928,15 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
         String branch = worktree.branch().orElse(worktree.detached() ? "(detached)" : repository.displayName());
         StartSessionModal modal = new StartSessionModal(branch, worktree.path(), agentRegistry, defaultKind.get(),
-                requireRemote, remoteOf(repository), modalLayer::close, (task, agent, eval) -> {
+                requireRemote, remoteOf(repository), lastUsedModelOf(repository), modalLayer::close,
+                (task, agent, model, eval) -> {
             clearUnopenedWorktreeState();
             if (worktree.mainCheckout()) {
-                openNewSession(repository, task, agent, eval);
+                openNewSession(repository, task, agent, model, eval);
             } else {
                 // Discovered on disk: drydock did not create this branch, so
                 // removing the worktree must never force-delete it.
-                openNewWorktreeSession(repository, branch, worktree.path(), task, false, agent, eval);
+                openNewWorktreeSession(repository, branch, worktree.path(), task, false, agent, model, eval);
             }
             onStarted.run();
         });
@@ -985,12 +987,13 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         String branch = status != null ? UiFormats.branchText(status)
                 : (worktreeRoot.isPresent() ? session.displayName() : repository.displayName());
         StartSessionModal modal = new StartSessionModal(branch, checkoutPath, agentRegistry, defaultKind.get(),
-                requireRemote, remoteOf(repository), modalLayer::close, (task, agent, eval) -> {
+                requireRemote, remoteOf(repository), lastUsedModelOf(repository), modalLayer::close,
+                (task, agent, model, eval) -> {
             if (worktreeRoot.isPresent()) {
                 openNewWorktreeSession(repository, branch, worktreeRoot.get(), task,
-                        session.branchCreatedHere(), agent, eval);
+                        session.branchCreatedHere(), agent, model, eval);
             } else {
-                openNewSession(repository, task, agent, eval);
+                openNewSession(repository, task, agent, model, eval);
             }
         });
         modalLayer.show(modal);
@@ -1031,8 +1034,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         NewWorktreeModal[] holder = new NewWorktreeModal[1];
         openWorktreeModal = null;
         holder[0] = new NewWorktreeModal(repository, gitStatusService, worktreeService, agentRegistry,
-                defaultKind.get(), false, modalLayer::close,
-                (mode, outcome, branchName, base, directory, task, agent, eval) -> {
+                defaultKind.get(), false, lastUsedModelOf(repository), modalLayer::close,
+                (mode, outcome, branchName, base, directory, task, agent, model, eval) -> {
                     holder[0].showCreating();
                     CompletableFuture<Path> creation = mode == NewWorktreeState.Mode.EXISTING
                             ? gitStatusService.addWorktreeForBranch(repository.root(), directory,
@@ -1046,7 +1049,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                         }
                         modalLayer.close();
                         openNewWorktreeSession(repository, branchName, created, task,
-                                mode == NewWorktreeState.Mode.NEW, agent, eval);
+                                mode == NewWorktreeState.Mode.NEW, agent, model, eval);
                     }));
                 }, branch);
         openWorktreeModal = holder[0];
@@ -1370,10 +1373,10 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             }
         });
         modalLayer.show(new StartSessionModal(branch, worktree, agentRegistry, defaultKind.get(),
-                repository.isRemote(), remoteOf(repository), modalLayer::close,
-                (task, agent, eval) -> {
+                repository.isRemote(), remoteOf(repository), lastUsedModelOf(repository), modalLayer::close,
+                (task, agent, model, eval) -> {
                     settle.confirmed();
-                    materializePullRequest(repository, pullRequest, worktree, task, agent, eval, onSettled);
+                    materializePullRequest(repository, pullRequest, worktree, task, agent, model, eval, onSettled);
                 }),
                 settleUnlessConfirmed);
     }
@@ -1389,7 +1392,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      */
     private void materializePullRequest(Repository repository, GhCliService.OpenPullRequest pullRequest,
                                         Path worktreeDirectory, Optional<String> task, AgentKind agent,
-                                        boolean eval, Runnable onSettled) {
+                                        Optional<String> model, boolean eval, Runnable onSettled) {
         int number = pullRequest.number();
         // Esc closes the busy modal without cancelling the fetch behind it,
         // so "was it dismissed" is tracked HERE, against this flow's own
@@ -1416,7 +1419,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                         requestWorktreeRefresh(repository);
                         return;
                     }
-                    startSessionOnCheckedOutPr(repository, pullRequest, created, task, agent, eval,
+                    startSessionOnCheckedOutPr(repository, pullRequest, created, task, agent, model, eval,
                             progress, onSettled);
                 }));
     }
@@ -1439,7 +1442,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      */
     private void startSessionOnCheckedOutPr(Repository repository, GhCliService.OpenPullRequest pullRequest,
                                             Path worktree, Optional<String> task, AgentKind agent,
-                                            boolean eval, MaterializationProgress progress,
+                                            Optional<String> model, boolean eval, MaterializationProgress progress,
                                             Runnable onSettled) {
         int number = pullRequest.number();
         progress.show(new PullRequestMaterialization.Step.StartSession(worktree));
@@ -1454,7 +1457,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             // review instruction's, interrupting the agent mid-turn. Both go
             // out as one line below (PullRequestMaterialization.prompt).
             session = openWorktreeSession(repository, PrCheckoutService.localBranchFor(number), worktree,
-                    Optional.empty(), false, agent, Spawn.FORBIDDEN, eval);
+                    Optional.empty(), false, agent, Spawn.FORBIDDEN, eval, model);
         } catch (RuntimeException e) {
             LOG.log(Level.WARNING, "Could not start a session on the checked-out PR #" + number, e);
             endMaterialization(progress, onSettled);
@@ -3388,8 +3391,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             return;
         }
         StartSessionModal modal = new StartSessionModal(repository.displayName(), repository.root(), agentRegistry,
-                defaultKind.get(), requireRemote, remoteOf(repository), modalLayer::close,
-                (task, agent, eval) -> openNewSession(repository, task, agent, eval));
+                defaultKind.get(), requireRemote, remoteOf(repository), lastUsedModelOf(repository), modalLayer::close,
+                (task, agent, model, eval) -> openNewSession(repository, task, agent, model, eval));
         modalLayer.show(modal);
     }
 
@@ -3447,6 +3450,18 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * persisted with the first state save and honored on resume.
      */
     public void openNewSession(Repository repository, Optional<String> task, AgentKind agent, boolean eval) {
+        openNewSession(repository, task, agent, Optional.empty(), eval);
+    }
+
+    /**
+     * The full form: carries the picked starting model in addition to eval
+     * mode. Empty {@code model} launches the harness's own default; a present
+     * one is passed to the provider's command builder and recorded as this
+     * repository's last-used model for the harness (see {@code
+     * SessionManager#finalizeCreate}).
+     */
+    public void openNewSession(Repository repository, Optional<String> task, AgentKind agent,
+                               Optional<String> model, boolean eval) {
         // Prepared (not just a fresh id) so the placeholder is keyed under
         // the REAL session id: the launch persists the session almost
         // immediately, and a sidebar resume racing the launch must find
@@ -3457,7 +3472,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 Optional.of(repository), repository.root());
 
         double scale = stage.getOutputScaleX();
-        sessionManager.launchSession(prepared, placeholderTab.app(), placeholderTab.host(), scale)
+        sessionManager.launchSession(prepared, placeholderTab.app(), placeholderTab.host(), scale, model)
                 .whenComplete((result, ex) -> Platform.runLater(() -> {
                     handleOpenResult(placeholderTab, result, ex);
                     if (ex == null && result instanceof SessionOpenResult.Opened && task.isPresent()) {
@@ -3577,8 +3592,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         // Diagnostic-only handle; the modal's own lifetime is the modal layer's.
         openWorktreeModal = null;
         holder[0] = new NewWorktreeModal(repository, gitStatusService, worktreeService, agentRegistry,
-                defaultKind.get(), requireRemote, modalLayer::close,
-                (mode, outcome, branch, base, directory, task, agent, eval) -> {
+                defaultKind.get(), requireRemote, lastUsedModelOf(repository), modalLayer::close,
+                (mode, outcome, branch, base, directory, task, agent, model, eval) -> {
                     holder[0].showCreating();
                     // The mode alone, never a second lookup: the modal is the
                     // authority on which of the two things the user asked for.
@@ -3599,7 +3614,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                         // but it tracks a remote somebody else owns -- removing
                         // the worktree must not offer to delete it.
                         openNewWorktreeSession(repository, branch, created, task,
-                                mode == NewWorktreeState.Mode.NEW, agent, eval);
+                                mode == NewWorktreeState.Mode.NEW, agent, model, eval);
                     }));
                 });
         openWorktreeModal = holder[0];
@@ -3665,7 +3680,16 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     public void openNewWorktreeSession(Repository repository, String branch, Path worktreeRoot,
                                        Optional<String> task, boolean branchCreatedHere, AgentKind agent,
                                        boolean eval) {
-        openWorktreeSession(repository, branch, worktreeRoot, task, branchCreatedHere, agent, Spawn.ALLOWED, eval);
+        openNewWorktreeSession(repository, branch, worktreeRoot, task, branchCreatedHere, agent, Optional.empty(),
+                eval);
+    }
+
+    /** The fullest form: also carries the picked starting model (empty: the harness's own default). */
+    public void openNewWorktreeSession(Repository repository, String branch, Path worktreeRoot,
+                                       Optional<String> task, boolean branchCreatedHere, AgentKind agent,
+                                       Optional<String> model, boolean eval) {
+        openWorktreeSession(repository, branch, worktreeRoot, task, branchCreatedHere, agent, Spawn.ALLOWED, eval,
+                model);
     }
 
     /**
@@ -3686,11 +3710,19 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     private ManagedSessionId openWorktreeSession(Repository repository, String branch, Path worktreeRoot,
                                                  Optional<String> task, boolean branchCreatedHere, AgentKind agent,
                                                  Spawn spawn, boolean eval) {
+        return openWorktreeSession(repository, branch, worktreeRoot, task, branchCreatedHere, agent, spawn, eval,
+                Optional.empty());
+    }
+
+    /** The fullest form: also carries the picked starting model (empty: the harness's own default). */
+    private ManagedSessionId openWorktreeSession(Repository repository, String branch, Path worktreeRoot,
+                                                 Optional<String> task, boolean branchCreatedHere, AgentKind agent,
+                                                 Spawn spawn, boolean eval, Optional<String> model) {
         // Keyed under the real session id for the same launch-race reason
         // as openNewSession.
         ManagedAgentSession prepared = sessionManager.prepareWorktreeSession(
                 repository, branch, worktreeRoot, branchCreatedHere, agent).withEvalMode(eval);
-        return openPreparedSession(prepared, branch, task, spawn, repository);
+        return openPreparedSession(prepared, branch, task, spawn, repository, model);
     }
 
     /**
@@ -4090,7 +4122,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 ManagedAgentSession prepared =
                         sessionManager.prepareSuccessorSession(owner.get(), outgoing, kind);
                 opened.complete(openPreparedSession(prepared, prepared.displayName(),
-                        Optional.of(seedPrompt), Spawn.ALLOWED, owner.get()));
+                        Optional.of(seedPrompt), Spawn.ALLOWED, owner.get(), Optional.empty()));
             } catch (RuntimeException e) {
                 opened.completeExceptionally(e);
             }
@@ -4100,14 +4132,15 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
     /** The shared launch tail: pending tab, launch, then the seeded prompt when it is ready. */
     private ManagedSessionId openPreparedSession(ManagedAgentSession prepared, String tabLabel,
-                                                 Optional<String> task, Spawn spawn, Repository repository) {
+                                                 Optional<String> task, Spawn spawn, Repository repository,
+                                                 Optional<String> model) {
         OpenSessionTab placeholderTab = showPendingTab(prepared.id(), tabLabel,
                 AgentLabels.displayName(agentRegistry, prepared), prepared.agentKind(),
                 prepared.status() == SessionStatus.UNSUPPORTED_AGENT,
                 Optional.of(repository), prepared.workingDirectory());
 
         double scale = stage.getOutputScaleX();
-        sessionManager.launchSession(prepared, placeholderTab.app(), placeholderTab.host(), scale, spawn)
+        sessionManager.launchSession(prepared, placeholderTab.app(), placeholderTab.host(), scale, spawn, model)
                 .whenComplete((result, ex) -> Platform.runLater(() -> {
                     handleOpenResult(placeholderTab, result, ex);
                     if (ex == null && result instanceof SessionOpenResult.Opened && task.isPresent()) {
@@ -4616,6 +4649,15 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     /** The repository's SSH remote, if it is a remote repository -- see {@link Repository#isRemote()}. */
     private static Optional<SshRemote> remoteOf(Repository repository) {
         return repository.isRemote() ? Optional.of(repository.remote()) : Optional.empty();
+    }
+
+    /**
+     * The model-picker seed: this repository's last starting model per
+     * harness. A method reference into the repository's settings -- a cheap
+     * in-memory read, safe on the FX thread where the modals call it.
+     */
+    private static Function<AgentKind, Optional<String>> lastUsedModelOf(Repository repository) {
+        return repository.settings()::lastUsedModel;
     }
 
     private Optional<Repository> repositoryFor(ManagedAgentSession session) {

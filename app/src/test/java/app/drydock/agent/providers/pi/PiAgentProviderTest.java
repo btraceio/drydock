@@ -64,6 +64,22 @@ class PiAgentProviderTest {
     }
 
     @Test
+    void createCarriesThePickedStartingModel() {
+        LaunchPlan plan = provider().buildCreateCommand(
+                new CreateContext("Session 1", "ignored-uuid", Path.of("/repo"), Optional.empty(), Optional.empty(),
+                        Optional.of("ai-gw-bedrock/bedrock/openai.gpt-5.4"), false));
+        assertTrue(plan.command().endsWith(" --model 'ai-gw-bedrock/bedrock/openai.gpt-5.4'"), plan.command());
+    }
+
+    @Test
+    void createWithoutAModelOmitsTheModelFlag() {
+        LaunchPlan plan = provider().buildCreateCommand(
+                new CreateContext("Session 1", "ignored-uuid", Path.of("/repo"), Optional.empty(), Optional.empty(),
+                        Optional.empty(), false));
+        assertFalse(plan.command().contains("--model"), plan.command());
+    }
+
+    @Test
     void evalCreateSetsEvalEnvFlag() {
         LaunchPlan plan = provider().buildCreateCommand(
                 new CreateContext("Session 1", "ignored-uuid", Path.of("/repo"),

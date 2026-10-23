@@ -14,6 +14,7 @@ import app.drydock.agent.api.SessionIdStrategy;
 
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -84,6 +85,20 @@ public interface AgentProvider {
     McpDelivery mcpDelivery();
 
     LaunchPlan buildCreateCommand(CreateContext c);
+
+    /**
+     * Model ids this harness's CLI can be launched with, offered by the
+     * start-session modal's model picker. May block (Pi enumerates its
+     * models with a {@code pi --list-models} subprocess), so callers MUST
+     * run this off the JavaFX Application Thread. The list is a SUGGESTION,
+     * never a whitelist: the launch command carries whatever model string
+     * the human typed, whether or not it appears here -- a catalog can be
+     * stale, and Claude and Codex have no listing command at all, so their
+     * implementations return only curated aliases or nothing.
+     */
+    default List<String> modelSuggestions() {
+        return List.of();
+    }
 
     LaunchPlan buildResumeCommand(ResumeContext r);
 

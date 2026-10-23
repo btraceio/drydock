@@ -117,7 +117,18 @@ public final class CodexAgentProvider implements AgentProvider {
         // require the user's base_url and auth -- too invasive and fragile.
         // So an eval Codex session is marked but its requests are NOT routed
         // to the eval account. See ManagedAgentSession.evalMode.
-        return LaunchPlan.of(codexCommand(c.mcp()), false);   // DISCOVERED: no id; no --settings
+        return LaunchPlan.of(codexCommand(c.mcp()) + modelFlag(c.model()), false);   // DISCOVERED: no id; no --settings
+    }
+
+    /**
+     * {@code -m <MODEL>} for the picked starting model, empty for the
+     * harness's own default. Codex's {@code --help} documents only
+     * {@code -m, --model <MODEL>} -- it has no model-listing command and no
+     * named aliases, so {@link #modelSuggestions()} offers nothing and the
+     * value is whatever the human typed.
+     */
+    private static String modelFlag(Optional<String> model) {
+        return model.map(m -> " -m " + AgentCommands.shellQuote(m)).orElse("");
     }
 
     @Override

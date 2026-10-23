@@ -38,6 +38,7 @@ import javafx.scene.layout.VBox;
 
 import java.nio.file.Path;
 import java.util.Optional;
+import java.util.function.Function;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -73,7 +74,7 @@ final class NewWorktreeModal extends VBox {
      */
     interface CreateHandler {
         void create(Mode mode, BranchCheckout.Outcome outcome, String branch, String base, Path directory,
-                    Optional<String> task, AgentKind agent, boolean eval);
+                    Optional<String> task, AgentKind agent, Optional<String> model, boolean eval);
     }
 
     private final ToggleGroup modeGroup = new ToggleGroup();
@@ -108,6 +109,7 @@ final class NewWorktreeModal extends VBox {
     private final TextField directoryField = new TextField();
     private final TextArea taskField = new TextArea();
     private final AgentSelector agentSelector;
+    private final ModelSelector modelSelector;
     private final CheckBox evalMode = new CheckBox("Eval mode");
     private final Label commandPreview = new Label();
     private final Label errorLine = new Label();
@@ -146,18 +148,26 @@ final class NewWorktreeModal extends VBox {
 
     NewWorktreeModal(Repository repository, GitStatusService gitStatusService, WorktreeService worktreeService,
                      AgentRegistry agentRegistry, AgentKind preselected, boolean requireRemoteCapability,
+                     Function<AgentKind, Optional<String>> lastUsedModel,
                      Runnable onClose, CreateHandler onCreate) {
         this(repository, gitStatusService, worktreeService, agentRegistry, preselected, requireRemoteCapability,
-                onClose, onCreate, null);
+                lastUsedModel, onClose, onCreate, null);
     }
 
     /**
      * As above, but pre-seeds the modal in existing-branch mode with
      * {@code preseedBranch} selected — used when starting a new worktree
      * from an existing session's branch.
+     *
+     * @param lastUsedModel the repository's last starting model per agent
+     *                      kind (see {@code RepositorySettings.lastUsedModel});
+     *                      seeds the model picker when it first shows a
+     *                      harness. Read on the FX thread, so it must be cheap
+     *                      (it reads an in-memory map).
      */
     NewWorktreeModal(Repository repository, GitStatusService gitStatusService, WorktreeService worktreeService,
                      AgentRegistry agentRegistry, AgentKind preselected, boolean requireRemoteCapability,
+                     Function<AgentKind, Optional<String>> lastUsedModel,
                      Runnable onClose, CreateHandler onCreate, String preseedBranch) {
         getStyleClass().add("modal");
         setMaxWidth(520);
@@ -216,7 +226,14 @@ final class NewWorktreeModal extends VBox {
         taskField.setPrefRowCount(3);
         taskField.setWrapText(true);
 
+        modelSelector = new ModelSelector(agentRegistry, lastUsedModel);
         agentSelector = new AgentSelector(agentRegistry, preselected, requireRemoteCapability, kind -> {
+            boolean terminal = kind == AgentKind.TERMINAL;
+            modelSelector.setManaged(!terminal);
+            modelSelector.setVisible(!terminal);
+            if (!terminal) {
+                modelSelector.setAgent(kind);
+            }
             boolean evalOk = agentRegistry.evalAvailable(kind);
             evalMode.setDisable(!evalOk);
             if (!evalOk) {
@@ -230,6 +247,12 @@ final class NewWorktreeModal extends VBox {
         });
         // AgentSelector fires its callback only on click, so set the initial
         // checkbox state for the preselected agent here too.
+        if (preselected == AgentKind.TERMINAL) {
+            modelSelector.setManaged(false);
+            modelSelector.setVisible(false);
+        } else {
+            modelSelector.setAgent(preselected);
+        }
         if (!agentRegistry.evalAvailable(preselected)) {
             evalMode.setDisable(true);
             evalMode.setSelected(false);
@@ -363,7 +386,7 @@ final class NewWorktreeModal extends VBox {
             onCreate.create(mode, lastState.outcome(), branch, baseText(),
                     Path.of(directoryField.getText().strip()).toAbsolutePath().normalize(),
                     task.isEmpty() ? Optional.empty() : Optional.of(task), agentSelector.selected(),
-                    evalMode.isSelected());
+                    modelSelector.selected(), evalMode.isSelected());
         });
         Region footerSpacer = new Region();
         HBox.setHgrow(footerSpacer, Priority.ALWAYS);
@@ -375,6 +398,7 @@ final class NewWorktreeModal extends VBox {
                 baseGroup,
                 fieldGroup("Worktree directory", directoryField),
                 agentSelector,
+                modelSelector,
                 fieldGroup("Start the agent with a task", taskField),
                 evalMode,
                 commandPreview, hintRow, errorLine, buttons);

@@ -16,6 +16,13 @@ import java.util.Optional;
  * its CLI wants (see {@code AgentProvider.mcpDelivery}); a provider with
  * {@link McpDelivery#NONE} never receives one.</p>
  *
+ * <p>{@code model}, when present, is the starting model the human picked for
+ * this launch: each provider renders it as its CLI's model flag (see
+ * {@code AgentProvider#buildCreateCommand}). Empty means the harness's own
+ * default -- a first-class choice, not an omission. It is a LAUNCH-TIME
+ * input only: a later resume of the same conversation carries no model, so
+ * resuming keeps whatever model the conversation last used.
+ *
  * <p>{@code evalMode} is true when this session runs on the "eval" account:
  * the provider arranges for its CLI to send an {@code x-target-account: eval}
  * request header. How that is done is provider-specific (env var or
@@ -27,7 +34,8 @@ import java.util.Optional;
  * Codex are marked but not rerouted (see their providers for why).</p>
  */
 public record CreateContext(String displayName, String sessionId, Path workingDirectory,
-                            Optional<SshRemote> remote, Optional<McpAccess> mcp, boolean evalMode) {
+                            Optional<SshRemote> remote, Optional<McpAccess> mcp, Optional<String> model,
+                            boolean evalMode) {
     public CreateContext {
         Objects.requireNonNull(displayName, "displayName");
         Objects.requireNonNull(sessionId, "sessionId");
@@ -39,6 +47,12 @@ public record CreateContext(String displayName, String sessionId, Path workingDi
     /** As the canonical constructor with {@code evalMode = false} (a non-eval session). */
     public CreateContext(String displayName, String sessionId, Path workingDirectory,
                          Optional<SshRemote> remote, Optional<McpAccess> mcp) {
-        this(displayName, sessionId, workingDirectory, remote, mcp, false);
+        this(displayName, sessionId, workingDirectory, remote, mcp, Optional.empty(), false);
+    }
+
+    /** As the canonical constructor with {@code model = empty} (the harness's own default). */
+    public CreateContext(String displayName, String sessionId, Path workingDirectory,
+                         Optional<SshRemote> remote, Optional<McpAccess> mcp, boolean evalMode) {
+        this(displayName, sessionId, workingDirectory, remote, mcp, Optional.empty(), evalMode);
     }
 }
