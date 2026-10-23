@@ -50,6 +50,15 @@ class TerminalAgentProviderTest {
         assertFalse(plan.sessionIdUsed());
     }
 
+    /** A terminal has no model to pick; the flag is ignored even when one is somehow handed over. */
+    @Test
+    void createIgnoresThePickedStartingModel() {
+        CreateContext withModel = new CreateContext("Session 1", "unused-id", Path.of("/repo"),
+                Optional.empty(), Optional.empty(), Optional.of("sonnet"), false);
+        LaunchPlan plan = provider().buildCreateCommand(withModel);
+        assertEquals("${SHELL:-/bin/zsh}", plan.command());
+    }
+
     /** Resume is the same command: there is no conversation to reattach. */
     @Test
     void resumeCommandIsTheLoginShellToo() {

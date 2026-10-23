@@ -453,6 +453,19 @@ public final class SessionManager implements AutoCloseable {
 
     /**
      * As {@link #launchSession(ManagedAgentSession, TerminalRuntime,
+     * TerminalHostView, double)}, launching the harness with {@code model}
+     * as the conversation's starting model (empty: the harness's own
+     * default). The model is a launch-time input, not session state: a later
+     * resume of the same conversation carries no model.
+     */
+    public CompletableFuture<SessionOpenResult> launchSession(ManagedAgentSession prepared, TerminalRuntime app,
+                                                              TerminalHostView host, double scaleFactor,
+                                                              Optional<String> model) {
+        return launchSession(prepared, app, host, scaleFactor, Spawn.ALLOWED, model);
+    }
+
+    /**
+     * As {@link #launchSession(ManagedAgentSession, TerminalRuntime,
      * TerminalHostView, double)}, stating whether the new session may itself
      * spawn worktrees and sessions through MCP. {@link Spawn#FORBIDDEN} is
      * what keeps agent-driven fan-out at depth 1: without it, one instruction
@@ -461,12 +474,20 @@ public final class SessionManager implements AutoCloseable {
     public CompletableFuture<SessionOpenResult> launchSession(ManagedAgentSession prepared, TerminalRuntime app,
                                                               TerminalHostView host, double scaleFactor,
                                                               Spawn spawn) {
-        return launchNewSession(prepared, prepared.displayName(), app, host, scaleFactor, spawn);
+        return launchNewSession(prepared, prepared.displayName(), app, host, scaleFactor, spawn, Optional.empty());
+    }
+
+    /** The full form: carries the starting model in addition to spawn. */
+    public CompletableFuture<SessionOpenResult> launchSession(ManagedAgentSession prepared, TerminalRuntime app,
+                                                              TerminalHostView host, double scaleFactor,
+                                                              Spawn spawn, Optional<String> model) {
+        return launchNewSession(prepared, prepared.displayName(), app, host, scaleFactor, spawn, model);
     }
 
     private CompletableFuture<SessionOpenResult> launchNewSession(ManagedAgentSession initial, String displayName,
                                                                   TerminalRuntime app, TerminalHostView host,
-                                                                  double scaleFactor, Spawn spawn) {
+                                                                  double scaleFactor, Spawn spawn,
+                                                                  Optional<String> model) {
         AgentKind kind = initial.agentKind();
         AgentProvider provider = registry.provider(kind)
                 .orElseThrow(() -> new IllegalStateException("No provider for " + kind));
@@ -510,8 +531,8 @@ public final class SessionManager implements AutoCloseable {
                 }, backgroundExecutor)
                 .thenCompose(ignored -> buildAndLaunchCreate(provider, displayName, sessionId,
                         initial.workingDirectory(), remote, app, host, scaleFactor, workingDir,
-                        initial.id(), spawn, initial.evalMode()))
-                .handleAsync((launch, ex) -> finalizeCreate(initial, sessionId, launch, ex), backgroundExecutor);
+                        initial.id(), spawn, initial.evalMode(), model))
+                .handleAsync((launch, ex) -> finalizeCreate(initial, sessionId, launch, ex, model), backgroundExecutor);
 
         if (discovery.isPresent()) {
             // Detached side effect: discovery polls for ~5s, which must
@@ -561,7 +582,7 @@ public final class SessionManager implements AutoCloseable {
                                                                   TerminalHostView host, double scaleFactor,
                                                                   String surfaceWorkingDirectory,
                                                                   ManagedSessionId managedSessionId, Spawn spawn,
-                                                                  boolean eval) {
+                                                                  boolean eval, Optional<String> model) {
         return CompletableFuture.supplyAsync(() -> {
                     if (eval) {
                         provider.markEvalSession(sessionId);
@@ -570,7 +591,7 @@ public final class SessionManager implements AutoCloseable {
                             ? Optional.empty()
                             : mcpAccessFor(provider, managedSessionId, spawn);
                     CreateContext ctx = new CreateContext(displayName, sessionId, targetWorkingDirectory, remote,
-                            mcp, eval);
+                            mcp, model, eval);
                     // A diagnostic command override (app.drydock.diag.command[.<kind>])
                     // replaces the provider's built command entirely, so it also
                     // bypasses the provider's support probe below -- which would
@@ -610,7 +631,7 @@ public final class SessionManager implements AutoCloseable {
     private record CreateLaunch(CreatePlan plan, TerminalSurface surface) { }
 
     private SessionOpenResult finalizeCreate(ManagedAgentSession initial, String agentSessionId,
-                                              CreateLaunch launch, Throwable ex) {
+                                              CreateLaunch launch, Throwable ex, Optional<String> model) {
         if (ex != null) {
             Throwable cause = unwrap(ex);
             LOG.log(Level.WARNING, () -> "Failed to start session " + initial.id() + ": " + cause.getMessage());
@@ -640,22 +661,38 @@ public final class SessionManager implements AutoCloseable {
         }
         persistUpdatedSession(running);
         // Records the agent kind actually used so the next session opened in
-        // this repository defaults to it (AgentSelector's per-repo default).
+        // this repository defaults to it (AgentSelector's per-repo default),
+        // and the starting model so the model picker pre-fills it for this
+        // harness. ONE stateStore.update transform for both: two updates would
+        // be two serialized load/modify/save cycles over the same file for one
+        // gesture (the shape of a documented data-loss bug), for no benefit.
+        // A fresh-conversation start (startFreshConversation) passes model=
+        // empty and MUST NOT clear the memory: it did not pick a model.
         RepositoryId createdRepositoryId = running.repositoryId();
         AgentKind createdAgentKind = running.agentKind();
-        stateStore.update(s -> repoWithLastUsedAgent(s, createdRepositoryId, createdAgentKind));
+        stateStore.update(s -> repoWithLastUsedAgent(s, createdRepositoryId, createdAgentKind, model));
         activeSurfaces.put(running.id(), launch.surface());
         return new SessionOpenResult.Opened(running, launch.surface());
     }
 
     /**
      * Pure transform: returns {@code state} with {@code repositoryId}'s
-     * settings updated to record {@code kind} as its last-used agent (a
-     * no-op if no repository matches, e.g. it was removed concurrently).
+     * settings updated to record {@code kind} as its last-used agent and
+     * {@code model} as that harness's last starting model (a no-op if no
+     * repository matches, e.g. it was removed concurrently). An empty
+     * {@code model} leaves the remembered model untouched -- absence here
+     * means "this launch picked no model", not "the human went back to the
+     * default"; only the picker's explicit empty choice could mean that,
+     * and it never reaches a launch.
      */
-    static ApplicationState repoWithLastUsedAgent(ApplicationState state, RepositoryId repositoryId, AgentKind kind) {
+    static ApplicationState repoWithLastUsedAgent(ApplicationState state, RepositoryId repositoryId, AgentKind kind,
+                                                  Optional<String> model) {
         return state.withRepositories(state.repositories().stream()
-                .map(r -> r.id().equals(repositoryId) ? r.withSettings(r.settings().withLastUsedAgent(kind)) : r)
+                .map(r -> r.id().equals(repositoryId)
+                        ? r.withSettings(model.isPresent()
+                                ? r.settings().withLastUsedAgent(kind).withLastUsedModel(kind, model)
+                                : r.settings().withLastUsedAgent(kind))
+                        : r)
                 .toList());
     }
 
@@ -864,10 +901,10 @@ public final class SessionManager implements AutoCloseable {
                     // fresh start is the human's own action, taken from the UI.
                     return buildAndLaunchCreate(provider, cleared.displayName(), freshSessionId,
                             cleared.workingDirectory(), remote, app, host, scaleFactor, workingDir,
-                            cleared.id(), Spawn.ALLOWED, cleared.evalMode())
+                            cleared.id(), Spawn.ALLOWED, cleared.evalMode(), Optional.empty())
                             .handleAsync((launch, ex) -> {
                                 try {
-                                    return finalizeCreate(cleared, freshSessionId, launch, ex);
+                                    return finalizeCreate(cleared, freshSessionId, launch, ex, Optional.empty());
                                 } catch (RuntimeException failure) {
                                     // finalizeCreate records FAILED and releases launch resources;
                                     // restore only the old binding that its generic failure path cleared.

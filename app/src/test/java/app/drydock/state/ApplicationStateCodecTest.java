@@ -162,6 +162,70 @@ class ApplicationStateCodecTest {
     }
 
     @Test
+    void lastUsedModelsRoundTrip() {
+        RepositorySettings settings = RepositorySettings.DEFAULT
+                .withLastUsedAgent(AgentKind.PI)
+                .withLastUsedModel(AgentKind.PI, Optional.of("ai-gw-bedrock/bedrock/openai.gpt-5.4"))
+                .withLastUsedModel(AgentKind.CLAUDE, Optional.of("sonnet"));
+        Repository repo = new Repository(RepositoryId.of(REPO_ID), TestPaths.abs("/tmp/x"), "x",
+                Instant.EPOCH, Instant.EPOCH, settings);
+        ApplicationState state = new ApplicationState(List.of(repo), List.of(), List.of(), WorkspaceUiState.empty(), List.of());
+
+        ApplicationState decoded = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state));
+
+        RepositorySettings decodedSettings = decoded.repositories().getFirst().settings();
+        assertEquals(Optional.of(AgentKind.PI), decodedSettings.lastUsedAgent());
+        assertEquals(Optional.of("ai-gw-bedrock/bedrock/openai.gpt-5.4"), decodedSettings.lastUsedModel(AgentKind.PI));
+        assertEquals(Optional.of("sonnet"), decodedSettings.lastUsedModel(AgentKind.CLAUDE));
+    }
+
+    @Test
+    void emptyLastUsedModelClearsTheEntry() {
+        // The human went back to the harness's own default; the picker must
+        // say so next time rather than re-offer the retired model.
+        RepositorySettings settings = RepositorySettings.DEFAULT
+                .withLastUsedModel(AgentKind.CLAUDE, Optional.of("sonnet"))
+                .withLastUsedModel(AgentKind.CLAUDE, Optional.empty());
+        assertTrue(settings.lastUsedModel(AgentKind.CLAUDE).isEmpty());
+    }
+
+    @Test
+    void malformedLastUsedModelsEntriesAreSkippedOthersKept() {
+        // Lenient like the rest of the cosmetic settings: one bad entry must
+        // never make the whole state file look corrupt.
+        String json = """
+                {
+                  "schemaVersion": 2,
+                  "repositories": [
+                    {
+                      "id": "%s",
+                      "root": "%s",
+                      "displayName": "repo",
+                      "addedAt": "2026-01-01T00:00:00Z",
+                      "lastOpenedAt": "2026-01-02T00:00:00Z",
+                      "settings": {
+                        "lastUsedAgent": "pi",
+                        "lastUsedModels": {
+                          "not-an-agent": "whatever",
+                          "claude": 42,
+                          "pi": "ai-gw-bedrock/bedrock/openai.gpt-5.4"
+                        }
+                      }
+                    }
+                  ],
+                  "sessions": [],
+                  "ui": {"selectedRepositoryId": null, "sidebarWidth": 260.0, "expandedRepositoryIds": []}
+                }
+                """.formatted(REPO_ID, REPO_ROOT);
+
+        RepositorySettings settings = ApplicationStateCodec.fromJson(JsonParser.parse(json))
+                .repositories().getFirst().settings();
+
+        assertEquals(Optional.of("ai-gw-bedrock/bedrock/openai.gpt-5.4"), settings.lastUsedModel(AgentKind.PI));
+        assertTrue(settings.lastUsedModel(AgentKind.CLAUDE).isEmpty());
+    }
+
+    @Test
     void repositoryWithoutRemoteMemberDecodesAsLocal() {
         Repository repo = new Repository(RepositoryId.newId(), TestPaths.abs("/tmp/x"), "x",
                 Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT);

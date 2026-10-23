@@ -35,6 +35,7 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -82,8 +83,8 @@ class NewWorktreeModalTest extends FxTest {
         Repository repository = new Repository(RepositoryId.newId(), clone, "example",
                 Instant.now(), Instant.now(), RepositorySettings.DEFAULT);
         modal = new NewWorktreeModal(repository, gitStatusService, worktreeService,
-                new AgentRegistry(List.of(), null), AgentKind.CLAUDE, false, () -> { },
-                (mode, outcome, branch, base, directory, task, agent, eval) -> {
+                new AgentRegistry(List.of(), null), AgentKind.CLAUDE, false, kind -> Optional.empty(), () -> { },
+                (mode, outcome, branch, base, directory, task, agent, model, eval) -> {
                     createdMode = mode;
                     createdBranch = branch;
                     createdRef = outcome instanceof app.drydock.git.BranchCheckout.Outcome.Ready ready

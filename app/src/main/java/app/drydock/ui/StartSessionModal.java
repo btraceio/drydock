@@ -21,6 +21,7 @@ import java.nio.file.Path;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Consumer;
+import java.util.function.Function;
 
 /**
  * The Start-session modal for an EXISTING worktree (worktree handoff,
@@ -35,13 +36,14 @@ import java.util.function.Consumer;
 final class StartSessionModal extends VBox {
 
     interface StartHandler {
-        void start(Optional<String> task, AgentKind agent, boolean eval);
+        void start(Optional<String> task, AgentKind agent, Optional<String> model, boolean eval);
     }
 
     private final AgentRegistry registry;
     private final String branch;
     private final Path worktreePath;
     private final Optional<SshRemote> remote;
+    private final ModelSelector modelSelector;
     private final Label commandPreview = new Label("Preparing…");
     private final CheckBox evalMode = new CheckBox("Eval mode");
 
@@ -75,10 +77,33 @@ final class StartSessionModal extends VBox {
     StartSessionModal(String branch, Path worktreePath, AgentRegistry registry, AgentKind preselected,
                        boolean requireRemoteCapability, Optional<SshRemote> remote, Runnable onClose,
                        StartHandler onStart) {
+        this(branch, worktreePath, registry, preselected, requireRemoteCapability, remote, kind -> Optional.empty(),
+                onClose, onStart);
+    }
+
+    /**
+     * @param lastUsedModel the repository's last starting model per agent
+     *                      kind (see {@code RepositorySettings.lastUsedModel});
+     *                      seeds the model picker when the modal first shows a
+     *                      harness. Read on the FX thread, so it must be cheap
+     *                      (it reads an in-memory map).
+     */
+    /** The agent whose launch command the preview currently shows; updated by {@code applyAgent}. */
+    private AgentKind previewedAgent;
+
+    StartSessionModal(String branch, Path worktreePath, AgentRegistry registry, AgentKind preselected,
+                       boolean requireRemoteCapability, Optional<SshRemote> remote,
+                       Function<AgentKind, Optional<String>> lastUsedModel, Runnable onClose,
+                       StartHandler onStart) {
         this.registry = registry;
         this.branch = branch;
         this.worktreePath = worktreePath;
         this.remote = remote;
+        this.modelSelector = new ModelSelector(registry, lastUsedModel, () -> {
+            if (previewedAgent != null) {
+                refreshPreview(previewedAgent);
+            }
+        });
 
         getStyleClass().add("modal");
         setMaxWidth(508);
@@ -120,11 +145,17 @@ final class StartSessionModal extends VBox {
         // field disappears entirely for it (typed text would otherwise be
         // executed as a shell command).
         Consumer<AgentKind> applyAgent = kind -> {
+            previewedAgent = kind;
             String name = agentDisplayName(kind);
             title.setText("Start a " + name + " session");
             boolean terminal = kind == AgentKind.TERMINAL;
             taskBox.setManaged(!terminal);
             taskBox.setVisible(!terminal);
+            modelSelector.setManaged(!terminal);
+            modelSelector.setVisible(!terminal);
+            if (!terminal) {
+                modelSelector.setAgent(kind);
+            }
             taskLabel.setText("Task for " + name);
             taskField.setPromptText("Optional: a task for " + name + "; it is typed into the new session");
             boolean evalOk = registry.evalAvailable(kind);
@@ -152,7 +183,7 @@ final class StartSessionModal extends VBox {
             String task = taskField.getText() == null ? "" : taskField.getText().strip();
             onClose.run();
             onStart.start(task.isEmpty() ? Optional.empty() : Optional.of(task), selector.selected(),
-                    evalMode.isSelected());
+                    modelSelector.selected(), evalMode.isSelected());
         });
         Region footerSpacer = new Region();
         HBox.setHgrow(footerSpacer, Priority.ALWAYS);
@@ -162,7 +193,7 @@ final class StartSessionModal extends VBox {
         Label targetLabel = new Label("Worktree");
         targetLabel.getStyleClass().add("worktree-field-label");
 
-        getChildren().addAll(header, selector, new VBox(4, targetLabel, target), taskBox,
+        getChildren().addAll(header, selector, new VBox(4, targetLabel, target), taskBox, modelSelector,
                 evalMode, commandPreview, buttons);
         Platform.runLater(taskField::requestFocus);
     }
@@ -188,7 +219,7 @@ final class StartSessionModal extends VBox {
             // No MCP config: this is a preview, so it must not mint a token or
             // write a per-session file the real launch would then replace.
             CreateContext ctx = new CreateContext(branch, UUID.randomUUID().toString(), worktreePath, remote,
-                    Optional.empty());
+                    Optional.empty(), modelSelector.selected(), false);
             String command = registry.previewCreateCommand(kind, ctx);
             return command.startsWith("(") ? command : "$ " + command;
         } catch (RuntimeException e) {
