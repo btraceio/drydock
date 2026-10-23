@@ -109,8 +109,40 @@ class NewTaskPlanTest {
     void refusesBlankName() {
         Choice choice = choice("  ", Optional.empty(), SessionMode.WRITES, WorkIn.NEW_WORKTREE, "x", Path.of("/b/x"));
 
-        assertEquals(Optional.of("Give the task a name."),
+        assertEquals(Optional.of("Describe what the agent should do."),
                 NewTaskPlan.refusal(inputs(Optional.empty(), false), choice, folder -> false));
+    }
+
+    @Test
+    void nameIsTheFirstNonBlankLineStrippedOfMarkdown() {
+        assertEquals("Fix the parser", NewTaskPlan.nameFor("\n  \n- Fix the parser\nThen keep it short."));
+        assertEquals("Fix the parser", NewTaskPlan.nameFor("## Fix the parser"));
+        assertEquals("Fix the parser", NewTaskPlan.nameFor("1. Fix the parser"));
+        assertEquals("Fix the parser", NewTaskPlan.nameFor("- ## Fix the parser"));
+        assertEquals("Fix the parser", NewTaskPlan.nameFor("   Fix the parser.   "));
+        assertEquals("Fix the parser", NewTaskPlan.nameFor("Fix the parser:  \nthen keep it short"));
+    }
+
+    @Test
+    void longNameIsCutAtAWordBoundary() {
+        assertEquals("Make the worktree pruning pass respect an external filter",
+                NewTaskPlan.nameFor("Make the worktree pruning pass respect an external filter that the caller "
+                        + "supplies instead of its own"));
+    }
+
+    @Test
+    void unusableDescriptionFallsBackToNewTask() {
+        assertEquals("New task", NewTaskPlan.nameFor("!!!"));
+        assertEquals("New task", NewTaskPlan.nameFor("🚀 🚀"));
+        assertEquals("New task", NewTaskPlan.nameFor("   \n "));
+        assertEquals("New task", NewTaskPlan.nameFor("---"));
+        assertEquals("New task", NewTaskPlan.nameFor(null));
+    }
+
+    @Test
+    void inferredNameNamesTheBranch() {
+        assertEquals("fix-the-parser",
+                NewTaskPlan.branchFor(NewTaskPlan.nameFor("- Fix the parser\nThen keep it short."), Set.of()));
     }
 
     @Test

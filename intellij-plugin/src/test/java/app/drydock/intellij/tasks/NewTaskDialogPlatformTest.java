@@ -8,6 +8,7 @@ import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.projects.SharedProject;
 
 import com.intellij.openapi.application.ApplicationManager;
+import com.intellij.openapi.ui.ValidationInfo;
 import com.intellij.openapi.util.Disposer;
 import com.intellij.testFramework.fixtures.BasePlatformTestCase;
 
@@ -17,6 +18,9 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 /** Platform-backed checks for values that must survive {@code DialogWrapper.init()}. */
 public class NewTaskDialogPlatformTest extends BasePlatformTestCase {
@@ -75,6 +79,51 @@ public class NewTaskDialogPlatformTest extends BasePlatformTestCase {
         });
 
         assertEquals(NewTaskPlan.WorkIn.MAIN_CHECKOUT, choice.get().workIn());
+    }
+
+    public void testNameIsInferredFromTheDescriptionAndThePresetNameWins() {
+        OpenIssue issue = new OpenIssue(42, "Fix allocation accounting", Optional.empty(), List.of(), List.of(),
+                Optional.empty());
+        AtomicReference<NewTaskPlan.Choice> inferred = new AtomicReference<>();
+        AtomicReference<NewTaskPlan.Choice> presetNamed = new AtomicReference<>();
+
+        ApplicationManager.getApplication().invokeAndWait(() -> {
+            NewTaskDialog plain = new NewTaskDialog(getProject(), inputs(), Optional.empty());
+            try {
+                plain.diagSetInstructions("- Fix the parser\nThen keep it short.");
+                inferred.set(plain.choice());
+            } finally {
+                Disposer.dispose(plain.getDisposable());
+            }
+            NewTaskDialog implement = new NewTaskDialog(getProject(), inputs(), Optional.empty(),
+                    NewTaskPreset.implement(issue));
+            try {
+                presetNamed.set(implement.choice());
+            } finally {
+                Disposer.dispose(implement.getDisposable());
+            }
+        });
+
+        assertEquals("Fix the parser", inferred.get().name());
+        assertEquals("#42 Fix allocation accounting", presetNamed.get().name());
+    }
+
+    public void testBlankDescriptionRefusesToStart() {
+        AtomicReference<ValidationInfo> validation = new AtomicReference<>();
+        AtomicReference<NewTaskPlan.Choice> blank = new AtomicReference<>();
+
+        ApplicationManager.getApplication().invokeAndWait(() -> {
+            NewTaskDialog dialog = new NewTaskDialog(getProject(), inputs(), Optional.empty());
+            try {
+                validation.set(dialog.doValidate());
+                blank.set(dialog.choice());
+            } finally {
+                Disposer.dispose(dialog.getDisposable());
+            }
+        });
+
+        assertEquals("Describe what the agent should do.", validation.get().message);
+        assertEquals("New task", blank.get().name());
     }
 
     private static NewTaskPlan.Inputs inputs() {
