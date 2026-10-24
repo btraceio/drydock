@@ -6,7 +6,6 @@ import app.drydock.git.WorktreeService;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.review.ReviewScope;
 
-import com.intellij.openapi.fileEditor.FileDocumentManager;
 import com.intellij.openapi.progress.ProgressIndicator;
 import com.intellij.openapi.progress.ProgressManager;
 import com.intellij.openapi.progress.Task;
@@ -74,7 +73,7 @@ public final class ReviewTabOpener {
         /** Selects the tab in its host's content manager. */
         void selectContent(Project project, String tabName);
 
-        /** Q9: saves the open documents ({@code FileDocumentManager.saveAllDocuments}); EDT. */
+        /** Q9: saves the open documents ({@link ReviewDocumentSaves#saveOpenDocuments}); EDT, write intent. */
         void saveDocuments(Project project);
 
         /** Re-runs the diff of the live tab's scope ({@code ReviewTabProvider}); EDT, after the selection. */
@@ -139,6 +138,7 @@ public final class ReviewTabOpener {
         }
         // Q9: a user-triggered load saves open documents first, on the EDT,
         // before the background work the placeholder fronts.
+        // (The save itself takes the write-intent lock: ReviewDocumentSaves.)
         host.saveDocuments(project);
         // The placeholder next (AC18): the click visibly does something
         // before any background work starts, and before the host is
@@ -268,7 +268,7 @@ public final class ReviewTabOpener {
 
         @Override
         public void saveDocuments(Project project) {
-            FileDocumentManager.getInstance().saveAllDocuments();
+            ReviewDocumentSaves.saveOpenDocuments();
         }
 
         @Override

@@ -26,7 +26,6 @@ import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.actionSystem.DefaultActionGroup;
 import com.intellij.openapi.application.Application;
 import com.intellij.openapi.application.ApplicationManager;
-import com.intellij.openapi.fileEditor.FileDocumentManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.Messages;
 import com.intellij.openapi.util.Disposer;
@@ -829,7 +828,7 @@ final class ReviewTabProvider implements ChangesViewContentProvider {
         if (disposed.get()) {
             return;
         }
-        FileDocumentManager.getInstance().saveAllDocuments();
+        ReviewDocumentSaves.saveOpenDocuments();
         ReviewScope scope = this.scope;
         ReviewTabRefresher refresher = this.refresher;
         if (scope == null || refresher == null) {
@@ -957,7 +956,7 @@ final class ReviewTabProvider implements ChangesViewContentProvider {
             ReviewScope scope = ReviewTabProvider.this.scope;
             ReviewTabRefresher refresher = ReviewTabProvider.this.refresher;
             if (scope == null || refresher == null) {
-                FileDocumentManager.getInstance().saveAllDocuments();
+                ReviewDocumentSaves.saveOpenDocuments();
                 // No scope yet (still loading, or the first load never
                 // completed): re-run the whole load path, which shows its
                 // own placeholder and terminal state.
