@@ -294,4 +294,64 @@ class CodexAgentProviderTest {
 
         assertTrue(command.endsWith(IDE_OVERRIDES + " resume '019f9072-abc'"), command);
     }
+
+    // ---- resume prompt: rendered after "--", only on a pinned id ----------
+
+    private static ResumeContext resumeWithPrompt(Optional<String> id, boolean readOnly, Optional<McpAccess> mcp,
+                                                  Optional<String> prompt) {
+        return new ResumeContext(id, Optional.empty(), Path.of("/repo"), Optional.empty(), mcp,
+                false, readOnly, List.of(), prompt);
+    }
+
+    @Test
+    void resumeWithAPinnedIdCarriesThePromptAfterEndOfOptions() {
+        String command = provider().buildResumeCommand(resumeWithPrompt(Optional.of("019f9072-abc"), false,
+                Optional.empty(), Optional.of("Pick up where you left off."))).command();
+        assertTrue(command.endsWith(
+                "codex --sandbox danger-full-access resume '019f9072-abc' -- 'Pick up where you left off.'"),
+                command);
+    }
+
+    @Test
+    void aDashLeadingResumePromptIsAPromptNotAnOption() {
+        String command = provider().buildResumeCommand(resumeWithPrompt(Optional.of("019f9072-abc"), false,
+                Optional.empty(), Optional.of("--continue the task"))).command();
+        assertTrue(command.endsWith("resume '019f9072-abc' -- '--continue the task'"), command);
+        assertTrue(command.indexOf(" -- ") > command.indexOf("resume '019f9072-abc'"), command);
+    }
+
+    @Test
+    void thePickerNeverCarriesTheResumePrompt() {
+        String command = provider().buildResumeCommand(resumeWithPrompt(Optional.empty(), false,
+                Optional.empty(), Optional.of("Pick up where you left off."))).command();
+        assertTrue(command.endsWith("codex --sandbox danger-full-access resume"), command);
+        assertFalse(command.contains(" -- "), command);
+        assertFalse(command.contains("Pick up"), command);
+        assertFalse(command.contains("--last"), command);
+    }
+
+    @Test
+    void aPinnedResumeWithoutAPromptEndsAtTheId() {
+        for (Optional<String> prompt : List.of(Optional.<String>empty(), Optional.of("   "))) {
+            String command = provider().buildResumeCommand(resumeWithPrompt(Optional.of("019f9072-abc"), false,
+                    Optional.empty(), prompt)).command();
+            assertTrue(command.endsWith("resume '019f9072-abc'"), command);
+            assertFalse(command.contains(" -- "), command);
+        }
+    }
+
+    @Test
+    void aReadOnlyResumeWithAPromptKeepsTheSandboxGlobal() {
+        String command = provider().buildResumeCommand(resumeWithPrompt(Optional.of("019f9072-abc"), true,
+                Optional.empty(), Optional.of("p"))).command();
+        assertTrue(command.endsWith("codex --sandbox read-only resume '019f9072-abc' -- 'p'"), command);
+    }
+
+    @Test
+    void theOverridesStayBeforeTheSubcommandWhenAPromptIsCarried() {
+        String command = provider().buildResumeCommand(resumeWithPrompt(Optional.of("019f9072-abc"), false,
+                SOME_MCP, Optional.of("p"))).command();
+        assertTrue(command.indexOf("-c 'mcp_servers") < command.indexOf(" resume "), command);
+        assertTrue(command.endsWith("resume '019f9072-abc' -- 'p'"), command);
+    }
 }

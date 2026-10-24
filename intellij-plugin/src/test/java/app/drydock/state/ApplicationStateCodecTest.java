@@ -995,7 +995,7 @@ class ApplicationStateCodecTest {
                 SessionStatus.INACTIVE, Instant.parse("2026-08-28T10:00:00Z"),
                 Instant.parse("2026-08-28T10:00:00Z"), java.util.Optional.empty(),
                 PrLink.none(), false, java.util.Optional.empty(), false,
-                java.util.Optional.of(workflowId));
+                java.util.Optional.of(workflowId), false);
 
         ApplicationState state = new ApplicationState(List.of(), List.of(session), List.of(),
                 WorkspaceUiState.empty(), List.of());
@@ -1004,6 +1004,26 @@ class ApplicationStateCodecTest {
 
         assertEquals(1, decoded.sessions().size());
         assertEquals(java.util.Optional.of(workflowId), decoded.sessions().get(0).workflowId());
+    }
+
+    @Test
+    void aSessionStartedWithATaskRoundTrips() {
+        ManagedAgentSession session = new ManagedAgentSession(ManagedSessionId.newId(),
+                RepositoryId.newId(), "test-session",
+                new AgentBinding(AgentKind.CLAUDE, java.util.Optional.empty(), java.util.Optional.empty()),
+                SessionWorkspace.inRepository(Path.of("/tmp/repo")),
+                SessionStatus.INACTIVE, Instant.parse("2026-08-28T10:00:00Z"),
+                Instant.parse("2026-08-28T10:00:00Z"), java.util.Optional.empty(),
+                PrLink.none(), false, java.util.Optional.empty(), false,
+                java.util.Optional.empty(), true);
+
+        ApplicationState state = new ApplicationState(List.of(), List.of(session), List.of(),
+                WorkspaceUiState.empty(), List.of());
+        JsonValue json = ApplicationStateCodec.toJson(state);
+        ApplicationState decoded = ApplicationStateCodec.fromJson(json);
+
+        assertEquals(1, decoded.sessions().size());
+        assertEquals(true, decoded.sessions().get(0).startedWithTask());
     }
 
     @Test

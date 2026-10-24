@@ -303,6 +303,31 @@ class SessionManagerTest {
         assertEquals("new name", stateRepository.savedState().sessions().get(0).displayName());
     }
 
+    @Test
+    void markStartedWithTaskPersistsTheMarker(@TempDir Path tempDir) {
+        ManagedAgentSession session = sessionWith(tempDir, Optional.empty(), Optional.empty());
+        assertFalse(session.startedWithTask());
+        InMemoryStateRepository stateRepository = new InMemoryStateRepository(List.of(session));
+        SessionManager manager = newManager(stateRepository);
+
+        ManagedAgentSession marked = manager.markStartedWithTask(session.id());
+
+        assertTrue(marked.startedWithTask());
+        flushState(stateRepository);
+        assertTrue(stateRepository.savedState().sessions().get(0).startedWithTask());
+        // Monotonic and idempotent: marking again never clears it.
+        assertTrue(manager.markStartedWithTask(session.id()).startedWithTask());
+    }
+
+    @Test
+    void markStartedWithTaskOnAnUnknownSessionThrows(@TempDir Path tempDir) {
+        InMemoryStateRepository stateRepository = new InMemoryStateRepository(
+                List.of(sessionWith(tempDir, Optional.empty(), Optional.empty())));
+        SessionManager manager = newManager(stateRepository);
+
+        assertThrows(UnknownSessionException.class, () -> manager.markStartedWithTask(ManagedSessionId.newId()));
+    }
+
     // ---- Task 7: applyAgentRename's single-transform outcome ---------------
 
     /** A session seeded directly into a repository's state, bypassing launch. */

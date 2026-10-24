@@ -120,6 +120,14 @@ public final class DrydockSessionService implements AgentExecutionListener {
     private static final String TRANSFER_BEGIN = "DRYDOCK_TRANSFER_V1_BEGIN_";
     private static final String TRANSFER_END = "DRYDOCK_TRANSFER_V1_END_";
 
+    /**
+     * The fixed prompt carried on a resumed task session's command line.
+     * The conversation history carries what the task was; the prompt only
+     * has to tell the agent where it is and what to do next.
+     */
+    private static final String RESUME_PROMPT = "You are resuming this task in a fresh session. "
+            + "Re-orient from the conversation history and continue the work where you left off.";
+
     private final CompletableFuture<Void> initialization;
     private final Supplier<ApplicationStateStore> stateStore;
     private final Supplier<AgentRegistry> registry;
@@ -478,9 +486,13 @@ public final class DrydockSessionService implements AgentExecutionListener {
      *                     row was read before the claim, so a delete may have
      *                     removed it since, and the launch must not add it back
      */
-    private CompletableFuture<ManagedAgentSession> launchPrepared(ManagedAgentSession prepared,
+    private CompletableFuture<ManagedAgentSession> launchPrepared(ManagedAgentSession pending,
                                                                   Optional<String> initialPrompt,
                                                                   boolean rowMustExist) {
+        // Stamped before the persist: the marker rides the row's first save,
+        // like the initialPrompt it mirrors, and earns the session the fixed
+        // resume prompt on its next resume.
+        ManagedAgentSession prepared = pending.withStartedWithTask(initialPrompt.isPresent());
         // Claimed before anything is persisted or minted: a refused launch
         // must not touch the row, the token or the credential file of the
         // agent that already holds the session.
@@ -874,7 +886,9 @@ public final class DrydockSessionService implements AgentExecutionListener {
             // session without an id gets (AC21).
             Optional<McpAccess> access = mcpAccessFor(session.id(), provider);
             ResumeContext ctx = new ResumeContext(session.agentSessionId(), session.agentSessionName(),
-                    session.workingDirectory(), Optional.empty(), access, false, session.readOnly())
+                    session.workingDirectory(), Optional.empty(), access, false, session.readOnly(),
+                    List.of(),
+                    session.startedWithTask() ? Optional.of(RESUME_PROMPT) : Optional.empty())
                     .withStdioMcpServers(stdioMcpServersFor(session.workingDirectory()));
             plan = provider.buildResumeCommand(ctx);
             releaseIfUnused(session.id(), access, plan);

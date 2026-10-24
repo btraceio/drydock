@@ -938,6 +938,19 @@ public final class SessionManager implements AutoCloseable {
     }
 
     /**
+     * Records that drydock injected a start prompt into this session's
+     * harness at creation -- the marker that later earns it the fixed resume
+     * prompt on an explicit resume. Called once the injected prompt has
+     * actually been handed to the session's terminal (not merely intended),
+     * for flows that inject the prompt outside the create path, such as the
+     * review instruction typed once the review scope has resolved. Throws
+     * {@link UnknownSessionException} if the session no longer exists.
+     */
+    public ManagedAgentSession markStartedWithTask(ManagedSessionId sessionId) {
+        return updateSession(sessionId, session -> session.withStartedWithTask(true));
+    }
+
+    /**
      * The {@code session_handoff} MCP tool's write.
      *
      * <p>One transform, like {@link #applyAgentRename}: the session lookup and

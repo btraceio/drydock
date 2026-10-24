@@ -315,6 +315,13 @@ public final class ClaudeAgentProvider implements AgentProvider {
         } else {
             inner = prefix + binary + " --resume" + suffix;
         }
+        // The resume prompt goes last, as claude's positional [prompt], after
+        // "--" so a prompt that starts with a dash is a prompt, never an
+        // option — the same shape the create path uses for initialPrompt. Only
+        // on a pinned id: the bare picker has no conversation to re-orient.
+        if (r.agentSessionId().isPresent() && r.resumePrompt().isPresent()) {
+            inner += " -- " + AgentCommands.shellQuote(r.resumePrompt().get());
+        }
         if (r.evalMode()) {
             // Resume key is the agent session id; for PRESET it equals the
             // --session-id drydock minted at create, so the seeded config

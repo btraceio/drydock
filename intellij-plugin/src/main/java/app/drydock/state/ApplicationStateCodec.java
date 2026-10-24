@@ -79,7 +79,9 @@ import java.util.Set;
  *       "branchCreatedHere": <boolean>,
  *       "namePinned": <boolean>,
  *       "forkedFrom": "<uuid>" | null,
- *       "evalMode": <boolean>
+ *       "evalMode": <boolean>,
+ *       "workflowId": "<uuid>" | null,
+ *       "startedWithTask": <boolean>
  *     }
  *   ],
  *   "handoffBriefs": [
@@ -297,6 +299,7 @@ public final class ApplicationStateCodec {
         obj.put("workflowId", session.workflowId()
                 .<JsonValue>map(w -> new JsonString(w.value().toString()))
                 .orElse(JsonValue.JsonNull.INSTANCE));
+        obj.put("startedWithTask", new JsonBoolean(session.startedWithTask()));
         return obj;
     }
 
@@ -585,13 +588,18 @@ public final class ApplicationStateCodec {
             // not discard the session.
             Optional<WorkflowId> workflowId = optionalString(obj, "workflowId")
                     .flatMap(ApplicationStateCodec::parseWorkflowId);
+            // Lenient like evalMode: a session persisted before this member
+            // existed was started without an injected prompt, and a malformed
+            // value must not silently earn it the resume prompt. No schema bump.
+            boolean startedWithTask = obj.get("startedWithTask") instanceof JsonBoolean st && st.value();
             // The persisted shape stays FLAT: grouping is a Java-side change,
             // and schemaVersion must not move for it.
             return new ManagedAgentSession(id, repositoryId, displayName,
                     new AgentBinding(agentKind, agentSessionId, agentSessionName, mode),
                     new SessionWorkspace(workingDirectory, worktreeRoot, branchCreatedHere),
                     status, createdAt, lastOpenedAt, lastExitCode,
-                    PrLink.fromPersisted(prState, prNumber), namePinned, forkedFrom, evalMode, workflowId);
+                    PrLink.fromPersisted(prState, prNumber), namePinned, forkedFrom, evalMode, workflowId,
+                    startedWithTask);
         } catch (IllegalArgumentException | DateTimeException e) {
             throw new StateDecodeException("Malformed session entry: " + e.getMessage());
         }
