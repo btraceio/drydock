@@ -4,6 +4,13 @@ on:
   push:
     branches: [main]
   pull_request:
+    # `labeled` is included so adding `target:windows` to an existing PR
+    # spawns a fresh run: a label added after a run started does not
+    # re-evaluate the in-flight run, and "Re-run jobs" replays the ORIGINAL
+    # event payload (label list included), so without this trigger the
+    # Windows jobs would stay skipped until the next push. The non-Windows
+    # jobs guard against re-running on label churn with their own `if`.
+    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
 
 permissions:
@@ -18,6 +25,9 @@ concurrency:
 jobs:
   test:
     name: app:test
+    # The `labeled` trigger exists only to (re)start the label-gated Windows
+    # jobs; re-running this suite on every label change would be pure waste.
+    if: github.event.action != 'labeled'
     # macOS because the product is macOS-only, and because the git-backed
     # tests exercise the same `git` this app spawns at runtime. The suite
     # itself needs no native libraries: libghostty is only wired into the
@@ -76,8 +86,16 @@ jobs:
   # once the job goes reliably green, remove continue-on-error and fold it
   # into the required checks (see the sibling macos test job for the
   # suite's constraints -- same checkout/JDK/setup, different runner).
+  # Every Windows job below is gated on the PR carrying the `target:windows`
+  # label: the product is macOS-only today, so most PRs have no Windows
+  # surface and burning windows-latest minutes on them is waste. Pushes to
+  # main and manual workflow_dispatch runs are exempt (labels exist only on
+  # PRs). GitHub has no trigger-level label filter for `pull_request`, so
+  # adding an unrelated label produces a run where every job is skipped --
+  # noise, but nothing executes.
   windows-test-trial:
     name: app:test (Windows, trial)
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'target:windows')
     runs-on: windows-latest
     timeout-minutes: 90
     continue-on-error: true
@@ -119,6 +137,8 @@ jobs:
 
   jediterm-spike:
     name: jeditermSpike (Windows)
+    # Same `target:windows` gate as the other Windows jobs (see above).
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'target:windows')
     # The JediTermFX + pty4j spikes are pure Java + pty4j's own native PTY
     # libs -- no Zig, no Xcode, no libghostty -- so they are the one piece of
     # the project that CAN run on Windows today, and running them there is the
@@ -165,6 +185,8 @@ jobs:
 
   boot-spike:
     name: bootSpike (Windows)
+    # Same `target:windows` gate as the other Windows jobs (see above).
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'target:windows')
     # Verifies the REAL app boots on Windows and opens a terminal-only session
     # through the production SessionManager/OpenSessionTab path -- no claude
     # installed (a diag command override bypasses the agent provider and runs
@@ -215,6 +237,8 @@ jobs:
 
   gradle-run-smoke:
     name: gradleRunSmoke (Windows)
+    # Same `target:windows` gate as the other Windows jobs (see above).
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'target:windows')
     # Verifies the production `gradlew :app:run` task launches on Windows --
     # stronger than the boot-spike job above because bootSpike uses a typed
     # JavaExec that sets its OWN jvmArgs, so it bypasses the
@@ -270,6 +294,8 @@ jobs:
 
   windows-runtime-image:
     name: windowsRuntimeImage (Windows)
+    # Same `target:windows` gate as the other Windows jobs (see above).
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'target:windows')
     # Builds the Windows runtime image at build/image-windows/ -- a
     # self-contained JDK 26 + JavaFX + drydock.jar directory with a
     # bin/drydock.bat launcher (no installer, no MSIX, no code signing;
