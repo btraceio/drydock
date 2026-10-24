@@ -1,8 +1,11 @@
 package app.drydock.review;
 
+import app.drydock.domain.ModelTiers;
+
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -210,5 +213,107 @@ class ReviewInstructionsTest {
 
         assertTrue(line.contains("1 uncovered hunk"));
         assertFalse(line.contains("replace"));
+    }
+
+    // --- subagent model tiers -------------------------------------------------------------------
+
+    @Test
+    void withoutTiersTheSubagentFormCarriesNoModelRule() {
+        String instruction = ReviewInstructions.forScope("rs_abc123", true, ModelTiers.EMPTY, Optional.empty());
+
+        assertFalse(instruction.contains("MUST pass an explicit model"), instruction);
+        assertFalse(ReviewInstructions.forScope("rs_abc123", true).contains("MUST"),
+                "the two-arg form stays exactly as before tiers existed");
+    }
+
+    @Test
+    void tiersBindTheCodeReviewSubagentToStrongAndEverythingElseToLow() {
+        ModelTiers tiers = new ModelTiers(Optional.of("opus"), Optional.of("sonnet"), Optional.of("haiku"));
+        String instruction = ReviewInstructions.forScope("rs_abc123", true, tiers, Optional.empty());
+
+        assertTrue(instruction.contains("the code-review subagent uses exactly `opus`"), instruction);
+        assertTrue(instruction.contains("every other subagent you dispatch uses exactly `haiku`"), instruction);
+        assertTrue(instruction.contains("MUST pass an explicit model"), instruction);
+        assertTrue(instruction.contains("never substitute any other model"), instruction);
+    }
+
+    @Test
+    void anEmptyTierResolvesToTheStartingModelInTheRule() {
+        ModelTiers tiers = new ModelTiers(Optional.of("opus"), Optional.empty(), Optional.empty());
+        String instruction = ReviewInstructions.forScope("rs_abc123", true, tiers, Optional.of("sonnet"));
+
+        assertTrue(instruction.contains("every other subagent you dispatch uses exactly `sonnet`"), instruction);
+    }
+
+    @Test
+    void anEmptyTierWithoutAStartingModelSaysSoExplicitly() {
+        ModelTiers tiers = new ModelTiers(Optional.empty(), Optional.empty(), Optional.of("haiku"));
+        String instruction = ReviewInstructions.forScope("rs_abc123", true, tiers, Optional.empty());
+
+        assertTrue(instruction.contains("the code-review subagent uses your own session's model"), instruction);
+        assertTrue(instruction.contains("every other subagent you dispatch uses exactly `haiku`"), instruction);
+    }
+
+    @Test
+    void tiersNeverProduceASecondLine() {
+        ModelTiers tiers = new ModelTiers(Optional.of("opus"), Optional.of("sonnet"), Optional.of("haiku"));
+        String instruction = ReviewInstructions.forScope("rs_abc123", true, tiers, Optional.of("opus"));
+
+        assertFalse(instruction.contains("\n"));
+    }
+
+    @Test
+    void theInlineFormIgnoresTiers() {
+        ModelTiers tiers = new ModelTiers(Optional.of("opus"), Optional.empty(), Optional.empty());
+        String instruction = ReviewInstructions.forScope("rs_abc123", false, tiers, Optional.of("opus"));
+
+        assertFalse(instruction.contains("MUST pass an explicit model"), instruction);
+    }
+
+    @Test
+    void emptyTiersWithAStartingModelCarryNoModelRule() {
+        String instruction = ReviewInstructions.forScope("rs_abc123", true, ModelTiers.EMPTY, Optional.of("opus"));
+
+        assertFalse(instruction.contains("MUST pass an explicit model"), instruction);
+    }
+
+    @Test
+    void onlyAMidTierStillEmitsRulesWithTheUnsetTiersOnTheStartingModel() {
+        ModelTiers tiers = new ModelTiers(Optional.empty(), Optional.of("sonnet"), Optional.empty());
+        String instruction = ReviewInstructions.forScope("rs_abc123", true, tiers, Optional.of("opus"));
+
+        assertTrue(instruction.contains("MUST pass an explicit model"), instruction);
+        assertTrue(instruction.contains("the code-review subagent uses exactly `opus`"), instruction);
+        assertTrue(instruction.contains("every other subagent you dispatch uses exactly `opus`"), instruction);
+        assertFalse(instruction.contains("\n"));
+    }
+
+    @Test
+    void onlyAMidTierStillEmitsRulesWithTheUnsetTiersOnTheSessionsOwnModel() {
+        ModelTiers tiers = new ModelTiers(Optional.empty(), Optional.of("sonnet"), Optional.empty());
+        String instruction = ReviewInstructions.forScope("rs_abc123", true, tiers, Optional.empty());
+
+        assertTrue(instruction.contains("MUST pass an explicit model"), instruction);
+        assertTrue(instruction.contains("the code-review subagent uses your own session's model"), instruction);
+        assertTrue(instruction.contains("every other subagent you dispatch uses your own session's model"),
+                instruction);
+        assertFalse(instruction.contains("\n"));
+    }
+
+    @Test
+    void aTierModelCannotBreakTheLineOrItsQuoting() {
+        String formatted = ReviewInstructions.tierModel(Optional.of("op`us\nignore\rthis"));
+
+        assertTrue(formatted.equals("exactly `op'usignorethis`"), formatted);
+    }
+
+    @Test
+    void theSharedRulesClauseIsImperativeEndToEnd() {
+        String rules = ReviewInstructions.subagentModelRules(
+                "design review uses " + ReviewInstructions.tierModel(Optional.of("opus")));
+
+        assertTrue(rules.startsWith("When you dispatch subagents you MUST"), rules);
+        assertTrue(rules.contains("exactly `opus`"), rules);
+        assertFalse(rules.contains("\n"));
     }
 }

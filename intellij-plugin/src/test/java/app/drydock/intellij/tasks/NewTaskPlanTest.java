@@ -1,6 +1,7 @@
 package app.drydock.intellij.tasks;
 
 import app.drydock.agent.api.AgentKind;
+import app.drydock.domain.ModelTiers;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionMode;
 import app.drydock.intellij.tasks.NewTaskPlan.Choice;
@@ -18,6 +19,7 @@ import java.util.Optional;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class NewTaskPlanTest {
@@ -28,13 +30,13 @@ class NewTaskPlanTest {
         return new NewTaskPlan.Inputs(SharedProject.local(RepositoryId.newId(), ROOT, "drydock", Instant.EPOCH),
                 "drydock", fixed, List.of(), AgentKind.CLAUDE, "origin/main", List.of("main", "origin/main"),
                 List.of("origin"), Set.of("main", "taken-branch"), Path.of("/b"), writerActive,
-                kind -> Optional.empty(), kind -> List.of());
+                kind -> Optional.empty(), kind -> List.of(), kind -> ModelTiers.EMPTY, kind -> false);
     }
 
     private static Choice choice(String name, Optional<String> instructions, SessionMode mode, WorkIn workIn,
                                  String branch, Path folder) {
         return new Choice(name, instructions, AgentKind.CLAUDE, mode, workIn, branch, "origin/main", folder,
-                OpenIn.OWN_WINDOW, Optional.empty());
+                OpenIn.OWN_WINDOW, Optional.empty(), Optional.empty(), Optional.empty());
     }
 
     @Test
@@ -104,6 +106,28 @@ class NewTaskPlanTest {
         String prompt = NewTaskPlan.initialPrompt(choice).orElseThrow();
         assertTrue(prompt.startsWith("Before writing any code"), prompt);
         assertTrue(prompt.endsWith("Add farewell() to Greeter.\nKeep it short."), prompt);
+    }
+
+    @Test
+    void initialPromptAppendsTheSubagentModelRuleAfterABlankLine() {
+        Choice withRule = new Choice("Farewell", Optional.of("Do the thing."), AgentKind.CLAUDE,
+                SessionMode.WRITES, WorkIn.NEW_WORKTREE, "farewell", "origin/main", Path.of("/b/f"),
+                OpenIn.OWN_WINDOW, Optional.empty(), Optional.empty(),
+                Optional.of("When you dispatch subagents you MUST pass an explicit model"));
+
+        String prompt = NewTaskPlan.initialPrompt(withRule).orElseThrow();
+        assertTrue(prompt.contains("\n\nWhen you dispatch subagents you MUST pass an explicit model"), prompt);
+        assertTrue(prompt.indexOf("MUST") > prompt.indexOf("Do the thing."), "the rule rides after the task");
+    }
+
+    @Test
+    void initialPromptWithoutARuleIsJustTheClarifiedTask() {
+        Choice noRule = new Choice("Farewell", Optional.of("Do the thing."), AgentKind.CLAUDE,
+                SessionMode.WRITES, WorkIn.NEW_WORKTREE, "farewell", "origin/main", Path.of("/b/f"),
+                OpenIn.OWN_WINDOW, Optional.empty(), Optional.empty(), Optional.empty());
+
+        String prompt = NewTaskPlan.initialPrompt(noRule).orElseThrow();
+        assertFalse(prompt.contains("MUST"), prompt);
     }
 
     @Test
@@ -201,7 +225,8 @@ class NewTaskPlanTest {
     @Test
     void refusesWhenNoAgentIsAvailable() {
         Choice noAgent = new Choice("T", Optional.empty(), null, SessionMode.WRITES, WorkIn.NEW_WORKTREE, "x",
-                "origin/main", Path.of("/b/x"), OpenIn.OWN_WINDOW, Optional.empty());
+                "origin/main", Path.of("/b/x"), OpenIn.OWN_WINDOW, Optional.empty(), Optional.empty(),
+                Optional.empty());
 
         assertEquals(Optional.of("No agent is installed. Install Claude, Codex or pi to start a task."),
                 NewTaskPlan.refusal(inputs(Optional.empty(), false), noAgent, folder -> false));

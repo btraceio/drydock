@@ -23,6 +23,7 @@ import app.drydock.domain.AgentBinding;
 import app.drydock.domain.ApplicationState;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.ModelTiers;
 import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.RepositorySettings;
@@ -2076,12 +2077,45 @@ class DrydockSessionServiceTest {
         ApplicationState state = ApplicationState.empty().withRepositories(List.of(a, b));
 
         ApplicationState updated = DrydockSessionService.repoWithLastUsedLaunch(state, a.id(), AgentKind.PI,
-                Optional.of("m"));
+                Optional.of("m"), Optional.empty());
 
         RepositorySettings aSettings = updated.repositories().get(0).settings();
         assertEquals(Optional.of(AgentKind.PI), aSettings.lastUsedAgent());
         assertEquals(Optional.of("m"), aSettings.lastUsedModel(AgentKind.PI));
         assertEquals(RepositorySettings.DEFAULT, updated.repositories().get(1).settings());
+    }
+
+    @Test
+    void launchRecordStoresTheTiersWithTheModelOnTheMatchingRepositoryOnly() {
+        Repository a = launchRecordRepo("/r/a", RepositorySettings.DEFAULT);
+        ModelTiers tiers = new ModelTiers(Optional.of("opus"), Optional.of("sonnet"), Optional.of("haiku"));
+
+        ApplicationState updated = DrydockSessionService.repoWithLastUsedLaunch(
+                ApplicationState.empty().withRepositories(List.of(a)), a.id(), AgentKind.CLAUDE,
+                Optional.of("opus"), Optional.of(tiers));
+
+        RepositorySettings settings = updated.repositories().get(0).settings();
+        assertEquals(Optional.of(tiers), settings.lastUsedTiers(AgentKind.CLAUDE));
+        // Pickers shown and every tier cleared: the entry goes, like an empty model's does.
+        ApplicationState cleared = DrydockSessionService.repoWithLastUsedLaunch(updated, a.id(), AgentKind.CLAUDE,
+                Optional.of("opus"), Optional.of(ModelTiers.EMPTY));
+        assertEquals(Optional.empty(), cleared.repositories().get(0).settings().lastUsedTiers(AgentKind.CLAUDE));
+    }
+
+    @Test
+    void launchRecordWithoutTierInputKeepsTheStoredTiers() {
+        ModelTiers stored = new ModelTiers(Optional.of("opus"), Optional.of("sonnet"), Optional.of("haiku"));
+        Repository a = launchRecordRepo("/r/a",
+                RepositorySettings.DEFAULT.withLastUsedTiers(AgentKind.CLAUDE, stored));
+
+        ApplicationState updated = DrydockSessionService.repoWithLastUsedLaunch(
+                ApplicationState.empty().withRepositories(List.of(a)), a.id(), AgentKind.CLAUDE,
+                Optional.of("sonnet"), Optional.empty());
+
+        RepositorySettings settings = updated.repositories().get(0).settings();
+        assertEquals(Optional.of(stored), settings.lastUsedTiers(AgentKind.CLAUDE));
+        assertEquals(Optional.of("sonnet"), settings.lastUsedModel(AgentKind.CLAUDE));
+        assertEquals(Optional.of(AgentKind.CLAUDE), settings.lastUsedAgent());
     }
 
     @Test
@@ -2091,7 +2125,7 @@ class DrydockSessionServiceTest {
         ApplicationState state = ApplicationState.empty().withRepositories(List.of(a));
 
         ApplicationState updated = DrydockSessionService.repoWithLastUsedLaunch(state, a.id(), AgentKind.PI,
-                Optional.empty());
+                Optional.empty(), Optional.empty());
 
         RepositorySettings settings = updated.repositories().get(0).settings();
         assertEquals(Optional.empty(), settings.lastUsedModel(AgentKind.PI));
@@ -2105,7 +2139,7 @@ class DrydockSessionServiceTest {
         ApplicationState state = ApplicationState.empty().withRepositories(List.of(a, b));
 
         ApplicationState updated = DrydockSessionService.repoWithLastUsedLaunch(state, RepositoryId.newId(),
-                AgentKind.PI, Optional.of("m"));
+                AgentKind.PI, Optional.of("m"), Optional.empty());
 
         assertEquals(state.repositories(), updated.repositories());
     }
@@ -2117,7 +2151,7 @@ class DrydockSessionServiceTest {
         ApplicationState state = ApplicationState.empty().withRepositories(List.of(a, b));
 
         ApplicationState updated = DrydockSessionService.repoWithLastUsedLaunch(state, b.id(), AgentKind.CLAUDE,
-                Optional.of("opus"));
+                Optional.of("opus"), Optional.empty());
 
         assertEquals(List.of(a.id(), b.id()), updated.repositories().stream().map(Repository::id).toList());
     }

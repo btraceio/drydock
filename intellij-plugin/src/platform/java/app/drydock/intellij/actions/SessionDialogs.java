@@ -4,6 +4,7 @@ import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.AgentRegistry;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.ModelTiers;
 import app.drydock.domain.SessionMode;
 import app.drydock.intellij.agent.AgentConsoles;
 import app.drydock.intellij.DrydockPluginService;
@@ -80,14 +81,18 @@ public final class SessionDialogs {
      * @param freshWindow whether {@code project} is a window Drydock has just
      *                    opened for this session, where the IDE's
      *                    README-on-first-open is still to come
+     * @param tiers       the launch's subagent model tiers, empty when no
+     *                    tier pickers were shown (see {@link
+     *                    #launchSession(Project, Path, Path, AgentKind, String,
+     *                    SessionMode, Function, boolean, Optional, Optional)})
      */
     public static void launchNewSession(Project project, Path workingDirectory, Path repositoryRoot, AgentKind kind,
             String displayName, SessionMode mode, Optional<String> task, Optional<String> model,
-            boolean freshWindow) {
+            Optional<ModelTiers> tiers, boolean freshWindow) {
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         String agentName = AgentLabels.displayName(plugin.registry(), kind);
         CompletableFuture<ManagedAgentSession> launch = launchSession(project, workingDirectory, repositoryRoot,
-                kind, displayName, mode, task, model, freshWindow);
+                kind, displayName, mode, task, model, tiers, freshWindow);
         ProgressManager.getInstance().run(new Task.Backgroundable(project,
                 "Starting " + agentName + " session…", true) {
             @Override
@@ -126,9 +131,9 @@ public final class SessionDialogs {
      */
     public static CompletableFuture<ManagedAgentSession> launchSession(Project project, Path workingDirectory,
             Path repositoryRoot, AgentKind kind, String displayName, SessionMode mode, Optional<String> task,
-            Optional<String> model, boolean freshWindow) {
+            Optional<String> model, Optional<ModelTiers> tiers, boolean freshWindow) {
         return launchSession(project, workingDirectory, repositoryRoot, kind, displayName, mode,
-                session -> CompletableFuture.completedFuture(task), freshWindow, model);
+                session -> CompletableFuture.completedFuture(task), freshWindow, model, tiers);
     }
 
     /**
@@ -143,23 +148,20 @@ public final class SessionDialogs {
      * resolves; it runs on the launch chain, off the EDT. It must not throw:
      * a failure to resolve a prompt means starting the session without one,
      * and the caller tells the human why.
-     */
-    public static CompletableFuture<ManagedAgentSession> launchSession(Project project, Path workingDirectory,
-            Path repositoryRoot, AgentKind kind, String displayName, SessionMode mode,
-            Function<ManagedAgentSession, CompletableFuture<Optional<String>>> prompt, boolean freshWindow) {
-        return launchSession(project, workingDirectory, repositoryRoot, kind, displayName, mode, prompt,
-                freshWindow, Optional.empty());
-    }
-
-    /**
-     * As above, with {@code model} — the starting model the human picked —
-     * riding the launch the same way the task does (see {@code
-     * CreateContext.model}); empty means the harness's own default.
+     *
+     * <p>{@code model} -- the starting model the human picked, empty for the
+     * harness's own default -- and {@code tiers} -- the subagent model tiers
+     * -- ride the launch chain (launch-time input only, a resume never
+     * carries them) so the session reaching RUNNING records them as the
+     * repository's last-used values for this harness. Empty {@code tiers}
+     * means no tier pickers were shown: nothing is recorded and the
+     * remembered tiers stay. Tiers reach the agent only through the prompt --
+     * a tier is a prompt rule, not a CLI flag.</p>
      */
     public static CompletableFuture<ManagedAgentSession> launchSession(Project project, Path workingDirectory,
             Path repositoryRoot, AgentKind kind, String displayName, SessionMode mode,
             Function<ManagedAgentSession, CompletableFuture<Optional<String>>> prompt, boolean freshWindow,
-            Optional<String> model) {
+            Optional<String> model, Optional<ModelTiers> tiers) {
         return DrydockStartupActivity.sessions(project)
                 .prepareSession(workingDirectory, repositoryRoot, kind, displayName, mode)
                 .thenApply(session -> {
@@ -167,7 +169,7 @@ public final class SessionDialogs {
                     return session;
                 })
                 .thenCompose(session -> prompt.apply(session).thenCompose(initial ->
-                        DrydockStartupActivity.sessions(project).launchSession(session, initial, model)));
+                        DrydockStartupActivity.sessions(project).launchSession(session, initial, model, tiers)));
     }
 
     /**
