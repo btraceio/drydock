@@ -215,11 +215,6 @@ public final class NewTaskPlan {
      * answers whether a folder exists and is not empty (I/O, injected).
      */
     public static Optional<String> refusal(Inputs in, Choice choice, Predicate<Path> folderOccupied) {
-        if (choice.name().isBlank()) {
-            // The dialog derives the name from the description, so a blank
-            // name can only mean a blank description.
-            return Optional.of("Describe what the agent should do.");
-        }
         if (choice.agent() == null) {
             // Checked here, not after: the launch would otherwise create the
             // worktree and the window before failing.
