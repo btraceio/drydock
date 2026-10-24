@@ -151,6 +151,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     private final Set<Path> requestedPullRequests = ConcurrentHashMap.newKeySet();
     /** One review materialization at a time per pull request; the flow itself refuses duplicates too. */
     private final PullRequestReview pullRequestReview = new PullRequestReview();
+    /** One review materialization at a time per worktree; the flow itself refuses duplicates too. */
+    private final WorktreeReview worktreeReview = new WorktreeReview();
     /** Guarded by {@code this}: subscribing after dispose() must undo itself. */
     private Runnable unsubscribeShared = () -> { };
     private volatile boolean disposed;
@@ -296,6 +298,59 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 reviewPullRequest(e);
             }
         };
+        AnAction reviewWorktree = new DumbAwareAction("Review…",
+                "Start a review session in this worktree, pick the starting model, and open its review board",
+                AllIcons.Actions.Preview) {
+            @Override
+            public void update(@NotNull AnActionEvent e) {
+                TaskActions.present(e, e.getData(SELECTED_NODE) instanceof IdleWorktree
+                        && e.getData(SELECTED_PROJECT_ROOT) != null);
+            }
+
+            @Override
+            public @NotNull ActionUpdateThread getActionUpdateThread() {
+                return ActionUpdateThread.EDT;
+            }
+
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                if (e.getData(SELECTED_NODE) instanceof IdleWorktree idle
+                        && e.getData(SELECTED_PROJECT_ROOT) != null) {
+                    worktreeReview.reviewWithModelDialog(project, e.getData(SELECTED_PROJECT_ROOT),
+                            idle.worktree(), idle.branch());
+                }
+            }
+        };
+        // One-gesture review with the repository's remembered starting model
+        // for the harness the review will launch; "Review…" above asks and
+        // re-records it instead. Same label rule as the PR review's quick
+        // action: the label names the model, and reads in-memory state only.
+        AnAction quickReviewWorktree = new DumbAwareAction("Review (default)",
+                "Start a review session in this worktree with the remembered starting model",
+                AllIcons.Actions.Preview) {
+            @Override
+            public void update(@NotNull AnActionEvent e) {
+                TaskActions.present(e, e.getData(SELECTED_NODE) instanceof IdleWorktree
+                        && e.getData(SELECTED_PROJECT_ROOT) != null);
+                if (e.getData(SELECTED_NODE) instanceof IdleWorktree) {
+                    e.getPresentation().setText(quickReviewLabel(e.getData(SELECTED_PROJECT_ROOT)));
+                }
+            }
+
+            @Override
+            public @NotNull ActionUpdateThread getActionUpdateThread() {
+                return ActionUpdateThread.EDT;
+            }
+
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                if (e.getData(SELECTED_NODE) instanceof IdleWorktree idle
+                        && e.getData(SELECTED_PROJECT_ROOT) != null) {
+                    worktreeReview.review(project, e.getData(SELECTED_PROJECT_ROOT),
+                            idle.worktree(), idle.branch());
+                }
+            }
+        };
         AnAction implement = new DumbAwareAction("Implement…",
                 "Create a writable task and worktree for this issue", AllIcons.Actions.Execute) {
             @Override
@@ -338,6 +393,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
         contextActions.add(quickReview);
         contextActions.add(reviewPullRequest);
+        contextActions.add(quickReviewWorktree);
+        contextActions.add(reviewWorktree);
         contextActions.add(implement);
         contextActions.add(triage);
         contextActions.addSeparator();
