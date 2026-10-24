@@ -10,7 +10,7 @@ set -eu
 
 EXT="${1:?usage: pi-bridge-smoke.sh <extension.ts>}"
 WORK="$(mktemp -d)"
-trap 'kill "${MOCK_PID:-}" 2>/dev/null || true; rm -rf "$WORK"' EXIT
+trap 'kill "${MOCK_PID:-}" "${LATE_PID:-}" 2>/dev/null || true; rm -rf "$WORK"' EXIT
 
 PORT=8765
 
@@ -37,7 +37,7 @@ const TOOLS = [{
 // carries one). So the instructions ask for something OBSERVABLE, and the
 // script checks the model's reply rather than the transcript.
 const INSTRUCTIONS = "Begin every reply with the exact token DRYDOCK-BRIDGE-OK on its own line.";
-createServer((req, res) => {
+const server = createServer((req, res) => {
   if (req.headers["x-drydock-session-token"] !== TOKEN) { res.writeHead(401).end(); return; }
   let body = "";
   req.on("data", (c) => (body += c));
@@ -73,8 +73,13 @@ createServer((req, res) => {
       }
     } else { reply({}); }
   });
-}).on("error", (e) => { console.error("mock failed to bind: " + e.message); process.exit(1); })
-  .listen(PORT, "127.0.0.1", () => writeFileSync(process.argv[3], "ready"));
+}).on("error", (e) => { console.error("mock failed to bind: " + e.message); process.exit(1); });
+// Optional 4th argument: delay before the server starts LISTENING, in ms.
+// The late-bind scenario launches pi while the server is still down, the
+// way the harness launches it in the same breath as the server.
+const startListening = (delay) => setTimeout(() =>
+  server.listen(PORT, "127.0.0.1", () => writeFileSync(process.argv[3], "ready")), delay);
+startListening(Number(process.argv[4] ?? 0));
 MOCK
 
 command -v node > /dev/null 2>&1 || { echo "SKIP: node is not on PATH; the mock server needs it"; exit 2; }
@@ -271,5 +276,29 @@ grep -q '"type":"session_info"' "$TRANSCRIPT" || { echo "FAIL: pi's session name
 grep -q '"name":"Smoke test"' "$TRANSCRIPT" || { echo "FAIL: session name did not come from the outcome"; cat "$TRANSCRIPT"; exit 1; }
 # A refused rename must NOT set it.
 grep -q '"type":"session_info"' "$T2" && { echo "FAIL: a refused rename still renamed the pi session"; cat "$T2"; exit 1; }
+
+# A server that binds LATE must still be reached: pi is spawned in the same
+# breath as the config file and the server bind, so the FIRST handshake
+# attempt usually fails, and a one-shot handshake stood the whole session
+# down (the IDE launch of 2026-10-24 18:16 proved it live: the agent had no
+# tools and fell back to raw HTTP over bash). The bridge must retry until
+# its deadline instead of standing down after losing one race.
+LATE_PORT=$((PORT + 1))
+node "$WORK/mock.mjs" "$LATE_PORT" "$WORK/late.ready" 5000 &
+LATE_PID=$!
+cat > "$WORK/state/late.json" <<LATE
+{"mcpServers":{"drydock":{"url":"http://127.0.0.1:$LATE_PORT/mcp","headers":{"X-Drydock-Session-Token":"smoke-token"}}}}
+LATE
+rm -rf "$WORK/sessions_late"; mkdir -p "$WORK/sessions_late"
+DRYDOCK_MCP_CONFIG="$WORK/state/late.json" \
+  env -u PI_CODING_AGENT pi --session-dir "$WORK/sessions_late" --offline -e "$EXT" \
+    -p "Call session_rename with the title 'Smoke test'. Then say done." \
+    < /dev/null > "$WORK/out_late.txt" 2>&1 || true
+TL="$(find "$WORK/sessions_late" -name '*.jsonl' | head -1)"
+# The rename outcome naming the pi session proves the handshake eventually
+# landed, the tool call went through, and the outcome round-tripped.
+grep -q '"name":"Smoke test"' "$TL" \
+  || { echo "FAIL: the late-binding server was never reached"; cat "$WORK/out_late.txt"; exit 1; }
+no_leak "$TL" "the late-server transcript"
 
 echo "PASS: handshake, registration and tools/call all reached the mock"

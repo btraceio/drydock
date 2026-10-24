@@ -38,6 +38,9 @@ public final class PiMcpExtensionSource {
             const STDIO_ENV = "DRYDOCK_STDIO_MCP_SERVERS";
             const TOKEN_HEADER = "X-Drydock-Session-Token";
             const HANDSHAKE_MS = 2000;
+            // pi may spawn before the session's MCP server binds; keep
+            // retrying the handshake this long before standing down.
+            const HANDSHAKE_DEADLINE_MS = 20000;
             const CALL_MS = 45000;
             // One localhost round trip plus one FX-thread hop. The rebind itself
             // is a single state transform, so this is generous for a busy app
@@ -195,27 +198,67 @@ public final class PiMcpExtensionSource {
               // Network work only, and never allowed to reject: a failed extension
               // load exits pi 1, on every load path.
               try {
-                wire = readWire();
+                wire = await connect();
                 if (!wire) return;
-                // ONE budget for the pair, not one each: this bounds a wedged
-                // socket, and a wedged socket burns the whole budget twice over.
-                const handshake = AbortSignal.timeout(HANDSHAKE_MS);
-                const init = await rpc(wire, "initialize", {
-                  protocolVersion: "2025-06-18",
-                  capabilities: {},
-                  clientInfo: { name: "drydock-pi-bridge", version: "1" },
-                }, handshake);
-                instructions = typeof init?.instructions === "string" ? init.instructions : "";
-                const listed = await rpc(wire, "tools/list", {}, handshake);
-                tools = Array.isArray(listed?.tools) ? listed.tools : [];
               } catch (e: any) {
                 wire = null;
-                // A half-failed handshake (initialize answered, tools/list did
-                // not, both sharing one HANDSHAKE_MS budget) must not leave
-                // `instructions` populated with nothing registered to back it.
+                // A half-failed handshake must not leave `instructions`
+                // populated with nothing registered to back it.
                 tools = [];
                 instructions = "";
                 loadError = "drydock: could not reach this session's tools";
+              }
+
+              /**
+               * pi is spawned in the same breath as the config file and the
+               * session's MCP server -- the harness launches the agent while
+               * the server is still binding -- so the FIRST attempt usually
+               * fails: the config may not exist yet and the server may not
+               * accept yet. A one-shot handshake therefore stood the whole
+               * session down (the IDE launch of 2026-10-24 18:16 proved it
+               * live: the agent had no tools and fell back to raw HTTP over
+               * bash). Retry until HANDSHAKE_DEADLINE_MS; each attempt keeps
+               * its own HANDSHAKE_MS budget, because a wedged socket must not
+               * eat the whole deadline. A success resets the half-failed
+               * state; only the final failure leaves a stand-down. No config
+               * env at all means no MCP access was granted -- no point
+               * retrying, return immediately.
+               */
+              async function connect(): Promise<Wire | null> {
+                if (!process.env[CONFIG_ENV]) return null;
+                const deadline = Date.now() + HANDSHAKE_DEADLINE_MS;
+                while (Date.now() < deadline) {
+                  let candidate: Wire | null = null;
+                  try {
+                    candidate = readWire();
+                  } catch (e: any) {
+                    // The config file may not exist yet; retry.
+                  }
+                  if (candidate) {
+                    try {
+                      // ONE budget for the pair, not one each: this bounds a
+                      // wedged socket, and a wedged socket burns the whole
+                      // budget twice over.
+                      const handshake = AbortSignal.timeout(HANDSHAKE_MS);
+                      const init = await rpc(candidate, "initialize", {
+                        protocolVersion: "2025-06-18",
+                        capabilities: {},
+                        clientInfo: { name: "drydock-pi-bridge", version: "1" },
+                      }, handshake);
+                      const listed = await rpc(candidate, "tools/list", {}, handshake);
+                      instructions = typeof init?.instructions === "string" ? init.instructions : "";
+                      tools = Array.isArray(listed?.tools) ? listed.tools : [];
+                      return candidate;
+                    } catch (e: any) {
+                      // Server not accepting yet, or a half-failed handshake:
+                      // reset the derived state and retry.
+                      tools = [];
+                      instructions = "";
+                    }
+                  }
+                  await new Promise((resolve) => setTimeout(resolve, 250));
+                }
+                return null;
               }
 
               function registerStdioServers() {
