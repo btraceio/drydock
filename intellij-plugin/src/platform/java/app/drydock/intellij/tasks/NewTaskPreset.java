@@ -12,9 +12,17 @@ import java.util.Optional;
  * Optional values and constraints supplied by a task entry point, and which
  * window the task opens in: this one (a tab, hosted when its worktree is
  * another project's) unless the entry point asks for its own.
+ *
+ * <p>{@code tierRoles} carries the preset's subagent role→tier mapping as
+ * the assignments clause of the prompt's model rules, with the placeholders
+ * {@code {STRONG}}, {@code {MID}} and {@code {LOW}} where the tier's model
+ * value goes; the dialog substitutes them from the picked tiers when the
+ * harness dispatches subagents (see {@code NewTaskDialog}). Presets without
+ * a mapping get no tier rules and no tier pickers.</p>
  */
 record NewTaskPreset(String name, Optional<String> instructions, Optional<SessionMode> fixedMode,
-                     Optional<WorkIn> fixedWorkIn, boolean instructionsRequired, OpenIn openIn) {
+                     Optional<WorkIn> fixedWorkIn, boolean instructionsRequired, OpenIn openIn,
+                     Optional<String> tierRoles) {
 
     NewTaskPreset {
         Objects.requireNonNull(name, "name");
@@ -22,6 +30,12 @@ record NewTaskPreset(String name, Optional<String> instructions, Optional<Sessio
         Objects.requireNonNull(fixedMode, "fixedMode");
         Objects.requireNonNull(fixedWorkIn, "fixedWorkIn");
         Objects.requireNonNull(openIn, "openIn");
+        Objects.requireNonNull(tierRoles, "tierRoles");
+    }
+
+    NewTaskPreset(String name, Optional<String> instructions, Optional<SessionMode> fixedMode,
+                  Optional<WorkIn> fixedWorkIn, boolean instructionsRequired, OpenIn openIn) {
+        this(name, instructions, fixedMode, fixedWorkIn, instructionsRequired, openIn, Optional.empty());
     }
 
     static NewTaskPreset empty() {
@@ -90,7 +104,9 @@ record NewTaskPreset(String name, Optional<String> instructions, Optional<Sessio
                 """.formatted(reference));
         return new NewTaskPreset(name, Optional.of(prompt.toString()), Optional.of(SessionMode.WRITES),
                 Optional.empty(), true,
-                OpenIn.THIS_WINDOW);
+                OpenIn.THIS_WINDOW,
+                Optional.of("design-critique and code-review subagents use {STRONG}; research and "
+                        + "verification subagents use {MID}; any other subagent you dispatch uses {LOW}"));
     }
 
     static NewTaskPreset triage(OpenIssue issue) {
@@ -119,7 +135,9 @@ record NewTaskPreset(String name, Optional<String> instructions, Optional<Sessio
                 """);
         return new NewTaskPreset(name, Optional.of(prompt.toString()), Optional.empty(),
                 Optional.of(WorkIn.MAIN_CHECKOUT), true,
-                OpenIn.THIS_WINDOW);
+                OpenIn.THIS_WINDOW,
+                Optional.of("investigation and the confirmed/stale verdict use {STRONG}; reproducer "
+                        + "work uses {MID}; summary and impact-assessment work use {LOW}"));
     }
 
     SessionMode mode(boolean readOnlySelected) {

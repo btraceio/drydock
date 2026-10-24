@@ -2,6 +2,7 @@ package app.drydock.intellij.tasks;
 
 import app.drydock.agent.api.Agent;
 import app.drydock.agent.api.AgentKind;
+import app.drydock.domain.ModelTiers;
 import app.drydock.domain.SessionMode;
 import app.drydock.git.BranchNameRules;
 import app.drydock.git.WorktreeNaming;
@@ -51,7 +52,9 @@ public final class NewTaskPlan {
                          List<Agent> agents, AgentKind preselected, String defaultStart, List<String> startPoints,
                          List<String> remoteNames, Set<String> takenBranches, Path worktreeBase,
                          boolean writerActiveInMain, Function<AgentKind, Optional<String>> lastUsedModel,
-                         Function<AgentKind, List<String>> modelSuggestions) {
+                         Function<AgentKind, List<String>> modelSuggestions,
+                         Function<AgentKind, ModelTiers> lastUsedTiers,
+                         Predicate<AgentKind> supportsSubagents) {
         public Inputs {
             Objects.requireNonNull(project, "project");
             Objects.requireNonNull(fixedWorktree, "fixedWorktree");
@@ -61,18 +64,37 @@ public final class NewTaskPlan {
             takenBranches = Set.copyOf(takenBranches);
             Objects.requireNonNull(lastUsedModel, "lastUsedModel");
             Objects.requireNonNull(modelSuggestions, "modelSuggestions");
+            Objects.requireNonNull(lastUsedTiers, "lastUsedTiers");
+            Objects.requireNonNull(supportsSubagents, "supportsSubagents");
         }
     }
 
-    /** What the user chose. {@code branch} and {@code folder} only mean something for a new worktree. */
+    /**
+     * What the user chose. {@code branch} and {@code folder} only mean something for a new worktree.
+     *
+     * <p>{@code tiers} are the subagent model tiers picked for the launch:
+     * empty when the pickers were not shown (the launch records nothing and
+     * the remembered tiers stay), present -- possibly all-empty, which
+     * clears them -- when they were; {@code
+     * subagentModelRule} is the prompt's subagent model rules clause, fully
+     * composed by the dialog (it needs the preset's role mapping, the
+     * harness's subagent capability and the starting model, none of which
+     * travel on a Choice) or empty when the launch carries none. The rule is
+     * appended to the prompt by {@link #initialPrompt(Choice)}; the tiers
+     * themselves ride the launch chain so the launch records them, exactly
+     * like the starting model.</p>
+     */
     public record Choice(String name, Optional<String> instructions, AgentKind agent, SessionMode mode, WorkIn workIn,
-                         String branch, String start, Path folder, OpenIn openIn, Optional<String> model) {
+                         String branch, String start, Path folder, OpenIn openIn, Optional<String> model,
+                         Optional<ModelTiers> tiers, Optional<String> subagentModelRule) {
         public Choice {
             Objects.requireNonNull(name, "name");
             Objects.requireNonNull(instructions, "instructions");
             Objects.requireNonNull(workIn, "workIn");
             Objects.requireNonNull(openIn, "openIn");
             Objects.requireNonNull(model, "model");
+            Objects.requireNonNull(tiers, "tiers");
+            Objects.requireNonNull(subagentModelRule, "subagentModelRule");
         }
     }
 
@@ -244,9 +266,16 @@ public final class NewTaskPlan {
     private static final String CLARIFY_FIRST = "Before writing any code, thoroughly clarify this request: "
             + "brainstorm to pin down the exact requirements, and confirm them before implementing.\n\n";
 
-    /** What the agent is told on start: the instructions behind a clarify-first directive, or nothing. Never the name. */
+    /**
+     * What the agent is told on start: the instructions behind a clarify-first directive, or nothing. Never the name.
+     * A launch that carries a composed subagent model rule gets it appended, after a blank line.
+     */
     public static Optional<String> initialPrompt(Choice choice) {
-        return choice.instructions().filter(text -> !text.isBlank()).map(CLARIFY_FIRST::concat);
+        return choice.instructions().filter(text -> !text.isBlank())
+                .map(CLARIFY_FIRST::concat)
+                .map(text -> choice.subagentModelRule()
+                        .map(rule -> text + "\n\n" + rule)
+                        .orElse(text));
     }
 
     public static String primaryLabel(boolean warned) {

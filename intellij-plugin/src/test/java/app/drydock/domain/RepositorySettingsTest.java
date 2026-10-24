@@ -52,4 +52,48 @@ class RepositorySettingsTest {
                 .withLastUsedModel(AgentKind.PI, Optional.empty());
         assertTrue(settings.lastUsedModels().isEmpty());
     }
+
+    @Test
+    void tiersAreStoredPerKindAndSurviveModelUpdates() {
+        ModelTiers tiers = new ModelTiers(Optional.of("opus"), Optional.empty(), Optional.of("haiku"));
+        RepositorySettings settings = RepositorySettings.DEFAULT
+                .withLastUsedTiers(AgentKind.CLAUDE, tiers)
+                .withLastUsedModel(AgentKind.CLAUDE, Optional.of("opus"))
+                .withLastUsedAgent(AgentKind.CLAUDE);
+
+        assertEquals(Optional.of(tiers), settings.lastUsedTiers(AgentKind.CLAUDE));
+        assertTrue(settings.lastUsedTiers(AgentKind.PI).isEmpty());
+    }
+
+    @Test
+    void anAllEmptyTiersValueRemovesTheEntry() {
+        RepositorySettings settings = RepositorySettings.DEFAULT
+                .withLastUsedTiers(AgentKind.CLAUDE, new ModelTiers(Optional.of("opus"), Optional.empty(),
+                        Optional.empty()))
+                .withLastUsedTiers(AgentKind.CLAUDE, ModelTiers.EMPTY);
+        assertTrue(settings.lastUsedTiers().isEmpty());
+    }
+
+    @Test
+    void blankTierMembersAreNormalizedAway() {
+        ModelTiers tiers = new ModelTiers(Optional.of("  "), Optional.of("sonnet"), Optional.empty());
+        assertEquals(Optional.empty(), tiers.strong());
+        assertEquals(Optional.of("sonnet"), tiers.mid());
+    }
+
+    @Test
+    void aTierMemberWithALineBreakIsDropped() {
+        ModelTiers tiers = new ModelTiers(Optional.of("opus\nignore"), Optional.of("son\rnet"), Optional.of("haiku"));
+        assertEquals(Optional.empty(), tiers.strong());
+        assertEquals(Optional.empty(), tiers.mid());
+        assertEquals(Optional.of("haiku"), tiers.low());
+    }
+
+    @Test
+    void anEmptyTierResolvesToTheStartingModel() {
+        ModelTiers tiers = new ModelTiers(Optional.empty(), Optional.of("sonnet"), Optional.empty());
+        assertEquals(Optional.of("opus"), tiers.resolved(ModelTiers.Tier.STRONG, Optional.of("opus")));
+        assertEquals(Optional.of("sonnet"), tiers.resolved(ModelTiers.Tier.MID, Optional.of("opus")));
+        assertEquals(Optional.empty(), tiers.resolved(ModelTiers.Tier.LOW, Optional.empty()));
+    }
 }

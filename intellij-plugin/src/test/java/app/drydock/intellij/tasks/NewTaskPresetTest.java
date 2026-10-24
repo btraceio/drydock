@@ -99,4 +99,29 @@ class NewTaskPresetTest {
         assertEquals(NewTaskPlan.OpenIn.THIS_WINDOW, preset.openIn());
         assertEquals(Optional.empty(), preset.fixedMode());
     }
+
+    @Test
+    void implementAndTriageCarrySubagentTierRoleMappingsOtherPresetsDoNot() {
+        OpenIssue issue = new OpenIssue(42, "Fix allocation accounting", Optional.empty(), List.of(), List.of(),
+                Optional.empty());
+
+        Optional<String> implementRoles = NewTaskPreset.implement(issue).tierRoles();
+        assertTrue(implementRoles.isPresent());
+        assertTrue(implementRoles.get().contains("{STRONG}"), implementRoles.get());
+        assertTrue(implementRoles.get().contains("{MID}"), implementRoles.get());
+        assertTrue(implementRoles.get().contains("{LOW}"), implementRoles.get());
+
+        Optional<String> triageRoles = NewTaskPreset.triage(issue).tierRoles();
+        assertTrue(triageRoles.isPresent());
+        assertTrue(triageRoles.get().contains("{STRONG}"), triageRoles.get());
+        assertTrue(triageRoles.get().contains("{MID}"), triageRoles.get());
+        assertTrue(triageRoles.get().contains("{LOW}"), triageRoles.get());
+
+        // A plain New task names no subagent roles, so it gets no tier rules
+        // and no tier pickers.
+        assertEquals(Optional.empty(), NewTaskPreset.empty().tierRoles());
+        assertEquals(Optional.empty(), NewTaskPreset.mainCheckout().tierRoles());
+        assertEquals(Optional.empty(),
+                NewTaskPreset.start(NewTaskPlan.OpenIn.THIS_WINDOW, SessionMode.WRITES).tierRoles());
+    }
 }

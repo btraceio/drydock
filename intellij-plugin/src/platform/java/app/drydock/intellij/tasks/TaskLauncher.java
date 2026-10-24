@@ -3,6 +3,7 @@ package app.drydock.intellij.tasks;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.AgentRegistry;
 import app.drydock.config.UserConfig;
+import app.drydock.domain.ModelTiers;
 import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryCatalog;
 import app.drydock.domain.RepositoryId;
@@ -229,6 +230,8 @@ public final class TaskLauncher {
                     .get(PREPARE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
             Function<AgentKind, Optional<String>> lastUsedModel = kind -> local == null ? Optional.empty()
                     : local.settings().lastUsedModel(kind);
+            Function<AgentKind, ModelTiers> lastUsedTiers = kind -> local == null ? ModelTiers.EMPTY
+                    : local.settings().lastUsedTiers(kind).orElse(ModelTiers.EMPTY);
             AgentRegistry registry = plugin.registry();
             AgentKind preselected = SessionDialogs.defaultAgent(registry,
                     local == null ? Optional.empty() : local.settings().lastUsedAgent()).orElse(null);
@@ -241,7 +244,7 @@ public final class TaskLauncher {
                             .orElseGet(() -> defaultStart(defaultBranch, startPoints, listing.remotes())),
                     startPoints,
                     listing.remotes(), taken, worktreeBase, writerActive, lastUsedModel,
-                    registry::modelSuggestions));
+                    registry::modelSuggestions, lastUsedTiers, registry::supportsSubagents));
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return Optional.empty();
@@ -341,7 +344,7 @@ public final class TaskLauncher {
                         return;
                     }
                     SessionDialogs.launchNewSession(target, steps.workingDirectory(), mainRoot, choice.agent(), choice.name(),
-                            choice.mode(), NewTaskPlan.initialPrompt(choice), choice.model(), fresh);
+                            choice.mode(), NewTaskPlan.initialPrompt(choice), choice.model(), choice.tiers(), fresh);
                 }, ModalityState.nonModal());
             }
         });

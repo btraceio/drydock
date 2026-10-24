@@ -1,8 +1,11 @@
 package app.drydock.review;
 
+import app.drydock.domain.ModelTiers;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * What drydock asks an agent to do when a human presses "Run review".
@@ -95,7 +98,23 @@ public final class ReviewInstructions {
     }
 
     public static String forScope(String scopeId, boolean supportsSubagents) {
+        return forScope(scopeId, supportsSubagents, ModelTiers.EMPTY, Optional.empty());
+    }
+
+    /**
+     * As {@link #forScope(String, boolean)}, with the launch's subagent model
+     * tiers: when the harness dispatches subagents and any tier carries a
+     * model, the dispatch line gains the mandatory per-subagent model rules
+     * (the code-review subagent runs on STRONG, every other subagent on LOW;
+     * a tier left empty resolves to the session's starting model, or to "your
+     * own session's model" when no starting model was picked). Same single
+     * line: this rides {@code TerminalBridge.sendPrompt} like every form.
+     */
+    public static String forScope(String scopeId, boolean supportsSubagents, ModelTiers tiers,
+                                  Optional<String> sessionModel) {
         Objects.requireNonNull(scopeId, "scopeId");
+        Objects.requireNonNull(tiers, "tiers");
+        Objects.requireNonNull(sessionModel, "sessionModel");
         String work = "read review_scope for handle " + scopeId + " with include=sections,impact"
                 + ", call review_state first so already-settled findings are not re-flagged, "
                 + "then post review_finding and review_tour against that handle; review_tour is validated "
@@ -103,10 +122,56 @@ public final class ReviewInstructions {
                 + "every problem if it is rejected, so fix them and post it again; " + ANCHOR_NOTES + "; "
                 + CHECK_KINDS + "; " + IMPACT_NOTES + "; " + CHECK_GROUNDING + "; " + TEACHING
                 + "; " + DIAGRAM;
-        return supportsSubagents
-                ? "Dispatch a code-review subagent to review the changes in this worktree: it must "
-                        + work + ". Report only its summary back here."
-                : "Review the changes in this worktree with the drydock review tools: " + work + ".";
+        if (!supportsSubagents) {
+            return "Review the changes in this worktree with the drydock review tools: " + work + ".";
+        }
+        String rules = "";
+        if (!tiers.isEmpty()) {
+            ModelTiers resolved = resolvedTiers(tiers, sessionModel);
+            rules = "; " + subagentModelRules("the code-review subagent uses "
+                    + tierModel(resolved.strong()) + ", every other subagent you "
+                    + "dispatch uses " + tierModel(resolved.low()));
+        }
+        return "Dispatch a code-review subagent to review the changes in this worktree: it must "
+                + work + ". Report only its summary back here" + rules + ".";
+    }
+
+    /** Tiers with every empty member filled from the session's starting model. */
+    private static ModelTiers resolvedTiers(ModelTiers tiers, Optional<String> sessionModel) {
+        return new ModelTiers(
+                tiers.resolved(ModelTiers.Tier.STRONG, sessionModel),
+                tiers.resolved(ModelTiers.Tier.MID, sessionModel),
+                tiers.resolved(ModelTiers.Tier.LOW, sessionModel));
+    }
+
+    /**
+     * One tier's value as it appears in a model rule: the concrete model id
+     * when one is known, otherwise the session's own model -- a rule that
+     * names no model is not a rule, so the fallback is spelled out. The id
+     * is sanitized (line breaks dropped, backticks made apostrophes) because
+     * it may be free text or come from the state file, and must not break
+     * the single-line prompt or its backtick quoting.
+     */
+    public static String tierModel(Optional<String> model) {
+        Objects.requireNonNull(model, "model");
+        return model.map(m -> "exactly `" + m.replace("\n", "").replace("\r", "").replace('`', '\'') + "`")
+                .orElse("your own session's model");
+    }
+
+    /**
+     * The mandatory subagent model rules, shared by every prompt that spends
+     * tiers: {@code assignments} is the flow's role→tier mapping with the
+     * resolved model values already in it (see {@link #tierModel}). One line
+     * -- review instructions ride {@code sendPrompt}, which submits at the
+     * first newline -- and imperative throughout, because a model rule the
+     * agent may interpret is a model rule it will not follow.
+     */
+    public static String subagentModelRules(String assignments) {
+        Objects.requireNonNull(assignments, "assignments");
+        return "When you dispatch subagents you MUST pass an explicit model to every subagent and use ONLY its "
+                + "assigned tier model: " + assignments
+                + ". Never dispatch a subagent without an explicit model from this list, never give a subagent "
+                + "your own session's model unless it is listed here, and never substitute any other model";
     }
 
     /**

@@ -8,6 +8,7 @@ import app.drydock.domain.ApplicationState;
 import app.drydock.domain.HandoffBrief;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.ModelTiers;
 import app.drydock.domain.PrState;
 import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
@@ -433,6 +434,56 @@ class ApplicationStateCodecTest {
         assertEquals(Optional.of("sonnet"),
                 back.repositories().getFirst().settings().lastUsedModel(AgentKind.CLAUDE));
         assertTrue(back.repositories().getFirst().settings().lastUsedModel(AgentKind.PI).isEmpty());
+    }
+
+    @Test
+    void repositoryLastUsedTiersRoundTrip() {
+        ModelTiers tiers = new ModelTiers(Optional.of("opus"), Optional.of("sonnet"), Optional.of("haiku"));
+        Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/repo"), "repo",
+                Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT)
+                .withSettings(RepositorySettings.DEFAULT.withLastUsedTiers(AgentKind.CLAUDE, tiers));
+        ApplicationState state = ApplicationState.empty().withRepositories(List.of(repo));
+
+        ApplicationState back = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state));
+
+        assertEquals(Optional.of(tiers), back.repositories().get(0).settings().lastUsedTiers(AgentKind.CLAUDE));
+    }
+
+    @Test
+    void aPartiallyFilledTierRoundTripsWithItsEmptyMembers() {
+        ModelTiers tiers = new ModelTiers(Optional.of("opus"), Optional.empty(), Optional.empty());
+        Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/repo"), "repo",
+                Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT)
+                .withSettings(RepositorySettings.DEFAULT.withLastUsedTiers(AgentKind.PI, tiers));
+        ApplicationState state = ApplicationState.empty().withRepositories(List.of(repo));
+
+        ApplicationState back = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state));
+
+        assertEquals(Optional.of(tiers), back.repositories().get(0).settings().lastUsedTiers(AgentKind.PI));
+    }
+
+    @Test
+    void malformedTierEntriesAndMembersAreSkippedLeniently() {
+        // Per-entry and per-field leniency, same as lastUsedModels: an unknown
+        // agent, a non-object tier value and a non-string member are each
+        // skipped; the well-formed entries survive.
+        String json = """
+                {"schemaVersion": 2, "repositories": [{
+                    "id": "%s", "root": "/tmp/repo", "displayName": "repo",
+                    "addedAt": "2026-01-01T00:00:00Z", "lastOpenedAt": "2026-01-01T00:00:00Z",
+                    "settings": {"lastUsedTiers": {
+                        "not-a-kind": {"strong": "opus"},
+                        "pi": "not-an-object",
+                        "claude": {"strong": "opus", "mid": 42, "low": "haiku"}
+                    }}
+                }], "sessions": [], "ui": {}}
+                """.formatted(RepositoryId.newId().value());
+
+        ApplicationState back = ApplicationStateCodec.fromJson(JsonParser.parse(json));
+
+        assertEquals(Optional.of(new ModelTiers(Optional.of("opus"), Optional.empty(), Optional.of("haiku"))),
+                back.repositories().getFirst().settings().lastUsedTiers(AgentKind.CLAUDE));
+        assertTrue(back.repositories().getFirst().settings().lastUsedTiers(AgentKind.PI).isEmpty());
     }
 
     /**

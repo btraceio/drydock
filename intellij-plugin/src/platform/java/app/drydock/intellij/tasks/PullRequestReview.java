@@ -3,6 +3,7 @@ package app.drydock.intellij.tasks;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.config.UserConfig;
 import app.drydock.domain.ManagedAgentSession;
+import app.drydock.domain.ModelTiers;
 import app.drydock.domain.Repository;
 import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionStatusFacet;
@@ -38,6 +39,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CancellationException;
@@ -146,10 +148,11 @@ public final class PullRequestReview {
     }
 
     /**
-     * As {@link #review}, but first asks for the starting model in a small
-     * dialog ({@link ReviewModelDialog}, seeded from the repository's
-     * last-used model for the resolved harness) and launches with what it
-     * picks; cancelling the dialog cancels the whole review.
+     * As {@link #review}, but first asks for the starting model and the
+     * subagent model tiers in a small dialog ({@link ReviewModelDialog},
+     * seeded from the repository's last-used model and tiers for the resolved
+     * harness) and launches with what it picks; cancelling the dialog cancels
+     * the whole review.
      */
     public void reviewWithModelDialog(Project from, Path mainRoot, String repositoryName,
                                       OpenPullRequest pullRequest) {
@@ -180,8 +183,14 @@ public final class PullRequestReview {
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         Optional<AgentKind> agent;
         Optional<String> rememberedModel;
+        ModelTiers rememberedTiers;
+        Optional<String> customTemplate;
         try {
             plugin.initialization().get(LAUNCH_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            // A custom template replaces Drydock's review instruction, and with
+            // it the only prompt that spends tiers: read it before the dialog,
+            // which then asks for no tiers.
+            customTemplate = PullRequestReviewPrompt.load();
             // The project's own record holds its last-used agent (as New task does).
             Repository local = DrydockStartupActivity.repositories(from).repositoryFor(mainRoot)
                     .get(LAUNCH_TIMEOUT_SECONDS, TimeUnit.SECONDS);
@@ -189,10 +198,12 @@ public final class PullRequestReview {
                     : local.settings().lastUsedAgent();
             agent = selectReviewAgent(SessionDialogs.defaultAgent(plugin.registry(), repoLastUsed),
                     kind -> plugin.registry().isAvailable(kind));
-            // The remembered model is keyed per harness, so it is read for the
-            // harness the review will actually launch.
+            // The remembered model and tiers are keyed per harness, so they are
+            // read for the harness the review will actually launch.
             rememberedModel = agent.flatMap(kind -> local == null ? Optional.empty()
                     : local.settings().lastUsedModel(kind));
+            rememberedTiers = agent.map(kind -> local == null ? ModelTiers.EMPTY
+                    : local.settings().lastUsedTiers(kind).orElse(ModelTiers.EMPTY)).orElse(ModelTiers.EMPTY);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return;
@@ -210,13 +221,21 @@ public final class PullRequestReview {
         // answer, so the in-flight guard still covers the whole materialization:
         // a second Review click is refused until the first one has either
         // launched or been cancelled. Outer empty = do not review at all.
-        Optional<Optional<String>> choice = pickModel
-                ? chooseModel(from, agent.get(), rememberedModel, plugin, indicator)
-                : Optional.of(rememberedModel);
+        boolean tiersApply = plugin.registry().supportsSubagents(agent.get()) && customTemplate.isEmpty();
+        Optional<ModelChoice> choice = pickModel
+                ? chooseModel(from, agent.get(), rememberedModel, rememberedTiers, tiersApply, plugin, indicator)
+                : Optional.of(new ModelChoice(rememberedModel, Optional.empty()));
         if (choice.isEmpty()) {
             return; // cancelled, abandoned, failed, or the dialog never opened: no checkout, no launch
         }
-        Optional<String> model = choice.get();
+        Optional<String> model = choice.get().model();
+        // Recorded only when the dialog asked for them; the prompt spends the
+        // remembered tiers otherwise (the quick Review), which a launch that
+        // asked for none leaves stored as they were.
+        Optional<ModelTiers> recordedTiers = choice.get().tiers();
+        ModelTiers promptTiers = recordedTiers.orElse(rememberedTiers);
+        Optional<String> customPrompt = customTemplate.map(template ->
+                PullRequestReviewPrompt.render(template, pullRequest.number()));
 
         Path base = WorktreeNaming.defaultDirectory(Path.of(System.getProperty("user.home")),
                 UserConfig.load().worktreesDirectory(), repositoryName,
@@ -255,13 +274,21 @@ public final class PullRequestReview {
         // No expiry on the window: openAndLaunch must run even when `from` is gone, to
         // clean up the worktree it would otherwise leave behind.
         ApplicationManager.getApplication().invokeLater(() -> openAndLaunch(from, mainRoot, reused,
-                pullRequest, agent.get(), model), ModalityState.nonModal());
+                pullRequest, agent.get(), model, promptTiers, recordedTiers, customPrompt), ModalityState.nonModal());
+    }
+
+    /**
+     * What the model dialog's answer contributes to the launch: {@code tiers}
+     * is empty when no tier pickers were shown.
+     */
+    record ModelChoice(Optional<String> model, Optional<ModelTiers> tiers) {
     }
 
     /** Shows the review model dialog on the EDT and waits for its answer; empty means do not review. */
-    private Optional<Optional<String>> chooseModel(Project from, AgentKind kind, Optional<String> rememberedModel,
-                                                   DrydockPluginService plugin, ProgressIndicator indicator) {
-        CompletableFuture<Optional<String>> picked = new CompletableFuture<>();
+    private Optional<ModelChoice> chooseModel(Project from, AgentKind kind, Optional<String> rememberedModel,
+                                              ModelTiers rememberedTiers, boolean tiersApply,
+                                              DrydockPluginService plugin, ProgressIndicator indicator) {
+        CompletableFuture<ModelChoice> picked = new CompletableFuture<>();
         AtomicBoolean claimed = new AtomicBoolean();
         ApplicationManager.getApplication().invokeLater(() -> {
             if (!claimed.compareAndSet(false, true)) {
@@ -271,10 +298,10 @@ public final class PullRequestReview {
                 if (picked.isDone() || from.isDisposed()) {
                     return; // defensive: nobody is waiting for an answer any more
                 }
-                ReviewModelDialog dialog = new ReviewModelDialog(from, kind, rememberedModel,
-                        plugin.registry()::modelSuggestions);
+                ReviewModelDialog dialog = new ReviewModelDialog(from, kind, rememberedModel, rememberedTiers,
+                        plugin.registry()::modelSuggestions, tiersApply);
                 boolean delivered = dialog.showAndGet()
-                        ? picked.complete(dialog.acceptedModel())
+                        ? picked.complete(new ModelChoice(dialog.acceptedModel(), dialog.acceptedTiers()))
                         : picked.cancel(false);
                 if (!delivered) {
                     LOG.log(Level.INFO, "The review model dialog was answered after the review was abandoned");
@@ -292,11 +319,11 @@ public final class PullRequestReview {
 
     /**
      * Waits for the dialog's answer. Outer empty: no review (dialog cancelled, failed, abandoned, or
-     * never opened by {@code openDeadlineNanos}); inner value: the accepted model, empty = harness default.
+     * never opened by {@code openDeadlineNanos}); inner value: what the dialog accepted.
      * Bounds only the dialog OPENING: once the EDT runnable has claimed, the user's think time is unbounded,
      * but {@code abandoned} (task cancelled / project disposed) still ends the wait.
      */
-    static Optional<Optional<String>> awaitModelChoice(CompletableFuture<Optional<String>> picked,
+    static Optional<ModelChoice> awaitModelChoice(CompletableFuture<ModelChoice> picked,
                                                        AtomicBoolean claimed, BooleanSupplier abandoned,
                                                        LongSupplier nanoClock, long openDeadlineNanos,
                                                        long pollMillis) {
@@ -328,7 +355,7 @@ public final class PullRequestReview {
      * The waiter stops waiting: takes the claim FIRST, so a runnable that has not run yet backs off
      * instead of opening a dialog whose answer would be dropped, then settles {@code picked}.
      */
-    private static Optional<Optional<String>> giveUp(CompletableFuture<Optional<String>> picked,
+    private static Optional<ModelChoice> giveUp(CompletableFuture<ModelChoice> picked,
                                                      AtomicBoolean claimed) {
         claimed.set(true);
         picked.cancel(false);
@@ -375,9 +402,14 @@ public final class PullRequestReview {
         return Optional.empty();
     }
 
-    /** EDT: hosts the review console as a tab in this window, then starts the session with its prompt. */
+    /**
+     * EDT: hosts the review console as a tab in this window, then starts the session with its prompt:
+     * {@code customPrompt} when a custom template is configured, otherwise Drydock's review instruction
+     * spending {@code promptTiers}. {@code recordedTiers} is what the launch records (empty: nothing).
+     */
     private void openAndLaunch(Project from, Path mainRoot, Path worktree, OpenPullRequest pullRequest,
-                               AgentKind agent, Optional<String> model) {
+                               AgentKind agent, Optional<String> model, ModelTiers promptTiers,
+                               Optional<ModelTiers> recordedTiers, Optional<String> customPrompt) {
         if (from.isDisposed()) {
             // The window the gesture came from is gone: nothing will host the review, so
             // its freshly checked-out worktree must not stay behind as an orphan.
@@ -387,12 +419,10 @@ public final class PullRequestReview {
             return;
         }
         String displayName = "Review #" + pullRequest.number() + " " + pullRequest.title();
-        Optional<String> custom = PullRequestReviewPrompt.load().map(template ->
-                PullRequestReviewPrompt.render(template, pullRequest.number()));
-        ReviewPrompt prompt = custom.map(ReviewPrompt::fixed)
-                .orElseGet(() -> ReviewPrompt.drydockReview(agent));
+        ReviewPrompt prompt = customPrompt.map(ReviewPrompt::fixed)
+                .orElseGet(() -> ReviewPrompt.drydockReview(agent, promptTiers, model));
         var launch = SessionDialogs.launchSession(from, worktree, mainRoot, agent, displayName,
-                SessionMode.WRITES, prompt::resolve, false, model);
+                SessionMode.WRITES, prompt::resolve, false, model, recordedTiers);
         ProgressManager.getInstance().run(new Task.Backgroundable(from,
                 "Starting review of PR #" + pullRequest.number() + "…", false) {
             @Override
@@ -417,7 +447,7 @@ public final class PullRequestReview {
                         ApplicationManager.getApplication().invokeLater(
                                 () -> Messages.showWarningDialog(from, message, "Drydock"),
                                 ModalityState.nonModal(), from.getDisposed()));
-                if (custom.isEmpty() && absence.isEmpty()) {
+                if (customPrompt.isEmpty() && absence.isEmpty()) {
                     // The review is armed: the Drydock instruction rode the
                     // launch and the session holds the review tools. Its
                     // console's window's Review tab is where the human watches
@@ -454,35 +484,56 @@ public final class PullRequestReview {
      */
     static final class ReviewPrompt {
 
-        private ReviewPrompt() { }
-
         /** Resolved without the session: the custom template needs only the PR number. */
         static ReviewPrompt fixed(String prompt) {
-            ReviewPrompt p = new ReviewPrompt();
+            ReviewPrompt p = new ReviewPrompt(ModelTiers.EMPTY, Optional.empty());
             p.needsTools = false;
             p.resolver = session -> CompletableFuture.completedFuture(Optional.of(prompt));
             return p;
         }
 
         /**
-         * Drydock's review instruction, resolved from the session's freshly bound scope.
-         * Every plugin-service lookup is deferred to resolution, inside a lambda.
+         * Drydock's review instruction with the launch's subagent model tiers,
+         * resolved from the session's freshly bound scope. Every plugin-
+         * service lookup is deferred to resolution, inside a lambda.
          */
-        static ReviewPrompt drydockReview(AgentKind agent) {
-            return drydockReview(agent,
+        static ReviewPrompt drydockReview(AgentKind agent, ModelTiers tiers, Optional<String> sessionModel) {
+            return drydockReview(agent, tiers, sessionModel,
                     () -> DrydockPluginService.getInstance().initialization(),
                     () -> DrydockPluginService.getInstance().reviewBackend(),
                     kind -> DrydockPluginService.getInstance().registry().supportsSubagents(kind),
                     command -> DrydockPluginService.getInstance().executor().execute(command));
         }
 
-        /** As {@link #drydockReview(AgentKind)}, with the plugin service's parts supplied; package-private for tests. */
+        /** As {@link #drydockReview(AgentKind)}, without tiers; kept for the tests. */
+        static ReviewPrompt drydockReview(AgentKind agent) {
+            return drydockReview(agent, ModelTiers.EMPTY, Optional.empty());
+        }
+
+        /**
+         * As {@link #drydockReview(AgentKind, ModelTiers, Optional, Supplier,
+         * Supplier, Predicate, Executor)}, without tiers; the shape the
+         * backend-absence tests use.
+         */
         static ReviewPrompt drydockReview(AgentKind agent,
                                           Supplier<? extends CompletableFuture<?>> initialization,
                                           Supplier<Optional<ReviewBackend>> backend,
                                           Predicate<AgentKind> supportsSubagents,
                                           Executor executor) {
-            ReviewPrompt p = new ReviewPrompt();
+            return drydockReview(agent, ModelTiers.EMPTY, Optional.empty(), initialization, backend,
+                    supportsSubagents, executor);
+        }
+
+        /**
+         * As {@link #drydockReview(AgentKind, ModelTiers, Optional)}, with the
+         * plugin service's parts supplied; package-private for tests.
+         */
+        static ReviewPrompt drydockReview(AgentKind agent, ModelTiers tiers, Optional<String> sessionModel,
+                                          Supplier<? extends CompletableFuture<?>> initialization,
+                                          Supplier<Optional<ReviewBackend>> backend,
+                                          Predicate<AgentKind> supportsSubagents,
+                                          Executor executor) {
+            ReviewPrompt p = new ReviewPrompt(tiers, sessionModel);
             p.needsTools = true;
             p.resolver = session -> CompletableFuture.supplyAsync(
                     () -> p.drydockInstruction(agent, session, initialization, backend, supportsSubagents), executor);
@@ -492,8 +543,17 @@ public final class PullRequestReview {
         private Function<ManagedAgentSession, CompletableFuture<Optional<String>>> resolver;
         /** Whether the prompt (when there is one) addresses Drydock's review tools. */
         private boolean needsTools;
+        /** The launch's subagent model tiers, spent by the review instruction's dispatch rules. */
+        private final ModelTiers tiers;
+        /** The launch's starting model, which an empty tier resolves to in those rules. */
+        private final Optional<String> sessionModel;
         /** Why no Drydock prompt was resolved; null when one was (or a custom one rides instead). */
         private volatile ReviewRequest.Outcome complaint;
+
+        private ReviewPrompt(ModelTiers tiers, Optional<String> sessionModel) {
+            this.tiers = Objects.requireNonNull(tiers, "tiers");
+            this.sessionModel = Objects.requireNonNull(sessionModel, "sessionModel");
+        }
 
         /**
          * See {@code SessionDialogs.launchSession}'s {@code prompt} parameter. Blocks while resolving.
@@ -556,7 +616,8 @@ public final class PullRequestReview {
             try {
                 ReviewScope scope = backend.scopeResolver().resolve(session)
                         .get(ReviewRequest.SCOPE_WAIT_SECONDS, TimeUnit.SECONDS);
-                return Optional.of(ReviewInstructions.forScope(scope.id(), supportsSubagents.test(agent)));
+                return Optional.of(ReviewInstructions.forScope(scope.id(), supportsSubagents.test(agent),
+                        tiers, sessionModel));
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return noPrompt(new ReviewRequest.Failed(PullRequestReview.cause(e)));

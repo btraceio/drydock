@@ -3,11 +3,13 @@ package app.drydock.intellij.tasks;
 import app.drydock.agent.api.Agent;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.config.UserConfig;
+import app.drydock.domain.ModelTiers;
 import app.drydock.domain.SessionMode;
 import app.drydock.intellij.settings.DrydockConfigurable;
 import app.drydock.intellij.tasks.NewTaskPlan.Choice;
 import app.drydock.intellij.tasks.NewTaskPlan.OpenIn;
 import app.drydock.intellij.tasks.NewTaskPlan.WorkIn;
+import app.drydock.review.ReviewInstructions;
 
 import com.intellij.icons.AllIcons;
 import com.intellij.openapi.application.ApplicationManager;
@@ -45,6 +47,7 @@ import javax.swing.text.JTextComponent;
 import java.awt.BorderLayout;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
+import java.awt.GridLayout;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -80,6 +83,16 @@ final class NewTaskDialog extends DialogWrapper {
     private final JBTextArea instructions = new JBTextArea(4, 40);
     /** Created in {@code createCenterPanel}, where {@code inputs} is at hand. */
     private ModelField modelField;
+    /**
+     * The STRONG/MID/LOW subagent tier pickers, shown only when the preset
+     * carries a role mapping and the selected harness dispatches subagents
+     * (the rules would otherwise bind nobody). Created in {@code
+     * createCenterPanel}, where {@code inputs} is at hand.
+     */
+    private ModelField strongField;
+    private ModelField midField;
+    private ModelField lowField;
+    private JPanel tierRows;
     private final Map<AgentKind, JBRadioButton> agentButtons = new LinkedHashMap<>();
     private final JBRadioButton writes = new JBRadioButton("Full access", true);
     private final JBRadioButton readOnly = new JBRadioButton("Read-only");
@@ -182,6 +195,37 @@ final class NewTaskDialog extends DialogWrapper {
         agentButtons.forEach((kind, button) -> button.addActionListener(
                 e -> modelField.setAgent(kind, inputs.lastUsedModel())));
 
+        // The tier pickers share the suggestion pool with the starting model
+        // (one harness, one model space) and seed from the repository's
+        // last-used tiers. Visible only where the rules can bind: the preset
+        // names subagent roles AND the harness dispatches subagents. A hidden
+        // picker is never pointed at a harness, so it starts no suggestion
+        // probe (for pi a subprocess).
+        strongField = new ModelField(inputs.modelSuggestions());
+        midField = new ModelField(inputs.modelSuggestions());
+        lowField = new ModelField(inputs.modelSuggestions());
+        tierRows = new JPanel(new GridLayout(0, 1, 0, JBUI.scale(4)));
+        tierRows.add(tierRow("STRONG model:", strongField));
+        tierRows.add(tierRow("MID model:", midField));
+        tierRows.add(tierRow("LOW model:", lowField));
+        tierRows.setVisible(false);
+        if (preset.tierRoles().isPresent()) {
+            if (tiersShown(selectedAgent())) {
+                setTierFields(selectedAgent());
+            }
+            tierRows.setVisible(tiersShown(selectedAgent()));
+            agentButtons.forEach((kind, button) -> button.addActionListener(e -> {
+                if (tiersShown(kind)) {
+                    setTierFields(kind);
+                }
+                boolean wasShowing = tierRows.isShowing();
+                tierRows.setVisible(tiersShown(kind));
+                if (wasShowing || tierRows.isShowing()) {
+                    pack();
+                }
+            }));
+        }
+
         JPanel modes;
         if (preset.fixedMode().isPresent()) {
             modes = row(new JBLabel(preset.fixedMode().get() == SessionMode.WRITES
@@ -222,6 +266,7 @@ final class NewTaskDialog extends DialogWrapper {
                         true)
                 .addLabeledComponent("Agent:", agents)
                 .addLabeledComponent("Model:", modelField)
+                .addComponent(tierRows, JBUI.scale(4))
                 .addLabeledComponent("Mode:", modes)
                 .addComponent(summaryRow, JBUI.scale(8))
                 .addComponent(details)
@@ -401,11 +446,60 @@ final class NewTaskDialog extends DialogWrapper {
             case NEW_WORKTREE -> Path.of(folder.getText().strip().isEmpty() ? "." : folder.getText().strip());
         };
         String text = instructions.getText();
+        Optional<ModelTiers> tiers = tiersShown(agent)
+                ? Optional.of(new ModelTiers(strongField.selected(), midField.selected(), lowField.selected()))
+                : Optional.empty();
         return new Choice(taskName(), text.isBlank() ? Optional.empty() : Optional.of(text), agent,
                 preset.mode(readOnly.isSelected()), workIn, chosenBranch,
                 startPoint(), chosenFolder,
                 ownWindow.isSelected() ? OpenIn.OWN_WINDOW : OpenIn.THIS_WINDOW,
-                modelField.selected());
+                modelField.selected(), tiers, tiers.flatMap(this::subagentModelRule));
+    }
+
+    /**
+     * Whether the tier rows show for {@code kind}: the preset names subagent
+     * roles and the harness dispatches subagents.
+     */
+    private boolean tiersShown(AgentKind kind) {
+        return preset.tierRoles().isPresent() && inputs.supportsSubagents().test(kind);
+    }
+
+    /**
+     * The launch's subagent model rules, composed while every ingredient is
+     * at hand: the preset's role mapping (with its {STRONG}/{MID}/{LOW}
+     * placeholders), the tiers, the harness's subagent capability, and the
+     * starting model an empty tier resolves to. Empty when the preset names
+     * no roles, the harness cannot dispatch subagents, or no tier was set --
+     * rules that bind nobody are noise in the prompt.
+     */
+    private Optional<String> subagentModelRule(ModelTiers tiers) {
+        if (preset.tierRoles().isEmpty() || tiers.isEmpty()
+                || !inputs.supportsSubagents().test(selectedAgent())) {
+            return Optional.empty();
+        }
+        Optional<String> starting = modelField.selected();
+        String assignments = preset.tierRoles().get()
+                .replace("{STRONG}", ReviewInstructions.tierModel(tiers.resolved(ModelTiers.Tier.STRONG, starting)))
+                .replace("{MID}", ReviewInstructions.tierModel(tiers.resolved(ModelTiers.Tier.MID, starting)))
+                .replace("{LOW}", ReviewInstructions.tierModel(tiers.resolved(ModelTiers.Tier.LOW, starting)));
+        return Optional.of(ReviewInstructions.subagentModelRules(assignments));
+    }
+
+    /** Points the three tier pickers at {@code kind}, seeded from the repository's last-used tiers. */
+    private void setTierFields(AgentKind kind) {
+        strongField.setAgent(kind, k -> inputs.lastUsedTiers().apply(k).strong());
+        midField.setAgent(kind, k -> inputs.lastUsedTiers().apply(k).mid());
+        lowField.setAgent(kind, k -> inputs.lastUsedTiers().apply(k).low());
+    }
+
+    /** One tier picker with its label; the label rides the row so hiding the panel hides both. */
+    private static JPanel tierRow(String label, ModelField field) {
+        JPanel panel = new JPanel(new BorderLayout(JBUI.scale(6), 0));
+        JBLabel name = new JBLabel(label);
+        name.setPreferredSize(new Dimension(JBUI.scale(110), name.getPreferredSize().height));
+        panel.add(name, BorderLayout.WEST);
+        panel.add(field, BorderLayout.CENTER);
+        return panel;
     }
 
     /** The selected harness, falling back to the preselection like the launch would. */

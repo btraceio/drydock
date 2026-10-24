@@ -6,6 +6,7 @@ import app.drydock.domain.HandoffBrief;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.ModelTiers;
 import app.drydock.domain.PrLink;
 import app.drydock.domain.PrState;
 import app.drydock.domain.Repository;
@@ -263,6 +264,12 @@ public final class ApplicationStateCodec {
                     models.put(kind.persistedName(), new JsonString(model)));
             settings.put("lastUsedModels", models);
         }
+        if (!repository.settings().lastUsedTiers().isEmpty()) {
+            JsonObject tiers = JsonObject.empty();
+            repository.settings().lastUsedTiers().forEach((kind, tierModels) ->
+                    tiers.put(kind.persistedName(), tierModelsToJson(tierModels)));
+            settings.put("lastUsedTiers", tiers);
+        }
         obj.put("settings", settings);
         if (repository.isRemote()) {
             JsonObject remote = JsonObject.empty();
@@ -501,7 +508,9 @@ public final class ApplicationStateCodec {
      * <p>Also decodes {@code lastUsedModels} — a map of agent persisted name
      * to starting model — with the same leniency: unknown agent names and
      * non-string values are skipped one entry at a time, never failing the
-     * whole repository (cosmetic-UI leniency per the state-file rules).</p>
+     * whole repository (cosmetic-UI leniency per the state-file rules).
+     * {@code lastUsedTiers} (agent persisted name to a strong/mid/low object)
+     * decodes with the same per-entry and per-field leniency.</p>
      */
     private static RepositorySettings settingsFromJson(JsonObject obj) {
         RepositorySettings settings = RepositorySettings.DEFAULT;
@@ -521,8 +530,34 @@ public final class ApplicationStateCodec {
                     }
                 }
             }
+            if (s.get("lastUsedTiers") instanceof JsonObject tierMap) {
+                for (var entry : tierMap.members().entrySet()) {
+                    if (entry.getValue() instanceof JsonObject tierModels
+                            && AgentKind.fromPersisted(entry.getKey()).isPresent()) {
+                        settings = settings.withLastUsedTiers(
+                                AgentKind.fromPersisted(entry.getKey()).orElseThrow(),
+                                tierModelsFromJson(tierModels));
+                    }
+                }
+            }
         }
         return settings;
+    }
+
+    private static JsonValue tierModelsToJson(ModelTiers tiers) {
+        JsonObject obj = JsonObject.empty();
+        tiers.strong().ifPresent(m -> obj.put("strong", new JsonString(m)));
+        tiers.mid().ifPresent(m -> obj.put("mid", new JsonString(m)));
+        tiers.low().ifPresent(m -> obj.put("low", new JsonString(m)));
+        return obj;
+    }
+
+    /** Lenient per-field decode: a malformed tier member is skipped, never a corrupt state file. */
+    private static ModelTiers tierModelsFromJson(JsonObject obj) {
+        return new ModelTiers(
+                obj.get("strong") instanceof JsonString strong ? Optional.of(strong.value()) : Optional.empty(),
+                obj.get("mid") instanceof JsonString mid ? Optional.of(mid.value()) : Optional.empty(),
+                obj.get("low") instanceof JsonString low ? Optional.of(low.value()) : Optional.empty());
     }
 
     /**

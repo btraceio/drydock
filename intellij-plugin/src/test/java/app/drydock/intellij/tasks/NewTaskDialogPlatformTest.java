@@ -2,6 +2,7 @@ package app.drydock.intellij.tasks;
 
 import app.drydock.agent.api.Agent;
 import app.drydock.agent.api.AgentKind;
+import app.drydock.domain.ModelTiers;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionMode;
 import app.drydock.git.GhCliService.OpenIssue;
@@ -18,9 +19,10 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
+import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 /** Platform-backed checks for values that must survive {@code DialogWrapper.init()}. */
 public class NewTaskDialogPlatformTest extends BasePlatformTestCase {
@@ -143,6 +145,11 @@ public class NewTaskDialogPlatformTest extends BasePlatformTestCase {
     }
 
     private static NewTaskPlan.Inputs inputs() {
+        return inputs(kind -> ModelTiers.EMPTY, kind -> true);
+    }
+
+    private static NewTaskPlan.Inputs inputs(Function<AgentKind, ModelTiers> lastUsedTiers,
+                                             Predicate<AgentKind> supportsSubagents) {
         Path root = Path.of("/tmp/profiler");
         SharedProject project = SharedProject.local(RepositoryId.newId(), root, "profiler", Instant.EPOCH);
         Agent pi = new Agent() {
@@ -153,6 +160,72 @@ public class NewTaskDialogPlatformTest extends BasePlatformTestCase {
         };
         return new NewTaskPlan.Inputs(project, "profiler", Optional.empty(), List.of(pi), AgentKind.PI,
                 "origin/main", List.of("origin/main"), List.of("origin"), Set.of(), Path.of("/tmp"), false,
-                kind -> Optional.empty(), kind -> List.of());
+                kind -> Optional.empty(), kind -> List.of(), lastUsedTiers, supportsSubagents);
+    }
+
+    public void testTriageTiersComposeTheSubagentModelRuleWhenTheHarnessDispatchesSubagents() {
+        OpenIssue issue = new OpenIssue(42, "Fix allocation accounting", Optional.empty(), List.of(), List.of(),
+                Optional.empty());
+        ModelTiers remembered = new ModelTiers(Optional.of("strong-m"), Optional.of("mid-m"), Optional.of("low-m"));
+        AtomicReference<NewTaskPlan.Choice> choice = new AtomicReference<>();
+
+        ApplicationManager.getApplication().invokeAndWait(() -> {
+            NewTaskDialog dialog = new NewTaskDialog(getProject(),
+                    inputs(kind -> remembered, kind -> true), Optional.empty(), NewTaskPreset.triage(issue));
+            try {
+                choice.set(dialog.choice());
+            } finally {
+                Disposer.dispose(dialog.getDisposable());
+            }
+        });
+
+        assertEquals(Optional.of(remembered), choice.get().tiers());
+        String rule = choice.get().subagentModelRule().orElseThrow();
+        assertTrue(rule.contains("exactly `strong-m`"));
+        assertTrue(rule.contains("exactly `mid-m`"));
+        assertTrue(rule.contains("exactly `low-m`"));
+        assertTrue(rule.startsWith("When you dispatch subagents you MUST"));
+        // The triage role mapping spent the placeholders.
+        assertFalse(rule.contains("{STRONG}") || rule.contains("{MID}") || rule.contains("{LOW}"));
+    }
+
+    public void testHiddenTierPickersRecordNothingWhenTheHarnessHasNoSubagents() {
+        OpenIssue issue = new OpenIssue(42, "Fix allocation accounting", Optional.empty(), List.of(), List.of(),
+                Optional.empty());
+        ModelTiers remembered = new ModelTiers(Optional.of("strong-m"), Optional.empty(), Optional.empty());
+        AtomicReference<NewTaskPlan.Choice> choice = new AtomicReference<>();
+
+        ApplicationManager.getApplication().invokeAndWait(() -> {
+            NewTaskDialog dialog = new NewTaskDialog(getProject(),
+                    inputs(kind -> remembered, kind -> false), Optional.empty(), NewTaskPreset.triage(issue));
+            try {
+                choice.set(dialog.choice());
+            } finally {
+                Disposer.dispose(dialog.getDisposable());
+            }
+        });
+
+        // The rows are hidden: nothing to record (the remembered tiers stay),
+        // and rules that bind nobody are noise.
+        assertEquals(Optional.empty(), choice.get().tiers());
+        assertEquals(Optional.empty(), choice.get().subagentModelRule());
+    }
+
+    public void testAPlainNewTaskCarriesNoTierRuleEvenWithRememberedTiers() {
+        ModelTiers remembered = new ModelTiers(Optional.of("strong-m"), Optional.of("mid-m"), Optional.of("low-m"));
+        AtomicReference<NewTaskPlan.Choice> choice = new AtomicReference<>();
+
+        ApplicationManager.getApplication().invokeAndWait(() -> {
+            NewTaskDialog dialog = new NewTaskDialog(getProject(),
+                    inputs(kind -> remembered, kind -> true), Optional.empty());
+            try {
+                choice.set(dialog.choice());
+            } finally {
+                Disposer.dispose(dialog.getDisposable());
+            }
+        });
+
+        assertEquals(Optional.empty(), choice.get().tiers());
+        assertEquals(Optional.empty(), choice.get().subagentModelRule());
     }
 }
