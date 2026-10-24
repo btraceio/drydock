@@ -78,6 +78,8 @@ final class NewTaskDialog extends DialogWrapper {
     private final NewTaskPreset preset;
 
     private final JBTextArea instructions = new JBTextArea(4, 40);
+    /** Created in {@code createCenterPanel}, where {@code inputs} is at hand. */
+    private ModelField modelField;
     private final Map<AgentKind, JBRadioButton> agentButtons = new LinkedHashMap<>();
     private final JBRadioButton writes = new JBRadioButton("Full access", true);
     private final JBRadioButton readOnly = new JBRadioButton("Read-only");
@@ -171,6 +173,14 @@ final class NewTaskDialog extends DialogWrapper {
             agentButtons.values().stream().filter(JBRadioButton::isEnabled).findFirst()
                     .ifPresent(button -> button.setSelected(true));
         }
+        // The model picker follows the selected harness: switching agents and
+        // back restores what the editor held for each (seeded from the
+        // repository's last-used model), and each harness's suggestion load
+        // runs once.
+        modelField = new ModelField(inputs.modelSuggestions());
+        modelField.setAgent(selectedAgent(), inputs.lastUsedModel());
+        agentButtons.forEach((kind, button) -> button.addActionListener(
+                e -> modelField.setAgent(kind, inputs.lastUsedModel())));
 
         JPanel modes;
         if (preset.fixedMode().isPresent()) {
@@ -211,6 +221,7 @@ final class NewTaskDialog extends DialogWrapper {
                 .addLabeledComponent("What should the agent do?", ScrollPaneFactory.createScrollPane(instructions),
                         true)
                 .addLabeledComponent("Agent:", agents)
+                .addLabeledComponent("Model:", modelField)
                 .addLabeledComponent("Mode:", modes)
                 .addComponent(summaryRow, JBUI.scale(8))
                 .addComponent(details)
@@ -378,11 +389,7 @@ final class NewTaskDialog extends DialogWrapper {
 
     Choice choice() {
         WorkIn workIn = workIn();
-        AgentKind agent = agentButtons.entrySet().stream()
-                .filter(entry -> entry.getValue().isSelected())
-                .map(Map.Entry::getKey)
-                .findFirst()
-                .orElse(inputs.preselected());
+        AgentKind agent = selectedAgent();
         String chosenBranch = switch (workIn) {
             case EXISTING_WORKTREE -> inputs.fixedWorktree().orElseThrow().branch();
             case MAIN_CHECKOUT -> "";
@@ -397,7 +404,17 @@ final class NewTaskDialog extends DialogWrapper {
         return new Choice(taskName(), text.isBlank() ? Optional.empty() : Optional.of(text), agent,
                 preset.mode(readOnly.isSelected()), workIn, chosenBranch,
                 startPoint(), chosenFolder,
-                ownWindow.isSelected() ? OpenIn.OWN_WINDOW : OpenIn.THIS_WINDOW);
+                ownWindow.isSelected() ? OpenIn.OWN_WINDOW : OpenIn.THIS_WINDOW,
+                modelField.selected());
+    }
+
+    /** The selected harness, falling back to the preselection like the launch would. */
+    private AgentKind selectedAgent() {
+        return agentButtons.entrySet().stream()
+                .filter(entry -> entry.getValue().isSelected())
+                .map(Map.Entry::getKey)
+                .findFirst()
+                .orElse(inputs.preselected());
     }
 
     /** Diagnostic-only: types into the description, through the real document listener. */

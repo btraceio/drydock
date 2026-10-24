@@ -67,6 +67,29 @@ class PiAgentProviderTest {
     }
 
     @Test
+    void createCarriesThePickedStartingModel() {
+        LaunchPlan plan = provider().buildCreateCommand(new CreateContext("Session 1", "ignored-uuid",
+                Path.of("/repo"), Optional.empty(), Optional.empty(),
+                Optional.of("ai-gw-bedrock/bedrock/openai.gpt-5.4"), false, false, Optional.empty(), List.of()));
+        assertTrue(plan.command().endsWith(" --model 'ai-gw-bedrock/bedrock/openai.gpt-5.4'"), plan.command());
+    }
+
+    @Test
+    void createWithoutAModelOmitsTheModelFlag() {
+        LaunchPlan plan = provider().buildCreateCommand(new CreateContext("Session 1", "ignored-uuid",
+                Path.of("/repo"), Optional.empty(), Optional.empty(), Optional.empty(), false, false,
+                Optional.empty(), List.of()));
+        assertFalse(plan.command().contains("--model"), plan.command());
+    }
+
+    @Test
+    void modelSuggestionsComeFromTheCliCatalogOrStayEmptyWithoutAnExecutable() {
+        // /nonexistent/pi: the probe cannot run, so the catalog is empty --
+        // the picker still works on free text and remembered models.
+        assertTrue(provider().modelSuggestions().isEmpty());
+    }
+
+    @Test
     void evalCreateSetsEvalEnvFlag() {
         LaunchPlan plan = provider().buildCreateCommand(
                 new CreateContext("Session 1", "ignored-uuid", Path.of("/repo"),

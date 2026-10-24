@@ -257,6 +257,12 @@ public final class ApplicationStateCodec {
         JsonObject settings = JsonObject.empty();
         repository.settings().lastUsedAgent()
                 .ifPresent(a -> settings.put("lastUsedAgent", new JsonString(a.persistedName())));
+        if (!repository.settings().lastUsedModels().isEmpty()) {
+            JsonObject models = JsonObject.empty();
+            repository.settings().lastUsedModels().forEach((kind, model) ->
+                    models.put(kind.persistedName(), new JsonString(model)));
+            settings.put("lastUsedModels", models);
+        }
         obj.put("settings", settings);
         if (repository.isRemote()) {
             JsonObject remote = JsonObject.empty();
@@ -491,14 +497,32 @@ public final class ApplicationStateCodec {
      * default a new session's agent picker to whichever agent was last used
      * in this repository. Absent or unparseable decodes to {@link
      * RepositorySettings#DEFAULT} rather than failing.
+     *
+     * <p>Also decodes {@code lastUsedModels} — a map of agent persisted name
+     * to starting model — with the same leniency: unknown agent names and
+     * non-string values are skipped one entry at a time, never failing the
+     * whole repository (cosmetic-UI leniency per the state-file rules).</p>
      */
     private static RepositorySettings settingsFromJson(JsonObject obj) {
-        if (obj.get("settings") instanceof JsonObject s && s.get("lastUsedAgent") instanceof JsonString la) {
-            return AgentKind.fromPersisted(la.value())
-                    .map(RepositorySettings.DEFAULT::withLastUsedAgent)
-                    .orElse(RepositorySettings.DEFAULT);
+        RepositorySettings settings = RepositorySettings.DEFAULT;
+        if (obj.get("settings") instanceof JsonObject s) {
+            if (s.get("lastUsedAgent") instanceof JsonString la) {
+                settings = AgentKind.fromPersisted(la.value())
+                        .map(settings::withLastUsedAgent)
+                        .orElse(settings);
+            }
+            if (s.get("lastUsedModels") instanceof JsonObject models) {
+                for (var entry : models.members().entrySet()) {
+                    if (entry.getValue() instanceof JsonString model
+                            && AgentKind.fromPersisted(entry.getKey()).isPresent()) {
+                        settings = settings.withLastUsedModel(
+                                AgentKind.fromPersisted(entry.getKey()).orElseThrow(),
+                                Optional.of(model.value()));
+                    }
+                }
+            }
         }
-        return RepositorySettings.DEFAULT;
+        return settings;
     }
 
     /**

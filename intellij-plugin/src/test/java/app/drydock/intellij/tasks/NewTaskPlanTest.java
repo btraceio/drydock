@@ -27,13 +27,14 @@ class NewTaskPlanTest {
     private static NewTaskPlan.Inputs inputs(Optional<FixedWorktree> fixed, boolean writerActive) {
         return new NewTaskPlan.Inputs(SharedProject.local(RepositoryId.newId(), ROOT, "drydock", Instant.EPOCH),
                 "drydock", fixed, List.of(), AgentKind.CLAUDE, "origin/main", List.of("main", "origin/main"),
-                List.of("origin"), Set.of("main", "taken-branch"), Path.of("/b"), writerActive);
+                List.of("origin"), Set.of("main", "taken-branch"), Path.of("/b"), writerActive,
+                kind -> Optional.empty(), kind -> List.of());
     }
 
     private static Choice choice(String name, Optional<String> instructions, SessionMode mode, WorkIn workIn,
                                  String branch, Path folder) {
         return new Choice(name, instructions, AgentKind.CLAUDE, mode, workIn, branch, "origin/main", folder,
-                OpenIn.OWN_WINDOW);
+                OpenIn.OWN_WINDOW, Optional.empty());
     }
 
     @Test
@@ -200,7 +201,7 @@ class NewTaskPlanTest {
     @Test
     void refusesWhenNoAgentIsAvailable() {
         Choice noAgent = new Choice("T", Optional.empty(), null, SessionMode.WRITES, WorkIn.NEW_WORKTREE, "x",
-                "origin/main", Path.of("/b/x"), OpenIn.OWN_WINDOW);
+                "origin/main", Path.of("/b/x"), OpenIn.OWN_WINDOW, Optional.empty());
 
         assertEquals(Optional.of("No agent is installed. Install Claude, Codex or pi to start a task."),
                 NewTaskPlan.refusal(inputs(Optional.empty(), false), noAgent, folder -> false));

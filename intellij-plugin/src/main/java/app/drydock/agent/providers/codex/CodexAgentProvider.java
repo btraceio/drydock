@@ -131,11 +131,25 @@ public final class CodexAgentProvider implements AgentProvider {
         // to the eval account. See ManagedAgentSession.evalMode.
         // DISCOVERED: no id; no --settings
         //
-        String command = codexCommand(c.mcp(), c.readOnly()) + stdioOverrides(c.stdioMcpServers());
+        String command = codexCommand(c.mcp(), c.readOnly()) + modelFlag(c.model())
+                + stdioOverrides(c.stdioMcpServers());
         if (c.initialPrompt().isPresent()) {
             command += " -- " + AgentCommands.shellQuote(c.initialPrompt().get());
         }
         return LaunchPlan.of(command, false);
+    }
+
+    /**
+     * {@code -m <m>} for a picked starting model; empty for the harness's own
+     * default. Codex has no model-listing command and its catalog lives in
+     * the user's config, so there are no curated aliases: {@code
+     * modelSuggestions()} keeps the SPI default (nothing) and the value is
+     * whatever the human typed. Launch-time only: {@code buildResumeCommand}
+     * never appends it, so a resume keeps whatever model the conversation
+     * last used.
+     */
+    private static String modelFlag(Optional<String> model) {
+        return model.map(m -> " -m " + AgentCommands.shellQuote(m)).orElse("");
     }
 
     @Override

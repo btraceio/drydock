@@ -11,6 +11,8 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -23,6 +25,9 @@ class AgentRegistryTest {
         private final AgentKind kind;
         private final boolean available;
         private final boolean remoteCapable;
+        /** What {@link #modelSuggestions()} answers; counted in {@link #catalogCalls}. */
+        Supplier<List<String>> catalog = List::of;
+        final AtomicInteger catalogCalls = new AtomicInteger();
         StubProvider(AgentKind kind, boolean available) { this(kind, available, true); }
         StubProvider(AgentKind kind, boolean available, boolean remoteCapable) {
             this.kind = kind;
@@ -45,6 +50,10 @@ class AgentRegistryTest {
         @Override public Optional<ConversationSource> conversations() { return Optional.empty(); }
         @Override public Optional<ActivityReporter> activity() { return Optional.empty(); }
         @Override public Optional<SessionIdDiscovery> idDiscovery() { return Optional.empty(); }
+        @Override public List<String> modelSuggestions() {
+            catalogCalls.incrementAndGet();
+            return catalog.get();
+        }
     }
 
     private static AgentContext ctx() {
@@ -161,5 +170,53 @@ class AgentRegistryTest {
         // registrations: the loader argument, not the TCCL, drives discovery.
         ClassLoader isolated = new URLClassLoader(new URL[0], null);
         assertTrue(AgentRegistry.create(ctx(), isolated).agents().isEmpty());
+    }
+
+    @Test
+    void aFailedModelCatalogProbeIsRetriedThenTheSuccessIsCached() {
+        StubProvider claude = new StubProvider(AgentKind.CLAUDE, true);
+        AtomicInteger attempts = new AtomicInteger();
+        claude.catalog = () -> {
+            if (attempts.getAndIncrement() == 0) {
+                throw new RuntimeException("transient");
+            }
+            return List.of("m1");
+        };
+        AgentRegistry registry = new AgentRegistry(List.of(claude), ctx());
+
+        assertEquals(List.of(), registry.modelSuggestions(AgentKind.CLAUDE));
+        assertEquals(List.of("m1"), registry.modelSuggestions(AgentKind.CLAUDE));
+        assertEquals(List.of("m1"), registry.modelSuggestions(AgentKind.CLAUDE));
+        assertEquals(2, claude.catalogCalls.get());
+    }
+
+    @Test
+    void anEmptyModelCatalogProbeIsRetried() {
+        StubProvider claude = new StubProvider(AgentKind.CLAUDE, true);
+        AtomicInteger attempts = new AtomicInteger();
+        claude.catalog = () -> attempts.getAndIncrement() == 0 ? List.of() : List.of("m1");
+        AgentRegistry registry = new AgentRegistry(List.of(claude), ctx());
+
+        assertEquals(List.of(), registry.modelSuggestions(AgentKind.CLAUDE));
+        assertEquals(List.of("m1"), registry.modelSuggestions(AgentKind.CLAUDE));
+        assertEquals(2, claude.catalogCalls.get());
+    }
+
+    @Test
+    void aNonEmptyModelCatalogIsProbedOnce() {
+        StubProvider claude = new StubProvider(AgentKind.CLAUDE, true);
+        claude.catalog = () -> List.of("a");
+        AgentRegistry registry = new AgentRegistry(List.of(claude), ctx());
+
+        for (int i = 0; i < 3; i++) {
+            assertEquals(List.of("a"), registry.modelSuggestions(AgentKind.CLAUDE));
+        }
+        assertEquals(1, claude.catalogCalls.get());
+    }
+
+    @Test
+    void aKindWithoutAProviderSuggestsNoModels() {
+        AgentRegistry registry = new AgentRegistry(List.of(new StubProvider(AgentKind.CLAUDE, true)), ctx());
+        assertEquals(List.of(), registry.modelSuggestions(AgentKind.CODEX));
     }
 }

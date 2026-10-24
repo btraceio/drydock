@@ -1,9 +1,14 @@
 package app.drydock.intellij.tasks;
 
+import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.Repository;
+import app.drydock.domain.RepositoryCatalog;
+import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionMode;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.DrydockSessionsListener;
+import app.drydock.intellij.actions.SessionDialogs;
 import app.drydock.intellij.agent.AgentConsoles;
 import app.drydock.intellij.agent.AgentExecutionListener;
 import app.drydock.intellij.agent.SessionActivityListener;
@@ -77,7 +82,10 @@ import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -146,6 +154,12 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     /** Guarded by {@code this}: subscribing after dispose() must undo itself. */
     private Runnable unsubscribeShared = () -> { };
     private volatile boolean disposed;
+    /**
+     * Canonical repository root -> its id, refreshed by every background rebuild so the EDT
+     * {@code update()} of the quick review action never canonicalizes (filesystem IO). First
+     * repository per root wins, as the previous stream's findFirst() did.
+     */
+    private volatile Map<Path, RepositoryId> repositoryIdsByRoot = Map.of();
 
     public TaskTreePanel(Project project) {
         super(true, true);
@@ -238,11 +252,38 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             }
         };
         AnAction reviewPullRequest = new DumbAwareAction("Review…",
-                "Check this pull request out into its own worktree and start a review session",
+                "Check this pull request out into its own worktree, pick the starting model, and start a review session",
                 AllIcons.Actions.Preview) {
             @Override
             public void update(@NotNull AnActionEvent e) {
                 TaskActions.present(e, e.getData(SELECTED_NODE) instanceof PullRequestRow);
+            }
+
+            @Override
+            public @NotNull ActionUpdateThread getActionUpdateThread() {
+                return ActionUpdateThread.EDT;
+            }
+
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                reviewPullRequestWithDialog(e);
+            }
+        };
+        // One-gesture review with the repository's remembered starting model
+        // for the harness the review will launch; "Review…" above asks and
+        // re-records it instead. The label names the model so the quick
+        // action says what it will launch with, and it must track the state
+        // store cheaply: it reads the in-memory repositories only, never git.
+        AnAction quickReview = new DumbAwareAction("Review (default)",
+                "Check this pull request out into its own worktree and start a review session "
+                        + "with the remembered starting model",
+                AllIcons.Actions.Preview) {
+            @Override
+            public void update(@NotNull AnActionEvent e) {
+                TaskActions.present(e, e.getData(SELECTED_NODE) instanceof PullRequestRow);
+                if (e.getData(SELECTED_NODE) instanceof PullRequestRow pullRequest) {
+                    e.getPresentation().setText(quickReviewLabel(pullRequest.mainRoot()));
+                }
             }
 
             @Override
@@ -295,6 +336,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         };
         AnAction issueGithubSettings = githubSettingsAction(node -> node instanceof IssueRow);
 
+        contextActions.add(quickReview);
         contextActions.add(reviewPullRequest);
         contextActions.add(implement);
         contextActions.add(triage);
@@ -579,6 +621,51 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         pullRequestReview.review(project, mainRoot, repositoryName, pullRequest.pullRequest());
     }
 
+    /** Opens the review's model dialog for the selected pull request. EDT. */
+    private void reviewPullRequestWithDialog(AnActionEvent e) {
+        if (e.getData(SELECTED_NODE) instanceof PullRequestRow pullRequest) {
+            reviewPullRequestWithDialog(pullRequest.mainRoot(), pullRequest);
+        }
+    }
+
+    private void reviewPullRequestWithDialog(Path mainRoot, PullRequestRow pullRequest) {
+        if (mainRoot == null) {
+            return;
+        }
+        String repositoryName = DrydockPluginService.getInstance().sharedProjects().byRoot(mainRoot)
+                .map(SharedProject::displayName)
+                .orElseGet(() -> String.valueOf(mainRoot.getFileName()));
+        pullRequestReview.reviewWithModelDialog(project, mainRoot, repositoryName, pullRequest.pullRequest());
+    }
+
+    /**
+     * The quick review action's label: the remembered starting model of the
+     * harness the review will launch, or "default" when none was picked yet.
+     * Reads in-memory state only (a precomputed canonical-root map plus the
+     * state store) — never git, never the disk — because {@code update} runs
+     * on the EDT; a root not yet mapped reads "default" until the next rebuild.
+     */
+    private String quickReviewLabel(Path mainRoot) {
+        if (mainRoot == null) {
+            return "Review (default)";
+        }
+        DrydockPluginService plugin = DrydockPluginService.getInstance();
+        // mainRoot is already canonical (TaskTreeInputs.gather), and the root -> id map is
+        // precomputed off the EDT; the settings themselves are read fresh from the in-memory store.
+        RepositoryId id = repositoryIdsByRoot.get(mainRoot);
+        Optional<Repository> repository = id == null ? Optional.empty()
+                : plugin.stateStore().state().repositories().stream()
+                        .filter(r -> r.id().equals(id))
+                        .findFirst();
+        Optional<AgentKind> agent = PullRequestReview.selectReviewAgent(
+                SessionDialogs.defaultAgent(plugin.registry(),
+                        repository.flatMap(r -> r.settings().lastUsedAgent())),
+                plugin.registry()::isAvailable);
+        String model = agent.flatMap(kind -> repository.flatMap(r -> r.settings().lastUsedModel(kind)))
+                .orElse("default");
+        return "Review (" + model + ")";
+    }
+
     /**
      * Compact, mutually exclusive filters; the text search narrows the
      * selected view further.
@@ -776,6 +863,15 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         scheduleRebuild();
     }
 
+    /** Background only: canonicalizes every recorded repository root (filesystem IO). */
+    private static Map<Path, RepositoryId> repositoryIdsByRoot(DrydockPluginService plugin) {
+        Map<Path, RepositoryId> byRoot = new LinkedHashMap<>();
+        for (Repository repository : plugin.stateStore().state().repositories()) {
+            byRoot.putIfAbsent(RepositoryCatalog.canonicalize(repository.root()), repository.id());
+        }
+        return Map.copyOf(byRoot);
+    }
+
     private void scheduleRebuild() {
         Optional<TaskTreeRefreshRequests.Pass> requested = refreshRequests.beginPass();
         if (requested.isEmpty()) {
@@ -795,6 +891,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 // follow-up pass and this flag survives until that pass.
                 inputs.invalidateWorktrees();
             }
+            repositoryIdsByRoot = repositoryIdsByRoot(plugin);
             List<TaskNode> nodes = TaskTreeModel.build(
                     inputs.gather(project, requestedFilter, requestedViewFilter,
                             Set.copyOf(requestedWorktrees), Set.copyOf(requestedIssues),
@@ -884,7 +981,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
     private static String emptyText(String appliedFilter, ViewFilter appliedViewFilter) {
         if (!appliedFilter.isBlank()) {
-            return "Nothing in " + appliedViewFilter.label().toLowerCase() + " matches the search.";
+            return "Nothing in " + appliedViewFilter.label().toLowerCase(Locale.ROOT) + " matches the search.";
         }
         return switch (appliedViewFilter) {
             case ALL -> "No projects yet. Start a task with ＋ to add this one.";

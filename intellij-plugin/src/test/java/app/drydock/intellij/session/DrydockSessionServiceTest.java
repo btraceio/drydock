@@ -20,6 +20,7 @@ import app.drydock.agent.providers.terminal.TerminalAgentProvider;
 import app.drydock.agent.spi.AgentProvider;
 import app.drydock.app.ApplicationStateStore;
 import app.drydock.domain.AgentBinding;
+import app.drydock.domain.ApplicationState;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.Repository;
@@ -2059,5 +2060,65 @@ class DrydockSessionServiceTest {
                 service.startSession(source.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS).status());
         assertEquals(2, target.createContexts.size());
         harness.store.flush();
+    }
+
+    // --- repoWithLastUsedLaunch: the launch record, in one pass -----------------------------------
+
+    private static Repository launchRecordRepo(String root, RepositorySettings settings) {
+        return new Repository(RepositoryId.newId(), Path.of(root), Path.of(root).getFileName().toString(),
+                Instant.EPOCH, Instant.EPOCH, settings);
+    }
+
+    @Test
+    void launchRecordStoresAgentAndModelOnTheMatchingRepositoryOnly() {
+        Repository a = launchRecordRepo("/r/a", RepositorySettings.DEFAULT);
+        Repository b = launchRecordRepo("/r/b", RepositorySettings.DEFAULT);
+        ApplicationState state = ApplicationState.empty().withRepositories(List.of(a, b));
+
+        ApplicationState updated = DrydockSessionService.repoWithLastUsedLaunch(state, a.id(), AgentKind.PI,
+                Optional.of("m"));
+
+        RepositorySettings aSettings = updated.repositories().get(0).settings();
+        assertEquals(Optional.of(AgentKind.PI), aSettings.lastUsedAgent());
+        assertEquals(Optional.of("m"), aSettings.lastUsedModel(AgentKind.PI));
+        assertEquals(RepositorySettings.DEFAULT, updated.repositories().get(1).settings());
+    }
+
+    @Test
+    void launchRecordWithAnEmptyModelClearsItAndStillRecordsTheAgent() {
+        Repository a = launchRecordRepo("/r/a",
+                RepositorySettings.DEFAULT.withLastUsedModel(AgentKind.PI, Optional.of("old")));
+        ApplicationState state = ApplicationState.empty().withRepositories(List.of(a));
+
+        ApplicationState updated = DrydockSessionService.repoWithLastUsedLaunch(state, a.id(), AgentKind.PI,
+                Optional.empty());
+
+        RepositorySettings settings = updated.repositories().get(0).settings();
+        assertEquals(Optional.empty(), settings.lastUsedModel(AgentKind.PI));
+        assertEquals(Optional.of(AgentKind.PI), settings.lastUsedAgent());
+    }
+
+    @Test
+    void launchRecordForAnUnknownRepositoryChangesNothing() {
+        Repository a = launchRecordRepo("/r/a", RepositorySettings.DEFAULT);
+        Repository b = launchRecordRepo("/r/b", RepositorySettings.DEFAULT);
+        ApplicationState state = ApplicationState.empty().withRepositories(List.of(a, b));
+
+        ApplicationState updated = DrydockSessionService.repoWithLastUsedLaunch(state, RepositoryId.newId(),
+                AgentKind.PI, Optional.of("m"));
+
+        assertEquals(state.repositories(), updated.repositories());
+    }
+
+    @Test
+    void launchRecordKeepsTheRepositoryOrder() {
+        Repository a = launchRecordRepo("/r/a", RepositorySettings.DEFAULT);
+        Repository b = launchRecordRepo("/r/b", RepositorySettings.DEFAULT);
+        ApplicationState state = ApplicationState.empty().withRepositories(List.of(a, b));
+
+        ApplicationState updated = DrydockSessionService.repoWithLastUsedLaunch(state, b.id(), AgentKind.CLAUDE,
+                Optional.of("opus"));
+
+        assertEquals(List.of(a.id(), b.id()), updated.repositories().stream().map(Repository::id).toList());
     }
 }

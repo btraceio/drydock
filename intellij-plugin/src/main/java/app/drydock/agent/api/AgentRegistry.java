@@ -34,6 +34,7 @@ public final class AgentRegistry {
     private final Map<AgentKind, Boolean> availability = new EnumMap<>(AgentKind.class);
     private final Map<AgentKind, Boolean> remoteCapability = new EnumMap<>(AgentKind.class);
     private final Map<AgentKind, Boolean> subagentCapability = new EnumMap<>(AgentKind.class);
+    private final Map<AgentKind, List<String>> modelSuggestionsCache = new EnumMap<>(AgentKind.class);
 
     /** Discovers providers via ServiceLoader. Call off the FX thread (probes executables). */
     public static AgentRegistry create(AgentContext ctx) {
@@ -110,6 +111,37 @@ public final class AgentRegistry {
 
     public Optional<AgentProvider> provider(AgentKind kind) {
         return Optional.ofNullable(providers.get(kind));
+    }
+
+    /**
+     * The model ids {@code kind}'s CLI can be launched with, per
+     * {@link AgentProvider#modelSuggestions()}. May block (Pi spawns a
+     * {@code pi --list-models} subprocess), so callers MUST run this off the
+     * EDT. A non-empty catalog is cached for the registry's lifetime (a stale
+     * catalog is a suggestion, never a whitelist). An empty or failed probe is
+     * NOT cached and is retried on the next call, because a transient failure
+     * (e.g. a {@code pi --list-models} timeout) surfaces as an empty list.
+     */
+    public synchronized List<String> modelSuggestions(AgentKind kind) {
+        List<String> cached = modelSuggestionsCache.get(kind);
+        if (cached != null) {
+            return cached;
+        }
+        Optional<AgentProvider> provider = provider(kind);
+        if (provider.isEmpty()) {
+            return List.of();
+        }
+        List<String> found;
+        try {
+            found = List.copyOf(provider.get().modelSuggestions());
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, () -> "Model catalog probe failed for " + kind + ": " + e);
+            return List.of();   // not cached: the next call retries
+        }
+        if (!found.isEmpty()) {
+            modelSuggestionsCache.put(kind, found);
+        }
+        return found;
     }
 
     /**

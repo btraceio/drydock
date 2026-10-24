@@ -13,6 +13,7 @@ import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.function.Predicate;
 
 /**
@@ -49,7 +50,8 @@ public final class NewTaskPlan {
     public record Inputs(SharedProject project, String repoName, Optional<FixedWorktree> fixedWorktree,
                          List<Agent> agents, AgentKind preselected, String defaultStart, List<String> startPoints,
                          List<String> remoteNames, Set<String> takenBranches, Path worktreeBase,
-                         boolean writerActiveInMain) {
+                         boolean writerActiveInMain, Function<AgentKind, Optional<String>> lastUsedModel,
+                         Function<AgentKind, List<String>> modelSuggestions) {
         public Inputs {
             Objects.requireNonNull(project, "project");
             Objects.requireNonNull(fixedWorktree, "fixedWorktree");
@@ -57,17 +59,20 @@ public final class NewTaskPlan {
             startPoints = List.copyOf(startPoints);
             remoteNames = List.copyOf(remoteNames);
             takenBranches = Set.copyOf(takenBranches);
+            Objects.requireNonNull(lastUsedModel, "lastUsedModel");
+            Objects.requireNonNull(modelSuggestions, "modelSuggestions");
         }
     }
 
     /** What the user chose. {@code branch} and {@code folder} only mean something for a new worktree. */
     public record Choice(String name, Optional<String> instructions, AgentKind agent, SessionMode mode, WorkIn workIn,
-                         String branch, String start, Path folder, OpenIn openIn) {
+                         String branch, String start, Path folder, OpenIn openIn, Optional<String> model) {
         public Choice {
             Objects.requireNonNull(name, "name");
             Objects.requireNonNull(instructions, "instructions");
             Objects.requireNonNull(workIn, "workIn");
             Objects.requireNonNull(openIn, "openIn");
+            Objects.requireNonNull(model, "model");
         }
     }
 
