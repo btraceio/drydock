@@ -58,9 +58,10 @@ import java.util.function.Supplier;
 import java.util.stream.Stream;
 
 /**
- * New task: a description, an agent and a mode; the task name is inferred
- * from the description (a preset's name wins when the entry point supplies
- * one). Everything else — branch, start point, folder, window — is generated
+ * New task: an optional description, an agent and a mode; the task name is
+ * inferred from the description (a preset's name wins when the entry point
+ * supplies one), and a blank description starts a chat-like task named
+ * "New task" that tells the agent nothing. Everything else — branch, start point, folder, window — is generated
  * and folded into one summary line; {@code Change…} unfolds it for the rare
  * edit.
  *
@@ -115,6 +116,8 @@ final class NewTaskDialog extends DialogWrapper {
     /** True once the user edits the branch or the folder; then the name stops rewriting it. */
     private boolean branchEdited;
     private boolean folderEdited;
+    /** True once the user picks Work in; then it stops following the description's blankness. */
+    private boolean workInEdited;
     /** Programmatic updates must not count as the user's edits. */
     private boolean updating;
 
@@ -154,6 +157,7 @@ final class NewTaskDialog extends DialogWrapper {
         thisWindow.setSelected(preset.openIn() == OpenIn.THIS_WINDOW);
         init();
         setResizable(true);
+        defaultWorkIn();
         regenerate();
         refresh();
     }
@@ -256,6 +260,7 @@ final class NewTaskDialog extends DialogWrapper {
         instructions.getDocument().addDocumentListener(new DocumentAdapter() {
             @Override
             protected void textChanged(@NotNull DocumentEvent e) {
+                defaultWorkIn();
                 regenerate();
                 refresh();
             }
@@ -286,8 +291,14 @@ final class NewTaskDialog extends DialogWrapper {
     private JPanel detailsForm() {
         group(newWorktree, mainCheckout);
         group(thisWindow, ownWindow);
-        newWorktree.addActionListener(e -> refresh());
-        mainCheckout.addActionListener(e -> refresh());
+        newWorktree.addActionListener(e -> {
+            workInEdited = true;
+            refresh();
+        });
+        mainCheckout.addActionListener(e -> {
+            workInEdited = true;
+            refresh();
+        });
 
         inputs.startPoints().forEach(start::addItem);
         start.setEditable(true);
@@ -368,6 +379,23 @@ final class NewTaskDialog extends DialogWrapper {
                     .addComponentToRightColumn(baseRow);
         }
         return builder.addLabeledComponent("Open in:", row(thisWindow, ownWindow)).getPanel();
+    }
+
+    /**
+     * A blank description is a chat-like task, which needs no branch: Work in
+     * defaults to the main checkout, and back to a new worktree once the
+     * description returns -- until the user picks explicitly, which stops the
+     * following (like the branch and folder fields). A read-only task or a
+     * fixed target is pinned to its work-in regardless of the description.
+     */
+    private void defaultWorkIn() {
+        if (workInEdited || preset.fixedWorkIn().isPresent() || inputs.fixedWorktree().isPresent()
+                || preset.mode(readOnly.isSelected()) == SessionMode.READ_ONLY) {
+            return;
+        }
+        boolean blank = instructions.getText().isBlank();
+        mainCheckout.setSelected(blank);
+        newWorktree.setSelected(!blank);
     }
 
     /**
@@ -526,10 +554,8 @@ final class NewTaskDialog extends DialogWrapper {
 
     @Override
     protected @Nullable ValidationInfo doValidate() {
-        if (preset.name().isEmpty() && instructions.getText().isBlank()) {
-            // Without a description there is nothing to infer a name from.
-            return new ValidationInfo("Describe what the agent should do.", instructions);
-        }
+        // A blank description no longer refuses: it names the task "New task"
+        // and starts the agent at its own prompt -- a chat, not a task.
         // Folder occupancy is a disk read; it is checked on OK only, not on
         // every keystroke.
         return NewTaskPlan.refusal(inputs, choice(), ignored -> false)

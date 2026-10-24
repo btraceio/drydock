@@ -1512,8 +1512,8 @@ public final class DrydockApplication extends Application {
     }
 
     /**
-     * Installs every available agent's activity hooks (Plan A: Claude only),
-     * then points the workspace at the one shared {@link
+     * Installs every available agent's activity reporter (Claude's hooks, Pi's
+     * activity extension), then points the workspace at the one shared {@link
      * SessionActivityWatcher} watching {@code activityDirectory}. Runs off
      * the FX thread (file writes), and a failure is logged and swallowed:
      * activity badges are a convenience, and no part of launching or

@@ -109,6 +109,19 @@ public final class McpToolRouter {
             "review_finding", "review_answer", "review_ask_answer", "review_state",
             "review_recheck");
 
+    /**
+     * The review tools plus {@code session_rename}: an agent reviewing here
+     * may also relabel its own session as the conversation finds its shape,
+     * exactly as the desktop app's MCP allows. The other session tools stay
+     * desktop-only -- the IDE plugin handles handoffs differently.
+     */
+    public static final Set<String> REVIEW_TOOLS_AND_RENAME;
+    static {
+        Set<String> union = new java.util.LinkedHashSet<>(REVIEW_TOOLS);
+        union.add("session_rename");
+        REVIEW_TOOLS_AND_RENAME = Set.copyOf(union);
+    }
+
     /** Every tool name {@link #call} dispatches, advertised or not. */
     private static final Set<String> ALL_TOOLS = Set.of(
             "review_comments", "review_reply", "review_scope", "review_tour", "review_check",

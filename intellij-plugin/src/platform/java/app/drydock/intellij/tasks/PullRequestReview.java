@@ -182,9 +182,12 @@ public final class PullRequestReview {
                              boolean pickModel, ProgressIndicator indicator) {
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         Optional<AgentKind> agent;
-        Optional<String> rememberedModel;
-        ModelTiers rememberedTiers;
         Optional<String> customTemplate;
+        // The repository's last-used values, read once: they seed the dialog's
+        // pickers per harness and the quick Review's launch, both keyed per
+        // harness.
+        Function<AgentKind, Optional<String>> lastUsedModel;
+        Function<AgentKind, ModelTiers> lastUsedTiers;
         try {
             plugin.initialization().get(LAUNCH_TIMEOUT_SECONDS, TimeUnit.SECONDS);
             // A custom template replaces Drydock's review instruction, and with
@@ -198,12 +201,10 @@ public final class PullRequestReview {
                     : local.settings().lastUsedAgent();
             agent = selectReviewAgent(SessionDialogs.defaultAgent(plugin.registry(), repoLastUsed),
                     kind -> plugin.registry().isAvailable(kind));
-            // The remembered model and tiers are keyed per harness, so they are
-            // read for the harness the review will actually launch.
-            rememberedModel = agent.flatMap(kind -> local == null ? Optional.empty()
-                    : local.settings().lastUsedModel(kind));
-            rememberedTiers = agent.map(kind -> local == null ? ModelTiers.EMPTY
-                    : local.settings().lastUsedTiers(kind).orElse(ModelTiers.EMPTY)).orElse(ModelTiers.EMPTY);
+            lastUsedModel = kind -> local == null ? Optional.empty()
+                    : local.settings().lastUsedModel(kind);
+            lastUsedTiers = kind -> local == null ? ModelTiers.EMPTY
+                    : local.settings().lastUsedTiers(kind).orElse(ModelTiers.EMPTY);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return;
@@ -221,19 +222,22 @@ public final class PullRequestReview {
         // answer, so the in-flight guard still covers the whole materialization:
         // a second Review click is refused until the first one has either
         // launched or been cancelled. Outer empty = do not review at all.
-        boolean tiersApply = plugin.registry().supportsSubagents(agent.get()) && customTemplate.isEmpty();
+        // The dialog picks the HARNESS too (seeded to the repository's
+        // last-used one); the quick Review keeps the auto-pick.
         Optional<ModelChoice> choice = pickModel
-                ? chooseModel(from, agent.get(), rememberedModel, rememberedTiers, tiersApply, plugin, indicator)
-                : Optional.of(new ModelChoice(rememberedModel, Optional.empty()));
+                ? chooseModel(from, plugin, agent.get(), lastUsedModel, lastUsedTiers, customTemplate.isPresent(),
+                        indicator)
+                : Optional.of(new ModelChoice(agent.get(), lastUsedModel.apply(agent.get()), Optional.empty()));
         if (choice.isEmpty()) {
             return; // cancelled, abandoned, failed, or the dialog never opened: no checkout, no launch
         }
+        AgentKind picked = choice.get().agent();
         Optional<String> model = choice.get().model();
         // Recorded only when the dialog asked for them; the prompt spends the
         // remembered tiers otherwise (the quick Review), which a launch that
         // asked for none leaves stored as they were.
         Optional<ModelTiers> recordedTiers = choice.get().tiers();
-        ModelTiers promptTiers = recordedTiers.orElse(rememberedTiers);
+        ModelTiers promptTiers = recordedTiers.orElseGet(() -> lastUsedTiers.apply(picked));
         Optional<String> customPrompt = customTemplate.map(template ->
                 PullRequestReviewPrompt.render(template, pullRequest.number()));
 
@@ -274,20 +278,21 @@ public final class PullRequestReview {
         // No expiry on the window: openAndLaunch must run even when `from` is gone, to
         // clean up the worktree it would otherwise leave behind.
         ApplicationManager.getApplication().invokeLater(() -> openAndLaunch(from, mainRoot, reused,
-                pullRequest, agent.get(), model, promptTiers, recordedTiers, customPrompt), ModalityState.nonModal());
+                pullRequest, picked, model, promptTiers, recordedTiers, customPrompt), ModalityState.nonModal());
     }
 
     /**
      * What the model dialog's answer contributes to the launch: {@code tiers}
      * is empty when no tier pickers were shown.
      */
-    record ModelChoice(Optional<String> model, Optional<ModelTiers> tiers) {
+    record ModelChoice(AgentKind agent, Optional<String> model, Optional<ModelTiers> tiers) {
     }
 
     /** Shows the review model dialog on the EDT and waits for its answer; empty means do not review. */
-    private Optional<ModelChoice> chooseModel(Project from, AgentKind kind, Optional<String> rememberedModel,
-                                              ModelTiers rememberedTiers, boolean tiersApply,
-                                              DrydockPluginService plugin, ProgressIndicator indicator) {
+    private Optional<ModelChoice> chooseModel(Project from, DrydockPluginService plugin, AgentKind preselected,
+                                              Function<AgentKind, Optional<String>> lastUsedModel,
+                                              Function<AgentKind, ModelTiers> lastUsedTiers,
+                                              boolean customTemplate, ProgressIndicator indicator) {
         CompletableFuture<ModelChoice> picked = new CompletableFuture<>();
         AtomicBoolean claimed = new AtomicBoolean();
         ApplicationManager.getApplication().invokeLater(() -> {
@@ -298,10 +303,12 @@ public final class PullRequestReview {
                 if (picked.isDone() || from.isDisposed()) {
                     return; // defensive: nobody is waiting for an answer any more
                 }
-                ReviewModelDialog dialog = new ReviewModelDialog(from, kind, rememberedModel, rememberedTiers,
-                        plugin.registry()::modelSuggestions, tiersApply);
+                ReviewModelDialog dialog = new ReviewModelDialog(from, plugin.registry().agents(), preselected,
+                        lastUsedModel, lastUsedTiers, plugin.registry()::modelSuggestions,
+                        plugin.registry()::supportsSubagents, customTemplate);
                 boolean delivered = dialog.showAndGet()
-                        ? picked.complete(new ModelChoice(dialog.acceptedModel(), dialog.acceptedTiers()))
+                        ? picked.complete(new ModelChoice(dialog.acceptedAgent(), dialog.acceptedModel(),
+                                dialog.acceptedTiers()))
                         : picked.cancel(false);
                 if (!delivered) {
                     LOG.log(Level.INFO, "The review model dialog was answered after the review was abandoned");

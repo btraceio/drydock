@@ -34,14 +34,28 @@ public final class PiExtensionInstaller {
     private static final String FILE_NAME = "drydock-mcp.ts";
 
     private final Path stateDirectory;
+    private final String fileName;
+    private final String source;
 
+    /** Native MCP bridge, {@code drydock-mcp.ts}. */
     public PiExtensionInstaller(Path stateDirectory) {
+        this(stateDirectory, FILE_NAME, PiExtensionSource.SOURCE);
+    }
+
+    private PiExtensionInstaller(Path stateDirectory, String fileName, String source) {
         this.stateDirectory = Objects.requireNonNull(stateDirectory, "stateDirectory");
+        this.fileName = Objects.requireNonNull(fileName, "fileName");
+        this.source = Objects.requireNonNull(source, "source");
+    }
+
+    /** Activity reporting, {@code drydock-activity.ts}. */
+    public static PiExtensionInstaller activity(Path stateDirectory) {
+        return new PiExtensionInstaller(stateDirectory, "drydock-activity.ts", PiActivityExtensionSource.SOURCE);
     }
 
     /** Where the extension lives, whether or not it has been written yet. */
     private Path extensionFile() {
-        return stateDirectory.resolve("pi").resolve(FILE_NAME);
+        return stateDirectory.resolve("pi").resolve(fileName);
     }
 
     /** Writes (or rewrites) the extension, returning its path. */
@@ -52,7 +66,7 @@ public final class PiExtensionInstaller {
         // POSIX permissions (NTFS); see OwnerOnly for the Windows constraint.
         OwnerOnly.createDirectories(directory);
         Path target = extensionFile();
-        writeAtomically(target, PiExtensionSource.SOURCE);
+        writeAtomically(target, source);
         return target;
     }
 

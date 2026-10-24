@@ -18,7 +18,8 @@ import java.util.function.Consumer;
  * {@code Start ▸} on a worktree row (cross-project tabs, frame F1): start a
  * task there in this window — hosted, tagged with its repo — or in its own
  * window, or read-only here. Each item opens New task fixed to the worktree,
- * preset to that choice; a task still needs its name.
+ * preset to that choice; the description stays optional — a blank one starts
+ * a chat-like task named New task.
  */
 final class StartMenu {
 

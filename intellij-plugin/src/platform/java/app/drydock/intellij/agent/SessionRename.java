@@ -17,7 +17,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
-/** The human rename shared by a task-tree node and its console title bar. */
+/** The human rename shared by a task-tree node, its console title bar and the strip's inline editor. */
 public final class SessionRename {
 
     private static final long RENAME_TIMEOUT_SECONDS = 15;
@@ -32,11 +32,22 @@ public final class SessionRename {
         if (requested == null || requested.strip().isEmpty()) {
             return;
         }
+        // The dialog's OK is an explicit confirm: it pins.
+        apply(project, session, requested, true);
+    }
+
+    /**
+     * Persists a rename with visible background progress; the EDT only owns
+     * the error dialog. {@code pin} is true for an explicit confirm (Enter in
+     * the inline editor, OK in the dialog) and false for a focus-loss commit;
+     * see {@code DrydockSessionService.renameSession} for what the flag does.
+     */
+    public static void apply(Project project, ManagedAgentSession session, String requested, boolean pin) {
         ProgressManager.getInstance().run(new Task.Backgroundable(project, "Renaming session…", false) {
             @Override
             public void run(@NotNull ProgressIndicator indicator) {
                 try {
-                    DrydockStartupActivity.sessions(project).renameSession(session.id(), requested)
+                    DrydockStartupActivity.sessions(project).renameSession(session.id(), requested, pin)
                             .get(RENAME_TIMEOUT_SECONDS, TimeUnit.SECONDS);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();

@@ -222,13 +222,15 @@ class PullRequestReviewTest {
 
     private static CompletableFuture<PullRequestReview.ModelChoice> picked(String model) {
         return CompletableFuture.completedFuture(
-                new PullRequestReview.ModelChoice(Optional.ofNullable(model), Optional.of(ModelTiers.EMPTY)));
+                new PullRequestReview.ModelChoice(AgentKind.CLAUDE, Optional.ofNullable(model),
+                        Optional.of(ModelTiers.EMPTY)));
     }
 
     @Test
     void dialogOkWithAModelLaunchesWithIt() {
         assertEquals(
-                Optional.of(new PullRequestReview.ModelChoice(Optional.of("m"), Optional.of(ModelTiers.EMPTY))),
+                Optional.of(new PullRequestReview.ModelChoice(AgentKind.CLAUDE, Optional.of("m"),
+                        Optional.of(ModelTiers.EMPTY))),
                 await(picked("m"), new AtomicBoolean(true), () -> false, 0));
     }
 
@@ -300,7 +302,8 @@ class PullRequestReviewTest {
                 Thread.currentThread().interrupt();
             }
             picked.complete(
-                    new PullRequestReview.ModelChoice(Optional.of("late-ok"), Optional.of(ModelTiers.EMPTY)));
+                    new PullRequestReview.ModelChoice(AgentKind.CLAUDE, Optional.of("late-ok"),
+                            Optional.of(ModelTiers.EMPTY)));
         });
         Optional<PullRequestReview.ModelChoice> choice = assertTimeoutPreemptively(Duration.ofSeconds(5),
                 () -> await(picked, claimed, () -> false, 2_000));
@@ -333,7 +336,8 @@ class PullRequestReviewTest {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
-            picked.complete(new PullRequestReview.ModelChoice(Optional.of("m"), Optional.of(ModelTiers.EMPTY)));
+            picked.complete(new PullRequestReview.ModelChoice(AgentKind.CLAUDE, Optional.of("m"),
+                    Optional.of(ModelTiers.EMPTY)));
         });
         Optional<PullRequestReview.ModelChoice> choice = assertTimeoutPreemptively(Duration.ofSeconds(5),
                 () -> await(picked, claimed, () -> false, 0));

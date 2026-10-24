@@ -142,6 +142,12 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
         this.project = Objects.requireNonNull(project, "project");
         this.file = Objects.requireNonNull(file, "file");
         this.strip = new AgentConsoleStrip(this::performAction);
+        this.strip.setOnRenamed((name, pin) -> {
+            ManagedAgentSession current = session;
+            if (current != null) {
+                SessionRename.apply(project, current, name, pin);
+            }
+        });
 
         placeholder.setForeground(UIUtil.getContextHelpForeground());
         placeholder.setBorder(JBUI.Borders.empty(20));

@@ -110,7 +110,7 @@ public class NewTaskDialogPlatformTest extends BasePlatformTestCase {
         assertEquals("#42 Fix allocation accounting", presetNamed.get().name());
     }
 
-    public void testBlankDescriptionRefusesToStart() {
+    public void testBlankDescriptionStartsAsAChat() {
         AtomicReference<ValidationInfo> validation = new AtomicReference<>();
         AtomicReference<NewTaskPlan.Choice> blank = new AtomicReference<>();
 
@@ -124,8 +124,32 @@ public class NewTaskDialogPlatformTest extends BasePlatformTestCase {
             }
         });
 
-        assertEquals("Describe what the agent should do.", validation.get().message);
+        // A blank description no longer refuses: it names the task "New task",
+        // works in the main checkout, and tells the agent nothing -- a chat.
+        assertEquals(null, validation.get());
         assertEquals("New task", blank.get().name());
+        assertEquals(NewTaskPlan.WorkIn.MAIN_CHECKOUT, blank.get().workIn());
+        assertEquals(Optional.empty(), blank.get().instructions());
+        assertEquals(Optional.empty(), NewTaskPlan.initialPrompt(blank.get()));
+    }
+
+    public void testWorkInFollowsTheDescriptionUntilTheUserPicks() {
+        AtomicReference<NewTaskPlan.WorkIn> blank = new AtomicReference<>();
+        AtomicReference<NewTaskPlan.WorkIn> described = new AtomicReference<>();
+
+        ApplicationManager.getApplication().invokeAndWait(() -> {
+            NewTaskDialog dialog = new NewTaskDialog(getProject(), inputs(), Optional.empty());
+            try {
+                blank.set(dialog.choice().workIn());
+                dialog.diagSetInstructions("Fix the parser");
+                described.set(dialog.choice().workIn());
+            } finally {
+                Disposer.dispose(dialog.getDisposable());
+            }
+        });
+
+        assertEquals(NewTaskPlan.WorkIn.MAIN_CHECKOUT, blank.get());
+        assertEquals(NewTaskPlan.WorkIn.NEW_WORKTREE, described.get());
     }
 
     public void testModelDefaultsToEmptyAndIsCarriedOnTheChoice() {

@@ -131,11 +131,21 @@ class NewTaskPlanTest {
     }
 
     @Test
-    void refusesBlankName() {
-        Choice choice = choice("  ", Optional.empty(), SessionMode.WRITES, WorkIn.NEW_WORKTREE, "x", Path.of("/b/x"));
+    void blankNameNoLongerRefuses() {
+        // A blank description names the task "New task" and starts at the
+        // agent's own prompt; nothing left to refuse before the branch checks.
+        Choice choice = choice("  ", Optional.empty(), SessionMode.WRITES, WorkIn.NEW_WORKTREE, "task", Path.of("/b/task"));
 
-        assertEquals(Optional.of("Describe what the agent should do."),
+        assertEquals(Optional.empty(),
                 NewTaskPlan.refusal(inputs(Optional.empty(), false), choice, folder -> false));
+    }
+
+    @Test
+    void blankInstructionsPromptNothing() {
+        Choice chat = choice("New task", Optional.empty(), SessionMode.WRITES, WorkIn.MAIN_CHECKOUT,
+                "", Path.of("/b/main"));
+
+        assertEquals(Optional.empty(), NewTaskPlan.initialPrompt(chat));
     }
 
     @Test
