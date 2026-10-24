@@ -9,6 +9,7 @@ import app.drydock.agent.api.McpDelivery;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdStrategy;
 import app.drydock.agent.providers.HostBinaryLocator;
+import app.drydock.agent.providers.pi.internal.PiActivityExtensionSource;
 import app.drydock.agent.providers.pi.internal.PiCapabilities;
 import app.drydock.agent.providers.pi.internal.PiExecutableLocator;
 import app.drydock.domain.SshRemote;
@@ -60,7 +61,7 @@ class PiAgentProviderTest {
                 new CreateContext("Session 1", "ignored-uuid", Path.of("/repo"), Optional.empty(), Optional.empty()));
         assertTrue(plan.supported());
         assertFalse(plan.sessionIdUsed());
-        assertTrue(plan.command().endsWith("pi"));   // env-scrub prefix (if any) + "pi"; no id
+        assertTrue(withoutActivity(plan.command()).endsWith("pi"));   // env-scrub prefix (if any) + "pi"; no id
     }
 
     @Test
@@ -86,7 +87,7 @@ class PiAgentProviderTest {
                         Optional.empty(), Optional.empty(), true));
         String command = plan.command();
         assertTrue(command.contains("DRYDOCK_EVAL=1 "), command);
-        assertTrue(command.endsWith("pi"));
+        assertTrue(withoutActivity(command).endsWith("pi"));
     }
 
     @Test
@@ -101,14 +102,14 @@ class PiAgentProviderTest {
     void resumeByIdWhenKnown() {
         LaunchPlan plan = provider().buildResumeCommand(
                 new ResumeContext(Optional.of("019f9072-abc"), Optional.empty(), Path.of("/repo"), Optional.empty(), Optional.empty()));
-        assertTrue(plan.command().endsWith("pi --session '019f9072-abc'"));
+        assertTrue(withoutActivity(plan.command()).endsWith("pi --session '019f9072-abc'"));
     }
 
     @Test
     void resumeUsesPickerWhenIdUnknown() {
         LaunchPlan plan = provider().buildResumeCommand(
                 new ResumeContext(Optional.empty(), Optional.empty(), Path.of("/repo"), Optional.empty(), Optional.empty()));
-        assertTrue(plan.command().endsWith("pi --resume"));   // picker; never --continue/--last
+        assertTrue(withoutActivity(plan.command()).endsWith("pi --resume"));   // picker; never --continue/--last
     }
 
     @Test
@@ -126,9 +127,9 @@ class PiAgentProviderTest {
     }
 
     @Test
-    void activityAndRemoteDeclinedButConversationsAndDiscoveryPresent() {
+    void remoteDeclinedButActivityConversationsAndDiscoveryPresent() {
         PiAgentProvider p = provider();
-        assertTrue(p.activity().isEmpty());
+        assertTrue(p.activity().isPresent());
         assertTrue(p.conversations().isPresent());
         assertTrue(p.idDiscovery().isPresent());
     }
@@ -179,7 +180,7 @@ class PiAgentProviderTest {
         int piIdx = command.indexOf("'" + fakePi + "'");
         assertTrue(nodeIdx >= 0 && piIdx > nodeIdx,
                 "node must precede the pi script (bypassing the shebang): " + command);
-        assertTrue(command.endsWith("'" + fakePi + "'"), command);
+        assertTrue(withoutActivity(command).endsWith("'" + fakePi + "'"), command);
     }
 
     /**
@@ -210,7 +211,7 @@ class PiAgentProviderTest {
                 new CreateContext("S", "x", Path.of("/repo"), Optional.empty(), Optional.empty())).command();
         assertFalse(command.contains("'" + fakeNode + "'"),
                 "a shell launcher must not be fed to node: " + command);
-        assertTrue(command.endsWith("'" + fakePi + "'"), command);
+        assertTrue(withoutActivity(command).endsWith("'" + fakePi + "'"), command);
     }
 
     /**
@@ -285,7 +286,7 @@ class PiAgentProviderTest {
         p.init(new AgentContext(Path.of("/tmp"), Path.of("/tmp/activity"), ForkJoinPool.commonPool()));
         String command = p.buildCreateCommand(
                 new CreateContext("S", "x", Path.of("/repo"), Optional.empty(), Optional.empty())).command();
-        assertTrue(command.endsWith("'" + fakePi + "'"), command);
+        assertTrue(withoutActivity(command).endsWith("'" + fakePi + "'"), command);
         assertFalse(command.contains(" node"), "no node prefix when unresolved: " + command);
     }
 
@@ -299,7 +300,8 @@ class PiAgentProviderTest {
         String command = plan.command();
         assertTrue(command.startsWith("env -u PI_CODING_AGENT DRYDOCK_MCP_CONFIG='" + config + "' "),
                 command);
-        assertTrue(command.endsWith("pi -e '" + state.resolve("pi").resolve("drydock-mcp.ts") + "'"), command);
+        assertTrue(withoutActivity(command)
+                .endsWith("pi -e '" + state.resolve("pi").resolve("drydock-mcp.ts") + "'"), command);
         assertFalse(command.contains("tok-abc"), "the token must never reach the command line");
     }
 
@@ -324,7 +326,7 @@ class PiAgentProviderTest {
                 .command();
 
         assertTrue(command.contains("DRYDOCK_MCP_CONFIG='" + config + "'"), command);
-        assertTrue(command.endsWith("--session '019f9072-abc'"), command);
+        assertTrue(withoutActivity(command).endsWith("--session '019f9072-abc'"), command);
         assertTrue(command.contains(" -e '"), command);
         assertFalse(command.contains("tok-abc"), "the token must never reach the command line");
     }
@@ -338,15 +340,17 @@ class PiAgentProviderTest {
         String command = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
                 Optional.empty(), Optional.of(access(state.resolve("mcp").resolve("s1.json"))))).command();
 
-        assertTrue(command.endsWith("pi"), command);
+        assertTrue(withoutActivity(command).endsWith("pi"), command);
         assertFalse(command.contains("DRYDOCK_MCP_CONFIG"), command);
     }
 
     @Test
-    void noMcpAccessMeansNoFlagsEvenOnAModernPi(@TempDir Path state) {
+    void noMcpAccessMeansNoBridgeFlagsEvenOnAModernPi(@TempDir Path state) {
         String command = bridgeProvider(state).buildCreateCommand(
                 new CreateContext("s", "x", Path.of("/repo"), Optional.empty(), Optional.empty())).command();
-        assertTrue(command.endsWith("pi"), command);
+        assertFalse(command.contains("DRYDOCK_MCP_CONFIG"), command);
+        assertFalse(command.contains("DRYDOCK_STDIO_MCP_SERVERS"), command);
+        assertTrue(withoutActivity(command).endsWith("pi"), command);
     }
 
     /**
@@ -403,7 +407,8 @@ class PiAgentProviderTest {
 
         String firstAttempt = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
                 Optional.empty(), Optional.of(access(config)))).command();
-        assertTrue(firstAttempt.endsWith("pi"), "an \"unknown\" probe must not carry the bridge flags: " + firstAttempt);
+        assertTrue(firstAttempt.endsWith("pi") || firstAttempt.contains("drydock-activity.ts"),
+                "an \"unknown\" probe must not carry the bridge flags: " + firstAttempt);
 
         String secondAttempt = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
                 Optional.empty(), Optional.of(access(config)))).command();
@@ -428,11 +433,11 @@ class PiAgentProviderTest {
 
         String firstAttempt = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
                 Optional.empty(), Optional.of(access(config)))).command();
-        assertTrue(firstAttempt.endsWith("pi"), "0.79.10 is below the floor: " + firstAttempt);
+        assertTrue(withoutActivity(firstAttempt).endsWith("pi"), "0.79.10 is below the floor: " + firstAttempt);
 
         String secondAttempt = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
                 Optional.empty(), Optional.of(access(config)))).command();
-        assertTrue(secondAttempt.endsWith("pi"),
+        assertTrue(withoutActivity(secondAttempt).endsWith("pi"),
                 "a parsed sub-floor read must stay memoised, not re-probed: " + secondAttempt);
         assertEquals(1, calls.get(), "the probe must run exactly once");
     }
@@ -454,7 +459,8 @@ class PiAgentProviderTest {
 
         String firstAttempt = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
                 Optional.empty(), Optional.of(access(config)))).command();
-        assertTrue(firstAttempt.endsWith("pi"), "an unparseable version must not carry the bridge flags: " + firstAttempt);
+        assertTrue(withoutActivity(firstAttempt).endsWith("pi"),
+                "an unparseable version must not carry the bridge flags: " + firstAttempt);
 
         String secondAttempt = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
                 Optional.empty(), Optional.of(access(config)))).command();
@@ -518,9 +524,11 @@ class PiAgentProviderTest {
 
         String afterDeletion = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
                 Optional.empty(), Optional.of(access(config)))).command();
-        assertTrue(afterDeletion.endsWith("pi"),
+        // Per-slot degrade: only the vanished extension's flag is withheld; the
+        // activity extension is independent and still rides this launch.
+        assertFalse(afterDeletion.contains(" -e '" + installed + "'"),
                 "a vanished extension must degrade, never point -e at a missing path: " + afterDeletion);
-        assertFalse(afterDeletion.contains(" -e '"), afterDeletion);
+        assertTrue(afterDeletion.contains("drydock-activity.ts"), afterDeletion);
 
         String next = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
                 Optional.empty(), Optional.of(access(config)))).command();
@@ -612,5 +620,47 @@ class PiAgentProviderTest {
                 "an unparseable version is not a too-old version: " + message);
         assertTrue(message.contains("v0.84.1"),
                 "the log must quote what it actually read: " + message);
+    }
+
+    /**
+     * Strips what the activity extension adds to every launch (the env var
+     * and the {@code -e} flag), so tests of the other flags stay about those
+     * flags; {@link #anActivityExtensionRidesEveryLaunch} asserts them.
+     */
+    private static String withoutActivity(String command) {
+        return command.replaceAll("DRYDOCK_ACTIVITY_DIR='[^']*' ", "")
+                .replaceAll(" -e '[^']*drydock-activity\\.ts'", "");
+    }
+
+    /** The state words and the events that produce them, matching the Claude hook's contract. */
+    @Test
+    void theActivityExtensionMirrorsTheClaudeStateContract() {
+        String source = PiActivityExtensionSource.SOURCE;
+        assertTrue(source.contains("delete process.env.DRYDOCK_ACTIVITY_DIR"), source);
+        assertTrue(source.contains("pi.on(\"before_agent_start\""), source);
+        assertTrue(source.contains("pi.on(\"input\""), source);
+        assertTrue(source.contains("pi.on(\"ui_prompt_start\""), source);
+        assertTrue(source.contains("pi.on(\"ui_prompt_end\""), source);
+        assertTrue(source.contains("pi.on(\"agent_settled\""), source);
+        assertTrue(source.contains("pi.on(\"session_shutdown\""), source);
+        assertTrue(source.contains("Write-then-rename"), source);
+    }
+
+    /** Attention reporting rides every launch -- create and resume, with or without MCP. */
+    @Test
+    void anActivityExtensionRidesEveryLaunch(@TempDir Path state) throws Exception {
+        PiAgentProvider p = bridgeProvider(state);
+        Path extension = state.resolve("pi").resolve("drydock-activity.ts");
+
+        String create = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
+                Optional.empty(), Optional.empty())).command();
+        assertTrue(create.contains("DRYDOCK_ACTIVITY_DIR='" + state.resolve("activity") + "' "), create);
+        assertTrue(create.contains(" -e '" + extension + "'"), create);
+        assertEquals(PiActivityExtensionSource.SOURCE, Files.readString(extension));
+
+        String resume = p.buildResumeCommand(new ResumeContext(Optional.of("019f9072-abc"),
+                Optional.empty(), Path.of("/repo"), Optional.empty(), Optional.empty())).command();
+        assertTrue(resume.contains("DRYDOCK_ACTIVITY_DIR='" + state.resolve("activity") + "' "), resume);
+        assertTrue(resume.contains(" -e '" + extension + "'"), resume);
     }
 }

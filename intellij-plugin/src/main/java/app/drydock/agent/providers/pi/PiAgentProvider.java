@@ -38,6 +38,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -83,6 +84,9 @@ public final class PiAgentProvider implements AgentProvider {
     /** Read once and removed by {@code PiInitialPromptExtensionSource}. */
     private static final String INITIAL_PROMPT_ENV_VAR = "DRYDOCK_PI_INITIAL_PROMPT";
 
+    /** Read once and removed by {@code PiActivityExtensionSource}; where state words are written. */
+    private static final String ACTIVITY_ENV_VAR = "DRYDOCK_ACTIVITY_DIR";
+
     /** Bounds a hung filesystem: a stuck write costs a tab its tools, never its launch. */
     private static final Duration INSTALL_JOIN = Duration.ofSeconds(5);
 
@@ -99,6 +103,8 @@ public final class PiAgentProvider implements AgentProvider {
     private PiExtensionInstaller installer;
     private PiExtensionInstaller evalInstaller;
     private PiExtensionInstaller initialPromptInstaller;
+    private PiExtensionInstaller activityInstaller;
+    private PiActivityReporter activityReporter;
     private ExecutorService background;
     private volatile String unsupportedVersion;
 
@@ -114,6 +120,7 @@ public final class PiAgentProvider implements AgentProvider {
     private final AtomicReference<CompletableFuture<Path>> extensionFile = new AtomicReference<>();
     private final AtomicReference<CompletableFuture<Path>> evalExtensionFile = new AtomicReference<>();
     private final AtomicReference<CompletableFuture<Path>> initialPromptExtensionFile = new AtomicReference<>();
+    private final AtomicReference<CompletableFuture<Path>> activityExtensionFile = new AtomicReference<>();
 
     /** Public no-arg constructor required by {@link java.util.ServiceLoader}. */
     public PiAgentProvider() {
@@ -155,6 +162,8 @@ public final class PiAgentProvider implements AgentProvider {
         this.installer = new PiExtensionInstaller(ctx.stateDirectory());
         this.evalInstaller = PiExtensionInstaller.eval(ctx.stateDirectory());
         this.initialPromptInstaller = PiExtensionInstaller.initialPrompt(ctx.stateDirectory());
+        this.activityInstaller = PiExtensionInstaller.activity(ctx.stateDirectory());
+        this.activityReporter = new PiActivityReporter(activityInstaller, ctx.activityDirectory());
         this.background = ctx.backgroundExecutor();
     }
 
@@ -409,10 +418,14 @@ public final class PiAgentProvider implements AgentProvider {
         CompletableFuture<Path> evalSetup = eval ? extensionFuture(evalExtensionFile, evalInstaller) : null;
         CompletableFuture<Path> prompt = initialPrompt.isEmpty() ? null
                 : extensionFuture(initialPromptExtensionFile, initialPromptInstaller);
+        // Attention reporting is independent of MCP, eval, and prompts: it rides
+        // every launch, create or resume.
+        CompletableFuture<Path> activity = extensionFuture(activityExtensionFile, activityInstaller);
 
         Path mcpExtension = mcp == null ? null : installed(extensionFile, mcp);
         Path evalExtension = evalSetup == null ? null : installed(evalExtensionFile, evalSetup);
         Path promptExtension = prompt == null ? null : installed(initialPromptExtensionFile, prompt);
+        Path activityExtension = installed(activityExtensionFile, activity);
 
         boolean useMcp = hasMcp && mcpExtension != null;
         if (hasMcp && !useMcp) {
@@ -426,10 +439,21 @@ public final class PiAgentProvider implements AgentProvider {
         if (initialPrompt.isPresent() && !useInitialPrompt) {
             LOG.log(Level.WARNING, "Pi initial-prompt extension could not be installed; using CLI fallback");
         }
+        boolean useActivity = activityExtension != null;
+        if (!useActivity) {
+            // A badge is a convenience: one failed install degrades this launch's
+            // attention reporting, never the session.
+            LOG.log(Level.WARNING, "Pi activity extension could not be installed; launching without attention reporting");
+        }
 
-        StringBuilder command = new StringBuilder(useMcp && configFile.isPresent()
-                ? AgentCommands.envPrefix(ENV_SCRUB, Map.of(CONFIG_ENV_VAR, configFile.get()), Map.of())
-                : AgentCommands.envPrefix(ENV_SCRUB));
+        Map<String, Path> literals = new LinkedHashMap<>();
+        if (useMcp && configFile.isPresent()) {
+            literals.put(CONFIG_ENV_VAR, configFile.get());
+        }
+        if (useActivity) {
+            literals.put(ACTIVITY_ENV_VAR, activityReporter.activityDirectory());
+        }
+        StringBuilder command = new StringBuilder(AgentCommands.envPrefix(ENV_SCRUB, literals, Map.of()));
         if (useEval) {
             command.append("DRYDOCK_EVAL=1 ");
         }
@@ -454,6 +478,9 @@ public final class PiAgentProvider implements AgentProvider {
         if (useInitialPrompt) {
             command.append(" -e ").append(AgentCommands.shellQuote(promptExtension.toString()));
         }
+        if (useActivity) {
+            command.append(" -e ").append(AgentCommands.shellQuote(activityExtension.toString()));
+        }
         // --model <m> for a picked starting model; empty for the harness's own
         // default. Launch-time only: buildResumeCommand never appends it, so a
         // resume keeps whatever model the conversation last used.
@@ -462,13 +489,21 @@ public final class PiAgentProvider implements AgentProvider {
     }
 
     /**
-     * Pi is the one harness whose CLI can enumerate its models ({@code pi
-     * --list-models}); the subprocess may block, so per the SPI contract the
-     * caller runs this off the EDT.
+     * Pi is the one harness whose models can be read without a subprocess:
+     * {@code models.json} is the user's own provider/model configuration, and
+     * every id in it is launchable by construction. The CLI probe (which
+     * needs {@code node} on PATH, the thing a Finder-launched IDE process
+     * lacks) stays only for an install that relies on pi's bundled catalog.
      */
     @Override
     public List<String> modelSuggestions() {
-        return PiModelCatalog.list(locator.locate().orElse(null));
+        List<String> configured = PiModelCatalog.fromConfig(PiModelCatalog.defaultModelsJson());
+        if (!configured.isEmpty()) {
+            return configured;
+        }
+        return locator.locate()
+                .map(executable -> PiModelCatalog.list(piProcessCommand(executable)))
+                .orElse(List.of());
     }
 
     private record PiCommand(String command, boolean initialPromptInjected) {
@@ -640,7 +675,7 @@ public final class PiAgentProvider implements AgentProvider {
 
     @Override
     public Optional<ActivityReporter> activity() {
-        return Optional.empty();
+        return Optional.ofNullable(activityReporter);
     }
 
     @Override

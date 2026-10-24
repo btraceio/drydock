@@ -69,6 +69,11 @@ public final class PiExtensionInstaller {
                 stateDirectory, "drydock-initial-prompt.ts", PiInitialPromptExtensionSource.SOURCE);
     }
 
+    /** Activity reporting, {@code drydock-activity.ts}. */
+    public static PiExtensionInstaller activity(Path stateDirectory) {
+        return new PiExtensionInstaller(stateDirectory, "drydock-activity.ts", PiActivityExtensionSource.SOURCE);
+    }
+
     /** Where the extension lives, whether or not it has been written yet. */
     private Path extensionFile() {
         return stateDirectory.resolve("pi").resolve(fileName);

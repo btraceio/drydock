@@ -24,6 +24,7 @@ import app.drydock.agent.providers.pi.internal.PiVersionProbe;
 import app.drydock.agent.spi.AgentProvider;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.lang.System.Logger;
@@ -31,6 +32,8 @@ import java.lang.System.Logger.Level;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -70,6 +73,9 @@ public final class PiAgentProvider implements AgentProvider {
 
     private static final String CONFIG_ENV_VAR = "DRYDOCK_MCP_CONFIG";
 
+    /** Read once and removed by {@code PiActivityExtensionSource}; where state words are written. */
+    private static final String ACTIVITY_ENV_VAR = "DRYDOCK_ACTIVITY_DIR";
+
     /** Bounds a hung filesystem: a stuck write costs a tab its tools, never its launch. */
     private static final Duration INSTALL_JOIN = Duration.ofSeconds(5);
 
@@ -84,6 +90,8 @@ public final class PiAgentProvider implements AgentProvider {
     private PiConversationSource conversationSource;
     private SessionIdDiscovery idDiscovery;
     private PiExtensionInstaller installer;
+    private PiExtensionInstaller activityInstaller;
+    private PiActivityReporter activityReporter;
     private ExecutorService background;
 
     /**
@@ -96,6 +104,7 @@ public final class PiAgentProvider implements AgentProvider {
      */
     private final AtomicReference<CompletableFuture<PiCapabilities>> capabilities = new AtomicReference<>();
     private final AtomicReference<CompletableFuture<Path>> extensionFile = new AtomicReference<>();
+    private final AtomicReference<CompletableFuture<Path>> activityExtensionFile = new AtomicReference<>();
 
     /** Public no-arg constructor required by {@link java.util.ServiceLoader}. */
     public PiAgentProvider() {
@@ -135,6 +144,8 @@ public final class PiAgentProvider implements AgentProvider {
         this.conversationSource = new PiConversationSource(store);
         this.idDiscovery = new SnapshotClaimDiscovery(store);
         this.installer = new PiExtensionInstaller(ctx.stateDirectory());
+        this.activityInstaller = PiExtensionInstaller.activity(ctx.stateDirectory());
+        this.activityReporter = new PiActivityReporter(activityInstaller, ctx.activityDirectory());
         this.background = ctx.backgroundExecutor();
     }
 
@@ -180,10 +191,47 @@ public final class PiAgentProvider implements AgentProvider {
         return LaunchPlan.of(piCommand(c.mcp(), c.evalMode()) + modelFlag(c.model()), false);   // DISCOVERED: no id
     }
 
-    /** {@code pi} is the one harness whose CLI can enumerate its models ({@code pi --list-models}). */
+    /**
+     * Pi is the one harness whose models can be read without a subprocess:
+     * {@code models.json} is the user's own provider/model configuration, and
+     * every id in it is launchable by construction. The CLI probe (which
+     * needs {@code node} on PATH, the thing a Finder-launched process lacks)
+     * stays only for an install that relies on pi's bundled catalog.
+     */
     @Override
     public List<String> modelSuggestions() {
-        return PiModelCatalog.list(locator.locate().orElse(null));
+        List<String> configured = PiModelCatalog.fromConfig(PiModelCatalog.defaultModelsJson());
+        if (!configured.isEmpty()) {
+            return configured;
+        }
+        return locator.locate().map(this::piProbeCommand).map(PiModelCatalog::list).orElse(List.of());
+    }
+
+    /**
+     * The argv-safe probe prefix for the catalog fallback: a resolved
+     * {@code node} directory goes on PATH so the launcher script's {@code
+     * env node} survives a bare inherited PATH (a Finder-launched process),
+     * and a Node-script pi is invoked through the interpreter directly. The
+     * same shape the plugin's launch/probe commands use.
+     */
+    private List<String> piProbeCommand(Path executable) {
+        List<String> command = new ArrayList<>(List.of("/usr/bin/env", "-u", "PI_CODING_AGENT"));
+        Optional<Path> node = nodeLocator.locate();
+        if (node.isPresent()) {
+            if (isNodeScript(executable)) {
+                command.add(node.get().toString());
+            } else {
+                command.add("PATH=" + node.get().toAbsolutePath().getParent() + File.pathSeparator
+                        + pathOrBare());
+            }
+        }
+        command.add(executable.toString());
+        return command;
+    }
+
+    private static String pathOrBare() {
+        String inherited = System.getenv("PATH");
+        return inherited == null || inherited.isBlank() ? "/usr/bin:/bin" : inherited;
     }
 
     /** {@code --model <m>} for a picked starting model; empty for the harness's own default. */
@@ -317,8 +365,21 @@ public final class PiAgentProvider implements AgentProvider {
         // a fresh shell) fails provider auth. drydock sets it per launch -- a non-secret id,
         // so it rides the env argv like DRYDOCK_EVAL.
         String piSessionId = "PI_SESSION_ID=" + AgentCommands.shellQuote(java.util.UUID.randomUUID().toString()) + " ";
+        // Attention reporting is independent of MCP and eval: it rides every launch.
+        Path activityExtension = installedActivityExtension();
+
+        Map<String, Path> literals = new LinkedHashMap<>();
+        if (activityExtension != null) {
+            literals.put(ACTIVITY_ENV_VAR, activityReporter.activityDirectory());
+        }
+        String envPrefix = AgentCommands.envPrefix(ENV_SCRUB, literals, Map.of());
+        String extensionFlags = "";
+        if (activityExtension != null) {
+            extensionFlags += " -e " + AgentCommands.shellQuote(activityExtension.toString());
+        }
+
         if (configFile.isEmpty()) {
-            return evalEnvPrefix(eval) + piSessionId + piBinary();
+            return envPrefix + evalEnvSuffix(eval) + piSessionId + piBinary() + extensionFlags;
         }
         // Start BOTH, then join both: the cost is max(probe, write), not the
         // sum. Sequencing them would put up to 35 s in front of the first Pi
@@ -346,18 +407,18 @@ public final class PiAgentProvider implements AgentProvider {
         if (!probed.supportsBridge() || bridgeExtension == null) {
             LOG.log(Level.INFO, "Pi bridge declined for this launch (drydock tools unavailable): "
                     + declineReason(probed, bridgeExtension));
-            return evalEnvPrefix(eval) + piSessionId + piBinary();
+            return envPrefix + evalEnvSuffix(eval) + piSessionId + piBinary() + extensionFlags;
         }
-        return AgentCommands.envPrefix(ENV_SCRUB, Map.of(CONFIG_ENV_VAR, configFile.get()), Map.of())
-                + evalEnvSuffix(eval) + piSessionId + piBinary() + " -e " + AgentCommands.shellQuote(bridgeExtension.toString());
-    }
-
-    /**
-     * The env prefix for a launch with no bridge extension: scrub vars, plus
-     * the eval flag when set.
-     */
-    private String evalEnvPrefix(boolean eval) {
-        return AgentCommands.envPrefix(ENV_SCRUB) + evalEnvSuffix(eval);
+        // The config path is a bridge flag: a declined launch (old pi) must not
+        // carry it, or a subfloor pi would look fully wired while loading nothing.
+        Map<String, Path> bridgeLiterals = new LinkedHashMap<>();
+        bridgeLiterals.put(CONFIG_ENV_VAR, configFile.orElseThrow());
+        if (activityExtension != null) {
+            bridgeLiterals.put(ACTIVITY_ENV_VAR, activityReporter.activityDirectory());
+        }
+        return AgentCommands.envPrefix(ENV_SCRUB, bridgeLiterals, Map.of())
+                + evalEnvSuffix(eval) + piSessionId + piBinary()
+                + " -e " + AgentCommands.shellQuote(bridgeExtension.toString()) + extensionFlags;
     }
 
     /**
@@ -414,6 +475,29 @@ public final class PiAgentProvider implements AgentProvider {
                 throw new UncheckedIOException(e);
             }
         }, written -> true);
+    }
+
+    /**
+     * The installed activity extension's path, or null when the install
+     * failed, timed out, or its file is gone. Same degrade-not-fail contract
+     * as the bridge: a badge is a convenience, and {@code pi -e <missing>}
+     * exits 1 and takes the whole tab down with it.
+     */
+    private Path installedActivityExtension() {
+        CompletableFuture<Path> activity = memoised(activityExtensionFile, () -> {
+            try {
+                return activityInstaller.install();
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        }, written -> true);
+        Path extension = join(activity, INSTALL_JOIN, null);
+        if (extension != null && !Files.isReadable(extension)) {
+            activityExtensionFile.compareAndSet(activity, null);
+            LOG.log(Level.WARNING, "Pi activity extension could not be installed; launching without attention reporting");
+            return null;
+        }
+        return extension;
     }
 
     /**
@@ -494,7 +578,7 @@ public final class PiAgentProvider implements AgentProvider {
 
     @Override
     public Optional<ActivityReporter> activity() {
-        return Optional.empty();
+        return Optional.ofNullable(activityReporter);
     }
 
     @Override

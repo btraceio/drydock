@@ -1,7 +1,10 @@
 package app.drydock.agent.providers.pi.internal;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -69,8 +72,55 @@ class PiModelCatalogTest {
     }
 
     @Test
-    void listRefusesANullExecutable() {
+    void listRefusesANullCommand() {
         assertTrue(PiModelCatalog.list(null).isEmpty());
+    }
+
+    @Test
+    void configReadsProviderKeyedModelIds(@TempDir Path dir) throws Exception {
+        Path modelsJson = Files.writeString(dir.resolve("models.json"), """
+                {
+                  "providers": {
+                    "ai-gw-bedrock": {
+                      "api": "openai-completions",
+                      "models": [
+                        {"id": "bedrock-openai/openai.gpt-5.4", "contextWindow": 1048576},
+                        {"id": "gpt-5-mini"}
+                      ]
+                    },
+                    "datadog-ai-gateway-anthropic": {
+                      "api": "anthropic-messages",
+                      "models": [
+                        {"id": "claude-opus-4-7"},
+                        {"name": "no id here"}
+                      ]
+                    },
+                    "empty-provider": {
+                      "api": "openai-completions"
+                    }
+                  }
+                }
+                """);
+
+        // Ids are verbatim -- the same strings `pi --list-models` prints in
+        // its model column; the provider key is a separate column there.
+        assertEquals(List.of(
+                        "bedrock-openai/openai.gpt-5.4",
+                        "gpt-5-mini",
+                        "claude-opus-4-7"),
+                PiModelCatalog.fromConfig(modelsJson));
+    }
+
+    @Test
+    void configDegradesToEmpty(@TempDir Path dir) throws Exception {
+        assertTrue(PiModelCatalog.fromConfig(null).isEmpty());
+        assertTrue(PiModelCatalog.fromConfig(dir.resolve("absent.json")).isEmpty());
+        Path malformed = Files.writeString(dir.resolve("malformed.json"), "{not json");
+        assertTrue(PiModelCatalog.fromConfig(malformed).isEmpty());
+        Path shapeless = Files.writeString(dir.resolve("shapeless.json"), "{\"providers\": 3}");
+        assertTrue(PiModelCatalog.fromConfig(shapeless).isEmpty());
+        Path empty = Files.writeString(dir.resolve("empty.json"), "{\"providers\": {}}");
+        assertTrue(PiModelCatalog.fromConfig(empty).isEmpty());
     }
 
     @Test
