@@ -18,8 +18,10 @@ import app.drydock.domain.AgentBinding;
 import app.drydock.domain.ApplicationState;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.ModelTiers;
 import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
+import app.drydock.domain.RepositorySettings;
 import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionStatusFacet;
@@ -248,22 +250,28 @@ public final class DrydockSessionService implements AgentExecutionListener {
      */
     public CompletableFuture<ManagedAgentSession> launchSession(ManagedAgentSession prepared,
                                                                 Optional<String> initialPrompt) {
-        return launchSession(prepared, initialPrompt, Optional.empty());
+        return launchSession(prepared, initialPrompt, Optional.empty(), Optional.empty());
     }
 
     /**
      * As {@link #launchSession(ManagedAgentSession, Optional)}, handing the
      * launch {@code model} — the starting model the human picked — which the
      * provider renders as its CLI's model flag (see {@code
-     * CreateContext.model}). Empty means the harness's own default. Launch
-     * -time only: a resume never carries it. The picked value is recorded as
-     * the repository's last-used model for this harness when the session
-     * reaches RUNNING (see {@code finalizeCreate}).
+     * CreateContext.model}), and the subagent model {@code tiers}, which
+     * reach the agent only through the prompt. Empty {@code model} means the
+     * harness's own default. Both are launch-time only: a resume never
+     * carries them. When the session reaches RUNNING (see {@code
+     * finalizeCreate}) the model is recorded as the repository's last-used
+     * model for this harness, and the tiers too when present; empty {@code
+     * tiers} means the launch showed no tier pickers, so the remembered
+     * tiers stay.
      */
     public CompletableFuture<ManagedAgentSession> launchSession(ManagedAgentSession prepared,
                                                                 Optional<String> initialPrompt,
-                                                                Optional<String> model) {
+                                                                Optional<String> model,
+                                                                Optional<ModelTiers> tiers) {
         Objects.requireNonNull(model, "model");
+        Objects.requireNonNull(tiers, "tiers");
         return initialization
                 .thenApplyAsync(unused -> {
                     ends.seedClaimedIdsOnce();
@@ -273,7 +281,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
                 // thread whenever the gate is already complete (the common
                 // production case): thenCompose on a completed source runs
                 // its function inline.
-                .thenComposeAsync(session -> launchPrepared(session, initialPrompt, model, false), executor);
+                .thenComposeAsync(session -> launchPrepared(session, initialPrompt, model, tiers, false), executor);
     }
 
     /**
@@ -359,7 +367,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
         boolean sessionIdUsed = !generatedId.isEmpty() && plan.sessionIdUsed()
                 && plan.command().contains(generatedId);
         StartedLaunch started = new StartedLaunch(candidate, discovery, snapshot, launchedAt,
-                generatedId, sessionIdUsed, Optional.empty(),
+                generatedId, sessionIdUsed, Optional.empty(), Optional.empty(),
                 consoles.startConsole(candidate.id(), candidate.workingDirectory(), plan));
         return started.openFuture().handleAsync((ignored, failure) -> {
             if (failure != null) {
@@ -502,7 +510,9 @@ public final class DrydockSessionService implements AgentExecutionListener {
      */
     private CompletableFuture<ManagedAgentSession> launchPrepared(ManagedAgentSession pending,
                                                                   Optional<String> initialPrompt,
-                                                                  Optional<String> model, boolean rowMustExist) {
+                                                                  Optional<String> model,
+                                                                  Optional<ModelTiers> tiers,
+                                                                  boolean rowMustExist) {
         // Stamped before the persist: the marker rides the row's first save,
         // like the initialPrompt it mirrors, and earns the session the fixed
         // resume prompt on its next resume.
@@ -521,7 +531,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
                             + ") provider is registered; cannot launch session"));
             StartedLaunch started;
             try {
-                started = startLaunch(prepared, provider, initialPrompt, model, rowMustExist);
+                started = startLaunch(prepared, provider, initialPrompt, model, tiers, rowMustExist);
             } catch (RuntimeException failure) {
                 // The session row exists from here on (persistNewSession ran),
                 // so the failure must be visible in the persisted state too.
@@ -557,6 +567,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
     /** Everything that must happen before the process spawns. */
     private StartedLaunch startLaunch(ManagedAgentSession prepared, AgentProvider provider,
                                       Optional<String> initialPrompt, Optional<String> model,
+                                      Optional<ModelTiers> tiers,
                                       boolean rowMustExist) {
         if (rowMustExist) {
             // A fresh start read the row before it claimed the session; a
@@ -598,7 +609,8 @@ public final class DrydockSessionService implements AgentExecutionListener {
         boolean sessionIdUsed = !generatedId.isEmpty()
                 && plan.sessionIdUsed() && plan.command().contains(generatedId);
         CompletableFuture<Void> open = consoles.startConsole(prepared.id(), cwd, plan);
-        return new StartedLaunch(prepared, discovery, snapshot, launchedAt, generatedId, sessionIdUsed, model, open);
+        return new StartedLaunch(prepared, discovery, snapshot, launchedAt, generatedId, sessionIdUsed, model,
+                tiers, open);
     }
 
     private ManagedAgentSession finalizeCreate(StartedLaunch started, Throwable failure) {
@@ -620,10 +632,12 @@ public final class DrydockSessionService implements AgentExecutionListener {
         // repository defaults to it (AC8's data half), and the starting model
         // with it -- keyed per harness, since the model spaces are disjoint.
         // An empty model means the human went back to the harness's own
-        // default, and the picker must say so next time.
+        // default, and the picker must say so next time. The subagent model
+        // tiers ride the same lifecycle, but only when the launch carried
+        // them: a launch that showed no tier pickers leaves them as they were.
         ManagedAgentSession recorded = running;
         stateStore.get().update(state -> repoWithLastUsedLaunch(state, recorded.repositoryId(),
-                recorded.agentKind(), started.model()));
+                recorded.agentKind(), started.model(), started.tiers()));
         scheduleDetachedDiscovery(started);
         return running;
     }
@@ -810,12 +824,14 @@ public final class DrydockSessionService implements AgentExecutionListener {
                 }, executor)
                 // No task: it was only ever the create dialog's input, and is
                 // not kept on the row.
-                .thenComposeAsync(session -> launchPrepared(session, Optional.empty(), Optional.empty(), true),
+                .thenComposeAsync(session -> launchPrepared(session, Optional.empty(), Optional.empty(),
+                        Optional.empty(), true),
                         executor);
     }
 
     private CompletableFuture<ManagedAgentSession> launchFreshOnExistingRow(ManagedAgentSession session) {
-        return launchPrepared(prepareFreshOnExistingRow(session), Optional.empty(), Optional.empty(), true);
+        return launchPrepared(prepareFreshOnExistingRow(session), Optional.empty(), Optional.empty(),
+                Optional.empty(), true);
     }
 
     private ManagedAgentSession prepareFreshOnExistingRow(ManagedAgentSession session) {
@@ -1252,16 +1268,23 @@ public final class DrydockSessionService implements AgentExecutionListener {
 
     /**
      * Pure transform: {@code state} with {@code repositoryId}'s settings recording {@code kind} as its
-     * last-used agent and {@code model} as that agent's last starting model, in ONE pass over the
-     * repositories (a no-op when no repository matches). Ported from {@code SessionManager}.
+     * last-used agent, {@code model} as that agent's last starting model and, when present,
+     * {@code tiers} as its last subagent model tiers (empty leaves any stored tiers untouched), in ONE
+     * pass over the repositories (a no-op when no repository matches). Ported from {@code SessionManager}.
      */
     static ApplicationState repoWithLastUsedLaunch(ApplicationState state, RepositoryId repositoryId,
-            AgentKind kind, Optional<String> model) {
+            AgentKind kind, Optional<String> model, Optional<ModelTiers> tiers) {
         return state.withRepositories(state.repositories().stream()
                 .map(r -> r.id().equals(repositoryId)
-                        ? r.withSettings(r.settings().withLastUsedAgent(kind).withLastUsedModel(kind, model))
+                        ? r.withSettings(launchRecorded(r.settings(), kind, model, tiers))
                         : r)
                 .toList());
+    }
+
+    private static RepositorySettings launchRecorded(RepositorySettings settings, AgentKind kind,
+            Optional<String> model, Optional<ModelTiers> tiers) {
+        RepositorySettings recorded = settings.withLastUsedAgent(kind).withLastUsedModel(kind, model);
+        return tiers.map(t -> recorded.withLastUsedTiers(kind, t)).orElse(recorded);
     }
 
     private static ManagedAgentSession newSessionMetadata(RepositoryId repositoryId, Path workingDirectory,
@@ -1305,6 +1328,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
             String generatedId,
             boolean sessionIdUsed,
             Optional<String> model,
+            Optional<ModelTiers> tiers,
             CompletableFuture<Void> openFuture) {
     }
 }

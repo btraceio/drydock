@@ -30,7 +30,8 @@ class TaskLauncherTest {
     private static Choice choice(SessionMode mode, WorkIn workIn, OpenIn openIn) {
         return new Choice("Task", Optional.empty(), AgentKind.CLAUDE, mode, workIn,
                 workIn == WorkIn.MAIN_CHECKOUT ? "" : "task", "origin/main",
-                workIn == WorkIn.MAIN_CHECKOUT ? MAIN : FOLDER, openIn, Optional.empty());
+                workIn == WorkIn.MAIN_CHECKOUT ? MAIN : FOLDER, openIn, Optional.empty(),
+                Optional.empty(), Optional.empty());
     }
 
     @Test

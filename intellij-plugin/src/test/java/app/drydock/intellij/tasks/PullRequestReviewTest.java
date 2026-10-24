@@ -4,6 +4,7 @@ import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.AgentBinding;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.ModelTiers;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionStatus;
@@ -213,58 +214,64 @@ class PullRequestReviewTest {
 
     private static final long DEADLINE = 1_000;
 
-    private static Optional<Optional<String>> await(CompletableFuture<Optional<String>> picked,
-                                                    AtomicBoolean claimed, BooleanSupplier abandoned,
-                                                    long now) {
+    private static Optional<PullRequestReview.ModelChoice> await(
+            CompletableFuture<PullRequestReview.ModelChoice> picked,
+            AtomicBoolean claimed, BooleanSupplier abandoned, long now) {
         return PullRequestReview.awaitModelChoice(picked, claimed, abandoned, () -> now, DEADLINE, 1);
+    }
+
+    private static CompletableFuture<PullRequestReview.ModelChoice> picked(String model) {
+        return CompletableFuture.completedFuture(
+                new PullRequestReview.ModelChoice(Optional.ofNullable(model), Optional.of(ModelTiers.EMPTY)));
     }
 
     @Test
     void dialogOkWithAModelLaunchesWithIt() {
-        CompletableFuture<Optional<String>> picked = CompletableFuture.completedFuture(Optional.of("m"));
-        assertEquals(Optional.of(Optional.of("m")), await(picked, new AtomicBoolean(true), () -> false, 0));
+        assertEquals(
+                Optional.of(new PullRequestReview.ModelChoice(Optional.of("m"), Optional.of(ModelTiers.EMPTY))),
+                await(picked("m"), new AtomicBoolean(true), () -> false, 0));
     }
 
     @Test
     void dialogOkWithAnEmptyEditorLaunchesWithTheHarnessDefault() {
-        CompletableFuture<Optional<String>> picked = CompletableFuture.completedFuture(Optional.empty());
-        Optional<Optional<String>> choice = await(picked, new AtomicBoolean(true), () -> false, 0);
+        Optional<PullRequestReview.ModelChoice> choice =
+                await(picked(null), new AtomicBoolean(true), () -> false, 0);
         assertTrue(choice.isPresent(), "OK with an empty editor is a review, not a cancel");
-        assertEquals(Optional.empty(), choice.get());
+        assertEquals(Optional.empty(), choice.get().model());
     }
 
     @Test
     void dialogCancelMeansNoReview() {
-        CompletableFuture<Optional<String>> picked = new CompletableFuture<>();
+        CompletableFuture<PullRequestReview.ModelChoice> picked = new CompletableFuture<>();
         picked.cancel(false);
         assertEquals(Optional.empty(), await(picked, new AtomicBoolean(true), () -> false, 0));
     }
 
     @Test
     void dialogFailureMeansNoReview() {
-        CompletableFuture<Optional<String>> picked = new CompletableFuture<>();
+        CompletableFuture<PullRequestReview.ModelChoice> picked = new CompletableFuture<>();
         picked.completeExceptionally(new RuntimeException("boom"));
         assertEquals(Optional.empty(), await(picked, new AtomicBoolean(true), () -> false, 0));
     }
 
     @Test
     void abandonedBeforeTheDialogOpensClaimsSoALateRunnableBacksOff() {
-        CompletableFuture<Optional<String>> picked = new CompletableFuture<>();
+        CompletableFuture<PullRequestReview.ModelChoice> picked = new CompletableFuture<>();
         AtomicBoolean claimed = new AtomicBoolean();
-        Optional<Optional<String>> choice = assertTimeoutPreemptively(Duration.ofSeconds(5),
+        Optional<PullRequestReview.ModelChoice> choice = assertTimeoutPreemptively(Duration.ofSeconds(5),
                 () -> await(picked, claimed, () -> true, 0));
         assertEquals(Optional.empty(), choice);
         assertTrue(picked.isCancelled());
         assertTrue(claimed.get());
         assertFalse(claimed.compareAndSet(false, true), "a late EDT runnable must back off");
-        assertFalse(picked.complete(Optional.of("late")), "a late OK must be dropped, never launched");
+        assertFalse(picked.complete(picked("late").join()), "a late OK must be dropped, never launched");
     }
 
     @Test
     void abandonedWhileTheDialogIsOpenGivesUp() {
-        CompletableFuture<Optional<String>> picked = new CompletableFuture<>();
+        CompletableFuture<PullRequestReview.ModelChoice> picked = new CompletableFuture<>();
         AtomicBoolean claimed = new AtomicBoolean(true);
-        Optional<Optional<String>> choice = assertTimeoutPreemptively(Duration.ofSeconds(5),
+        Optional<PullRequestReview.ModelChoice> choice = assertTimeoutPreemptively(Duration.ofSeconds(5),
                 () -> await(picked, claimed, () -> true, 0));
         assertEquals(Optional.empty(), choice);
         assertTrue(picked.isCancelled());
@@ -273,9 +280,9 @@ class PullRequestReviewTest {
 
     @Test
     void aDialogThatNeverOpensIsBoundedByTheDeadline() {
-        CompletableFuture<Optional<String>> picked = new CompletableFuture<>();
+        CompletableFuture<PullRequestReview.ModelChoice> picked = new CompletableFuture<>();
         AtomicBoolean claimed = new AtomicBoolean();
-        Optional<Optional<String>> choice = assertTimeoutPreemptively(Duration.ofSeconds(5),
+        Optional<PullRequestReview.ModelChoice> choice = assertTimeoutPreemptively(Duration.ofSeconds(5),
                 () -> await(picked, claimed, () -> false, 2_000));
         assertEquals(Optional.empty(), choice);
         assertTrue(claimed.get());
@@ -284,7 +291,7 @@ class PullRequestReviewTest {
 
     @Test
     void theDeadlineDoesNotBoundThinkTimeOnceTheDialogIsOpen() {
-        CompletableFuture<Optional<String>> picked = new CompletableFuture<>();
+        CompletableFuture<PullRequestReview.ModelChoice> picked = new CompletableFuture<>();
         AtomicBoolean claimed = new AtomicBoolean(true);
         CompletableFuture.runAsync(() -> {
             try {
@@ -292,16 +299,17 @@ class PullRequestReviewTest {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
-            picked.complete(Optional.of("late-ok"));
+            picked.complete(
+                    new PullRequestReview.ModelChoice(Optional.of("late-ok"), Optional.of(ModelTiers.EMPTY)));
         });
-        Optional<Optional<String>> choice = assertTimeoutPreemptively(Duration.ofSeconds(5),
+        Optional<PullRequestReview.ModelChoice> choice = assertTimeoutPreemptively(Duration.ofSeconds(5),
                 () -> await(picked, claimed, () -> false, 2_000));
-        assertEquals(Optional.of(Optional.of("late-ok")), choice);
+        assertEquals(Optional.of("late-ok"), choice.get().model());
     }
 
     @Test
     void anInterruptedWaiterGivesUpAndKeepsTheInterrupt() {
-        CompletableFuture<Optional<String>> picked = new CompletableFuture<>();
+        CompletableFuture<PullRequestReview.ModelChoice> picked = new CompletableFuture<>();
         AtomicBoolean claimed = new AtomicBoolean();
         Thread.currentThread().interrupt();
         try {
@@ -317,7 +325,7 @@ class PullRequestReviewTest {
 
     @Test
     void beforeTheDeadlineTheWaiterKeepsWaitingWithoutClaiming() {
-        CompletableFuture<Optional<String>> picked = new CompletableFuture<>();
+        CompletableFuture<PullRequestReview.ModelChoice> picked = new CompletableFuture<>();
         AtomicBoolean claimed = new AtomicBoolean();
         CompletableFuture.runAsync(() -> {
             try {
@@ -325,11 +333,11 @@ class PullRequestReviewTest {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
-            picked.complete(Optional.of("m"));
+            picked.complete(new PullRequestReview.ModelChoice(Optional.of("m"), Optional.of(ModelTiers.EMPTY)));
         });
-        Optional<Optional<String>> choice = assertTimeoutPreemptively(Duration.ofSeconds(5),
+        Optional<PullRequestReview.ModelChoice> choice = assertTimeoutPreemptively(Duration.ofSeconds(5),
                 () -> await(picked, claimed, () -> false, 0));
-        assertEquals(Optional.of(Optional.of("m")), choice);
+        assertEquals(Optional.of("m"), choice.get().model());
         assertFalse(claimed.get(), "the waiter must not claim before the deadline");
     }
 }
