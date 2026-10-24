@@ -82,11 +82,12 @@ public final class SessionDialogs {
      *                    README-on-first-open is still to come
      */
     public static void launchNewSession(Project project, Path workingDirectory, Path repositoryRoot, AgentKind kind,
-            String displayName, SessionMode mode, Optional<String> task, boolean freshWindow) {
+            String displayName, SessionMode mode, Optional<String> task, Optional<String> model,
+            boolean freshWindow) {
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         String agentName = AgentLabels.displayName(plugin.registry(), kind);
         CompletableFuture<ManagedAgentSession> launch = launchSession(project, workingDirectory, repositoryRoot,
-                kind, displayName, mode, task, freshWindow);
+                kind, displayName, mode, task, model, freshWindow);
         ProgressManager.getInstance().run(new Task.Backgroundable(project,
                 "Starting " + agentName + " session…", true) {
             @Override
@@ -125,9 +126,9 @@ public final class SessionDialogs {
      */
     public static CompletableFuture<ManagedAgentSession> launchSession(Project project, Path workingDirectory,
             Path repositoryRoot, AgentKind kind, String displayName, SessionMode mode, Optional<String> task,
-            boolean freshWindow) {
+            Optional<String> model, boolean freshWindow) {
         return launchSession(project, workingDirectory, repositoryRoot, kind, displayName, mode,
-                session -> CompletableFuture.completedFuture(task), freshWindow);
+                session -> CompletableFuture.completedFuture(task), freshWindow, model);
     }
 
     /**
@@ -146,6 +147,19 @@ public final class SessionDialogs {
     public static CompletableFuture<ManagedAgentSession> launchSession(Project project, Path workingDirectory,
             Path repositoryRoot, AgentKind kind, String displayName, SessionMode mode,
             Function<ManagedAgentSession, CompletableFuture<Optional<String>>> prompt, boolean freshWindow) {
+        return launchSession(project, workingDirectory, repositoryRoot, kind, displayName, mode, prompt,
+                freshWindow, Optional.empty());
+    }
+
+    /**
+     * As above, with {@code model} — the starting model the human picked —
+     * riding the launch the same way the task does (see {@code
+     * CreateContext.model}); empty means the harness's own default.
+     */
+    public static CompletableFuture<ManagedAgentSession> launchSession(Project project, Path workingDirectory,
+            Path repositoryRoot, AgentKind kind, String displayName, SessionMode mode,
+            Function<ManagedAgentSession, CompletableFuture<Optional<String>>> prompt, boolean freshWindow,
+            Optional<String> model) {
         return DrydockStartupActivity.sessions(project)
                 .prepareSession(workingDirectory, repositoryRoot, kind, displayName, mode)
                 .thenApply(session -> {
@@ -153,7 +167,7 @@ public final class SessionDialogs {
                     return session;
                 })
                 .thenCompose(session -> prompt.apply(session).thenCompose(initial ->
-                        DrydockStartupActivity.sessions(project).launchSession(session, initial)));
+                        DrydockStartupActivity.sessions(project).launchSession(session, initial, model)));
     }
 
     /**

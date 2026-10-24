@@ -121,6 +121,20 @@ public interface AgentProvider {
 
     SessionIdStrategy idStrategy();
 
+    /**
+     * Model ids this harness's CLI can be launched with, offered by the
+     * new-task dialog's model picker. May block (Pi enumerates its models
+     * with a {@code pi --list-models} subprocess), so callers MUST run this
+     * off the EDT. The list is a SUGGESTION, never a whitelist: the launch
+     * command carries whatever model string the human typed, whether or not
+     * it appears here -- a catalog can be stale, and Claude and Codex have
+     * no listing command at all, so their implementations return only
+     * curated aliases or nothing.
+     */
+    default List<String> modelSuggestions() {
+        return List.of();
+    }
+
     Optional<ConversationSource> conversations();
 
     Optional<ActivityReporter> activity();

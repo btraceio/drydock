@@ -12,6 +12,7 @@ import app.drydock.agent.providers.HostBinaryLocator;
 import app.drydock.agent.providers.claude.internal.ClaudeEvalContainer;
 import app.drydock.agent.providers.claude.internal.ClaudeEvalContainer.EvalSetup;
 import app.drydock.agent.providers.claude.internal.ClaudeExecutableLocator;
+import app.drydock.domain.SshRemote;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Files;
@@ -84,6 +85,42 @@ class ClaudeAgentProviderTest {
         assertEquals(ENV + "claude", plan.command());
         assertFalse(plan.sessionIdUsed());
         assertTrue(plan.supported());
+    }
+
+    @Test
+    void createCarriesThePickedStartingModel() {
+        LaunchPlan plan = newProviderNoExecutable().buildCreateCommand(new CreateContext("Session 1", "uuid-1",
+                Path.of("/tmp"), Optional.empty(), Optional.empty(), Optional.of("sonnet"), false, false,
+                Optional.empty(), List.of()));
+        assertEquals(ENV + "claude --model 'sonnet'", plan.command());
+    }
+
+    @Test
+    void remoteCreateCarriesThePickedStartingModel() {
+        LaunchPlan plan = newProviderNoExecutable().buildCreateCommand(new CreateContext("Session 1", "uuid-1",
+                Path.of("/tmp"), Optional.of(new SshRemote("build-box", "/srv/repo")), Optional.empty(),
+                Optional.of("opus"), false, false, Optional.empty(), List.of()));
+        String command = plan.command();
+        // The remote command is double-quoted by SshCommandBuilder (outer ssh
+        // layer, inner remote-shell layer), so the model value comes back
+        // re-quoted: --model \'opus\'.
+        assertTrue(command.contains("claude --model"), command);
+        assertTrue(command.contains("opus"), command);
+    }
+
+    @Test
+    void createWithoutAModelOmitsTheModelFlag() {
+        LaunchPlan plan = newProviderNoExecutable().buildCreateCommand(new CreateContext("Session 1", "uuid-1",
+                Path.of("/tmp"), Optional.empty(), Optional.empty(), Optional.empty(), false, false,
+                Optional.empty(), List.of()));
+        assertFalse(plan.command().contains("--model"), plan.command());
+    }
+
+    @Test
+    void modelSuggestionsAreTheAliasesClaudesHelpNames() {
+        // claude has no model-listing command; --help names fable/opus/sonnet
+        // as alias examples. A suggestion list, not a whitelist.
+        assertEquals(List.of("fable", "opus", "sonnet"), newProviderNoExecutable().modelSuggestions());
     }
 
     @Test

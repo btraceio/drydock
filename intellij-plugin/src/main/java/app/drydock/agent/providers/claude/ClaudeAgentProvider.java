@@ -243,6 +243,30 @@ public final class ClaudeAgentProvider implements AgentProvider {
         return true;
     }
 
+    /**
+     * {@code --model <m>} for a picked starting model; empty for the
+     * harness's own default. Claude's {@code --help} names the aliases
+     * {@code fable}, {@code opus}, and {@code sonnet} and accepts a model's
+     * full name, so the value is passed through verbatim. Launch-time only:
+     * {@code buildResumeCommand} never appends it, so a resume keeps whatever
+     * model the conversation last used.
+     */
+    private static String modelFlag(Optional<String> model) {
+        return model.map(m -> " --model " + AgentCommands.shellQuote(m)).orElse("");
+    }
+
+    /**
+     * The aliases claude's own {@code --help} names ("e.g. 'fable', 'opus',
+     * or 'sonnet'"). Claude has no model-listing command, so this is the
+     * whole catalog the picker can offer beyond free text and remembered
+     * models -- a suggestion list, not a whitelist (the launch passes
+     * whatever the human typed).
+     */
+    @Override
+    public List<String> modelSuggestions() {
+        return List.of("fable", "opus", "sonnet");
+    }
+
     /** Claude reads a config file drydock writes ({@code --mcp-config}). */
     @Override
     public McpDelivery mcpDelivery() {
@@ -253,7 +277,8 @@ public final class ClaudeAgentProvider implements AgentProvider {
     public LaunchPlan buildCreateCommand(CreateContext c) {
         if (c.remote().isPresent()) {
             return LaunchPlan.of(
-                    SshCommandBuilder.interactiveSessionCommand(c.remote().get(), REMOTE_COMMAND_PREFIX), false);
+                    SshCommandBuilder.interactiveSessionCommand(c.remote().get(),
+                            REMOTE_COMMAND_PREFIX + modelFlag(c.model())), false);
         }
         ClaudeCapabilities caps = detectCaps();
         // Eval runs inside a container whose PATH has `claude` (installed by the
@@ -261,7 +286,8 @@ public final class ClaudeAgentProvider implements AgentProvider {
         // path -- which does not exist in the container's filesystem.
         String binary = c.evalMode() ? "claude" : claudeBinary();
         String pathInjection = c.evalMode() ? "" : ddtoolPathInjection();
-        StringBuilder command = new StringBuilder(ENV_CLEANUP_PREFIX).append(pathInjection).append(binary);
+        StringBuilder command = new StringBuilder(ENV_CLEANUP_PREFIX).append(pathInjection).append(binary)
+                .append(modelFlag(c.model()));
         boolean sessionIdUsed = false;
         if (caps.supportsName()) {
             command.append(" -n ").append(AgentCommands.shellQuote(c.displayName()));

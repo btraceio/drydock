@@ -19,6 +19,7 @@ import app.drydock.agent.providers.HostBinaryLocator;
 import app.drydock.agent.providers.pi.internal.PiCapabilities;
 import app.drydock.agent.providers.pi.internal.PiExecutableLocator;
 import app.drydock.agent.providers.pi.internal.PiExtensionInstaller;
+import app.drydock.agent.providers.pi.internal.PiModelCatalog;
 import app.drydock.agent.providers.pi.internal.PiSessionStore;
 import app.drydock.agent.providers.pi.internal.PiVersionProbe;
 import app.drydock.agent.spi.AgentProvider;
@@ -220,7 +221,7 @@ public final class PiAgentProvider implements AgentProvider {
         if (c.remote().isPresent() || !supportsLaunch(currentCapabilities())) {
             return LaunchPlan.unsupported();   // Pi declines remote
         }
-        PiCommand pi = piCommand(c.mcp(), c.stdioMcpServers(), c.evalMode(), c.initialPrompt());
+        PiCommand pi = piCommand(c.mcp(), c.stdioMcpServers(), c.evalMode(), c.initialPrompt(), c.model());
         // The extension submits after Pi has mounted its UI and initialized
         // the session. If its owner-only file could not be installed, retain
         // the CLI positional form as a degraded but functional fallback.
@@ -235,7 +236,7 @@ public final class PiAgentProvider implements AgentProvider {
         if (r.remote().isPresent() || !supportsLaunch(currentCapabilities())) {
             return LaunchPlan.unsupported();
         }
-        String pi = piCommand(r.mcp(), r.stdioMcpServers(), r.evalMode(), Optional.empty()).command();
+        String pi = piCommand(r.mcp(), r.stdioMcpServers(), r.evalMode(), Optional.empty(), Optional.empty()).command();
         if (r.agentSessionId().isPresent()) {
             // The resume prompt rides pi's positional [messages...] after "--"
             // (verified against pi --help: messages are accepted in interactive
@@ -390,6 +391,11 @@ public final class PiAgentProvider implements AgentProvider {
     /** Builds the Pi invocation and installs only the adapters this launch needs. */
     private PiCommand piCommand(Optional<McpAccess> access, List<StdioMcpServer> stdioServers, boolean eval,
                                 Optional<String> initialPrompt) {
+        return piCommand(access, stdioServers, eval, initialPrompt, Optional.empty());
+    }
+
+    private PiCommand piCommand(Optional<McpAccess> access, List<StdioMcpServer> stdioServers, boolean eval,
+                                Optional<String> initialPrompt, Optional<String> model) {
         Optional<Path> configFile = access.flatMap(McpAccess::credentialFile);
         // PI_SESSION_ID: the user's pi models.json sends `x-claude-code-session-id: $PI_SESSION_ID`
         // to omlx_proxy for per-session correlation, but pi does NOT set PI_SESSION_ID in its
@@ -448,7 +454,21 @@ public final class PiAgentProvider implements AgentProvider {
         if (useInitialPrompt) {
             command.append(" -e ").append(AgentCommands.shellQuote(promptExtension.toString()));
         }
+        // --model <m> for a picked starting model; empty for the harness's own
+        // default. Launch-time only: buildResumeCommand never appends it, so a
+        // resume keeps whatever model the conversation last used.
+        model.ifPresent(m -> command.append(" --model ").append(AgentCommands.shellQuote(m)));
         return new PiCommand(command.toString(), useInitialPrompt);
+    }
+
+    /**
+     * Pi is the one harness whose CLI can enumerate its models ({@code pi
+     * --list-models}); the subprocess may block, so per the SPI contract the
+     * caller runs this off the EDT.
+     */
+    @Override
+    public List<String> modelSuggestions() {
+        return PiModelCatalog.list(locator.locate().orElse(null));
     }
 
     private record PiCommand(String command, boolean initialPromptInjected) {

@@ -50,6 +50,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 /**
@@ -222,9 +223,12 @@ public final class TaskLauncher {
             // Local names only are taken: a new worktree's branch is local.
             Set<String> taken = listing.branches().stream().filter(ref -> !ref.remote()).map(BranchRef::name)
                     .collect(Collectors.toUnmodifiableSet());
-            // The project's own record holds its last-used agent.
+            // The project's own record holds its last-used agent and, per
+            // harness, its last-used starting model.
             Repository local = DrydockStartupActivity.repositories(from).repositoryFor(mainRoot)
                     .get(PREPARE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            Function<AgentKind, Optional<String>> lastUsedModel = kind -> local == null ? Optional.empty()
+                    : local.settings().lastUsedModel(kind);
             AgentRegistry registry = plugin.registry();
             AgentKind preselected = SessionDialogs.defaultAgent(registry,
                     local == null ? Optional.empty() : local.settings().lastUsedAgent()).orElse(null);
@@ -236,7 +240,8 @@ public final class TaskLauncher {
                     start.filter(startPoints::contains)
                             .orElseGet(() -> defaultStart(defaultBranch, startPoints, listing.remotes())),
                     startPoints,
-                    listing.remotes(), taken, worktreeBase, writerActive));
+                    listing.remotes(), taken, worktreeBase, writerActive, lastUsedModel,
+                    registry::modelSuggestions));
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return Optional.empty();
@@ -336,7 +341,7 @@ public final class TaskLauncher {
                         return;
                     }
                     SessionDialogs.launchNewSession(target, steps.workingDirectory(), mainRoot, choice.agent(), choice.name(),
-                            choice.mode(), NewTaskPlan.initialPrompt(choice), fresh);
+                            choice.mode(), NewTaskPlan.initialPrompt(choice), choice.model(), fresh);
                 }, ModalityState.nonModal());
             }
         });

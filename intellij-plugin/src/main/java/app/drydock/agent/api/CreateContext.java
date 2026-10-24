@@ -40,10 +40,17 @@ import java.util.Optional;
  * (or whose contract has not been verified against the installed binary)
  * ignores it, and the user types the task into the console instead. It is a
  * create-only input: resuming a conversation never re-sends it.</p>
+ *
+ * <p>{@code model}, when present, is the starting model the human picked for
+ * this launch: each provider renders it as its CLI's model flag (see each
+ * provider's {@code buildCreateCommand}). Empty means the harness's own
+ * default — a first-class choice, not an omission. It is a LAUNCH-TIME input
+ * only: a later resume of the same conversation carries no model, so
+ * resuming keeps whatever model the conversation last used.</p>
  */
 public record CreateContext(String displayName, String sessionId, Path workingDirectory,
-                            Optional<SshRemote> remote, Optional<McpAccess> mcp, boolean evalMode,
-                            boolean readOnly, Optional<String> initialPrompt,
+                            Optional<SshRemote> remote, Optional<McpAccess> mcp, Optional<String> model,
+                            boolean evalMode, boolean readOnly, Optional<String> initialPrompt,
                             List<StdioMcpServer> stdioMcpServers) {
     public CreateContext {
         Objects.requireNonNull(displayName, "displayName");
@@ -61,12 +68,13 @@ public record CreateContext(String displayName, String sessionId, Path workingDi
     public CreateContext(String displayName, String sessionId, Path workingDirectory,
                          Optional<SshRemote> remote, Optional<McpAccess> mcp, boolean evalMode,
                          boolean readOnly, Optional<String> initialPrompt) {
-        this(displayName, sessionId, workingDirectory, remote, mcp, evalMode, readOnly, initialPrompt, List.of());
+        this(displayName, sessionId, workingDirectory, remote, mcp, Optional.empty(), evalMode, readOnly,
+                initialPrompt, List.of());
     }
 
     /** This context, with {@code servers} as the stdio MCP servers the agent starts. */
     public CreateContext withStdioMcpServers(List<StdioMcpServer> servers) {
-        return new CreateContext(displayName, sessionId, workingDirectory, remote, mcp, evalMode, readOnly,
+        return new CreateContext(displayName, sessionId, workingDirectory, remote, mcp, model, evalMode, readOnly,
                 initialPrompt, servers);
     }
 
@@ -74,7 +82,8 @@ public record CreateContext(String displayName, String sessionId, Path workingDi
     public CreateContext(String displayName, String sessionId, Path workingDirectory,
                          Optional<SshRemote> remote, Optional<McpAccess> mcp, boolean evalMode,
                          boolean readOnly) {
-        this(displayName, sessionId, workingDirectory, remote, mcp, evalMode, readOnly, Optional.empty());
+        this(displayName, sessionId, workingDirectory, remote, mcp, Optional.empty(), evalMode, readOnly,
+                Optional.empty(), List.of());
     }
 
     /** As the canonical constructor with {@code readOnly = false} (a writing session). */

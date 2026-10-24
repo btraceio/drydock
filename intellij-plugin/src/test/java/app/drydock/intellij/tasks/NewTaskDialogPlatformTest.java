@@ -126,6 +126,22 @@ public class NewTaskDialogPlatformTest extends BasePlatformTestCase {
         assertEquals("New task", blank.get().name());
     }
 
+    public void testModelDefaultsToEmptyAndIsCarriedOnTheChoice() {
+        AtomicReference<NewTaskPlan.Choice> choice = new AtomicReference<>();
+
+        ApplicationManager.getApplication().invokeAndWait(() -> {
+            NewTaskDialog dialog = new NewTaskDialog(getProject(), inputs(), Optional.empty(), NewTaskPreset.empty());
+            try {
+                assertEquals(Optional.empty(), dialog.choice().model());
+                choice.set(dialog.choice());
+            } finally {
+                Disposer.dispose(dialog.getDisposable());
+            }
+        });
+
+        assertEquals(Optional.empty(), choice.get().model());
+    }
+
     private static NewTaskPlan.Inputs inputs() {
         Path root = Path.of("/tmp/profiler");
         SharedProject project = SharedProject.local(RepositoryId.newId(), root, "profiler", Instant.EPOCH);
@@ -136,6 +152,7 @@ public class NewTaskDialogPlatformTest extends BasePlatformTestCase {
             @Override public String describeSearched() { return "test"; }
         };
         return new NewTaskPlan.Inputs(project, "profiler", Optional.empty(), List.of(pi), AgentKind.PI,
-                "origin/main", List.of("origin/main"), List.of("origin"), Set.of(), Path.of("/tmp"), false);
+                "origin/main", List.of("origin/main"), List.of("origin"), Set.of(), Path.of("/tmp"), false,
+                kind -> Optional.empty(), kind -> List.of());
     }
 }

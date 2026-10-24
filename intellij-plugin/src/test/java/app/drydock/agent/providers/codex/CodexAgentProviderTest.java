@@ -52,6 +52,29 @@ class CodexAgentProviderTest {
     }
 
     @Test
+    void createCarriesThePickedStartingModel() {
+        LaunchPlan plan = provider().buildCreateCommand(new CreateContext("Session 1", "ignored-uuid",
+                Path.of("/repo"), Optional.empty(), Optional.empty(), Optional.of("gpt-5.2-codex"), false, false,
+                Optional.empty(), List.of()));
+        assertTrue(plan.command().contains(" -m 'gpt-5.2-codex'"), plan.command());
+    }
+
+    @Test
+    void createWithoutAModelOmitsTheModelFlag() {
+        LaunchPlan plan = provider().buildCreateCommand(new CreateContext("Session 1", "ignored-uuid",
+                Path.of("/repo"), Optional.empty(), Optional.empty(), Optional.empty(), false, false,
+                Optional.empty(), List.of()));
+        assertFalse(plan.command().contains(" -m "), plan.command());
+    }
+
+    @Test
+    void modelSuggestionsAreEmpty() {
+        // codex has no model-listing command and names no aliases; the picker
+        // offers only remembered models and free text.
+        assertTrue(provider().modelSuggestions().isEmpty());
+    }
+
+    @Test
     void aReadOnlySessionRunsInCodexSandbox() {
         LaunchPlan plan = provider().buildCreateCommand(
                 new CreateContext("Session 1", "ignored-uuid", Path.of("/repo"), Optional.empty(),

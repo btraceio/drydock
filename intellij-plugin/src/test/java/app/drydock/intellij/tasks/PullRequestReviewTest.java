@@ -15,16 +15,20 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PullRequestReviewTest {
@@ -203,5 +207,129 @@ class PullRequestReviewTest {
         return new ManagedAgentSession.Builder(ManagedSessionId.newId(), RepositoryId.newId(),
                 "Review #12", AgentBinding.unlaunched(AgentKind.PI, SessionMode.WRITES),
                 SessionWorkspace.inRepository(directory), Instant.EPOCH).status(status).build();
+    }
+
+    // --- awaitModelChoice: the review model dialog hand-off -------------------------------------
+
+    private static final long DEADLINE = 1_000;
+
+    private static Optional<Optional<String>> await(CompletableFuture<Optional<String>> picked,
+                                                    AtomicBoolean claimed, BooleanSupplier abandoned,
+                                                    long now) {
+        return PullRequestReview.awaitModelChoice(picked, claimed, abandoned, () -> now, DEADLINE, 1);
+    }
+
+    @Test
+    void dialogOkWithAModelLaunchesWithIt() {
+        CompletableFuture<Optional<String>> picked = CompletableFuture.completedFuture(Optional.of("m"));
+        assertEquals(Optional.of(Optional.of("m")), await(picked, new AtomicBoolean(true), () -> false, 0));
+    }
+
+    @Test
+    void dialogOkWithAnEmptyEditorLaunchesWithTheHarnessDefault() {
+        CompletableFuture<Optional<String>> picked = CompletableFuture.completedFuture(Optional.empty());
+        Optional<Optional<String>> choice = await(picked, new AtomicBoolean(true), () -> false, 0);
+        assertTrue(choice.isPresent(), "OK with an empty editor is a review, not a cancel");
+        assertEquals(Optional.empty(), choice.get());
+    }
+
+    @Test
+    void dialogCancelMeansNoReview() {
+        CompletableFuture<Optional<String>> picked = new CompletableFuture<>();
+        picked.cancel(false);
+        assertEquals(Optional.empty(), await(picked, new AtomicBoolean(true), () -> false, 0));
+    }
+
+    @Test
+    void dialogFailureMeansNoReview() {
+        CompletableFuture<Optional<String>> picked = new CompletableFuture<>();
+        picked.completeExceptionally(new RuntimeException("boom"));
+        assertEquals(Optional.empty(), await(picked, new AtomicBoolean(true), () -> false, 0));
+    }
+
+    @Test
+    void abandonedBeforeTheDialogOpensClaimsSoALateRunnableBacksOff() {
+        CompletableFuture<Optional<String>> picked = new CompletableFuture<>();
+        AtomicBoolean claimed = new AtomicBoolean();
+        Optional<Optional<String>> choice = assertTimeoutPreemptively(Duration.ofSeconds(5),
+                () -> await(picked, claimed, () -> true, 0));
+        assertEquals(Optional.empty(), choice);
+        assertTrue(picked.isCancelled());
+        assertTrue(claimed.get());
+        assertFalse(claimed.compareAndSet(false, true), "a late EDT runnable must back off");
+        assertFalse(picked.complete(Optional.of("late")), "a late OK must be dropped, never launched");
+    }
+
+    @Test
+    void abandonedWhileTheDialogIsOpenGivesUp() {
+        CompletableFuture<Optional<String>> picked = new CompletableFuture<>();
+        AtomicBoolean claimed = new AtomicBoolean(true);
+        Optional<Optional<String>> choice = assertTimeoutPreemptively(Duration.ofSeconds(5),
+                () -> await(picked, claimed, () -> true, 0));
+        assertEquals(Optional.empty(), choice);
+        assertTrue(picked.isCancelled());
+        assertTrue(claimed.get());
+    }
+
+    @Test
+    void aDialogThatNeverOpensIsBoundedByTheDeadline() {
+        CompletableFuture<Optional<String>> picked = new CompletableFuture<>();
+        AtomicBoolean claimed = new AtomicBoolean();
+        Optional<Optional<String>> choice = assertTimeoutPreemptively(Duration.ofSeconds(5),
+                () -> await(picked, claimed, () -> false, 2_000));
+        assertEquals(Optional.empty(), choice);
+        assertTrue(claimed.get());
+        assertTrue(picked.isCancelled());
+    }
+
+    @Test
+    void theDeadlineDoesNotBoundThinkTimeOnceTheDialogIsOpen() {
+        CompletableFuture<Optional<String>> picked = new CompletableFuture<>();
+        AtomicBoolean claimed = new AtomicBoolean(true);
+        CompletableFuture.runAsync(() -> {
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            picked.complete(Optional.of("late-ok"));
+        });
+        Optional<Optional<String>> choice = assertTimeoutPreemptively(Duration.ofSeconds(5),
+                () -> await(picked, claimed, () -> false, 2_000));
+        assertEquals(Optional.of(Optional.of("late-ok")), choice);
+    }
+
+    @Test
+    void anInterruptedWaiterGivesUpAndKeepsTheInterrupt() {
+        CompletableFuture<Optional<String>> picked = new CompletableFuture<>();
+        AtomicBoolean claimed = new AtomicBoolean();
+        Thread.currentThread().interrupt();
+        try {
+            assertEquals(Optional.empty(), await(picked, claimed, () -> false, 0));
+            assertTrue(Thread.interrupted(), "the interrupt must be restored");
+            assertTrue(picked.isCancelled());
+            assertTrue(claimed.get());
+            assertFalse(claimed.compareAndSet(false, true));
+        } finally {
+            Thread.interrupted();
+        }
+    }
+
+    @Test
+    void beforeTheDeadlineTheWaiterKeepsWaitingWithoutClaiming() {
+        CompletableFuture<Optional<String>> picked = new CompletableFuture<>();
+        AtomicBoolean claimed = new AtomicBoolean();
+        CompletableFuture.runAsync(() -> {
+            try {
+                Thread.sleep(50);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            picked.complete(Optional.of("m"));
+        });
+        Optional<Optional<String>> choice = assertTimeoutPreemptively(Duration.ofSeconds(5),
+                () -> await(picked, claimed, () -> false, 0));
+        assertEquals(Optional.of(Optional.of("m")), choice);
+        assertFalse(claimed.get(), "the waiter must not claim before the deadline");
     }
 }

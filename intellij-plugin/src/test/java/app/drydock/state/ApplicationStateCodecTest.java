@@ -395,6 +395,46 @@ class ApplicationStateCodecTest {
         assertTrue(back.repositories().get(0).settings().lastUsedAgent().isEmpty());
     }
 
+    @Test
+    void repositoryLastUsedModelsRoundTrip() {
+        Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/repo"), "repo",
+                Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT)
+                .withSettings(RepositorySettings.DEFAULT
+                        .withLastUsedModel(AgentKind.PI, Optional.of("ai-gw-bedrock/bedrock/openai.gpt-5.4"))
+                        .withLastUsedModel(AgentKind.CLAUDE, Optional.of("sonnet")));
+        ApplicationState state = ApplicationState.empty().withRepositories(List.of(repo));
+
+        ApplicationState back = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state));
+
+        assertEquals(Optional.of("ai-gw-bedrock/bedrock/openai.gpt-5.4"),
+                back.repositories().get(0).settings().lastUsedModel(AgentKind.PI));
+        assertEquals(Optional.of("sonnet"),
+                back.repositories().get(0).settings().lastUsedModel(AgentKind.CLAUDE));
+    }
+
+    @Test
+    void unknownAgentNamesAndNonStringModelsAreSkippedLeniently() {
+        // Lenient per-entry, like the cosmetic-UI rules demand: one bad entry
+        // must not cost the whole repository — the good entries survive.
+        String json = """
+                {"schemaVersion": 2, "repositories": [{
+                    "id": "%s", "root": "/tmp/repo", "displayName": "repo",
+                    "addedAt": "2026-01-01T00:00:00Z", "lastOpenedAt": "2026-01-01T00:00:00Z",
+                    "settings": {"lastUsedModels": {
+                        "not-a-kind": "sonnet",
+                        "pi": 42,
+                        "claude": "sonnet"
+                    }}
+                }], "sessions": [], "ui": {}}
+                """.formatted(RepositoryId.newId().value());
+
+        ApplicationState back = ApplicationStateCodec.fromJson(JsonParser.parse(json));
+
+        assertEquals(Optional.of("sonnet"),
+                back.repositories().getFirst().settings().lastUsedModel(AgentKind.CLAUDE));
+        assertTrue(back.repositories().getFirst().settings().lastUsedModel(AgentKind.PI).isEmpty());
+    }
+
     /**
      * A well-formed session document, as a template for the strict-decode
      * regression tests below: each replaces exactly one field of {@link

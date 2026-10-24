@@ -40,13 +40,17 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 import java.util.function.Function;
+import java.util.function.LongSupplier;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 
@@ -99,6 +103,9 @@ public final class PullRequestReview {
     /** Bounded waits, mirroring the New task flow's generous launch bound. */
     private static final long LAUNCH_TIMEOUT_SECONDS = 60;
 
+    /** How often the review waits for the model dialog's answer re-checks for cancellation/disposal. */
+    private static final long DIALOG_POLL_MILLIS = 200;
+
     /**
      * What the launch future can legitimately take before the agent spawns:
      * the launch itself plus the prompt resolver's own bounds — scope
@@ -135,6 +142,22 @@ public final class PullRequestReview {
 
     /** EDT entry: refuses a second materialization of the same pull request. */
     public void review(Project from, Path mainRoot, String repositoryName, OpenPullRequest pullRequest) {
+        review(from, mainRoot, repositoryName, pullRequest, false);
+    }
+
+    /**
+     * As {@link #review}, but first asks for the starting model in a small
+     * dialog ({@link ReviewModelDialog}, seeded from the repository's
+     * last-used model for the resolved harness) and launches with what it
+     * picks; cancelling the dialog cancels the whole review.
+     */
+    public void reviewWithModelDialog(Project from, Path mainRoot, String repositoryName,
+                                      OpenPullRequest pullRequest) {
+        review(from, mainRoot, repositoryName, pullRequest, true);
+    }
+
+    private void review(Project from, Path mainRoot, String repositoryName, OpenPullRequest pullRequest,
+                        boolean pickModel) {
         String key = mainRoot + "#" + pullRequest.number();
         if (!inFlight.add(key)) {
             return;
@@ -144,7 +167,7 @@ public final class PullRequestReview {
             @Override
             public void run(@NotNull ProgressIndicator indicator) {
                 try {
-                    materialize(from, mainRoot, repositoryName, pullRequest);
+                    materialize(from, mainRoot, repositoryName, pullRequest, pickModel, indicator);
                 } finally {
                     inFlight.remove(key);
                 }
@@ -152,17 +175,24 @@ public final class PullRequestReview {
         });
     }
 
-    private void materialize(Project from, Path mainRoot, String repositoryName, OpenPullRequest pullRequest) {
+    private void materialize(Project from, Path mainRoot, String repositoryName, OpenPullRequest pullRequest,
+                             boolean pickModel, ProgressIndicator indicator) {
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         Optional<AgentKind> agent;
+        Optional<String> rememberedModel;
         try {
             plugin.initialization().get(LAUNCH_TIMEOUT_SECONDS, TimeUnit.SECONDS);
             // The project's own record holds its last-used agent (as New task does).
             Repository local = DrydockStartupActivity.repositories(from).repositoryFor(mainRoot)
                     .get(LAUNCH_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-            agent = selectReviewAgent(SessionDialogs.defaultAgent(plugin.registry(),
-                    local == null ? Optional.empty() : local.settings().lastUsedAgent()),
+            Optional<AgentKind> repoLastUsed = local == null ? Optional.empty()
+                    : local.settings().lastUsedAgent();
+            agent = selectReviewAgent(SessionDialogs.defaultAgent(plugin.registry(), repoLastUsed),
                     kind -> plugin.registry().isAvailable(kind));
+            // The remembered model is keyed per harness, so it is read for the
+            // harness the review will actually launch.
+            rememberedModel = agent.flatMap(kind -> local == null ? Optional.empty()
+                    : local.settings().lastUsedModel(kind));
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return;
@@ -175,6 +205,18 @@ public final class PullRequestReview {
             report(from, "No agent CLI is available, so PR #" + pullRequest.number() + " cannot be reviewed.");
             return;
         }
+
+        // The dialog runs on the EDT while this background task waits for its
+        // answer, so the in-flight guard still covers the whole materialization:
+        // a second Review click is refused until the first one has either
+        // launched or been cancelled. Outer empty = do not review at all.
+        Optional<Optional<String>> choice = pickModel
+                ? chooseModel(from, agent.get(), rememberedModel, plugin, indicator)
+                : Optional.of(rememberedModel);
+        if (choice.isEmpty()) {
+            return; // cancelled, abandoned, failed, or the dialog never opened: no checkout, no launch
+        }
+        Optional<String> model = choice.get();
 
         Path base = WorktreeNaming.defaultDirectory(Path.of(System.getProperty("user.home")),
                 UserConfig.load().worktreesDirectory(), repositoryName,
@@ -213,7 +255,84 @@ public final class PullRequestReview {
         // No expiry on the window: openAndLaunch must run even when `from` is gone, to
         // clean up the worktree it would otherwise leave behind.
         ApplicationManager.getApplication().invokeLater(() -> openAndLaunch(from, mainRoot, reused,
-                pullRequest, agent.get()), ModalityState.nonModal());
+                pullRequest, agent.get(), model), ModalityState.nonModal());
+    }
+
+    /** Shows the review model dialog on the EDT and waits for its answer; empty means do not review. */
+    private Optional<Optional<String>> chooseModel(Project from, AgentKind kind, Optional<String> rememberedModel,
+                                                   DrydockPluginService plugin, ProgressIndicator indicator) {
+        CompletableFuture<Optional<String>> picked = new CompletableFuture<>();
+        AtomicBoolean claimed = new AtomicBoolean();
+        ApplicationManager.getApplication().invokeLater(() -> {
+            if (!claimed.compareAndSet(false, true)) {
+                return; // the waiter gave up (abandoned, interrupted, or deadline) before the dialog could open
+            }
+            try {
+                if (picked.isDone() || from.isDisposed()) {
+                    return; // defensive: nobody is waiting for an answer any more
+                }
+                ReviewModelDialog dialog = new ReviewModelDialog(from, kind, rememberedModel,
+                        plugin.registry()::modelSuggestions);
+                boolean delivered = dialog.showAndGet()
+                        ? picked.complete(dialog.acceptedModel())
+                        : picked.cancel(false);
+                if (!delivered) {
+                    LOG.log(Level.INFO, "The review model dialog was answered after the review was abandoned");
+                }
+            } catch (RuntimeException e) {
+                picked.completeExceptionally(e);
+            } finally {
+                picked.cancel(false); // no-op once settled; settles every other exit
+            }
+        }, ModalityState.nonModal());
+        long openDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(LAUNCH_TIMEOUT_SECONDS);
+        return awaitModelChoice(picked, claimed, () -> indicator.isCanceled() || from.isDisposed(),
+                System::nanoTime, openDeadline, DIALOG_POLL_MILLIS);
+    }
+
+    /**
+     * Waits for the dialog's answer. Outer empty: no review (dialog cancelled, failed, abandoned, or
+     * never opened by {@code openDeadlineNanos}); inner value: the accepted model, empty = harness default.
+     * Bounds only the dialog OPENING: once the EDT runnable has claimed, the user's think time is unbounded,
+     * but {@code abandoned} (task cancelled / project disposed) still ends the wait.
+     */
+    static Optional<Optional<String>> awaitModelChoice(CompletableFuture<Optional<String>> picked,
+                                                       AtomicBoolean claimed, BooleanSupplier abandoned,
+                                                       LongSupplier nanoClock, long openDeadlineNanos,
+                                                       long pollMillis) {
+        while (true) {
+            try {
+                return Optional.of(picked.get(pollMillis, TimeUnit.MILLISECONDS));
+            } catch (TimeoutException e) {
+                if (abandoned.getAsBoolean()) {
+                    return giveUp(picked, claimed);
+                }
+                if (nanoClock.getAsLong() - openDeadlineNanos >= 0 && claimed.compareAndSet(false, true)) {
+                    picked.cancel(false);
+                    LOG.log(Level.WARNING, "The review model dialog did not open in time");
+                    return Optional.empty();
+                }
+            } catch (CancellationException e) {
+                return Optional.empty();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return giveUp(picked, claimed);
+            } catch (ExecutionException e) {
+                LOG.log(Level.WARNING, "The review model dialog failed", e.getCause());
+                return Optional.empty();
+            }
+        }
+    }
+
+    /**
+     * The waiter stops waiting: takes the claim FIRST, so a runnable that has not run yet backs off
+     * instead of opening a dialog whose answer would be dropped, then settles {@code picked}.
+     */
+    private static Optional<Optional<String>> giveUp(CompletableFuture<Optional<String>> picked,
+                                                     AtomicBoolean claimed) {
+        claimed.set(true);
+        picked.cancel(false);
+        return Optional.empty();
     }
 
     /** EDT: moves the running review's console into this window; nothing is relaunched. */
@@ -258,7 +377,7 @@ public final class PullRequestReview {
 
     /** EDT: hosts the review console as a tab in this window, then starts the session with its prompt. */
     private void openAndLaunch(Project from, Path mainRoot, Path worktree, OpenPullRequest pullRequest,
-                               AgentKind agent) {
+                               AgentKind agent, Optional<String> model) {
         if (from.isDisposed()) {
             // The window the gesture came from is gone: nothing will host the review, so
             // its freshly checked-out worktree must not stay behind as an orphan.
@@ -273,7 +392,7 @@ public final class PullRequestReview {
         ReviewPrompt prompt = custom.map(ReviewPrompt::fixed)
                 .orElseGet(() -> ReviewPrompt.drydockReview(agent));
         var launch = SessionDialogs.launchSession(from, worktree, mainRoot, agent, displayName,
-                SessionMode.WRITES, prompt::resolve, false);
+                SessionMode.WRITES, prompt::resolve, false, model);
         ProgressManager.getInstance().run(new Task.Backgroundable(from,
                 "Starting review of PR #" + pullRequest.number() + "…", false) {
             @Override
