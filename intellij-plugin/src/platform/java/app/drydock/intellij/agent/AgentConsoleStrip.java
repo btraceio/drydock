@@ -15,12 +15,23 @@ import javax.swing.Box;
 import javax.swing.BoxLayout;
 import javax.swing.JButton;
 import javax.swing.JPanel;
+import javax.swing.JTextField;
+import javax.swing.SwingUtilities;
+import javax.swing.Timer;
 
 import java.awt.Dimension;
 import java.awt.Font;
+import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
+import java.awt.event.FocusAdapter;
+import java.awt.event.FocusEvent;
+import java.awt.event.KeyAdapter;
+import java.awt.event.KeyEvent;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 import java.time.Duration;
 import java.util.Optional;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
 /**
@@ -56,6 +67,20 @@ final class AgentConsoleStrip extends JPanel {
     private final JBLabel secondary = new JBLabel();
     /** {@code from <repo> ⑂ <branch>}: only on a tab hosted from another worktree. */
     private final JBLabel provenance = new JBLabel();
+    /** The inline rename editor; created on first use, swapped in over {@link #title}. */
+    private final JTextField renameField = new JTextField();
+    /**
+     * The rename commit: {@code pin} is true for an explicit Enter (which
+     * claims the name against agent renames even when the text is unchanged)
+     * and false for a focus-loss commit. Set by the owning editor.
+     */
+    private BiConsumer<String, Boolean> onRenamed = (name, pin) -> { };
+    /** Single-click vs double-click disambiguation on the title link. */
+    private Timer singleClickDialog;
+    /** The title as the rename editor must restore it; kept in {@link #update}. */
+    private String titleText = "";
+    /** The editor's action handler, kept for the title link's single click. */
+    private final Consumer<StripAction> onAction;
     private final ActionLink openWindow;
     private final ActionLink changes;
     private final ActionLink transfer;
@@ -66,11 +91,16 @@ final class AgentConsoleStrip extends JPanel {
     private StripAction primaryAction = StripAction.START;
 
     AgentConsoleStrip(Consumer<StripAction> onAction) {
+        this.onAction = onAction;
         // The ActionListener overload explicitly: ActionLink also takes a
         // Kotlin Function1 of the same shape, and a bare lambda is ambiguous
         // between the two.
-        this.title = new ActionLink("",
-                (ActionListener) event -> onAction.accept(StripAction.RENAME));
+        // The link's own click handling is NOT used: single and double clicks
+        // must be told apart (single opens the rename dialog, double turns
+        // the title into an inline editor), and an ActionLink fires on every
+        // click of a double-click pair.
+        this.title = new ActionLink("", (ActionListener) event -> { });
+        installTitleClicks();
         this.changes = new ActionLink("Changes",
                 (ActionListener) event -> onAction.accept(StripAction.SHOW_CHANGES));
         this.openWindow = new ActionLink("Open project window ↗",
@@ -121,6 +151,108 @@ final class AgentConsoleStrip extends JPanel {
         add(primary);
         add(Box.createHorizontalStrut(JBUI.scale(10)));
         add(more);
+    }
+
+    /** The rename commit, wired by the owning editor; see {@link #onRenamed}. */
+    void setOnRenamed(BiConsumer<String, Boolean> onRenamed) {
+        this.onRenamed = onRenamed;
+    }
+
+    /**
+     * Single click on the title opens the rename dialog (after a short
+     * double-click window, so a second click can still claim the gesture);
+     * double click swaps the title for an inline editor.
+     */
+    private void installTitleClicks() {
+        title.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent event) {
+                if (!SwingUtilities.isLeftMouseButton(event)) {
+                    return;
+                }
+                if (event.getClickCount() == 2) {
+                    cancelSingleClickDialog();
+                    startInlineRename();
+                } else if (event.getClickCount() == 1) {
+                    cancelSingleClickDialog();
+                    singleClickDialog = new Timer(280, ignored -> onAction.accept(StripAction.RENAME));
+                    singleClickDialog.setRepeats(false);
+                    singleClickDialog.start();
+                }
+            }
+        });
+        // Enter is an explicit confirm: it pins, even when the text is
+        // unchanged -- a human who opened the editor, read the agent's title
+        // and pressed Enter has claimed that name.
+        renameField.addActionListener((ActionEvent event) -> commitInlineRename(true));
+        renameField.addFocusListener(new FocusAdapter() {
+            @Override
+            public void focusLost(FocusEvent event) {
+                // Focus loss is not a confirm. An agent's console opening and
+                // selecting its tab can steal focus, so pinning here would
+                // let an agent pin a human's session at will; commit(false)
+                // still applies a changed name, preserving any earlier pin.
+                commitInlineRename(false);
+            }
+        });
+        renameField.addKeyListener(new KeyAdapter() {
+            @Override
+            public void keyPressed(KeyEvent event) {
+                if (event.getKeyCode() == KeyEvent.VK_ESCAPE) {
+                    event.consume();
+                    endInlineRename();
+                }
+            }
+        });
+    }
+
+    private void cancelSingleClickDialog() {
+        if (singleClickDialog != null) {
+            singleClickDialog.stop();
+            singleClickDialog = null;
+        }
+    }
+
+    /** EDT: swaps the title for an inline editor; Enter pins, blur commits, Esc cancels. */
+    private void startInlineRename() {
+        if (renameField.getParent() == this) {
+            return;
+        }
+        cancelSingleClickDialog();
+        renameField.setText(titleText);
+        renameField.setFont(title.getFont());
+        renameField.setColumns(16);
+        int at = getComponentZOrder(title);
+        remove(title);
+        add(renameField, at);
+        revalidate();
+        repaint();
+        renameField.requestFocusInWindow();
+        renameField.selectAll();
+    }
+
+    /** EDT: restores the title; a changed name is committed with the caller's pin. */
+    private void commitInlineRename(boolean pin) {
+        if (renameField.getParent() != this) {
+            return;
+        }
+        String newName = renameField.getText() == null ? "" : renameField.getText().strip();
+        endInlineRename();
+        // Empty text cancels on both paths: the human rename applies no
+        // emptiness filter of its own, and committing one would blank the
+        // title permanently -- and, on the pin path, pin the blank.
+        if (!newName.isEmpty() && (pin || !newName.equals(titleText))) {
+            onRenamed.accept(newName, pin);
+        }
+    }
+
+    private void endInlineRename() {
+        cancelSingleClickDialog();
+        int at = getComponentZOrder(renameField);
+        remove(renameField);
+        add(title, at);
+        revalidate();
+        repaint();
     }
 
     /**
@@ -176,6 +308,7 @@ final class AgentConsoleStrip extends JPanel {
         // it: a row left in the running band with nothing running here reads
         // as not running (see AgentStripText.displayStatus).
         SessionStatus shown = AgentStripText.displayStatus(session.status(), running);
+        titleText = session.displayName();
         title.setText(session.displayName());
         title.setToolTipText("Rename \"" + session.displayName() + "\"");
         state.setIcon(SessionDots.dotIcon(shown, activity));
