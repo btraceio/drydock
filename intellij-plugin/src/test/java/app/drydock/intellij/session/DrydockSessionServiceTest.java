@@ -33,6 +33,8 @@ import app.drydock.intellij.agent.AgentConsoleHost;
 import app.drydock.intellij.agent.AgentExecutionListener;
 import app.drydock.intellij.agent.LaunchClaims;
 import app.drydock.intellij.review.SessionMcpAccess;
+import app.drydock.mcp.McpSessionContext.RenameKind;
+import app.drydock.mcp.McpSessionContext.RenameOutcome;
 import app.drydock.state.JsonApplicationStateRepository;
 
 
@@ -1230,6 +1232,81 @@ class DrydockSessionServiceTest {
         assertTrue(failure.getCause().getMessage().contains("already named"));
         assertEquals("First", persisted(harness, first.id()).displayName());
         assertFalse(persisted(harness, first.id()).namePinned());
+        harness.store.flush();
+    }
+
+    @Test
+    void agentRenameRefusesAPinnedNameWithoutChangingIt(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        DrydockSessionService service = harness.service(new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, true, null, harness.events));
+        ManagedAgentSession session = persistSession(harness, AgentKind.CLAUDE, "Generated name",
+                AgentBinding.unlaunched(AgentKind.CLAUDE), base, SessionStatus.INACTIVE,
+                Instant.parse("2026-08-12T10:00:00Z"));
+        service.renameSession(session.id(), "Human name").get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        RenameOutcome outcome = service.applyAgentRename(session.id(), "Agent title")
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(RenameKind.PINNED, outcome.kind());
+        assertEquals("Human name", outcome.currentName());
+        assertEquals("Human name", persisted(harness, session.id()).displayName());
+        harness.store.flush();
+    }
+
+    @Test
+    void agentRenameAppliesAndLeavesTheNameUnpinned(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        DrydockSessionService service = harness.service(new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, true, null, harness.events));
+        ManagedAgentSession session = persistSession(harness, AgentKind.CLAUDE, "Generated name",
+                AgentBinding.unlaunched(AgentKind.CLAUDE), base, SessionStatus.INACTIVE,
+                Instant.parse("2026-08-12T10:00:00Z"));
+
+        RenameOutcome outcome = service.applyAgentRename(session.id(), "Fix the login flow")
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(RenameKind.RENAMED, outcome.kind());
+        assertEquals("Fix the login flow", outcome.currentName());
+        assertFalse(persisted(harness, session.id()).namePinned());
+        harness.store.flush();
+    }
+
+    @Test
+    void agentRenameReportsUnchangedAndCollided(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        DrydockSessionService service = harness.service(new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, true, null, harness.events));
+        ManagedAgentSession first = persistSession(harness, AgentKind.CLAUDE, "First",
+                AgentBinding.unlaunched(AgentKind.CLAUDE), base, SessionStatus.INACTIVE,
+                Instant.parse("2026-08-12T10:00:00Z"));
+        persistSession(harness, AgentKind.PI, "Existing name",
+                AgentBinding.unlaunched(AgentKind.PI), base, SessionStatus.INACTIVE,
+                Instant.parse("2026-08-12T10:00:01Z"));
+
+        assertEquals(RenameKind.UNCHANGED,
+                service.applyAgentRename(first.id(), "First").get(TIMEOUT_SECONDS, TimeUnit.SECONDS).kind());
+        assertEquals(RenameKind.COLLIDED,
+                service.applyAgentRename(first.id(), "existing name").get(TIMEOUT_SECONDS, TimeUnit.SECONDS).kind());
+        assertEquals("First", persisted(harness, first.id()).displayName());
+        harness.store.flush();
+    }
+
+    @Test
+    void aBlurRenameAppliesButNeverClearsAnEarlierPin(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        DrydockSessionService service = harness.service(new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, true, null, harness.events));
+        ManagedAgentSession session = persistSession(harness, AgentKind.CLAUDE, "Generated name",
+                AgentBinding.unlaunched(AgentKind.CLAUDE), base, SessionStatus.INACTIVE,
+                Instant.parse("2026-08-12T10:00:00Z"));
+        service.renameSession(session.id(), "Human name").get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        ManagedAgentSession renamed = service.renameSession(session.id(), "Human name 2", false)
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals("Human name 2", renamed.displayName());
+        assertTrue(renamed.namePinned(), "a focus-loss commit must not unclaim a human-named session");
         harness.store.flush();
     }
 

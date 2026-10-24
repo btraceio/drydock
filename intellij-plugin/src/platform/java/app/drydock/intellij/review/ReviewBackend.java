@@ -14,6 +14,7 @@ import app.drydock.git.PrCheckoutService;
 import app.drydock.git.WorktreeService;
 import app.drydock.mcp.McpConfigWriter;
 import app.drydock.mcp.McpServer;
+import app.drydock.mcp.McpSessionContext.RenameOutcome;
 import app.drydock.mcp.McpSessionRegistry;
 import app.drydock.mcp.McpSessionRegistry.Spawn;
 import app.drydock.mcp.McpToolRouter;
@@ -33,6 +34,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BiFunction;
 import java.util.function.Supplier;
 
 /**
@@ -70,6 +72,21 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
 
     public ReviewBackend(Path baseDir, Supplier<List<ManagedAgentSession>> sessions,
                          Supplier<List<Repository>> repositories, AgentRegistry agentRegistry) {
+        this(baseDir, sessions, repositories, agentRegistry,
+                (id, title) -> CompletableFuture.failedFuture(
+                        new UnsupportedOperationException("session_rename is not served by this backend")));
+    }
+
+    /**
+     * As above, with the agent-rename write: {@code sessionRenamer} receives
+     * a validated title and answers with the outcome (refusing a human-pinned
+     * name, republishing on a real change) -- the same channel the desktop
+     * app binds to its workspace. The production backend serves {@code
+     * session_rename} through it; backends without one keep refusing.
+     */
+    public ReviewBackend(Path baseDir, Supplier<List<ManagedAgentSession>> sessions,
+                         Supplier<List<Repository>> repositories, AgentRegistry agentRegistry,
+                         BiFunction<ManagedSessionId, String, CompletableFuture<RenameOutcome>> sessionRenamer) {
         Path stateFile = baseDir.resolve("state.json");
         annotationStore = new AnnotationStore(AnnotationStore.siblingOf(stateFile));
         tourStore = new TourStore(TourStore.siblingOf(stateFile));
@@ -86,8 +103,9 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
         credentialWriter = (id, delivery, endpointUrl, token) -> delivery == McpDelivery.COMMAND_LINE
                 ? configWriter.writeTokenFor(id, token)
                 : configWriter.writeFor(id, endpointUrl, token);
-        // The router built below serves only REVIEW_TOOLS, so it never calls
-        // the session-management callbacks; each one fails if it is reached.
+        // The router serves the review tools plus session_rename: an agent
+        // reviewing here may relabel its own session, as the desktop app's
+        // MCP allows. Everything else session-side stays desktop-only.
         WorkspaceMcpSessionContext context = new WorkspaceMcpSessionContext(
                 sessions,
                 repositories,
@@ -100,12 +118,12 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
                 worktreeService,
                 UserConfig::load,
                 (worktree, prompt) -> notServed("session_start"),
-                (session, name) -> notServed("session_rename"),
+                sessionRenamer,
                 (session, conversation) -> notServed("session_reclaim"),
                 (session, draft) -> notServed("session_handoff"),
                 (session, draft) -> notServed("session_handoff"),
                 pendingQuestions);
-        McpToolRouter router = new McpToolRouter(context, mcpRegistry, McpToolRouter.REVIEW_TOOLS);
+        McpToolRouter router = new McpToolRouter(context, mcpRegistry, McpToolRouter.REVIEW_TOOLS_AND_RENAME);
         server = new McpServer(mcpRegistry, router);
         pullRequests = new GhCliService();
         scopeResolver = new SessionReviewScopeResolver(worktreeService, gitStatusService,

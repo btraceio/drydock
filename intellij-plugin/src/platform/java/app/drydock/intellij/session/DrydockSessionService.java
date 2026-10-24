@@ -35,6 +35,9 @@ import app.drydock.intellij.agent.LaunchClaims;
 import app.drydock.intellij.mcp.IdeMcpServer;
 import app.drydock.intellij.project.ProjectRepositoryService;
 import app.drydock.intellij.review.SessionMcpAccess;
+import app.drydock.mcp.McpSessionContext;
+import app.drydock.mcp.McpSessionContext.RenameKind;
+import app.drydock.mcp.McpSessionContext.RenameOutcome;
 import app.drydock.mcp.McpToolException;
 import app.drydock.mcp.PromptSafety;
 import app.drydock.process.ProcessResult;
@@ -1095,6 +1098,19 @@ public final class DrydockSessionService implements AgentExecutionListener {
      * background executor; the EDT only owns the prompt and progress UI.
      */
     public CompletableFuture<ManagedAgentSession> renameSession(ManagedSessionId sessionId, String requestedName) {
+        return renameSession(sessionId, requestedName, true);
+    }
+
+    /**
+     * The human's rename with the pin decided by the caller: {@code pin} is
+     * true for an explicit confirm (Enter in the inline editor, OK in the
+     * Rename dialog) and false for a focus-loss commit, which an agent can
+     * provoke by opening a tab and stealing focus. A false pin never CLEARS
+     * an earlier pin -- {@code withDisplayName} preserves the flag -- so a
+     * blur over a human-named session leaves the claim intact.
+     */
+    public CompletableFuture<ManagedAgentSession> renameSession(ManagedSessionId sessionId, String requestedName,
+                                                                 boolean pin) {
         Objects.requireNonNull(sessionId, "sessionId");
         Objects.requireNonNull(requestedName, "requestedName");
         return initialization.thenApplyAsync(unused -> {
@@ -1121,13 +1137,70 @@ public final class DrydockSessionService implements AgentExecutionListener {
                     throw new IllegalArgumentException("Another session in this project is already named \""
                             + clash.get().displayName() + "\"");
                 }
-                renamed[0] = session.withDisplayName(title).withNamePinned(true);
+                renamed[0] = pin
+                        ? session.withDisplayName(title).withNamePinned(true)
+                        : session.withDisplayName(title);
                 return state.withSessions(state.sessions().stream()
                         .map(existing -> existing.id().equals(sessionId) ? renamed[0] : existing)
                         .toList());
             });
             DrydockSessionsListener.publishChanged();
             return renamed[0];
+        }, executor);
+    }
+
+    /**
+     * The agent's {@code session_rename}: refuses a human-pinned name,
+     * refuses an unchanged title and a sibling collision as outcomes (the
+     * router turns each into its own message), applies anything else, and
+     * republishes so the task tree and console titles relabel. One state
+     * transform, like the human rename: the lookup and the comparison happen
+     * under the single writer's lock, so a concurrent human edit of the same
+     * name cannot be silently overwritten.
+     */
+    public CompletableFuture<RenameOutcome> applyAgentRename(ManagedSessionId sessionId, String title) {
+        Objects.requireNonNull(sessionId, "sessionId");
+        Objects.requireNonNull(title, "title");
+        return initialization.thenApplyAsync(unused -> {
+            RenameOutcome[] result = new RenameOutcome[1];
+            stateStore.get().update(state -> {
+                ManagedAgentSession session = state.sessions().stream()
+                        .filter(existing -> existing.id().equals(sessionId))
+                        .findFirst()
+                        .orElseThrow(() -> new IllegalStateException("The session no longer exists"));
+                if (session.namePinned()) {
+                    result[0] = new RenameOutcome(RenameKind.PINNED, session.displayName());
+                    return state;
+                }
+                if (session.displayName().equals(title)) {
+                    result[0] = new RenameOutcome(RenameKind.UNCHANGED, session.displayName());
+                    return state;
+                }
+                Optional<ManagedAgentSession> clash = state.sessions().stream()
+                        .filter(other -> !other.id().equals(sessionId))
+                        .filter(other -> other.repositoryId().equals(session.repositoryId()))
+                        // Both sides folded: a stored name came through the
+                        // human path, which applies no checkSessionTitle, so
+                        // it can carry a non-breaking space that renders
+                        // identically.
+                        .filter(other -> PromptSafety.foldForComparison(other.displayName()).equalsIgnoreCase(title))
+                        .findFirst();
+                if (clash.isPresent()) {
+                    result[0] = new RenameOutcome(RenameKind.COLLIDED, clash.get().displayName());
+                    return state;
+                }
+                ManagedAgentSession renamed = session.withDisplayName(title);
+                result[0] = new RenameOutcome(RenameKind.RENAMED, title);
+                return state.withSessions(state.sessions().stream()
+                        .map(existing -> existing.id().equals(sessionId) ? renamed : existing)
+                        .toList());
+            });
+            // Only a real change is worth a republish; a refused attempt must
+            // not buy the agent a task-tree rebuild.
+            if (result[0].kind() == RenameKind.RENAMED) {
+                DrydockSessionsListener.publishChanged();
+            }
+            return result[0];
         }, executor);
     }
 

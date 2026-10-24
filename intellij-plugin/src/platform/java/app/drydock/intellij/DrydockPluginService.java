@@ -7,6 +7,8 @@ import app.drydock.agent.api.AgentContext;
 import app.drydock.agent.api.McpAccess;
 import app.drydock.agent.api.McpDelivery;
 import app.drydock.app.ApplicationStateStore;
+import app.drydock.intellij.agent.AgentExecution;
+import app.drydock.intellij.agent.AgentExecutionRegistry;
 import app.drydock.intellij.agent.QuitConfirmation;
 import app.drydock.intellij.agent.SessionActivityMonitor;
 import app.drydock.domain.ApplicationState;
@@ -16,6 +18,9 @@ import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.SessionStatus;
 import app.drydock.git.WorktreeService;
 import app.drydock.intellij.projects.SharedProjectsService;
+import app.drydock.intellij.startup.DrydockStartupActivity;
+import app.drydock.mcp.McpSessionContext;
+import app.drydock.mcp.McpSessionContext.RenameOutcome;
 import app.drydock.intellij.review.ReviewBackend;
 import app.drydock.intellij.review.SessionMcpAccess;
 import app.drydock.projects.SharedProject;
@@ -26,6 +31,7 @@ import app.drydock.state.JsonApplicationStateRepository;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.PathManager;
+import com.intellij.openapi.project.Project;
 
 import java.io.IOException;
 import java.lang.System.Logger;
@@ -155,7 +161,25 @@ public final class DrydockPluginService implements Disposable {
     private static ReviewBackend productionBackend(Path baseDir, Supplier<List<ManagedAgentSession>> sessions,
                                                    Supplier<List<Repository>> repositories, AgentRegistry registry) {
         useOwnTreeSitterLibraries(Path.of(PathManager.getSystemPath()).resolve("drydock").resolve("tree-sitter"));
-        return new ReviewBackend(baseDir, sessions, repositories, registry);
+        return new ReviewBackend(baseDir, sessions, repositories, registry, DrydockPluginService::renameFromAgent);
+    }
+
+    /**
+     * The MCP {@code session_rename} write: routes the session to the project
+     * whose console hosts it and applies the rename there. An agent renames
+     * only a session it is running in, so the execution registry always has
+     * the host; a session with no live execution has no harness to ask.
+     */
+    private static CompletableFuture<McpSessionContext.RenameOutcome> renameFromAgent(ManagedSessionId id,
+                                                                                      String title) {
+        Optional<Project> host = AgentExecutionRegistry.getInstance().execution(id)
+                .flatMap(AgentExecution::host)
+                .filter(project -> !project.isDisposed());
+        if (host.isEmpty()) {
+            return CompletableFuture.failedFuture(new IllegalStateException(
+                    "No running session is named by " + id + ", so it cannot be renamed"));
+        }
+        return DrydockStartupActivity.sessions(host.get()).applyAgentRename(id, title);
     }
 
     /**
