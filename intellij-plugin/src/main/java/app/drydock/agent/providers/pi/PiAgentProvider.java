@@ -237,7 +237,14 @@ public final class PiAgentProvider implements AgentProvider {
         }
         String pi = piCommand(r.mcp(), r.stdioMcpServers(), r.evalMode(), Optional.empty()).command();
         if (r.agentSessionId().isPresent()) {
-            return LaunchPlan.of(pi + " --session " + AgentCommands.shellQuote(r.agentSessionId().get()), false);
+            // The resume prompt rides pi's positional [messages...] after "--"
+            // (verified against pi --help: messages are accepted in interactive
+            // mode), the same shape the create path falls back to. Never on the
+            // bare --resume picker: no conversation has been picked yet.
+            return LaunchPlan.of(r.resumePrompt()
+                    .map(prompt -> pi + " --session " + AgentCommands.shellQuote(r.agentSessionId().get())
+                            + " -- " + AgentCommands.shellQuote(prompt))
+                    .orElseGet(() -> pi + " --session " + AgentCommands.shellQuote(r.agentSessionId().get())), false);
         }
         // Unknown id -> picker. NEVER --continue/--last (same-cwd ambiguity).
         return LaunchPlan.of(pi + " --resume", false);

@@ -12,6 +12,7 @@ import app.drydock.agent.api.ResumeCostEstimate;
 import app.drydock.activity.SessionActivityWatcher;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.app.SessionHandoffService;
+import app.drydock.app.UnknownSessionException;
 import app.drydock.git.GitExecutableLocator;
 import app.drydock.domain.HandoffBrief;
 import app.drydock.handoff.HandoffStaleness;
@@ -146,6 +147,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
+import java.util.function.BooleanSupplier;
 import java.util.function.DoubleSupplier;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -3466,7 +3468,11 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         // the REAL session id: the launch persists the session almost
         // immediately, and a sidebar resume racing the launch must find
         // this pending tab instead of starting a second surface.
-        ManagedAgentSession prepared = sessionManager.prepareSession(repository, agent).withEvalMode(eval);
+        // startedWithTask is stamped before launch, like eval mode, so it
+        // is persisted with the first state save and honored on resume.
+        ManagedAgentSession prepared = sessionManager.prepareSession(repository, agent)
+                .withEvalMode(eval)
+                .withStartedWithTask(task.isPresent());
         OpenSessionTab placeholderTab = showPendingTab(prepared.id(), "Starting...", AgentLabels.displayName(agentRegistry, prepared),
                 prepared.agentKind(), prepared.status() == SessionStatus.UNSUPPORTED_AGENT,
                 Optional.of(repository), repository.root());
@@ -3498,6 +3504,14 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * than typed as a second one.</p>
      */
     private void runReviewWhenSessionReady(ManagedSessionId session, ReviewScope scope, Optional<String> task) {
+        // The session was created without a task (the review instruction is
+        // deliberately withheld until the scope resolves), so it carries no
+        // startedWithTask marker yet. sendWhenSessionReady sets it once the
+        // instruction is actually delivered -- marking here, before delivery,
+        // could stamp a session that never receives its instruction (the
+        // launch failed, the pending tab was closed), could run before the
+        // launch's own persist and be overwritten by it, or could throw
+        // UnknownSessionException for a session not yet persisted.
         sendWhenSessionReady(session, () -> PullRequestMaterialization.prompt(task, reviewInstruction(scope)),
                 "the review for scope " + scope.id(), task);
     }
@@ -3514,9 +3528,17 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * placeholder tab may still be in {@link #pendingTabs} -- the task is
      * offered to that, because a typed task silently dropped is worse than
      * one sent to a terminal that may not read it.</p>
+     *
+     * <p>The session is marked {@code startedWithTask} only once {@code prompt}
+     * (or the fallback task) has actually been handed to the terminal (see
+     * {@link #deliverThenMark}), so a session whose prompt never goes out
+     * earns no resume prompt. On the fallback path the launch has not
+     * finished, so its own persist may still overwrite the marker. That loss
+     * is the safe direction.</p>
      */
     private void sendWhenSessionReady(ManagedSessionId session, Supplier<String> prompt, String what,
                                       Optional<String> fallbackTask) {
+        Runnable markDelivered = () -> sessionManager.markStartedWithTask(session);
         Timeline poll = new Timeline();
         int[] attemptsLeft = {REVIEW_LAUNCH_WAIT_SECONDS * 2};
         poll.getKeyFrames().add(new KeyFrame(Duration.millis(500), e -> {
@@ -3526,7 +3548,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 // The surface exists, but the agent behind it has only just
                 // been exec'd; the same grace period every other start-task
                 // gets (see sendTaskWhenReady).
-                sendTaskWhenReady(open, prompt.get());
+                sendTaskWhenReady(open, prompt.get(), markDelivered);
                 return;
             }
             if (--attemptsLeft[0] <= 0) {
@@ -3535,7 +3557,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                         + " to start before sending " + what);
                 OpenSessionTab pending = pendingTabs.get(session);
                 if (pending != null && fallbackTask.isPresent()) {
-                    sendTaskWhenReady(pending, fallbackTask.get());
+                    sendTaskWhenReady(pending, fallbackTask.get(), markDelivered);
                 }
             }
         }));
@@ -3564,14 +3586,56 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         return box;
     }
 
-    /** Types a start-task into a freshly opened session once claude has had a moment to start up. */
+    /**
+     * Types a start-task into a freshly opened session once claude has had a moment to start up.
+     */
     private static void sendTaskWhenReady(OpenSessionTab tab, String task) {
+        sendTaskWhenReady(tab, task, () -> { });
+    }
+
+    /**
+     * As {@link #sendTaskWhenReady(OpenSessionTab, String)}, then runs
+     * {@code onDelivered} -- once, on the FX thread -- only if the terminal
+     * accepted the instruction (see {@link #deliverThenMark}).
+     */
+    private static void sendTaskWhenReady(OpenSessionTab tab, String task, Runnable onDelivered) {
         // Single line only (an embedded newline would submit early).
         String instruction = task.replaceAll("\\s+", " ").strip();
         PauseTransition delay = new PauseTransition(Duration.seconds(1.5));
-        delay.setOnFinished(e -> tab.sendPrompt(instruction));
+        delay.setOnFinished(e -> deliverThenMark(() -> tab.sendPrompt(instruction), onDelivered));
         delay.play();
     }
+
+    /**
+     * Sends a prompt, then runs {@code mark} only if {@code send} reports the
+     * prompt reached the terminal (typed now, or held for the surface being
+     * attached). The send always comes first: a marker must never claim a
+     * prompt that was not handed over. The session may have been deleted since
+     * the send was scheduled; its marker is then moot, so an
+     * {@link UnknownSessionException} from {@code mark} is logged, not thrown.
+     *
+     * @return whether the prompt was delivered
+     */
+    static boolean deliverThenMark(BooleanSupplier send, Runnable mark) {
+        if (!send.getAsBoolean()) {
+            return false;
+        }
+        try {
+            mark.run();
+        } catch (UnknownSessionException e) {
+            LOG.log(Level.DEBUG, "Prompt delivered to a session that no longer exists", e);
+        }
+        return true;
+    }
+
+    /**
+     * The fixed prompt typed into a resumed task session's freshly spawned
+     * harness, reusing the start-task delivery (single line, after a settle
+     * delay). The conversation history carries what the task was; the prompt
+     * only has to tell the agent where it is and what to do next.
+     */
+    private static final String RESUME_PROMPT = "You are resuming this task in a fresh session. "
+            + "Re-orient from the conversation history and continue the work where you left off.";
 
     /**
      * Shows the create-worktree modal for {@code repository} (worktree
@@ -4134,13 +4198,18 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     private ManagedSessionId openPreparedSession(ManagedAgentSession prepared, String tabLabel,
                                                  Optional<String> task, Spawn spawn, Repository repository,
                                                  Optional<String> model) {
-        OpenSessionTab placeholderTab = showPendingTab(prepared.id(), tabLabel,
-                AgentLabels.displayName(agentRegistry, prepared), prepared.agentKind(),
-                prepared.status() == SessionStatus.UNSUPPORTED_AGENT,
-                Optional.of(repository), prepared.workingDirectory());
+        // Stamped before launch, like eval mode, so the marker is persisted
+        // with the first state save and honored on resume. Covers every
+        // create path that seeds a prompt through this tail: a human's
+        // worktree task, an MCP session_start prompt, a successor seed.
+        ManagedAgentSession launched = prepared.withStartedWithTask(task.isPresent());
+        OpenSessionTab placeholderTab = showPendingTab(launched.id(), tabLabel,
+                AgentLabels.displayName(agentRegistry, launched), launched.agentKind(),
+                launched.status() == SessionStatus.UNSUPPORTED_AGENT,
+                Optional.of(repository), launched.workingDirectory());
 
         double scale = stage.getOutputScaleX();
-        sessionManager.launchSession(prepared, placeholderTab.app(), placeholderTab.host(), scale, spawn, model)
+        sessionManager.launchSession(launched, placeholderTab.app(), placeholderTab.host(), scale, spawn, model)
                 .whenComplete((result, ex) -> Platform.runLater(() -> {
                     handleOpenResult(placeholderTab, result, ex);
                     if (ex == null && result instanceof SessionOpenResult.Opened && task.isPresent()) {
@@ -4690,8 +4759,15 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
         switch (result) {
             case SessionOpenResult.Opened opened -> {
+                // Read BEFORE attachOpenedSession, which consumes the restore
+                // marker: a startup restore must reopen the tab silently, an
+                // explicit resume of a task session also re-seeds it.
+                boolean fromStartupRestore = restoringSessionIds.contains(requested.id());
                 attachOpenedSession(placeholderTab, opened);
                 showResumeNotice(placeholderTab, opened.session());
+                if (!fromStartupRestore && requested.startedWithTask()) {
+                    sendTaskWhenReady(placeholderTab, RESUME_PROMPT);
+                }
             }
             case SessionOpenResult.AlreadyOpen alreadyOpen -> {
                 // The placeholder's app/host were never handed a surface (SessionManager's

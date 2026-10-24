@@ -93,7 +93,8 @@ public record ManagedAgentSession(
         boolean namePinned,
         Optional<ManagedSessionId> forkedFrom,
         boolean evalMode,
-        Optional<WorkflowId> workflowId
+        Optional<WorkflowId> workflowId,
+        boolean startedWithTask
 ) {
 
     public ManagedAgentSession {
@@ -125,12 +126,13 @@ public record ManagedAgentSession(
                                Instant createdAt, Instant lastOpenedAt, Optional<Integer> lastExitCode,
                                PrLink pr, boolean namePinned, Optional<ManagedSessionId> forkedFrom) {
         this(id, repositoryId, displayName, binding, workspace, status, createdAt, lastOpenedAt, lastExitCode,
-                pr, namePinned, forkedFrom, false, Optional.empty());
+                pr, namePinned, forkedFrom, false, Optional.empty(), false);
     }
 
     /**
-     * As the canonical constructor with {@code workflowId = Optional.empty()};
-     * for callers (and tests) that do not participate in workflow grouping.
+     * As the canonical constructor with {@code workflowId = Optional.empty()}
+     * and {@code startedWithTask = false}; for callers (and tests) that do
+     * not participate in workflow grouping or the resume prompt.
      */
     public ManagedAgentSession(ManagedSessionId id, RepositoryId repositoryId, String displayName,
                                AgentBinding binding, SessionWorkspace workspace, SessionStatus status,
@@ -138,7 +140,7 @@ public record ManagedAgentSession(
                                PrLink pr, boolean namePinned, Optional<ManagedSessionId> forkedFrom,
                                boolean evalMode) {
         this(id, repositoryId, displayName, binding, workspace, status, createdAt, lastOpenedAt, lastExitCode,
-                pr, namePinned, forkedFrom, evalMode, Optional.empty());
+                pr, namePinned, forkedFrom, evalMode, Optional.empty(), false);
     }
 
     // ---- leaf accessors, delegating into the groups --------------------------
@@ -245,6 +247,18 @@ public record ManagedAgentSession(
     }
 
     /**
+     * Records whether drydock injected a start prompt into this session's
+     * harness when it was created (a human-typed task, a review instruction,
+     * an MCP {@code session_start} prompt, a successor seed). Only such a
+     * session gets the fixed resume prompt typed into a freshly spawned
+     * harness on an explicit resume: a harness that never received a task
+     * has nothing to continue.
+     */
+    public ManagedAgentSession withStartedWithTask(boolean newStartedWithTask) {
+        return toBuilder().startedWithTask(newStartedWithTask).build();
+    }
+
+    /**
      * The single construction path. Adding a component touches this class in
      * one place instead of once per {@code with*} method, which is the whole
      * reason it exists.
@@ -265,6 +279,7 @@ public record ManagedAgentSession(
         private Optional<ManagedSessionId> forkedFrom;
         private boolean evalMode;
         private Optional<WorkflowId> workflowId;
+        private boolean startedWithTask;
 
         private Builder(ManagedAgentSession from) {
             this.id = from.id;
@@ -281,6 +296,7 @@ public record ManagedAgentSession(
             this.forkedFrom = from.forkedFrom;
             this.evalMode = from.evalMode;
             this.workflowId = from.workflowId;
+            this.startedWithTask = from.startedWithTask;
         }
 
         /**
@@ -305,6 +321,7 @@ public record ManagedAgentSession(
             this.forkedFrom = Optional.empty();
             this.evalMode = false;
             this.workflowId = Optional.empty();
+            this.startedWithTask = false;
         }
 
         public Builder id(ManagedSessionId value) {
@@ -377,9 +394,15 @@ public record ManagedAgentSession(
             return this;
         }
 
+        public Builder startedWithTask(boolean value) {
+            this.startedWithTask = value;
+            return this;
+        }
+
         public ManagedAgentSession build() {
             return new ManagedAgentSession(id, repositoryId, displayName, binding, workspace, status,
-                    createdAt, lastOpenedAt, lastExitCode, pr, namePinned, forkedFrom, evalMode, workflowId);
+                    createdAt, lastOpenedAt, lastExitCode, pr, namePinned, forkedFrom, evalMode, workflowId,
+                    startedWithTask);
         }
     }
 }

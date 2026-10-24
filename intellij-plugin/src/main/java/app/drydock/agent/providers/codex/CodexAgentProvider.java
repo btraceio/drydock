@@ -145,7 +145,18 @@ public final class CodexAgentProvider implements AgentProvider {
         }
         String codex = codexCommand(r.mcp(), r.readOnly()) + stdioOverrides(r.stdioMcpServers());
         if (r.agentSessionId().isPresent()) {
-            return LaunchPlan.of(codex + " resume " + AgentCommands.shellQuote(r.agentSessionId().get()), false);
+            // codex resume [SESSION_ID] [PROMPT] — the prompt is a documented
+            // positional (verified against `codex resume --help`), rendered
+            // after "--" so a prompt that starts with a dash is a prompt, never
+            // an option (clap binds the token after "--" to [PROMPT], following
+            // SESSION_ID) — the same shape the create path uses for
+            // initialPrompt. Only on a pinned id: the bare picker starts
+            // nothing to re-orient.
+            String command = codex + " resume " + AgentCommands.shellQuote(r.agentSessionId().get());
+            if (r.resumePrompt().isPresent()) {
+                command += " -- " + AgentCommands.shellQuote(r.resumePrompt().get());
+            }
+            return LaunchPlan.of(command, false);
         }
         // Unknown id (or name) -> cwd-filtered picker. NEVER --last (same-cwd ambiguity).
         return LaunchPlan.of(codex + " resume", false);
