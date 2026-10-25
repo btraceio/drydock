@@ -153,11 +153,16 @@ copy) in its own commit, before the plugin's first use.
 
 ### Editor gutter marks
 
-- A project-level listener keeps the set of open editors whose file belongs
-  to a live review scope's diff (paths from `UnifiedDiff.FileDiff`).
-- Open findings get a `RangeHighlighter` at their line with a
-  `GutterIconRenderer` (severity icon, tooltip = title, count badge when a
-  line holds several).
+- A project service starts during Drydock's existing post-startup warm-up,
+  independently of the Review tool window. It resolves the project's scope,
+  diff and findings off the EDT, then keeps the set of open source editors
+  whose file belongs to that scope's diff (paths from `UnifiedDiff.FileDiff`).
+  Marks therefore appear after project warm-up even if Review has never been
+  opened; lazy tool-window content is not their data source.
+- Open findings with a valid new-side line get a `RangeHighlighter` at that
+  line with a `GutterIconRenderer` (severity icon, tooltip = title, count
+  badge when a line holds several). Old-side-only or drifted anchors do not
+  guess a source-editor line; they remain visible in the Review diff.
 - Clicking a gutter icon activates the dedicated Review tool window through
   `ReviewTabOpener`, selects the finding's file and finding, and opens the
   reusable diff tab. The operator selected this behavior over a source-editor
@@ -181,7 +186,8 @@ copy) in its own commit, before the plugin's first use.
 | `FindingInlayCard` | glue | the Swing content of one finding's inlay: thread, comment box, actions |
 | `ReviewDiffEditor` | glue | project-owned reusable `DiffVirtualFile` and processor; opens/reopens the single diff tab and swaps requests |
 | `ReviewDiffInlays` | glue | processor/viewer listeners; decorates `EditorDiffViewer.getHighlightEditors()` after rediff and owns per-editor inlay lifecycles |
-| `ReviewEditorMarks` | glue | gutter icons on open source editors of scope files; click → activate Review and select the finding |
+| `ReviewEditorMarkModel` | glue | pure scope-diff/findings → source-file/line mark model; excludes old-side-only and drifted anchors |
+| `ReviewEditorMarks` | glue | project-startup scope/diff loader plus gutter lifecycle on open source editors; click → activate Review and select the finding |
 | `ReviewTriageActions` | glue | the store writes behind Confirm/Dismiss/Undo; refuses a disposed store loudly |
 | Ask-to-fix delivery | glue | resolve the scope's bound session, `submitPrompt`, mark SENT; REFUSED and no-session are distinct surfaced outcomes (the app's never-pretend rule) |
 
@@ -220,7 +226,7 @@ tree still compiles (`compileCoreJava`) with the shared builder change.
 | AC2 | Confirm sets triage CONFIRMED, Dismiss sets DISMISSED, both persist to `annotations.json` after flush and re-render the mark. Undo returns to PROPOSED. | JUnit over `ReviewTriageActions` + store |
 | AC3 | A comment entered on the card appends `Message(author="You")` to the thread, persists, and is returned by `review_answer` for that finding. | JUnit through the store + router path (P1 style) |
 | AC4 | Ask-to-fix sends the same one-line prompt text the app sends (shared builder), through `submitPrompt`; on success the findings become SENT. A REFUSED hand-off and a missing bound session are distinct, surfaced outcomes that mark nothing. | JUnit on the builder (both trees byte-identical) + the delivery path with fakes |
-| AC5 | The source editor shows gutter icons for open findings on scope files' open editors; click activates the dedicated Review tool window, selects that file and finding, and opens or updates the reusable diff tab. Non-scope files get nothing. | live IDE + unit test on the editor-set filter and opener call |
+| AC5 | After project warm-up, the source editor shows gutter icons for open new-side findings on scope files even if Review was never opened. Clicking activates the dedicated Review tool window, selects that file and finding, and opens or updates the reusable diff tab. Non-scope files, old-side-only anchors and drifted anchors get no guessed source line. | live IDE before opening Review + unit test on the mark model, editor filter and opener call |
 | AC6 | A finding whose line key drifted renders at its file's first hunk with the drift hint, never at a wrong line. | JUnit on placement logic |
 | AC7 | Inlays and gutter marks are disposed with the viewer/editor/tab; processor and viewer listeners have matching parent disposables; no global editor listener, listener leak, or inlay survives disposal. | JUnit dispose test + live check for no disposer warning |
 | AC8 | All store writes run off the EDT; every UI rebuild is coalesced. | review + existing executor conventions |
