@@ -12,13 +12,21 @@ import com.intellij.openapi.vcs.changes.ui.ChangesBrowserNode;
 import org.junit.jupiter.api.Test;
 
 import javax.swing.tree.DefaultTreeModel;
+import javax.swing.tree.TreePath;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -268,5 +276,149 @@ class ReviewTabBrowserTest {
         ReviewTabBrowser.FileNode a = (ReviewTabBrowser.FileNode)
                 ((ChangesBrowserNode<?>) rebuilt.getRoot()).getChildAt(0);
         assertEquals(0, a.getChildCount()); // the earlier snapshot's finding row is gone
+    }
+
+    // ---- AC5's gutter navigation: selection by stable path and id ----------
+
+    /**
+     * The stable-path/id resolution a rebuild consumes its target through:
+     * an exact target resolves to exactly its own finding node — root,
+     * its file row, the finding — never a sibling finding, a file row or
+     * a fallback. This is the pure decision the Swing half applies as a
+     * tree selection after the rebuild.
+     */
+    @Test
+    void anExactFindingTargetResolvesToItsOwnNode() {
+        ReviewTabModel.Snapshot snapshot = snapshot(
+                diff(file("a.txt", hunk(A_LINES)), file("b.txt", hunk(B_LINES))),
+                List.of(open("a.txt", "n1", "n1", Severity.BLOCKING, "leak"),
+                        open("b.txt", "n1", "n1", Severity.NIT, "spare")),
+                List.of(), Optional.empty());
+        // The findings' ids, in call order: a.txt's is f0, b.txt's is f1.
+
+        DefaultTreeModel model = ReviewTabBrowser.treeOf(snapshot);
+        TreePath path = ReviewTabBrowser.findingPath(model.getRoot(), "b.txt", "f1");
+
+        assertEquals(3, path.getPathCount(), () -> path.toString());
+        assertSame(model.getRoot(), path.getPathComponent(0), path::toString);
+        ReviewTabBrowser.FileNode file = (ReviewTabBrowser.FileNode) path.getPathComponent(1);
+        assertEquals("b.txt", file.getUserObject().path());
+        ReviewTabBrowser.FindingNode finding = (ReviewTabBrowser.FindingNode) path.getPathComponent(2);
+        assertEquals("f1", finding.getUserObject().id());
+        assertEquals("spare", finding.getUserObject().title());
+    }
+
+    /**
+     * Stale and malformed targets resolve to nothing: an id that belongs
+     * to another file's row, a file the snapshot does not hold, and
+     * null/blank path or id all yield {@code null} — the selection stays
+     * whatever the rebuild left it. So does a non-assembled tree.
+     */
+    @Test
+    void staleAndMalformedTargetsResolveToNothing() {
+        ReviewTabModel.Snapshot snapshot = snapshot(
+                diff(file("a.txt", hunk(A_LINES)), file("b.txt", hunk(B_LINES))),
+                List.of(open("a.txt", "n1", "n1", Severity.BLOCKING, "leak"),
+                        open("b.txt", "n1", "n1", Severity.NIT, "spare")),
+                List.of(), Optional.empty());
+        Object root = ReviewTabBrowser.treeOf(snapshot).getRoot();
+
+        assertNull(ReviewTabBrowser.findingPath(root, "a.txt", "f1"), // the file holds f0, not f1
+                "an id of another file's row is stale");
+        assertNull(ReviewTabBrowser.findingPath(root, "a.txt", "f9"), "no such finding id");
+        assertNull(ReviewTabBrowser.findingPath(root, "gone.txt", "f0"), "no such file row");
+        assertNull(ReviewTabBrowser.findingPath(root, "  ", "f0"), "blank path");
+        assertNull(ReviewTabBrowser.findingPath(root, null, "f0"), "null path");
+        assertNull(ReviewTabBrowser.findingPath(root, "a.txt", ""), "blank id");
+        assertNull(ReviewTabBrowser.findingPath(root, "a.txt", null), "null id");
+        assertNull(ReviewTabBrowser.findingPath(null, "a.txt", "f0"), "no assembled tree");
+    }
+
+    /**
+     * The retention rule: a target recorded before any snapshot has
+     * arrived is not spent on the empty tree — it waits for the next
+     * accept, and the consumption after that snapshot's rebuild takes it
+     * exactly once. A malformed target is never recorded at all, and a
+     * later click overwrites an earlier one — the latest navigation is
+     * the one that counts.
+     */
+    @Test
+    void aTargetRecordedBeforeAnySnapshotIsRetainedUntilTheNextOneConsumesIt() {
+        ReviewTabBrowser.TreeState tree = new ReviewTabBrowser.TreeState();
+
+        assertTrue(tree.requestSelection("a.txt", "f0"));
+        assertFalse(tree.isLoaded()); // nothing is applied yet: the target waits
+
+        // The next snapshot arrives (accept); the rebuild that follows is
+        // the consumption point.
+        tree.accept(snapshot(
+                diff(file("a.txt", hunk(A_LINES))),
+                List.of(open("a.txt", "n1", "n1", Severity.BLOCKING, "leak")),
+                List.of(), Optional.empty()));
+        assertTrue(tree.isLoaded());
+        assertEquals(Optional.of(new ReviewTabOpener.FindingTarget("a.txt", "f0")),
+                tree.takePendingSelection());
+        // Spent exactly once: the selection cannot fire twice.
+        assertTrue(tree.takePendingSelection().isEmpty());
+
+        // A malformed target records nothing, even against a loaded tree.
+        assertFalse(tree.requestSelection("", "f0"));
+        assertTrue(tree.takePendingSelection().isEmpty());
+
+        // The latest click wins.
+        assertTrue(tree.requestSelection("a.txt", "f0"));
+        assertTrue(tree.requestSelection("b.txt", "f1"));
+        assertEquals(Optional.of(new ReviewTabOpener.FindingTarget("b.txt", "f1")),
+                tree.takePendingSelection());
+    }
+
+    /**
+     * The record and the take are atomic against each other: when a
+     * target is recorded and several takers reach for it at the same
+     * instant, the target is spent at most once — the concurrent shape of
+     * exactly-once consumption, which the sequential tests above cannot
+     * show. The takers spin-start on a flag so they enter the take as
+     * simultaneously as the JVM allows, and every assertion holds for
+     * every interleaving: at most one taker per round takes the target,
+     * and after the rounds nothing is left to spend.
+     */
+    @Test
+    void aConcurrentTakeNeverSpendsTheTargetTwice() throws Exception {
+        ReviewTabBrowser.TreeState tree = new ReviewTabBrowser.TreeState();
+        int takers = 4;
+        int rounds = 500;
+        ExecutorService pool = Executors.newFixedThreadPool(takers);
+        try {
+            for (int round = 0; round < rounds; round++) {
+                ReviewTabOpener.FindingTarget target =
+                        new ReviewTabOpener.FindingTarget("a.txt", "f" + round);
+                assertTrue(tree.requestSelection(target.filePath(), target.findingId()));
+
+                AtomicBoolean go = new AtomicBoolean();
+                CountDownLatch ready = new CountDownLatch(takers);
+                List<Future<Boolean>> races = new ArrayList<>();
+                for (int taker = 0; taker < takers; taker++) {
+                    races.add(pool.submit(() -> {
+                        ready.countDown();
+                        while (!go.get()) {
+                            Thread.onSpinWait(); // enter the take as one instant
+                        }
+                        return tree.takePendingSelection().isPresent();
+                    }));
+                }
+                ready.await(20, TimeUnit.SECONDS);
+                go.set(true);
+
+                int spent = 0;
+                for (Future<Boolean> race : races) {
+                    spent += race.get(20, TimeUnit.SECONDS) ? 1 : 0;
+                }
+                assertTrue(spent <= 1,
+                        "round " + round + " spent its target " + spent + " times");
+            }
+            assertTrue(tree.takePendingSelection().isEmpty(), "nothing is left after the rounds");
+        } finally {
+            pool.shutdownNow();
+        }
     }
 }

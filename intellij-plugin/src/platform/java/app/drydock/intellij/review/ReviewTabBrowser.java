@@ -18,11 +18,13 @@ import org.jetbrains.annotations.NotNull;
 import javax.swing.Icon;
 import javax.swing.JTree;
 import javax.swing.tree.DefaultTreeModel;
+import javax.swing.tree.TreeNode;
 import javax.swing.tree.TreePath;
 import java.awt.Color;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
 /**
@@ -55,6 +57,18 @@ import java.util.function.Consumer;
  * else, then triggers the rebuild on the EDT. {@code buildTree} reads only
  * the latest accepted snapshot: no git, no I/O, no store lock is ever held
  * from here.</p>
+ *
+ * <p><strong>Finding navigation</strong> (AC5, T8): {@link #selectFinding}
+ * selects a finding by its stable file path and finding id — the value
+ * keys the rows carry, so a snapshot rebuild cannot invalidate a target
+ * the way row identity would. A target recorded before any snapshot has
+ * arrived is retained and consumed after the next accept's rebuild; a
+ * stale or malformed target changes nothing; and the record and the
+ * consumption are atomic against each other, so a navigation click racing
+ * a rebuild's completion can never spend one target twice. The pure
+ * halves — target retention ({@link TreeState}) and path resolution
+ * ({@link #findingPath}) — carry the whole decision, so the
+ * exact/stale/malformed matrix is testable without the Swing host.</p>
  */
 public final class ReviewTabBrowser extends AsyncChangesBrowserBase {
 
@@ -116,16 +130,71 @@ public final class ReviewTabBrowser extends AsyncChangesBrowserBase {
      * rebuild is triggered, so the rebuild reads the new data and never the
      * previous one; a caller already on the EDT rebuilds immediately, any
      * other caller gets the rebuild hopped there — but the store always
-     * happens first.
+     * happens first. The rebuild's completion is also where a retained
+     * navigation target is consumed: it runs once the displayed tree
+     * reflects the just-stored snapshot.
      */
     public void accept(ReviewTabModel.Snapshot snapshot) {
         tree.accept(snapshot);
+        rebuild(this::applyPendingSelection);
+    }
+
+    /**
+     * Selects the finding with the given stable file path and finding id
+     * (AC5's gutter navigation, T8): if a snapshot is already loaded the
+     * selection is applied to the freshly rebuilt tree; if none has
+     * arrived yet the target is retained and consumed after the next
+     * snapshot's rebuild. A malformed target (null/blank path or id) is
+     * never recorded; a stale one — no such file row or finding id in the
+     * snapshot it is consumed against — leaves the selection unchanged.
+     * Either way the target is spent on its first consumption. EDT is the
+     * natural caller thread (the provider's snapshot hops); any other
+     * thread gets the rebuild hopped there.
+     */
+    public void selectFinding(String filePath, String findingId) {
+        if (!tree.requestSelection(filePath, findingId)) {
+            return; // malformed: nothing recorded, the selection is unchanged
+        }
+        if (!tree.isLoaded()) {
+            return; // no snapshot yet: retained, consumed after the next accept's rebuild
+        }
+        rebuild(this::applyPendingSelection);
+    }
+
+    /**
+     * Rebuilds the async tree, running {@code after} once the displayed
+     * tree reflects the latest accepted snapshot —
+     * {@code requestRefresh(callback)}, the rebuild the base class's
+     * {@code rebuildTree()} performs plus its completion callback.
+     */
+    private void rebuild(Runnable after) {
         Application application = ApplicationManager.getApplication();
         if (application == null || application.isDispatchThread()) {
-            getViewer().rebuildTree();
+            getViewer().requestRefresh(after);
         } else {
-            application.invokeLater(() -> getViewer().rebuildTree());
+            application.invokeLater(() -> getViewer().requestRefresh(after));
         }
+    }
+
+    /**
+     * Applies the pending navigation target, if any, to the freshly rebuilt
+     * tree — EDT, after the refresh. The take is the consumption: found or
+     * stale, the target is spent exactly once, and a stale one (no path)
+     * simply leaves the selection as the rebuild left it.
+     */
+    private void applyPendingSelection() {
+        Optional<ReviewTabOpener.FindingTarget> target = tree.takePendingSelection();
+        if (target.isEmpty()) {
+            return;
+        }
+        TreePath path = findingPath(getViewer().getModel().getRoot(),
+                target.get().filePath(), target.get().findingId());
+        if (path == null) {
+            return; // stale against this snapshot: the selection is unchanged
+        }
+        getViewer().expandPath(path.getParentPath());
+        getViewer().setSelectionPath(path);
+        getViewer().scrollPathToVisible(path);
     }
 
     /**
@@ -161,20 +230,90 @@ public final class ReviewTabBrowser extends AsyncChangesBrowserBase {
                 : null;
     }
 
+    /**
+     * The tree path to the finding with the given stable file path and
+     * finding id, or {@code null} when this tree holds no such row — the
+     * pure half of the navigation selection, so exact, stale and
+     * malformed targets are decidable without the Swing host. A file row
+     * whose findings do not contain the id is as stale as a missing file:
+     * no partial selection, no fallback to the file row.
+     */
+    static TreePath findingPath(Object root, String filePath, String findingId) {
+        if (!(root instanceof TreeNode node)
+                || ReviewTabOpener.FindingTarget.of(filePath, findingId).isEmpty()) {
+            return null; // malformed input, or no assembled tree: never a selection
+        }
+        for (int i = 0; i < node.getChildCount(); i++) {
+            TreeNode child = node.getChildAt(i);
+            if (!(child instanceof FileNode file) || !file.getUserObject().path().equals(filePath)) {
+                continue;
+            }
+            for (int j = 0; j < file.getChildCount(); j++) {
+                if (file.getChildAt(j) instanceof FindingNode finding
+                        && finding.getUserObject().id().equals(findingId)) {
+                    return new TreePath(new Object[] {node, file, finding});
+                }
+            }
+            return null; // the file row is there, its findings are not: stale id
+        }
+        return null; // no such file row: stale path
+    }
+
     // ---- pure assembly — everything below needs no Swing host, no EDT ----
 
     /**
      * The browser's tree state minus the Swing host: the latest accepted
-     * snapshot and the node assembly from it. This is the seam the
-     * accept-then-rebuild ordering is tested through — store first, then
-     * every rebuild reads exactly the latest.
+     * snapshot, the node assembly from it, and the retained navigation
+     * target. This is the seam the accept-then-rebuild ordering is tested
+     * through — store first, then every rebuild reads exactly the latest —
+     * and the seam the retention rule is tested through: a target recorded
+     * before any snapshot waits, and the next accept's consumption spends it.
+     *
+     * <p>Threading: the pending target is an {@link AtomicReference}, so
+     * the record ({@code set} — latest record wins) and the consumption
+     * ({@code getAndSet(null)} — exactly once) are atomic against each
+     * other: a navigation click recording on one thread while a rebuild's
+     * completion takes on another can neither tear the target nor spend
+     * it twice, whatever the interleaving.</p>
      */
     static final class TreeState {
 
         private volatile ReviewTabModel.Snapshot latest;
+        private final AtomicReference<ReviewTabOpener.FindingTarget> pendingSelection = new AtomicReference<>();
 
         void accept(ReviewTabModel.Snapshot snapshot) {
             latest = Objects.requireNonNull(snapshot, "snapshot");
+        }
+
+        /** Whether a snapshot has been accepted — the loaded/not-loaded line the retention rule turns on. */
+        boolean isLoaded() {
+            return latest != null;
+        }
+
+        /**
+         * Records a navigation selection target: {@code false} — and
+         * nothing recorded — for malformed input (null/blank path or id).
+         * A later record overwrites an earlier one — atomically, so a
+         * concurrent take can never observe a half-recorded state: the
+         * latest navigation click is the target that counts.
+         */
+        boolean requestSelection(String filePath, String findingId) {
+            Optional<ReviewTabOpener.FindingTarget> target = ReviewTabOpener.FindingTarget.of(filePath, findingId);
+            if (target.isEmpty()) {
+                return false;
+            }
+            pendingSelection.set(target.get());
+            return true;
+        }
+
+        /**
+         * Takes the pending target, clearing it — consumption is exactly
+         * once: found or stale, the first take spends it and every later
+         * take finds nothing, and the get-and-clear is one atomic step,
+         * so two concurrent takers can never both walk away with it.
+         */
+        Optional<ReviewTabOpener.FindingTarget> takePendingSelection() {
+            return Optional.ofNullable(pendingSelection.getAndSet(null));
         }
 
         /** The tree the latest accepted snapshot dictates; empty before the first accept. */
