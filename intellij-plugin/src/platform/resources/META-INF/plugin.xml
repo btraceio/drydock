@@ -103,21 +103,28 @@
         <postStartupActivity
                 implementation="app.drydock.intellij.startup.DrydockStartupActivity"/>
 
-        <!-- The Review tab (P2): Drydock's own review marks over the
-             checkout's diff. The host tool window is resolved from the tab
-             name at runtime, never hard-coded: with isInCommitToolWindow
-             set it lands in the Commit tool window, or in the Version
-             Control window when the Commit one is disabled. The predicate
-             hides the tab in windows no Drydock session covers (Q8).
-             Deliberately no <module> element for intellij.platform.diff /
-             intellij.platform.diff.impl: they are internal-visibility
-             product modules on 2026.3 and stay compile-only in
-             build.gradle.kts, resolved at runtime through
+        <!-- The Review surface (P3): Drydock's own review marks over the
+             checkout's diff, as a dedicated tool window — the P2
+             changesViewContent subtab was hard to discover and the
+             operator rejected it. The window carries exactly one content
+             (the ReviewTabProvider panel) and aligns itself with the first
+             available Changes host (Commit, then Version Control) at
+             registration from ReviewToolWindowFactory.init; the anchor
+             below is only the first-layout default, because the stored
+             layout overrides it from the first registration on. The
+             factory follows the host's moves afterwards and ignores its
+             own events; the separate "Drydock" task window above keeps
+             its own right dock untouched. The factory applies Q8's
+             ReviewTabVisibility coverage rule to availability, so a
+             window with no covering session carries no empty Review
+             window. Deliberately no <module> element for
+             intellij.platform.diff / intellij.platform.diff.impl: they
+             are internal-visibility product modules on 2026.3 and stay
+             compile-only in build.gradle.kts, resolved at runtime through
              intellij.platform.vcs.impl. -->
-        <changesViewContent tabName="Drydock Review"
-                            className="app.drydock.intellij.review.ReviewTabProvider"
-                            predicateClassName="app.drydock.intellij.review.ReviewTabVisibility"
-                            isInCommitToolWindow="true"/>
+        <toolWindow id="Drydock Review" anchor="left" secondary="false"
+                    icon="/icons/drydock.svg"
+                    factoryClass="app.drydock.intellij.review.ReviewToolWindowFactory"/>
 
     </extensions>
     <applicationListeners>
