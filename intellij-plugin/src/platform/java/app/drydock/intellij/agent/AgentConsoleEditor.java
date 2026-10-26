@@ -110,6 +110,8 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
 
     /** Whether a hosted tab's worktree folder is gone; the strip says so. */
     private volatile boolean folderMissing;
+    /** The session's checkout directory is gone or holds no git checkout — the Changes link disables itself. */
+    private volatile boolean checkoutGone;
 
     /** {@link #hostedFrom} as the tab title last showed it. EDT. */
     private Optional<SessionPlace> paintedHostedFrom = Optional.empty();
@@ -263,6 +265,12 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
                 hostedFrom = found != null ? hostedPlace(plugin, found) : Optional.empty();
                 folderMissing = found != null && hostedFrom.isPresent()
                         && HostedLifecycle.folderGone(true, Files.isDirectory(found.workingDirectory()));
+                // Off the EDT (this runs on the plugin executor): a stat
+                // probe, never a git process. A deleted worktree or a
+                // directory that lost its git metadata (only .idea left)
+                // has no checkout to review, so the strip's Changes link
+                // disables itself instead of clicking into nothing.
+                checkoutGone = found != null && !isGitCheckout(found.workingDirectory());
                 if (hostedFrom.isPresent()) {
                     file.putUserData(HostedTab.KEY, new HostedTab.Facts(project.getLocationHash(), hostedFrom.get()));
                 } else if (HostedTab.placeIn(file, project).isPresent()) {
@@ -278,6 +286,18 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
             // Shutdown drained the executor; paint what is already known.
             refreshLater();
         }
+    }
+
+    /**
+     * Whether {@code dir} still is a git checkout: the directory exists and
+     * carries a {@code .git} entry — the directory form of a main checkout
+     * or the file form of a linked worktree. No git process: a stat probe,
+     * off the EDT, on every catalog repaint. A directory that survives its
+     * worktree (only {@code .idea} left) fails the entry check, exactly the
+     * case where a Changes click could resolve nothing.
+     */
+    private static boolean isGitCheckout(Path dir) {
+        return Files.isDirectory(dir) && Files.exists(dir.resolve(".git"));
     }
 
     /**
@@ -419,6 +439,7 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
                 resumable, resumeTokens,
                 DumbService.isDumb(project),
                 hostedFrom.map(place -> execution.map(AgentExecution::place).orElse(place)), folderMissing,
+                checkoutGone,
                 AgentExecutionRegistry.getInstance().moving().contains(current.id()),
                 SessionTransfer.destination(current.id()));
 

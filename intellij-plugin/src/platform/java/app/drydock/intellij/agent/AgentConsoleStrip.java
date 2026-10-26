@@ -292,6 +292,10 @@ final class AgentConsoleStrip extends JPanel {
      *                         it from another worktree; adds the provenance
      *                         and the jump to its own window
      * @param folderMissing    whether a hosted agent's worktree folder is gone
+     * @param checkoutGone     whether the session's checkout directory is gone
+     *                         or is not a git checkout — the Changes link could
+     *                         resolve no review there, so it is disabled with a
+     *                         tooltip saying so rather than clicking into nothing
      * @param moving           whether the console is on its way to the
      *                         agent's own window: the strip says so and its
      *                         actions wait (typing still reaches the agent)
@@ -302,7 +306,7 @@ final class AgentConsoleStrip extends JPanel {
     void update(ManagedAgentSession session, Optional<SessionActivity> activity, boolean running,
                 boolean readOnlyEnforced, String agentName, Duration age, Optional<Integer> changedFiles,
                 boolean resumable, Optional<Integer> estimatedTokens, boolean indexing,
-                Optional<SessionPlace> hostedFrom, boolean folderMissing, boolean moving,
+                Optional<SessionPlace> hostedFrom, boolean folderMissing, boolean checkoutGone, boolean moving,
                 Optional<String> transferTarget) {
         // The window, not the catalog, is the authority on what is alive in
         // it: a row left in the running band with nothing running here reads
@@ -331,7 +335,13 @@ final class AgentConsoleStrip extends JPanel {
         provenance.setVisible(hostedFrom.isPresent());
         openWindow.setVisible(hostedFrom.isPresent());
         openWindow.setEnabled(!moving);
-        changes.setEnabled(!moving);
+        // A checkout that is gone (a deleted worktree, or a directory that
+        // no longer holds a git checkout) cannot produce a review: the link
+        // says so instead of clicking into a silent nothing.
+        changes.setEnabled(!moving && !checkoutGone);
+        changes.setToolTipText(checkoutGone
+                ? "The session's checkout is gone or is not a git repository"
+                : null);
         boolean transferring = transferTarget.isPresent();
         transfer.setVisible(!transferring && running && SessionTransfer.available(session, activity));
         transfer.setEnabled(!moving);
