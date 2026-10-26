@@ -2,6 +2,7 @@ package app.drydock.git;
 
 import org.junit.jupiter.api.Test;
 
+import java.io.File;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -70,5 +71,25 @@ class GhCliPullRequestListingTest {
                 assertInstanceOf(GhCliService.PullRequestListing.Listed.class, listing).pullRequests();
         assertEquals(1, prs.size());
         assertEquals(2, prs.get(0).number());
+    }
+
+    @Test
+    void executablePathKeepsShimsButAddsLocationsTheyCanDelegateTo() {
+        String separator = File.pathSeparator;
+
+        assertEquals(String.join(separator, "/usr/local/bin", "/usr/bin", "/opt/homebrew/bin"),
+                GhCliService.pathWithFallbacks(String.join(separator, "/usr/local/bin", "/usr/bin")));
+        assertEquals(String.join(separator, "/opt/homebrew/bin", "/usr/local/bin"),
+                GhCliService.pathWithFallbacks(String.join(separator, "/opt/homebrew/bin", "/usr/local/bin")),
+                "known locations already on PATH must not be duplicated");
+    }
+
+    @Test
+    void executablePathOfNullIsOnlyTheFallbacksSoCallersMustNullCheckBeforeWrapping() {
+        // pathWithFallbacks never returns null. A caller that wrapped an unset
+        // PATH would hand its child only these two dirs (no /usr/bin), so the
+        // callers null-check the raw PATH first and let the child inherit.
+        assertEquals(String.join(File.pathSeparator, "/usr/local/bin", "/opt/homebrew/bin"),
+                GhCliService.pathWithFallbacks(null));
     }
 }

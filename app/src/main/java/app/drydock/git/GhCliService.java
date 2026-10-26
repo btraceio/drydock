@@ -21,6 +21,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -332,9 +333,15 @@ public final class GhCliService implements AutoCloseable {
      * bare launchd PATH -- under which the gh-shim wrapper cannot re-exec a
      * real {@code gh} ("exec: gh: not found"), and every listing reports
      * unavailable.</p>
+     *
+     * <p>The raw PATH is null-checked before the fallbacks are appended:
+     * {@link #pathWithFallbacks} never returns null, so wrapping first would
+     * hand a child with no PATH set only the fallback dirs (losing
+     * {@code /usr/bin}). No PATH means the child inherits the environment.</p>
      */
     private static ProcessResult runIn(Path workingDirectory, List<String> command) {
-        String livePath = LoginShellEnvironment.currentRealPath();
+        String rawPath = LoginShellEnvironment.currentRealPath();
+        String livePath = rawPath == null ? null : pathWithFallbacks(rawPath);
         try {
             if (livePath == null) {
                 return ProcessRunner.run(command, workingDirectory, PROCESS_TIMEOUT);
@@ -352,5 +359,25 @@ public final class GhCliService implements AutoCloseable {
             Thread.currentThread().interrupt();
             return null;
         }
+    }
+
+    /**
+     * Keeps the user's PATH order but makes known real-install locations
+     * reachable by wrappers encountered earlier on PATH. A shim that
+     * delegates to a later {@code gh} can otherwise exit with
+     * {@code exec: gh: not found}.
+     */
+    static String pathWithFallbacks(String path) {
+        LinkedHashSet<String> entries = new LinkedHashSet<>();
+        if (path != null) {
+            for (String entry : path.split(Pattern.quote(File.pathSeparator))) {
+                if (!entry.isBlank()) {
+                    entries.add(entry);
+                }
+            }
+        }
+        entries.add("/usr/local/bin");
+        entries.add("/opt/homebrew/bin");
+        return String.join(File.pathSeparator, entries);
     }
 }

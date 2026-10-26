@@ -269,7 +269,15 @@ public final class PullRequestReview {
                 return;
             } catch (ExecutionException | TimeoutException | RuntimeException e) {
                 LOG.log(Level.WARNING, "Could not check out PR #" + pullRequest.number() + " of " + mainRoot, e);
-                report(from, "Could not check out PR #" + pullRequest.number() + ": " + cause(e));
+                // Prefix only when the message does not already carry it. A
+                // PrCheckoutException already reads "Could not check out PR #N:
+                // <cause>", and re-prefixing that is what doubled the sentence;
+                // but a bare TimeoutException, "gh is not installed" or a missing
+                // git executable names no PR, and reporting those bare would
+                // lose which checkout failed.
+                String prefix = "Could not check out PR #" + pullRequest.number() + ": ";
+                String message = cause(e);
+                report(from, message.startsWith(prefix) ? message : prefix + message);
                 return;
             }
         }
