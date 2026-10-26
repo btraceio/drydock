@@ -470,13 +470,21 @@ public final class ReviewDiffInlays {
                     disposeCard(card);
                     return () -> { };
                 }
-                // The editor resizing must re-measure the inlay: the
+                // The editor resizing — or first showing, which is how a
+                // decoration attached before the diff tab was laid out
+                // recovers its real width — must re-measure the inlay: the
                 // container's preferred size follows the live text width,
                 // and update() makes the platform re-read it. The listener
                 // dies with the inlay (the release below), never with the
                 // editor — a released decoration must not keep watching.
                 ComponentAdapter resize = new ComponentAdapter() {
                     @Override public void componentResized(ComponentEvent event) {
+                        if (inlay.isValid()) {
+                            inlay.update();
+                        }
+                    }
+
+                    @Override public void componentShown(ComponentEvent event) {
                         if (inlay.isValid()) {
                             inlay.update();
                         }

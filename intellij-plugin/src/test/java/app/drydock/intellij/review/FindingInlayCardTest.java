@@ -21,7 +21,6 @@ import java.util.List;
 import java.util.Optional;
 
 import javax.swing.JButton;
-import javax.swing.JLabel;
 import javax.swing.JTextField;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;

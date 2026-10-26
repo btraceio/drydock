@@ -92,6 +92,8 @@ public final class FindingInlayCard extends JPanel {
      */
     private String confirmLabel = "Agree";
     private String dismissLabel = "Won't fix";
+    /** One entry per thread message, embedded newlines intact — the accessor's contract. */
+    private final List<String> threadLines = new ArrayList<>();
     private ReviewAnnotation finding;
     private boolean busy;
     private boolean disposed;
@@ -256,7 +258,7 @@ public final class FindingInlayCard extends JPanel {
     }
 
     List<String> threadLines() {
-        return thread.getText().isEmpty() ? List.of() : List.of(thread.getText().split("\n", -1));
+        return List.copyOf(threadLines);
     }
 
     /** The text blocks' wrapped preferred heights, for the wrapping test. */
@@ -290,6 +292,8 @@ public final class FindingInlayCard extends JPanel {
         for (ReviewAnnotation.Message message : finding.thread()) {
             lines.add(message.author() + " · " + age(message.at()) + ": " + message.text());
         }
+        threadLines.clear();
+        threadLines.addAll(lines);
         thread.setText(String.join("\n", lines));
         thread.setVisible(!lines.isEmpty());
     }

@@ -63,7 +63,6 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
@@ -981,9 +980,11 @@ final class ReviewTabProvider {
 
     /**
      * Re-reads the pending decisions from the store — in-memory, cheap on
-     * the EDT — and shows the bar only when a decision exists. Every
-     * decision path lands here (store listener, snapshot, a completed
-     * send), so the bar never lags its own send.
+     * the EDT — and shows the bar only when a decision exists. The Send
+     * button is dead until the backend wiring ({@code triage}) is in place,
+     * so a click before the first load completes can never silently do
+     * nothing. Every decision path lands here (store listener, snapshot, a
+     * completed send), so the bar never lags its own send.
      */
     private void refreshDecisionsBar() {
         JPanel bar = decisionsBar;
@@ -998,6 +999,7 @@ final class ReviewTabProvider {
                 : pendingDecisions(annotations.forScope(current.id()));
         label.setText(pending.describe());
         bar.setVisible(pending.total() > 0);
+        sendDecisionsButton.setEnabled(triage != null && pending.total() > 0);
     }
 
     /**
@@ -1013,6 +1015,7 @@ final class ReviewTabProvider {
         ReviewTriageActions actions = triage;
         ReviewScope current = scope;
         if (actions == null || current == null || sendInFlight) {
+            refreshDecisionsBar(); // re-gate the button: the wiring state may have moved
             return;
         }
         sendInFlight = true;
@@ -1045,7 +1048,9 @@ final class ReviewTabProvider {
     /**
      * The pending decisions of one finding list (pure): the unresolved
      * findings with a decision that no hand-off has carried yet — exactly
-     * what {@code sendDecisions} will include.
+     * what {@code sendDecisions} will include. The membership test is the
+     * send's own {@link ReviewTriageActions#isPendingDecision}, so the bar
+     * and the send can never drift apart.
      */
     record PendingDecisions(int toFix, int dismissed) {
 
@@ -1059,7 +1064,7 @@ final class ReviewTabProvider {
                 parts.add(toFix + (toFix == 1 ? " finding agreed" : " findings agreed"));
             }
             if (dismissed > 0) {
-                parts.add(dismissed + (dismissed == 1 ? " dismissed" : " dismissed"));
+                parts.add(dismissed + " dismissed");
             }
             return String.join(" · ", parts) + " — not sent to the agent yet";
         }
@@ -1069,8 +1074,7 @@ final class ReviewTabProvider {
         int toFix = 0;
         int dismissed = 0;
         for (ReviewAnnotation finding : findings) {
-            if (finding.resolved() || finding.triage() == Triage.PROPOSED
-                    || finding.status() == AnnotationStatus.SENT) {
+            if (!ReviewTriageActions.isPendingDecision(finding)) {
                 continue;
             }
             if (finding.triage() == Triage.CONFIRMED) {

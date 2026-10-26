@@ -320,6 +320,11 @@ class ReviewTabProviderTest {
         assertEquals(1, pending.dismissed());
         assertEquals(2, pending.total());
         assertEquals(0, ReviewTabProvider.pendingDecisions(List.of()).total());
+        // The bar and the send share one membership test: the counts can
+        // never advertise a batch sendDecisions would refuse.
+        assertEquals((int) findings.stream()
+                        .filter(ReviewTriageActions::isPendingDecision).count(),
+                pending.total());
     }
 
     /** The hand-off's subject: the pull request when the scope carries one, else the checkout's name. */

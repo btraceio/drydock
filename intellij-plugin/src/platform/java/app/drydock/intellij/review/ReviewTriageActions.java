@@ -230,6 +230,20 @@ public final class ReviewTriageActions {
      * refused send can simply be retried. A submitter that throws completes
      * the future exceptionally; nothing is marked either way.
      */
+    /**
+     * Whether {@code finding} is a pending decision: unresolved, decided
+     * (CONFIRMED or DISMISSED) and not yet carried by a hand-off. The one
+     * filter both the review tab's decisions bar
+     * ({@code ReviewTabProvider#pendingDecisions}) and {@link #sendDecisions}
+     * count through, so the bar can never advertise a batch the send would
+     * refuse. Pure read — any thread.
+     */
+    static boolean isPendingDecision(ReviewAnnotation finding) {
+        return !finding.resolved()
+                && finding.triage() != Triage.PROPOSED
+                && finding.status() != AnnotationStatus.SENT;
+    }
+
     public CompletableFuture<FixOutcome> sendDecisions(ReviewScope scope, String subject) {
         Objects.requireNonNull(scope, "scope");
         Objects.requireNonNull(subject, "subject");
@@ -243,9 +257,7 @@ public final class ReviewTriageActions {
             // taken after the bar's last refresh are still included, and
             // already-SENT findings are never sent twice.
             List<ReviewAnnotation> decided = store.forScope(scope.id()).stream()
-                    .filter(finding -> !finding.resolved()
-                            && finding.triage() != Triage.PROPOSED
-                            && finding.status() != AnnotationStatus.SENT)
+                    .filter(ReviewTriageActions::isPendingDecision)
                     .toList();
             if (decided.isEmpty()) {
                 // The app's rule: an empty hand-off is refused outright,
