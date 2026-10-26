@@ -77,8 +77,12 @@ public final class WorktreeReview {
     private static final long START_TIMEOUT_SECONDS =
             LAUNCH_TIMEOUT_SECONDS + ReviewRequest.INIT_WAIT_SECONDS + ReviewRequest.SCOPE_WAIT_SECONDS;
 
-    /** Worktrees with a materialization in flight, by real path; a second click is refused. */
-    private final Set<String> inFlight = ConcurrentHashMap.newKeySet();
+    /** Worktrees with a materialization in flight, by real path; a second click is refused —
+     * process-wide, so the task window's Review flow and the Changes link's preparation offer
+     * (ReviewTabOpener.PreparationOffers, which builds its own WorktreeReview) can never both
+     * materialize one worktree.
+     */
+    private static final Set<String> inFlight = ConcurrentHashMap.newKeySet();
 
     public WorktreeReview() { }
 

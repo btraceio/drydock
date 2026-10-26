@@ -73,6 +73,7 @@ class ReviewTabOpenerTest {
                 "saveDocuments",
                 "placeholder: Loading review…",
                 "resolve: /repo link=" + link.id(),
+                "hasData: scope-1",
                 "activate: Drydock Review",
                 "reloadTab"), calls);
     }
@@ -87,6 +88,7 @@ class ReviewTabOpenerTest {
                 "saveDocuments",
                 "placeholder: Loading review…",
                 "resolve: /repo link=" + link.id(),
+                "hasData: scope-1",
                 "activate: Drydock Review",
                 "reloadTab"), calls);
     }
@@ -99,6 +101,7 @@ class ReviewTabOpenerTest {
                 "saveDocuments",
                 "placeholder: Loading review…",
                 "resolve: /repo link=<unbound>",
+                "hasData: scope-1",
                 "activate: Drydock Review",
                 "reloadTab"), calls);
     }
@@ -112,7 +115,7 @@ class ReviewTabOpenerTest {
                             .orElse("<unbound>"));
                     return CompletableFuture.failedFuture(new IllegalStateException("not a git checkout"));
                 },
-                recordingLoading());
+                recordingLoading(), preparations(true));
 
         opener.openIn(project("/nowhere"), Optional.of(link));
 
@@ -175,6 +178,7 @@ class ReviewTabOpenerTest {
                 "saveDocuments",
                 "placeholder: Loading review…",
                 "resolve: /repo link=<unbound>",
+                "hasData: scope-1",
                 "activate: Drydock Review",
                 "reloadTab"), calls);
         // The seam: still recorded (the content never existed to consume
@@ -195,6 +199,7 @@ class ReviewTabOpenerTest {
                 "saveDocuments",
                 "placeholder: Loading review…",
                 "resolve: /repo link=<unbound>",
+                "hasData: scope-1",
                 "activate: Drydock Review",
                 "reloadTab"), calls);
     }
@@ -281,7 +286,114 @@ class ReviewTabOpenerTest {
         }
     }
 
-    // ---- the fakes --------------------------------------------------------
+    // ---- the empty-review offer -------------------------------------------
+
+    /**
+     * A checkout no review was ever prepared for (no findings, no tour):
+     * the open still activates and reloads the window — the click is not
+     * lost — and ends in the offer. Declining stops there.
+     */
+    @Test
+    void anEmptyReviewOffersThePreparationAndDecliningStopsThere() {
+        ReviewTabOpener opener = opener(scopeSource(), new RecordingPreparation(false, false));
+
+        opener.openIn(project("/repo"), Optional.of(link));
+
+        assertTrue(calls.contains("offer: /repo scope-1"), calls::toString);
+        assertTrue(calls.indexOf("activate: Drydock Review") < calls.indexOf("offer: /repo scope-1"),
+                "the window opens before the offer: " + calls);
+        assertTrue(calls.stream().noneMatch(call -> call.startsWith("launch")), calls::toString);
+    }
+
+    /** Accepting the offer launches the preparation against the same checkout. */
+    @Test
+    void acceptingTheOfferLaunchesThePreparation() {
+        ReviewTabOpener opener = opener(scopeSource(), new RecordingPreparation(false, true));
+
+        opener.openIn(project("/repo"), Optional.of(link));
+
+        assertEquals(List.of(
+                "saveDocuments",
+                "placeholder: Loading review…",
+                "resolve: /repo link=" + link.id(),
+                "hasData: scope-1",
+                "activate: Drydock Review",
+                "reloadTab",
+                "offer: /repo scope-1",
+                "launch: /repo scope-1"), calls);
+    }
+
+    /** A checkout with review data (findings or a tour) opens exactly as before — no offer, no nag. */
+    @Test
+    void aReviewWithFindingsOffersNothing() {
+        ReviewTabOpener opener = opener(scopeSource(), preparations(true));
+
+        opener.openIn(project("/repo"), Optional.of(link));
+
+        assertTrue(calls.stream().noneMatch(call -> call.startsWith("offer")), calls::toString);
+        assertTrue(calls.stream().noneMatch(call -> call.startsWith("launch")), calls::toString);
+    }
+
+    /** A failed mint records no outcome, so no offer follows the (still successful) open. */
+    @Test
+    void aFailedMintOffersNothing() {
+        ReviewTabOpener opener = new ReviewTabOpener(
+                host(),
+                (checkout, linkSession) -> CompletableFuture
+                        .failedFuture(new IllegalStateException("not a git checkout")),
+                recordingLoading(), new RecordingPreparation(false, true));
+
+        opener.openIn(project("/nowhere"), Optional.of(link));
+
+        assertTrue(calls.contains("activate: Drydock Review"), calls::toString);
+        assertTrue(calls.stream().noneMatch(call -> call.startsWith("offer")), calls::toString);
+    }
+
+    /** The probe runs in the background half, before the EDT half finishes the open. */
+    @Test
+    void theDataProbeRunsBeforeTheWindowOpens() {
+        ReviewTabOpener opener = opener(scopeSource(), preparations(false));
+
+        opener.openIn(project("/repo"), Optional.of(link));
+
+        assertTrue(calls.indexOf("hasData: scope-1") >= 0, calls::toString);
+        assertTrue(calls.indexOf("hasData: scope-1") < calls.indexOf("activate: Drydock Review"),
+                calls::toString);
+    }
+
+    /** A preparation seam recording its calls; the probe answers {@code withData}, the offer returns {@code accepted}. */
+    private final class RecordingPreparation implements ReviewTabOpener.Preparation {
+
+        private final boolean withData;
+        private final boolean accepted;
+
+        RecordingPreparation(boolean withData, boolean accepted) {
+            this.withData = withData;
+            this.accepted = accepted;
+        }
+
+        @Override
+        public boolean hasData(ReviewScope scope) {
+            calls.add("hasData: " + scope.id());
+            return withData;
+        }
+
+        @Override
+        public boolean offer(Project project, Path checkout, ReviewScope scope) {
+            calls.add("offer: " + checkout + " " + scope.id());
+            return accepted;
+        }
+
+        @Override
+        public void launch(Project project, Path checkout, ReviewScope scope) {
+            calls.add("launch: " + checkout + " " + scope.id());
+        }
+    }
+
+    /** A preparation seam recording its calls; {@code withData} answers the probe, {@code accepted} the offer. */
+    private RecordingPreparation preparations(boolean withData) {
+        return new RecordingPreparation(withData, false);
+    }
 
     /** A scope source that records the mint and always succeeds. */
     private ReviewTabOpener.ScopeSource scopeSource() {
@@ -331,7 +443,13 @@ class ReviewTabOpenerTest {
     }
 
     private ReviewTabOpener opener(ReviewTabOpener.ScopeSource scopes) {
-        return new ReviewTabOpener(host(), scopes, recordingLoading());
+        // Data present by default: the plain open paths must keep their
+        // exact recorded shape; the offer's own tests pass their seam.
+        return opener(scopes, preparations(true));
+    }
+
+    private ReviewTabOpener opener(ReviewTabOpener.ScopeSource scopes, ReviewTabOpener.Preparation preparations) {
+        return new ReviewTabOpener(host(), scopes, recordingLoading(), preparations);
     }
 
     private static ReviewScope scope() {

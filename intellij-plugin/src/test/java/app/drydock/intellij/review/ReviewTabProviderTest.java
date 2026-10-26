@@ -298,6 +298,49 @@ class ReviewTabProviderTest {
         assertTrue(gate.applies(otherPath, "rs_b", "src/B.java"));
     }
 
+    // ---- the batched decisions hand-off (pure pieces) ---------------------------
+
+    /**
+     * The bar's counts: only unresolved, decided, not-yet-SENT findings
+     * count — exactly what {@code sendDecisions} will include, so the bar
+     * never advertises a batch the send would refuse.
+     */
+    @Test
+    void pendingDecisionsCountsOnlyUndecidedUnsentFindings() {
+        List<ReviewAnnotation> findings = List.of(
+                finding("a1", "src/A.java", "n1", Triage.CONFIRMED, AnnotationStatus.OPEN),
+                finding("a2", "src/A.java", "n2", Triage.DISMISSED, AnnotationStatus.OPEN),
+                finding("a3", "src/A.java", "n3", Triage.PROPOSED, AnnotationStatus.OPEN),
+                finding("a4", "src/A.java", "n4", Triage.CONFIRMED, AnnotationStatus.SENT),
+                finding("a5", "src/A.java", "n5", Triage.CONFIRMED, AnnotationStatus.RESOLVED));
+
+        ReviewTabProvider.PendingDecisions pending = ReviewTabProvider.pendingDecisions(findings);
+
+        assertEquals(1, pending.toFix());
+        assertEquals(1, pending.dismissed());
+        assertEquals(2, pending.total());
+        assertEquals(0, ReviewTabProvider.pendingDecisions(List.of()).total());
+        // The bar and the send share one membership test: the counts can
+        // never advertise a batch sendDecisions would refuse.
+        assertEquals((int) findings.stream()
+                        .filter(ReviewTriageActions::isPendingDecision).count(),
+                pending.total());
+    }
+
+    /** The hand-off's subject: the pull request when the scope carries one, else the checkout's name. */
+    @Test
+    void theHandoffSubjectNamesThePullRequestOrTheCheckout() {
+        ReviewScope withPr = new ReviewScope("rs_a", ReviewScope.Kind.PR, Path.of("/repo"),
+                Optional.empty(), "base", "head",
+                Optional.of(new ReviewScope.PullRequestRef(858, Optional.empty())),
+                Optional.empty(), Optional.empty());
+        ReviewScope withoutPr = new ReviewScope("rs_a", ReviewScope.Kind.WORKING_TREE, Path.of("/repo"),
+                Optional.empty(), "base", "head", Optional.empty(), Optional.empty(), Optional.empty());
+
+        assertEquals("PR #858", ReviewTabProvider.subjectOf(withPr));
+        assertEquals("repo", ReviewTabProvider.subjectOf(withoutPr));
+    }
+
     // ---- the fix outcome messages ----------------------------------------------
 
     /**
@@ -357,7 +400,7 @@ class ReviewTabProviderTest {
         notices.clear();
         messages.clear();
         cards = new ReviewTabProvider.TriageCards(() -> actions,
-                () -> scope(Optional.of(SESSION)), () -> store, Runnable::run,
+                () -> scope(Optional.of(SESSION)), () -> store,
                 (notice, text) -> {
                     notices.add(notice);
                     messages.add(text);
@@ -385,7 +428,6 @@ class ReviewTabProviderTest {
             @Override public void confirm() { }
             @Override public void dismiss() { }
             @Override public void undo() { }
-            @Override public void fix() { }
             @Override public void comment(String text) { }
         }));
 
@@ -413,85 +455,6 @@ class ReviewTabProviderTest {
     }
 
     @Test
-    void aDeliveredFixMarksTheFindingSentAndSurfacesNothing() {
-        ReviewAnnotation finding = finding("f1", "src/Main.java", "n10", Triage.PROPOSED,
-                AnnotationStatus.OPEN);
-        store.upsert(finding);
-        FindingInlayCard card = card(finding);
-
-        onEdt(() -> cards.fix(finding.key(), card));
-
-        assertEquals(AnnotationStatus.SENT, store.byKey(finding.key()).orElseThrow().status());
-        assertEquals(1, prompts.size(), "the shared builder's one-line prompt was submitted once");
-        assertTrue(prompts.get(0).startsWith("Address these review findings on \"src/Main.java\""),
-                prompts.get(0));
-        assertTrue(prompts.get(0).contains("[1] src/Main.java n10: "), prompts.get(0));
-        assertFalse(card.isBusy());
-        assertTrue(notices.isEmpty() && messages.isEmpty(),
-                "a delivered prompt needs no message: the store change rebuild shows SENT");
-    }
-
-    @Test
-    void eachFailedDeliveryOutcomeSurfacesItsOwnDistinctMessageAndMarksNothing() {
-        ReviewAnnotation finding = finding("f1", "src/Main.java", "n10", Triage.PROPOSED,
-                AnnotationStatus.OPEN);
-        store.upsert(finding);
-
-        answer = PromptOutcome.REFUSED;
-        FindingInlayCard refused = card(finding);
-        onEdt(() -> cards.fix(finding.key(), refused));
-        assertEquals(AnnotationStatus.OPEN, store.byKey(finding.key()).orElseThrow().status());
-        assertFalse(refused.isBusy());
-        assertEquals(List.of(ReviewTabProvider.TriageCards.Notice.WARNING), notices);
-        assertTrue(messages.get(0).contains("refused"), messages.get(0));
-
-        answer = PromptOutcome.FAILED;
-        notices.clear();
-        messages.clear();
-        FindingInlayCard failed = card(finding);
-        onEdt(() -> cards.fix(finding.key(), failed));
-        assertEquals(AnnotationStatus.OPEN, store.byKey(finding.key()).orElseThrow().status());
-        assertFalse(failed.isBusy());
-        assertEquals(List.of(ReviewTabProvider.TriageCards.Notice.ERROR), notices);
-        assertTrue(messages.get(0).contains("failed"), messages.get(0));
-        assertTrue(messages.get(0).contains("nothing was sent"), messages.get(0));
-
-        // A submitter that throws: the failure is surfaced, nothing marked.
-        notices.clear();
-        messages.clear();
-        answer = null;
-        FindingInlayCard thrown = card(finding);
-        onEdt(() -> cards.fix(finding.key(), thrown));
-        assertEquals(AnnotationStatus.OPEN, store.byKey(finding.key()).orElseThrow().status());
-        assertFalse(thrown.isBusy());
-        assertEquals(List.of(ReviewTabProvider.TriageCards.Notice.ERROR), notices);
-        assertTrue(messages.get(0).contains("Asking the agent to fix the finding failed"),
-                messages.get(0));
-    }
-
-    @Test
-    void aScopeWithNoBoundSessionSendsNothingAndSaysSoDistinctly() {
-        ReviewAnnotation finding = finding("f1", "src/Main.java", "n10", Triage.PROPOSED,
-                AnnotationStatus.OPEN);
-        store.upsert(finding);
-        cards = new ReviewTabProvider.TriageCards(() -> actions,
-                () -> scope(Optional.empty()), () -> store, Runnable::run,
-                (notice, text) -> {
-                    notices.add(notice);
-                    messages.add(text);
-                });
-        FindingInlayCard card = card(finding);
-
-        onEdt(() -> cards.fix(finding.key(), card));
-
-        assertTrue(prompts.isEmpty(), "nothing was submitted with no session bound");
-        assertEquals(AnnotationStatus.OPEN, store.byKey(finding.key()).orElseThrow().status());
-        assertFalse(card.isBusy());
-        assertEquals(List.of(ReviewTabProvider.TriageCards.Notice.WARNING), notices);
-        assertTrue(messages.get(0).contains("No agent session is bound"), messages.get(0));
-    }
-
-    @Test
     void aMissingFindingSurfacesDistinctlyForBothTriageAndComment() {
         ReviewAnnotation gone = finding("gone", "src/Main.java", "n10", Triage.PROPOSED,
                 AnnotationStatus.OPEN);
@@ -511,12 +474,6 @@ class ReviewTabProviderTest {
         assertEquals(1, messages.size(), "a stale triage write says the finding is gone, once");
         assertTrue(messages.get(0).contains("no longer exists"), messages.get(0));
 
-        notices.clear();
-        messages.clear();
-        onEdt(() -> cards.fix(missing, card));
-        assertTrue(prompts.isEmpty(), "a removed finding's text is never sent");
-        assertEquals(List.of(ReviewTabProvider.TriageCards.Notice.WARNING), notices);
-        assertTrue(messages.get(0).contains("no longer exists; nothing was sent"), messages.get(0));
     }
 
     // ---- synchronous scheduling failures clear the card too ---------------------
@@ -540,7 +497,7 @@ class ReviewTabProviderTest {
             return answer;
         }, Clock.fixed(NOW, ZoneOffset.UTC));
         ReviewTabProvider.TriageCards rejectingCards = new ReviewTabProvider.TriageCards(
-                () -> rejecting, () -> scope(Optional.of(SESSION)), () -> store, Runnable::run,
+                () -> rejecting, () -> scope(Optional.of(SESSION)), () -> store,
                 (notice, text) -> {
                     notices.add(notice);
                     messages.add(text);
@@ -583,66 +540,6 @@ class ReviewTabProviderTest {
                 "the comment was not written");
     }
 
-    @Test
-    void aSynchronouslyRejectedStoreReaderClearsTheFixCardAndSurfacesTheRootCause() {
-        ReviewAnnotation finding = finding("f1", "src/Main.java", "n10", Triage.PROPOSED,
-                AnnotationStatus.OPEN);
-        store.upsert(finding);
-        ReviewTabProvider.TriageCards rejectingReader = new ReviewTabProvider.TriageCards(
-                () -> actions, () -> scope(Optional.of(SESSION)), () -> store, task -> {
-                    throw new RejectedExecutionException("store reader is shut down");
-                }, (notice, text) -> {
-                    notices.add(notice);
-                    messages.add(text);
-                });
-        FindingInlayCard fixCard = card(finding);
-
-        onEdt(() -> rejectingReader.fix(finding.key(), fixCard));
-
-        assertFalse(fixCard.isBusy(), "the card's progress cleared on the synchronous rejection");
-        assertEquals(List.of(ReviewTabProvider.TriageCards.Notice.ERROR), notices);
-        assertTrue(messages.get(0).startsWith("Asking the agent to fix the finding failed: "),
-                messages.get(0));
-        assertTrue(messages.get(0).endsWith("store reader is shut down"), messages.get(0));
-        assertTrue(prompts.isEmpty(), "nothing was submitted");
-        assertEquals(AnnotationStatus.OPEN, store.byKey(finding.key()).orElseThrow().status(),
-                "nothing was marked");
-    }
-
-    @Test
-    void aSynchronouslyRejectedAskToFixInsideTheStoreTaskClearsTheCardAndSurfacesTheRootCause() {
-        ReviewAnnotation finding = finding("f1", "src/Main.java", "n10", Triage.PROPOSED,
-                AnnotationStatus.OPEN);
-        store.upsert(finding);
-        // The store reader runs (Runnable::run), but the ask's own
-        // scheduling — ReviewTriageActions.onExecutor — rejects
-        // synchronously inside the task: no future, no whenComplete.
-        ReviewTriageActions rejecting = new ReviewTriageActions(store, task -> {
-            throw new RejectedExecutionException("executor is shut down");
-        }, (session, prompt) -> {
-            prompts.add(prompt);
-            return PromptOutcome.DELIVERED;
-        }, Clock.fixed(NOW, ZoneOffset.UTC));
-        ReviewTabProvider.TriageCards cardsOverRejectingActions = new ReviewTabProvider.TriageCards(
-                () -> rejecting, () -> scope(Optional.of(SESSION)), () -> store, Runnable::run,
-                (notice, text) -> {
-                    notices.add(notice);
-                    messages.add(text);
-                });
-        FindingInlayCard fixCard = card(finding);
-
-        onEdt(() -> cardsOverRejectingActions.fix(finding.key(), fixCard));
-
-        assertFalse(fixCard.isBusy(), "the card's progress cleared on the synchronous rejection");
-        assertEquals(List.of(ReviewTabProvider.TriageCards.Notice.ERROR), notices);
-        assertTrue(messages.get(0).startsWith("Asking the agent to fix the finding failed: "),
-                messages.get(0));
-        assertTrue(messages.get(0).endsWith("executor is shut down"), messages.get(0));
-        assertTrue(prompts.isEmpty(), "nothing was submitted");
-        assertEquals(AnnotationStatus.OPEN, store.byKey(finding.key()).orElseThrow().status(),
-                "nothing was marked");
-    }
-
     /**
      * The catch split the checker demanded (T9): a synchronous
      * {@link RuntimeException} that is not a rejection — a plain failure
@@ -661,7 +558,7 @@ class ReviewTabProviderTest {
             return answer;
         }, Clock.fixed(NOW, ZoneOffset.UTC));
         ReviewTabProvider.TriageCards throwingCards = new ReviewTabProvider.TriageCards(
-                () -> throwing, () -> scope(Optional.of(SESSION)), () -> store, Runnable::run,
+                () -> throwing, () -> scope(Optional.of(SESSION)), () -> store,
                 (notice, text) -> {
                     notices.add(notice);
                     messages.add(text);
@@ -679,11 +576,9 @@ class ReviewTabProviderTest {
 
     /**
      * The Error half of the split (T9): an {@link Error} is never
-     * converted into a dialog — surfacing it as one swallows it. On every
-     * scheduling path — the triage action's own scheduling, the
-     * store-reader's scheduling, and an Error raised inside the
-     * store-reader task's ask-to-fix scheduling — the card clears and the
-     * Error is rethrown, so it propagates instead of dying in the UI.
+     * converted into a dialog — surfacing it as one swallows it. On the
+     * triage action's own scheduling path the card clears and the Error is
+     * rethrown, so it propagates instead of dying in the UI.
      */
     @Test
     void aSynchronousErrorClearsTheCardAndIsRethrownNeverBecomingADialog() {
@@ -697,7 +592,7 @@ class ReviewTabProviderTest {
             return answer;
         }, Clock.fixed(NOW, ZoneOffset.UTC));
         ReviewTabProvider.TriageCards errorCards = new ReviewTabProvider.TriageCards(
-                () -> failing, () -> scope(Optional.of(SESSION)), () -> store, Runnable::run,
+                () -> failing, () -> scope(Optional.of(SESSION)), () -> store,
                 (notice, text) -> {
                     notices.add(notice);
                     messages.add(text);
@@ -716,44 +611,6 @@ class ReviewTabProviderTest {
         assertTrue(fromConfirm[0] instanceof AssertionError,
                 "the Error is rethrown, not converted into a dialog: " + fromConfirm[0]);
         assertFalse(confirming.isBusy(), "the card's progress cleared before the rethrow");
-
-        // The Error from the store-reader's own scheduling: same rule.
-        ReviewTabProvider.TriageCards errorReader = new ReviewTabProvider.TriageCards(
-                () -> actions, () -> scope(Optional.of(SESSION)), () -> store, task -> {
-                    throw new AssertionError("store reader died");
-                }, (notice, text) -> {
-                    notices.add(notice);
-                    messages.add(text);
-                });
-        FindingInlayCard fixCard = card(finding);
-        Throwable[] fromFix = new Throwable[1];
-        onEdt(() -> {
-            try {
-                errorReader.fix(finding.key(), fixCard);
-            } catch (Error e) {
-                fromFix[0] = e;
-            }
-        });
-        assertTrue(fromFix[0] instanceof AssertionError,
-                "the store-reader Error is rethrown, not converted into a dialog: " + fromFix[0]);
-        assertFalse(fixCard.isBusy(), "the card's progress cleared before the rethrow");
-
-        // The Error raised inside the store-reader task's askToFix: not
-        // swallowed by schedule — it clears the card, rethrows, and
-        // propagates out of the task.
-        FindingInlayCard askCard = card(finding);
-        Throwable[] fromAsk = new Throwable[1];
-        onEdt(() -> {
-            try {
-                errorCards.fix(finding.key(), askCard);
-            } catch (Error e) {
-                fromAsk[0] = e;
-            }
-        });
-        assertTrue(fromAsk[0] instanceof AssertionError,
-                "an Error inside the store-reader task's askToFix is not swallowed by schedule: "
-                        + fromAsk[0]);
-        assertFalse(askCard.isBusy(), "the card's progress cleared before the rethrow");
 
         assertTrue(notices.isEmpty() && messages.isEmpty(), "no dialog was raised for any Error");
         assertTrue(prompts.isEmpty(), "nothing was submitted");
@@ -819,7 +676,6 @@ class ReviewTabProviderTest {
             @Override public void confirm() { }
             @Override public void dismiss() { }
             @Override public void undo() { }
-            @Override public void fix() { }
             @Override public void comment(String text) { }
         }));
     }

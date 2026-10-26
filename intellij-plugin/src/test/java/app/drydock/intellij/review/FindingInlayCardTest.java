@@ -21,7 +21,6 @@ import java.util.List;
 import java.util.Optional;
 
 import javax.swing.JButton;
-import javax.swing.JLabel;
 import javax.swing.JTextField;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -91,7 +90,6 @@ class FindingInlayCardTest {
         @Override public void confirm() { record("confirm"); }
         @Override public void dismiss() { record("dismiss"); }
         @Override public void undo() { record("undo"); }
-        @Override public void fix() { record("fix"); }
         @Override public void comment(String text) { record("comment:" + text); }
 
         void record(String what) {
@@ -104,14 +102,24 @@ class FindingInlayCardTest {
     // ---- component state matrix ----------------------------------------------
 
     @Test
-    void proposedShowsConfirmDismissAndFix() {
+    void proposedShowsAgreeAndWontFixByDefault() {
         FindingInlayCard card = card(finding(Triage.PROPOSED, AnnotationStatus.OPEN), new Recording());
 
         onEdt(() -> {
-            assertEquals(List.of("Confirm", "Dismiss", "Fix"), buttonTexts(card));
-            assertTrue(button(card, "Confirm").isEnabled());
+            assertEquals(List.of("Agree", "Won't fix"), buttonTexts(card));
+            assertTrue(button(card, "Agree").isEnabled());
             assertFalse(card.stateVisible());
         });
+    }
+
+    /** A review with a pull request to post to confirms findings into it: the labels name that meaning. */
+    @Test
+    void aPullRequestReviewConfirmsInsteadOfAgrees() {
+        FindingInlayCard card = card(finding(Triage.PROPOSED, AnnotationStatus.OPEN), new Recording());
+
+        onEdt(() -> card.setTriageLabels("Confirm", "Dismiss"));
+
+        onEdt(() -> assertEquals(List.of("Confirm", "Dismiss"), buttonTexts(card)));
     }
 
     @Test
@@ -137,7 +145,7 @@ class FindingInlayCardTest {
             assertEquals("sent", card.stateText());
             // no invented reply: the thread shows exactly the finding's own messages
             assertEquals(List.of(FIRST_MESSAGE), card.threadLines());
-            assertEquals(List.of("Confirm", "Dismiss", "Fix"), buttonTexts(card));
+            assertEquals(List.of("Agree", "Won't fix"), buttonTexts(card));
         });
     }
 
@@ -185,7 +193,7 @@ class FindingInlayCardTest {
         Recording owner = new Recording();
         FindingInlayCard card = card(finding(Triage.PROPOSED, AnnotationStatus.OPEN), owner);
 
-        onEdt(() -> button(card, "Confirm").doClick());
+        onEdt(() -> button(card, "Agree").doClick());
 
         assertEquals(List.of("confirm"), owner.calls);
         assertEquals(List.of(true), owner.busyAtCall, "the callback must see the card already busy");
@@ -193,7 +201,7 @@ class FindingInlayCardTest {
         onEdt(() -> {
             assertTrue(card.isBusy());
             assertTrue(card.progressVisible());
-            assertFalse(button(card, "Confirm").isEnabled());
+            assertFalse(button(card, "Agree").isEnabled());
             assertFalse(commentField(card).isEnabled());
         });
 
@@ -201,19 +209,19 @@ class FindingInlayCardTest {
         onEdt(() -> {
             assertFalse(card.isBusy());
             assertFalse(card.progressVisible());
-            assertTrue(button(card, "Confirm").isEnabled());
+            assertTrue(button(card, "Agree").isEnabled());
             assertTrue(commentField(card).isEnabled());
         });
 
         onEdt(card::complete); // idempotent: a second completion changes nothing
-        onEdt(() -> assertTrue(button(card, "Confirm").isEnabled()));
+        onEdt(() -> assertTrue(button(card, "Agree").isEnabled()));
     }
 
     @Test
     void aRefusedOrFailedCompletionClearsProgressToo() {
         Recording owner = new Recording();
         FindingInlayCard card = card(finding(Triage.PROPOSED, AnnotationStatus.OPEN), owner);
-        onEdt(() -> button(card, "Dismiss").doClick());
+        onEdt(() -> button(card, "Won't fix").doClick());
 
         onEdt(card::complete); // the owner reports a refusal or failure the same way as success
 
@@ -221,7 +229,7 @@ class FindingInlayCardTest {
             assertEquals(List.of("dismiss"), owner.calls);
             assertFalse(card.isBusy());
             assertFalse(card.progressVisible());
-            assertTrue(button(card, "Dismiss").isEnabled());
+            assertTrue(button(card, "Won't fix").isEnabled());
         });
     }
 
@@ -254,7 +262,7 @@ class FindingInlayCardTest {
         IllegalStateException[] thrown = new IllegalStateException[1];
         onEdt(() -> {
             try {
-                button(card, "Confirm").doClick();
+                button(card, "Agree").doClick();
             } catch (IllegalStateException e) {
                 thrown[0] = e;
             }
@@ -267,7 +275,7 @@ class FindingInlayCardTest {
         onEdt(() -> {
             assertFalse(card.isBusy(), "no async owner exists to call complete(), so the card must restore itself");
             assertFalse(card.progressVisible());
-            assertTrue(button(card, "Confirm").isEnabled());
+            assertTrue(button(card, "Agree").isEnabled());
             assertTrue(commentField(card).isEnabled());
         });
     }
@@ -290,23 +298,23 @@ class FindingInlayCardTest {
     void disposalRemovesProgressAndALateCompletionChangesNothing() {
         Recording owner = new Recording();
         FindingInlayCard card = card(finding(Triage.PROPOSED, AnnotationStatus.OPEN), owner);
-        onEdt(() -> button(card, "Fix").doClick());
+        onEdt(() -> button(card, "Agree").doClick());
         onEdt(() -> assertTrue(card.progressVisible()));
 
         onEdt(card::dispose);
 
         onEdt(() -> {
-            assertEquals(List.of("fix"), owner.calls);
+            assertEquals(List.of("confirm"), owner.calls);
             assertFalse(card.isBusy());
             assertFalse(card.progressVisible());
-            assertFalse(button(card, "Fix").isEnabled());
+            assertFalse(button(card, "Agree").isEnabled());
             assertFalse(commentField(card).isEnabled());
         });
 
         onEdt(card::complete); // the async work finished after the inlay went away
         onEdt(() -> {
             assertFalse(card.progressVisible());
-            assertFalse(button(card, "Fix").isEnabled());
+            assertFalse(button(card, "Agree").isEnabled());
             assertFalse(commentField(card).isEnabled());
         });
     }
@@ -315,7 +323,7 @@ class FindingInlayCardTest {
     void updateRebuildsStateThreadAndActionsWithoutLosingTheBusyContract() {
         Recording owner = new Recording();
         FindingInlayCard card = card(finding(Triage.PROPOSED, AnnotationStatus.OPEN), owner);
-        onEdt(() -> button(card, "Confirm").doClick());
+        onEdt(() -> button(card, "Agree").doClick());
 
         ReviewAnnotation next = finding(Triage.CONFIRMED, AnnotationStatus.SENT)
                 .withReply(new ReviewAnnotation.Message("You", NOW, "on it"));
@@ -402,15 +410,96 @@ class FindingInlayCardTest {
     }
 
     private static String headerText(FindingInlayCard card) {
-        return labelAt(card, 0);
+        return card.headerText();
     }
 
     private static String metaText(FindingInlayCard card) {
-        return labelAt(card, 1);
+        return card.metaText();
     }
 
-    private static String labelAt(FindingInlayCard card, int index) {
-        Component[] children = card.getComponents();
-        return ((JLabel) children[index]).getText();
+    // ---- geometry: wrapping, selection, alignment ------------------------------
+
+    /**
+     * A wrap width makes the card's text blocks wrap at it: the preferred
+     * width stays at the assigned width and a long text's preferred height
+     * grows beyond the single line a fresh text area reports — the wrapped
+     * height is what the inlay must reserve, and the truncation was its
+     * absence.
+     */
+    @Test
+    void aWrapWidthWrapsTheTextBlocksAtIt() {
+        ReviewAnnotation longFinding = new ReviewAnnotation(
+                "s1", "f1", "src/A.java", "n3", "n3",
+                Severity.BLOCKING, Confidence.HIGH,
+                Optional.of("This title is long enough that wrapping it at two hundred pixels "
+                        + "must take more than one line, otherwise the card truncates"), "reviewer",
+                NOW.minus(Duration.ofHours(2)), List.of(), Optional.empty(), Optional.empty(),
+                List.of(), thread("reviewer", "A message long enough that wrapping it at two "
+                + "hundred pixels must take more than one line, otherwise the card truncates."),
+                Optional.empty(), AnnotationStatus.OPEN,
+                Optional.empty(), false, Triage.PROPOSED, Optional.empty());
+        FindingInlayCard card = card(longFinding, new Recording());
+
+        onEdt(() -> {
+            int unwrappedHeight = card.blockHeights().stream().mapToInt(Integer::intValue).sum();
+            card.setWrapWidth(200);
+            int wrappedHeight = card.blockHeights().stream().mapToInt(Integer::intValue).sum();
+            assertTrue(wrappedHeight > unwrappedHeight,
+                    "a long text wraps to a taller block at 200px");
+            for (java.awt.Dimension preferred : blockPreferredSizes(card)) {
+                assertTrue(preferred.width <= 200, "blocks wrap at, never exceed, the assigned width");
+            }
+        });
+    }
+
+    /** The text blocks are selectable for copy-paste but never editable. */
+    @Test
+    void textBlocksAreSelectableAndNotEditable() {
+        FindingInlayCard card = card(finding(Triage.PROPOSED, AnnotationStatus.OPEN), new Recording());
+
+        onEdt(() -> {
+            List<javax.swing.JTextArea> areas = all(card).stream()
+                    .filter(c -> c instanceof javax.swing.JTextArea)
+                    .map(c -> (javax.swing.JTextArea) c)
+                    .toList();
+            assertTrue(areas.size() >= 3, "header, drift and thread are text blocks");
+            for (javax.swing.JTextArea area : areas) {
+                assertFalse(area.isEditable(), "the reviewer copies, never edits, the card's words");
+                assertTrue(area.getWrapStyleWord(), "wrapping breaks at word ends");
+            }
+        });
+    }
+
+    /** The action buttons sit at the card's right edge, not under the text. */
+    @Test
+    void actionsAlignToTheRightEdge() {
+        FindingInlayCard card = card(finding(Triage.PROPOSED, AnnotationStatus.OPEN), new Recording());
+
+        onEdt(() -> {
+            javax.swing.JPanel actionsPanel = all(card).stream()
+                    .filter(c -> c instanceof javax.swing.JPanel panel
+                            && panel.getLayout() instanceof java.awt.BorderLayout
+                            && panel.getComponentCount() > 0
+                            && ((java.awt.BorderLayout) panel.getLayout())
+                                    .getLayoutComponent(java.awt.BorderLayout.EAST) != null)
+                    .map(c -> (javax.swing.JPanel) c)
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("no right-aligned actions row"));
+            java.awt.FlowLayout layout = (java.awt.FlowLayout) all(actionsPanel).stream()
+                    .filter(c -> c instanceof javax.swing.JPanel panel
+                            && panel.getLayout() instanceof java.awt.FlowLayout)
+                    .map(c -> (javax.swing.JPanel) c)
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("no buttons row"))
+                    .getLayout();
+            assertEquals(java.awt.FlowLayout.RIGHT, layout.getAlignment());
+        });
+    }
+
+    private static List<java.awt.Dimension> blockPreferredSizes(FindingInlayCard card) {
+        return all(card).stream()
+                .filter(c -> c instanceof javax.swing.JTextArea)
+                .map(c -> ((javax.swing.JTextArea) c).getPreferredSize())
+                .toList();
     }
 }

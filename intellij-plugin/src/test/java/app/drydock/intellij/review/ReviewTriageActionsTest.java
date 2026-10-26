@@ -299,39 +299,44 @@ class ReviewTriageActionsTest {
         }
     }
 
-    // --- ask-to-fix (AC4) ----------------------------------------------------
+    // --- the batched decisions hand-off (AC4) ----------------------------------
 
     @Test
-    void aDeliveredAskSendsTheSharedPromptAndMarksEveryFindingSent() {
-        List<ReviewAnnotation> findings =
-                List.of(finding("f1", Triage.CONFIRMED, true), finding("f2", Triage.CONFIRMED, true));
-        findings.forEach(store::upsert);
+    void aDeliveredSendCarriesTheWholeDecisionSetInOnePromptAndMarksEveryFindingSent() {
+        store.upsert(finding("f1", Triage.CONFIRMED, true));
+        store.upsert(finding("f2", Triage.DISMISSED, false));
+        store.upsert(finding("f3", Triage.PROPOSED, false)); // not a decision: never sent
+        store.upsert(stored("f1").withReply(new ReviewAnnotation.Message("You", NOW, "please fix the leak")));
 
         ReviewTriageActions.FixOutcome outcome =
-                await(actions.askToFix(scope(Optional.of(SESSION)), "src/Main.java", findings));
+                await(actions.sendDecisions(scope(Optional.of(SESSION)), "src/Main.java"));
 
         assertEquals(ReviewTriageActions.FixOutcome.State.DELIVERED, outcome.state());
-        assertEquals(1, submittedPrompts.size());
+        assertEquals(1, submittedPrompts.size(), "one prompt for the whole decision set");
         assertEquals(SESSION, submittedSession.get());
-        // The app's exact one-line prompt, built by the shared core builder.
+        // The shared builder's decisions prompt: the agreed finding with the
+        // reviewer's comment, then the dismissed one as explicit no-action.
         assertEquals("Address these review findings on \"src/Main.java\", "
                         + "then summarize what you changed: "
-                        + "[1] src/Main.java n10: Title f1. [2] src/Main.java n10: Title f2.",
+                        + "[1] src/Main.java n10: Title f1. You said: \"please fix the leak\". "
+                        + "Dismissed by the reviewer, no action needed: "
+                        + "[1] src/Main.java n10: Title f2.",
                 submittedPrompts.get(0));
-        assertEquals(2, outcome.findings().size());
+        // Both decided findings are SENT; the proposed one is untouched.
         assertEquals(AnnotationStatus.SENT, stored("f1").status());
         assertEquals(AnnotationStatus.SENT, stored("f2").status());
+        assertEquals(AnnotationStatus.OPEN, stored("f3").status());
         for (ReviewAnnotation sent : outcome.findings()) {
             assertEquals(AnnotationStatus.SENT, sent.status());
         }
     }
 
     @Test
-    void anAskWithoutABoundSessionSendsNothingAndMarksNothing() {
+    void aSendWithoutABoundSessionSendsNothingAndMarksNothing() {
         store.upsert(finding("f1", Triage.CONFIRMED, true));
 
-        ReviewTriageActions.FixOutcome outcome = await(actions.askToFix(
-                scope(Optional.empty()), "src/Main.java", List.of(stored("f1"))));
+        ReviewTriageActions.FixOutcome outcome =
+                await(actions.sendDecisions(scope(Optional.empty()), "src/Main.java"));
 
         assertEquals(ReviewTriageActions.FixOutcome.State.NO_SESSION, outcome.state());
         assertTrue(outcome.findings().isEmpty());
@@ -340,22 +345,36 @@ class ReviewTriageActionsTest {
     }
 
     @Test
-    void anEmptyAskIsRefusedBeforeAPromptIsBuilt() {
-        ReviewTriageActions.FixOutcome outcome = await(actions.askToFix(
-                scope(Optional.of(SESSION)), "src/Main.java", List.of()));
+    void anEmptyBatchIsRefusedBeforeAPromptIsBuilt() {
+        store.upsert(finding("f1", Triage.PROPOSED, false)); // no decision yet
+
+        ReviewTriageActions.FixOutcome outcome =
+                await(actions.sendDecisions(scope(Optional.of(SESSION)), "src/Main.java"));
 
         assertEquals(ReviewTriageActions.FixOutcome.State.EMPTY, outcome.state());
         assertTrue(submittedPrompts.isEmpty());
     }
 
     @Test
-    void aRefusedHandOffMarksNothing() {
-        List<ReviewAnnotation> findings = List.of(finding("f1", Triage.CONFIRMED, true));
-        findings.forEach(store::upsert);
+    void anAlreadySentFindingIsNeverSentTwice() {
+        store.upsert(finding("f1", Triage.CONFIRMED, true));
+        await(actions.sendDecisions(scope(Optional.of(SESSION)), "src/Main.java"));
+        submittedPrompts.clear();
+
+        ReviewTriageActions.FixOutcome outcome =
+                await(actions.sendDecisions(scope(Optional.of(SESSION)), "src/Main.java"));
+
+        assertEquals(ReviewTriageActions.FixOutcome.State.EMPTY, outcome.state());
+        assertTrue(submittedPrompts.isEmpty(), "SENT findings are outside every later batch");
+    }
+
+    @Test
+    void aRefusedSendMarksNothing() {
+        store.upsert(finding("f1", Triage.CONFIRMED, true));
         submitAnswer.set(PromptOutcome.REFUSED);
 
         ReviewTriageActions.FixOutcome outcome =
-                await(actions.askToFix(scope(Optional.of(SESSION)), "src/Main.java", findings));
+                await(actions.sendDecisions(scope(Optional.of(SESSION)), "src/Main.java"));
 
         assertEquals(ReviewTriageActions.FixOutcome.State.REFUSED, outcome.state());
         assertTrue(outcome.findings().isEmpty());
@@ -363,17 +382,34 @@ class ReviewTriageActionsTest {
     }
 
     @Test
-    void aFailedHandOffMarksNothing() {
-        List<ReviewAnnotation> findings = List.of(finding("f1", Triage.CONFIRMED, true));
-        findings.forEach(store::upsert);
+    void aFailedSendMarksNothing() {
+        store.upsert(finding("f1", Triage.CONFIRMED, true));
         submitAnswer.set(PromptOutcome.FAILED);
 
         ReviewTriageActions.FixOutcome outcome =
-                await(actions.askToFix(scope(Optional.of(SESSION)), "src/Main.java", findings));
+                await(actions.sendDecisions(scope(Optional.of(SESSION)), "src/Main.java"));
 
         assertEquals(ReviewTriageActions.FixOutcome.State.FAILED, outcome.state());
         assertTrue(outcome.findings().isEmpty());
         assertEquals(AnnotationStatus.OPEN, stored("f1").status());
+    }
+
+    @Test
+    void aResolvedFindingIsOutsideEveryBatch() {
+        ReviewAnnotation resolved = new ReviewAnnotation(
+                "rs_a", "f1", "src/Main.java", "n10", "n12",
+                Severity.QUESTION, Confidence.HIGH, Optional.of("Title f1"), "Claude", AT,
+                List.of(), Optional.empty(), Optional.empty(), List.of(),
+                List.of(new ReviewAnnotation.Message("Claude", AT, "body of f1")),
+                Optional.empty(), AnnotationStatus.RESOLVED, Optional.empty(), true,
+                Triage.CONFIRMED, Optional.empty());
+        store.upsert(resolved);
+
+        ReviewTriageActions.FixOutcome outcome =
+                await(actions.sendDecisions(scope(Optional.of(SESSION)), "src/Main.java"));
+
+        assertEquals(ReviewTriageActions.FixOutcome.State.EMPTY, outcome.state());
+        assertTrue(submittedPrompts.isEmpty());
     }
 
     // --- typed-outcome invariants (direct construction) ----------------------
@@ -464,8 +500,7 @@ class ReviewTriageActionsTest {
 
         await(actions.confirm(new ReviewAnnotation.Key("rs_a", "f1")));
         await(actions.comment(new ReviewAnnotation.Key("rs_a", "f1"), "note"));
-        await(actions.askToFix(scope(Optional.of(SESSION)), "src/Main.java",
-                List.of(stored("f1"))));
+        await(actions.sendDecisions(scope(Optional.of(SESSION)), "src/Main.java"));
 
         assertFalse(executor.threads.isEmpty(), "the work must have gone through the executor");
         for (Thread thread : executor.threads) {
@@ -482,16 +517,15 @@ class ReviewTriageActionsTest {
 
     @Test
     void aThrowingSubmitterFailsTheFutureAndMarksNothing() {
-        List<ReviewAnnotation> findings = List.of(finding("f1", Triage.CONFIRMED, true));
-        findings.forEach(store::upsert);
+        store.upsert(finding("f1", Triage.CONFIRMED, true));
         ReviewTriageActions broken = new ReviewTriageActions(store, executor,
                 (session, prompt) -> {
                     throw new IllegalStateException("registry is gone");
                 },
                 Clock.fixed(NOW, ZoneOffset.UTC));
 
-        CompletableFuture<ReviewTriageActions.FixOutcome> future = broken.askToFix(
-                scope(Optional.of(SESSION)), "src/Main.java", findings);
+        CompletableFuture<ReviewTriageActions.FixOutcome> future =
+                broken.sendDecisions(scope(Optional.of(SESSION)), "src/Main.java");
         ExecutionException failure =
                 assertThrows(ExecutionException.class, () -> future.get(10, TimeUnit.SECONDS));
         assertTrue(failure.getCause() instanceof IllegalStateException);

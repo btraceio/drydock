@@ -222,7 +222,6 @@ class ReviewDiffInlaysTest {
                         @Override public void confirm() { }
                         @Override public void dismiss() { }
                         @Override public void undo() { }
-                        @Override public void fix() { }
                         @Override public void comment(String text) { }
                     });
             built.add(card);
@@ -594,7 +593,7 @@ class ReviewDiffInlaysTest {
         });
         FindingInlayCard live = cards.built.get(0);
 
-        onEdt(() -> button(live, "Confirm").doClick()); // an action goes in flight
+        onEdt(() -> button(live, "Agree").doClick()); // an action goes in flight
         onEdt(() -> assertTrue(live.isBusy(), "the action is in flight on the live card"));
 
         onEdt(() -> { // the rebuild releases the inlay — and disposes the card with it
@@ -604,14 +603,14 @@ class ReviewDiffInlaysTest {
         assertTrue(right.inlays.get(0).released, "the prior inlay is disposed");
 
         onEdt(live::complete); // the owner's late completion
-        onEdt(() -> assertFalse(button(live, "Confirm").isEnabled(),
+        onEdt(() -> assertFalse(button(live, "Agree").isEnabled(),
                 "a late completion on the detached card is inert: the controls stay dead"));
 
         FindingInlayCard rebuilt = cards.built.get(1); // the rebuild's fresh card
-        onEdt(() -> button(rebuilt, "Confirm").doClick());
+        onEdt(() -> button(rebuilt, "Agree").doClick());
         onEdt(inlays::dispose);
         onEdt(rebuilt::complete);
-        onEdt(() -> assertFalse(button(rebuilt, "Confirm").isEnabled(),
+        onEdt(() -> assertFalse(button(rebuilt, "Agree").isEnabled(),
                 "dispose releases the card too: a late completion changes nothing"));
     }
 
@@ -721,7 +720,7 @@ class ReviewDiffInlaysTest {
 
         onEdt(() -> card[0] = (FindingInlayCard) ReviewDiffInlays.triageCards(
                 Clock.fixed(NOW, ZoneOffset.UTC), actions).card(finding, Optional.empty()));
-        onEdt(() -> button(card[0], "Confirm").doClick());
+        onEdt(() -> button(card[0], "Agree").doClick());
 
         assertEquals(finding.key(), actions.key);
         assertEquals(card[0], actions.card);
@@ -743,10 +742,6 @@ class ReviewDiffInlaysTest {
 
         @Override
         public void undo(ReviewAnnotation.Key key, FindingInlayCard card) {
-        }
-
-        @Override
-        public void fix(ReviewAnnotation.Key key, FindingInlayCard card) {
         }
 
         @Override

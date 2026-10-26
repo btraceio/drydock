@@ -4,8 +4,20 @@ import app.drydock.review.AnnotationStatus;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.Triage;
 
+import javax.swing.BorderFactory;
+import javax.swing.BoxLayout;
+import javax.swing.JButton;
+import javax.swing.JLabel;
+import javax.swing.JPanel;
+import javax.swing.JTextArea;
+import javax.swing.JTextField;
+import java.awt.BorderLayout;
 import java.awt.Component;
+import java.awt.Dimension;
 import java.awt.EventQueue;
+import java.awt.FlowLayout;
+import java.awt.Font;
+import java.awt.Insets;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -14,20 +26,26 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 
-import javax.swing.BoxLayout;
-import javax.swing.JButton;
-import javax.swing.JLabel;
-import javax.swing.JPanel;
-import javax.swing.JTextField;
-
 /**
  * The Swing content of one finding's diff inlay (spec "Review surface and
  * diff inlays", AC1): severity and title, author and relative age, the drift
  * hint when the anchor fell out of the current diff, the whole thread, a
  * comment box that submits on Enter, and the actions the finding's state
- * allows — PROPOSED shows Confirm/Dismiss/Fix, CONFIRMED and DISMISSED keep
+ * allows — PROPOSED shows Agree/Won't fix, CONFIRMED and DISMISSED keep
  * the card and expose Undo, and a SENT finding says so instead of pretending
  * a reply.
+ *
+ * <p><strong>Geometry is the owner's business.</strong> The card fills the
+ * width its inlay container assigns (the editor's text width, minus the
+ * indent border the host adds): every text block is a non-editable, wrapped,
+ * selectable {@link javax.swing.JTextArea} whose preferred height is
+ * computed at the assigned width, so nothing truncates and every word is
+ * selectable for copy-paste. The width arrives through {@link
+ * #setWrapWidth(int)} (the container, on attach and on every editor resize;
+ * the card's own {@link #doLayout} re-applies it when the assigned width
+ * changes) — until it is set the card reports an unwrapped preferred size,
+ * which is why the container must apply the width before the inlay is
+ * measured.</p>
  *
  * <p>The card renders state and invokes the injected {@link Callbacks};
  * it never touches a store, a process or the filesystem, and it runs no work
@@ -49,8 +67,6 @@ public final class FindingInlayCard extends JPanel {
 
         void undo();
 
-        void fix();
-
         void comment(String text);
     }
 
@@ -58,18 +74,31 @@ public final class FindingInlayCard extends JPanel {
 
     private final Clock clock;
     private final Callbacks callbacks;
-    private final JLabel header = new JLabel();
+    private final List<TextBlock> blocks = new ArrayList<>();
+    private final TextBlock header = new TextBlock();
     private final JLabel meta = new JLabel();
     private final JLabel state = new JLabel();
-    private final JLabel drift = new JLabel();
-    private final JPanel thread = new JPanel();
+    private final TextBlock drift = new TextBlock();
+    private final TextBlock thread = new TextBlock();
     private final JTextField comment = new JTextField();
+    private final JPanel actions = new JPanel(new BorderLayout());
+    private final JPanel actionButtons = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 0));
     private final JLabel progress = new JLabel(PROGRESS_TEXT);
-    private final JPanel actions = new JPanel();
+    /**
+     * The triage buttons' labels: "Agree"/"Won't fix" by default — the honest
+     * reading for a review with nothing to post to — and the owner switches
+     * to "Confirm"/"Dismiss" when the scope carries a pull request, where
+     * confirming vouches the finding into the posted review.
+     */
+    private String confirmLabel = "Agree";
+    private String dismissLabel = "Won't fix";
+    /** One entry per thread message, embedded newlines intact — the accessor's contract. */
     private final List<String> threadLines = new ArrayList<>();
     private ReviewAnnotation finding;
     private boolean busy;
     private boolean disposed;
+    /** The content width the text blocks wrap at; 0 until the container assigns one. */
+    private int wrapWidth;
 
     /** {@code driftHint} is present exactly when the placement fell back to the first hunk (T3). */
     public FindingInlayCard(ReviewAnnotation finding, Optional<String> driftHint,
@@ -84,8 +113,10 @@ public final class FindingInlayCard extends JPanel {
         drift.setVisible(driftHint.isPresent());
         progress.setVisible(false);
         comment.addActionListener(e -> submitComment());
+        actions.add(actionButtons, BorderLayout.EAST);
         // vertical order: header, meta, state, drift hint, thread, comment box, actions, progress
         List.of(header, meta, state, drift, thread, comment, actions, progress).forEach(this::add);
+        blocks.addAll(List.of(header, drift, thread));
         render();
     }
 
@@ -121,6 +152,81 @@ public final class FindingInlayCard extends JPanel {
         return busy;
     }
 
+    /**
+     * The triage buttons' labels for this scope's shape: a pull-request
+     * review confirms findings into the posted review ("Confirm"); a local
+     * review only agrees the finding is valid ("Agree") — the same store
+     * state either way, named for what the click means where there is no
+     * submission target. Re-rendering keeps the labels.
+     */
+    public void setTriageLabels(String confirmLabel, String dismissLabel) {
+        checkEdt();
+        this.confirmLabel = Objects.requireNonNull(confirmLabel, "confirmLabel");
+        this.dismissLabel = Objects.requireNonNull(dismissLabel, "dismissLabel");
+        renderActions();
+    }
+
+    /**
+     * The content width the text blocks wrap at — the inlay container calls
+     * this when it attaches the card and whenever the editor's text width
+     * changes. Zero or negative (no width yet, or a degenerate container)
+     * leaves the blocks unwrapped.
+     */
+    public void setWrapWidth(int width) {
+        checkEdt();
+        Insets insets = getInsets();
+        int content = width - insets.left - insets.right;
+        if (content <= 0 || content == wrapWidth) {
+            return;
+        }
+        wrapWidth = content;
+        applyWrapWidth();
+        revalidate();
+    }
+
+    /** The card's own layout: a changed assigned width re-wraps the blocks at it. */
+    @Override
+    public void doLayout() {
+        super.doLayout();
+        Insets insets = getInsets();
+        int assigned = getWidth() - insets.left - insets.right;
+        if (assigned > 0 && assigned != wrapWidth) {
+            wrapWidth = assigned;
+            applyWrapWidth();
+        }
+    }
+
+    /**
+     * The preferred size at the assigned width: every block's preferred
+     * height is already the wrapped height ({@link #applyWrapWidth} sizes
+     * each block at {@code wrapWidth} before its height is read), so this is
+     * the height the container and the inlay must reserve — never the
+     * unwrapped height a fresh text area would report, which was the
+     * truncation.
+     */
+    @Override
+    public Dimension getPreferredSize() {
+        Insets insets = getInsets();
+        int height = insets.top + insets.bottom;
+        int width = Math.max(wrapWidth, 0) + insets.left + insets.right;
+        for (Component child : getComponents()) {
+            if (!child.isVisible()) {
+                continue;
+            }
+            Dimension preferred = child.getPreferredSize();
+            height += preferred.height;
+            width = Math.max(width, preferred.width + insets.left + insets.right);
+        }
+        return new Dimension(width, height);
+    }
+
+    /** Re-sizes every text block at the current width so its preferred height is the wrapped height. */
+    private void applyWrapWidth() {
+        for (TextBlock block : blocks) {
+            block.wrapAt(wrapWidth);
+        }
+    }
+
     // Package-private views for the test: what the rendering said, without a component walk.
 
     boolean progressVisible() {
@@ -143,8 +249,21 @@ public final class FindingInlayCard extends JPanel {
         return drift.getText();
     }
 
+    String headerText() {
+        return header.getText();
+    }
+
+    String metaText() {
+        return meta.getText();
+    }
+
     List<String> threadLines() {
         return List.copyOf(threadLines);
+    }
+
+    /** The text blocks' wrapped preferred heights, for the wrapping test. */
+    List<Integer> blockHeights() {
+        return blocks.stream().map(block -> block.getPreferredSize().height).toList();
     }
 
     private void render() {
@@ -153,6 +272,7 @@ public final class FindingInlayCard extends JPanel {
         renderState();
         renderThread();
         renderActions();
+        applyWrapWidth();
     }
 
     private void renderState() {
@@ -168,25 +288,31 @@ public final class FindingInlayCard extends JPanel {
     }
 
     private void renderThread() {
-        thread.removeAll();
-        threadLines.clear();
-        thread.setLayout(new BoxLayout(thread, BoxLayout.Y_AXIS));
+        List<String> lines = new ArrayList<>();
         for (ReviewAnnotation.Message message : finding.thread()) {
-            String line = message.author() + " · " + age(message.at()) + ": " + message.text();
-            threadLines.add(line);
-            thread.add(new JLabel(line));
+            lines.add(message.author() + " · " + age(message.at()) + ": " + message.text());
         }
-        thread.revalidate();
+        threadLines.clear();
+        threadLines.addAll(lines);
+        thread.setText(String.join("\n", lines));
+        thread.setVisible(!lines.isEmpty());
     }
 
     private void renderActions() {
-        actions.removeAll();
+        actionButtons.removeAll();
         if (finding.triage() == Triage.PROPOSED) {
-            actions.add(button("Confirm", callbacks::confirm));
-            actions.add(button("Dismiss", callbacks::dismiss));
-            actions.add(button("Fix", callbacks::fix));
+            JButton confirm = button(confirmLabel, callbacks::confirm);
+            confirm.setToolTipText("The finding is valid: it is included when this review is submitted,"
+                    + " and in the next decisions hand-off to the agent.");
+            JButton dismiss = button(dismissLabel, callbacks::dismiss);
+            dismiss.setToolTipText("The finding is dismissed: reported to the agent as a decision"
+                    + " with the next hand-off, and left out of the review submission.");
+            actionButtons.add(confirm);
+            actionButtons.add(dismiss);
         } else {
-            actions.add(button("Undo", callbacks::undo));
+            JButton undo = button("Undo", callbacks::undo);
+            undo.setToolTipText("Back to proposed.");
+            actionButtons.add(undo);
         }
         setControlsEnabled(!busy && !disposed);
         actions.revalidate();
@@ -226,7 +352,7 @@ public final class FindingInlayCard extends JPanel {
     }
 
     private void setControlsEnabled(boolean enabled) {
-        for (Component child : actions.getComponents()) {
+        for (Component child : actionButtons.getComponents()) {
             child.setEnabled(enabled);
         }
         comment.setEnabled(enabled);
@@ -254,6 +380,36 @@ public final class FindingInlayCard extends JPanel {
     private static void checkEdt() {
         if (!EventQueue.isDispatchThread()) {
             throw new IllegalStateException("FindingInlayCard must be constructed and mutated on the EDT");
+        }
+    }
+
+    /**
+     * One wrapped, selectable, non-editable text block. The preferred height
+     * is the height of the text wrapped at {@code wrapWidth} — recomputed by
+     * sizing the area at that width ({@link #wrapAt}), the standard Swing
+     * trick, because a fresh text area's preferred size is the unwrapped
+     * single line. Selectable but not editable: the reviewer can select and
+     * copy the finding's words, never change them.
+     */
+    private static final class TextBlock extends JTextArea {
+
+        private TextBlock() {
+            setLineWrap(true);
+            setWrapStyleWord(true);
+            setEditable(false);
+            setOpaque(false);
+            setBorder(BorderFactory.createEmptyBorder());
+            setFont((Font) javax.swing.UIManager.get("Label.font"));
+        }
+
+        /** Re-sizes the block at {@code width} so its preferred height is the wrapped height. */
+        void wrapAt(int width) {
+            if (width <= 0) {
+                return;
+            }
+            setSize(width, Integer.MAX_VALUE);
+            Dimension wrapped = getPreferredSize();
+            setPreferredSize(new Dimension(width, wrapped.height));
         }
     }
 }

@@ -4,13 +4,18 @@ import app.drydock.domain.ManagedAgentSession;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.WorktreeService;
 import app.drydock.intellij.DrydockPluginService;
+import app.drydock.intellij.tasks.WorktreeReview;
 import app.drydock.review.ReviewScope;
 
+import com.intellij.icons.AllIcons;
+import com.intellij.openapi.application.ApplicationManager;
+import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.progress.ProgressIndicator;
 import com.intellij.openapi.progress.ProgressManager;
 import com.intellij.openapi.progress.Task;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.Key;
+import com.intellij.openapi.ui.Messages;
 import com.intellij.openapi.wm.ToolWindow;
 import com.intellij.openapi.wm.ToolWindowManager;
 import org.jetbrains.annotations.NotNull;
@@ -21,6 +26,7 @@ import java.nio.file.Path;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Opens the Drydock Review tab — what the console strip's Changes link
@@ -102,16 +108,18 @@ public final class ReviewTabOpener {
     }
 
     private static final ReviewTabOpener PRODUCTION = new ReviewTabOpener(
-            new ProductionHost(), ReviewTabOpener::mintScope, new ProgressLoading());
+            new ProductionHost(), ReviewTabOpener::mintScope, new ProgressLoading(), new PreparationOffers());
 
     private final Host host;
     private final ScopeSource scopes;
     private final Loading loading;
+    private final Preparation preparations;
 
-    ReviewTabOpener(Host host, ScopeSource scopes, Loading loading) {
+    ReviewTabOpener(Host host, ScopeSource scopes, Loading loading, Preparation preparations) {
         this.host = Objects.requireNonNull(host, "host");
         this.scopes = Objects.requireNonNull(scopes, "scopes");
         this.loading = Objects.requireNonNull(loading, "loading");
+        this.preparations = Objects.requireNonNull(preparations, "preparations");
     }
 
     /**
@@ -158,10 +166,14 @@ public final class ReviewTabOpener {
         host.saveDocuments(project);
         // The placeholder next (AC18): the click visibly does something
         // before any background work starts, and before the window is
-        // activated.
+        // activated. The mint hands its outcome to the EDT half through the
+        // reference — one open, one hand-off; two opens racing is the same
+        // accepted race the mint documents, and each finish reads only its
+        // own outcome.
+        AtomicReference<Outcome> minted = new AtomicReference<>();
         loading.run(project, ReviewTabStatus.LOADING.message(),
-                () -> mint(project, linkSession),
-                () -> selectTab(project));
+                () -> mint(project, linkSession, minted),
+                () -> finish(project, minted.get()));
     }
 
     /** The gutter path over the seams; see {@link #openFinding}. */
@@ -180,13 +192,16 @@ public final class ReviewTabOpener {
 
     /**
      * The background half: the mint of the window's checkout scope, bound
-     * to the link session (T8, Q7). The minted value itself is the tab's
-     * to read — this path only establishes it in the registry.
+     * to the link session (T8, Q7), plus the data probe that decides the
+     * empty-review offer. The minted value itself is the tab's to read —
+     * this path only establishes it in the registry. The probe runs here,
+     * off the EDT, because it reads the persisted stores.
      */
-    private void mint(Project project, Optional<ManagedAgentSession> linkSession) {
+    private void mint(Project project, Optional<ManagedAgentSession> linkSession, AtomicReference<Outcome> into) {
         Path checkout = checkoutOf(project);
         try {
-            scopes.resolve(checkout, linkSession).join();
+            ReviewScope scope = scopes.resolve(checkout, linkSession).join();
+            into.set(new Outcome(scope, preparations.hasData(scope)));
         } catch (RuntimeException e) {
             // The open is not lost: the tab's own load resolves the same
             // checkout and shows the failure in its own states (AC22).
@@ -195,6 +210,29 @@ public final class ReviewTabOpener {
             // checkout.
             LOG.log(Level.WARNING,
                     "The Changes link could not bind the Review tab's scope for " + checkout, rootCause(e));
+        }
+    }
+
+    /**
+     * The EDT half after the mint: activate the dedicated Review window —
+     * its single content needs no separate selection (T7) — then re-run its
+     * diff. When the minted scope carries no review data (no findings, no
+     * tour — a checkout no review was ever prepared for), the open ends in
+     * the preparation offer instead of a silently empty window: the review
+     * data lives with the checkout a review ran against, and a session that
+     * never had one must be told so, with the launch one confirmation away.
+     */
+    private void finish(Project project, Outcome outcome) {
+        if (project.isDisposed()) {
+            return;
+        }
+        selectTab(project);
+        if (outcome == null || outcome.hasData()) {
+            return; // mint failed (already warned), or a review exists for this checkout
+        }
+        Path checkout = checkoutOf(project);
+        if (preparations.offer(project, checkout, outcome.scope())) {
+            preparations.launch(project, checkout, outcome.scope());
         }
     }
 
@@ -208,6 +246,41 @@ public final class ReviewTabOpener {
         }
         host.activate(project, ReviewToolWindowFactory.TOOL_WINDOW_ID);
         host.reloadTab(project);
+    }
+
+    /**
+     * The mint's outcome handed from the background half to the EDT half:
+     * the scope (never null here — a failed mint stores nothing) and whether
+     * it already carries review data. The flag is computed off the EDT,
+     * where the stores are read.
+     */
+    private record Outcome(ReviewScope scope, boolean hasData) { }
+
+    /**
+     * The empty-review offer's seams: the data probe (off the EDT, reading
+     * the persisted stores), the question (EDT), and the launch (EDT;
+     * resolves the main root and branch itself). Faked in tests.
+     */
+    interface Preparation {
+
+        /**
+         * Whether {@code scope} already carries review data — at least one
+         * finding or a tour. In-memory store reads; called off the EDT.
+         */
+        boolean hasData(ReviewScope scope);
+
+        /**
+         * Asks whether to run the review preparation for {@code scope}'s
+         * checkout; true on acceptance, false on dismissal. EDT.
+         */
+        boolean offer(Project project, Path checkout, ReviewScope scope);
+
+        /**
+         * Launches the review-preparation flow (the task window's Review
+         * flow) for {@code scope}'s checkout. EDT; the checkout's main root
+         * and branch are resolved on a background thread, never here.
+         */
+        void launch(Project project, Path checkout, ReviewScope scope);
     }
 
     /** The project's checkout — the window's own scope, which on both strip
@@ -414,6 +487,88 @@ public final class ReviewTabOpener {
                     done.run();
                 }
             });
+        }
+    }
+
+    /**
+     * The production empty-review offer. The probe reads the review
+     * backend's persisted stores (findings, tours) — in-memory maps loaded
+     * when the backend started, so the read never blocks on disk. The
+     * offer is a plain ok/cancel dialog; the launch reuses the task
+     * window's Review flow ({@link WorktreeReview#reviewWithModelDialog}),
+     * which owns its own background work, model pickers and in-flight
+     * guard — this class only finds the checkout's main root and branch
+     * for it, off the EDT.
+     */
+    private static final class PreparationOffers implements Preparation {
+
+        @Override
+        public boolean hasData(ReviewScope scope) {
+            return DrydockPluginService.getInstance().reviewBackend()
+                    .map(backend -> !backend.annotationStore().forScope(scope.id()).isEmpty()
+                            || backend.tourStore().forScope(scope.id()).isPresent())
+                    // No backend: the mint failed before any store existed —
+                    // never offer a launch that cannot start.
+                    .orElse(true);
+        }
+
+        @Override
+        public boolean offer(Project project, Path checkout, ReviewScope scope) {
+            if (project.isDisposed()) {
+                return false;
+            }
+            return Messages.showOkCancelDialog(project,
+                    "No review has been prepared for " + checkout.getFileName() + ".\n\n"
+                            + "Run the review preparation? An agent reviews this checkout and "
+                            + "produces the findings and tour the review board shows.",
+                    "Drydock Review",
+                    "Run preparation", "Cancel", AllIcons.General.QuestionDialog) == Messages.OK;
+        }
+
+        @Override
+        public void launch(Project project, Path checkout, ReviewScope scope) {
+            if (project.isDisposed()) {
+                return;
+            }
+            Path target = scope.diffRoot();
+            WorktreeService worktrees = new WorktreeService();
+            worktrees.list(checkout)
+                    .thenApply(listed -> {
+                        WorktreeService.Worktree main = listed.stream()
+                                .filter(WorktreeService.Worktree::mainCheckout).findFirst()
+                                .orElseThrow(() -> new IllegalStateException(
+                                        checkout + " is not in a git repository"));
+                        WorktreeService.Worktree own = listed.stream()
+                                .filter(entry -> samePath(entry.path(), target)).findFirst()
+                                .orElse(main);
+                        // The task window's own branch fallback: a detached
+                        // worktree is labelled by its directory name.
+                        String branch = own.branch().orElse(String.valueOf(own.path().getFileName()));
+                        return new String[] { main.path().toString(), own.path().toString(), branch };
+                    })
+                    .whenComplete((ignored, error) -> closeQuietly(worktrees, "worktree service"))
+                    .thenAccept(rootAndBranch -> ApplicationManager.getApplication().invokeLater(() -> {
+                        if (project.isDisposed()) {
+                            return;
+                        }
+                        new WorktreeReview().reviewWithModelDialog(project,
+                                Path.of(rootAndBranch[0]), Path.of(rootAndBranch[1]), rootAndBranch[2]);
+                    }, ModalityState.nonModal()))
+                    .exceptionally(error -> {
+                        LOG.log(Level.WARNING,
+                                "Could not resolve the checkout for the review preparation of " + target,
+                                rootCause(error));
+                        return null;
+                    });
+        }
+
+        /** Real-path equality: macOS lists temporary directories as {@code /private/var/…}. */
+        private static boolean samePath(Path a, Path b) {
+            try {
+                return a.toRealPath().equals(b.toRealPath());
+            } catch (RuntimeException | java.io.IOException e) {
+                return a.toAbsolutePath().normalize().equals(b.toAbsolutePath().normalize());
+            }
         }
     }
 }
