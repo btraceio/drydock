@@ -52,6 +52,7 @@ import app.drydock.mcp.WorkspaceMcpSessionContext;
 import app.drydock.process.SshCommandBuilder;
 import app.drydock.process.TmuxPersistence;
 import app.drydock.review.AnnotationStore;
+import app.drydock.review.FindingsPrompt;
 import app.drydock.review.BaseMove;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewVerdict;
@@ -2427,12 +2428,16 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             annotationStore.mutate(finding.key(), current -> current.withSeverityOverride(severity));
         }
 
+        /**
+         * The Fix ask: the findings through the shared builder's fix
+         * heading ({@link FindingsPrompt#forFix}), then the standard
+         * hand-off -- every finding SENT unless the session refused.
+         */
         @Override
         public boolean askAgentToFix(ReviewScope scope, String subject,
                                      List<ReviewAnnotation> findings) {
-            return handFindingsToSession(scope,
-                    "Address these review findings on \"" + subject + "\", then summarize what you changed: ",
-                    findings);
+            return askToFix(scope, subject, findings,
+                    MainWorkspace.this::sendToBoundSession, sentMarker());
         }
 
         /**
@@ -2449,37 +2454,21 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             return handoff != Handoff.REFUSED;
         }
 
+        /**
+         * The send-back hand-off: the same findings through the shared
+         * builder under the reviewer's own heading, so the two asks stay
+         * distinct asks while their finding lines render identically.
+         */
         @Override
         public boolean sendFindingsToAuthor(ReviewScope scope, List<ReviewAnnotation> findings) {
-            return handFindingsToSession(scope,
-                    "The reviewer sent these blocking findings back. Address them, then summarize what you changed: ",
-                    findings);
+            return sendFindingsBack(scope, findings,
+                    MainWorkspace.this::sendToBoundSession, sentMarker());
         }
 
-        /**
-         * Hands {@code findings} to the scope's bound session as one prompt
-         * opening with {@code heading}, and marks them SENT once the hand-off
-         * succeeded. False when there was nothing to hand or no session.
-         */
-        private boolean handFindingsToSession(ReviewScope scope, String heading, List<ReviewAnnotation> findings) {
-            if (findings.isEmpty()) {
-                return false;
-            }
-            StringBuilder prompt = new StringBuilder(heading);
-            int n = 1;
-            for (ReviewAnnotation finding : findings) {
-                prompt.append('[').append(n++).append("] ").append(finding.file()).append(' ')
-                        .append(finding.startKey()).append(": ")
-                        .append(finding.displayTitle().replaceAll("\\s+", " ")).append(". ");
-            }
-            if (sendToBoundSession(scope, prompt.toString().strip()) == Handoff.REFUSED) {
-                return false;
-            }
-            for (ReviewAnnotation finding : findings) {
-                annotationStore.mutate(finding.key(),
-                        current -> current.withStatus(AnnotationStatus.SENT));
-            }
-            return true;
+        /** Marks one finding SENT once its hand-off did not refuse (see {@link #handFindings}). */
+        private Consumer<ReviewAnnotation> sentMarker() {
+            return finding -> annotationStore.mutate(finding.key(),
+                    current -> current.withStatus(AnnotationStatus.SENT));
         }
 
         @Override
@@ -3185,9 +3174,10 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * moment the surface is attached, and a tab dying before adoption loses
      * it (logged, never silent). Callers decide per outcome whether a held
      * ask counts as a recorded claim; none of them may treat REFUSED as
-     * anything but "nothing was sent".
+     * anything but "nothing was sent". Package-private so the findings
+     * hand-off seams can name it in tests without a workspace.
      */
-    private enum Handoff {
+    enum Handoff {
         /** The terminal submitted the prompt to the running process. */
         DELIVERED,
         /**
@@ -3280,6 +3270,63 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         // Benignly racy: a surface adopted between the two reads mislabels a
         // delivered prompt as held -- the prompt itself is delivered either way.
         return open.surfaceAdopted() ? Handoff.DELIVERED : Handoff.HELD;
+    }
+
+    /** The send-back hand-off's heading: the reviewer's own ask, distinct from the Fix chip's. */
+    private static final String SEND_BACK_HEADING =
+            "The reviewer sent these blocking findings back. Address them, then summarize what you changed: ";
+
+    /**
+     * The Fix chip's hand-off: the findings through the shared builder's
+     * fix heading ({@link FindingsPrompt#forFix}), delivered to the scope's
+     * bound session. Static behind injected deliver/mark seams so the exact
+     * prompt a session receives is testable without a JavaFX workspace.
+     */
+    static boolean askToFix(ReviewScope scope, String subject, List<ReviewAnnotation> findings,
+                            BiFunction<ReviewScope, String, Handoff> deliver,
+                            Consumer<ReviewAnnotation> markSent) {
+        return handFindings(scope, () -> FindingsPrompt.forFix(subject, findings),
+                findings, deliver, markSent);
+    }
+
+    /**
+     * The send-back hand-off: the same findings through the shared builder
+     * under the reviewer's own heading, so the two asks stay distinct asks
+     * while their finding lines render identically.
+     */
+    static boolean sendFindingsBack(ReviewScope scope, List<ReviewAnnotation> findings,
+                                    BiFunction<ReviewScope, String, Handoff> deliver,
+                                    Consumer<ReviewAnnotation> markSent) {
+        return handFindings(scope, () -> FindingsPrompt.render(SEND_BACK_HEADING, findings),
+                findings, deliver, markSent);
+    }
+
+    /**
+     * Hands a rendered findings prompt to a scope's bound session and marks
+     * every finding SENT once the hand-off did not refuse. An empty
+     * hand-off is refused outright -- before the prompt is even built,
+     * nothing is sent and nothing is marked. HELD and DELIVERED both count
+     * as sent: the held ask is delivered on adoption and a drop is the
+     * bridge's WARNING log, so only a REFUSED hand-off returns false and
+     * leaves the findings unmarked. Static and pure behind the injected
+     * seams so the payload, the empty refusal and the SENT timing are
+     * testable without a JavaFX workspace.
+     */
+    static boolean handFindings(ReviewScope scope, Supplier<String> promptFor,
+                                List<ReviewAnnotation> findings,
+                                BiFunction<ReviewScope, String, Handoff> deliver,
+                                Consumer<ReviewAnnotation> markSent) {
+        if (findings.isEmpty()) {
+            return false;
+        }
+        String prompt = promptFor.get();
+        if (deliver.apply(scope, prompt) == Handoff.REFUSED) {
+            return false;
+        }
+        for (ReviewAnnotation finding : findings) {
+            markSent.accept(finding);
+        }
+        return true;
     }
 
     /** ⌘⇧]: selects the next session tab (wraps around). */

@@ -16,12 +16,20 @@ import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.git.DiffService;
+import app.drydock.git.GitExecutableLocator;
+import app.drydock.git.GitStatusService;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.process.ProcessResult;
 import app.drydock.process.ProcessRunner;
+import app.drydock.review.AnnotationStatus;
+import app.drydock.review.AnnotationStore;
+import app.drydock.review.Confidence;
 import app.drydock.review.HunkDigest;
 import app.drydock.review.HunkIds;
+import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewScope;
+import app.drydock.review.Severity;
+import app.drydock.review.Triage;
 import app.drydock.state.JsonApplicationStateRepository;
 import app.drydock.state.json.JsonParser;
 import app.drydock.state.json.JsonValue;
@@ -31,11 +39,17 @@ import app.drydock.state.json.JsonValue.JsonNumber;
 import app.drydock.state.json.JsonValue.JsonObject;
 import app.drydock.state.json.JsonValue.JsonString;
 import app.drydock.state.json.JsonWriter;
+import com.intellij.diff.fragments.LineFragment;
+import com.intellij.diff.requests.DiffRequest;
+import com.intellij.diff.requests.LoadingDiffRequest;
+import com.intellij.diff.util.Side;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.awt.EventQueue;
+import java.lang.reflect.InvocationTargetException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -53,6 +67,7 @@ import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -233,6 +248,165 @@ class ReviewTabEndToEndTest {
                         "digest of hunk " + row.hunkIds().get(i));
             }
         }
+    }
+
+    /**
+     * T9, end to end: the selection pipeline over the real fixture — the
+     * backend's own store and diff service, the real git texts and
+     * fragments, and the reusable editor's selection seam. The snapshot
+     * arrives, a finding is selected, the off-EDT half builds the texts
+     * and fragments, the EDT half builds the titled request context and
+     * sends it through the editor's selection/{@code requestReady} — and
+     * a late build for a superseded selection is dropped. The decorations
+     * the same selection feeds carry every unresolved finding of the
+     * file, CONFIRMED and DISMISSED included, so Undo stays reachable in
+     * the diff even where the tree hides the dismissed row.
+     */
+    @Test
+    void selectionBuildsTheTitledReusableRequestAndTheFileDecorations() throws Exception {
+        AnnotationStore annotations = backend.annotationStore();
+        annotations.upsert(finding("f-proposed", Triage.PROPOSED, AnnotationStatus.OPEN));
+        annotations.upsert(finding("f-confirmed", Triage.CONFIRMED, AnnotationStatus.OPEN));
+        annotations.upsert(finding("f-dismissed", Triage.DISMISSED, AnnotationStatus.OPEN));
+        annotations.upsert(finding("f-resolved", Triage.PROPOSED, AnnotationStatus.RESOLVED));
+
+        UnifiedDiff diff = backend.diffService()
+                .diff(scope.diffRoot(), scope.diffScope(), scope.base(), DiffService.REVIEW_CONTEXT_LINES)
+                .get(30, TimeUnit.SECONDS);
+        ReviewTabModel.Snapshot snapshot = ReviewTabModel.snapshot(new ReviewTabModel.Inputs(
+                diff, annotations.forScope(scope.id()), annotations.verdictsFor(scope.id()),
+                Optional.empty()));
+        ReviewTabModel.FileRow row = snapshot.files().stream()
+                .filter(f -> f.path().equals("src/A.java")).findFirst().orElseThrow();
+        assertEquals(2, row.findings().size(),
+                "the proposed and confirmed findings are tree children; the dismissed one is not");
+
+        // The pipeline's off-EDT half: the file's real texts and fragments.
+        ReviewContents contents = new ReviewContents(new GitExecutableLocator(), new GitStatusService());
+        String left = contents.leftText(scope, row.diff());
+        String right = contents.rightText(scope, row.diff());
+        assertTrue(ReviewContents.matchesRows(left, row.diff(), false), "the base text matches the rows");
+        assertTrue(ReviewContents.matchesRows(right, row.diff(), true), "the current text matches the rows");
+        List<LineFragment> fragments = ReviewFragments.fragmentsFor(row.diff(), left, right);
+
+        // The EDT half: the titled context for the selected finding.
+        ReviewTabModel.FindingRow selected = row.findings().get(0);
+        assertEquals("n2", selected.startKey());
+        ReviewDiffRequests.RequestContext context = onEdtGet(() -> ReviewTabProvider.requestContextFor(
+                selected, row.diff(), left, right, fragments));
+        assertEquals("src/A.java", context.path(), "the file path titles the reusable tab");
+        assertEquals(Side.RIGHT, context.plan().scrollToSide());
+        assertEquals(1, context.plan().scrollToLine(), "the finding key n2 scrolls to its line");
+        assertEquals(fragments, context.plan().fragments(), "the git-authoritative fragments ride the plan");
+
+        // ...sent through the reusable editor's selection seam: the current
+        // selection's request opens the one reusable tab — no processor
+        // exists yet, so the opener is the whole effect (the platform the
+        // fake opener stands in for creates the processor, which T6's own
+        // tests cover).
+        List<ReviewDiffRequests.RequestContext> built = new ArrayList<>();
+        RecordingOpener tabs = new RecordingOpener();
+        ReviewDiffEditor editor = new ReviewDiffEditor(tabs,
+                requestContext -> {
+                    built.add(requestContext);
+                    return new LoadingDiffRequest();
+                },
+                viewer -> { });
+        onEdt(() -> {
+            editor.selection("selection-1");
+            editor.requestReady("selection-1", context);
+        });
+        assertEquals(1, tabs.opened, "the one reusable tab was opened");
+        assertTrue(built.isEmpty(), "the open path builds nothing itself");
+
+        // A later selection of the same file swaps the request into the
+        // live processor in place — the tab is reused, not reopened.
+        FakeProcessor processor = new FakeProcessor();
+        ReviewDiffRequests.RequestContext next = onEdtGet(() -> ReviewTabProvider.requestContextFor(
+                row, row.diff(), left, right, fragments));
+        onEdt(() -> editor.processorReady(processor));
+        onEdt(() -> editor.requestReady("selection-1", next));
+        assertEquals(1, tabs.opened, "the live tab is reused");
+        assertEquals(List.of(next), built, "the titled context is the request shown");
+        assertEquals(1, processor.applied.size());
+
+        // A build for a superseded selection is dropped: only the current
+        // selection's request is ever shown.
+        onEdt(() -> editor.requestReady("stale-selection", next));
+        assertEquals(1, tabs.opened, "a superseded selection's build changes nothing");
+        assertEquals(List.of(next), built, "a superseded selection's request is never shown");
+        assertEquals(1, processor.applied.size());
+
+        // The decorations the same selection feeds: every unresolved finding
+        // of the file, whatever its triage — the dismissed card the tree
+        // hides stays reachable in the diff, the resolved one is finished.
+        ReviewDiffInlays.Decorations decorations =
+                ReviewTabProvider.decorationsFor(row, annotations.forScope(scope.id()));
+        assertEquals("src/A.java", decorations.path());
+        assertEquals(ReviewFindingPlacement.firstHunkFallback(row.diff()), decorations.firstHunkFallback());
+        assertTrue(decorations.rowKeys().contains("n2"),
+                "the current diff's row keys carry the finding's anchor");
+        assertEquals(List.of("f-proposed", "f-confirmed", "f-dismissed"),
+                decorations.findings().stream().map(ReviewAnnotation::id).toList());
+    }
+
+    /** A scope finding over the fixture's tracked file, keyed at its changed line. */
+    private ReviewAnnotation finding(String id, Triage triage, AnnotationStatus status) {
+        return new ReviewAnnotation(scope.id(), id, "src/A.java", "n2", "n2",
+                Severity.QUESTION, Confidence.HIGH, Optional.of("Title " + id), "Claude", Instant.EPOCH,
+                List.of(), Optional.empty(), Optional.empty(), List.of(),
+                List.of(new ReviewAnnotation.Message("Claude", Instant.EPOCH, "body of " + id)),
+                Optional.empty(), status, Optional.empty(), false, triage, Optional.empty());
+    }
+
+    /** The reusable editor's tab seam: records that the one tab was opened. */
+    private static final class RecordingOpener implements ReviewDiffEditor.TabOpener {
+
+        int opened;
+
+        @Override
+        public void open() {
+            opened++;
+        }
+    }
+
+    /** The live processor the platform creates behind the reusable tab. */
+    private static final class FakeProcessor implements ReviewDiffEditor.ProcessorHandle {
+
+        final List<DiffRequest> applied = new ArrayList<>();
+
+        @Override
+        public void apply(DiffRequest request) {
+            applied.add(request);
+        }
+
+        @Override
+        public boolean isDisposed() {
+            return false;
+        }
+    }
+
+    private static void onEdt(Runnable op) {
+        if (EventQueue.isDispatchThread()) {
+            op.run();
+            return;
+        }
+        try {
+            EventQueue.invokeAndWait(op);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError("interrupted waiting for the EDT", e);
+        } catch (InvocationTargetException e) {
+            throw new AssertionError("the EDT runnable failed", e.getCause());
+        }
+    }
+
+    private static <T> T onEdtGet(Supplier<T> op) {
+        Object[] out = new Object[1];
+        onEdt(() -> out[0] = op.get());
+        @SuppressWarnings("unchecked")
+        T value = (T) out[0];
+        return value;
     }
 
     private static UnifiedDiff.FileDiff diffFile(UnifiedDiff diff, String path) {

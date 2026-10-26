@@ -155,6 +155,12 @@ dependencies {
         // Whether that holds live is exactly what the spike tests.
         bundledModule("intellij.platform.diff")
         bundledModule("intellij.platform.diff.impl")
+        // P3's finding inlays: EditorComponentInlaysUtilKt.insertComponentAfter
+        // (Java-callable, needs a non-null renderer factory on 263) lives in
+        // this product module. Compile dependency only, exactly like the
+        // diff modules above: plugin.xml declares nothing for it, and no
+        // Kotlin source set or coroutine dependency is added.
+        bundledModule("intellij.platform.collaborationTools.shared")
         // Optional at runtime (plugin.xml): IdeMcpServer routes the IDE's
         // bundled MCP server to each launched agent's worktree.
         bundledPlugin("com.intellij.mcpServer")

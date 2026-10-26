@@ -82,14 +82,19 @@ class PiExtensionInstallerTest {
 
     @Test
     void theSourceIsAPlausibleExtension() {
-        assertTrue(PiMcpExtensionSource.SOURCE.contains("registerMcpServer"),
-                "pi loads an extension by calling its default export");
+        assertTrue(PiMcpExtensionSource.SOURCE.contains("registerTool"),
+                "the session tools must be direct proxies: an MCP extension that"
+                        + " replaced Pi's built-in MCP support (pi-mcp-adapter) gives"
+                        + " extension-registered servers no direct tools and ignores"
+                        + " exposure: \"direct\"");
+        assertTrue(PiMcpExtensionSource.SOURCE.contains("fetch("),
+                "the proxy transport is the bridge's own localhost fetch, not an MCP client");
         assertTrue(PiMcpExtensionSource.SOURCE.contains("DRYDOCK_MCP_CONFIG"),
-                "the adapter must load the session-scoped HTTP config");
-        assertTrue(!PiMcpExtensionSource.SOURCE.contains("registerTool"),
-                "MCP tools belong to Pi's native client, not Drydock proxies");
-        assertTrue(!PiMcpExtensionSource.SOURCE.contains("fetch("),
-                "MCP transport belongs to Pi's native client");
+                "the bridge must load the session-scoped HTTP config");
+        assertTrue(PiMcpExtensionSource.SOURCE.contains("DRYDOCK_STDIO_MCP_SERVERS"),
+                "the IDE-hosted stdio servers ride the same bridge");
+        assertTrue(PiMcpExtensionSource.SOURCE.contains("registerMcpServer"),
+                "the stdio servers have no direct-tool requirement and stay on Pi's native registration");
     }
 
     @Test

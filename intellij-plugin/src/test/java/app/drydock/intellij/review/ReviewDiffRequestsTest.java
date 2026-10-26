@@ -127,7 +127,7 @@ class ReviewDiffRequestsTest {
 
     @Test
     void malformedLineKeysAreRefusedNeverReAnchored() {
-        for (String bad : new String[]{"x3", "n", "o", "nabc", "n-4", "", "42"}) {
+        for (String bad : new String[]{"x3", "n", "o", "nabc", "n-4", "n+5", "o+5", "n 5", "", "42"}) {
             assertThrows(IllegalArgumentException.class, () -> ReviewDiffRequests.scrollTarget(bad), bad);
         }
         assertThrows(IllegalArgumentException.class, () -> ReviewDiffRequests.scrollTarget(null));
@@ -208,6 +208,66 @@ class ReviewDiffRequestsTest {
         assertEquals("left text", plan.leftText().toString());
         assertEquals("right text", plan.rightText().toString());
         assertEquals(List.of(FRAGMENT), plan.fragments());
+    }
+
+    // --- the widened creation: the request context (plan treated as read-only) ---
+
+    @Test
+    void widenedUserDataCarriesTheFourReviewKeysPlusTheContext() {
+        Plan plan = planFor(file(add(2)));
+        ReviewDiffRequests.RequestContext context =
+                new ReviewDiffRequests.RequestContext("src/A.java", plan);
+        UserDataHolderBase holder = new UserDataHolderBase();
+        ReviewDiffRequests.applyUserData(holder, context);
+
+        Set<Key<?>> keys = Stream.of(holder.getUserMap().getKeys()).collect(Collectors.toSet());
+        assertEquals(Set.of(
+                DiffUserDataKeys.FORCE_READ_ONLY,
+                DiffUserDataKeysEx.CUSTOM_DIFF_COMPUTER,
+                DiffUserDataKeys.SCROLL_TO_LINE,
+                ReviewDiffRequests.REQUEST_KEY,
+                ReviewDiffRequests.CONTEXT_KEY), keys);
+        assertSame(context, holder.getUserData(ReviewDiffRequests.CONTEXT_KEY));
+    }
+
+    @Test
+    void widenedUserDataPreservesThePlanKeysUnchanged() {
+        UnifiedDiff.FileDiff file = file(del(9));
+        Plan plan = planFor(file);
+        UserDataHolderBase holder = new UserDataHolderBase();
+        ReviewDiffRequests.applyUserData(holder,
+                new ReviewDiffRequests.RequestContext(file.path(), plan));
+
+        // Exactly what the plan-only creation puts there, values included.
+        assertEquals(Boolean.TRUE, holder.getUserData(DiffUserDataKeys.FORCE_READ_ONLY));
+        assertEquals(Pair.create(Side.LEFT, 8), holder.getUserData(DiffUserDataKeys.SCROLL_TO_LINE));
+        assertEquals(Boolean.TRUE, holder.getUserData(ReviewDiffRequests.REQUEST_KEY));
+        assertSame(plan.fragments(), holder.getUserData(DiffUserDataKeysEx.CUSTOM_DIFF_COMPUTER)
+                .compute("anything", "else", null, true, null));
+    }
+
+    @Test
+    void theContextKeyIsTheOneStaticKeyMintedFromItsName() {
+        assertEquals(ReviewDiffRequests.REQUEST_CONTEXT_KEY_NAME,
+                ReviewDiffRequests.CONTEXT_KEY.toString());
+        // Key identity is per-instance: a re-minted key with the same name
+        // is a different key, which is why the single static CONTEXT_KEY is
+        // the one every reader must use.
+        assertNotEquals(ReviewDiffRequests.CONTEXT_KEY,
+                Key.create(ReviewDiffRequests.REQUEST_CONTEXT_KEY_NAME));
+    }
+
+    @Test
+    void aContextCarriesItsPathAndPlanAndRequiresBoth() {
+        Plan plan = planFor(file(add(2)));
+        ReviewDiffRequests.RequestContext context =
+                new ReviewDiffRequests.RequestContext("src/A.java", plan);
+        assertEquals("src/A.java", context.path());
+        assertSame(plan, context.plan());
+        assertThrows(NullPointerException.class,
+                () -> new ReviewDiffRequests.RequestContext(null, plan));
+        assertThrows(NullPointerException.class,
+                () -> new ReviewDiffRequests.RequestContext("src/A.java", null));
     }
 
     @Test

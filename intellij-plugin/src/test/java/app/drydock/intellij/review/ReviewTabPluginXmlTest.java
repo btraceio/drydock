@@ -19,31 +19,55 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * The AC1 registration half and AC2's static half, on the plugin descriptor
- * as the test classpath serves it: exactly one {@code changesViewContent}
- * tab named "Drydock Review", registered for the Commit tool window with
- * the provider and the visibility predicate, and no {@code <module>}
- * element naming either diff module — the diff modules stay compile-only
- * (a plugin declaring an internal-visibility module would be refused at
- * load; {@code kb/find-263-diff-api-internal}). The spike-absence half of
- * AC1 is asserted here too: T16 deleted the spike package, so the
- * descriptor registers no spike tab, extension or action.
+ * The registration half on the plugin descriptor as the test classpath
+ * serves it: exactly one dedicated {@code Drydock Review} tool window (the
+ * P3 replacement for the P2 changesViewContent subtab, which the operator
+ * rejected as hard to discover), the separate {@code Drydock} task window
+ * untouched on its right dock, and no {@code <module>} element naming
+ * either diff module — the diff modules stay compile-only (a plugin
+ * declaring an internal-visibility module would be refused at load;
+ * {@code kb/find-263-diff-api-internal}). The spike-absence half is
+ * asserted here too: the descriptor registers no spike tab, extension or
+ * action.
  */
 class ReviewTabPluginXmlTest {
 
     private static final String TAB_NAME = "Drydock Review";
 
     @Test
-    void registersExactlyOneDrydockReviewTabForTheCommitToolWindow() throws Exception {
-        List<Element> drydockReview = changesViewContentTabsNamed(descriptor(), TAB_NAME);
+    void registersExactlyOneDrydockReviewToolWindow() throws Exception {
+        List<Element> reviewWindows = toolWindowsNamed(descriptor(), TAB_NAME);
 
-        assertEquals(1, drydockReview.size(),
-                "exactly one changesViewContent tab named \"" + TAB_NAME + "\" must be registered");
-        Element tab = drydockReview.get(0);
-        assertEquals("app.drydock.intellij.review.ReviewTabProvider", attribute(tab, "className"));
-        assertEquals("app.drydock.intellij.review.ReviewTabVisibility", attribute(tab, "predicateClassName"));
-        assertEquals("true", attribute(tab, "isInCommitToolWindow"),
-                "the tab must register for the Commit tool window");
+        assertEquals(1, reviewWindows.size(),
+                "exactly one tool window named \"" + TAB_NAME + "\" must be registered");
+        Element window = reviewWindows.get(0);
+        assertEquals("app.drydock.intellij.review.ReviewToolWindowFactory", attribute(window, "factoryClass"));
+        assertEquals("left", attribute(window, "anchor"),
+                "the anchor is only the first-layout default: the stored layout overrides it "
+                        + "from the first registration on, and the factory aligns with the Changes host");
+        assertFalse("true".equals(window.getAttribute("secondary")),
+                "the Review window is a primary window, not a secondary one");
+    }
+
+    @Test
+    void theOldChangesSubtabRegistrationIsGone() throws Exception {
+        NodeList tabs = descriptor().getElementsByTagName("changesViewContent");
+
+        assertEquals(0, tabs.getLength(),
+                "the changesViewContent subtab was replaced by the dedicated tool window; "
+                        + "no such registration may remain");
+    }
+
+    @Test
+    void theSeparateDrydockTaskWindowIsUnchanged() throws Exception {
+        List<Element> taskWindows = toolWindowsNamed(descriptor(), "Drydock");
+
+        assertEquals(1, taskWindows.size(),
+                "the task-centric Drydock window stays exactly one registration, untouched by the Review move");
+        Element window = taskWindows.get(0);
+        assertEquals("app.drydock.intellij.tasks.DrydockToolWindowFactory", attribute(window, "factoryClass"));
+        assertEquals("right", attribute(window, "anchor"),
+                "the task window keeps its own right dock");
     }
 
     @Test
@@ -54,9 +78,10 @@ class ReviewTabPluginXmlTest {
             moduleNames.add(attribute((Element) modules.item(i), "name"));
         }
 
-        // AC2's static half: the diff product modules are internal-visibility
-        // on 2026.3 and are bundledModule(...) compile-only dependencies in
-        // build.gradle.kts; declaring them here would refuse the plugin at load.
+        // The diff product modules are internal-visibility on 2026.3 and
+        // are bundledModule(...) compile-only dependencies in
+        // build.gradle.kts; declaring them here would refuse the plugin at
+        // load.
         assertFalse(moduleNames.contains("intellij.platform.diff"),
                 "intellij.platform.diff must stay compile-only, not a declared module: " + moduleNames);
         assertFalse(moduleNames.contains("intellij.platform.diff.impl"),
@@ -64,8 +89,8 @@ class ReviewTabPluginXmlTest {
     }
 
     /**
-     * T16's half of AC1: the spike package and its three plugin.xml entries
-     * (the "Drydock Review (Spike)" tab, the diff.DiffExtension, the
+     * The spike package and its three plugin.xml entries (the "Drydock
+     * Review (Spike)" tab, the diff.DiffExtension, the
      * Drydock.SpikeReviewDiff action) are gone, leaving no trace.
      */
     @Test
@@ -93,13 +118,13 @@ class ReviewTabPluginXmlTest {
         }
     }
 
-    private static List<Element> changesViewContentTabsNamed(Document descriptor, String tabName) {
+    private static List<Element> toolWindowsNamed(Document descriptor, String id) {
         List<Element> matches = new ArrayList<>();
-        NodeList tabs = descriptor.getElementsByTagName("changesViewContent");
-        for (int i = 0; i < tabs.getLength(); i++) {
-            Element tab = (Element) tabs.item(i);
-            if (tabName.equals(attribute(tab, "tabName"))) {
-                matches.add(tab);
+        NodeList windows = descriptor.getElementsByTagName("toolWindow");
+        for (int i = 0; i < windows.getLength(); i++) {
+            Element window = (Element) windows.item(i);
+            if (id.equals(attribute(window, "id"))) {
+                matches.add(window);
             }
         }
         return matches;
