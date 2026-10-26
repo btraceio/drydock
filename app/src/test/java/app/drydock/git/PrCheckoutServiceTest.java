@@ -11,6 +11,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -93,6 +96,41 @@ class PrCheckoutServiceTest {
 
     private static int worktreeCount(Path repo) throws IOException, InterruptedException {
         return (int) runGitCapture(repo, "worktree", "list").lines().filter(line -> !line.isBlank()).count();
+    }
+
+    /**
+     * The shim re-exec regression: the found {@code gh} may be a wrapper that
+     * re-execs a real gh from PATH (the Dogbrew shim does exactly this), so the
+     * child must receive a PATH that reaches one. The wrapper and its target
+     * live ONLY on the path the service is told to hand the child -- the test
+     * JVM's own PATH knows neither -- so without the PATH the invocation fails
+     * with "exec: gh: not found" and no worktree can ever be made.
+     */
+    @EnabledOnOs({OS.MAC, OS.LINUX})
+    @Test
+    void theGhChildReExecsARealGhThroughThePathItIsGiven(@TempDir Path dir) throws Exception {
+        Path repo = initCommittedRepo(dir);
+        Path bin = dir.resolve("bin");
+        Files.createDirectories(bin);
+        Path receipt = dir.resolve("receipt.txt");
+        Files.writeString(bin.resolve("gh-real"),
+                "#!/bin/sh\nprintf 'cwd=%s|args=%s\\n' \"$(pwd)\" \"$*\" >> " + receipt + "\nexit 0\n");
+        Files.writeString(bin.resolve("gh"), "#!/bin/sh\nexec gh-real \"$@\"\n");
+        bin.resolve("gh").toFile().setExecutable(true);
+        bin.resolve("gh-real").toFile().setExecutable(true);
+
+        ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+        PrCheckoutService service = new PrCheckoutService(new GitExecutableLocator(), executor, false,
+                () -> Optional.of(bin.resolve("gh")), () -> bin.toString());
+        try {
+            Path worktree = service.checkoutBlocking(repo, dir.resolve("wt"), 858);
+            assertTrue(Files.exists(worktree), "the wrapper gh reported success, so the worktree stays");
+        } finally {
+            service.close();
+        }
+        String logged = Files.readString(receipt);
+        assertTrue(logged.contains("args=pr checkout 858"), logged);
+        assertTrue(logged.contains("cwd=" + dir.resolve("wt").toRealPath()), logged);
     }
 
     // ---- fixtures -----------------------------------------------------------

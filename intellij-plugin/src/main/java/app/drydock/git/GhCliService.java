@@ -437,7 +437,12 @@ public final class GhCliService implements AutoCloseable {
      * unavailable.</p>
      */
     private static ProcessResult runIn(Path workingDirectory, List<String> command) {
-        String livePath = pathWithFallbacks(LoginShellEnvironment.currentRealPath());
+        // Null-check the raw PATH BEFORE wrapping: pathWithFallbacks(null)
+        // returns only the fallback dirs, which would strip /usr/bin and break
+        // the ssh/git lookups gh itself performs. A null raw PATH means the
+        // child inherits the environment unchanged.
+        String rawPath = LoginShellEnvironment.currentRealPath();
+        String livePath = rawPath == null ? null : pathWithFallbacks(rawPath);
         try {
             if (livePath == null) {
                 return ProcessRunner.run(command, workingDirectory, PROCESS_TIMEOUT);

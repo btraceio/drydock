@@ -1,5 +1,6 @@
 package app.drydock.git;
 
+import app.drydock.app.LoginShellEnvironment;
 import app.drydock.process.ProcessResult;
 import app.drydock.process.ProcessRunner;
 import app.drydock.process.ProcessTimeoutException;
@@ -12,10 +13,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
 /**
@@ -86,6 +89,9 @@ public final class PrCheckoutService implements AutoCloseable {
     private final ExecutorService executor;
     private final boolean ownsExecutor;
     private volatile Optional<Path> cachedGh;
+    /** Test seams: the gh executable to run and the child PATH; null = the production discovery/live login-shell PATH. */
+    private final Supplier<Optional<Path>> ghOverride;
+    private final Supplier<String> childPathOverride;
 
     public PrCheckoutService() {
         this(new GitExecutableLocator(), Executors.newVirtualThreadPerTaskExecutor(), true);
@@ -96,9 +102,17 @@ public final class PrCheckoutService implements AutoCloseable {
     }
 
     private PrCheckoutService(GitExecutableLocator locator, ExecutorService executor, boolean ownsExecutor) {
+        this(locator, executor, ownsExecutor, null, null);
+    }
+
+    /** Package-private seams: pin the gh executable and the child PATH so tests can script a wrapper gh. */
+    PrCheckoutService(GitExecutableLocator locator, ExecutorService executor, boolean ownsExecutor,
+                      Supplier<Optional<Path>> ghOverride, Supplier<String> childPathOverride) {
         this.locator = locator;
         this.executor = executor;
         this.ownsExecutor = ownsExecutor;
+        this.ghOverride = ghOverride;
+        this.childPathOverride = childPathOverride;
     }
 
     /** The local branch name a PR is checked out under. */
@@ -206,8 +220,28 @@ public final class PrCheckoutService implements AutoCloseable {
     }
 
     private ProcessResult run(List<String> command, Path workingDirectory, Duration timeout) {
+        // The child gets the live (post-merge) PATH explicitly, with the known
+        // real-install locations appended. The JDK's environment snapshot is
+        // frozen at launch, and under the bare snapshot the Dogbrew gh-shim --
+        // which re-execs a real gh from PATH -- dies with "exec: gh: not found"
+        // (the same defect GhCliService.runIn fixes for the read-only calls;
+        // the checkout step was missed). The raw PATH is null-checked before
+        // the fallbacks are appended: pathWithFallbacks never returns null, so
+        // wrapping first would give the child only the fallback dirs (losing
+        // /usr/bin) when no PATH is set; null means inherit the environment.
+        String childPath;
+        if (childPathOverride != null) {
+            childPath = childPathOverride.get();
+        } else {
+            String rawPath = LoginShellEnvironment.currentRealPath();
+            childPath = rawPath == null ? null : GhCliService.pathWithFallbacks(rawPath);
+        }
         try {
-            return ProcessRunner.run(command, workingDirectory, timeout);
+            if (childPath == null) {
+                return ProcessRunner.run(command, workingDirectory, timeout);
+            }
+            return ProcessRunner.run(command, new ProcessRunner.Options(
+                    workingDirectory, timeout, false, Map.of("PATH", childPath)));
         } catch (IOException e) {
             throw new PrCheckoutException("Could not run " + command.get(0) + ": " + e.getMessage(), e);
         } catch (ProcessTimeoutException e) {
@@ -220,6 +254,9 @@ public final class PrCheckoutService implements AutoCloseable {
     }
 
     private Optional<Path> locateGh() {
+        if (ghOverride != null) {
+            return ghOverride.get();
+        }
         Optional<Path> cached = cachedGh;
         if (cached != null) {
             return cached;
@@ -230,7 +267,11 @@ public final class PrCheckoutService implements AutoCloseable {
     }
 
     private static Optional<Path> discoverGh() {
-        String pathEnv = System.getenv("PATH");
+        // The live (post-merge) PATH rather than the JDK's frozen snapshot: on
+        // a late-merge launch the snapshot still holds the bare launchd PATH
+        // and misses executables added by the login shell (same as
+        // GhCliService.discover).
+        String pathEnv = LoginShellEnvironment.currentRealPath();
         if (pathEnv != null) {
             for (String dir : pathEnv.split(Pattern.quote(File.pathSeparator))) {
                 if (dir.isBlank()) {
