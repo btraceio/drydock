@@ -3,6 +3,7 @@ package app.drydock.intellij.tasks;
 import app.drydock.agent.api.AgentKind;
 
 import com.intellij.openapi.application.ApplicationManager;
+import com.intellij.openapi.application.ModalityState;
 import com.intellij.ui.DocumentAdapter;
 
 import org.jetbrains.annotations.NotNull;
@@ -206,6 +207,15 @@ final class ModelField extends JPanel {
     private void loadSuggestions(AgentKind kind) {
         ApplicationManager.getApplication().executeOnPooledThread(() -> {
             List<String> found = suggestions.apply(kind);
+            // ModalityState.any(), deliberately. The first load is kicked from
+            // the owning dialog's CONSTRUCTOR, when the dialog window does not
+            // exist yet -- so any modality state derived from this component
+            // would be non-modal -- and the rest while the modal dialog is up;
+            // either way the merge would be starved: a non-modal runnable
+            // is not dispatched while a modal dialog shows, which is exactly
+            // the "popup opens, zero rows" defect this fixes. any() dispatches
+            // under any active modality; the kind guard above and the field's
+            // own filter keep a late merge harmless.
             ApplicationManager.getApplication().invokeLater(() -> {
                 if (currentKind != kind) {
                     return;
@@ -218,7 +228,7 @@ final class ModelField extends JPanel {
                 // A query typed before the catalog arrived must still hold:
                 // merged items are filtered against it like the rest (empty query = all).
                 applyFilter(editorText());
-            });
+            }, ModalityState.any());
         });
     }
 
