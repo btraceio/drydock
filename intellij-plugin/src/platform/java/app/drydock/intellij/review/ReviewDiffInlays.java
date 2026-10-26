@@ -135,8 +135,6 @@ public final class ReviewDiffInlays {
 
         void undo(ReviewAnnotation.Key key, FindingInlayCard card);
 
-        void fix(ReviewAnnotation.Key key, FindingInlayCard card);
-
         void comment(ReviewAnnotation.Key key, FindingInlayCard card, String text);
     }
 
@@ -196,7 +194,6 @@ public final class ReviewDiffInlays {
                 @Override public void confirm() { actions.confirm(key, card[0]); }
                 @Override public void dismiss() { actions.dismiss(key, card[0]); }
                 @Override public void undo() { actions.undo(key, card[0]); }
-                @Override public void fix() { actions.fix(key, card[0]); }
                 @Override public void comment(String text) { actions.comment(key, card[0], text); }
             };
             card[0] = new FindingInlayCard(finding, driftHint, clock, callbacks);

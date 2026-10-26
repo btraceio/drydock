@@ -14,9 +14,11 @@ import app.drydock.intellij.DrydockSessionsListener;
 import app.drydock.intellij.agent.AgentExecutionRegistry;
 import app.drydock.intellij.agent.PromptOutcome;
 import app.drydock.intellij.agent.SessionActivityListener;
+import app.drydock.review.AnnotationStatus;
 import app.drydock.review.AnnotationStore;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewScope;
+import app.drydock.review.Triage;
 
 import com.intellij.diff.fragments.LineFragment;
 import com.intellij.icons.AllIcons;
@@ -38,7 +40,9 @@ import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBPanel;
 import org.jetbrains.annotations.NotNull;
 
+import javax.swing.JButton;
 import javax.swing.JComponent;
+import javax.swing.JPanel;
 import javax.swing.border.EmptyBorder;
 import java.awt.BorderLayout;
 import java.io.IOException;
@@ -46,6 +50,7 @@ import java.io.UncheckedIOException;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
@@ -154,6 +159,11 @@ final class ReviewTabProvider {
     private DebounceScheduler debounce;
     private AnAction markReviewedAction;
     private AnAction unmarkAction;
+    /** The batched-decisions hand-off: pending counts on the left, the one Send on the right. */
+    private JPanel decisionsBar;
+    private JBLabel decisionsLabel;
+    private JButton sendDecisionsButton;
+    private boolean sendInFlight;
 
     // ---- wired on the background load, once the backend is ready ----
     private WorktreeService worktrees;
@@ -252,19 +262,25 @@ final class ReviewTabProvider {
         // swapped in place afterwards, and its active viewer's decorations
         // (the finding cards) are the inlay layer's. The card callbacks
         // route through TriageCards — the write side is ReviewTriageActions
-        // (T4), reached through the volatile fields wire() fills.
+        // (T4), reached through the volatile fields wire() fills. Decisions
+        // reach the agent as ONE batch (the decisions bar below), so the
+        // cards carry no per-finding send at all.
         diffParent = Disposer.newDisposable();
         TriageCards cardActions = new TriageCards(
-                () -> triage, () -> scope, () -> store,
-                plugin.executor(), this::showCardOutcome);
-        inlays = new ReviewDiffInlays(ReviewDiffInlays.platformEdt(),
-                ReviewDiffInlays.triageCards(Clock.systemDefaultZone(), cardActions));
+                () -> triage, () -> scope, () -> store, this::showCardOutcome);
+        inlays = new ReviewDiffInlays(ReviewDiffInlays.platformEdt(), labeledCards(
+                ReviewDiffInlays.triageCards(Clock.systemDefaultZone(), cardActions)));
         diffEditor = ReviewDiffEditor.platform(project, diffParent, inlays);
+
+        buildDecisionsBar();
 
         JBPanel<?> content = new JBPanel<>(new BorderLayout());
         content.add(header, BorderLayout.NORTH);
         content.add(browser, BorderLayout.CENTER);
-        content.add(statusLabel, BorderLayout.SOUTH);
+        JPanel south = new JPanel(new BorderLayout());
+        south.add(decisionsBar, BorderLayout.NORTH);
+        south.add(statusLabel, BorderLayout.SOUTH);
+        content.add(south, BorderLayout.SOUTH);
 
         // Q13: one command, two entry points — the toolbar and the row
         // context menu. (The preview's third entry point left with the
@@ -462,6 +478,7 @@ final class ReviewTabProvider {
         refresher.onDispose(annotations.addChangeListener(key -> {
             refresher.marksChanged();
             submitDecorationRefresh();
+            onEdt(this::refreshDecisionsBar);
         }));
         refresher.onDispose(backend.scopeRegistry().addChangeListener(scopeId -> {
             refresher.marksChanged();
@@ -489,6 +506,7 @@ final class ReviewTabProvider {
             }
             browser.accept(snapshot);
             header.setText(snapshot.headerText());
+            refreshDecisionsBar();
             consumePendingFindingTarget();
         });
     }
@@ -941,6 +959,159 @@ final class ReviewTabProvider {
         }
     }
 
+    // ---- the batched decisions hand-off --------------------------------------
+
+    /**
+     * Builds the decisions bar: the pending decisions since the last
+     * hand-off on the left, one Send on the right. Hidden until a decision
+     * exists — a bar advertising zero decisions is noise.
+     */
+    private void buildDecisionsBar() {
+        decisionsBar = new JPanel(new BorderLayout());
+        decisionsBar.setBorder(new EmptyBorder(2, 8, 2, 8));
+        decisionsLabel = new JBLabel();
+        sendDecisionsButton = new JButton("Send decisions…");
+        sendDecisionsButton.setToolTipText("One prompt to the scope's agent: the findings you agreed with"
+                + " (with your comments), and the ones you dismissed as no-action.");
+        sendDecisionsButton.addActionListener(event -> sendDecisions());
+        decisionsBar.add(decisionsLabel, BorderLayout.WEST);
+        decisionsBar.add(sendDecisionsButton, BorderLayout.EAST);
+        decisionsBar.setVisible(false);
+    }
+
+    /**
+     * Re-reads the pending decisions from the store — in-memory, cheap on
+     * the EDT — and shows the bar only when a decision exists. Every
+     * decision path lands here (store listener, snapshot, a completed
+     * send), so the bar never lags its own send.
+     */
+    private void refreshDecisionsBar() {
+        JPanel bar = decisionsBar;
+        JBLabel label = decisionsLabel;
+        if (bar == null || label == null) {
+            return;
+        }
+        AnnotationStore annotations = store;
+        ReviewScope current = scope;
+        PendingDecisions pending = annotations == null || current == null
+                ? new PendingDecisions(0, 0)
+                : pendingDecisions(annotations.forScope(current.id()));
+        label.setText(pending.describe());
+        bar.setVisible(pending.total() > 0);
+    }
+
+    /**
+     * The Send: one prompt — the agreed findings (with the reviewer's
+     * comments) plus the dismissed ones — to the scope's bound agent, via
+     * {@link ReviewTriageActions#sendDecisions}. The button is dead for the
+     * duration, and every completion — delivered, refused, failed, or the
+     * scheduling rejected outright — revives it and refreshes the bar; a
+     * delivered send needs no message (the findings turn SENT and the bar
+     * empties), the rest surface distinctly. EDT.
+     */
+    private void sendDecisions() {
+        ReviewTriageActions actions = triage;
+        ReviewScope current = scope;
+        if (actions == null || current == null || sendInFlight) {
+            return;
+        }
+        sendInFlight = true;
+        sendDecisionsButton.setEnabled(false);
+        try {
+            actions.sendDecisions(current, subjectOf(current)).whenComplete((outcome, error) -> onEdt(() -> {
+                sendInFlight = false;
+                sendDecisionsButton.setEnabled(true);
+                refreshDecisionsBar();
+                if (error != null) {
+                    showCardOutcome(TriageCards.Notice.ERROR,
+                            "Sending the decisions to the agent failed: " + rootMessage(error));
+                    return;
+                }
+                TriageCards.Surfaced message = TriageCards.fixOutcome(outcome.state());
+                if (message != null) {
+                    showCardOutcome(message.notice(), message.text());
+                }
+            }));
+        } catch (RuntimeException e) {
+            // The scheduling itself was rejected — no future exists; the
+            // button revives here and the failure surfaces.
+            sendInFlight = false;
+            sendDecisionsButton.setEnabled(true);
+            showCardOutcome(TriageCards.Notice.ERROR,
+                    "Sending the decisions to the agent failed: " + rootMessage(e));
+        }
+    }
+
+    /**
+     * The pending decisions of one finding list (pure): the unresolved
+     * findings with a decision that no hand-off has carried yet — exactly
+     * what {@code sendDecisions} will include.
+     */
+    record PendingDecisions(int toFix, int dismissed) {
+
+        int total() {
+            return toFix + dismissed;
+        }
+
+        String describe() {
+            List<String> parts = new ArrayList<>();
+            if (toFix > 0) {
+                parts.add(toFix + (toFix == 1 ? " finding agreed" : " findings agreed"));
+            }
+            if (dismissed > 0) {
+                parts.add(dismissed + (dismissed == 1 ? " dismissed" : " dismissed"));
+            }
+            return String.join(" · ", parts) + " — not sent to the agent yet";
+        }
+    }
+
+    static PendingDecisions pendingDecisions(List<ReviewAnnotation> findings) {
+        int toFix = 0;
+        int dismissed = 0;
+        for (ReviewAnnotation finding : findings) {
+            if (finding.resolved() || finding.triage() == Triage.PROPOSED
+                    || finding.status() == AnnotationStatus.SENT) {
+                continue;
+            }
+            if (finding.triage() == Triage.CONFIRMED) {
+                toFix++;
+            } else if (finding.triage() == Triage.DISMISSED) {
+                dismissed++;
+            }
+        }
+        return new PendingDecisions(toFix, dismissed);
+    }
+
+    /**
+     * The hand-off's subject (pure): the pull request when the scope
+     * carries one, else the checkout directory's name.
+     */
+    static String subjectOf(ReviewScope scope) {
+        return scope.pr()
+                .map(pr -> "PR #" + pr.number())
+                .orElseGet(() -> String.valueOf(scope.diffRoot().getFileName()));
+    }
+
+    /**
+     * The card factory with the scope's triage labels: a pull-request
+     * review confirms findings into the posted review ("Confirm"), a local
+     * review only agrees the finding is valid ("Agree") — the same store
+     * state either way, named for what the click means where there is no
+     * submission target. The wrapper runs on the EDT at decoration time,
+     * where the volatile scope read is fine.
+     */
+    private ReviewDiffInlays.CardFactory labeledCards(ReviewDiffInlays.CardFactory cards) {
+        return (finding, driftHint) -> {
+            JComponent component = cards.card(finding, driftHint);
+            ReviewScope current = scope;
+            if (component instanceof FindingInlayCard card) {
+                boolean prReview = current != null && current.pr().isPresent();
+                card.setTriageLabels(prReview ? "Confirm" : "Agree", "Won't fix");
+            }
+            return component;
+        };
+    }
+
     /**
      * The card callbacks' wiring (T9): every card button hands its finding
      * to {@link ReviewTriageActions} — all store mutation and the prompt
@@ -949,9 +1120,9 @@ final class ReviewTabProvider {
      * clears the card's progress on the EDT and surfaces what happened
      * distinctly, without blocking. The write side is reached through the
      * injected suppliers (the production instance's are the provider's
-     * volatile fields, filled by {@code wire()}); the prompt path resolves
-     * the finding fresh from the store, off the EDT, so a stale card can
-     * never send a removed finding's text. A {@link RuntimeException}
+     * volatile fields, filled by {@code wire()}); the agent hand-off is not
+     * here at all — decisions reach the agent as one batch through the
+     * review tab's decisions bar, never one prompt per click. A {@link RuntimeException}
      * thrown synchronously while an action's work is being scheduled —
      * an executor rejecting, the one case no future ever sees — completes
      * the card and surfaces the ERROR with the root cause the same way, so
@@ -984,21 +1155,17 @@ final class ReviewTabProvider {
         private final Supplier<ReviewTriageActions> triage;
         private final Supplier<ReviewScope> scope;
         private final Supplier<AnnotationStore> store;
-        /** Where the fix path's store read runs (the plugin executor in production; never the EDT). */
-        private final Executor storeReader;
         private final Surface surface;
 
         /** The failure messages, one prefix per action: synchronous scheduling rejections and asynchronous failures surface the same words. */
         private static final String UPDATING_FAILED = "Updating the finding failed: ";
         private static final String COMMENT_FAILED = "Saving the comment failed: ";
-        private static final String FIX_FAILED = "Asking the agent to fix the finding failed: ";
 
         TriageCards(Supplier<ReviewTriageActions> triage, Supplier<ReviewScope> scope,
-                    Supplier<AnnotationStore> store, Executor storeReader, Surface surface) {
+                    Supplier<AnnotationStore> store, Surface surface) {
             this.triage = Objects.requireNonNull(triage, "triage");
             this.scope = Objects.requireNonNull(scope, "scope");
             this.store = Objects.requireNonNull(store, "store");
-            this.storeReader = Objects.requireNonNull(storeReader, "storeReader");
             this.surface = Objects.requireNonNull(surface, "surface");
         }
 
@@ -1044,63 +1211,6 @@ final class ReviewTabProvider {
             }
             schedule(card, COMMENT_FAILED, () -> actions.comment(key, text),
                     (outcome, error) -> reportComment(card, outcome, error));
-        }
-
-        @Override
-        public void fix(ReviewAnnotation.Key key, FindingInlayCard card) {
-            ReviewTriageActions actions = triage.get();
-            ReviewScope current = scope.get();
-            AnnotationStore annotations = store.get();
-            if (actions == null || current == null || annotations == null) {
-                // Nothing is wired yet (or the tab closed under the card):
-                // no work exists to run, and the card must not stay busy.
-                onEdt(card::complete);
-                return;
-            }
-            try {
-                storeReader.execute(() -> askToFix(actions, annotations, current, key, card));
-            } catch (RuntimeException e) {
-                // The store read itself was rejected — an executor shut
-                // down under the card: no task ever runs, so no future
-                // exists; the card still completes and the failure surfaces.
-                Throwable rejected = e;
-                onEdt(() -> {
-                    card.complete();
-                    surface.show(Notice.ERROR, FIX_FAILED + rootMessage(rejected));
-                });
-            } catch (Error e) {
-                // An Error is not an operational failure to convert into a
-                // dialog — surfacing it as one swallows it. The card clears
-                // (here on the EDT synchronously, from a worker via the
-                // EDT hop) and the Error is rethrown to whoever must see
-                // it.
-                onEdt(card::complete);
-                throw e;
-            }
-        }
-
-        /**
-         * The fix path's store-reader task: resolves the finding fresh, off
-         * the EDT, then schedules the ask. A synchronous rejection of the
-         * ask's own scheduling — the triage executor refusing while this
-         * task already runs — is caught by {@link #schedule} like every
-         * other action's, instead of killing the task with the card busy.
-         */
-        private void askToFix(ReviewTriageActions actions, AnnotationStore annotations,
-                              ReviewScope current, ReviewAnnotation.Key key, FindingInlayCard card) {
-            ReviewAnnotation finding = annotations.byKey(key).orElse(null);
-            if (finding == null) {
-                // A removed finding is never sent, never marked, and
-                // surfaced distinctly — the never-pretend rule.
-                onEdt(() -> {
-                    card.complete();
-                    surface.show(Notice.WARNING, "This finding no longer exists; nothing was sent.");
-                });
-                return;
-            }
-            schedule(card, FIX_FAILED,
-                    () -> actions.askToFix(current, finding.file(), List.of(finding)),
-                    (outcome, error) -> reportFix(card, outcome, error));
         }
 
         /**
@@ -1172,25 +1282,13 @@ final class ReviewTabProvider {
             }
         }
 
-        /** The fix completion; see {@link #fix} and {@link #fixOutcome}. */
-        private void reportFix(FindingInlayCard card, ReviewTriageActions.FixOutcome outcome, Throwable error) {
-            card.complete();
-            if (error != null) {
-                surface.show(Notice.ERROR, FIX_FAILED + rootMessage(error));
-                return;
-            }
-            Surfaced message = fixOutcome(outcome.state());
-            if (message != null) {
-                surface.show(message.notice(), message.text());
-            }
-        }
-
         /**
-         * The message an ask-to-fix outcome surfaces (pure): a delivered
-         * prompt needs none — the store change rebuild shows the SENT state
-         * — while no-session, an empty hand-off, a refusal and a failed
-         * write are distinct, never-blank messages; only the failed write
-         * is an error, the rest are states the human chose or can act on.
+         * The message a decisions hand-off outcome surfaces (pure): a
+         * delivered prompt needs none — the store change rebuild shows the
+         * SENT state — while no-session, an empty batch, a refusal and a
+         * failed write are distinct, never-blank messages; only the failed
+         * write is an error, the rest are states the human chose or can act
+         * on.
          */
         static Surfaced fixOutcome(ReviewTriageActions.FixOutcome.State state) {
             return switch (state) {

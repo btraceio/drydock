@@ -217,36 +217,51 @@ public final class ReviewTriageActions {
     }
 
     /**
-     * Asks the scope's bound agent to fix {@code findings}: the shared
-     * {@link FindingsPrompt#forFix} bytes (never forked text), submitted on
-     * the executor. Findings become {@link AnnotationStatus#SENT} only when
-     * the submitter answers {@link PromptOutcome#DELIVERED} -- REFUSED,
-     * FAILED, a missing bound session and an empty hand-off are distinct
-     * outcomes that mark nothing. A submitter that throws completes the
-     * future exceptionally; nothing is marked either way.
+     * Sends the scope's batched decisions to its bound agent in ONE prompt:
+     * every unresolved, decided, not-yet-sent finding -- the CONFIRMED ones
+     * as the fix list (each carrying the reviewer's last comment), the
+     * DISMISSED ones as an explicit no-action list -- through the shared
+     * {@link FindingsPrompt#forDecisions} bytes (never forked text),
+     * submitted on the executor. One hand-off per review round, never one
+     * prompt per click. Every included finding becomes {@link
+     * AnnotationStatus#SENT} only when the submitter answers {@link
+     * PromptOutcome#DELIVERED} -- REFUSED, FAILED, a missing bound session
+     * and an empty batch are distinct outcomes that mark nothing, so a
+     * refused send can simply be retried. A submitter that throws completes
+     * the future exceptionally; nothing is marked either way.
      */
-    public CompletableFuture<FixOutcome> askToFix(ReviewScope scope, String subject,
-                                                  List<ReviewAnnotation> findings) {
+    public CompletableFuture<FixOutcome> sendDecisions(ReviewScope scope, String subject) {
         Objects.requireNonNull(scope, "scope");
         Objects.requireNonNull(subject, "subject");
-        Objects.requireNonNull(findings, "findings");
         Optional<ManagedSessionId> session = scope.sessionId();
         if (session.isEmpty()) {
             return CompletableFuture.completedFuture(FixOutcome.of(FixOutcome.State.NO_SESSION));
         }
-        if (findings.isEmpty()) {
-            // The app's rule: an empty hand-off is refused outright, before
-            // a prompt is even built -- nothing is sent and nothing marked.
-            return CompletableFuture.completedFuture(FixOutcome.of(FixOutcome.State.EMPTY));
-        }
         ManagedSessionId sessionId = session.get();
         return onExecutor(() -> {
+            // Membership is read here, off the EDT, at send time: decisions
+            // taken after the bar's last refresh are still included, and
+            // already-SENT findings are never sent twice.
+            List<ReviewAnnotation> decided = store.forScope(scope.id()).stream()
+                    .filter(finding -> !finding.resolved()
+                            && finding.triage() != Triage.PROPOSED
+                            && finding.status() != AnnotationStatus.SENT)
+                    .toList();
+            if (decided.isEmpty()) {
+                // The app's rule: an empty hand-off is refused outright,
+                // before a prompt is even built -- nothing sent, nothing marked.
+                return FixOutcome.of(FixOutcome.State.EMPTY);
+            }
+            List<ReviewAnnotation> toFix = decided.stream()
+                    .filter(finding -> finding.triage() == Triage.CONFIRMED).toList();
+            List<ReviewAnnotation> dismissed = decided.stream()
+                    .filter(finding -> finding.triage() == Triage.DISMISSED).toList();
             PromptOutcome outcome = promptSubmitter.apply(sessionId,
-                    FindingsPrompt.forFix(subject, findings));
+                    FindingsPrompt.forDecisions(subject, toFix, dismissed));
             return switch (outcome) {
                 case DELIVERED -> {
-                    List<ReviewAnnotation> sent = new ArrayList<>(findings.size());
-                    for (ReviewAnnotation finding : findings) {
+                    List<ReviewAnnotation> sent = new ArrayList<>(decided.size());
+                    for (ReviewAnnotation finding : decided) {
                         // A finding another writer removed mid-flight is
                         // skipped, not resurrected; the rest are still SENT.
                         store.mutate(finding.key(),

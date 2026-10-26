@@ -67,8 +67,6 @@ public final class FindingInlayCard extends JPanel {
 
         void undo();
 
-        void fix();
-
         void comment(String text);
     }
 
@@ -86,6 +84,14 @@ public final class FindingInlayCard extends JPanel {
     private final JPanel actions = new JPanel(new BorderLayout());
     private final JPanel actionButtons = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 0));
     private final JLabel progress = new JLabel(PROGRESS_TEXT);
+    /**
+     * The triage buttons' labels: "Agree"/"Won't fix" by default — the honest
+     * reading for a review with nothing to post to — and the owner switches
+     * to "Confirm"/"Dismiss" when the scope carries a pull request, where
+     * confirming vouches the finding into the posted review.
+     */
+    private String confirmLabel = "Agree";
+    private String dismissLabel = "Won't fix";
     private ReviewAnnotation finding;
     private boolean busy;
     private boolean disposed;
@@ -142,6 +148,20 @@ public final class FindingInlayCard extends JPanel {
     /** Whether an action is in flight; tests and owners read this rather than the label. */
     public boolean isBusy() {
         return busy;
+    }
+
+    /**
+     * The triage buttons' labels for this scope's shape: a pull-request
+     * review confirms findings into the posted review ("Confirm"); a local
+     * review only agrees the finding is valid ("Agree") — the same store
+     * state either way, named for what the click means where there is no
+     * submission target. Re-rendering keeps the labels.
+     */
+    public void setTriageLabels(String confirmLabel, String dismissLabel) {
+        checkEdt();
+        this.confirmLabel = Objects.requireNonNull(confirmLabel, "confirmLabel");
+        this.dismissLabel = Objects.requireNonNull(dismissLabel, "dismissLabel");
+        renderActions();
     }
 
     /**
@@ -277,11 +297,18 @@ public final class FindingInlayCard extends JPanel {
     private void renderActions() {
         actionButtons.removeAll();
         if (finding.triage() == Triage.PROPOSED) {
-            actionButtons.add(button("Confirm", callbacks::confirm));
-            actionButtons.add(button("Dismiss", callbacks::dismiss));
-            actionButtons.add(button("Fix", callbacks::fix));
+            JButton confirm = button(confirmLabel, callbacks::confirm);
+            confirm.setToolTipText("The finding is valid: it is included when this review is submitted,"
+                    + " and in the next decisions hand-off to the agent.");
+            JButton dismiss = button(dismissLabel, callbacks::dismiss);
+            dismiss.setToolTipText("The finding is dismissed: reported to the agent as a decision"
+                    + " with the next hand-off, and left out of the review submission.");
+            actionButtons.add(confirm);
+            actionButtons.add(dismiss);
         } else {
-            actionButtons.add(button("Undo", callbacks::undo));
+            JButton undo = button("Undo", callbacks::undo);
+            undo.setToolTipText("Back to proposed.");
+            actionButtons.add(undo);
         }
         setControlsEnabled(!busy && !disposed);
         actions.revalidate();

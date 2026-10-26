@@ -91,7 +91,6 @@ class FindingInlayCardTest {
         @Override public void confirm() { record("confirm"); }
         @Override public void dismiss() { record("dismiss"); }
         @Override public void undo() { record("undo"); }
-        @Override public void fix() { record("fix"); }
         @Override public void comment(String text) { record("comment:" + text); }
 
         void record(String what) {
@@ -104,14 +103,24 @@ class FindingInlayCardTest {
     // ---- component state matrix ----------------------------------------------
 
     @Test
-    void proposedShowsConfirmDismissAndFix() {
+    void proposedShowsAgreeAndWontFixByDefault() {
         FindingInlayCard card = card(finding(Triage.PROPOSED, AnnotationStatus.OPEN), new Recording());
 
         onEdt(() -> {
-            assertEquals(List.of("Confirm", "Dismiss", "Fix"), buttonTexts(card));
-            assertTrue(button(card, "Confirm").isEnabled());
+            assertEquals(List.of("Agree", "Won't fix"), buttonTexts(card));
+            assertTrue(button(card, "Agree").isEnabled());
             assertFalse(card.stateVisible());
         });
+    }
+
+    /** A review with a pull request to post to confirms findings into it: the labels name that meaning. */
+    @Test
+    void aPullRequestReviewConfirmsInsteadOfAgrees() {
+        FindingInlayCard card = card(finding(Triage.PROPOSED, AnnotationStatus.OPEN), new Recording());
+
+        onEdt(() -> card.setTriageLabels("Confirm", "Dismiss"));
+
+        onEdt(() -> assertEquals(List.of("Confirm", "Dismiss"), buttonTexts(card)));
     }
 
     @Test
@@ -137,7 +146,7 @@ class FindingInlayCardTest {
             assertEquals("sent", card.stateText());
             // no invented reply: the thread shows exactly the finding's own messages
             assertEquals(List.of(FIRST_MESSAGE), card.threadLines());
-            assertEquals(List.of("Confirm", "Dismiss", "Fix"), buttonTexts(card));
+            assertEquals(List.of("Agree", "Won't fix"), buttonTexts(card));
         });
     }
 
@@ -185,7 +194,7 @@ class FindingInlayCardTest {
         Recording owner = new Recording();
         FindingInlayCard card = card(finding(Triage.PROPOSED, AnnotationStatus.OPEN), owner);
 
-        onEdt(() -> button(card, "Confirm").doClick());
+        onEdt(() -> button(card, "Agree").doClick());
 
         assertEquals(List.of("confirm"), owner.calls);
         assertEquals(List.of(true), owner.busyAtCall, "the callback must see the card already busy");
@@ -193,7 +202,7 @@ class FindingInlayCardTest {
         onEdt(() -> {
             assertTrue(card.isBusy());
             assertTrue(card.progressVisible());
-            assertFalse(button(card, "Confirm").isEnabled());
+            assertFalse(button(card, "Agree").isEnabled());
             assertFalse(commentField(card).isEnabled());
         });
 
@@ -201,19 +210,19 @@ class FindingInlayCardTest {
         onEdt(() -> {
             assertFalse(card.isBusy());
             assertFalse(card.progressVisible());
-            assertTrue(button(card, "Confirm").isEnabled());
+            assertTrue(button(card, "Agree").isEnabled());
             assertTrue(commentField(card).isEnabled());
         });
 
         onEdt(card::complete); // idempotent: a second completion changes nothing
-        onEdt(() -> assertTrue(button(card, "Confirm").isEnabled()));
+        onEdt(() -> assertTrue(button(card, "Agree").isEnabled()));
     }
 
     @Test
     void aRefusedOrFailedCompletionClearsProgressToo() {
         Recording owner = new Recording();
         FindingInlayCard card = card(finding(Triage.PROPOSED, AnnotationStatus.OPEN), owner);
-        onEdt(() -> button(card, "Dismiss").doClick());
+        onEdt(() -> button(card, "Won't fix").doClick());
 
         onEdt(card::complete); // the owner reports a refusal or failure the same way as success
 
@@ -221,7 +230,7 @@ class FindingInlayCardTest {
             assertEquals(List.of("dismiss"), owner.calls);
             assertFalse(card.isBusy());
             assertFalse(card.progressVisible());
-            assertTrue(button(card, "Dismiss").isEnabled());
+            assertTrue(button(card, "Won't fix").isEnabled());
         });
     }
 
@@ -254,7 +263,7 @@ class FindingInlayCardTest {
         IllegalStateException[] thrown = new IllegalStateException[1];
         onEdt(() -> {
             try {
-                button(card, "Confirm").doClick();
+                button(card, "Agree").doClick();
             } catch (IllegalStateException e) {
                 thrown[0] = e;
             }
@@ -267,7 +276,7 @@ class FindingInlayCardTest {
         onEdt(() -> {
             assertFalse(card.isBusy(), "no async owner exists to call complete(), so the card must restore itself");
             assertFalse(card.progressVisible());
-            assertTrue(button(card, "Confirm").isEnabled());
+            assertTrue(button(card, "Agree").isEnabled());
             assertTrue(commentField(card).isEnabled());
         });
     }
@@ -290,23 +299,23 @@ class FindingInlayCardTest {
     void disposalRemovesProgressAndALateCompletionChangesNothing() {
         Recording owner = new Recording();
         FindingInlayCard card = card(finding(Triage.PROPOSED, AnnotationStatus.OPEN), owner);
-        onEdt(() -> button(card, "Fix").doClick());
+        onEdt(() -> button(card, "Agree").doClick());
         onEdt(() -> assertTrue(card.progressVisible()));
 
         onEdt(card::dispose);
 
         onEdt(() -> {
-            assertEquals(List.of("fix"), owner.calls);
+            assertEquals(List.of("confirm"), owner.calls);
             assertFalse(card.isBusy());
             assertFalse(card.progressVisible());
-            assertFalse(button(card, "Fix").isEnabled());
+            assertFalse(button(card, "Agree").isEnabled());
             assertFalse(commentField(card).isEnabled());
         });
 
         onEdt(card::complete); // the async work finished after the inlay went away
         onEdt(() -> {
             assertFalse(card.progressVisible());
-            assertFalse(button(card, "Fix").isEnabled());
+            assertFalse(button(card, "Agree").isEnabled());
             assertFalse(commentField(card).isEnabled());
         });
     }
@@ -315,7 +324,7 @@ class FindingInlayCardTest {
     void updateRebuildsStateThreadAndActionsWithoutLosingTheBusyContract() {
         Recording owner = new Recording();
         FindingInlayCard card = card(finding(Triage.PROPOSED, AnnotationStatus.OPEN), owner);
-        onEdt(() -> button(card, "Confirm").doClick());
+        onEdt(() -> button(card, "Agree").doClick());
 
         ReviewAnnotation next = finding(Triage.CONFIRMED, AnnotationStatus.SENT)
                 .withReply(new ReviewAnnotation.Message("You", NOW, "on it"));
