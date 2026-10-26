@@ -1,5 +1,6 @@
 package app.drydock.intellij.review;
 
+import app.drydock.review.AnnotationStatus;
 import app.drydock.review.ReviewAnnotation;
 
 import com.intellij.collaboration.ui.codereview.editor.EditorComponentInlaysUtilKt;
@@ -15,12 +16,16 @@ import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.editor.Editor;
 import com.intellij.openapi.editor.Inlay;
+import com.intellij.openapi.editor.colors.EditorFontType;
 import com.intellij.openapi.editor.ex.EditorEx;
 import com.intellij.openapi.editor.markup.GutterIconRenderer;
 import com.intellij.openapi.editor.markup.HighlighterLayer;
 import com.intellij.openapi.editor.markup.RangeHighlighter;
 
 import java.awt.EventQueue;
+import java.awt.FontMetrics;
+import java.awt.event.ComponentAdapter;
+import java.awt.event.ComponentEvent;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.time.Clock;
@@ -32,6 +37,7 @@ import java.util.Set;
 
 import javax.swing.Icon;
 import javax.swing.JComponent;
+import javax.swing.border.EmptyBorder;
 import kotlin.jvm.functions.Function1;
 
 /**
@@ -449,8 +455,15 @@ public final class ReviewDiffInlays {
             }
 
             @Override public Owned insertCardAfter(int line, JComponent card) {
+                // The card spans the editor's text width and wraps inside it;
+                // the anchor line's own indentation becomes the card's left
+                // inset, so the card reads as belonging to that code.
+                int indent = indentWidth(editor, line);
+                card.setBorder(new EmptyBorder(2, indent + 4, 2, 12));
+                FindingInlayContainer container = new FindingInlayContainer(card,
+                        () -> textWidth(editor), () -> heightCap(editor));
                 Inlay<?> inlay = EditorComponentInlaysUtilKt.insertComponentAfter(
-                        editor, line, card, 0, NO_GUTTER_RENDERER);
+                        editor, line, container, 0, NO_GUTTER_RENDERER);
                 if (inlay == null) {
                     // InlayModel can refuse the inlay (verified on 263:
                     // addBlockElement answers null, and the Kotlin signature
@@ -460,10 +473,24 @@ public final class ReviewDiffInlays {
                     disposeCard(card);
                     return () -> { };
                 }
+                // The editor resizing must re-measure the inlay: the
+                // container's preferred size follows the live text width,
+                // and update() makes the platform re-read it. The listener
+                // dies with the inlay (the release below), never with the
+                // editor — a released decoration must not keep watching.
+                ComponentAdapter resize = new ComponentAdapter() {
+                    @Override public void componentResized(ComponentEvent event) {
+                        if (inlay.isValid()) {
+                            inlay.update();
+                        }
+                    }
+                };
+                editor.getScrollPane().addComponentListener(resize);
                 // Validity is the disposal check (an inlay goes invalid with
                 // its editor); anything else that fails propagates and is
                 // logged by the layer, not swallowed here.
                 return () -> {
+                    editor.getScrollPane().removeComponentListener(resize);
                     if (inlay.isValid()) {
                         inlay.dispose();
                     }
@@ -484,6 +511,66 @@ public final class ReviewDiffInlays {
                 };
             }
         };
+    }
+
+    // ---- the inlay geometry -------------------------------------------------
+
+    /**
+     * The pixel width of the anchor line's leading whitespace — the indent the
+     * card's left inset aligns with. Tabs expand to tab stops at the editor's
+     * tab size; the plain-text font's space width converts columns to pixels.
+     * Best effort: a degenerate editor (no font metrics yet, no project for
+     * the tab size) measures nothing and the card sits at the margin.
+     */
+    static int indentWidth(EditorEx editor, int line) {
+        var document = editor.getDocument();
+        if (line < 0 || line >= document.getLineCount()) {
+            return 0;
+        }
+        int start = document.getLineStartOffset(line);
+        int end = document.getLineEndOffset(line);
+        CharSequence text = document.getCharsSequence();
+        int firstNonWhitespace = start;
+        while (firstNonWhitespace < end
+                && (text.charAt(firstNonWhitespace) == ' ' || text.charAt(firstNonWhitespace) == '\t')) {
+            firstNonWhitespace++;
+        }
+        if (firstNonWhitespace == start) {
+            return 0;
+        }
+        int tabSize = editor.getProject() == null
+                ? 4 : Math.max(1, editor.getSettings().getTabSize(editor.getProject()));
+        int columns = 0;
+        for (int i = start; i < firstNonWhitespace; i++) {
+            columns = text.charAt(i) == '\t' ? (columns / tabSize + 1) * tabSize : columns + 1;
+        }
+        FontMetrics metrics = editor.getContentComponent()
+                .getFontMetrics(editor.getColorsScheme().getFont(EditorFontType.PLAIN));
+        int width = columns * metrics.charWidth(' ');
+        int viewport = textWidth(editor);
+        return viewport > 0 ? Math.min(width, viewport / 2) : width;
+    }
+
+    /**
+     * The width the card wraps at: the diff editor's viewport width, minus a
+     * little for the vertical scrollbar the card's own scrolling may raise.
+     * Zero before the editor is laid out — the container falls back to the
+     * card's own preferred size until the first resize fires.
+     */
+    private static int textWidth(EditorEx editor) {
+        int viewport = editor.getScrollPane().getViewport().getWidth();
+        return Math.max(0, viewport - 16);
+    }
+
+    /**
+     * The height cap the card scrolls beyond: most of the editor's viewport,
+     * floored at a few text lines so a tiny viewport still shows something
+     * readable.
+     */
+    private static int heightCap(EditorEx editor) {
+        int lineHeight = editor.getLineHeight();
+        int cap = (int) (editor.getScrollPane().getViewport().getHeight() * 0.6);
+        return Math.max(cap, lineHeight * 4);
     }
 
     /** The severity gutter mark: its icon, and the finding's title as the tooltip. */

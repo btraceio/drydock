@@ -402,15 +402,96 @@ class FindingInlayCardTest {
     }
 
     private static String headerText(FindingInlayCard card) {
-        return labelAt(card, 0);
+        return card.headerText();
     }
 
     private static String metaText(FindingInlayCard card) {
-        return labelAt(card, 1);
+        return card.metaText();
     }
 
-    private static String labelAt(FindingInlayCard card, int index) {
-        Component[] children = card.getComponents();
-        return ((JLabel) children[index]).getText();
+    // ---- geometry: wrapping, selection, alignment ------------------------------
+
+    /**
+     * A wrap width makes the card's text blocks wrap at it: the preferred
+     * width stays at the assigned width and a long text's preferred height
+     * grows beyond the single line a fresh text area reports — the wrapped
+     * height is what the inlay must reserve, and the truncation was its
+     * absence.
+     */
+    @Test
+    void aWrapWidthWrapsTheTextBlocksAtIt() {
+        ReviewAnnotation longFinding = new ReviewAnnotation(
+                "s1", "f1", "src/A.java", "n3", "n3",
+                Severity.BLOCKING, Confidence.HIGH,
+                Optional.of("This title is long enough that wrapping it at two hundred pixels "
+                        + "must take more than one line, otherwise the card truncates"), "reviewer",
+                NOW.minus(Duration.ofHours(2)), List.of(), Optional.empty(), Optional.empty(),
+                List.of(), thread("reviewer", "A message long enough that wrapping it at two "
+                + "hundred pixels must take more than one line, otherwise the card truncates."),
+                Optional.empty(), AnnotationStatus.OPEN,
+                Optional.empty(), false, Triage.PROPOSED, Optional.empty());
+        FindingInlayCard card = card(longFinding, new Recording());
+
+        onEdt(() -> {
+            int unwrappedHeight = card.blockHeights().stream().mapToInt(Integer::intValue).sum();
+            card.setWrapWidth(200);
+            int wrappedHeight = card.blockHeights().stream().mapToInt(Integer::intValue).sum();
+            assertTrue(wrappedHeight > unwrappedHeight,
+                    "a long text wraps to a taller block at 200px");
+            for (java.awt.Dimension preferred : blockPreferredSizes(card)) {
+                assertTrue(preferred.width <= 200, "blocks wrap at, never exceed, the assigned width");
+            }
+        });
+    }
+
+    /** The text blocks are selectable for copy-paste but never editable. */
+    @Test
+    void textBlocksAreSelectableAndNotEditable() {
+        FindingInlayCard card = card(finding(Triage.PROPOSED, AnnotationStatus.OPEN), new Recording());
+
+        onEdt(() -> {
+            List<javax.swing.JTextArea> areas = all(card).stream()
+                    .filter(c -> c instanceof javax.swing.JTextArea)
+                    .map(c -> (javax.swing.JTextArea) c)
+                    .toList();
+            assertTrue(areas.size() >= 3, "header, drift and thread are text blocks");
+            for (javax.swing.JTextArea area : areas) {
+                assertFalse(area.isEditable(), "the reviewer copies, never edits, the card's words");
+                assertTrue(area.getWrapStyleWord(), "wrapping breaks at word ends");
+            }
+        });
+    }
+
+    /** The action buttons sit at the card's right edge, not under the text. */
+    @Test
+    void actionsAlignToTheRightEdge() {
+        FindingInlayCard card = card(finding(Triage.PROPOSED, AnnotationStatus.OPEN), new Recording());
+
+        onEdt(() -> {
+            javax.swing.JPanel actionsPanel = all(card).stream()
+                    .filter(c -> c instanceof javax.swing.JPanel panel
+                            && panel.getLayout() instanceof java.awt.BorderLayout
+                            && panel.getComponentCount() > 0
+                            && ((java.awt.BorderLayout) panel.getLayout())
+                                    .getLayoutComponent(java.awt.BorderLayout.EAST) != null)
+                    .map(c -> (javax.swing.JPanel) c)
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("no right-aligned actions row"));
+            java.awt.FlowLayout layout = (java.awt.FlowLayout) all(actionsPanel).stream()
+                    .filter(c -> c instanceof javax.swing.JPanel panel
+                            && panel.getLayout() instanceof java.awt.FlowLayout)
+                    .map(c -> (javax.swing.JPanel) c)
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("no buttons row"))
+                    .getLayout();
+            assertEquals(java.awt.FlowLayout.RIGHT, layout.getAlignment());
+        });
+    }
+
+    private static List<java.awt.Dimension> blockPreferredSizes(FindingInlayCard card) {
+        return all(card).stream()
+                .filter(c -> c instanceof javax.swing.JTextArea)
+                .map(c -> ((javax.swing.JTextArea) c).getPreferredSize())
+                .toList();
     }
 }
