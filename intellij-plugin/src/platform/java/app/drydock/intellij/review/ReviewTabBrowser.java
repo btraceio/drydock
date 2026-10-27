@@ -205,6 +205,16 @@ public final class ReviewTabBrowser extends AsyncChangesBrowserBase {
         shutdown();
     }
 
+    /**
+     * Hands the tree's current selection to the consumer again, unchanged.
+     * The provider calls this when the Files tab is shown after a tour anchor
+     * took over the diff, so the diff and the Mark commands follow the row
+     * the tree shows as selected again. No selection: nothing is handed over.
+     */
+    void reannounceSelection() {
+        notifySelection();
+    }
+
     /** Hands the current selection's row to the consumer; anything else a node can be is not a row. */
     private void notifySelection() {
         TreePath path = getViewer().getSelectionPath();

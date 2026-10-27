@@ -10,6 +10,7 @@ import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.Severity;
 import app.drydock.review.Triage;
+import app.drydock.review.tour.ReviewTour;
 import com.intellij.diff.fragments.LineFragment;
 import com.intellij.diff.util.Side;
 import org.junit.jupiter.api.AfterEach;
@@ -177,6 +178,41 @@ class ReviewTabProviderTest {
         assertEquals("src/A.java", fileRow.path());
         assertEquals(filePlan.scrollToLine(), fileRow.plan().scrollToLine());
         assertEquals(filePlan.scrollToSide(), fileRow.plan().scrollToSide());
+    }
+
+    @Test
+    void aFollowedTourAnchorScrollsToItsStartKeyLikeAFinding() {
+        UnifiedDiff.FileDiff file = file("src/A.java",
+                hunk(ctx(1, 1, "one"), add(2, "two"), ctx(3, 3, "three"), add(4, "four")));
+        String left = "one\nthree\n";
+        String right = "one\ntwo\nthree\nfour\n";
+        List<LineFragment> fragments = ReviewFragments.fragmentsFor(file, left, right);
+
+        ReviewDiffRequests.RequestContext context = ReviewTabProvider.requestContextFor(
+                new ReviewTabProvider.TourAnchorRow("src/A.java", "n4"), file, left, right, fragments);
+        assertEquals("src/A.java", context.path());
+        assertEquals(Side.RIGHT, context.plan().scrollToSide());
+        assertEquals(3, context.plan().scrollToLine(), "the anchor's n4 scrolls to its own 0-based line");
+
+        // A malformed stored key falls back to the file's own scroll, as a finding's does.
+        ReviewDiffRequests.RequestContext fallback = ReviewTabProvider.requestContextFor(
+                new ReviewTabProvider.TourAnchorRow("src/A.java", "bogus"), file, left, right, fragments);
+        assertEquals(ReviewDiffRequests.plan(file, left, right, fragments).scrollToLine(),
+                fallback.plan().scrollToLine());
+    }
+
+    @Test
+    void aTourIsStaleOnlyAgainstADifferentDiffItHasSeen() {
+        ReviewTour tour = new ReviewTour("rs_1", "fp-a", List.of());
+        assertFalse(ReviewTabProvider.tourStale(tour, null), "no diff read yet: nothing to call it stale against");
+        assertFalse(ReviewTabProvider.tourStale(tour, "fp-a"));
+        assertTrue(ReviewTabProvider.tourStale(tour, "fp-b"));
+    }
+
+    @Test
+    void theTourTabTitleCountsSteps() {
+        assertEquals("Tour", ReviewTabProvider.tourTabTitle(0));
+        assertEquals("Tour (3)", ReviewTabProvider.tourTabTitle(3));
     }
 
     @Test

@@ -19,6 +19,11 @@ import app.drydock.review.AnnotationStore;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.Triage;
+import app.drydock.review.tour.ReviewTour;
+import app.drydock.review.tour.TourAnchor;
+import app.drydock.review.tour.TourFingerprint;
+import app.drydock.review.tour.TourRecord;
+import app.drydock.review.tour.TourStore;
 
 import com.intellij.diff.fragments.LineFragment;
 import com.intellij.icons.AllIcons;
@@ -38,6 +43,7 @@ import com.intellij.openapi.vfs.newvfs.BulkFileListener;
 import com.intellij.openapi.vfs.newvfs.events.VFileEvent;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBPanel;
+import com.intellij.ui.components.JBTabbedPane;
 import org.jetbrains.annotations.NotNull;
 
 import javax.swing.JButton;
@@ -113,6 +119,14 @@ import java.util.function.Supplier;
  * ReviewTabBrowser#selectFinding}, whose selection then drives the diff
  * open exactly as a click on the row would.</p>
  *
+ * <p><strong>The Tour tab.</strong> Beside the file tree, the scope's
+ * guided tour ({@link ReviewTourPanel}), read from the backend's tour store
+ * when the scope resolves, when the store says that scope's tour changed,
+ * and on every snapshot (a reload may have moved the diff under it, which
+ * the panel then flags as stale). Following a tour anchor selects a {@link
+ * TourAnchorRow}, which opens the reusable diff at the anchor's first line
+ * exactly as a finding row would.</p>
+ *
  * <p><strong>Threading.</strong> Everything blocking — scope resolution,
  * contents, the diff, digests, store reads, prompt submission — runs on the
  * plugin's background executor or the services' own executors, never the
@@ -151,6 +165,12 @@ final class ReviewTabProvider {
     private JBLabel header;
     private JBLabel statusLabel;
     private ReviewTabBrowser browser;
+    /** Files (the browser) and Tour (the tour panel). */
+    private JBTabbedPane tabs;
+    private ReviewTourPanel tourPanel;
+    /** What the tour panel last showed (EDT only), so an unchanged refresh does not reset its scroll. */
+    private Optional<ReviewTour> shownTour = Optional.empty();
+    private boolean shownTourStale;
     /** The disposal parent of the reusable diff editor and its inlay layer. */
     private Disposable diffParent;
     private ReviewDiffEditor diffEditor;
@@ -172,6 +192,14 @@ final class ReviewTabProvider {
     private ReviewTabScopes scopes;
     /** The backend's annotation store; volatile: the store listeners read it from their own threads. */
     private volatile AnnotationStore store;
+    /** The backend's tour store; volatile for the same reason. */
+    private volatile TourStore tours;
+    /**
+     * The {@link TourFingerprint} of the latest review diff, set where each
+     * reload joins its inputs; a tour whose own fingerprint differs was
+     * written for other hunks. Null before the first diff.
+     */
+    private volatile String reviewFingerprint;
     /** The finding cards' write side; volatile: the card callbacks read it from the EDT. */
     private volatile ReviewTriageActions triage;
     /** Volatile: the file/activity listeners and the Changes link read it from any thread. */
@@ -273,9 +301,23 @@ final class ReviewTabProvider {
 
         buildDecisionsBar();
 
+        // The tour's anchors open in the same reusable diff a finding does.
+        tourPanel = new ReviewTourPanel(this::openTourAnchor);
+        tabs = new JBTabbedPane();
+        tabs.addTab("Files", browser);
+        tabs.addTab(TOUR_TAB, tourPanel);
+        // A followed anchor leaves the tree's highlighted row behind; back on
+        // the Files tab, the tree's row drives the diff and the commands again.
+        tabs.addChangeListener(e -> {
+            ReviewTabBrowser files = browser;
+            if (files != null && tabs != null && tabs.getSelectedComponent() == files) {
+                files.reannounceSelection();
+            }
+        });
+
         JBPanel<?> content = new JBPanel<>(new BorderLayout());
         content.add(header, BorderLayout.NORTH);
-        content.add(browser, BorderLayout.CENTER);
+        content.add(tabs, BorderLayout.CENTER);
         JPanel south = new JPanel(new BorderLayout());
         south.add(decisionsBar, BorderLayout.NORTH);
         south.add(statusLabel, BorderLayout.SOUTH);
@@ -349,6 +391,12 @@ final class ReviewTabProvider {
         header = null;
         statusLabel = null;
         browser = null;
+        tabs = null;
+        tourPanel = null;
+        shownTour = Optional.empty();
+        shownTourStale = false;
+        tours = null;
+        reviewFingerprint = null;
         diffParent = null;
         diffEditor = null;
         inlays = null;
@@ -421,6 +469,7 @@ final class ReviewTabProvider {
                         return;
                     }
                     ReviewTabProvider.this.scope = scope;
+                    submitTourRefresh();
                     // reload reports LOADING synchronously before any
                     // background work starts, and every outcome of it is
                     // terminal (T11) — the placeholder always clears.
@@ -441,6 +490,8 @@ final class ReviewTabProvider {
         }
         AnnotationStore annotations = backend.annotationStore();
         store = annotations;
+        TourStore tourStore = backend.tourStore();
+        tours = tourStore;
         worktrees = new WorktreeService();
         git = new GitStatusService();
         contents = new ReviewContents(new GitExecutableLocator(), git);
@@ -461,11 +512,16 @@ final class ReviewTabProvider {
                 // The base commit's git rev-parse runs once per reload; the
                 // marks path reuses the cached value and spawns no git (AC21).
                 contents::baseCommit,
-                (scope, diff, baseCommit) -> new ReviewTabModel.Inputs(
-                        diff,
-                        annotations.forScope(scope.id()),
-                        annotations.verdictsFor(scope.id()),
-                        baseCommit),
+                (scope, diff, baseCommit) -> {
+                    // Every reload passes here with its fresh diff, off the
+                    // EDT: the one place the tour's staleness can be read.
+                    reviewFingerprint = TourFingerprint.of(diff);
+                    return new ReviewTabModel.Inputs(
+                            diff,
+                            annotations.forScope(scope.id()),
+                            annotations.verdictsFor(scope.id()),
+                            baseCommit);
+                },
                 ReviewTabModel::snapshot,
                 this::snapshotArrived,
                 (state, text) -> onEdt(() -> refreshStatus(state, text)));
@@ -483,6 +539,98 @@ final class ReviewTabProvider {
             refresher.marksChanged();
             submitDecorationRefresh();
         }));
+        // A posted or replaced tour (review_tour) reaches the Tour tab
+        // without a reload; another scope's tour is not this tab's.
+        refresher.onDispose(tourStore.addChangeListener(scopeId -> {
+            if (scopeId.equals(currentScopeId())) {
+                submitTourRefresh();
+            }
+        }));
+    }
+
+    // ---- the Tour tab ------------------------------------------------------
+
+    /** The Tour tab's title, without its step count. */
+    static final String TOUR_TAB = "Tour";
+
+    /** The Tour tab's title for a tour of {@code steps} steps (0: none). */
+    static String tourTabTitle(int steps) {
+        return steps == 0 ? TOUR_TAB : TOUR_TAB + " (" + steps + ")";
+    }
+
+    /**
+     * Whether {@code tour} was written for other hunks than the current
+     * review diff's: false while no diff has been read yet, rather than
+     * flagging every tour before the first reload lands.
+     */
+    static boolean tourStale(ReviewTour tour, String currentFingerprint) {
+        return currentFingerprint != null && !currentFingerprint.equals(tour.diffFingerprint());
+    }
+
+    /** Schedules a Tour tab refresh on the plugin executor; a shutdown race is ignored, not thrown. */
+    private void submitTourRefresh() {
+        if (disposed.get()) {
+            return;
+        }
+        try {
+            plugin.executor().execute(this::refreshTour);
+        } catch (RejectedExecutionException e) {
+            SYS_LOG.log(Level.WARNING, "Review tour refresh not scheduled: plugin executor is shut down");
+        }
+    }
+
+    /** Reads the scope's tour (an in-memory store read) off the EDT and shows it on the EDT. */
+    private void refreshTour() {
+        ReviewScope current = scope;
+        TourStore store = tours;
+        if (disposed.get() || current == null || store == null) {
+            return;
+        }
+        Optional<ReviewTour> tour = store.forScope(current.id()).map(TourRecord::tour);
+        boolean stale = tour.map(t -> tourStale(t, reviewFingerprint)).orElse(false);
+        onEdt(() -> {
+            ReviewTourPanel panel = tourPanel;
+            JBTabbedPane tabbed = tabs;
+            if (panel == null || tabbed == null || disposed.get() || !current.equals(scope)) {
+                return; // closed, or a newer scope owns the tab: its own refresh follows
+            }
+            if (tour.equals(shownTour) && stale == shownTourStale) {
+                return; // unchanged: re-rendering would only reset the reader's scroll
+            }
+            shownTour = tour;
+            shownTourStale = stale;
+            panel.show(tour, stale);
+            tabbed.setTitleAt(tabbed.indexOfComponent(panel), tourTabTitle(panel.stepCount()));
+        });
+    }
+
+    /**
+     * A tour anchor was followed (EDT): opens the review diff at its first
+     * line, the way selecting a finding does. An anchor whose file is not
+     * in the current diff (the tour is stale) has nothing to open, and the
+     * status line says so instead of the click doing nothing.
+     */
+    private void openTourAnchor(TourAnchor anchor) {
+        TourAnchorRow row = new TourAnchorRow(anchor.file(), anchor.startKey());
+        if (fileRowOf(row) == null) {
+            if (!commandRunning.get()) { // a running command's progress text stays
+                renderStatusText(anchor.file() + " is not in the current review diff.");
+            }
+            return;
+        }
+        selected(row);
+    }
+
+    /**
+     * The selection a followed tour anchor makes: a file of the review diff
+     * and the line key to scroll to. Like a finding row, it addresses its
+     * file row by path in the latest snapshot.
+     */
+    record TourAnchorRow(String path, String startKey) {
+        TourAnchorRow {
+            Objects.requireNonNull(path, "path");
+            Objects.requireNonNull(startKey, "startKey");
+        }
     }
 
     // ---- snapshots and status (the EDT half) --------------------------------
@@ -497,6 +645,7 @@ final class ReviewTabProvider {
     private void snapshotArrived(ReviewTabModel.Snapshot snapshot) {
         this.snapshot = snapshot;
         refreshDecorations();
+        refreshTour(); // the reload behind this snapshot may have moved the diff under the tour
         onEdt(() -> {
             ReviewTabBrowser browser = this.browser;
             JBLabel header = this.header;
@@ -706,19 +855,23 @@ final class ReviewTabProvider {
      * The titled request context for a selection (pure, EDT-built by
      * {@link #buildRequest}): the file path names the request — the title
      * the reusable tab shows and the identity the inlay layer's path
-     * check compares — and the plan scrolls a finding row to its own line
-     * key (a malformed persisted key falls back to the file's own scroll —
-     * it is a value, not a crash), a file row to its first changed line.
+     * check compares — and the plan scrolls a finding row or a tour anchor
+     * to its own line key (a malformed persisted key falls back to the
+     * file's own scroll — it is a value, not a crash), a file row to its
+     * first changed line.
      */
     static ReviewDiffRequests.RequestContext requestContextFor(Object row, UnifiedDiff.FileDiff file,
                                                                CharSequence left, CharSequence right,
                                                                List<LineFragment> fragments) {
         Objects.requireNonNull(file, "file");
         ReviewDiffRequests.Plan plan;
-        if (row instanceof ReviewTabModel.FindingRow finding) {
+        String scrollKey = row instanceof ReviewTabModel.FindingRow finding ? finding.startKey()
+                : row instanceof TourAnchorRow anchor ? anchor.startKey()
+                : null;
+        if (scrollKey != null) {
             try {
                 plan = ReviewDiffRequests.plan(left, right, fragments,
-                        ReviewDiffRequests.scrollTarget(finding.startKey()));
+                        ReviewDiffRequests.scrollTarget(scrollKey));
             } catch (IllegalArgumentException e) {
                 // fall through: the file's own scroll target
                 plan = ReviewDiffRequests.plan(file, left, right, fragments);
@@ -831,24 +984,24 @@ final class ReviewTabProvider {
 
     /**
      * The file row a selection addresses: a file row itself, or the file
-     * row of a selected finding (look up in the latest snapshot — the
-     * finding's own file, wherever the snapshot lists it).
+     * row of a selected finding or followed tour anchor (look up in the
+     * latest snapshot — its own file, wherever the snapshot lists it).
      */
     private ReviewTabModel.FileRow fileRowOf(Object row) {
         if (row instanceof ReviewTabModel.FileRow file) {
             return file;
         }
-        if (row instanceof ReviewTabModel.FindingRow finding) {
-            ReviewTabModel.Snapshot current = snapshot;
-            if (current == null) {
-                return null;
-            }
-            return current.files().stream()
-                    .filter(file -> file.path().equals(finding.annotation().file()))
-                    .findFirst()
-                    .orElse(null);
+        String path = row instanceof ReviewTabModel.FindingRow finding ? finding.annotation().file()
+                : row instanceof TourAnchorRow anchor ? anchor.path()
+                : null;
+        ReviewTabModel.Snapshot current = snapshot;
+        if (path == null || current == null) {
+            return null;
         }
-        return null;
+        return current.files().stream()
+                .filter(file -> file.path().equals(path))
+                .findFirst()
+                .orElse(null);
     }
 
     /** The current scope's id; null before the first load resolves one. */
@@ -870,6 +1023,9 @@ final class ReviewTabProvider {
         }
         if (row instanceof ReviewTabModel.FindingRow finding) {
             return finding.annotation().file();
+        }
+        if (row instanceof TourAnchorRow anchor) {
+            return anchor.path();
         }
         return null;
     }
@@ -1336,6 +1492,13 @@ final class ReviewTabProvider {
     private void runCommand(boolean mark) {
         ReviewVerdictCommands commands = this.commands;
         ReviewScope scope = this.scope;
+        if (selectionRow instanceof TourAnchorRow) {
+            // The tree has no selection of its own (it would have been
+            // re-announced when the Files tab was shown): the anchor's file
+            // is not what the tree says is selected, so it is not marked.
+            renderStatusText("Select a file in the tree to mark it.");
+            return;
+        }
         ReviewTabModel.FileRow row = fileRowOf(selectionRow);
         if (commands == null || scope == null || row == null) {
             return; // nothing selected to command; the tree's own state says so
