@@ -520,7 +520,8 @@ public final class ReviewTabOpener {
             return Messages.showOkCancelDialog(project,
                     "No review has been prepared for " + checkout.getFileName() + ".\n\n"
                             + "Run the review preparation? An agent reviews this checkout and "
-                            + "produces the findings and tour the review board shows.",
+                            + "posts findings to this window's Files tab, plus a guided tour in "
+                            + "its Tour tab if you ask for one in the next dialog.",
                     "Drydock Review",
                     "Run preparation", "Cancel", AllIcons.General.QuestionDialog) == Messages.OK;
         }
