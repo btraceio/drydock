@@ -170,7 +170,7 @@ public final class WorktreeReview {
         Optional<PullRequestReview.ModelChoice> choice = pickModel
                 ? chooseModel(from, plugin, agent.get(), lastUsedModel, lastUsedTiers, false, indicator)
                 : Optional.of(new PullRequestReview.ModelChoice(agent.get(),
-                        lastUsedModel.apply(agent.get()), Optional.empty()));
+                        lastUsedModel.apply(agent.get()), Optional.empty(), ReviewModelDialog.rememberedWithTour()));
         if (choice.isEmpty()) {
             return; // cancelled, abandoned, failed, or the dialog never opened: no launch
         }
@@ -178,6 +178,7 @@ public final class WorktreeReview {
         Optional<String> model = choice.get().model();
         Optional<ModelTiers> recordedTiers = choice.get().tiers();
         ModelTiers promptTiers = recordedTiers.orElseGet(() -> lastUsedTiers.apply(picked));
+        boolean withTour = choice.get().withTour();
 
         if (!Files.isDirectory(worktree)) {
             report(from, "The worktree " + worktree + " is gone, so " + branch + " cannot be reviewed.");
@@ -195,7 +196,7 @@ public final class WorktreeReview {
 
         Path reused = worktree;
         ApplicationManager.getApplication().invokeLater(() ->
-                openAndLaunch(from, mainRoot, reused, branch, picked, model, promptTiers, recordedTiers),
+                openAndLaunch(from, mainRoot, reused, branch, picked, model, promptTiers, recordedTiers, withTour),
                 ModalityState.nonModal());
     }
 
@@ -221,7 +222,7 @@ public final class WorktreeReview {
                         plugin.registry()::supportsSubagents, customTemplate);
                 boolean delivered = dialog.showAndGet()
                         ? picked.complete(new PullRequestReview.ModelChoice(dialog.acceptedAgent(),
-                                dialog.acceptedModel(), dialog.acceptedTiers()))
+                                dialog.acceptedModel(), dialog.acceptedTiers(), dialog.acceptedWithTour()))
                         : picked.cancel(false);
                 if (!delivered) {
                     LOG.log(Level.INFO, "The review model dialog was answered after the review was abandoned");
@@ -256,7 +257,7 @@ public final class WorktreeReview {
      */
     private void openAndLaunch(Project from, Path mainRoot, Path worktree, String branch,
                                AgentKind agent, Optional<String> model, ModelTiers promptTiers,
-                               Optional<ModelTiers> recordedTiers) {
+                               Optional<ModelTiers> recordedTiers, boolean withTour) {
         if (from.isDisposed()) {
             LOG.log(Level.INFO, "The window was closed while the review of {0} was starting; {1} is untouched",
                     branch, worktree);
@@ -264,7 +265,7 @@ public final class WorktreeReview {
         }
         String displayName = displayName(branch);
         PullRequestReview.ReviewPrompt prompt =
-                PullRequestReview.ReviewPrompt.drydockReview(agent, promptTiers, model);
+                PullRequestReview.ReviewPrompt.drydockReview(agent, promptTiers, model, withTour);
         var launch = SessionDialogs.launchSession(from, worktree, mainRoot, agent, displayName,
                 SessionMode.WRITES, prompt::resolve, false, model, recordedTiers);
         ProgressManager.getInstance().run(new Task.Backgroundable(from,

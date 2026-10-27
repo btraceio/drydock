@@ -3,6 +3,7 @@ package app.drydock.intellij.review;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.ModelTiers;
 import app.drydock.intellij.agent.PromptOutcome;
 import app.drydock.review.ReviewInstructions;
 import app.drydock.review.ReviewScope;
@@ -26,7 +27,8 @@ import java.util.function.Supplier;
  *
  * <p>{@link #request} blocks while it waits for the review service to
  * initialize and for the scope to resolve, so callers run it off the EDT. It
- * sends {@link ReviewInstructions#forScope} unchanged. A session whose agent
+ * sends {@link ReviewInstructions#forScope} unchanged, with or without the
+ * guided tour as the caller asked. A session whose agent
  * is not running gets {@link Refused}, and a running one that holds no
  * Drydock MCP access gets {@link NoTools}: in both cases no scope is resolved
  * and nothing is written to its agent.</p>
@@ -133,15 +135,17 @@ public final class ReviewRequest {
      * {@link Refused} when the agent is not running, and {@link NoTools} when
      * the session holds no MCP access, before it resolves a scope. The
      * running check comes first because an ended agent's access is already
-     * released. Logs the outcome, never the prompt. Blocks; never throws.
+     * released. {@code withTour} asks the agent for a guided tour beside
+     * its findings. Logs the outcome, never the prompt. Blocks; never throws.
      */
-    public Outcome request(ManagedAgentSession session) {
-        Outcome outcome = outcome(session);
-        LOG.log(Level.INFO, "Review Changes for session {0}: {1}", session.id(), outcome);
+    public Outcome request(ManagedAgentSession session, boolean withTour) {
+        Outcome outcome = outcome(session, withTour);
+        LOG.log(Level.INFO, "Review Changes ({0}) for session {1}: {2}",
+                withTour ? "with tour" : "findings only", session.id(), outcome);
         return outcome;
     }
 
-    private Outcome outcome(ManagedAgentSession session) {
+    private Outcome outcome(ManagedAgentSession session, boolean withTour) {
         try {
             try {
                 initialization.get(initWait.toNanos(), TimeUnit.NANOSECONDS);
@@ -166,8 +170,8 @@ public final class ReviewRequest {
             } catch (ExecutionException e) {
                 return new Failed(describe(e.getCause() != null ? e.getCause() : e));
             }
-            String prompt = ReviewInstructions.forScope(
-                    scope.id(), supportsSubagents.test(session.agentKind()));
+            String prompt = ReviewInstructions.forScope(scope.id(), supportsSubagents.test(session.agentKind()),
+                    ModelTiers.EMPTY, Optional.empty(), withTour);
             PromptOutcome outcome = submit.apply(session.id(), prompt);
             return switch (outcome) {
                 case DELIVERED -> new Sent(scope.id());

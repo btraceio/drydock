@@ -73,18 +73,18 @@ class ReviewRequestBackendTest {
 
     @Test
     void noBackendIsNotReady() {
-        assertInstanceOf(NotReady.class, request(Optional.empty()).request(session(ManagedSessionId.newId())));
+        assertInstanceOf(NotReady.class, request(Optional.empty()).request(session(ManagedSessionId.newId()), true));
     }
 
     @Test
     void aBackendThatIsNotStartedIsNotReady() {
-        assertInstanceOf(NotReady.class, request(Optional.of(backend)).request(session(ManagedSessionId.newId())));
+        assertInstanceOf(NotReady.class, request(Optional.of(backend)).request(session(ManagedSessionId.newId()), true));
     }
 
     @Test
     void aSessionTheBackendNeverMintedForGetsNoTools() {
         backend.start();
-        assertInstanceOf(NoTools.class, request(Optional.of(backend)).request(session(ManagedSessionId.newId())));
+        assertInstanceOf(NoTools.class, request(Optional.of(backend)).request(session(ManagedSessionId.newId()), true));
         assertTrue(prompts.isEmpty());
     }
 
@@ -95,7 +95,7 @@ class ReviewRequestBackendTest {
         backend.accessFor(id, McpDelivery.CONFIG_FILE).orElseThrow();
         backend.release(id);
 
-        assertInstanceOf(NoTools.class, request(Optional.of(backend)).request(session(id)));
+        assertInstanceOf(NoTools.class, request(Optional.of(backend)).request(session(id), true));
     }
 
     @Test
@@ -106,7 +106,7 @@ class ReviewRequestBackendTest {
 
         // The temporary directory is not a git checkout, so the scope fails to
         // resolve: the request got past the access check.
-        assertInstanceOf(Failed.class, request(Optional.of(backend)).request(session(id)));
+        assertInstanceOf(Failed.class, request(Optional.of(backend)).request(session(id), true));
         assertTrue(prompts.isEmpty());
     }
 }

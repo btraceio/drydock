@@ -102,8 +102,15 @@ final class TaskActions {
         return List.of(
                 task("Deactivate", "Deactivate this task's agent", AllIcons.Actions.Suspend, TaskRow::running,
                         (project, row) -> stop(project, row, false)),
-                task("Review Changes", "Ask this task's agent to review its changes", AllIcons.Actions.Diff,
-                        TaskActions::reviewsChanges, TaskActions::reviewChanges),
+                // Two entries, not a setting: whether a review is worth a
+                // guided tour is decided per change, at the click.
+                task("Review Changes", "Ask this task's agent for review findings on its changes",
+                        AllIcons.Actions.Diff, TaskActions::reviewsChanges,
+                        (project, row) -> reviewChanges(project, row, false)),
+                task("Review Changes with Tour",
+                        "Ask this task's agent for review findings and a guided tour of its changes",
+                        AllIcons.Actions.Preview, TaskActions::reviewsChanges,
+                        (project, row) -> reviewChanges(project, row, true)),
                 task("Deactivate && Close Window", "Deactivate the agent and close its window", AllIcons.Actions.Close,
                         TaskActions::closesOwnWindow, (project, row) -> stop(project, row, true)),
                 // F5: moves an agent another window shows into this one.
@@ -137,11 +144,12 @@ final class TaskActions {
     }
 
     /**
-     * Asks {@code row}'s agent to review its changes. EDT. The request runs
-     * under a background progress that ends when it returns; any outcome but
-     * a sent prompt is shown in a warning dialog on the EDT.
+     * Asks {@code row}'s agent to review its changes, with a guided tour
+     * when {@code withTour}. EDT. The request runs under a background
+     * progress that ends when it returns; any outcome but a sent prompt is
+     * shown in a warning dialog on the EDT.
      */
-    static void reviewChanges(Project from, TaskRow row) {
+    static void reviewChanges(Project from, TaskRow row, boolean withTour) {
         ProgressManager.getInstance().run(new Task.Backgroundable(from, "Starting review…", false) {
             @Override
             public void run(@NotNull ProgressIndicator indicator) {
@@ -150,7 +158,7 @@ final class TaskActions {
                 ReviewRequest request = ReviewRequest.forBackend(plugin.initialization(), plugin::reviewBackend,
                         executions::isRunning, kind -> plugin.registry().supportsSubagents(kind),
                         executions::submitPrompt);
-                ReviewRequest.Outcome outcome = request.request(row.session());
+                ReviewRequest.Outcome outcome = request.request(row.session(), withTour);
                 ReviewRequest.message(row.session().displayName(), outcome).ifPresent(message ->
                         ApplicationManager.getApplication().invokeLater(
                                 () -> Messages.showWarningDialog(from, message, "Drydock"),

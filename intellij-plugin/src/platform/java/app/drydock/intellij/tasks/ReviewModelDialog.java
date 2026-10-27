@@ -4,8 +4,10 @@ import app.drydock.agent.api.Agent;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.ModelTiers;
 
+import com.intellij.ide.util.PropertiesComponent;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.DialogWrapper;
+import com.intellij.ui.components.JBCheckBox;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBRadioButton;
 import com.intellij.util.ui.FormBuilder;
@@ -49,8 +51,18 @@ import java.util.function.Predicate;
  * <p>The review instruction never spends MID: its row is there because the
  * tiers are remembered as one set per harness, shared with the Triage and
  * Implement tasks that do spend it, and the row is labelled so.</p>
+ *
+ * <p>"Also write a guided tour" decides whether Drydock's instruction asks
+ * for a tour beside the findings: a tour costs the agent far more than its
+ * findings, and a small change rarely needs one. The answer is remembered
+ * IDE-wide ({@link #rememberedWithTour}), not per repository: it describes
+ * how this reviewer likes to work, not the code. A custom template replaces
+ * the instruction, so the box is not shown then.</p>
  */
 final class ReviewModelDialog extends DialogWrapper {
+
+    /** The IDE-wide memory of the tour box; absent means a tour (what a review asked for before the box existed). */
+    private static final String WITH_TOUR_KEY = "drydock.review.withTour";
 
     private final List<Agent> agents;
     private final AgentKind preselected;
@@ -62,6 +74,7 @@ final class ReviewModelDialog extends DialogWrapper {
     private final ModelField strongField;
     private final ModelField midField;
     private final ModelField lowField;
+    private final JBCheckBox withTourBox;
     private final Map<AgentKind, JBRadioButton> agentButtons = new LinkedHashMap<>();
     /** Created in {@code createCenterPanel}, where the agent row is at hand. */
     private JPanel tierRows;
@@ -70,6 +83,7 @@ final class ReviewModelDialog extends DialogWrapper {
     private AgentKind acceptedAgent;
     private Optional<String> acceptedModel;
     private Optional<ModelTiers> acceptedTiers;
+    private Boolean acceptedWithTour;
 
     /**
      * @param preselected   the flow's default harness (the repository's
@@ -96,6 +110,9 @@ final class ReviewModelDialog extends DialogWrapper {
         strongField = new ModelField(suggestions);
         midField = new ModelField(suggestions);
         lowField = new ModelField(suggestions);
+        withTourBox = new JBCheckBox("Also write a guided tour", rememberedWithTour());
+        withTourBox.setToolTipText("The agent walks the change step by step in the Drydock Review window's Tour "
+                + "tab. Costs the agent noticeably more than findings alone.");
         init();
         applyAgent(preselected);
     }
@@ -130,11 +147,14 @@ final class ReviewModelDialog extends DialogWrapper {
         tierRows.add(tierRow("LOW model:", lowField, labelWidth));
         tierRows.setVisible(tiersShown(selectedAgent()));
 
-        return FormBuilder.createFormBuilder()
+        FormBuilder form = FormBuilder.createFormBuilder()
                 .addLabeledComponent("Harness:", agentsRow)
                 .addLabeledComponent("Starting model:", modelField)
-                .addComponent(tierRows, JBUI.scale(4))
-                .getPanel();
+                .addComponent(tierRows, JBUI.scale(4));
+        if (!customTemplate) {
+            form.addComponent(withTourBox, JBUI.scale(8));
+        }
+        return form.getPanel();
     }
 
     private static JPanel tierRow(String label, ModelField field, int labelWidth) {
@@ -187,7 +207,28 @@ final class ReviewModelDialog extends DialogWrapper {
         acceptedTiers = tiersShown(acceptedAgent)
                 ? Optional.of(new ModelTiers(strongField.selected(), midField.selected(), lowField.selected()))
                 : Optional.empty();
+        acceptedWithTour = !customTemplate && withTourBox.isSelected();
+        if (!customTemplate) {
+            PropertiesComponent.getInstance().setValue(WITH_TOUR_KEY, withTourBox.isSelected(), true);
+        }
         super.doOKAction();
+    }
+
+    /**
+     * The tour box's remembered answer, IDE-wide; true until the reviewer
+     * first unticks it. An in-memory read of the application's properties
+     * (persisted by the platform), so any thread may call it.
+     */
+    static boolean rememberedWithTour() {
+        return PropertiesComponent.getInstance().getBoolean(WITH_TOUR_KEY, true);
+    }
+
+    /** Whether the instruction asks for a guided tour; false under a custom template. Only valid after OK. */
+    boolean acceptedWithTour() {
+        if (acceptedWithTour == null) {
+            throw new IllegalStateException("The review model dialog has not been accepted");
+        }
+        return acceptedWithTour;
     }
 
     /** The picked harness. Only valid after OK. */

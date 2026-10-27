@@ -112,16 +112,33 @@ public final class ReviewInstructions {
      */
     public static String forScope(String scopeId, boolean supportsSubagents, ModelTiers tiers,
                                   Optional<String> sessionModel) {
+        return forScope(scopeId, supportsSubagents, tiers, sessionModel, true);
+    }
+
+    /**
+     * As {@link #forScope(String, boolean, ModelTiers, Optional)}, with the
+     * reviewer's choice of whether the review also writes a guided tour. A
+     * tour costs the agent far more than its findings do (every changed row
+     * in a step, a check with an alternate per step), and a small change
+     * often needs only the findings; without a tour the instruction says so
+     * outright, because an agent left to infer it from silence may still
+     * call {@code review_tour}, which the router serves either way.
+     */
+    public static String forScope(String scopeId, boolean supportsSubagents, ModelTiers tiers,
+                                  Optional<String> sessionModel, boolean withTour) {
         Objects.requireNonNull(scopeId, "scopeId");
         Objects.requireNonNull(tiers, "tiers");
         Objects.requireNonNull(sessionModel, "sessionModel");
-        String work = "read review_scope for handle " + scopeId + " with include=sections,impact"
-                + ", call review_state first so already-settled findings are not re-flagged, "
-                + "then post review_finding and review_tour against that handle; review_tour is validated "
-                + "(every changed row in a step, each step at least one check with an alternate) and lists "
-                + "every problem if it is rejected, so fix them and post it again; " + ANCHOR_NOTES + "; "
-                + CHECK_KINDS + "; " + IMPACT_NOTES + "; " + CHECK_GROUNDING + "; " + TEACHING
-                + "; " + DIAGRAM;
+        String read = "read review_scope for handle " + scopeId + " with include=sections,impact"
+                + ", call review_state first so already-settled findings are not re-flagged, ";
+        String work = withTour
+                ? read + "then post review_finding and review_tour against that handle; review_tour is validated "
+                        + "(every changed row in a step, each step at least one check with an alternate) and lists "
+                        + "every problem if it is rejected, so fix them and post it again; " + ANCHOR_NOTES + "; "
+                        + CHECK_KINDS + "; " + IMPACT_NOTES + "; " + CHECK_GROUNDING + "; " + TEACHING
+                        + "; " + DIAGRAM
+                : read + "then post review_finding against that handle; the reviewer asked for findings only, "
+                        + "so do not call review_tour";
         if (!supportsSubagents) {
             return "Review the changes in this worktree with the drydock review tools: " + work + ".";
         }

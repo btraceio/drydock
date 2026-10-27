@@ -4,6 +4,7 @@ import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.AgentBinding;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.ModelTiers;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionStatus;
@@ -65,18 +66,28 @@ class ReviewRequestTest {
                 Optional.of(s -> CompletableFuture.completedFuture(scope)),
                 k -> k == AgentKind.CLAUDE, PromptOutcome.DELIVERED);
 
-        assertEquals(new Sent(scope.id()), r.request(claude));
-        assertEquals(new Sent(scope.id()), r.request(pi));
+        assertEquals(new Sent(scope.id()), r.request(claude, true));
+        assertEquals(new Sent(scope.id()), r.request(pi, true));
 
         assertEquals(List.of(ReviewInstructions.forScope(scope.id(), true),
                 ReviewInstructions.forScope(scope.id(), false)), prompts);
     }
 
     @Test
+    void aFindingsOnlyRequestSendsTheInstructionWithoutTheTour() {
+        ReviewRequest r = delivering(PromptOutcome.DELIVERED);
+
+        assertEquals(new Sent(scope.id()), r.request(session(AgentKind.CLAUDE), false));
+
+        assertEquals(List.of(ReviewInstructions.forScope(scope.id(), true, ModelTiers.EMPTY, Optional.empty(),
+                false)), prompts);
+    }
+
+    @Test
     void emptySourceIsNotReady() {
         ReviewRequest r = request(CompletableFuture.completedFuture(null), Optional.empty(),
                 k -> true, PromptOutcome.DELIVERED);
-        assertInstanceOf(NotReady.class, r.request(session(AgentKind.CLAUDE)));
+        assertInstanceOf(NotReady.class, r.request(session(AgentKind.CLAUDE), true));
         assertTrue(prompts.isEmpty());
     }
 
@@ -92,7 +103,7 @@ class ReviewRequestTest {
                     return PromptOutcome.DELIVERED;
                 }, SHORT, SHORT);
 
-        assertInstanceOf(NoTools.class, r.request(session(AgentKind.CLAUDE)));
+        assertInstanceOf(NoTools.class, r.request(session(AgentKind.CLAUDE), true));
         assertTrue(scoped.isEmpty());
         assertTrue(prompts.isEmpty());
         assertTrue(ReviewRequest.message("Fix login", new NoTools()).orElseThrow().contains("Fix login"));
@@ -110,7 +121,7 @@ class ReviewRequestTest {
                     return PromptOutcome.DELIVERED;
                 }, SHORT, SHORT);
 
-        assertInstanceOf(Refused.class, r.request(session(AgentKind.CLAUDE)));
+        assertInstanceOf(Refused.class, r.request(session(AgentKind.CLAUDE), true));
         assertTrue(scoped.isEmpty());
         assertTrue(prompts.isEmpty());
     }
@@ -120,7 +131,7 @@ class ReviewRequestTest {
         ReviewRequest r = new ReviewRequest(CompletableFuture.completedFuture(null),
                 Optional::empty, id -> true, id -> false, k -> true, (id, prompt) -> PromptOutcome.DELIVERED,
                 SHORT, SHORT);
-        assertInstanceOf(NotReady.class, r.request(session(AgentKind.CLAUDE)));
+        assertInstanceOf(NotReady.class, r.request(session(AgentKind.CLAUDE), true));
     }
 
     @Test
@@ -128,7 +139,7 @@ class ReviewRequestTest {
         ReviewRequest r = request(new CompletableFuture<>(),
                 Optional.of(s -> CompletableFuture.completedFuture(scope)), k -> true,
                 PromptOutcome.DELIVERED);
-        assertInstanceOf(NotReady.class, r.request(session(AgentKind.CLAUDE)));
+        assertInstanceOf(NotReady.class, r.request(session(AgentKind.CLAUDE), true));
     }
 
     @Test
@@ -136,17 +147,17 @@ class ReviewRequestTest {
         ReviewRequest r = request(CompletableFuture.failedFuture(new IllegalStateException("x")),
                 Optional.of(s -> CompletableFuture.completedFuture(scope)), k -> true,
                 PromptOutcome.DELIVERED);
-        assertInstanceOf(NotReady.class, r.request(session(AgentKind.CLAUDE)));
+        assertInstanceOf(NotReady.class, r.request(session(AgentKind.CLAUDE), true));
     }
 
     @Test
     void refusedPromptIsRefused() {
-        assertInstanceOf(Refused.class, delivering(PromptOutcome.REFUSED).request(session(AgentKind.CLAUDE)));
+        assertInstanceOf(Refused.class, delivering(PromptOutcome.REFUSED).request(session(AgentKind.CLAUDE), true));
     }
 
     @Test
     void failedPromptIsFailed() {
-        assertInstanceOf(Failed.class, delivering(PromptOutcome.FAILED).request(session(AgentKind.CLAUDE)));
+        assertInstanceOf(Failed.class, delivering(PromptOutcome.FAILED).request(session(AgentKind.CLAUDE), true));
     }
 
     @Test
@@ -154,7 +165,7 @@ class ReviewRequestTest {
         ReviewRequest r = request(CompletableFuture.completedFuture(null),
                 Optional.of(s -> CompletableFuture.failedFuture(new IllegalStateException("no git"))),
                 k -> true, PromptOutcome.DELIVERED);
-        Outcome outcome = r.request(session(AgentKind.CLAUDE));
+        Outcome outcome = r.request(session(AgentKind.CLAUDE), true);
         assertEquals(new Failed("no git"), outcome);
         assertTrue(prompts.isEmpty());
     }
@@ -164,7 +175,7 @@ class ReviewRequestTest {
         ReviewRequest r = request(CompletableFuture.completedFuture(null),
                 Optional.of(s -> new CompletableFuture<>()), k -> true, PromptOutcome.DELIVERED);
         assertEquals(new Failed("resolving the review scope timed out"),
-                r.request(session(AgentKind.CLAUDE)));
+                r.request(session(AgentKind.CLAUDE), true));
     }
 
     @Test
@@ -173,7 +184,7 @@ class ReviewRequestTest {
                 Optional.of(s -> {
                     throw new IllegalStateException("boom");
                 }), k -> true, PromptOutcome.DELIVERED);
-        assertEquals(new Failed("boom"), r.request(session(AgentKind.CLAUDE)));
+        assertEquals(new Failed("boom"), r.request(session(AgentKind.CLAUDE), true));
     }
 
     @Test

@@ -223,14 +223,14 @@ class PullRequestReviewTest {
     private static CompletableFuture<PullRequestReview.ModelChoice> picked(String model) {
         return CompletableFuture.completedFuture(
                 new PullRequestReview.ModelChoice(AgentKind.CLAUDE, Optional.ofNullable(model),
-                        Optional.of(ModelTiers.EMPTY)));
+                        Optional.of(ModelTiers.EMPTY), true));
     }
 
     @Test
     void dialogOkWithAModelLaunchesWithIt() {
         assertEquals(
                 Optional.of(new PullRequestReview.ModelChoice(AgentKind.CLAUDE, Optional.of("m"),
-                        Optional.of(ModelTiers.EMPTY))),
+                        Optional.of(ModelTiers.EMPTY), true)),
                 await(picked("m"), new AtomicBoolean(true), () -> false, 0));
     }
 
@@ -303,7 +303,7 @@ class PullRequestReviewTest {
             }
             picked.complete(
                     new PullRequestReview.ModelChoice(AgentKind.CLAUDE, Optional.of("late-ok"),
-                            Optional.of(ModelTiers.EMPTY)));
+                            Optional.of(ModelTiers.EMPTY), true));
         });
         Optional<PullRequestReview.ModelChoice> choice = assertTimeoutPreemptively(Duration.ofSeconds(5),
                 () -> await(picked, claimed, () -> false, 2_000));
@@ -337,7 +337,7 @@ class PullRequestReviewTest {
                 Thread.currentThread().interrupt();
             }
             picked.complete(new PullRequestReview.ModelChoice(AgentKind.CLAUDE, Optional.of("m"),
-                    Optional.of(ModelTiers.EMPTY)));
+                    Optional.of(ModelTiers.EMPTY), true));
         });
         Optional<PullRequestReview.ModelChoice> choice = assertTimeoutPreemptively(Duration.ofSeconds(5),
                 () -> await(picked, claimed, () -> false, 0));

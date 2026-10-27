@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.Optional;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -48,6 +49,28 @@ class ReviewInstructionsTest {
             assertTrue(instruction.contains("review_tour"));
             assertTrue(instruction.contains("review_finding"));
         }
+    }
+
+    @Test
+    void aFindingsOnlyReviewAsksForNoTourAndSaysSo() {
+        for (boolean subagents : new boolean[] {true, false}) {
+            String instruction = ReviewInstructions.forScope("rs_abc123", subagents, ModelTiers.EMPTY,
+                    Optional.empty(), false);
+            assertTrue(instruction.contains("rs_abc123"), instruction);
+            assertTrue(instruction.contains("review_state"), instruction);
+            assertTrue(instruction.contains("review_finding"), instruction);
+            assertTrue(instruction.contains("do not call review_tour"), instruction);
+            assertFalse(instruction.contains("anchor"), "no tour authoring rules: " + instruction);
+            assertFalse(instruction.contains("\n"));
+        }
+    }
+
+    @Test
+    void theShorterFormsKeepAskingForATour() {
+        assertEquals(ReviewInstructions.forScope("rs_abc123", true, ModelTiers.EMPTY, Optional.empty(), true),
+                ReviewInstructions.forScope("rs_abc123", true));
+        assertEquals(ReviewInstructions.forScope("rs_abc123", false, ModelTiers.EMPTY, Optional.empty(), true),
+                ReviewInstructions.forScope("rs_abc123", false, ModelTiers.EMPTY, Optional.empty()));
     }
 
     @Test
