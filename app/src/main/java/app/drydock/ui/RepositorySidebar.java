@@ -1,6 +1,7 @@
 package app.drydock.ui;
 
 import app.drydock.agent.api.AgentRegistry;
+import app.drydock.agent.api.SphinxReviewSupport;
 import app.drydock.app.ExternalEditorLauncher;
 import app.drydock.app.FinderLauncher;
 import app.drydock.app.RepositoryManager;
@@ -275,6 +276,8 @@ public final class RepositorySidebar extends VBox {
     private final Map<RepositoryId, ContextMenu> repoMenus = new HashMap<>();
     /** One cached menu per discovered-worktree row, keyed and pruned by checkout path. */
     private final Map<Path, ContextMenu> unopenedMenus = new HashMap<>();
+    /** One cached menu per PR row, keyed {@code <repoId>:<number>} and pruned with the rows. */
+    private final Map<String, ContextMenu> pullRequestMenus = new HashMap<>();
     private final Map<RepositoryId, ContextMenu> newSessionMenus = new HashMap<>();
     private final Map<Path, Tooltip> unopenedTooltips = new HashMap<>();
 
@@ -1699,6 +1702,17 @@ public final class RepositorySidebar extends VBox {
         newSessionMenus.keySet().retainAll(repoIds);
         unopenedTooltips.keySet().retainAll(worktreePaths);
         unopenedMenus.keySet().retainAll(worktreePaths);
+        Set<String> pullRequestKeys = new HashSet<>();
+        for (Repository repository : repositoryManager.repositories()) {
+            viewModel.pullRequests(repository.id()).ifPresent(outcome -> {
+                if (outcome instanceof RepositoryPullRequests.Outcome.Rows rows) {
+                    for (GhCliService.OpenPullRequest pullRequest : rows.pullRequests()) {
+                        pullRequestKeys.add(pullRequestMenuKey(repository.id(), pullRequest.number()));
+                    }
+                }
+            });
+        }
+        pullRequestMenus.keySet().retainAll(pullRequestKeys);
         staleBucketExpanded.retainAll(repoIds);
         lockedBucketExpanded.retainAll(repoIds);
         pullRequestsExpanded.retainAll(repoIds);
@@ -2550,7 +2564,7 @@ public final class RepositorySidebar extends VBox {
                 }
                 case SidebarNode.PullRequestNode pullRequestNode -> {
                     setGraphic(buildPullRequestRow(pullRequestNode));
-                    setContextMenu(null);
+                    setContextMenu(pullRequestMenu(pullRequestNode));
                 }
             }
         }
@@ -3204,6 +3218,9 @@ public final class RepositorySidebar extends VBox {
 
     // ---- Cached per-row context menus ---------------------------------------
 
+    /** The label every "Review in Sphinx" affordance carries, across worktree, session, and PR rows. */
+    private static final String SPHINX_MENU_LABEL = "Review in Sphinx";
+
     /** Applies {@code action} to the CURRENT version of the session, resolved through the model. */
     private void withLiveSession(ManagedSessionId sessionId, Consumer<ManagedAgentSession> action) {
         viewModel.sessionById(sessionId).ifPresent(action);
@@ -3264,18 +3281,37 @@ public final class RepositorySidebar extends VBox {
             MenuItem reviewPullRequest = new MenuItem();
             reviewPullRequest.setOnAction(e ->
                     navigator.showReviewForSession(id, SessionReviewScopes.Choice.PULL_REQUEST));
+            MenuItem sphinxReview = new MenuItem(SPHINX_MENU_LABEL);
+            sphinxReview.setOnAction(e -> navigator.startSphinxReviewInSession(id));
 
             ContextMenu menu = new ContextMenu();
             menu.getItems().addAll(resume, newSessionMenu, rename, stop, delete,
-                    new SeparatorMenuItem(), reviewLocal, reviewPullRequest,
+                    new SeparatorMenuItem(), reviewLocal, reviewPullRequest, sphinxReview,
                     new SeparatorMenuItem(), reveal);
             // Relabelled on every showing, not once at build: this menu is
             // cached for the life of the row, and whether the checkout
             // carries an open pull request changes underneath it.
-            menu.setOnShowing(e -> applyReviewMenuLabels(reviewLocal, reviewPullRequest, id));
+            menu.setOnShowing(e -> {
+                applyReviewMenuLabels(reviewLocal, reviewPullRequest, id);
+                applySphinxMenuVisibility(sphinxReview, id);
+            });
             applyReviewMenuLabels(reviewLocal, reviewPullRequest, id);
+            applySphinxMenuVisibility(sphinxReview, id);
             return menu;
         });
+    }
+
+    /**
+     * Shows the sphinx entry only when the LIVE session's agent reaches the
+     * sphinx plugin -- hidden, never disabled, like the other sphinx
+     * affordances. Re-evaluated on every showing because the menu outlives
+     * what the row knew at build time.
+     */
+    private void applySphinxMenuVisibility(MenuItem sphinx, ManagedSessionId sessionId) {
+        boolean available = viewModel.sessionById(sessionId)
+                .flatMap(session -> agentRegistry.sphinxReview(session.agentKind()))
+                .isPresent();
+        sphinx.setVisible(available);
     }
 
     /** Re-reads {@link #reviewMenuLabels} for the live session and hides the PR entry when there is none. */
@@ -3298,8 +3334,53 @@ public final class RepositorySidebar extends VBox {
             MenuItem review = new MenuItem(reviewMenuLabels(Optional.empty()).get(0));
             review.setOnAction(e -> navigator.startReviewForWorktree(repository, worktree,
                     SessionReviewScopes.Choice.LOCAL));
-            return new ContextMenu(review);
+            ContextMenu menu = new ContextMenu(review);
+            // Hidden, not disabled, when the default agent reaches no sphinx
+            // plugin -- a greyed item whose reason nobody can see is noise
+            // for everyone whose harness simply lacks the plugin.
+            sphinxFor(repository).ifPresent(support -> {
+                MenuItem sphinx = new MenuItem(SPHINX_MENU_LABEL);
+                sphinx.setOnAction(e -> navigator.startSphinxReviewForWorktree(repository, worktree));
+                menu.getItems().add(sphinx);
+            });
+            return menu;
         });
+    }
+
+    /** The one menu item the PR row offers: a sphinx review of the materialized checkout. */
+    private ContextMenu pullRequestMenu(SidebarNode.PullRequestNode node) {
+        String key = pullRequestMenuKey(node.repository().id(), node.pullRequest().number());
+        return pullRequestMenus.computeIfAbsent(key, k -> {
+            ContextMenu menu = new ContextMenu();
+            // Same hidden-when-absent rule as the worktree menu, and the same
+            // remote guard: the probe describes THIS machine's plugin cache,
+            // which a remote checkout's harness never sees.
+            sphinxFor(node.repository()).ifPresent(support -> {
+                MenuItem sphinx = new MenuItem(SPHINX_MENU_LABEL);
+                sphinx.setOnAction(e -> navigator.startSphinxReviewForPullRequest(node.repository(),
+                        node.pullRequest(), () -> { }));
+                menu.getItems().add(sphinx);
+            });
+            return menu;
+        });
+    }
+
+    private static String pullRequestMenuKey(RepositoryId repositoryId, int number) {
+        return repositoryId + ":" + number;
+    }
+
+    /**
+     * The repository's default agent's sphinx support, empty when there is
+     * none to offer: remote repositories never qualify (the probe describes
+     * this machine's plugin cache), and neither does a repository whose
+     * default harness reports no sphinx plugin.
+     */
+    private Optional<SphinxReviewSupport> sphinxFor(Repository repository) {
+        if (repository.isRemote()) {
+            return Optional.empty();
+        }
+        return agentRegistry.resolveDefault(repository.settings().lastUsedAgent(), false)
+                .flatMap(kind -> agentRegistry.sphinxReview(kind));
     }
 
     /** The repo "+" menu (worktree handoff "Creating"): checkout session / new worktree / rescan. */

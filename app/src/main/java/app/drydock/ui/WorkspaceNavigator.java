@@ -81,6 +81,47 @@ public interface WorkspaceNavigator {
                                 SessionReviewScopes.Choice choice);
 
     /**
+     * Reviews a discovered worktree that has no session yet in the harness's
+     * sphinx review plugin: the Start-session modal pre-seeded with the
+     * harness's sphinx command, then that command typed into the new session
+     * as its first task. Callers offer the gesture only when the repository's
+     * default agent reports sphinx ({@code AgentRegistry#sphinxReview}); this
+     * re-checks the agent the human actually picked and starts the session
+     * without the seeded command if that agent has none.
+     */
+    void startSphinxReviewForWorktree(Repository repository, WorktreeService.Worktree worktree);
+
+    /**
+     * Types the harness's sphinx review command into {@code sessionId}'s own
+     * terminal -- the with-a-session form of {@link
+     * #startSphinxReviewForWorktree}, which a worktree with a running session
+     * cannot use (the sidebar shows sessions, not their worktrees). A no-op
+     * when the session's agent has no sphinx plugin.
+     */
+    void startSphinxReviewInSession(ManagedSessionId sessionId);
+
+    /**
+     * Reviews an open pull request in the harness's sphinx review plugin: the
+     * same materialization as {@link #startReviewForPullRequest} (the
+     * Start-session modal on the {@code pr-<n>} worktree, the checkout, the
+     * session), but the session's first task is the harness's sphinx command
+     * and no review board opens.
+     */
+    void startSphinxReviewForPullRequest(Repository repository, GhCliService.OpenPullRequest pullRequest);
+
+    /**
+     * As above, running {@code onSettled} when the gesture is over however it
+     * ends -- same contract as {@link #startReviewForPullRequest(Repository,
+     * GhCliService.OpenPullRequest, Runnable)}, which the sidebar's row
+     * disabling relies on.
+     */
+    default void startSphinxReviewForPullRequest(Repository repository, GhCliService.OpenPullRequest pullRequest,
+                                                 Runnable onSettled) {
+        startSphinxReviewForPullRequest(repository, pullRequest);
+        onSettled.run();
+    }
+
+    /**
      * Reviews an open pull request with nothing local behind it: check it out,
      * start a session on it, land on its Review sub-tab.
      */

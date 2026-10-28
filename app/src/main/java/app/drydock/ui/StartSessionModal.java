@@ -95,6 +95,23 @@ final class StartSessionModal extends VBox {
                        boolean requireRemoteCapability, Optional<SshRemote> remote,
                        Function<AgentKind, Optional<String>> lastUsedModel, Runnable onClose,
                        StartHandler onStart) {
+        this(branch, worktreePath, registry, preselected, requireRemoteCapability, remote, lastUsedModel,
+                Optional.empty(), onClose, onStart);
+    }
+
+    /**
+     * @param initialTask text the task field starts with -- the caller's
+     *                    affordance pre-seeds it (e.g. the harness's sphinx
+     *                    review command) rather than sending a prompt the
+     *                    human never saw. Still editable here, and still
+     *                    subject to the confirm-time agent check (a caller
+     *                    that gated the seed on one agent re-checks whichever
+     *                    agent is actually selected).
+     */
+    StartSessionModal(String branch, Path worktreePath, AgentRegistry registry, AgentKind preselected,
+                       boolean requireRemoteCapability, Optional<SshRemote> remote,
+                       Function<AgentKind, Optional<String>> lastUsedModel, Optional<String> initialTask,
+                       Runnable onClose, StartHandler onStart) {
         this.registry = registry;
         this.branch = branch;
         this.worktreePath = worktreePath;
@@ -128,6 +145,7 @@ final class StartSessionModal extends VBox {
         taskField.getStyleClass().add("worktree-task");
         taskField.setPrefRowCount(3);
         taskField.setWrapText(true);
+        initialTask.ifPresent(taskField::setText);
 
         Label taskLabel = new Label();
         taskLabel.getStyleClass().add("worktree-field-label");

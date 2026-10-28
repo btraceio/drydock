@@ -11,6 +11,7 @@ import app.drydock.agent.api.McpDelivery;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdDiscovery;
 import app.drydock.agent.api.SessionIdStrategy;
+import app.drydock.agent.api.SphinxReviewSupport;
 
 import java.nio.file.Path;
 import java.time.Instant;
@@ -141,6 +142,17 @@ public interface AgentProvider {
 
     /** Present only for DISCOVERED-strategy providers; empty for PRESET. */
     Optional<SessionIdDiscovery> idDiscovery();
+
+    /**
+     * How this integration reaches the sphinx review plugin, probed
+     * out-of-band (e.g. at {@link #init}, a cheap config-file read) and
+     * returned as a snapshot -- never probe here, so callers may read this on
+     * the EDT. Empty when the plugin is not installed; callers hide sphinx
+     * affordances rather than disable them.
+     */
+    default Optional<SphinxReviewSupport> sphinxReview() {
+        return Optional.empty();
+    }
 
     /**
      * Whether this provider can actually route an eval session's traffic to

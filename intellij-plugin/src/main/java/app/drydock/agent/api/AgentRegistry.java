@@ -34,6 +34,7 @@ public final class AgentRegistry {
     private final Map<AgentKind, Boolean> availability = new EnumMap<>(AgentKind.class);
     private final Map<AgentKind, Boolean> remoteCapability = new EnumMap<>(AgentKind.class);
     private final Map<AgentKind, Boolean> subagentCapability = new EnumMap<>(AgentKind.class);
+    private final Map<AgentKind, Optional<SphinxReviewSupport>> sphinxReviewCapability = new EnumMap<>(AgentKind.class);
     private final Map<AgentKind, List<String>> modelSuggestionsCache = new EnumMap<>(AgentKind.class);
 
     /** Discovers providers via ServiceLoader. Call off the FX thread (probes executables). */
@@ -95,6 +96,14 @@ public final class AgentRegistry {
                 subagents = false;
             }
             subagentCapability.put(provider.kind(), subagents);
+            Optional<SphinxReviewSupport> sphinx;
+            try {
+                sphinx = provider.sphinxReview();
+            } catch (RuntimeException e) {
+                LOG.log(Level.WARNING, () -> "Sphinx plugin probe failed for " + provider.kind() + ": " + e);
+                sphinx = Optional.empty();
+            }
+            sphinxReviewCapability.put(provider.kind(), sphinx);
         }
     }
 
@@ -232,6 +241,18 @@ public final class AgentRegistry {
      */
     public boolean supportsSubagents(AgentKind kind) {
         return subagentCapability.getOrDefault(kind, false);
+    }
+
+    /**
+     * How {@code kind}'s harness reaches the sphinx review plugin, per
+     * {@link app.drydock.agent.spi.AgentProvider#sphinxReview()}. Probed by
+     * the provider at init and cached here at construction alongside {@link
+     * #supportsSubagents}, so the UI reads it on the EDT without I/O. Empty
+     * when the plugin is not installed (or the provider has no way to reach
+     * it).
+     */
+    public Optional<SphinxReviewSupport> sphinxReview(AgentKind kind) {
+        return sphinxReviewCapability.getOrDefault(kind, Optional.empty());
     }
 
     /**

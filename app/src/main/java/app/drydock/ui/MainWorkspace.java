@@ -3,6 +3,7 @@ package app.drydock.ui;
 import app.drydock.agent.api.Agent;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.AgentRegistry;
+import app.drydock.agent.api.SphinxReviewSupport;
 import app.drydock.app.RepositoryManager;
 import app.drydock.app.SessionManager;
 import app.drydock.app.SessionOpenResult;
@@ -1324,6 +1325,76 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     }
 
     /**
+     * Reviews a discovered worktree in the harness's sphinx plugin: the
+     * Start-session modal pre-seeded with the harness's sphinx review
+     * command, then that command typed into the new session as its first
+     * task. The seed is written for the default agent, but whatever the human
+     * picked in the modal decides: a harness without sphinx must not receive
+     * a command it cannot run, so the effective task is dropped when the
+     * chosen agent reports none.
+     */
+    @Override
+    public void startSphinxReviewForWorktree(Repository repository, WorktreeService.Worktree worktree) {
+        if (modalLayer == null) {
+            return;
+        }
+        boolean requireRemote = repository.isRemote();
+        Optional<AgentKind> defaultKind = agentRegistry.resolveDefault(repository.settings().lastUsedAgent(),
+                requireRemote);
+        if (defaultKind.isEmpty()) {
+            showNoAgentAvailable();
+            return;
+        }
+        String branch = worktree.branch().orElse(worktree.detached() ? "(detached)" : repository.displayName());
+        Optional<String> seeded = agentRegistry.sphinxReview(defaultKind.get())
+                .map(SphinxReviewSupport::reviewLocalChangesPrompt);
+        StartSessionModal modal = new StartSessionModal(branch, worktree.path(), agentRegistry, defaultKind.get(),
+                requireRemote, remoteOf(repository), lastUsedModelOf(repository), seeded, modalLayer::close,
+                (task, agent, model, eval) -> {
+            clearUnopenedWorktreeState();
+            Optional<String> effective = agentRegistry.sphinxReview(agent).isPresent() ? task : Optional.empty();
+            if (worktree.mainCheckout()) {
+                openNewSession(repository, effective, agent, model, eval);
+            } else {
+                // Discovered on disk: drydock did not create this branch, so
+                // removing the worktree must never force-delete it.
+                openNewWorktreeSession(repository, branch, worktree.path(), effective, false, agent, model, eval);
+            }
+        });
+        modalLayer.show(modal);
+    }
+
+    /**
+     * Types the harness's sphinx review command into {@code sessionId}'s own
+     * terminal. A no-op when the session's agent has no sphinx plugin or has
+     * no live terminal -- the command typed into a dead terminal would sit
+     * in its scrollback, looking sent.
+     */
+    @Override
+    public void startSphinxReviewInSession(ManagedSessionId sessionId) {
+        Optional<ManagedAgentSession> session = sessionManager.sessions().stream()
+                .filter(candidate -> candidate.id().equals(sessionId))
+                .findFirst();
+        if (session.isEmpty()) {
+            return;
+        }
+        // The probe describes THIS machine's plugin cache; a remote session's
+        // harness runs on the far end and sees a different one.
+        if (repositoryFor(session.get()).map(Repository::isRemote).orElse(false)) {
+            return;
+        }
+        Optional<SphinxReviewSupport> support = agentRegistry.sphinxReview(session.get().agentKind());
+        if (support.isEmpty()) {
+            return;
+        }
+        OpenSessionTab open = openTabs.get(sessionId);
+        if (open == null || !open.sendPrompt(support.get().reviewLocalChangesPrompt())) {
+            LOG.log(Level.INFO, "Could not send the sphinx review command to session " + sessionId
+                    + ": no live terminal");
+        }
+    }
+
+    /**
      * Reviews an open pull request that has nothing local behind it, end to
      * end: the Start-session modal on the worktree path the repository's
      * naming policy gives {@code pr-<n>}, then -- once the human confirms --
@@ -1407,20 +1478,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         prCheckoutService.checkout(repository.root(), worktreeDirectory, number)
                 .whenComplete((created, failure) -> Platform.runLater(() -> {
                     if (failure != null) {
-                        LOG.log(Level.WARNING, "Could not check out PR #" + number
-                                + " of " + repository.root(), failure);
-                        endMaterialization(progress, onSettled);
-                        UiErrors.show("Could not open review", "PR #" + number + " was not checked out",
-                                PullRequestMaterialization.failureMessage(
-                                        new PullRequestMaterialization.Failure.CheckoutFailed(
-                                                UiErrors.message(failure))));
-                        // Normally a no-op -- the service removed what it
-                        // made. Run anyway for the case where that removal
-                        // ALSO failed (it logs and carries on): the sidebar
-                        // then shows the stranded worktree rather than
-                        // nothing, which is what the next attempt will
-                        // collide with.
-                        requestWorktreeRefresh(repository);
+                        prCheckoutFailed(repository, number, failure, progress, onSettled);
                         return;
                     }
                     startSessionOnCheckedOutPr(repository, pullRequest, created, task, agent, model, eval,
@@ -1532,6 +1590,149 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                     // along on that same line.
                     runReviewWhenSessionReady(session, scope, task);
                 }));
+    }
+
+    /**
+     * Reviews an open pull request in the harness's sphinx plugin: the same
+     * materialization as {@link #startReviewForPullRequest} -- Start-session
+     * modal on the {@code pr-<n>} worktree path, checkout, session -- but the
+     * session's first task is the harness's sphinx command and no review
+     * board opens. The seed is written for the default agent; whatever the
+     * human picked in the modal decides (a harness without sphinx starts the
+     * session without the command it cannot run).
+     */
+    @Override
+    public void startSphinxReviewForPullRequest(Repository repository, GhCliService.OpenPullRequest pullRequest) {
+        startSphinxReviewForPullRequest(repository, pullRequest, () -> { });
+    }
+
+    @Override
+    public void startSphinxReviewForPullRequest(Repository repository, GhCliService.OpenPullRequest pullRequest,
+                                                Runnable onSettled) {
+        if (modalLayer == null) {
+            onSettled.run();
+            return;
+        }
+        Optional<AgentKind> defaultKind =
+                agentRegistry.resolveDefault(repository.settings().lastUsedAgent(), repository.isRemote());
+        if (defaultKind.isEmpty()) {
+            showNoAgentAvailable();
+            onSettled.run();
+            return;
+        }
+        String branch = PrCheckoutService.localBranchFor(pullRequest.number());
+        Path worktree = WorktreeNaming.defaultDirectory(Path.of(System.getProperty("user.home")),
+                UserConfig.load().worktreesDirectory(), repository.displayName(), branch);
+        Optional<String> seeded = agentRegistry.sphinxReview(defaultKind.get())
+                .map(support -> support.reviewPullRequestPrompt(pullRequest.number()));
+        // Same settle discipline as startReviewForPullRequest: cancelled and
+        // confirmed are indistinguishable from the modal's onClose alone,
+        // and the sidebar's row must re-enable on EVERY ending.
+        PullRequestMaterialization.StartModalSettle settle = new PullRequestMaterialization.StartModalSettle();
+        Runnable settleUnlessConfirmed = () -> Platform.runLater(() -> {
+            if (settle.settleNow()) {
+                onSettled.run();
+            }
+        });
+        modalLayer.show(new StartSessionModal(branch, worktree, agentRegistry, defaultKind.get(),
+                repository.isRemote(), remoteOf(repository), lastUsedModelOf(repository), seeded,
+                modalLayer::close,
+                (task, agent, model, eval) -> {
+                    settle.confirmed();
+                    Optional<String> effective = agentRegistry.sphinxReview(agent).isPresent()
+                            ? task : Optional.empty();
+                    materializeSphinxPullRequest(repository, pullRequest, worktree, effective, agent, model, eval,
+                            onSettled);
+                }),
+                settleUnlessConfirmed);
+    }
+
+    /**
+     * Step 1 of a sphinx materialization: the checkout, on {@link
+     * PrCheckoutService}'s own executor -- same failure semantics as the
+     * review materialization (nothing left on disk, row re-enabled).
+     */
+    private void materializeSphinxPullRequest(Repository repository, GhCliService.OpenPullRequest pullRequest,
+                                              Path worktreeDirectory, Optional<String> task, AgentKind agent,
+                                              Optional<String> model, boolean eval, Runnable onSettled) {
+        int number = pullRequest.number();
+        MaterializationProgress progress = new MaterializationProgress();
+        progress.show(new PullRequestMaterialization.Step.Checkout(number));
+        prCheckoutService.checkout(repository.root(), worktreeDirectory, number)
+                .whenComplete((created, failure) -> Platform.runLater(() -> {
+                    if (failure != null) {
+                        prCheckoutFailed(repository, number, failure, progress, onSettled);
+                        return;
+                    }
+                    startSphinxSessionOnCheckedOutPr(repository, pullRequest, created, task, agent, model, eval,
+                            progress, onSettled);
+                }));
+    }
+
+    /**
+     * Step 2 of a sphinx materialization: the session on the fresh checkout,
+     * with the sphinx command going out as its first task once the terminal
+     * is live. No review scopes are resolved and no board opens -- sphinx
+     * runs its own review loop inside the session.
+     */
+    private void startSphinxSessionOnCheckedOutPr(Repository repository, GhCliService.OpenPullRequest pullRequest,
+                                                  Path worktree, Optional<String> task, AgentKind agent,
+                                                  Optional<String> model, boolean eval,
+                                                  MaterializationProgress progress, Runnable onSettled) {
+        int number = pullRequest.number();
+        progress.show(new PullRequestMaterialization.Step.StartSession(worktree));
+        ManagedSessionId session;
+        try {
+            // branchCreatedHere=false: gh minted pr-<n>, and it tracks a
+            // branch somebody else owns -- removing the worktree must never
+            // offer to delete it.
+            session = openWorktreeSession(repository, PrCheckoutService.localBranchFor(number), worktree,
+                    Optional.empty(), false, agent, Spawn.FORBIDDEN, eval, model);
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, "Could not start a session on the checked-out PR #" + number, e);
+            endMaterialization(progress, onSettled);
+            UiErrors.show("Could not open review", "PR #" + number + " is checked out, but has no session",
+                    PullRequestMaterialization.failureMessage(
+                            new PullRequestMaterialization.Failure.SessionFailed(
+                                    worktree, UiErrors.message(e))));
+            // The worktree survives, so the sidebar must show it.
+            requestWorktreeRefresh(repository);
+            return;
+        }
+        // The session is a pull request by construction -- same link
+        // recording as the review materialization, so the tab's PR chip and
+        // the sidebar's PR filter see it immediately. Bookkeeping only: a
+        // failure here must not report the session as missing.
+        try {
+            sessionManager.updatePrState(session, PrState.OPEN, Optional.of(number));
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, "Could not record PR #" + number + " on session " + session, e);
+        }
+        endMaterialization(progress, onSettled);
+        // The worktree exists now, so discovery has to re-run -- the gh scan
+        // is the ONLY thing that dedups this PR's own row away.
+        requestWorktreeRefresh(repository);
+        task.ifPresent(prompt -> sendWhenSessionReady(session, () -> prompt,
+                "the sphinx review", task));
+    }
+
+    /**
+     * The shared tail of a failed PR checkout, identical for the review and
+     * sphinx materializations: report, re-enable the row, refresh discovery.
+     * Normally a no-op -- the service removed what it made. Run anyway for
+     * the case where that removal ALSO failed (it logs and carries on): the
+     * sidebar then shows the stranded worktree rather than nothing, which is
+     * what the next attempt will collide with.
+     */
+    private void prCheckoutFailed(Repository repository, int number, Throwable failure,
+                                  MaterializationProgress progress, Runnable onSettled) {
+        LOG.log(Level.WARNING, "Could not check out PR #" + number + " of " + repository.root(), failure);
+        endMaterialization(progress, onSettled);
+        UiErrors.show("Could not open review", "PR #" + number + " was not checked out",
+                PullRequestMaterialization.failureMessage(
+                        new PullRequestMaterialization.Failure.CheckoutFailed(
+                                UiErrors.message(failure))));
+        requestWorktreeRefresh(repository);
     }
 
     /**
