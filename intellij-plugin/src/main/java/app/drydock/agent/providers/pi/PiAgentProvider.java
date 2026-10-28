@@ -13,6 +13,7 @@ import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdDiscovery;
 import app.drydock.agent.api.SessionIdStrategy;
 import app.drydock.agent.api.SnapshotClaimDiscovery;
+import app.drydock.agent.api.SphinxReviewSupport;
 import app.drydock.agent.api.StdioMcpServer;
 import app.drydock.agent.providers.AgentCommands;
 import app.drydock.agent.providers.HostBinaryLocator;
@@ -21,6 +22,7 @@ import app.drydock.agent.providers.pi.internal.PiExecutableLocator;
 import app.drydock.agent.providers.pi.internal.PiExtensionInstaller;
 import app.drydock.agent.providers.pi.internal.PiModelCatalog;
 import app.drydock.agent.providers.pi.internal.PiSessionStore;
+import app.drydock.agent.providers.pi.internal.PiSphinxProbe;
 import app.drydock.agent.providers.pi.internal.PiVersionProbe;
 import app.drydock.agent.spi.AgentProvider;
 import app.drydock.state.json.JsonValue;
@@ -106,6 +108,8 @@ public final class PiAgentProvider implements AgentProvider {
     private PiExtensionInstaller activityInstaller;
     private PiActivityReporter activityReporter;
     private ExecutorService background;
+    /** Snapshotted by the settings read at {@link #init}; read by {@link #sphinxReview()} on the EDT. */
+    private volatile Optional<SphinxReviewSupport> sphinxReview = Optional.empty();
     private volatile String unsupportedVersion;
 
     /**
@@ -165,6 +169,11 @@ public final class PiAgentProvider implements AgentProvider {
         this.activityInstaller = PiExtensionInstaller.activity(ctx.stateDirectory());
         this.activityReporter = new PiActivityReporter(activityInstaller, ctx.activityDirectory());
         this.background = ctx.backgroundExecutor();
+        // A settings read (a few ms), so it runs here rather than on the
+        // background executor: the registry snapshots sphinxReview() right
+        // after init, and a later-landing probe would leave the task tree's
+        // menus without the item until a listings rescan.
+        this.sphinxReview = PiSphinxProbe.probe();
     }
 
     @Override
@@ -681,6 +690,11 @@ public final class PiAgentProvider implements AgentProvider {
     @Override
     public Optional<SessionIdDiscovery> idDiscovery() {
         return Optional.of(idDiscovery);
+    }
+
+    @Override
+    public Optional<SphinxReviewSupport> sphinxReview() {
+        return sphinxReview;
     }
 
 }

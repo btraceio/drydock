@@ -12,6 +12,7 @@ import app.drydock.agent.api.McpDelivery;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdDiscovery;
 import app.drydock.agent.api.SessionIdStrategy;
+import app.drydock.agent.api.SphinxReviewSupport;
 import app.drydock.agent.api.StdioMcpServer;
 import app.drydock.agent.providers.AgentCommands;
 import app.drydock.agent.providers.HostBinaryLocator;
@@ -22,6 +23,7 @@ import app.drydock.agent.providers.claude.internal.ClaudeEvalContainer;
 import app.drydock.agent.providers.claude.internal.ClaudeEvalContainer.EvalSetup;
 import app.drydock.agent.providers.claude.internal.ClaudeExecutableLocator;
 import app.drydock.agent.providers.claude.internal.ClaudeHookInstaller;
+import app.drydock.agent.providers.claude.internal.ClaudeSphinxProbe;
 import app.drydock.agent.providers.claude.internal.ConversationCatalog;
 import app.drydock.app.LoginShellEnvironment;
 import app.drydock.process.SshCommandBuilder;
@@ -143,6 +145,8 @@ public final class ClaudeAgentProvider implements AgentProvider {
     private Path activityDirectory;
     /** Set once by the background probe at {@link #init}; read by {@link #evalAvailable()} on the FX thread. */
     private volatile boolean evalAvailable;
+    /** Snapshotted by the config read at {@link #init}; read by {@link #sphinxReview()} on the EDT. */
+    private volatile Optional<SphinxReviewSupport> sphinxReview = Optional.empty();
     /**
      * Set once by the background capability probe at {@link #init}; read by
      * {@link #enforcesReadOnly()}, which the UI calls synchronously and which
@@ -210,6 +214,11 @@ public final class ClaudeAgentProvider implements AgentProvider {
             evalContainer = new ClaudeEvalContainer(ctx.stateDirectory());
         }
         ctx.backgroundExecutor().execute(() -> evalAvailable = evalContainer.probe());
+        // A config-file read (a few ms), so it runs here rather than on the
+        // background executor: the registry snapshots sphinxReview() right
+        // after init, and a later-landing probe would leave the task tree's
+        // menus without the item until a listings rescan.
+        this.sphinxReview = ClaudeSphinxProbe.probe();
         // Same shape as the eval probe: `claude --help` is a process spawn, so
         // the plan-mode answer is snapshotted here instead of being re-probed
         // from the EDT every time the strip repaints. A probe failure leaves
@@ -398,6 +407,11 @@ public final class ClaudeAgentProvider implements AgentProvider {
     @Override
     public boolean evalAvailable() {
         return evalAvailable;
+    }
+
+    @Override
+    public Optional<SphinxReviewSupport> sphinxReview() {
+        return sphinxReview;
     }
 
     @Override
