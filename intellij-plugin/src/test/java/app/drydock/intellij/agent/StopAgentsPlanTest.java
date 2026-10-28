@@ -26,6 +26,18 @@ class StopAgentsPlanTest {
     }
 
     @Test
+    void stoppingOneSessionAsksOnlyForAnAgentThatMightBeMidTask() {
+        // One session stopped from the tree, ribbon, tab header or popup:
+        // an agent the user knows is waiting for them is not mid-task.
+        assertTrue(StopAgentsPlan.confirmsSingleStop(Optional.of(SessionActivity.BUSY)));
+        assertTrue(StopAgentsPlan.confirmsSingleStop(Optional.of(SessionActivity.UNKNOWN)));
+        // Unreadable activity is not known to be at its prompt.
+        assertTrue(StopAgentsPlan.confirmsSingleStop(Optional.empty()));
+        assertFalse(StopAgentsPlan.confirmsSingleStop(Optional.of(SessionActivity.IDLE)));
+        assertFalse(StopAgentsPlan.confirmsSingleStop(Optional.of(SessionActivity.NEEDS_ATTENTION)));
+    }
+
+    @Test
     void theQuitCopyCountsTheAgents() {
         assertEquals("Deactivate 1 working agent?", StopAgentsPlan.title(1));
         assertEquals("Deactivate 2 working agents?", StopAgentsPlan.title(2));

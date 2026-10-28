@@ -2,11 +2,13 @@ package app.drydock.intellij.agent;
 
 import app.drydock.domain.ManagedSessionId;
 
+import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.util.Disposer;
 import com.intellij.terminal.TerminalExecutionConsole;
 import com.intellij.testFramework.LeakHunter;
 import com.intellij.testFramework.PlatformTestUtil;
 import com.intellij.testFramework.fixtures.BasePlatformTestCase;
+import com.intellij.util.messages.MessageBusConnection;
 import com.jediterm.terminal.model.TerminalLine;
 import com.jediterm.terminal.model.TerminalTextBuffer;
 
@@ -17,6 +19,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -371,5 +374,48 @@ public class AgentExecutionRegistryPlatformTest extends BasePlatformTestCase {
 
         assertFalse(window.isRunning(id));
         assertTrue(registry.isRunning(id));
+    }
+
+    /** A real application-bus listener, so the events counted are the ones a subscriber really receives. */
+    public void testMarkStartingPublishesOnlyOnChangeAndReflectsTheSet() {
+        List<Boolean> events = new CopyOnWriteArrayList<>();
+        MessageBusConnection connection = ApplicationManager.getApplication().getMessageBus().connect();
+        try {
+            connection.subscribe(AgentExecutionListener.TOPIC, new AgentExecutionListener() {
+                @Override
+                public void executionStarting(ManagedSessionId sessionId, boolean starting) {
+                    if (id.equals(sessionId)) {
+                        events.add(starting);
+                    }
+                }
+            });
+
+            assertFalse(registry.isStarting(id));
+            registry.markStarting(id, true);
+            assertTrue(registry.isStarting(id));
+            assertEquals(Set.of(id), registry.starting());
+            registry.markStarting(id, true);
+            assertTrue(registry.isStarting(id));
+            registry.markStarting(id, false);
+
+            // true, true, false → exactly the two changes, never one per call.
+            assertEquals(List.of(true, false), events);
+            assertFalse(registry.isStarting(id));
+            assertTrue(registry.starting().isEmpty());
+        } finally {
+            connection.disconnect();
+        }
+        ManagedSessionId other = ManagedSessionId.newId();
+        assertFalse(registry.isStarting(other));
+        assertTrue(registry.starting().isEmpty());
+    }
+
+    /** The O(1) membership the per-update callers use, following {@code markMoving}. */
+    public void testIsMovingFollowsMarkMoving() {
+        assertFalse(registry.isMoving(id));
+        registry.markMoving(id, true);
+        assertTrue(registry.isMoving(id));
+        registry.markMoving(id, false);
+        assertFalse(registry.isMoving(id));
     }
 }
