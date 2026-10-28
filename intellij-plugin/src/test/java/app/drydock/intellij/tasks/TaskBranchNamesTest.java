@@ -11,6 +11,7 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -62,6 +63,30 @@ class TaskBranchNamesTest {
             assertTrue(taken.add(branch), "Reused a taken branch: " + branch);
         }
         assertEquals(128, taken.size());
+    }
+
+    @Test
+    void collisionWithZeroDrawsStillFindsAFreeName() {
+        AtomicInteger draws = new AtomicInteger();
+        Random zeros = new Random(0) {
+            @Override
+            public int nextInt(int bound) {
+                draws.incrementAndGet();
+                return 0;
+            }
+        };
+        String first = TaskBranchNames.generate(Set.of(), zeros);
+        Set<String> taken = Set.of(first);
+        draws.set(0);
+
+        // A zero stride draw must still yield an odd (non-zero) stride, or the walk never leaves the taken start.
+        String next = TaskBranchNames.generate(taken, zeros);
+
+        assertNotEquals(first, next);
+        assertFalse(taken.contains(next), next);
+        assertTrue(next.matches("[a-z]+-[a-z]+-[a-z]+"), next);
+        assertTrue(BranchNameRules.check(next, List.of("origin")).isEmpty(), next);
+        assertEquals(2, draws.get());
     }
 
     @Test
