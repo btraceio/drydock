@@ -66,8 +66,8 @@ import java.util.stream.Stream;
  * edit.
  *
  * <p>The decisions are {@link NewTaskPlan}'s; this class only lays them
- * out and keeps the generated values following the inferred name until the
- * user edits them.</p>
+ * out. The generated branch is independent of the description and stays fixed
+ * for this dialog; the folder follows the branch until the user edits it.</p>
  */
 final class NewTaskDialog extends DialogWrapper {
 
@@ -80,6 +80,7 @@ final class NewTaskDialog extends DialogWrapper {
     private final NewTaskPlan.Inputs inputs;
     private final Optional<Supplier<Optional<String>>> refChooser;
     private final NewTaskPreset preset;
+    private final String generatedBranch;
 
     private final JBTextArea instructions = new JBTextArea(4, 40);
     /** Created in {@code createCenterPanel}, where {@code inputs} is at hand. */
@@ -113,7 +114,10 @@ final class NewTaskDialog extends DialogWrapper {
     /** Where generated folders go; starts as the inputs' and follows "Change base…". */
     private Path worktreeBase;
 
-    /** True once the user edits the branch or the folder; then the name stops rewriting it. */
+    /**
+     * True once the user edits a field: regeneration must preserve that value.
+     * The folder follows branch edits only until it has been edited itself.
+     */
     private boolean branchEdited;
     private boolean folderEdited;
     /** True once the user picks Work in; then it stops following the description's blankness. */
@@ -143,6 +147,7 @@ final class NewTaskDialog extends DialogWrapper {
         this.inputs = inputs;
         this.refChooser = refChooser;
         this.preset = preset;
+        this.generatedBranch = TaskBranchNames.generate(inputs.takenBranches());
         this.worktreeBase = inputs.worktreeBase();
         instructions.setText(preset.instructions().orElse(""));
         if (preset.fixedMode().orElse(null) == SessionMode.READ_ONLY) {
@@ -399,15 +404,15 @@ final class NewTaskDialog extends DialogWrapper {
     }
 
     /**
-     * Branch and folder follow the inferred name until the user edits them.
-     * The name itself is never shown here: it labels the task in the tree and
-     * on its tab, and reaches this dialog's output only through {@link #choice()}.
+     * Reuse the dialog's generated branch and derive the folder from the current branch.
+     * Never overwrite a manual field edit or regenerate the branch when the description changes.
+     * The task name labels the tree and tab only, reaching the output through {@link #choice()}.
      */
     private void regenerate() {
         updating = true;
         try {
             if (!branchEdited) {
-                branch.setText(NewTaskPlan.branchFor(taskName(), inputs.takenBranches()));
+                branch.setText(generatedBranch);
             }
             if (!folderEdited) {
                 folder.setText(NewTaskPlan.folderFor(worktreeBase, inputs.repoName(),

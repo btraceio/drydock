@@ -11,7 +11,10 @@ import app.drydock.projects.SharedProject;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.ui.ValidationInfo;
 import com.intellij.openapi.util.Disposer;
+import com.intellij.openapi.ui.TextFieldWithBrowseButton;
 import com.intellij.testFramework.fixtures.BasePlatformTestCase;
+import com.intellij.ui.components.JBRadioButton;
+import com.intellij.ui.components.JBTextField;
 
 import java.nio.file.Path;
 import java.time.Instant;
@@ -152,6 +155,93 @@ public class NewTaskDialogPlatformTest extends BasePlatformTestCase {
         assertEquals(NewTaskPlan.WorkIn.NEW_WORKTREE, described.get());
     }
 
+    public void testGeneratedBranchAndFolderStayStableAcrossTaskAndLocationChanges() {
+        ApplicationManager.getApplication().invokeAndWait(() -> {
+            NewTaskDialog dialog = new NewTaskDialog(getProject(), inputs(), Optional.empty());
+            try {
+                dialog.diagSetInstructions("Fix the parser");
+                NewTaskPlan.Choice original = dialog.choice();
+                assertTrue(original.branch(), original.branch().matches("[a-z]+-[a-z]+-[a-z]+"));
+                assertFalse(original.branch().contains("parser"));
+                assertEquals(Path.of("/tmp/profiler-" + original.branch()), original.folder());
+
+                dialog.diagSetInstructions("Investigate a completely different task");
+                assertEquals(original.branch(), dialog.choice().branch());
+                assertEquals(original.folder(), dialog.choice().folder());
+                assertEquals("Investigate a completely different task", dialog.choice().name());
+
+                dialog.diagSetInstructions("");
+                assertEquals(NewTaskPlan.WorkIn.MAIN_CHECKOUT, dialog.choice().workIn());
+                dialog.diagSetInstructions("Fix the parser again");
+                assertEquals(original.branch(), dialog.choice().branch());
+                assertEquals(original.folder(), dialog.choice().folder());
+
+                control(dialog, "mainCheckout", JBRadioButton.class).doClick();
+                assertEquals(NewTaskPlan.WorkIn.MAIN_CHECKOUT, dialog.choice().workIn());
+                control(dialog, "newWorktree", JBRadioButton.class).doClick();
+                assertEquals(original.branch(), dialog.choice().branch());
+                assertEquals(original.folder(), dialog.choice().folder());
+                control(dialog, "readOnly", JBRadioButton.class).doClick();
+                assertEquals(NewTaskPlan.WorkIn.MAIN_CHECKOUT, dialog.choice().workIn());
+                control(dialog, "writes", JBRadioButton.class).doClick();
+                assertEquals(original.branch(), dialog.choice().branch());
+                assertEquals(original.folder(), dialog.choice().folder());
+            } finally {
+                Disposer.dispose(dialog.getDisposable());
+            }
+        });
+    }
+
+    public void testManualBranchAndFolderEditsSurviveDescriptionChanges() {
+        ApplicationManager.getApplication().invokeAndWait(() -> {
+            NewTaskDialog dialog = new NewTaskDialog(getProject(), inputs(), Optional.empty());
+            try {
+                dialog.diagSetInstructions("Fix the parser");
+                control(dialog, "branch", JBTextField.class).setText("my-branch");
+                assertEquals(Path.of("/tmp/profiler-my-branch"), dialog.choice().folder());
+                dialog.diagSetInstructions("A different task");
+                assertEquals("my-branch", dialog.choice().branch());
+                assertEquals(Path.of("/tmp/profiler-my-branch"), dialog.choice().folder());
+
+                control(dialog, "folder", TextFieldWithBrowseButton.class).setText("/tmp/custom-checkout");
+                control(dialog, "branch", JBTextField.class).setText("my-other-branch");
+                dialog.diagSetInstructions("Another task");
+                assertEquals("my-other-branch", dialog.choice().branch());
+                assertEquals(Path.of("/tmp/custom-checkout"), dialog.choice().folder());
+            } finally {
+                Disposer.dispose(dialog.getDisposable());
+            }
+        });
+    }
+
+    public void testIssueImplementationUsesAWhimsicalBranchWithoutChangingItsTitle() {
+        OpenIssue issue = new OpenIssue(42, "Fix allocation accounting", Optional.empty(), List.of(), List.of(),
+                Optional.empty());
+        ApplicationManager.getApplication().invokeAndWait(() -> {
+            NewTaskDialog dialog = new NewTaskDialog(getProject(), inputs(), Optional.empty(),
+                    NewTaskPreset.implement(issue));
+            try {
+                NewTaskPlan.Choice choice = dialog.choice();
+                assertEquals(NewTaskPlan.WorkIn.NEW_WORKTREE, choice.workIn());
+                assertTrue(choice.branch(), choice.branch().matches("[a-z]+-[a-z]+-[a-z]+"));
+                assertEquals(Path.of("/tmp/profiler-" + choice.branch()), choice.folder());
+                assertEquals("#42 Fix allocation accounting", choice.name());
+            } finally {
+                Disposer.dispose(dialog.getDisposable());
+            }
+        });
+    }
+
+    private static <T> T control(NewTaskDialog dialog, String name, Class<T> type) {
+        try {
+            var field = NewTaskDialog.class.getDeclaredField(name);
+            field.setAccessible(true);
+            return type.cast(field.get(dialog));
+        } catch (ReflectiveOperationException e) {
+            throw new AssertionError(e);
+        }
+    }
+
     public void testModelDefaultsToEmptyAndIsCarriedOnTheChoice() {
         AtomicReference<NewTaskPlan.Choice> choice = new AtomicReference<>();
 
@@ -168,11 +258,36 @@ public class NewTaskDialogPlatformTest extends BasePlatformTestCase {
         assertEquals(Optional.empty(), choice.get().model());
     }
 
+    public void testExistingWorktreeKeepsItsBranchAndFolder() {
+        NewTaskPlan.FixedWorktree fixed = new NewTaskPlan.FixedWorktree(Path.of("/tmp/existing"), "existing-branch");
+        ApplicationManager.getApplication().invokeAndWait(() -> {
+            NewTaskDialog dialog = new NewTaskDialog(getProject(),
+                    inputs(Optional.of(fixed), kind -> ModelTiers.EMPTY, kind -> true), Optional.empty());
+            try {
+                dialog.diagSetInstructions("Fix the parser");
+                assertEquals(NewTaskPlan.WorkIn.EXISTING_WORKTREE, dialog.choice().workIn());
+                assertEquals(fixed.branch(), dialog.choice().branch());
+                assertEquals(fixed.dir(), dialog.choice().folder());
+                dialog.diagSetInstructions("A different task");
+                assertEquals(fixed.branch(), dialog.choice().branch());
+                assertEquals(fixed.dir(), dialog.choice().folder());
+            } finally {
+                Disposer.dispose(dialog.getDisposable());
+            }
+        });
+    }
+
     private static NewTaskPlan.Inputs inputs() {
         return inputs(kind -> ModelTiers.EMPTY, kind -> true);
     }
 
     private static NewTaskPlan.Inputs inputs(Function<AgentKind, ModelTiers> lastUsedTiers,
+                                             Predicate<AgentKind> supportsSubagents) {
+        return inputs(Optional.empty(), lastUsedTiers, supportsSubagents);
+    }
+
+    private static NewTaskPlan.Inputs inputs(Optional<NewTaskPlan.FixedWorktree> fixed,
+                                             Function<AgentKind, ModelTiers> lastUsedTiers,
                                              Predicate<AgentKind> supportsSubagents) {
         Path root = Path.of("/tmp/profiler");
         SharedProject project = SharedProject.local(RepositoryId.newId(), root, "profiler", Instant.EPOCH);
@@ -182,7 +297,7 @@ public class NewTaskDialogPlatformTest extends BasePlatformTestCase {
             @Override public boolean isAvailable() { return true; }
             @Override public String describeSearched() { return "test"; }
         };
-        return new NewTaskPlan.Inputs(project, "profiler", Optional.empty(), List.of(pi), AgentKind.PI,
+        return new NewTaskPlan.Inputs(project, "profiler", fixed, List.of(pi), AgentKind.PI,
                 "origin/main", List.of("origin/main"), List.of("origin"), Set.of(), Path.of("/tmp"), false,
                 kind -> Optional.empty(), kind -> List.of(), lastUsedTiers, supportsSubagents);
     }

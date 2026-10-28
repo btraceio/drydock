@@ -10,7 +10,6 @@ import app.drydock.projects.SharedProject;
 
 import java.nio.file.Path;
 import java.util.List;
-import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -98,9 +97,6 @@ public final class NewTaskPlan {
         }
     }
 
-    /** Used when a name leaves nothing usable for a branch ({@code "!!!"}, an emoji). */
-    private static final String FALLBACK_BRANCH = "task";
-
     /** The label used when the description leaves nothing usable for a name. */
     private static final String FALLBACK_NAME = "New task";
 
@@ -167,35 +163,11 @@ public final class NewTaskPlan {
         return line.substring(0, cut);
     }
 
-    /** The first three words of the name as a branch, made unique against {@code taken}. */
-    public static String branchFor(String name, Set<String> taken) {
-        String base = FALLBACK_BRANCH;
-        if (name != null && !name.isBlank()) {
-            String[] words = name.strip().split("\\s+");
-            StringBuilder first = new StringBuilder();
-            for (int i = 0; i < Math.min(3, words.length); i++) {
-                first.append(' ').append(words[i]);
-            }
-            // Not WorktreeNaming.slug: that keeps only what follows the last
-            // "/" (it names folders after branches like feat/x), which turned
-            // "CI/CD pipeline fix" into "cd-pipeline-fix", and it answers
-            // "worktree" for nothing usable, so a task named "Worktree" lost
-            // its name too.
-            String slug = first.toString().toLowerCase(Locale.ROOT)
-                    .replaceAll("[^a-z0-9]+", "-")
-                    .replaceAll("^-+|-+$", "");
-            if (!slug.isEmpty()) {
-                base = slug;
-            }
-        }
-        String candidate = base;
-        for (int n = 2; taken.contains(candidate); n++) {
-            candidate = base + "-" + n;
-        }
-        return candidate;
-    }
-
-    /** {@code <base>/<repo>-<branch slug>}. */
+    /**
+     * {@code <base>/<repo>-<branch slug>}.
+     * WorktreeNaming.slug drops everything through the last slash and falls back to "worktree".
+     * Keep that slugging confined to folders; generated branch names must not pass through it.
+     */
     public static Path folderFor(Path base, String repoName, String branch) {
         return WorktreeNaming.defaultDirectory(base, Optional.of(base), repoName, branch);
     }

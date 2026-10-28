@@ -40,25 +40,6 @@ class NewTaskPlanTest {
     }
 
     @Test
-    void branchFollowsFirstThreeWords() {
-        assertEquals("task-centric-tool-window",
-                NewTaskPlan.branchFor("Task-centric tool window for drydock", Set.of()));
-    }
-
-    @Test
-    void takenBranchGetsSuffix() {
-        assertEquals("fix-the-parser-2", NewTaskPlan.branchFor("Fix the parser", Set.of("fix-the-parser")));
-    }
-
-    @Test
-    void nameWithoutUsableSlugFallsBackToTask() {
-        assertEquals("task", NewTaskPlan.branchFor("!!!", Set.of()));
-        assertEquals("opravit-chybu", NewTaskPlan.branchFor("Opravit chybu ž", Set.of()));
-        assertEquals("task", NewTaskPlan.branchFor("🚀", Set.of()));
-        assertEquals("task-2", NewTaskPlan.branchFor("", Set.of("task")));
-    }
-
-    @Test
     void folderUsesBaseRepoAndBranch() {
         assertEquals(Path.of("/b/drydock-x"), NewTaskPlan.folderFor(Path.of("/b"), "drydock", "x"));
     }
@@ -175,12 +156,6 @@ class NewTaskPlanTest {
     }
 
     @Test
-    void inferredNameNamesTheBranch() {
-        assertEquals("fix-the-parser",
-                NewTaskPlan.branchFor(NewTaskPlan.nameFor("- Fix the parser\nThen keep it short."), Set.of()));
-    }
-
-    @Test
     void refusesTakenBranch() {
         Choice choice = choice("T", Optional.empty(), SessionMode.WRITES, WorkIn.NEW_WORKTREE, "taken-branch",
                 Path.of("/b/x"));
@@ -248,13 +223,6 @@ class NewTaskPlanTest {
 
         assertEquals(Optional.of("Choose a full folder path for the worktree."),
                 NewTaskPlan.refusal(inputs(Optional.empty(), false), relative, folder -> false));
-    }
-
-    @Test
-    void branchKeepsWordsAroundSlashesAndTheWordWorktree() {
-        assertEquals("ci-cd-pipeline-fix", NewTaskPlan.branchFor("CI/CD pipeline fix", Set.of()));
-        assertEquals("fix-a-b-parser", NewTaskPlan.branchFor("Fix a/b parser", Set.of()));
-        assertEquals("worktree", NewTaskPlan.branchFor("Worktree", Set.of()));
     }
 
     @Test
