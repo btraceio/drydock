@@ -10,7 +10,6 @@ import app.drydock.projects.SharedProject;
 
 import java.nio.file.Path;
 import java.util.List;
-import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -98,9 +97,6 @@ public final class NewTaskPlan {
         }
     }
 
-    /** Used when a name leaves nothing usable for a branch ({@code "!!!"}, an emoji). */
-    private static final String FALLBACK_BRANCH = "task";
-
     /** The label used when the description leaves nothing usable for a name. */
     private static final String FALLBACK_NAME = "New task";
 
@@ -167,35 +163,11 @@ public final class NewTaskPlan {
         return line.substring(0, cut);
     }
 
-    /** The first three words of the name as a branch, made unique against {@code taken}. */
-    public static String branchFor(String name, Set<String> taken) {
-        String base = FALLBACK_BRANCH;
-        if (name != null && !name.isBlank()) {
-            String[] words = name.strip().split("\\s+");
-            StringBuilder first = new StringBuilder();
-            for (int i = 0; i < Math.min(3, words.length); i++) {
-                first.append(' ').append(words[i]);
-            }
-            // Not WorktreeNaming.slug: that keeps only what follows the last
-            // "/" (it names folders after branches like feat/x), which turned
-            // "CI/CD pipeline fix" into "cd-pipeline-fix", and it answers
-            // "worktree" for nothing usable, so a task named "Worktree" lost
-            // its name too.
-            String slug = first.toString().toLowerCase(Locale.ROOT)
-                    .replaceAll("[^a-z0-9]+", "-")
-                    .replaceAll("^-+|-+$", "");
-            if (!slug.isEmpty()) {
-                base = slug;
-            }
-        }
-        String candidate = base;
-        for (int n = 2; taken.contains(candidate); n++) {
-            candidate = base + "-" + n;
-        }
-        return candidate;
-    }
-
-    /** {@code <base>/<repo>-<branch slug>}. */
+    /**
+     * {@code <base>/<repo>-<branch slug>}.
+     * WorktreeNaming.slug drops everything through the last slash and falls back to "worktree".
+     * Keep that slugging confined to folders; generated branch names must not pass through it.
+     */
     public static Path folderFor(Path base, String repoName, String branch) {
         return WorktreeNaming.defaultDirectory(base, Optional.of(base), repoName, branch);
     }
@@ -261,13 +233,19 @@ public final class NewTaskPlan {
     private static final String CLARIFY_FIRST = "Before writing any code, thoroughly clarify this request: "
             + "brainstorm to pin down the exact requirements, and confirm them before implementing.\n\n";
 
+    private static final String TITLE_GUIDANCE = "Quickly understand the gist of this task, then call session_rename "
+            + "with a short, descriptive title before substantial investigation or implementation. "
+            + "Keep the title updated when the task materially changes. Respect a title pinned by the human; "
+            + "if another session already uses your title, choose a distinct one. "
+            + "Rename only the session, not its branch or worktree folder.\n\n";
+
     /**
-     * What the agent is told on start: the instructions behind a clarify-first directive, or nothing. Never the name.
-     * A launch that carries a composed subagent model rule gets it appended, after a blank line.
+     * What the agent is told on start: clarify-first and title guidance, then the instructions, or nothing.
+     * Never send the temporary name. A composed subagent model rule follows after a blank line.
      */
     public static Optional<String> initialPrompt(Choice choice) {
         return choice.instructions().filter(text -> !text.isBlank())
-                .map(CLARIFY_FIRST::concat)
+                .map(text -> CLARIFY_FIRST + TITLE_GUIDANCE + text)
                 .map(text -> choice.subagentModelRule()
                         .map(rule -> text + "\n\n" + rule)
                         .orElse(text));

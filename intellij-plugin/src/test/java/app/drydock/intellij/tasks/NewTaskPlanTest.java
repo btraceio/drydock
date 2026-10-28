@@ -40,25 +40,6 @@ class NewTaskPlanTest {
     }
 
     @Test
-    void branchFollowsFirstThreeWords() {
-        assertEquals("task-centric-tool-window",
-                NewTaskPlan.branchFor("Task-centric tool window for drydock", Set.of()));
-    }
-
-    @Test
-    void takenBranchGetsSuffix() {
-        assertEquals("fix-the-parser-2", NewTaskPlan.branchFor("Fix the parser", Set.of("fix-the-parser")));
-    }
-
-    @Test
-    void nameWithoutUsableSlugFallsBackToTask() {
-        assertEquals("task", NewTaskPlan.branchFor("!!!", Set.of()));
-        assertEquals("opravit-chybu", NewTaskPlan.branchFor("Opravit chybu ž", Set.of()));
-        assertEquals("task", NewTaskPlan.branchFor("🚀", Set.of()));
-        assertEquals("task-2", NewTaskPlan.branchFor("", Set.of("task")));
-    }
-
-    @Test
     void folderUsesBaseRepoAndBranch() {
         assertEquals(Path.of("/b/drydock-x"), NewTaskPlan.folderFor(Path.of("/b"), "drydock", "x"));
     }
@@ -99,6 +80,15 @@ class NewTaskPlanTest {
     }
 
     @Test
+    void blankInstructionsSendNothingEvenWithASubagentModelRule() {
+        Choice chat = new Choice("New task", Optional.of(" \n "), AgentKind.PI, SessionMode.WRITES,
+                WorkIn.MAIN_CHECKOUT, "", "origin/main", ROOT, OpenIn.THIS_WINDOW,
+                Optional.empty(), Optional.empty(), Optional.of("Use the remembered subagent models."));
+
+        assertEquals(Optional.empty(), NewTaskPlan.initialPrompt(chat));
+    }
+
+    @Test
     void initialPromptPrependsClarifyFirst() {
         Choice choice = choice("Farewell", Optional.of("Add farewell() to Greeter.\nKeep it short."),
                 SessionMode.WRITES, WorkIn.NEW_WORKTREE, "farewell", Path.of("/b/drydock-farewell"));
@@ -106,6 +96,24 @@ class NewTaskPlanTest {
         String prompt = NewTaskPlan.initialPrompt(choice).orElseThrow();
         assertTrue(prompt.startsWith("Before writing any code"), prompt);
         assertTrue(prompt.endsWith("Add farewell() to Greeter.\nKeep it short."), prompt);
+    }
+
+    @Test
+    void initialPromptAsksForAnEarlyTitleAndKeepsItCurrentInEveryWorkLocation() {
+        for (WorkIn workIn : WorkIn.values()) {
+            Choice task = choice("Temporary label", Optional.of("Fix the parser."), SessionMode.WRITES,
+                    workIn, "curious-mossy-otter", Path.of("/b/parser"));
+
+            String prompt = NewTaskPlan.initialPrompt(task).orElseThrow();
+            assertTrue(prompt.contains("call session_rename"), prompt);
+            assertTrue(prompt.contains("before substantial investigation or implementation"), prompt);
+            assertTrue(prompt.contains("when the task materially changes"), prompt);
+            assertTrue(prompt.contains("title pinned by the human"), prompt);
+            assertTrue(prompt.contains("not its branch or worktree folder"), prompt);
+            assertTrue(prompt.indexOf("session_rename") < prompt.indexOf("Fix the parser."), prompt);
+            assertTrue(prompt.endsWith("Fix the parser."), prompt);
+            assertFalse(prompt.contains("Temporary label"), prompt);
+        }
     }
 
     @Test
@@ -121,7 +129,7 @@ class NewTaskPlanTest {
     }
 
     @Test
-    void initialPromptWithoutARuleIsJustTheClarifiedTask() {
+    void initialPromptWithoutAModelRuleAddsNoSubagentRules() {
         Choice noRule = new Choice("Farewell", Optional.of("Do the thing."), AgentKind.CLAUDE,
                 SessionMode.WRITES, WorkIn.NEW_WORKTREE, "farewell", "origin/main", Path.of("/b/f"),
                 OpenIn.OWN_WINDOW, Optional.empty(), Optional.empty(), Optional.empty());
@@ -172,12 +180,6 @@ class NewTaskPlanTest {
         assertEquals("New task", NewTaskPlan.nameFor("   \n "));
         assertEquals("New task", NewTaskPlan.nameFor("---"));
         assertEquals("New task", NewTaskPlan.nameFor(null));
-    }
-
-    @Test
-    void inferredNameNamesTheBranch() {
-        assertEquals("fix-the-parser",
-                NewTaskPlan.branchFor(NewTaskPlan.nameFor("- Fix the parser\nThen keep it short."), Set.of()));
     }
 
     @Test
@@ -248,13 +250,6 @@ class NewTaskPlanTest {
 
         assertEquals(Optional.of("Choose a full folder path for the worktree."),
                 NewTaskPlan.refusal(inputs(Optional.empty(), false), relative, folder -> false));
-    }
-
-    @Test
-    void branchKeepsWordsAroundSlashesAndTheWordWorktree() {
-        assertEquals("ci-cd-pipeline-fix", NewTaskPlan.branchFor("CI/CD pipeline fix", Set.of()));
-        assertEquals("fix-a-b-parser", NewTaskPlan.branchFor("Fix a/b parser", Set.of()));
-        assertEquals("worktree", NewTaskPlan.branchFor("Worktree", Set.of()));
     }
 
     @Test

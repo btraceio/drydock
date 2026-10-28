@@ -5,11 +5,9 @@ import app.drydock.git.GhCliService.OpenIssue;
 
 import org.junit.jupiter.api.Test;
 
-import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
-import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -42,10 +40,6 @@ class NewTaskPresetTest {
         assertTrue(prompt.contains("Do not silently ignore failures, flakes, skipped checks, or untested behavior"));
         assertTrue(prompt.contains("Definition of done:"));
         assertTrue(prompt.contains("the work is not done merely because code was written"));
-        String branch = NewTaskPlan.branchFor(preset.name(), Set.of());
-        assertEquals("42-fix-allocation", branch);
-        assertEquals(Path.of("/worktrees/profiler-42-fix-allocation"),
-                NewTaskPlan.folderFor(Path.of("/worktrees"), "profiler", branch));
         assertEquals(SessionMode.WRITES, preset.mode(false));
         assertEquals(SessionMode.WRITES, preset.mode(true), "the hidden read-only state cannot override the preset");
         assertEquals(Optional.of(SessionMode.WRITES), preset.fixedMode());
