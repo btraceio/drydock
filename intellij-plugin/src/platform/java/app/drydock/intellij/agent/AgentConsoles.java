@@ -38,6 +38,7 @@ import javax.swing.JFrame;
 
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
@@ -145,6 +146,18 @@ public final class AgentConsoles {
     }
 
     /**
+     * The tab-show step of {@link #start}. A seam, not a test hook: every
+     * production entry point goes through it with {@link AgentConsoles#show},
+     * so a launch whose show fails is exercised through the same production
+     * guard that clears the starting mark.
+     */
+    @FunctionalInterface
+    interface ShowStep {
+        /** As {@link AgentConsoles#show}. EDT. */
+        void show(Project project, ManagedSessionId sessionId);
+    }
+
+    /**
      * Whether {@code session} has a conversation to resume into. Reads the
      * provider's transcript store: blocking, off the EDT only.
      */
@@ -179,6 +192,12 @@ public final class AgentConsoles {
     private static void start(Project project, ManagedSessionId sessionId, String progressTitle,
                               String verb, Function<DrydockSessionService,
                                       CompletableFuture<ManagedAgentSession>> launch) {
+        start(project, sessionId, progressTitle, verb, launch, AgentConsoles::show);
+    }
+
+    static void start(Project project, ManagedSessionId sessionId, String progressTitle,
+                      String verb, Function<DrydockSessionService,
+                              CompletableFuture<ManagedAgentSession>> launch, ShowStep showStep) {
         Objects.requireNonNull(project, "project");
         Objects.requireNonNull(sessionId, "sessionId");
         if (SessionTransfer.inProgress(sessionId)) {
@@ -205,22 +224,38 @@ public final class AgentConsoles {
                 // below
             }
         }
-        show(project, sessionId);
-        ProgressManager.getInstance().run(new Task.Backgroundable(project, progressTitle, true) {
-            @Override
-            public void run(@NotNull ProgressIndicator indicator) {
-                try {
-                    launch.apply(DrydockStartupActivity.sessions(project)).join();
-                    focusConsoleLater(project, sessionId);
-                } catch (RuntimeException e) {
-                    LOG.log(Level.WARNING, () -> "Could not " + verb + " session " + sessionId + ": " + e);
-                    ApplicationManager.getApplication().invokeLater(
-                            () -> Messages.showErrorDialog(project,
-                                    "Could not " + verb + " this session: " + rootMessage(e), "Drydock"),
-                            ModalityState.nonModal(), project.getDisposed());
+        // The START path marks the session as starting here: the click has
+        // committed to a launch, and until the process is live (or the launch
+        // fails) the guard layer must keep the lifecycle commands off (A11).
+        // Every later exit unmarks — see the report's exit-path list.
+        registry.markStarting(sessionId, true);
+        try {
+            showStep.show(project, sessionId);
+            ProgressManager.getInstance().run(new Task.Backgroundable(project, progressTitle, true) {
+                @Override
+                public void run(@NotNull ProgressIndicator indicator) {
+                    try {
+                        launch.apply(DrydockStartupActivity.sessions(project)).join();
+                        focusConsoleLater(project, sessionId);
+                    } catch (RuntimeException e) {
+                        LOG.log(Level.WARNING, () -> "Could not " + verb + " session " + sessionId + ": " + e);
+                        ApplicationManager.getApplication().invokeLater(
+                                () -> Messages.showErrorDialog(project,
+                                        "Could not " + verb + " this session: " + rootMessage(e), "Drydock"),
+                                ModalityState.nonModal(), project.getDisposed());
+                    } finally {
+                        // Normal end, a failed launch, and an error dialog
+                        // that itself throws: all leave nothing starting.
+                        registry.markStarting(sessionId, false);
+                    }
                 }
-            }
-        });
+            });
+        } catch (RuntimeException e) {
+            // The show failed to open the tab, or run refused the task
+            // outright: the background run, and its unmark, never happened.
+            registry.markStarting(sessionId, false);
+            throw e;
+        }
     }
 
     /** What a Resume, Start or Show does, given where the agent is shown now. */
@@ -258,20 +293,69 @@ public final class AgentConsoles {
         focusConsole(project, sessionId);
     }
 
+    /** What {@link #showExisting} did. */
+    public enum ShowOutcome {
+        /** The existing execution was shown: its console attached here, or its host window raised. */
+        SHOWN,
+        /** Nothing runs: nothing was shown, and nothing was started. */
+        ENDED
+    }
+
+    /**
+     * Show agent (A6, reconnect first): shows the session's <em>existing</em>
+     * execution — attaching its console in {@code from} when no live window
+     * has it, or raising the window that does. NEVER starts, resumes or
+     * restores: an execution that ended before the click shows nothing
+     * ({@link ShowOutcome#ENDED}), rather than start a process the user
+     * never asked for — which is why this must not call {@code resumeOrStart}.
+     * EDT only.
+     */
+    public static ShowOutcome showExisting(Project from, ManagedSessionId sessionId) {
+        Objects.requireNonNull(from, "from");
+        Objects.requireNonNull(sessionId, "sessionId");
+        AgentExecutionRegistry registry = AgentExecutionRegistry.getInstance();
+        Optional<Project> host = registry.host(sessionId).filter(open -> !open.isDisposed());
+        return switch (decide(registry.isRunning(sessionId), host, from)) {
+            case RAISE_HOST -> {
+                Project window = host.orElseThrow();
+                ProjectUtil.focusProjectWindow(window, true);
+                show(window, sessionId);
+                focusConsole(window, sessionId);
+                yield ShowOutcome.SHOWN;
+            }
+            case SHOW_HERE -> {
+                showHere(from, sessionId);
+                yield ShowOutcome.SHOWN;
+            }
+            // The end race: nothing runs any more. Show agent never takes
+            // the start path — the caller reports what happened instead.
+            case START -> ShowOutcome.ENDED;
+        };
+    }
+
     /** Matches the plugin.xml notificationGroup id of the "moved" balloon. */
     private static final String MOVES_GROUP = "Drydock moves";
 
     /**
      * "Open project window ↗" on a hosted tab (frame F3): opens or raises the
      * agent's own worktree window and moves its console there — same process,
-     * history replayed. With {@code thenChanges}, then activates that window's
-     * Commit tool window ("Changes ↗"). The hosting tab closes, and a balloon
-     * in {@code host} confirms the move and offers to bring it back.
+     * history replayed. A hosted <em>stopped</em> session gets the same
+     * window with its tab shown there, dimmed, and nothing started. With
+     * {@code thenChanges}, then activates that window's Commit tool window
+     * ("Changes ↗"). The hosting tab closes, and a balloon in {@code host}
+     * confirms the move and offers to bring it back.
      *
      * <p>While the window opens the session is {@code moving}: the hosting
      * tab says so and disables its strip, and closing the host meanwhile
      * neither stops nor releases it. Every path clears that, including a
      * window that does not open. EDT.</p>
+     *
+     * <p>The balloon that confirms the move is shown only when the
+     * registry's live execution actually moved — that is the only move its
+     * "Bring back here" can undo. A hosted stopped session gets its window
+     * and its dimmed tab, but no balloon: nothing live moved, and a "Bring
+     * back here" for it would have to call showHere, which with no
+     * execution in the registry silently does nothing.</p>
      */
     public static void jumpToOwnWindow(Project host, ManagedSessionId sessionId, boolean thenChanges) {
         jumpToOwnWindow(host, sessionId, thenChanges, true);
@@ -286,31 +370,59 @@ public final class AgentConsoles {
     public static void jumpToOwnWindow(Project host, ManagedSessionId sessionId, boolean thenChanges,
                                        boolean announce) {
         if (SessionTransfer.inProgress(sessionId)) {
+            Messages.showInfoMessage(host, "This session is being transferred.", "Drydock");
             return;
         }
         AgentExecutionRegistry registry = AgentExecutionRegistry.getInstance();
         Optional<AgentExecution> execution = registry.execution(sessionId);
-        if (execution.isEmpty()) {
+        // A hosted stopped session has no execution, so the session itself —
+        // read from the catalog in memory, not from disk — carries the
+        // directory. Missing from both, there is nothing to open, and a
+        // silent return would read as "done".
+        Optional<ManagedAgentSession> session = DrydockPluginService.getInstance().stateStore().state().sessions()
+                .stream()
+                .filter(candidate -> candidate.id().equals(sessionId))
+                .findFirst();
+        if (execution.isEmpty() && session.isEmpty()) {
+            Messages.showErrorDialog(host, "This session is no longer in Drydock's catalog.", "Drydock");
             return;
         }
-        Path directory = execution.get().workingDirectory();
-        SessionPlace place = execution.get().place();
+        Path directory = execution.map(AgentExecution::workingDirectory)
+                .or(() -> session.map(ManagedAgentSession::workingDirectory)).orElseThrow();
+        SessionPlace place = execution.map(AgentExecution::place)
+                .orElseGet(() -> HostedTab.placeIn(AgentConsoleFileSystem.getInstance().fileFor(sessionId), host)
+                        .orElseGet(() -> new SessionPlace(directory.getFileName().toString(), Optional.empty())));
         registry.markMoving(sessionId, true);
         runOrUndo(DrydockPluginService.getInstance().executor(), () -> {
+            boolean folderExists;
             Optional<Project> open;
             try {
                 Path canonical = RepositoryCatalog.canonicalize(directory);
-                open = Arrays.stream(ProjectManager.getInstance().getOpenProjects())
-                        .filter(project -> !project.isDisposed() && project != host && project.getBasePath() != null)
-                        .filter(project -> RepositoryCatalog.canonicalize(Path.of(project.getBasePath())).equals(canonical))
-                        .findFirst();
+                folderExists = Files.isDirectory(canonical);
+                open = folderExists
+                        ? Arrays.stream(ProjectManager.getInstance().getOpenProjects())
+                                .filter(project -> !project.isDisposed() && project != host
+                                        && project.getBasePath() != null)
+                                .filter(project -> RepositoryCatalog.canonicalize(Path.of(project.getBasePath()))
+                                        .equals(canonical))
+                                .findFirst()
+                        : Optional.empty();
             } catch (RuntimeException e) {
                 LOG.log(Level.WARNING, () -> "Could not look for the window of " + directory + ": " + e);
+                folderExists = false;
                 open = Optional.empty();
             }
+            boolean folder = folderExists;
             Optional<Project> existing = open;
             ApplicationManager.getApplication().invokeLater(() -> {
                 try {
+                    if (!folder) {
+                        if (!host.isDisposed()) {
+                            Messages.showErrorDialog(host, JumpPlan.folderGone(place.label(), directory),
+                                    "Drydock");
+                        }
+                        return;
+                    }
                     Project target = existing.filter(project -> !project.isDisposed())
                             .orElseGet(() -> TaskWindows.openAsProject(directory));
                     if (target == null || target.isDisposed()) {
@@ -320,19 +432,33 @@ public final class AgentConsoles {
                         }
                         return;
                     }
-                    if (registry.show(sessionId, target).isEmpty()) {
-                        return;   // the agent ended and nothing showed it
+                    // The race rule: never the execution captured at the
+                    // click. An agent that started or restarted while the
+                    // window opened is live here and takes the unchanged
+                    // running move, wherever it runs; one that ended shows
+                    // stopped in the window that just opened, and is neither
+                    // treated as stranded nor started again.
+                    boolean shownByRegistry = registry.execution(sessionId).isPresent()
+                            && registry.show(sessionId, target).isPresent();
+                    JumpPlan.Outcome outcome = JumpPlan.after(true, true, shownByRegistry);
+                    switch (outcome) {
+                        case MOVED_LIVE -> {
+                            ProjectUtil.focusProjectWindow(target, true);
+                            show(target, sessionId);
+                            focusConsole(target, sessionId);
+                        }
+                        case SHOW_STOPPED -> showStopped(host, target, sessionId);
+                        // Unreachable: both facts were established above.
+                        case FOLDER_GONE, OPEN_FAILED -> throw new IllegalStateException(
+                                "the folder and the window were both established above");
                     }
-                    ProjectUtil.focusProjectWindow(target, true);
-                    show(target, sessionId);
-                    focusConsole(target, sessionId);
                     if (thenChanges) {
                         DrydockPluginService.getInstance().stateStore().state().sessions().stream()
-                                .filter(session -> session.id().equals(sessionId))
+                                .filter(candidate -> candidate.id().equals(sessionId))
                                 .findFirst()
-                                .ifPresent(session -> ReviewTabOpener.open(target, Optional.of(session)));
+                                .ifPresent(found -> ReviewTabOpener.open(target, Optional.of(found)));
                     }
-                    if (announce && !host.isDisposed()) {
+                    if (announce && !host.isDisposed() && JumpPlan.announcesMove(outcome)) {
                         announceMove(host, target, sessionId, place);
                     }
                 } finally {
@@ -340,6 +466,25 @@ public final class AgentConsoles {
                 }
             }, ModalityState.nonModal());
         }, () -> registry.markMoving(sessionId, false));
+    }
+
+    /**
+     * Shows a stopped session's console tab in its own project's window and
+     * closes the hosting tab. Starts nothing — {@link #show} only — so a
+     * stopped agent stays stopped, its transcript dimmed, exactly as a
+     * reopened hosted tab. {@code host == target} (one window, or already
+     * there) keeps the tab: there is nowhere to move it from. EDT.
+     */
+    static void showStopped(Project host, Project target, ManagedSessionId sessionId) {
+        show(target, sessionId);
+        if (JumpPlan.closesHostTab(host == target)) {
+            FileEditorManager.getInstance(host)
+                    .closeFile(AgentConsoleFileSystem.getInstance().fileFor(sessionId));
+        }
+        if (host != target) {
+            ProjectUtil.focusProjectWindow(target, true);
+        }
+        focusConsole(target, sessionId);
     }
 
     /**

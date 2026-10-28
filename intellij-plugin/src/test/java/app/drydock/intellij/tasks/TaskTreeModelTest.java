@@ -33,6 +33,7 @@ import org.junit.jupiter.api.Test;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -41,6 +42,7 @@ import java.util.Optional;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -73,6 +75,7 @@ class TaskTreeModelTest {
         final Map<Path, IssueListing> issues = new HashMap<>();
         final Map<Path, PullRequestListing> pullRequests = new HashMap<>();
         final Map<Path, List<Worktree>> pullRequestDedupWorktrees = new HashMap<>();
+        Map<ManagedSessionId, Boolean> resumable = Map.of();
         Optional<String> problem = Optional.empty();
         String filter = "";
         ViewFilter viewFilter = ViewFilter.ALL;
@@ -101,7 +104,7 @@ class TaskTreeModelTest {
             return new TaskTreeModel.Inputs(projects, sessions, worktrees, mainRootOf, currentMain, currentWorking,
                     activity, running, hosts, missing, recordedRoots, worktreeContainers, issueContainers,
                     pullRequestContainers, openFolders, lastActivity, T,
-                    issues, pullRequests, pullRequestDedupWorktrees, problem, filter, viewFilter);
+                    issues, pullRequests, pullRequestDedupWorktrees, problem, filter, viewFilter, resumable);
         }
     }
 
@@ -432,6 +435,128 @@ class TaskTreeModelTest {
     }
 
     @Test
+    void viewFilterOrderMatchesTheRibbon() {
+        assertEquals(List.of("All", "Active", "Inactive", "Needs you", "PRs", "Issues"),
+                Arrays.stream(ViewFilter.values()).map(ViewFilter::label).toList());
+    }
+
+    @Test
+    void needsYouViewContainsOnlyRunningSessionsNeedingAttention() {
+        In in = new In().project(ALPHA).project(BTRACE);
+        ManagedAgentSession waiting = session("Waiting for you", ALPHA.resolve("a"));
+        ManagedAgentSession idle = session("Acknowledged idle", ALPHA.resolve("b"));
+        ManagedAgentSession busy = session("Busy", ALPHA.resolve("c"));
+        ManagedAgentSession unknown = session("Unknown", ALPHA.resolve("d"));
+        ManagedAgentSession stopped = session("Stopped, attention left over", ALPHA.resolve("e"));
+        in.sessions.addAll(List.of(waiting, idle, busy, unknown, stopped));
+        in.running.addAll(Set.of(waiting.id(), idle.id(), busy.id(), unknown.id()));
+        in.activity.put(waiting.id(), Optional.of(SessionActivity.NEEDS_ATTENTION));
+        in.activity.put(idle.id(), Optional.of(SessionActivity.IDLE));
+        in.activity.put(busy.id(), Optional.of(SessionActivity.BUSY));
+        in.activity.put(unknown.id(), Optional.of(SessionActivity.UNKNOWN));
+        in.activity.put(stopped.id(), Optional.of(SessionActivity.NEEDS_ATTENTION));
+        in.viewFilter = ViewFilter.NEEDS_YOU;
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build());
+
+        // BTRACE has no needs-you session, so it is hidden entirely.
+        assertEquals(List.of(ALPHA), projectRoots(nodes));
+        assertEquals(List.of("Waiting for you"), sessionNames(nodes, ALPHA));
+        assertTrue(section(projectRow(nodes, ALPHA), SectionKind.WORKTREES).isEmpty());
+    }
+
+    @Test
+    void searchNarrowsInsideTheNeedsYouView() {
+        In in = new In().project(ALPHA);
+        ManagedAgentSession allocation = session("Allocation waiting", ALPHA.resolve("a"));
+        ManagedAgentSession sampling = session("Sampling waiting", ALPHA.resolve("b"));
+        in.sessions.addAll(List.of(allocation, sampling));
+        in.running.addAll(Set.of(allocation.id(), sampling.id()));
+        in.activity.put(allocation.id(), Optional.of(SessionActivity.NEEDS_ATTENTION));
+        in.activity.put(sampling.id(), Optional.of(SessionActivity.NEEDS_ATTENTION));
+        in.viewFilter = ViewFilter.NEEDS_YOU;
+        in.filter = "alloc";
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build());
+
+        assertEquals(List.of("Allocation waiting"), sessionNames(nodes, ALPHA));
+    }
+
+    @Test
+    void projectScopeAppliesInsideTheNeedsYouView() {
+        In in = new In().project(BTRACE).project(ALPHA);
+        ManagedAgentSession btraceWaiting = session("Waiting here", BTRACE);
+        ManagedAgentSession alphaWaiting = session("Waiting there", ALPHA);
+        in.sessions.addAll(List.of(btraceWaiting, alphaWaiting));
+        in.running.addAll(Set.of(btraceWaiting.id(), alphaWaiting.id()));
+        in.activity.put(btraceWaiting.id(), Optional.of(SessionActivity.NEEDS_ATTENTION));
+        in.activity.put(alphaWaiting.id(), Optional.of(SessionActivity.NEEDS_ATTENTION));
+        in.viewFilter = ViewFilter.NEEDS_YOU;
+        in.filter = "/btr/";
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build());
+
+        assertEquals(List.of(BTRACE), projectRoots(nodes));
+        assertEquals(List.of("Waiting here"), sessionNames(nodes, BTRACE));
+    }
+
+    @Test
+    void prsViewShowsOnlySelectablePullRequestsAndComposesWithSearch() {
+        Path taken = Path.of("/wt/drydock-feature");
+        In in = new In().project(DRYDOCK).project(ALPHA).worktree(DRYDOCK, taken, "feature/taken");
+        in.pullRequestContainers.addAll(Set.of(DRYDOCK, ALPHA));
+        in.pullRequests.put(DRYDOCK, new PullRequestListing.Listed(List.of(
+                pullRequest(12, "Allocation regression", "feature/alloc", false),
+                pullRequest(40, "New one", "feature/new", false),
+                pullRequest(41, "A draft", "feature/draft", true),
+                pullRequest(42, "Already local", "feature/taken", false))));
+        in.pullRequestDedupWorktrees.put(DRYDOCK, List.of(linked(taken, "feature/taken")));
+        in.pullRequests.put(ALPHA, new PullRequestListing.Listed(List.of(
+                pullRequest(7, "Unrelated", "feature/x", false))));
+        in.sessions.add(session("A task", DRYDOCK));
+        in.issues.put(DRYDOCK, new IssueListing.Listed(List.of(
+                new OpenIssue(9, "Allocation regression", Optional.empty(), List.of(), List.of(),
+                        Optional.of(T)))));
+        in.viewFilter = ViewFilter.PULL_REQUESTS;
+        in.filter = "alloc";
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build());
+
+        // Alpha's single PR does not match the search, so Alpha is hidden.
+        assertEquals(List.of(DRYDOCK), projectRoots(nodes));
+        ProjectRow row = projectRow(nodes, DRYDOCK);
+        assertTrue(section(row, SectionKind.SESSIONS).isEmpty(), "no session rows in the PRs view");
+        assertTrue(section(row, SectionKind.WORKTREES).isEmpty(), "worktrees render in All only");
+        assertTrue(section(row, SectionKind.ISSUES).isEmpty(), "issues render in All or Issues only");
+        assertEquals(List.of(12), pullRequestNodes(row).stream().map(PullRequestRow.class::cast)
+                .map(pullRequestRow -> pullRequestRow.pullRequest().number()).toList());
+    }
+
+    @Test
+    void prsViewShowsTheDeferredRowWhileTheListingHasNotArrived() {
+        In in = new In().project(DRYDOCK);
+        in.pullRequestContainers.add(DRYDOCK);
+        in.viewFilter = ViewFilter.PULL_REQUESTS;
+
+        List<TaskNode> children = section(projectRow(TaskTreeModel.build(in.build()), DRYDOCK),
+                SectionKind.PULL_REQUESTS).orElseThrow().children();
+
+        assertEquals(List.of(new TaskNode.Deferred("Loading pull requests…")), children);
+    }
+
+    @Test
+    void prsViewShowsTheFailedRow() {
+        In in = new In().project(DRYDOCK);
+        in.pullRequestContainers.add(DRYDOCK);
+        in.pullRequests.put(DRYDOCK, new PullRequestListing.Failed("gh pr list exited 1"));
+        in.viewFilter = ViewFilter.PULL_REQUESTS;
+
+        List<TaskNode> children = pullRequestNodes(projectRow(TaskTreeModel.build(in.build()), DRYDOCK));
+
+        assertEquals(List.of(new TaskNode.ListProblem("GitHub pull requests: gh pr list exited 1")), children);
+    }
+
+    @Test
     void aRunningTaskFromAnotherWorktreeShownInThisWindowIsHere() {
         Path feature = Path.of("/wt/btrace-feature");
         In in = new In().project(BTRACE).worktree(BTRACE, feature, "feature").current(BTRACE, BTRACE);
@@ -674,6 +799,35 @@ class TaskTreeModelTest {
         in.sessions.add(session("A shell", ALPHA, AgentKind.TERMINAL, T));
 
         assertEquals(List.of(), projectRow(TaskTreeModel.build(in.build()), ALPHA).children());
+    }
+
+    @Test
+    void taskRowsCarryTheModelSResumabilityAnswer() {
+        In in = new In().project(ALPHA);
+        ManagedAgentSession gone = session("Conversation gone", ALPHA.resolve("gone"))
+                .withAgentSessionId(Optional.of("cli-gone"));
+        ManagedAgentSession cold = session("Cold answer", ALPHA.resolve("cold"))
+                .withAgentSessionId(Optional.of("cli-cold"));
+        ManagedAgentSession fresh = session("Never started", ALPHA.resolve("fresh"));
+        ManagedAgentSession live = session("Live session", ALPHA.resolve("live"))
+                .withAgentSessionId(Optional.of("cli-live"));
+        in.sessions.addAll(List.of(gone, cold, fresh, live));
+        in.running.add(live.id());
+        in.resumable = Map.of(gone.id(), false, live.id(), true);
+
+        List<TaskNode> rows = sessionNodes(projectRow(TaskTreeModel.build(in.build()), ALPHA));
+
+        // A warmed answer wins; cold, a stopped session with an agent id keeps
+        // Resume; no agent id, nothing to resume; running is never resumable.
+        Map<String, Boolean> byName = new HashMap<>();
+        rows.forEach(node -> {
+            TaskRow task = (TaskRow) node;
+            byName.put(task.session().displayName(), task.resumable());
+        });
+        assertFalse(byName.get("Conversation gone"), "the warmed cache answer wins");
+        assertTrue(byName.get("Cold answer"), "cold, a stopped session with an agent id keeps Resume");
+        assertFalse(byName.get("Never started"), "no agent session id means nothing to resume into");
+        assertFalse(byName.get("Live session"), "a running session is never resumable");
     }
 
     @Test

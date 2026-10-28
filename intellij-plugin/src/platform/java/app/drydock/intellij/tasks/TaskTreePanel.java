@@ -28,6 +28,7 @@ import app.drydock.intellij.tasks.TaskTreeModel.ViewFilter;
 import com.intellij.icons.AllIcons;
 import com.intellij.ide.BrowserUtil;
 import com.intellij.openapi.Disposable;
+import com.intellij.openapi.actionSystem.ActionGroup;
 import com.intellij.openapi.actionSystem.ActionManager;
 import com.intellij.openapi.actionSystem.ActionToolbar;
 import com.intellij.openapi.actionSystem.ActionUpdateThread;
@@ -39,40 +40,35 @@ import com.intellij.openapi.actionSystem.DefaultActionGroup;
 import com.intellij.openapi.actionSystem.UiDataProvider;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
+import com.intellij.openapi.project.DumbAware;
 import com.intellij.openapi.project.DumbAwareAction;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.Messages;
 import com.intellij.openapi.ui.SimpleToolWindowPanel;
+
 import com.intellij.ui.DocumentAdapter;
-import com.intellij.ui.JBColor;
 import com.intellij.ui.PopupHandler;
 import com.intellij.ui.ScrollPaneFactory;
 import com.intellij.ui.SearchTextField;
 import com.intellij.ui.SimpleColoredComponent;
 import com.intellij.ui.awt.RelativePoint;
 import com.intellij.ui.treeStructure.Tree;
+
 import com.intellij.util.Alarm;
 import com.intellij.util.messages.MessageBusConnection;
-import com.intellij.util.ui.JBUI;
-import com.intellij.util.ui.UIUtil;
-import com.intellij.util.ui.tree.TreeUtil;
-import org.jetbrains.annotations.NotNull;
 
-import javax.swing.ButtonGroup;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
 import javax.swing.JPanel;
-import javax.swing.JToggleButton;
 import javax.swing.SwingUtilities;
 import javax.swing.event.DocumentEvent;
-import javax.swing.event.TreeExpansionEvent;
-import javax.swing.event.TreeWillExpandListener;
 import javax.swing.tree.DefaultMutableTreeNode;
 import javax.swing.tree.DefaultTreeModel;
-import javax.swing.tree.ExpandVetoException;
 import javax.swing.tree.TreePath;
 
 import java.awt.BorderLayout;
 import java.awt.Component;
-import java.awt.FlowLayout;
 import java.awt.Rectangle;
 import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
@@ -82,13 +78,14 @@ import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.EnumMap;
+import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Predicate;
 
 /**
@@ -139,16 +136,15 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     private final TaskTreeInputs inputs = new TaskTreeInputs();
     private final TaskTreeRefreshRequests refreshRequests = new TaskTreeRefreshRequests();
     private final Alarm searchAlarm = new Alarm(Alarm.ThreadToUse.SWING_THREAD, this);
-    private final DefaultActionGroup contextActions = new DefaultActionGroup();
     private volatile String filter = "";
     private volatile ViewFilter viewFilter = ViewFilter.ALL;
     private List<TaskNode> displayedNodes = List.of();
     private String displayedFilter = "";
     private ViewFilter displayedViewFilter = ViewFilter.ALL;
-    /** Main roots whose lazy containers the user has opened in this panel. EDT only. */
-    private final Set<Path> requestedWorktrees = ConcurrentHashMap.newKeySet();
-    private final Set<Path> requestedIssues = ConcurrentHashMap.newKeySet();
-    private final Set<Path> requestedPullRequests = ConcurrentHashMap.newKeySet();
+    /** Which lazy listing sections the user opened here, with the guard that keeps the
+     * panel's own tree restoration from counting as such an open. */
+    private final ListingExpansionTracker expansions =
+            new ListingExpansionTracker(this::requestRebuild, TaskTreePanel::projectRootOf);
     /** One review materialization at a time per pull request; the flow itself refuses duplicates too. */
     private final PullRequestReview pullRequestReview = new PullRequestReview();
     /** One review materialization at a time per worktree; the flow itself refuses duplicates too. */
@@ -156,6 +152,39 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     /** Guarded by {@code this}: subscribing after dispose() must undo itself. */
     private Runnable unsubscribeShared = () -> { };
     private volatile boolean disposed;
+    /**
+     * The refresh action's effects, tied to this panel's real caches and
+     * rebuild scheduler: the seam the dispatch tests record against (F8).
+     */
+    private final RefreshTarget refreshTarget = new RefreshTarget() {
+        @Override
+        public void invalidateAll() {
+            inputs.invalidateGitHub();
+        }
+
+        @Override
+        public void invalidateIssues(Path root) {
+            inputs.invalidateIssues(root);
+        }
+
+        @Override
+        public void invalidatePullRequests(Path root) {
+            inputs.invalidatePullRequests(root);
+        }
+
+        @Override
+        public void requestListing(SectionKind kind, Path root) {
+            // Refresh intent is user intent: the next gather must fetch this
+            // listing and open its section, even when the row was still
+            // collapsed (deferred) when it was refreshed.
+            expansions.requested(kind).add(root);
+        }
+
+        @Override
+        public void requestRebuild(boolean changedWorktrees) {
+            TaskTreePanel.this.requestRebuild(changedWorktrees);
+        }
+    };
     /**
      * Canonical repository root -> its id, refreshed by every background rebuild so the EDT
      * {@code update()} of the quick review action never canonicalizes (filesystem IO). First
@@ -240,7 +269,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 AllIcons.Vcs.Vendors.Github) {
             @Override
             public void update(@NotNull AnActionEvent e) {
-                TaskActions.present(e, urlOf(e.getData(SELECTED_NODE)).isPresent());
+                TaskActions.present(e, TaskMenu.urlOf(e.getData(SELECTED_NODE)).isPresent());
             }
 
             @Override
@@ -250,15 +279,21 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
             @Override
             public void actionPerformed(@NotNull AnActionEvent e) {
-                urlOf(e.getData(SELECTED_NODE)).ifPresent(BrowserUtil::browse);
+                TaskMenu.urlOf(e.getData(SELECTED_NODE)).ifPresent(BrowserUtil::browse);
             }
         };
-        AnAction reviewPullRequest = new DumbAwareAction("Review…",
-                "Check this pull request out into its own worktree, pick the starting model, and start a review session",
+        // "Review…" asks for the starting model and re-records the choice:
+        // a pull request is first checked out into its own worktree, an
+        // idle worktree starts the session right there.
+        AnAction review = new DumbAwareAction("Review…",
+                "Pick the starting model and start a review session; "
+                        + "a pull request is first checked out into its own worktree",
                 AllIcons.Actions.Preview) {
             @Override
             public void update(@NotNull AnActionEvent e) {
-                TaskActions.present(e, e.getData(SELECTED_NODE) instanceof PullRequestRow);
+                TaskNode node = e.getData(SELECTED_NODE);
+                TaskActions.present(e, node instanceof PullRequestRow
+                        || (node instanceof IdleWorktree && e.getData(SELECTED_PROJECT_ROOT) != null));
             }
 
             @Override
@@ -268,24 +303,36 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
             @Override
             public void actionPerformed(@NotNull AnActionEvent e) {
-                reviewPullRequestWithDialog(e);
+                TaskNode node = e.getData(SELECTED_NODE);
+                if (node instanceof PullRequestRow pullRequest) {
+                    reviewPullRequestWithDialog(pullRequest.mainRoot(), pullRequest);
+                } else if (node instanceof IdleWorktree idle) {
+                    Path root = e.getData(SELECTED_PROJECT_ROOT);
+                    if (root != null) {
+                        worktreeReview.reviewWithModelDialog(project, root, idle.worktree(), idle.branch());
+                    }
+                }
             }
         };
         // One-gesture review with the repository's remembered starting model
         // for the harness the review will launch; "Review…" above asks and
-        // re-records it instead. The label names the model so the quick
+        // re-records it instead. For a pull request the review checks the
+        // PR out into its own worktree first; an idle worktree starts the
+        // session right there. The label names the model so the quick
         // action says what it will launch with, and it must track the state
         // store cheaply: it reads the in-memory repositories only, never git.
         AnAction quickReview = new DumbAwareAction("Review (default)",
-                "Check this pull request out into its own worktree and start a review session "
-                        + "with the remembered starting model",
+                "Start a review session with the remembered starting model; "
+                        + "a pull request is first checked out into its own worktree",
                 AllIcons.Actions.Preview) {
             @Override
             public void update(@NotNull AnActionEvent e) {
-                TaskActions.present(e, e.getData(SELECTED_NODE) instanceof PullRequestRow);
-                if (e.getData(SELECTED_NODE) instanceof PullRequestRow pullRequest) {
-                    e.getPresentation().setText(quickReviewLabel(pullRequest.mainRoot()));
-                }
+                TaskNode node = e.getData(SELECTED_NODE);
+                Path root = node instanceof PullRequestRow pullRequest ? pullRequest.mainRoot()
+                        : e.getData(SELECTED_PROJECT_ROOT);
+                TaskActions.present(e, node instanceof PullRequestRow
+                        || (node instanceof IdleWorktree && root != null));
+                e.getPresentation().setText(quickReviewLabel(root));
             }
 
             @Override
@@ -295,59 +342,14 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
             @Override
             public void actionPerformed(@NotNull AnActionEvent e) {
-                reviewPullRequest(e);
-            }
-        };
-        AnAction reviewWorktree = new DumbAwareAction("Review…",
-                "Start a review session in this worktree, pick the starting model, and open its review board",
-                AllIcons.Actions.Preview) {
-            @Override
-            public void update(@NotNull AnActionEvent e) {
-                TaskActions.present(e, e.getData(SELECTED_NODE) instanceof IdleWorktree
-                        && e.getData(SELECTED_PROJECT_ROOT) != null);
-            }
-
-            @Override
-            public @NotNull ActionUpdateThread getActionUpdateThread() {
-                return ActionUpdateThread.EDT;
-            }
-
-            @Override
-            public void actionPerformed(@NotNull AnActionEvent e) {
-                if (e.getData(SELECTED_NODE) instanceof IdleWorktree idle
-                        && e.getData(SELECTED_PROJECT_ROOT) != null) {
-                    worktreeReview.reviewWithModelDialog(project, e.getData(SELECTED_PROJECT_ROOT),
-                            idle.worktree(), idle.branch());
-                }
-            }
-        };
-        // One-gesture review with the repository's remembered starting model
-        // for the harness the review will launch; "Review…" above asks and
-        // re-records it instead. Same label rule as the PR review's quick
-        // action: the label names the model, and reads in-memory state only.
-        AnAction quickReviewWorktree = new DumbAwareAction("Review (default)",
-                "Start a review session in this worktree with the remembered starting model",
-                AllIcons.Actions.Preview) {
-            @Override
-            public void update(@NotNull AnActionEvent e) {
-                TaskActions.present(e, e.getData(SELECTED_NODE) instanceof IdleWorktree
-                        && e.getData(SELECTED_PROJECT_ROOT) != null);
-                if (e.getData(SELECTED_NODE) instanceof IdleWorktree) {
-                    e.getPresentation().setText(quickReviewLabel(e.getData(SELECTED_PROJECT_ROOT)));
-                }
-            }
-
-            @Override
-            public @NotNull ActionUpdateThread getActionUpdateThread() {
-                return ActionUpdateThread.EDT;
-            }
-
-            @Override
-            public void actionPerformed(@NotNull AnActionEvent e) {
-                if (e.getData(SELECTED_NODE) instanceof IdleWorktree idle
-                        && e.getData(SELECTED_PROJECT_ROOT) != null) {
-                    worktreeReview.review(project, e.getData(SELECTED_PROJECT_ROOT),
-                            idle.worktree(), idle.branch());
+                TaskNode node = e.getData(SELECTED_NODE);
+                if (node instanceof PullRequestRow pullRequest) {
+                    reviewPullRequest(pullRequest.mainRoot(), pullRequest);
+                } else if (node instanceof IdleWorktree idle) {
+                    Path root = e.getData(SELECTED_PROJECT_ROOT);
+                    if (root != null) {
+                        worktreeReview.review(project, root, idle.worktree(), idle.branch());
+                    }
                 }
             }
         };
@@ -389,25 +391,34 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 }
             }
         };
-        AnAction issueGithubSettings = githubSettingsAction(node -> node instanceof IssueRow);
-
-        contextActions.add(quickReview);
-        contextActions.add(reviewPullRequest);
-        contextActions.add(quickReviewWorktree);
-        contextActions.add(reviewWorktree);
-        contextActions.add(implement);
-        contextActions.add(triage);
-        contextActions.addSeparator();
-        contextActions.add(openInGitHub);
-        contextActions.add(refreshListingsAction());
-        contextActions.add(issueGithubSettings);
-        contextActions.addSeparator();
-        contextActions.add(switchToTask);
-        contextActions.add(newTask);
-        contextActions.add(newTaskInMain);
-        contextActions.add(githubSettingsAction(TaskTreePanel::githubSettingsNode));
-        contextActions.addAll(TaskActions.taskActions());
-        PopupHandler.installPopupMenu(tree, contextActions, "Drydock.TaskTree.Popup");
+        // One GitHub Settings action for every row that offers it — an
+        // issue, a project, or a listings section (A10: the old duplicate
+        // pair is gone).
+        AnAction githubSettings = githubSettingsAction(node -> node instanceof IssueRow
+                || githubSettingsNode(node));
+        // The manual refresh, one shared instance for the toolbar and the
+        // tree's context menu alike: it is the same "show me now" gesture
+        // (A10), but what it drops depends on where it ran — global from the
+        // toolbar and the project row, one listing only from a section's
+        // own menu (see the static refresh(…) dispatch below).
+        AnAction refresh = refreshAction(refreshTarget);
+        // The tree's context menu, one action instance per entry: TaskMenu
+        // lays out which of them apply to the selection, and in what order
+        // (A10), so a popup holds exactly the applicable actions.
+        Map<TaskMenu.Item, AnAction> taskActions = TaskActions.taskActions();
+        Map<TaskMenu.Item, AnAction> menuActions = new EnumMap<>(TaskMenu.Item.class);
+        menuActions.putAll(taskActions);
+        menuActions.put(TaskMenu.Item.SWITCH_TO_TASK, switchToTask);
+        menuActions.put(TaskMenu.Item.NEW_TASK, newTask);
+        menuActions.put(TaskMenu.Item.NEW_TASK_IN_MAIN, newTaskInMain);
+        menuActions.put(TaskMenu.Item.OPEN_IN_GITHUB, openInGitHub);
+        menuActions.put(TaskMenu.Item.QUICK_REVIEW, quickReview);
+        menuActions.put(TaskMenu.Item.REVIEW, review);
+        menuActions.put(TaskMenu.Item.IMPLEMENT, implement);
+        menuActions.put(TaskMenu.Item.TRIAGE, triage);
+        menuActions.put(TaskMenu.Item.GITHUB_SETTINGS, githubSettings);
+        menuActions.put(TaskMenu.Item.REFRESH, refresh);
+        PopupHandler.installPopupMenu(tree, new TreeMenu(menuActions), "Drydock.TaskTree.Popup");
 
         // The tool window's own buttons: start a task, then what can be done
         // to the selected task or project. They stay in place, greyed when
@@ -419,25 +430,35 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         }
         toolbarActions.add(switchToTask);
         toolbarActions.addSeparator();
-        toolbarActions.addAll(TaskActions.taskActions());
+        // One button per action instance, in the enum's values() order —
+        // the removal action sits under several menu entries but is one
+        // button (TaskActions.toolbarActions).
+        toolbarActions.addAll(TaskActions.toolbarActions(taskActions));
         toolbarActions.addSeparator();
-        toolbarActions.add(new DumbAwareAction("Refresh", "Re-read projects, worktrees, and GitHub listings", AllIcons.Actions.Refresh) {
-            @Override
-            public void actionPerformed(@NotNull AnActionEvent e) {
-                // A manual refresh is the user saying "show me now", so the
-                // cached GitHub listings (issues, pull requests) are dropped
-                // too -- not just the worktree scan.
-                inputs.invalidateGitHub();
-                requestRebuild(true);
-            }
-        });
+        toolbarActions.add(refresh);
         ActionToolbar toolbar = ActionManager.getInstance().createActionToolbar("Drydock.TaskTree", toolbarActions, true);
         toolbar.setTargetComponent(this);
         JPanel top = new JPanel(new BorderLayout());
         top.add(toolbar.getComponent(), BorderLayout.NORTH);
         JPanel query = new JPanel(new BorderLayout());
         query.add(search, BorderLayout.NORTH);
-        query.add(quickFilters(), BorderLayout.SOUTH);
+        query.add(new ViewFilterRibbon(viewFilter, candidate -> {
+            // The ribbon owns only the chips; the chosen view stays here,
+            // and every real change (not a re-click of the selected chip)
+            // narrows the tree the same way the old chip row did.
+            viewFilter = candidate;
+            // The listing views load every project's listing on the next
+            // pass; until it lands, the previous tree would mislead, so it
+            // is cleared and the busy painter carries the wait.
+            if (candidate == ViewFilter.ISSUES || candidate == ViewFilter.PULL_REQUESTS) {
+                ((DefaultTreeModel) tree.getModel()).setRoot(new DefaultMutableTreeNode());
+                displayedNodes = List.of();
+                tree.getEmptyText().setText(candidate == ViewFilter.ISSUES
+                        ? "Loading issues…" : "Loading pull requests…");
+                tree.setPaintBusy(true);
+            }
+            requestRebuild(false);
+        }), BorderLayout.SOUTH);
         top.add(query, BorderLayout.SOUTH);
         setToolbar(top);
 
@@ -481,33 +502,10 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 }
             }
         });
-        tree.addTreeWillExpandListener(new TreeWillExpandListener() {
-            @Override
-            public void treeWillExpand(TreeExpansionEvent event) throws ExpandVetoException {
-                Object component = event.getPath().getLastPathComponent();
-                if (!(component instanceof DefaultMutableTreeNode node)
-                        || !(node.getUserObject() instanceof Section section)) {
-                    return;
-                }
-                Path root = projectRootOf(event.getPath()).orElse(null);
-                if (root == null) {
-                    return;
-                }
-                boolean requested = switch (section.kind()) {
-                    case WORKTREES -> requestedWorktrees.add(root);
-                    case ISSUES -> requestedIssues.add(root);
-                    case PULL_REQUESTS -> requestedPullRequests.add(root);
-                    default -> false;
-                };
-                if (requested) {
-                    requestRebuild(false);
-                }
-            }
-
-            @Override
-            public void treeWillCollapse(TreeExpansionEvent event) throws ExpandVetoException {
-            }
-        });
+        // Real expansion events — the user's click and the panel's own
+        // restoration alike — reach the tracker, which records only the
+        // user's; restoration runs inside its programmatic guard.
+        tree.addTreeWillExpandListener(expansions);
 
         search.addDocumentListener(new DocumentAdapter() {
             @Override
@@ -560,9 +558,137 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         });
     }
 
-    /** The actions of the tree's context menu; later tasks add theirs. */
-    public DefaultActionGroup contextActions() {
-        return contextActions;
+    /**
+     * The context-menu items whose actions this panel itself provides, as
+     * opposed to {@link TaskActions}; the constructor's {@code menuActions}
+     * puts cover exactly these. Pure — the seam the menu-coverage test
+     * reads, so no {@link TaskMenu} item can be left without an action
+     * behind it.
+     */
+    static Set<TaskMenu.Item> panelMenuItems() {
+        return EnumSet.of(TaskMenu.Item.SWITCH_TO_TASK, TaskMenu.Item.NEW_TASK, TaskMenu.Item.NEW_TASK_IN_MAIN,
+                TaskMenu.Item.OPEN_IN_GITHUB, TaskMenu.Item.QUICK_REVIEW, TaskMenu.Item.REVIEW,
+                TaskMenu.Item.IMPLEMENT, TaskMenu.Item.TRIAGE, TaskMenu.Item.GITHUB_SETTINGS, TaskMenu.Item.REFRESH);
+    }
+
+    /**
+     * What one refresh gesture can ask of the panel: the caches it can drop
+     * and the rebuild it can schedule. Production implements this over the
+     * panel's real inputs, listing intent and rebuild scheduler; tests
+     * record the calls to assert which scope a real action event actually
+     * dispatched — no {@code gh}, no network, no rebuild (F8).
+     */
+    interface RefreshTarget {
+
+        /** The global gesture: every project's GitHub listings. */
+        void invalidateAll();
+
+        /** One project's issue listing only. */
+        void invalidateIssues(Path root);
+
+        /** One project's pull-request listing only. */
+        void invalidatePullRequests(Path root);
+
+        /** Records the user's intent to see {@code root}'s listing of {@code kind}. */
+        void requestListing(SectionKind kind, Path root);
+
+        /** Schedules one rebuild; {@code changedWorktrees} re-lists worktrees. */
+        void requestRebuild(boolean changedWorktrees);
+    }
+
+    /**
+     * The manual Refresh action, one instance for the toolbar and the tree's
+     * context menu alike: it is the same "show me now" gesture (A10), and
+     * the dispatch decides its scope from where the event came from and
+     * what the tree selection is (see {@link #refresh}).
+     */
+    static AnAction refreshAction(RefreshTarget target) {
+        return new DumbAwareAction("Refresh", "Re-read projects, worktrees, and GitHub listings",
+                AllIcons.Actions.Refresh) {
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                refresh(target, e.isFromContextMenu(), e.getData(SELECTED_NODE),
+                        e.getData(SELECTED_PROJECT_ROOT));
+            }
+        };
+    }
+
+    /**
+     * One refresh gesture, two scopes. From the toolbar — or the project
+     * row's context menu, which names a whole project — it is the user
+     * saying "show me now", so the cached GitHub listings (issues, pull
+     * requests) are dropped too, not just the worktree scan. From a
+     * listing section's own context menu it re-reads only that project's
+     * listing, the per-section semantics the tree's menu had before the
+     * two gestures were merged into one action; the root is also recorded
+     * as listing intent, so a refresh of a still-collapsed (deferred)
+     * section loads it and the pass after opens it. A section with no root
+     * above it — or no listing of its own — fetches nothing rather than
+     * silently broadening to a global fetch. Pure dispatch over
+     * {@code target}'s effects; EDT.
+     */
+    static void refresh(RefreshTarget target, boolean fromContextMenu, TaskNode node, Path root) {
+        if (!fromContextMenu || !(node instanceof Section section)) {
+            target.invalidateAll();
+            target.requestRebuild(true);
+            return;
+        }
+        switch (section.kind()) {
+            case ISSUES -> {
+                if (root == null) {
+                    return;
+                }
+                target.invalidateIssues(root);
+                target.requestListing(SectionKind.ISSUES, root);
+                target.requestRebuild(false);
+            }
+            case PULL_REQUESTS -> {
+                if (root == null) {
+                    return;
+                }
+                target.invalidatePullRequests(root);
+                target.requestListing(SectionKind.PULL_REQUESTS, root);
+                target.requestRebuild(false);
+            }
+            // Sessions/worktrees sections have no listing to scope to; the
+            // menu never offers Refresh on them, and a stray dispatch must
+            // not turn into a global fetch.
+            default -> {
+            }
+        }
+    }
+
+    /**
+     * The tree's context menu: {@link TaskMenu#group} over the selection at
+     * popup time, so each popup holds exactly the actions that apply to
+     * the selected rows, in TaskMenu's order — navigation first,
+     * destructive cleanup last (A10). EDT: the tree's selection is Swing
+     * state, and the actions' own updates read the same data the popup
+     * sinks.
+     */
+    private final class TreeMenu extends ActionGroup implements DumbAware {
+
+        private final Map<TaskMenu.Item, AnAction> actions;
+
+        TreeMenu(Map<TaskMenu.Item, AnAction> actions) {
+            this.actions = actions;
+        }
+
+        @Override
+        public @NotNull ActionUpdateThread getActionUpdateThread() {
+            return ActionUpdateThread.EDT;
+        }
+
+        @Override
+        public AnAction[] getChildren(@Nullable AnActionEvent e) {
+            // The platform enumerates a group's children with no event in
+            // some paths; with no event no popup is being built for the
+            // tree, and its menu applies to nothing.
+            if (e == null) {
+                return AnAction.EMPTY_ARRAY;
+            }
+            return TaskMenu.group(selected().orElse(null), selectedNodes(), actions).getChildren(e);
+        }
     }
 
     @Override
@@ -591,7 +717,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     }
 
     /** The main checkout of the project row at or above {@code path}. */
-    private static Optional<Path> projectRootOf(TreePath path) {
+    static Optional<Path> projectRootOf(TreePath path) {
         for (TreePath at = path; at != null; at = at.getParentPath()) {
             if (at.getLastPathComponent() instanceof DefaultMutableTreeNode node
                     && node.getUserObject() instanceof ProjectRow row) {
@@ -647,22 +773,6 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 && (section.kind() == SectionKind.ISSUES || section.kind() == SectionKind.PULL_REQUESTS);
     }
 
-    /** The GitHub URL of an issue or pull request row, when it has one. Pure. */
-    private static Optional<String> urlOf(TaskNode node) {
-        return switch (node) {
-            case IssueRow issue -> issue.issue().url();
-            case PullRequestRow pullRequest -> pullRequest.pullRequest().url();
-            case null, default -> Optional.empty();
-        };
-    }
-
-    /** Starts the review materialization for the selected pull request. EDT. */
-    private void reviewPullRequest(AnActionEvent e) {
-        if (e.getData(SELECTED_NODE) instanceof PullRequestRow pullRequest) {
-            reviewPullRequest(pullRequest.mainRoot(), pullRequest);
-        }
-    }
-
     /** Starts the review materialization for the clicked pull request. EDT. */
     private void reviewPullRequest(TreePath path, PullRequestRow pullRequest) {
         reviewPullRequest(projectRootOf(path).orElse(null), pullRequest);
@@ -678,13 +788,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         pullRequestReview.review(project, mainRoot, repositoryName, pullRequest.pullRequest());
     }
 
-    /** Opens the review's model dialog for the selected pull request. EDT. */
-    private void reviewPullRequestWithDialog(AnActionEvent e) {
-        if (e.getData(SELECTED_NODE) instanceof PullRequestRow pullRequest) {
-            reviewPullRequestWithDialog(pullRequest.mainRoot(), pullRequest);
-        }
-    }
-
+    /** Opens the review's model dialog for the pull request. EDT. */
     private void reviewPullRequestWithDialog(Path mainRoot, PullRequestRow pullRequest) {
         if (mainRoot == null) {
             return;
@@ -721,121 +825,6 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         String model = agent.flatMap(kind -> repository.flatMap(r -> r.settings().lastUsedModel(kind)))
                 .orElse("default");
         return "Review (" + model + ")";
-    }
-
-    /**
-     * Compact, mutually exclusive filters; the text search narrows the
-     * selected view further.
-     *
-     * <p>The selected filter is painted through the {@code
-     * JButton.backgroundColor} client property, not left to the LaF's focus
-     * outline: DarculaToggleButtonUI paints no selected background at all
-     * (its paint path fills the plain button gradient whatever {@code
-     * isSelected()} says), so the only visible "on" state is the focus
-     * ring — which disappears the moment focus moves to the editor, leaving
-     * no way to tell which filter is on. The client property gives a
-     * persistent selected background that follows the theme.
-     */
-    private JPanel quickFilters() {
-        JPanel filters = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 2));
-        ButtonGroup group = new ButtonGroup();
-        for (ViewFilter candidate : ViewFilter.values()) {
-            JToggleButton button = new JToggleButton(candidate.label(), candidate == viewFilter);
-            button.setMargin(JBUI.insets(2, 7));
-            button.setToolTipText(switch (candidate) {
-                case ALL -> "Show sessions, worktrees, and issues";
-                case ACTIVE -> "Show only sessions whose agent is running";
-                case INACTIVE -> "Show only sessions whose agent is not running";
-                case ISSUES -> "Show only open GitHub issues";
-            });
-            button.addActionListener(event -> {
-                if (viewFilter != candidate) {
-                    viewFilter = candidate;
-                    requestRebuild(false);
-                }
-                // ButtonGroup clears the model of the previously selected
-                // button without firing its action listener; refresh the
-                // painted state of every chip from its model.
-                for (Component sibling : filters.getComponents()) {
-                    if (sibling instanceof JToggleButton toggle) {
-                        paintSelectedState(toggle);
-                    }
-                }
-            });
-            paintSelectedState(button);
-            group.add(button);
-            filters.add(button);
-        }
-        return filters;
-    }
-
-    /**
-     * A theme-aware, focus-independent background for the selected chip.
-     * {@code JButton.backgroundColor} is what DarculaButtonUI.getBackground
-     * reads before any LaF gradient — with it set, the fill is the same in
-     * the focused and the unfocused window.
-     */
-    private static void paintSelectedState(JToggleButton button) {
-        button.putClientProperty("JButton.backgroundColor", button.isSelected()
-                ? JBColor.namedColor("ToggleButton.selectedBackground", UIUtil.getListSelectionBackground(true))
-                : null);
-    }
-
-    /**
-     * The Issues/Pull Requests section rows' context action: re-queries this
-     * project's listing now, instead of waiting for the next event-driven
-     * rebuild or the toolbar's global refresh. The section's requested-set
-     * membership is ensured here too, so a refresh of a still-loading
-     * (deferred) section also lands.
-     */
-    private AnAction refreshListingsAction() {
-        return new DumbAwareAction("Refresh", "Re-read this project's GitHub listing", AllIcons.Actions.Refresh) {
-            @Override
-            public void update(@NotNull AnActionEvent e) {
-                TaskActions.present(e, refreshedKind(e.getData(SELECTED_NODE)).isPresent()
-                        && e.getData(SELECTED_PROJECT_ROOT) != null);
-            }
-
-            @Override
-            public @NotNull ActionUpdateThread getActionUpdateThread() {
-                return ActionUpdateThread.EDT;
-            }
-
-            @Override
-            public void actionPerformed(@NotNull AnActionEvent e) {
-                Path root = e.getData(SELECTED_PROJECT_ROOT);
-                if (root == null) {
-                    return;
-                }
-                Optional<SectionKind> kind = refreshedKind(e.getData(SELECTED_NODE));
-                if (kind.isEmpty()) {
-                    return;
-                }
-                switch (kind.get()) {
-                    case ISSUES -> {
-                        inputs.invalidateIssues(root);
-                        requestedIssues.add(root);
-                    }
-                    case PULL_REQUESTS -> {
-                        inputs.invalidatePullRequests(root);
-                        requestedPullRequests.add(root);
-                    }
-                    default -> {
-                        return;
-                    }
-                }
-                requestRebuild(false);
-            }
-        };
-    }
-
-    /** The GitHub-listing section kind the action can refresh, or empty. Pure. */
-    private static Optional<SectionKind> refreshedKind(TaskNode node) {
-        if (node instanceof Section section
-                && (section.kind() == SectionKind.ISSUES || section.kind() == SectionKind.PULL_REQUESTS)) {
-            return Optional.of(section.kind());
-        }
-        return Optional.empty();
     }
 
     private AnAction githubSettingsAction(Predicate<TaskNode> applies) {
@@ -951,8 +940,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             repositoryIdsByRoot = repositoryIdsByRoot(plugin);
             List<TaskNode> nodes = TaskTreeModel.build(
                     inputs.gather(project, requestedFilter, requestedViewFilter,
-                            Set.copyOf(requestedWorktrees), Set.copyOf(requestedIssues),
-                            Set.copyOf(requestedPullRequests)));
+                            Set.copyOf(expansions.requested(SectionKind.WORKTREES)),
+                            Set.copyOf(expansions.requested(SectionKind.ISSUES)),
+                            Set.copyOf(expansions.requested(SectionKind.PULL_REQUESTS))));
             ApplicationManager.getApplication().invokeLater(
                     () -> finishRebuild(requestedVersion, requestedFilter, requestedViewFilter, nodes, null),
                     ModalityState.any(), project.getDisposed());
@@ -967,15 +957,25 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     /** EDT: applies only the newest requested view, then schedules any request coalesced behind it. */
     private void finishRebuild(long requestedVersion, String requestedFilter, ViewFilter requestedViewFilter,
                                List<TaskNode> nodes, Throwable failure) {
+        boolean newerPassPending = requestedVersion != refreshRequests.version();
         if (failure != null) {
             // Never silent: an empty tree with no reason given is the worst
             // outcome this panel can have.
             LOG.log(Level.WARNING, "Could not rebuild the Drydock task tree", failure);
+            // A newer pass owns the busy state now; this one clears it and
+            // says why only when nothing else is on screen.
+            if (!newerPassPending) {
+                tree.setPaintBusy(false);
+                if (tree.getRowCount() == 0) {
+                    tree.getEmptyText().setText("Could not load the task list: "
+                            + (failure.getMessage() == null ? failure : failure.getMessage()));
+                }
+            }
         } else if (requestedVersion == refreshRequests.version() && !disposed && !project.isDisposed()) {
             apply(nodes, requestedFilter, requestedViewFilter);
         }
         refreshRequests.finishPass();
-        if (!disposed && !project.isDisposed() && requestedVersion != refreshRequests.version()) {
+        if (!disposed && !project.isDisposed() && newerPassPending) {
             scheduleRebuild();
         }
     }
@@ -995,14 +995,39 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         }
         ((DefaultTreeModel) tree.getModel()).setRoot(root);
         tree.getEmptyText().setText(emptyText(appliedFilter, appliedViewFilter));
-        expandEagerAndRequested(root, new TreePath(root.getPath()), null);
-        if (toSelect[0] != null) {
-            tree.setSelectionPath(new TreePath(toSelect[0].getPath()));
+        // This pass replaced the rows; the load it announced is over, even
+        // when the rows are empty (the empty text says that instead).
+        tree.setPaintBusy(false);
+        // Restoration, not intent: every expansion in this span (and any a
+        // selection could cause) records no user request.
+        expansions.runProgrammatic(() -> {
+            expandEagerAndRequested(root, new TreePath(root.getPath()), null, appliedViewFilter);
+            if (toSelect[0] != null) {
+                tree.setSelectionPath(new TreePath(toSelect[0].getPath()));
+            }
+        });
+    }
+
+    /**
+     * Whether a lazy listing section expands: always in the view that is
+     * that listing (the Issues view opens every Issues section, the PRs
+     * view every Pull Requests section), otherwise only after the user
+     * opened it here. Sections with no view of their own (worktrees) follow
+     * the request alone. Pure.
+     */
+    static boolean expandsListing(SectionKind kind, ViewFilter view, boolean requested) {
+        if (kind == SectionKind.ISSUES) {
+            return view == ViewFilter.ISSUES || requested;
         }
+        if (kind == SectionKind.PULL_REQUESTS) {
+            return view == ViewFilter.PULL_REQUESTS || requested;
+        }
+        return requested;
     }
 
     /** Sessions stay eager; worktree and issue containers expand only after the user opened them. */
-    private void expandEagerAndRequested(DefaultMutableTreeNode node, TreePath path, Path projectRoot) {
+    private void expandEagerAndRequested(DefaultMutableTreeNode node, TreePath path, Path projectRoot,
+                                        ViewFilter view) {
         Object value = node.getUserObject();
         Path root = value instanceof ProjectRow row ? row.project().root() : projectRoot;
         boolean expand = switch (value) {
@@ -1012,9 +1037,12 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             case StaleWorktrees ignored -> true;
             case Section section -> switch (section.kind()) {
                 case SESSIONS, ACTIVE, INACTIVE -> true;
-                case WORKTREES -> root != null && requestedWorktrees.contains(root);
-                case ISSUES -> root != null && requestedIssues.contains(root);
-                case PULL_REQUESTS -> root != null && requestedPullRequests.contains(root);
+                case WORKTREES -> root != null && expandsListing(SectionKind.WORKTREES, view,
+                        expansions.requested(SectionKind.WORKTREES).contains(root));
+                case ISSUES -> root != null && expandsListing(SectionKind.ISSUES, view,
+                        expansions.requested(SectionKind.ISSUES).contains(root));
+                case PULL_REQUESTS -> root != null && expandsListing(SectionKind.PULL_REQUESTS, view,
+                        expansions.requested(SectionKind.PULL_REQUESTS).contains(root));
             };
             default -> false;
         };
@@ -1023,7 +1051,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         }
         for (int i = 0; i < node.getChildCount(); i++) {
             DefaultMutableTreeNode child = (DefaultMutableTreeNode) node.getChildAt(i);
-            expandEagerAndRequested(child, path.pathByAddingChild(child), root);
+            expandEagerAndRequested(child, path.pathByAddingChild(child), root, view);
         }
     }
 
@@ -1040,12 +1068,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         if (!appliedFilter.isBlank()) {
             return "Nothing in " + appliedViewFilter.label().toLowerCase(Locale.ROOT) + " matches the search.";
         }
-        return switch (appliedViewFilter) {
-            case ALL -> "No projects yet. Start a task with ＋ to add this one.";
-            case ACTIVE -> "No active sessions.";
-            case INACTIVE -> "No inactive sessions.";
-            case ISSUES -> "No open GitHub issues.";
-        };
+        return appliedViewFilter.emptyText();
     }
 
     private static DefaultMutableTreeNode treeNode(TaskNode node, Optional<ManagedSessionId> selected,

@@ -26,10 +26,15 @@ class TaskTreeRendererTest {
     private static final Path DIR = Path.of("/wt/dd-jmc-fix");
 
     private static TaskRow row(boolean running, TaskPlacement placement) {
+        return row(running, placement, true);
+    }
+
+    private static TaskRow row(boolean running, TaskPlacement placement, boolean resumable) {
         ManagedAgentSession session = new ManagedAgentSession.Builder(ManagedSessionId.newId(), RepositoryId.newId(),
                 "Fix chunk memory growth", AgentBinding.unlaunched(AgentKind.PI, SessionMode.WRITES),
                 SessionWorkspace.inRepository(DIR), Instant.EPOCH).status(SessionStatus.INACTIVE).build();
-        return new TaskRow(session, Optional.empty(), running, Optional.of("fix/chunk_memory"), placement, false, false);
+        return new TaskRow(session, Optional.empty(), running, Optional.of("fix/chunk_memory"), placement, false,
+                false, resumable);
     }
 
     @Test
@@ -65,10 +70,17 @@ class TaskTreeRendererTest {
     }
 
     @Test
-    void anIdleRowFromAnotherWorktreeOffersResumeHere() {
-        TaskRow row = row(false, new TaskPlacement.Idle(false));
+    void anIdleRowFromAnotherWorktreeOffersResumeHereWhenResumable() {
+        assertEquals(Optional.of("Resume here"),
+                TaskTreeRenderer.link(row(false, new TaskPlacement.Idle(false), true)));
+    }
 
-        assertEquals(Optional.of("Resume here"), TaskTreeRenderer.link(row));
+    @Test
+    void anIdleRowFromAnotherWorktreeOffersStartHereWhenNotResumable() {
+        // "Resume" on a task with no conversation left to resume into is a
+        // broken promise: the click would start a fresh one, so say that.
+        assertEquals(Optional.of("Start here"),
+                TaskTreeRenderer.link(row(false, new TaskPlacement.Idle(false), false)));
     }
 
     @Test

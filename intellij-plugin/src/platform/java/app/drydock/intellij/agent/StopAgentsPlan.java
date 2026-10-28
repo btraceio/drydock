@@ -28,6 +28,22 @@ public final class StopAgentsPlan {
         return activity.orElse(SessionActivity.UNKNOWN) != SessionActivity.IDLE;
     }
 
+    /**
+     * Whether deactivating one session — stopped from the tool window tree,
+     * a tab ribbon, a tab header or a tab popup — should ask first. An agent
+     * waiting at its prompt ({@code IDLE}) or waiting for the user
+     * ({@code NEEDS_ATTENTION}) is stopped without asking: the user has just
+     * decided that an agent waiting for them is not mid-task. An agent that
+     * is busy, or whose activity cannot be read, still asks. Quitting and
+     * closing a window keep {@link #isWorking} and its own question.
+     */
+    public static boolean confirmsSingleStop(Optional<SessionActivity> activity) {
+        return switch (activity.orElse(SessionActivity.UNKNOWN)) {
+            case BUSY, UNKNOWN -> true;
+            case IDLE, NEEDS_ATTENTION -> false;
+        };
+    }
+
     /** {@code Deactivate 1 working agent?} / {@code Deactivate 3 working agents?} */
     public static String title(int working) {
         return working == 1

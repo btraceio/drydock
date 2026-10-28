@@ -98,6 +98,8 @@ public final class AgentExecutionRegistry implements Disposable {
     private final Map<ManagedSessionId, AgentExecution> executions = new ConcurrentHashMap<>();
     /** Sessions whose console is on its way to another window (a jump, while that window opens). */
     private final Set<ManagedSessionId> moving = ConcurrentHashMap.newKeySet();
+    /** Sessions whose agent a click has just started, until the process is live or the start failed. */
+    private final Set<ManagedSessionId> starting = ConcurrentHashMap.newKeySet();
     private final LaunchClaims launchClaims = new LaunchClaims(this::isRunning);
 
     /** The launch claims every session launch in this IDE goes through; see {@link LaunchClaims}. */
@@ -152,6 +154,21 @@ public final class AgentExecutionRegistry implements Disposable {
         return Set.copyOf(moving);
     }
 
+    /** Sessions whose agent start is in flight; see {@link #markStarting}. */
+    public Set<ManagedSessionId> starting() {
+        return Set.copyOf(starting);
+    }
+
+    /** Whether {@code sessionId}'s console is on its way to another window. O(1), for per-update callers. */
+    public boolean isMoving(ManagedSessionId sessionId) {
+        return moving.contains(sessionId);
+    }
+
+    /** Whether {@code sessionId}'s agent start is in flight. O(1), for per-update callers. */
+    public boolean isStarting(ManagedSessionId sessionId) {
+        return starting.contains(sessionId);
+    }
+
     /**
      * Marks {@code sessionId} as moving to another window, or no longer. A
      * window closing meanwhile must neither stop nor release it: it is about
@@ -161,6 +178,20 @@ public final class AgentExecutionRegistry implements Disposable {
         boolean changed = isMoving ? moving.add(sessionId) : moving.remove(sessionId);
         if (changed) {
             publish().executionMoving(sessionId, isMoving);
+        }
+    }
+
+    /**
+     * Marks {@code sessionId} as having an agent start in flight, or no longer
+     * — the span from a Start/Resume click to the process being live or the
+     * start failing, during which the guard {@code busy} must hold the
+     * lifecycle commands off (A11). Like {@link #markMoving}, publishes
+     * {@code executionStarting} only on change.
+     */
+    public void markStarting(ManagedSessionId sessionId, boolean isStarting) {
+        boolean changed = isStarting ? starting.add(sessionId) : starting.remove(sessionId);
+        if (changed) {
+            publish().executionStarting(sessionId, isStarting);
         }
     }
 

@@ -10,6 +10,7 @@ import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.GhCliService.OpenPullRequest;
 import app.drydock.git.GhCliService.PullRequestListing;
 import app.drydock.git.WorktreeService.Worktree;
+import app.drydock.intellij.agent.SessionCommands;
 import app.drydock.intellij.tasks.TaskNode.AddCurrentProject;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
 import app.drydock.intellij.tasks.TaskNode.IssueRow;
@@ -120,19 +121,38 @@ public final class TaskTreeModel {
 
     /** Mutually exclusive quick views; text search is applied within the selected view. */
     public enum ViewFilter {
-        ALL("All"),
-        ACTIVE("Active"),
-        INACTIVE("Inactive"),
-        ISSUES("Issues");
+        ALL("All", "Show sessions, worktrees, and issues",
+                "No projects yet. Start a task with ＋ to add this one."),
+        ACTIVE("Active", "Show only sessions whose agent is running", "No active sessions."),
+        INACTIVE("Inactive", "Show only sessions whose agent is not running",
+                "No inactive sessions."),
+        NEEDS_YOU("Needs you", "Show only running sessions waiting for your answer",
+                "No sessions need you."),
+        PULL_REQUESTS("PRs", "Show only open GitHub pull requests", "No open pull requests."),
+        ISSUES("Issues", "Show only open GitHub issues", "No open GitHub issues.");
 
         private final String label;
+        private final String tooltip;
+        private final String emptyText;
 
-        ViewFilter(String label) {
+        ViewFilter(String label, String tooltip, String emptyText) {
             this.label = label;
+            this.tooltip = tooltip;
+            this.emptyText = emptyText;
         }
 
         public String label() {
             return label;
+        }
+
+        /** The view chip's hover text: what the view shows. */
+        public String tooltip() {
+            return tooltip;
+        }
+
+        /** What the tree says when this view is selected and nothing is in it. */
+        public String emptyText() {
+            return emptyText;
         }
     }
 
@@ -170,7 +190,7 @@ public final class TaskTreeModel {
                          Map<Path, PullRequestListing> pullRequestsByMainRoot,
                          Map<Path, List<Worktree>> pullRequestDedupWorktrees,
                          Optional<String> listProblem, String filter,
-                         ViewFilter viewFilter) {
+                         ViewFilter viewFilter, Map<ManagedSessionId, Boolean> resumable) {
         public Inputs {
             projects = List.copyOf(projects);
             sessions = List.copyOf(sessions);
@@ -195,6 +215,7 @@ public final class TaskTreeModel {
             Objects.requireNonNull(listProblem, "listProblem");
             filter = filter == null ? "" : filter.strip();
             Objects.requireNonNull(viewFilter, "viewFilter");
+            resumable = Map.copyOf(resumable);
         }
 
         /** Compatibility constructor for callers that want the unfiltered full tree. */
@@ -207,7 +228,7 @@ public final class TaskTreeModel {
             this(projects, sessions, worktreesByMainRoot, mainRootOf, currentMainRoot, currentWorkingRoot,
                     activity, running, Map.of(), missingFolders, recordedRoots,
                     worktreesByMainRoot.keySet(), issuesByMainRoot.keySet(), Set.of(), Set.of(), Map.of(), Instant.EPOCH,
-                    issuesByMainRoot, Map.of(), Map.of(), listProblem, filter, ViewFilter.ALL);
+                    issuesByMainRoot, Map.of(), Map.of(), listProblem, filter, ViewFilter.ALL, Map.of());
         }
 
         /** Compatibility constructor for model callers with no GitHub issue input. */
@@ -220,7 +241,7 @@ public final class TaskTreeModel {
             this(projects, sessions, worktreesByMainRoot, mainRootOf, currentMainRoot, currentWorkingRoot,
                     activity, running, Map.of(), missingFolders, recordedRoots,
                     worktreesByMainRoot.keySet(), Set.of(), Set.of(), Set.of(), Map.of(), Instant.EPOCH,
-                    Map.of(), Map.of(), Map.of(), listProblem, filter, ViewFilter.ALL);
+                    Map.of(), Map.of(), Map.of(), listProblem, filter, ViewFilter.ALL, Map.of());
         }
     }
 
@@ -365,11 +386,14 @@ public final class TaskTreeModel {
                 .findFirst()
                 .flatMap(Worktree::branch);
         boolean running = in.running().contains(session.id());
+        boolean resumable = !running && SessionCommands.resumable(
+                Optional.ofNullable(in.resumable().get(session.id())), session.agentSessionId().isPresent());
         Optional<Host> host = Optional.ofNullable(in.hosts().get(session.id()));
         TaskPlacement placement = TaskPlacement.of(running, host.map(Host::base), host.map(Host::repo), directory,
                 in.currentWorkingRoot());
         return new TaskRow(session, in.activity().getOrDefault(session.id(), Optional.empty()),
-                running, branch, placement, session.readOnly(), running && in.missingFolders().contains(directory));
+                running, branch, placement, session.readOnly(),
+                running && in.missingFolders().contains(directory), resumable);
     }
 
     private record Children(List<TaskNode> visible, List<IdleWorktree> inactive) {
@@ -437,7 +461,7 @@ public final class TaskTreeModel {
                         children.add(new Section(SectionKind.ISSUES, issueChildren)));
             }
         }
-        if (in.viewFilter() == ViewFilter.ALL) {
+        if (in.viewFilter() == ViewFilter.ALL || in.viewFilter() == ViewFilter.PULL_REQUESTS) {
             if (in.pullRequestContainers().contains(main) && !in.pullRequestsByMainRoot().containsKey(main)) {
                 children.add(new Section(SectionKind.PULL_REQUESTS,
                         List.of(new TaskNode.Deferred("Loading pull requests…"))));
@@ -454,7 +478,11 @@ public final class TaskTreeModel {
             case ALL -> true;
             case ACTIVE -> task.running();
             case INACTIVE -> !task.running();
-            case ISSUES -> false;
+            // Needs you is live process + unacknowledged attention: a
+            // stopped session's leftover activity never counts.
+            case NEEDS_YOU -> task.running()
+                    && task.activity().equals(Optional.of(SessionActivity.NEEDS_ATTENTION));
+            case PULL_REQUESTS, ISSUES -> false;
         };
     }
 

@@ -170,5 +170,65 @@
                 description="Start an agent on a new task from this branch">
             <add-to-group group-id="Git.Branch" anchor="first"/>
         </action>
+        <!-- The agent console tab's own commands (A7): the header shortcuts
+             ride EditorTabActionGroup, the platform's per-tab label-action
+             seam, so every agent console tab carries them and a click
+             targets THAT tab's session, never the selected editor's.
+             Visibility constraint: agent console tabs are PINNED BY
+             DEFAULT, and on a pinned tab the header icons are painted
+             unconditionally. Consequence: if the user unpins a tab, the
+             IDE's native New UI paint gate applies — the icons are painted
+             only while that unpinned tab is selected, hovered, or otherwise
+             qualifies for the gate (e.g. modified), exactly like stock
+             tab-label actions. Drydock deliberately does not work around
+             that gate: no re-pinning, no internal hover-state sampling, no
+             global tab-presentation change (user-approved native behavior);
+             the console's full labeled ribbon remains the always-available
+             surface. The popup-only commands are registered here for the
+             tab popup contribution to reference. update() sets every label;
+             the XML texts are the accessible fallbacks. Stock close, pin
+             and split are untouched. -->
+        <action id="Drydock.AgentTab.OwnProject"
+                class="app.drydock.intellij.agent.AgentTabActions$OwnProject"
+                text="Project window"/>
+        <action id="Drydock.AgentTab.Changes"
+                class="app.drydock.intellij.agent.AgentTabActions$Changes"
+                text="Changes"/>
+        <action id="Drydock.AgentTab.Lifecycle"
+                class="app.drydock.intellij.agent.AgentTabActions$Lifecycle"
+                text="Lifecycle"/>
+        <action id="Drydock.AgentTab.Transfer"
+                class="app.drydock.intellij.agent.AgentTabActions$Transfer"
+                text="Transfer…"/>
+        <action id="Drydock.AgentTab.Rename"
+                class="app.drydock.intellij.agent.AgentTabActions$Rename"
+                text="Rename…"/>
+        <action id="Drydock.AgentTab.Done"
+                class="app.drydock.intellij.agent.AgentTabActions$Done"
+                text="Done…"/>
+        <!-- The tab-header shortcut group: own-project window, the lifecycle
+             and Done — the compact supplement to the ribbon's full labels
+             (A7). anchor="first" keeps it ahead of the stock actions the
+             platform adds to the same group. -->
+        <group id="Drydock.AgentTabShortcuts">
+            <reference ref="Drydock.AgentTab.OwnProject"/>
+            <reference ref="Drydock.AgentTab.Lifecycle"/>
+            <reference ref="Drydock.AgentTab.Done"/>
+            <add-to-group group-id="EditorTabActionGroup" anchor="first"/>
+        </group>
+        <!-- The tab popup's Drydock block (T15, A10): one dynamic group
+             added to the platform's stock EditorTabPopupMenu, anchor first,
+             so a right-click on an agent console tab leads with its own
+             commands before the stock close/pin/split entries — which are
+             untouched. The group carries no children of its own in XML: it
+             builds them per right-click from the registered actions above,
+             in sections with separators, and contributes nothing at all on
+             a non-agent tab (getChildren returns EMPTY_ARRAY), so ordinary
+             tabs keep the stock popup unchanged. -->
+        <group id="Drydock.AgentTabPopup"
+               class="app.drydock.intellij.agent.AgentTabPopupGroup"
+               popup="false">
+            <add-to-group group-id="EditorTabPopupMenu" anchor="first"/>
+        </group>
     </actions>
 </idea-plugin>

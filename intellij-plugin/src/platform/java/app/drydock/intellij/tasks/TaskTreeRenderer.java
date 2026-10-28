@@ -176,13 +176,16 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
 
     /**
      * Pure: the row's inline link. {@code Show here} for an agent no window
-     * shows; {@code Resume here} for an idle task from another worktree (its
-     * own worktree's Resume is the toolbar's).
+     * shows; for an idle task from another worktree (its own worktree's Resume
+     * is the toolbar's) {@code Resume here} while it still has a conversation
+     * to resume into, and {@code Start here} once it does not — the honest
+     * word for what a click would actually do.
      */
     static Optional<String> link(TaskRow task) {
         return switch (task.placement()) {
             case TaskPlacement.NotShown notShown -> Optional.of("Show here");
-            case TaskPlacement.Idle idle when !idle.thisWindow() -> Optional.of("Resume here");
+            case TaskPlacement.Idle idle when !idle.thisWindow() ->
+                    Optional.of(task.resumable() ? "Resume here" : "Start here");
             default -> Optional.empty();
         };
     }

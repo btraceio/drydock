@@ -58,4 +58,8 @@ public interface AgentExecutionListener {
     /** {@code sessionId}'s console is on its way to another window ({@code true}), or that ended. */
     default void executionMoving(ManagedSessionId sessionId, boolean moving) {
     }
+
+    /** An agent start is in flight for {@code sessionId} ({@code true}), or that ended. */
+    default void executionStarting(ManagedSessionId sessionId, boolean starting) {
+    }
 }

@@ -8,16 +8,31 @@ import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
+import app.drydock.git.GhCliService.OpenIssue;
+import app.drydock.git.GhCliService.OpenPullRequest;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
+import app.drydock.intellij.tasks.TaskNode.IssueRow;
 import app.drydock.intellij.tasks.TaskNode.ListProblem;
+import app.drydock.intellij.tasks.TaskNode.ProjectRow;
+import app.drydock.intellij.tasks.TaskNode.PullRequestRow;
+import app.drydock.intellij.tasks.TaskNode.Section;
+import app.drydock.intellij.tasks.TaskNode.SectionKind;
 import app.drydock.intellij.tasks.TaskNode.StaleWorktrees;
+import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
+import app.drydock.projects.SharedProject;
+
+import com.intellij.openapi.actionSystem.AnAction;
 
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -37,6 +52,39 @@ class TaskActionsTest {
         assertEquals(new TaskActions.Shown(true, true), TaskActions.shown(false, true), "toolbar, applicable");
         assertEquals(new TaskActions.Shown(false, false), TaskActions.shown(true, false), "menu, not applicable");
         assertEquals(new TaskActions.Shown(true, true), TaskActions.shown(true, true), "menu, applicable");
+    }
+
+    @Test
+    void aSeparateEnabledAnswerGreysWithoutEverHiding() {
+        // Busy greys the action everywhere; it never removes it.
+        assertEquals(new TaskActions.Shown(true, false), TaskActions.shown(false, false, false),
+                "toolbar, not applicable, busy");
+        assertEquals(new TaskActions.Shown(true, false), TaskActions.shown(false, true, false),
+                "toolbar, applicable, busy");
+        assertEquals(new TaskActions.Shown(false, false), TaskActions.shown(true, false, false),
+                "menu, not applicable, busy");
+        assertEquals(new TaskActions.Shown(true, false), TaskActions.shown(true, true, false),
+                "menu, applicable, busy");
+        assertEquals(new TaskActions.Shown(true, true), TaskActions.shown(true, true, true),
+                "menu, applicable, idle");
+        assertEquals(new TaskActions.Shown(true, true), TaskActions.shown(false, true, true),
+                "toolbar, applicable, idle");
+    }
+
+    @Test
+    void theTwoArgFormsDelegateWithEnabledTrue() {
+        assertEquals(TaskActions.shown(false, false), TaskActions.shown(false, false, true));
+        assertEquals(TaskActions.shown(false, true), TaskActions.shown(false, true, true));
+        assertEquals(TaskActions.shown(true, false), TaskActions.shown(true, false, true));
+        assertEquals(TaskActions.shown(true, true), TaskActions.shown(true, true, true));
+    }
+
+    @Test
+    void lifecycleTextSaysStartOnlyWhenThereIsNothingToResume() {
+        assertEquals("Start", TaskActions.lifecycleText(false, false));
+        assertEquals("Resume", TaskActions.lifecycleText(true, false));
+        assertEquals("Start in Its Own Window", TaskActions.lifecycleText(false, true));
+        assertEquals("Resume in Its Own Window", TaskActions.lifecycleText(true, true));
     }
 
     @Test
@@ -119,6 +167,86 @@ class TaskActionsTest {
         IdleWorktree worktree = new IdleWorktree(Path.of("/wt/first"), "first", Optional.empty(), false, false);
 
         assertEquals(List.of(), TaskActions.removable(List.of(worktree, new ListProblem("broken"))));
+    }
+
+    @Test
+    void theReviewChangesActionNamesTheAskExplicitly() {
+        // "Review Changes" read as viewing them; the action sends the agent
+        // a review prompt, so the label says what it does (A10).
+        assertEquals("Ask Agent to Review Changes",
+                TaskActions.taskActions().get(TaskMenu.Item.REVIEW_CHANGES).getTemplatePresentation().getText());
+    }
+
+    @Test
+    void theActionsMapCoversEveryItemTaskMenuUses() {
+        Map<TaskMenu.Item, AnAction> actions = TaskActions.taskActions();
+        Set<TaskMenu.Item> covered = new HashSet<>(actions.keySet());
+        covered.addAll(TaskTreePanel.panelMenuItems());
+
+        assertTrue(Collections.disjoint(actions.keySet(), TaskTreePanel.panelMenuItems()),
+                "an item cannot be owned by both TaskActions and the panel");
+        assertEquals(usedByTaskMenu(), covered, "every menu item needs an action behind it");
+    }
+
+    @Test
+    void theToolbarShowsEachActionOnceInEnumOrder() {
+        Map<TaskMenu.Item, AnAction> actions = TaskActions.taskActions();
+        List<AnAction> toolbar = TaskActions.toolbarActions(actions);
+
+        // The removal action serves four menu entries but must be one button.
+        assertEquals(1, Collections.frequency(toolbar, actions.get(TaskMenu.Item.REMOVE_INACTIVE_WORKTREES)),
+                "the shared removal action must be one toolbar button");
+        assertEquals(Set.copyOf(actions.values()), Set.copyOf(toolbar), "every action, and no other");
+        assertEquals(actions.size() - 3, toolbar.size(), "four removal keys share one instance");
+        // values() is the toolbar's order: the enum's declaration order.
+        assertTrue(toolbar.indexOf(actions.get(TaskMenu.Item.SHOW_HERE))
+                < toolbar.indexOf(actions.get(TaskMenu.Item.DEACTIVATE)));
+        assertTrue(toolbar.indexOf(actions.get(TaskMenu.Item.DONE_WITH_TASK))
+                < toolbar.indexOf(actions.get(TaskMenu.Item.RESUME)));
+        assertTrue(toolbar.indexOf(actions.get(TaskMenu.Item.RESUME))
+                < toolbar.indexOf(actions.get(TaskMenu.Item.RESUME_IN_OWN_WINDOW)));
+        assertTrue(toolbar.indexOf(actions.get(TaskMenu.Item.REMOVE_INACTIVE_WORKTREES))
+                < toolbar.indexOf(actions.get(TaskMenu.Item.REMOVE_FROM_DRYDOCK)));
+    }
+
+    /** Every {@link TaskMenu.Item} a menu can offer, over one row of each kind. */
+    private static Set<TaskMenu.Item> usedByTaskMenu() {
+        TaskMenu.MenuFacts transfer = new TaskMenu.MenuFacts(true);
+        IdleWorktree worktree = new IdleWorktree(Path.of("/wt/fix"), "fix", Optional.empty(), false, false);
+        List<TaskNode> shapes = List.of(
+                row(true, new TaskPlacement.OwnWindow()),
+                row(false, new TaskPlacement.Idle(false)),
+                pullRequest(Optional.of("https://github.com/DataDog/repo/pull/7")),
+                issue(Optional.of("https://github.com/DataDog/repo/issues/9")),
+                worktree,
+                new StaleWorktrees(List.of(worktree)),
+                new WorktreeGroup(Path.of("/wt/fix"), "fix", List.of()),
+                new Section(SectionKind.ISSUES, List.of(issue(Optional.empty()))),
+                project(worktree));
+        Set<TaskMenu.Item> used = new HashSet<>();
+        for (TaskNode shape : shapes) {
+            TaskMenu.sections(shape, List.of(), transfer).forEach(used::addAll);
+        }
+        // The bulk-removal entry only a multi-selection offers.
+        TaskMenu.sections(worktree, List.of(worktree,
+                new IdleWorktree(Path.of("/wt/other"), "other", Optional.empty(), false, false)), transfer)
+                .forEach(used::addAll);
+        return used;
+    }
+
+    private static IssueRow issue(Optional<String> url) {
+        return new IssueRow(Path.of("/repo"), new OpenIssue(9, "Fix the thing", url, List.of(), List.of(),
+                Optional.of(Instant.EPOCH)));
+    }
+
+    private static PullRequestRow pullRequest(Optional<String> url) {
+        return new PullRequestRow(Path.of("/repo"), new OpenPullRequest(7, "Speed the suite", "pr-7", "main",
+                false, Optional.empty(), url));
+    }
+
+    private static ProjectRow project(IdleWorktree... inactive) {
+        return new ProjectRow(SharedProject.local(RepositoryId.newId(), Path.of("/repo"), "repo", Instant.EPOCH),
+                false, false, List.of(), List.of(inactive), 0);
     }
 
     private static TaskNode.TaskRow row(boolean running, TaskPlacement placement) {
