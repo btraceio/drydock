@@ -111,9 +111,14 @@ public class ModelFieldPlatformTest extends BasePlatformTestCase {
 
         field.setAgent(AgentKind.CLAUDE, k -> Optional.empty());
         assertEquals("", editor(field).getText());
-        assertEquals(3, combo.getItemCount());
+        // The list is the selected harness's, not a merge: CLAUDE's catalog
+        // (the same CATALOG here) lands on its own pooled-thread load.
+        waitFor(() -> combo.getItemCount() == 3);
 
         field.setAgent(AgentKind.PI, k -> Optional.empty());
+        // The editor restores what PI's editor held ("gp"), and PI's own
+        // list is already in hand (kept per harness), so the filtered count
+        // is 2 without any further load.
         assertEquals("gp", editor(field).getText());
         assertEquals(2, combo.getItemCount());
 
@@ -131,12 +136,148 @@ public class ModelFieldPlatformTest extends BasePlatformTestCase {
         waitFor(() -> combo.getItemCount() == 2);
 
         field.setAgent(AgentKind.CLAUDE, k -> Optional.empty());
+        // The CLAUDE list is its own (empty until its load lands), not PI's
+        // retained items: wait for the swap before switching back.
+        waitFor(() -> combo.getItemCount() == 0);
         field.setAgent(AgentKind.PI, k -> Optional.empty());
         waitFor(() -> count(calls, AgentKind.CLAUDE) == 1);
+        waitFor(() -> combo.getItemCount() == 2);
         pump();
 
         assertEquals(1, count(calls, AgentKind.PI));
         assertEquals(2, combo.getItemCount());
+    }
+
+    public void testSwitchingHarnessSwapsTheListInsteadOfMerging() throws Exception {
+        Map<AgentKind, List<String>> catalogs = new EnumMap<>(AgentKind.class);
+        catalogs.put(AgentKind.PI, List.of("pi-a", "pi-b", "pi-c"));
+        catalogs.put(AgentKind.CLAUDE, List.of("sonnet"));
+        Map<AgentKind, AtomicInteger> calls = new EnumMap<>(AgentKind.class);
+        for (AgentKind kind : AgentKind.values()) {
+            calls.put(kind, new AtomicInteger());
+        }
+        ModelField field = new ModelField(kind -> {
+            calls.get(kind).incrementAndGet();
+            return catalogs.get(kind);
+        });
+        JComboBox<?> combo = combo(field);
+        field.setAgent(AgentKind.PI, k -> Optional.empty());
+        waitFor(() -> combo.getItemCount() == 3);
+
+        field.setAgent(AgentKind.CLAUDE, k -> Optional.empty());
+        waitFor(() -> combo.getItemCount() == 1);
+        pump();
+
+        assertEquals("sonnet", combo.getItemAt(0));
+        for (int i = 0; i < combo.getItemCount(); i++) {
+            // The platform test base is JUnit 3: its assertFalse takes
+            // (message, condition), so the single-arg form is used here.
+            String item = String.valueOf(combo.getItemAt(i));
+            assertFalse(item.startsWith("pi-"));
+        }
+
+        // Returning to the first harness restores its own list, with no
+        // second load: the catalog is kept per harness, not re-probed.
+        field.setAgent(AgentKind.PI, k -> Optional.empty());
+        waitFor(() -> combo.getItemCount() == 3);
+        pump();
+        assertEquals(1, calls.get(AgentKind.PI).get());
+        assertEquals(1, calls.get(AgentKind.CLAUDE).get());
+    }
+
+    public void testRepeatedCatalogIdAppearsOnceOnLoadAndAfterSwitchingBack() throws Exception {
+        Map<AgentKind, AtomicInteger> calls = new EnumMap<>(AgentKind.class);
+        for (AgentKind kind : AgentKind.values()) {
+            calls.put(kind, new AtomicInteger());
+        }
+        Map<AgentKind, List<String>> catalogs = new EnumMap<>(AgentKind.class);
+        catalogs.put(AgentKind.CLAUDE, List.of("sonnet", "sonnet"));
+        catalogs.put(AgentKind.PI, List.of("pi-a"));
+        ModelField field = new ModelField(kind -> {
+            calls.get(kind).incrementAndGet();
+            return catalogs.getOrDefault(kind, List.of());
+        });
+        JComboBox<?> combo = combo(field);
+
+        field.setAgent(AgentKind.CLAUDE, k -> Optional.empty());
+        waitFor(() -> combo.getItemCount() >= 1);
+        pump();
+        // First load: the repeated id is shown once (a lost dedup reads 2
+        // here, a direct failure rather than a timeout).
+        assertEquals(1, combo.getItemCount());
+        assertEquals("sonnet", combo.getItemAt(0));
+
+        field.setAgent(AgentKind.PI, k -> Optional.empty());
+        waitFor(() -> combo.getItemCount() == 1 && "pi-a".equals(combo.getItemAt(0)));
+
+        // Switching back replays CLAUDE's cached list synchronously: still once.
+        field.setAgent(AgentKind.CLAUDE, k -> Optional.empty());
+        assertEquals(1, combo.getItemCount());
+        assertEquals("sonnet", combo.getItemAt(0));
+        pump();
+        assertEquals(1, count(calls, AgentKind.CLAUDE));
+    }
+
+    public void testTypingBeforeAnyHarnessIsSelectedShowsNothing() throws Exception {
+        ModelField field = new ModelField(kind -> List.of("gpt-1"));
+        JComboBox<?> combo = combo(field);
+
+        type(field, "g");
+
+        assertEquals(0, combo.getItemCount());
+        assertEquals(Optional.of("g"), field.selected());
+    }
+
+    public void testALateLoadForAnUnselectedHarnessOnlyFillsItsCache() throws Exception {
+        CountDownLatch release = new CountDownLatch(1);
+        Map<AgentKind, AtomicInteger> calls = new EnumMap<>(AgentKind.class);
+        for (AgentKind kind : AgentKind.values()) {
+            calls.put(kind, new AtomicInteger());
+        }
+        ModelField field = new ModelField(kind -> {
+            if (kind == AgentKind.CLAUDE) {
+                try {
+                    release.await(10, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            // After the gate: a count of 1 means the probe has returned.
+            calls.get(kind).incrementAndGet();
+            return kind == AgentKind.CLAUDE ? List.of("sonnet") : List.of("pi-a", "pi-b");
+        });
+        JComboBox<?> combo = combo(field);
+        try {
+            field.setAgent(AgentKind.PI, k -> Optional.empty());
+            waitFor(() -> combo.getItemCount() == 2);
+
+            field.setAgent(AgentKind.CLAUDE, k -> Optional.empty());
+            // CLAUDE's own list, still empty while its load is blocked.
+            assertEquals(0, combo.getItemCount());
+
+            field.setAgent(AgentKind.PI, k -> Optional.empty());
+            assertEquals(2, combo.getItemCount());
+
+            release.countDown();
+            waitFor(() -> count(calls, AgentKind.CLAUDE) == 1);
+            pump();
+
+            // The late CLAUDE load must not reach PI's popup.
+            assertEquals(2, combo.getItemCount());
+            assertEquals("pi-a", combo.getItemAt(0));
+            assertEquals("pi-b", combo.getItemAt(1));
+            for (int i = 0; i < combo.getItemCount(); i++) {
+                assertFalse("sonnet".equals(combo.getItemAt(i)));
+            }
+
+            // ...but it did fill CLAUDE's cache: switching shows it with no reload.
+            field.setAgent(AgentKind.CLAUDE, k -> Optional.empty());
+            assertEquals(1, combo.getItemCount());
+            assertEquals("sonnet", combo.getItemAt(0));
+            assertEquals(1, count(calls, AgentKind.CLAUDE));
+        } finally {
+            release.countDown();
+        }
     }
 
     public void testRememberedModelSeedsTheEditorButNotTheList() throws Exception {
