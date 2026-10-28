@@ -17,6 +17,7 @@ import app.drydock.git.GitExecutableLocator;
 import app.drydock.domain.HandoffBrief;
 import app.drydock.handoff.HandoffStaleness;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.PrState;
 import app.drydock.domain.Repository;
 import app.drydock.domain.SessionActivity;
 import app.drydock.domain.Workflow;
@@ -1471,6 +1472,23 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             // The worktree survives, so the sidebar must show it.
             requestWorktreeRefresh(repository);
             return;
+        }
+        // The session is a pull request by construction -- the queue only
+        // offers open, non-draft PRs -- so its PR link is recorded here,
+        // not left for a Finish-panel probe to reconcile. The tab's PR
+        // chip and the sidebar's PR filter then see it immediately; the
+        // probe still matters later (merged/closed since), and only works
+        // for a pr-<n> branch since GhCliService.viewPr learned the
+        // alias. The row-level change fires the listener that refreshes
+        // this tab's header, so the chip lands without more wiring here.
+        //
+        // Bookkeeping only: the session already exists, so failing to record
+        // its PR link must not report it as missing. The tab simply lacks the
+        // chip until the Finish-panel probe reconciles it.
+        try {
+            sessionManager.updatePrState(session, PrState.OPEN, Optional.of(number));
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, "Could not record PR #" + number + " on session " + session, e);
         }
         progress.show(new PullRequestMaterialization.Step.OpenReview(worktree));
         // The PR is handed over whole, draft included: SessionReviewScopes
