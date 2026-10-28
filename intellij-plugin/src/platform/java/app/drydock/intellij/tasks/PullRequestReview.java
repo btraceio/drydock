@@ -1,6 +1,7 @@
 package app.drydock.intellij.tasks;
 
 import app.drydock.agent.api.AgentKind;
+import app.drydock.agent.api.SphinxReviewSupport;
 import app.drydock.config.UserConfig;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ModelTiers;
@@ -12,9 +13,12 @@ import app.drydock.git.PrCheckoutService;
 import app.drydock.git.WorktreeNaming;
 import app.drydock.git.WorktreeService;
 import app.drydock.intellij.DrydockPluginService;
+import app.drydock.ui.AgentLabels;
 import app.drydock.intellij.DrydockSessionsListener;
 import app.drydock.intellij.actions.SessionDialogs;
 import app.drydock.intellij.agent.AgentConsoles;
+import app.drydock.intellij.agent.AgentExecutionRegistry;
+import app.drydock.intellij.agent.PromptOutcome;
 import app.drydock.intellij.review.ReviewBackend;
 import app.drydock.intellij.review.ReviewRequest;
 import app.drydock.intellij.review.ReviewTabOpener;
@@ -144,7 +148,7 @@ public final class PullRequestReview {
 
     /** EDT entry: refuses a second materialization of the same pull request. */
     public void review(Project from, Path mainRoot, String repositoryName, OpenPullRequest pullRequest) {
-        review(from, mainRoot, repositoryName, pullRequest, false);
+        review(from, mainRoot, repositoryName, pullRequest, false, false);
     }
 
     /**
@@ -156,11 +160,27 @@ public final class PullRequestReview {
      */
     public void reviewWithModelDialog(Project from, Path mainRoot, String repositoryName,
                                       OpenPullRequest pullRequest) {
-        review(from, mainRoot, repositoryName, pullRequest, true);
+        review(from, mainRoot, repositoryName, pullRequest, true, false);
+    }
+
+    /**
+     * Reviews {@code pullRequest} in the harness's sphinx plugin: the same
+     * materialization, but the harness's sphinx command — not Drydock's
+     * review instruction — rides the launch as the initial prompt, and no
+     * Review tab opens (sphinx runs its own review loop inside the session).
+     * A RUNNING session on the target worktree is not joined silently: the
+     * sphinx command is submitted into its console, per the same
+     * send-into-the-bound-session rule the standalone app follows. The
+     * harness must report the sphinx plugin ({@code AgentRegistry#sphinxReview});
+     * the task tree only offers this when the repository's default agent
+     * does, and the launch re-checks whoever actually got picked.
+     */
+    public void reviewSphinx(Project from, Path mainRoot, String repositoryName, OpenPullRequest pullRequest) {
+        review(from, mainRoot, repositoryName, pullRequest, false, true);
     }
 
     private void review(Project from, Path mainRoot, String repositoryName, OpenPullRequest pullRequest,
-                        boolean pickModel) {
+                        boolean pickModel, boolean sphinx) {
         String key = mainRoot + "#" + pullRequest.number();
         if (!inFlight.add(key)) {
             return;
@@ -170,7 +190,7 @@ public final class PullRequestReview {
             @Override
             public void run(@NotNull ProgressIndicator indicator) {
                 try {
-                    materialize(from, mainRoot, repositoryName, pullRequest, pickModel, indicator);
+                    materialize(from, mainRoot, repositoryName, pullRequest, pickModel, sphinx, indicator);
                 } finally {
                     inFlight.remove(key);
                 }
@@ -179,7 +199,7 @@ public final class PullRequestReview {
     }
 
     private void materialize(Project from, Path mainRoot, String repositoryName, OpenPullRequest pullRequest,
-                             boolean pickModel, ProgressIndicator indicator) {
+                             boolean pickModel, boolean sphinx, ProgressIndicator indicator) {
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         Optional<AgentKind> agent;
         Optional<String> customTemplate;
@@ -192,8 +212,9 @@ public final class PullRequestReview {
             plugin.initialization().get(LAUNCH_TIMEOUT_SECONDS, TimeUnit.SECONDS);
             // A custom template replaces Drydock's review instruction, and with
             // it the only prompt that spends tiers: read it before the dialog,
-            // which then asks for no tiers.
-            customTemplate = PullRequestReviewPrompt.load();
+            // which then asks for no tiers. The sphinx flow overrides both:
+            // its fixed command is the whole prompt.
+            customTemplate = sphinx ? Optional.empty() : PullRequestReviewPrompt.load();
             // The project's own record holds its last-used agent (as New task does).
             Repository local = DrydockStartupActivity.repositories(from).repositoryFor(mainRoot)
                     .get(LAUNCH_TIMEOUT_SECONDS, TimeUnit.SECONDS);
@@ -233,13 +254,30 @@ public final class PullRequestReview {
         }
         AgentKind picked = choice.get().agent();
         Optional<String> model = choice.get().model();
+        // The harness's sphinx reach, resolved for whoever actually got
+        // picked — the menu gated on the DEFAULT agent, and the dialog can
+        // have changed it. A harness without the plugin must not receive the
+        // command it cannot run.
+        Optional<SphinxReviewSupport> sphinxSupport = sphinx
+                ? plugin.registry().sphinxReview(picked)
+                : Optional.empty();
+        if (sphinx && sphinxSupport.isEmpty()) {
+            report(from, "The " + AgentLabels.displayName(DrydockPluginService.getInstance().registry(), picked) + " harness has no sphinx plugin installed, so PR #"
+                    + pullRequest.number() + " cannot be reviewed in Sphinx.");
+            return;
+        }
         // Recorded only when the dialog asked for them; the prompt spends the
         // remembered tiers otherwise (the quick Review), which a launch that
         // asked for none leaves stored as they were.
         Optional<ModelTiers> recordedTiers = choice.get().tiers();
         ModelTiers promptTiers = recordedTiers.orElseGet(() -> lastUsedTiers.apply(picked));
-        Optional<String> customPrompt = customTemplate.map(template ->
-                PullRequestReviewPrompt.render(template, pullRequest.number()));
+        // The sphinx command takes the custom-prompt channel: a fixed prompt
+        // needs no review backend and opens no Review tab, which is exactly
+        // what a harness-run review loop wants.
+        Optional<String> customPrompt = sphinx
+                ? Optional.of(sphinxSupport.get().reviewPullRequestPrompt(pullRequest.number()))
+                : customTemplate.map(template ->
+                        PullRequestReviewPrompt.render(template, pullRequest.number()));
 
         Path base = WorktreeNaming.defaultDirectory(Path.of(System.getProperty("user.home")),
                 UserConfig.load().worktreesDirectory(), repositoryName,
@@ -255,7 +293,15 @@ public final class PullRequestReview {
         Optional<ManagedAgentSession> running = runningSessionFor(plugin.stateStore().state().sessions(),
                 base);
         if (running.isPresent()) {
-            joinRunningReview(from, running.get());
+            if (sphinx) {
+                // Send into the bound session rather than joining silently:
+                // a console moved here with no review started would look like
+                // a review that never begins.
+                submitSphinxPrompt(from, running.get(),
+                        sphinxSupport.get().reviewPullRequestPrompt(pullRequest.number()));
+            } else {
+                joinRunningReview(from, running.get());
+            }
             return;
         }
 
@@ -385,6 +431,30 @@ public final class PullRequestReview {
             }
             AgentConsoles.showHere(from, running.id());
         }, ModalityState.nonModal(), from.getDisposed());
+    }
+
+    /**
+     * Sends the sphinx command into a RUNNING session's console, under a
+     * background progress; any outcome but a delivered prompt is shown in a
+     * warning dialog. The same delivery the Ask-Agent-to-Review request
+     * uses, without the review backend in between — sphinx is the harness's
+     * business.
+     */
+    static void submitSphinxPrompt(Project from, ManagedAgentSession running, String prompt) {
+        ProgressManager.getInstance().run(new Task.Backgroundable(from, "Starting sphinx review…", false) {
+            @Override
+            public void run(@NotNull ProgressIndicator indicator) {
+                PromptOutcome outcome = AgentExecutionRegistry.getInstance().submitPrompt(running.id(), prompt);
+                if (outcome != PromptOutcome.DELIVERED) {
+                    ApplicationManager.getApplication().invokeLater(
+                            () -> Messages.showWarningDialog(from,
+                                    "Could not send the sphinx review command to the session on "
+                                            + running.workingDirectory() + " (" + outcome + ").",
+                                    "Drydock"),
+                            ModalityState.nonModal(), from.getDisposed());
+                }
+            }
+        });
     }
 
     /**

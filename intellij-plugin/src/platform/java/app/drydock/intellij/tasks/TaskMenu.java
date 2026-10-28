@@ -59,6 +59,8 @@ final class TaskMenu {
         /** Review with the repository's remembered starting model. */
         QUICK_REVIEW,
         REVIEW,
+        /** Start a review session whose first prompt is the harness's sphinx command. */
+        REVIEW_IN_SPHINX,
         OPEN_IN_GITHUB,
         /** Open the Jira issue's page; only a Jira row offers it. */
         OPEN_IN_JIRA,
@@ -102,7 +104,7 @@ final class TaskMenu {
             case null -> List.of();
             case TaskRow row -> row.running() ? running(row, facts) : idle(row);
             case PullRequestRow ignored -> nonEmpty(List.of(
-                    List.of(Item.QUICK_REVIEW, Item.REVIEW),
+                    List.of(Item.QUICK_REVIEW, Item.REVIEW, Item.REVIEW_IN_SPHINX),
                     section(urlOf(node).isPresent() ? Item.OPEN_IN_GITHUB : null)));
             case IssueRow ignored -> nonEmpty(List.of(
                     List.of(Item.IMPLEMENT, Item.TRIAGE),
@@ -111,7 +113,7 @@ final class TaskMenu {
                     List.of(Item.IMPLEMENT, Item.TRIAGE),
                     List.of(Item.OPEN_IN_JIRA, Item.JIRA_SETTINGS)));
             case IdleWorktree idleWorktree -> nonEmpty(List.of(
-                    List.of(Item.NEW_TASK, Item.QUICK_REVIEW, Item.REVIEW),
+                    List.of(Item.NEW_TASK, Item.QUICK_REVIEW, Item.REVIEW, Item.REVIEW_IN_SPHINX),
                     // Locked or open worktrees cannot be removed from here.
                     section(TaskActions.removable(idleWorktree).isEmpty() ? null : Item.REMOVE_WORKTREE)));
             case StaleWorktrees ignored -> List.of(List.of(Item.REMOVE_STALE_WORKTREES));

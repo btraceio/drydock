@@ -169,11 +169,11 @@ class TaskMenuTest {
     @Test
     void pullRequestRowOffersQuickReviewThenModelReviewThenGitHub() {
         assertEquals(List.of(
-                List.of(TaskMenu.Item.QUICK_REVIEW, TaskMenu.Item.REVIEW),
+                List.of(TaskMenu.Item.QUICK_REVIEW, TaskMenu.Item.REVIEW, TaskMenu.Item.REVIEW_IN_SPHINX),
                 List.of(TaskMenu.Item.OPEN_IN_GITHUB)),
                 sectionsOf(pullRequest(Optional.of("https://github.com/DataDog/profiling-backend/pull/40"))));
         // No URL, no second section: never an empty one.
-        assertEquals(List.of(List.of(TaskMenu.Item.QUICK_REVIEW, TaskMenu.Item.REVIEW)),
+        assertEquals(List.of(List.of(TaskMenu.Item.QUICK_REVIEW, TaskMenu.Item.REVIEW, TaskMenu.Item.REVIEW_IN_SPHINX)),
                 sectionsOf(pullRequest(Optional.empty())));
     }
 
@@ -200,12 +200,12 @@ class TaskMenuTest {
     @Test
     void idleWorktreeOffersRemoveOnlyWhenItIsNeitherLockedNorOpen() {
         assertEquals(List.of(
-                List.of(TaskMenu.Item.NEW_TASK, TaskMenu.Item.QUICK_REVIEW, TaskMenu.Item.REVIEW),
+                List.of(TaskMenu.Item.NEW_TASK, TaskMenu.Item.QUICK_REVIEW, TaskMenu.Item.REVIEW, TaskMenu.Item.REVIEW_IN_SPHINX),
                 List.of(TaskMenu.Item.REMOVE_WORKTREE)),
                 sectionsOf(worktree(false, false)));
-        assertEquals(List.of(List.of(TaskMenu.Item.NEW_TASK, TaskMenu.Item.QUICK_REVIEW, TaskMenu.Item.REVIEW)),
+        assertEquals(List.of(List.of(TaskMenu.Item.NEW_TASK, TaskMenu.Item.QUICK_REVIEW, TaskMenu.Item.REVIEW, TaskMenu.Item.REVIEW_IN_SPHINX)),
                 sectionsOf(worktree(true, false)));
-        assertEquals(List.of(List.of(TaskMenu.Item.NEW_TASK, TaskMenu.Item.QUICK_REVIEW, TaskMenu.Item.REVIEW)),
+        assertEquals(List.of(List.of(TaskMenu.Item.NEW_TASK, TaskMenu.Item.QUICK_REVIEW, TaskMenu.Item.REVIEW, TaskMenu.Item.REVIEW_IN_SPHINX)),
                 sectionsOf(worktree(false, true)));
     }
 
@@ -297,7 +297,7 @@ class TaskMenuTest {
                 sectionsOf(new TaskNode.StaleWorktrees(List.of(worktree(false, false)))),
                 sectionsOf(project(worktree(false, false))));
         List<TaskMenu.Item> last = List.of(TaskMenu.Item.DONE_WITH_TASK, TaskMenu.Item.DONE_WITH_TASK,
-                TaskMenu.Item.DONE_WITH_TASK, TaskMenu.Item.REVIEW, TaskMenu.Item.GITHUB_SETTINGS,
+                TaskMenu.Item.DONE_WITH_TASK, TaskMenu.Item.REVIEW_IN_SPHINX, TaskMenu.Item.GITHUB_SETTINGS,
                 TaskMenu.Item.REMOVE_WORKTREE, TaskMenu.Item.REMOVE_STALE_WORKTREES,
                 TaskMenu.Item.REMOVE_FROM_DRYDOCK);
         assertEquals(last.size(), menus.size());

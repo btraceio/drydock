@@ -1,14 +1,18 @@
 package app.drydock.intellij.tasks;
 
 import app.drydock.agent.api.AgentKind;
+import app.drydock.agent.api.SphinxReviewSupport;
 import app.drydock.config.UserConfig;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ModelTiers;
 import app.drydock.domain.Repository;
 import app.drydock.domain.SessionMode;
 import app.drydock.intellij.DrydockPluginService;
+import app.drydock.ui.AgentLabels;
 import app.drydock.intellij.actions.SessionDialogs;
 import app.drydock.intellij.agent.AgentConsoles;
+import app.drydock.intellij.agent.AgentExecutionRegistry;
+import app.drydock.intellij.agent.PromptOutcome;
 import app.drydock.intellij.review.ReviewRequest;
 import app.drydock.intellij.review.ReviewTabOpener;
 import app.drydock.intellij.startup.DrydockStartupActivity;
@@ -88,7 +92,7 @@ public final class WorktreeReview {
 
     /** EDT entry: refuses a second materialization of the same worktree. */
     public void review(Project from, Path mainRoot, Path worktree, String branch) {
-        review(from, mainRoot, worktree, branch, false);
+        review(from, mainRoot, worktree, branch, false, false);
     }
 
     /**
@@ -98,10 +102,24 @@ public final class WorktreeReview {
      * dialog cancels the whole review.
      */
     public void reviewWithModelDialog(Project from, Path mainRoot, Path worktree, String branch) {
-        review(from, mainRoot, worktree, branch, true);
+        review(from, mainRoot, worktree, branch, true, false);
     }
 
-    private void review(Project from, Path mainRoot, Path worktree, String branch, boolean pickModel) {
+    /**
+     * Reviews {@code worktree} in the harness's sphinx plugin: the same
+     * in-place review, but the harness's sphinx command — not Drydock's
+     * review instruction — rides the launch, and no Review tab opens. A
+     * RUNNING session on the worktree gets the command submitted into its
+     * console rather than a silent join. The harness must report the sphinx
+     * plugin; the task tree only offers this when the repository's default
+     * agent does, and the launch re-checks whoever actually got picked.
+     */
+    public void reviewSphinx(Project from, Path mainRoot, Path worktree, String branch) {
+        review(from, mainRoot, worktree, branch, false, true);
+    }
+
+    private void review(Project from, Path mainRoot, Path worktree, String branch, boolean pickModel,
+                        boolean sphinx) {
         String key;
         try {
             key = worktree.toRealPath().toString();
@@ -117,7 +135,7 @@ public final class WorktreeReview {
             @Override
             public void run(@NotNull ProgressIndicator indicator) {
                 try {
-                    materialize(from, mainRoot, worktree, branch, pickModel, indicator);
+                    materialize(from, mainRoot, worktree, branch, pickModel, sphinx, indicator);
                 } finally {
                     inFlight.remove(key);
                 }
@@ -126,7 +144,7 @@ public final class WorktreeReview {
     }
 
     private void materialize(Project from, Path mainRoot, Path worktree, String branch, boolean pickModel,
-                             ProgressIndicator indicator) {
+                             boolean sphinx, ProgressIndicator indicator) {
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         Optional<AgentKind> agent;
         // The repository's last-used values, read once: they seed the dialog's
@@ -176,6 +194,18 @@ public final class WorktreeReview {
         }
         AgentKind picked = choice.get().agent();
         Optional<String> model = choice.get().model();
+        // The harness's sphinx reach, resolved for whoever actually got
+        // picked — the menu gated on the DEFAULT agent, and the quick pick
+        // can resolve differently. A harness without the plugin must not
+        // receive the command it cannot run.
+        Optional<SphinxReviewSupport> sphinxSupport = sphinx
+                ? plugin.registry().sphinxReview(picked)
+                : Optional.empty();
+        if (sphinx && sphinxSupport.isEmpty()) {
+            report(from, "The " + AgentLabels.displayName(DrydockPluginService.getInstance().registry(), picked) + " harness has no sphinx plugin installed, so "
+                    + branch + " cannot be reviewed in Sphinx.");
+            return;
+        }
         Optional<ModelTiers> recordedTiers = choice.get().tiers();
         ModelTiers promptTiers = recordedTiers.orElseGet(() -> lastUsedTiers.apply(picked));
 
@@ -189,13 +219,22 @@ public final class WorktreeReview {
         Optional<ManagedAgentSession> running = PullRequestReview.runningSessionFor(
                 plugin.stateStore().state().sessions(), worktree);
         if (running.isPresent()) {
-            joinRunningReview(from, running.get());
+            if (sphinx) {
+                // Send into the bound session rather than joining silently:
+                // a console moved here with no review started would look like
+                // a review that never begins.
+                PullRequestReview.submitSphinxPrompt(from, running.get(),
+                        sphinxSupport.get().reviewLocalChangesPrompt());
+            } else {
+                joinRunningReview(from, running.get());
+            }
             return;
         }
 
         Path reused = worktree;
         ApplicationManager.getApplication().invokeLater(() ->
-                openAndLaunch(from, mainRoot, reused, branch, picked, model, promptTiers, recordedTiers),
+                openAndLaunch(from, mainRoot, reused, branch, picked, model, promptTiers, recordedTiers,
+                        sphinx ? Optional.of(sphinxSupport.get().reviewLocalChangesPrompt()) : Optional.empty()),
                 ModalityState.nonModal());
     }
 
@@ -256,15 +295,19 @@ public final class WorktreeReview {
      */
     private void openAndLaunch(Project from, Path mainRoot, Path worktree, String branch,
                                AgentKind agent, Optional<String> model, ModelTiers promptTiers,
-                               Optional<ModelTiers> recordedTiers) {
+                               Optional<ModelTiers> recordedTiers, Optional<String> sphinxPrompt) {
         if (from.isDisposed()) {
             LOG.log(Level.INFO, "The window was closed while the review of {0} was starting; {1} is untouched",
                     branch, worktree);
             return;
         }
         String displayName = displayName(branch);
-        PullRequestReview.ReviewPrompt prompt =
-                PullRequestReview.ReviewPrompt.drydockReview(agent, promptTiers, model);
+        // The sphinx command takes the custom-prompt channel: a fixed prompt
+        // needs no review backend and opens no Review tab, which is exactly
+        // what a harness-run review loop wants.
+        PullRequestReview.ReviewPrompt prompt = sphinxPrompt
+                .map(PullRequestReview.ReviewPrompt::fixed)
+                .orElseGet(() -> PullRequestReview.ReviewPrompt.drydockReview(agent, promptTiers, model));
         var launch = SessionDialogs.launchSession(from, worktree, mainRoot, agent, displayName,
                 SessionMode.WRITES, prompt::resolve, false, model, recordedTiers);
         ProgressManager.getInstance().run(new Task.Backgroundable(from,

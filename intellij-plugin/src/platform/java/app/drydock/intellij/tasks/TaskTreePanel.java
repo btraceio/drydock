@@ -360,6 +360,44 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 }
             }
         };
+        // Reviews in the harness's sphinx plugin: same surfaces as the two
+        // actions above, but the harness's sphinx command rides the launch
+        // and no Drydock review tab opens. Hidden — never greyed — when the
+        // repository's default harness reports no sphinx plugin: a greyed
+        // item whose reason nobody can see is noise for everyone whose
+        // harness simply lacks the plugin. The launch re-checks whoever the
+        // resolved harness actually is.
+        AnAction reviewInSphinx = new DumbAwareAction("Review in Sphinx",
+                "Start a review session whose first prompt is the harness's sphinx command; "
+                        + "a pull request is first checked out into its own worktree",
+                AllIcons.Actions.Preview) {
+            @Override
+            public void update(@NotNull AnActionEvent e) {
+                TaskNode node = e.getData(SELECTED_NODE);
+                Path root = node instanceof PullRequestRow pullRequest ? pullRequest.mainRoot()
+                        : e.getData(SELECTED_PROJECT_ROOT);
+                TaskActions.present(e, (node instanceof PullRequestRow
+                        || (node instanceof IdleWorktree && root != null)) && sphinxAvailable(root));
+            }
+
+            @Override
+            public @NotNull ActionUpdateThread getActionUpdateThread() {
+                return ActionUpdateThread.EDT;
+            }
+
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                TaskNode node = e.getData(SELECTED_NODE);
+                if (node instanceof PullRequestRow pullRequest) {
+                    reviewPullRequestInSphinx(pullRequest.mainRoot(), pullRequest);
+                } else if (node instanceof IdleWorktree idle) {
+                    Path root = e.getData(SELECTED_PROJECT_ROOT);
+                    if (root != null) {
+                        worktreeReview.reviewSphinx(project, root, idle.worktree(), idle.branch());
+                    }
+                }
+            }
+        };
         AnAction implement = new DumbAwareAction("Implement…",
                 "Create a writable task and worktree for this issue", AllIcons.Actions.Execute) {
             @Override
@@ -427,6 +465,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         menuActions.put(TaskMenu.Item.OPEN_IN_GITHUB, openInGitHub);
         menuActions.put(TaskMenu.Item.QUICK_REVIEW, quickReview);
         menuActions.put(TaskMenu.Item.REVIEW, review);
+        menuActions.put(TaskMenu.Item.REVIEW_IN_SPHINX, reviewInSphinx);
         menuActions.put(TaskMenu.Item.IMPLEMENT, implement);
         menuActions.put(TaskMenu.Item.TRIAGE, triage);
         menuActions.put(TaskMenu.Item.GITHUB_SETTINGS, githubSettings);
@@ -588,7 +627,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     static Set<TaskMenu.Item> panelMenuItems() {
         return EnumSet.of(TaskMenu.Item.SWITCH_TO_TASK, TaskMenu.Item.NEW_TASK, TaskMenu.Item.NEW_TASK_IN_MAIN,
                 TaskMenu.Item.OPEN_IN_GITHUB, TaskMenu.Item.OPEN_IN_JIRA, TaskMenu.Item.QUICK_REVIEW,
-                TaskMenu.Item.REVIEW, TaskMenu.Item.IMPLEMENT, TaskMenu.Item.TRIAGE,
+                TaskMenu.Item.REVIEW, TaskMenu.Item.REVIEW_IN_SPHINX,
+                TaskMenu.Item.IMPLEMENT, TaskMenu.Item.TRIAGE,
                 TaskMenu.Item.GITHUB_SETTINGS, TaskMenu.Item.JIRA_SETTINGS, TaskMenu.Item.REFRESH);
     }
 
@@ -825,6 +865,17 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         pullRequestReview.reviewWithModelDialog(project, mainRoot, repositoryName, pullRequest.pullRequest());
     }
 
+    /** Starts the sphinx review materialization for the clicked pull request. EDT. */
+    private void reviewPullRequestInSphinx(Path mainRoot, PullRequestRow pullRequest) {
+        if (mainRoot == null) {
+            return;
+        }
+        String repositoryName = DrydockPluginService.getInstance().sharedProjects().byRoot(mainRoot)
+                .map(SharedProject::displayName)
+                .orElseGet(() -> String.valueOf(mainRoot.getFileName()));
+        pullRequestReview.reviewSphinx(project, mainRoot, repositoryName, pullRequest.pullRequest());
+    }
+
     /**
      * The quick review action's label: the remembered starting model of the
      * harness the review will launch, or "default" when none was picked yet.
@@ -851,6 +902,32 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         String model = agent.flatMap(kind -> repository.flatMap(r -> r.settings().lastUsedModel(kind)))
                 .orElse("default");
         return "Review (" + model + ")";
+    }
+
+    /**
+     * Whether the repository's default harness reaches the sphinx plugin —
+     * the same cheap EDT answer {@code quickReviewLabel} builds on: the
+     * precomputed root→id map plus the in-memory state store, never git and
+     * never a fresh probe ({@code AgentRegistry#sphinxReview} reads its
+     * init-time snapshot). {@code null} root or an unknown repository reads
+     * as unavailable — absent must not look like offered.
+     */
+    private boolean sphinxAvailable(Path mainRoot) {
+        if (mainRoot == null) {
+            return false;
+        }
+        DrydockPluginService plugin = DrydockPluginService.getInstance();
+        RepositoryId id = repositoryIdsByRoot.get(mainRoot);
+        Optional<Repository> repository = id == null ? Optional.empty()
+                : plugin.stateStore().state().repositories().stream()
+                        .filter(r -> r.id().equals(id))
+                        .findFirst();
+        return PullRequestReview.selectReviewAgent(
+                        SessionDialogs.defaultAgent(plugin.registry(),
+                                repository.flatMap(r -> r.settings().lastUsedAgent())),
+                        plugin.registry()::isAvailable)
+                .flatMap(kind -> plugin.registry().sphinxReview(kind))
+                .isPresent();
     }
 
     private AnAction githubSettingsAction(Predicate<TaskNode> applies) {
