@@ -1,32 +1,26 @@
 package app.drydock.intellij.tasks;
 
-import app.drydock.domain.ManagedAgentSession;
-import app.drydock.domain.ManagedSessionId;
-import app.drydock.domain.SessionStatus;
 import app.drydock.git.WorktreeService;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.DrydockSessionsListener;
 import app.drydock.intellij.agent.AgentConsoles;
 import app.drydock.intellij.agent.AgentExecutionRegistry;
-import app.drydock.intellij.agent.SessionDone;
+import app.drydock.intellij.agent.SessionCommands;
+import app.drydock.intellij.agent.SessionCommandHandlers;
 import app.drydock.intellij.agent.SessionRename;
 import app.drydock.intellij.agent.SessionTransfer;
-import app.drydock.intellij.agent.StopAgentsDialog;
-import app.drydock.intellij.agent.StopAgentsPlan;
 import app.drydock.intellij.review.ReviewRequest;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.intellij.tasks.TaskNode.StaleWorktrees;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
-import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
-import app.drydock.intellij.ui.SessionDots;
 import app.drydock.intellij.worktree.WorktreeErrors;
-import app.drydock.ui.AgentLabels;
 
 import com.intellij.icons.AllIcons;
 import com.intellij.openapi.actionSystem.ActionUpdateThread;
 import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.AnActionEvent;
+import com.intellij.openapi.actionSystem.Presentation;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.progress.ProgressIndicator;
@@ -34,10 +28,6 @@ import com.intellij.openapi.progress.ProgressManager;
 import com.intellij.openapi.progress.Task;
 import com.intellij.openapi.project.DumbAwareAction;
 import com.intellij.openapi.project.Project;
-import com.intellij.openapi.progress.ProgressIndicator;
-import com.intellij.openapi.progress.ProgressManager;
-import com.intellij.openapi.progress.Task;
-import com.intellij.openapi.project.ProjectManager;
 import com.intellij.openapi.ui.Messages;
 import org.jetbrains.annotations.NotNull;
 
@@ -45,6 +35,7 @@ import javax.swing.Icon;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -70,12 +61,6 @@ final class TaskActions {
 
     enum DefaultActivation { SWITCH_TO_RUNNING, RESUME_HERE }
 
-    /**
-     * How long Deactivate &amp; Close and Done wait for the agent to end: past the
-     * execution's own two-second force-kill, with room to spare.
-     */
-    private static final long STOP_WAIT_MILLIS = 5_000;
-    private static final long STOP_POLL_MILLIS = 100;
     private static final long REMOVE_TIMEOUT_SECONDS = 120;
 
     private TaskActions() {
@@ -85,53 +70,149 @@ final class TaskActions {
     record Shown(boolean visible, boolean enabled) {
     }
 
-    /** Pure: toolbar buttons stay in place so they do not jump around as the selection changes. */
+    /**
+     * Pure: toolbar buttons stay in place so they do not jump around as the
+     * selection changes; applicability gates both. A context menu hides
+     * what does not apply, the toolbar only greys it; a separate enabled
+     * answer (the busy guard) greys without hiding anywhere.
+     */
+    static Shown shown(boolean fromContextMenu, boolean applicable, boolean enabled) {
+        return new Shown(applicable || !fromContextMenu, applicable && enabled);
+    }
+
+    /** {@link #shown} with no separate enabled answer: applicability alone decides. */
     static Shown shown(boolean fromContextMenu, boolean applicable) {
-        return new Shown(applicable || !fromContextMenu, applicable);
+        return shown(fromContextMenu, applicable, true);
     }
 
     /** Applies {@link #shown} to {@code e}'s presentation. */
     static void present(AnActionEvent e, boolean applicable) {
-        Shown shown = shown(e.isFromContextMenu(), applicable);
+        present(e, applicable, true);
+    }
+
+    /** Applies {@link #shown} with a separate enabled answer: a busy row keeps the action in place, greyed. */
+    static void present(AnActionEvent e, boolean applicable, boolean enabled) {
+        Shown shown = shown(e.isFromContextMenu(), applicable, enabled);
         e.getPresentation().setVisible(shown.visible());
         e.getPresentation().setEnabled(shown.enabled());
     }
 
-    /** The task and project actions, for the tree's context menu and the tool window's toolbar. */
-    static List<AnAction> taskActions() {
-        return List.of(
-                task("Deactivate", "Deactivate this task's agent", AllIcons.Actions.Suspend, TaskRow::running,
-                        (project, row) -> stop(project, row, false)),
-                task("Review Changes", "Ask this task's agent to review its changes", AllIcons.Actions.Diff,
-                        TaskActions::reviewsChanges, TaskActions::reviewChanges),
-                task("Deactivate && Close Window", "Deactivate the agent and close its window", AllIcons.Actions.Close,
-                        TaskActions::closesOwnWindow, (project, row) -> stop(project, row, true)),
-                // F5: moves an agent another window shows into this one.
-                task("Show Here", "Move this agent's console into this window", AllIcons.Actions.Show,
-                        row -> row.placement() instanceof TaskPlacement.OwnWindow
-                                || row.placement() instanceof TaskPlacement.OtherWindow,
-                        (project, row) -> AgentConsoles.showHere(project, row.session().id())),
-                // Resume in this window, hosted when the task is another
-                // worktree's — as New task does; its own window is the
-                // explicit alternative.
-                task("Resume", "Resume the task's conversation in this window", AllIcons.Actions.Execute,
-                        row -> !row.running(), (project, row) -> AgentConsoles.resumeOrStart(project, row.session())),
-                task("Resume in Its Own Window", "Open the task's own window and resume its conversation there",
-                        AllIcons.Actions.MoveTo2, TaskActions::resumesElsewhere,
-                        (project, row) -> TaskNavigator.switchTo(row.session(),
-                                target -> AgentConsoles.resumeOrStart(target, row.session()))),
-                task("Transfer to…", "Continue this live task with another installed agent",
-                        AllIcons.Actions.Refresh, row -> SessionTransfer.available(row.session(), row.activity()),
-                        (project, row) -> SessionTransfer.show(project, row.session())),
-                task("Rename…", "Rename this session", AllIcons.Actions.Edit, row -> true,
-                        (project, row) -> SessionRename.show(project, row.session())),
-                task("Done with This Task…", "Forget the task, and optionally remove its worktree",
-                        AllIcons.Actions.Checked, row -> true, TaskActions::done),
-                removeWorktrees(),
-                removeProject());
+    /**
+     * Pure: the lifecycle label of a stopped task — "Resume" only when
+     * there is a conversation to resume into, "Start" when the only way
+     * forward is a fresh one; the own-window variant names where (A6, A10).
+     */
+    static String lifecycleText(boolean resumable, boolean ownWindow) {
+        return (resumable ? "Resume" : "Start") + (ownWindow ? " in Its Own Window" : "");
     }
 
-    /** Whether Review Changes applies: the agent runs, whatever its mode. Pure. */
+    /**
+     * Whether no operation is already in flight for {@code row}'s session —
+     * the shared busy guard for the tree's mutating actions. Memory-only
+     * reads (the registry's O(1) probes, the transfer table, the row's
+     * warmed resumable answer), safe on the EDT (A5, A11).
+     */
+    static boolean notBusy(TaskRow row) {
+        return !SessionCommands.busy(SessionCommands.stateOf(row.session(), Optional.of(row.resumable())));
+    }
+
+    /**
+     * Whether a launch action — Resume/Start in this window or in the
+     * task's own — may run for {@code row}: the shared {@link
+     * SessionCommands#lifecycleEnabled} policy on the row's current facts,
+     * in the tree's global scope (the F1 detached rule never turns a tree
+     * action into Show agent). Busy always wins; past that, a stopped
+     * session whose agent this build cannot run is held off — it has
+     * nothing to start and nothing to resume into — so the tree greys the
+     * launch actions exactly as the tab header and strip do. Memory-only
+     * reads, safe on the EDT (A5, A11).
+     */
+    static boolean launchable(TaskRow row) {
+        return SessionCommands.lifecycleEnabled(
+                SessionCommands.stateOf(row.session(), Optional.of(row.resumable())));
+    }
+
+    /**
+     * The task and project actions by their {@link TaskMenu.Item} menu
+     * identity — one action instance each, shared by the tree's context
+     * menu and the tool window's toolbar. The removal action serves every
+     * removal entry: its label follows the selection (removalActionName),
+     * so the same instance sits under several keys.
+     */
+    static Map<TaskMenu.Item, AnAction> taskActions() {
+        AnAction deactivate = task("Deactivate", "Deactivate this task's agent", AllIcons.Actions.Suspend,
+                TaskRow::running, TaskActions::notBusy,
+                (project, row) -> SessionCommandHandlers.deactivate(project, row.session(), false, () -> {}));
+        AnAction askReview = task("Ask Agent to Review Changes", "Ask this task's agent to review its changes",
+                AllIcons.Actions.Diff, TaskActions::reviewsChanges, TaskActions::reviewChanges);
+        AnAction deactivateAndClose = task("Deactivate && Close Window",
+                "Deactivate the agent and close its window", AllIcons.Actions.Close,
+                TaskActions::closesOwnWindow, TaskActions::notBusy,
+                (project, row) -> SessionCommandHandlers.deactivate(project, row.session(), true, () -> {}));
+        // F5: moves an agent another window shows into this one.
+        AnAction showHere = task("Show Here", "Move this agent's console into this window", AllIcons.Actions.Show,
+                row -> row.placement() instanceof TaskPlacement.OwnWindow
+                        || row.placement() instanceof TaskPlacement.OtherWindow,
+                (project, row) -> AgentConsoles.showHere(project, row.session().id()));
+        // Resume in this window, hosted when the task is another
+        // worktree's — as New task does; its own window is the
+        // explicit alternative.
+        AnAction resume = task("Resume", "Resume the task's conversation in this window", AllIcons.Actions.Execute,
+                row -> !row.running(), TaskActions::launchable, TaskActions::resumesHere,
+                (project, row) -> AgentConsoles.resumeOrStart(project, row.session()));
+        AnAction resumeInOwnWindow = task("Resume in Its Own Window",
+                "Open the task's own window and resume its conversation there",
+                AllIcons.Actions.MoveTo2, TaskActions::resumesElsewhere, TaskActions::launchable,
+                TaskActions::resumesInOwnWindow,
+                (project, row) -> TaskNavigator.switchTo(row.session(),
+                        target -> AgentConsoles.resumeOrStart(target, row.session())));
+        AnAction transfer = task("Transfer to…", "Continue this live task with another installed agent",
+                AllIcons.Actions.Refresh, row -> SessionTransfer.available(row.session(), row.activity()),
+                TaskActions::notBusy,
+                (project, row) -> SessionTransfer.show(project, row.session()));
+        AnAction rename = task("Rename…", "Rename this session", AllIcons.Actions.Edit, row -> true,
+                (project, row) -> SessionRename.show(project, row.session()));
+        AnAction done = task("Done with This Task…", "Forget the task, and optionally remove its worktree",
+                AllIcons.Actions.Checked, row -> true, TaskActions::notBusy,
+                (project, row) -> SessionCommandHandlers.done(project, row.session()));
+        AnAction removeWorktrees = removeWorktrees();
+        AnAction removeProject = removeProject();
+        Map<TaskMenu.Item, AnAction> actions = new EnumMap<>(TaskMenu.Item.class);
+        actions.put(TaskMenu.Item.DEACTIVATE, deactivate);
+        actions.put(TaskMenu.Item.REVIEW_CHANGES, askReview);
+        actions.put(TaskMenu.Item.DEACTIVATE_AND_CLOSE, deactivateAndClose);
+        actions.put(TaskMenu.Item.SHOW_HERE, showHere);
+        actions.put(TaskMenu.Item.RESUME, resume);
+        actions.put(TaskMenu.Item.RESUME_IN_OWN_WINDOW, resumeInOwnWindow);
+        actions.put(TaskMenu.Item.TRANSFER_TO, transfer);
+        actions.put(TaskMenu.Item.RENAME, rename);
+        actions.put(TaskMenu.Item.DONE_WITH_TASK, done);
+        actions.put(TaskMenu.Item.REMOVE_WORKTREE, removeWorktrees);
+        actions.put(TaskMenu.Item.REMOVE_STALE_WORKTREES, removeWorktrees);
+        actions.put(TaskMenu.Item.REMOVE_INACTIVE_WORKTREES, removeWorktrees);
+        actions.put(TaskMenu.Item.REMOVE_WORKTREES, removeWorktrees);
+        actions.put(TaskMenu.Item.REMOVE_FROM_DRYDOCK, removeProject);
+        return actions;
+    }
+
+    /**
+     * Pure: the map's actions as the toolbar shows them — one button per
+     * action instance, in the enum's {@code values()} order. The removal
+     * action is one instance under several menu entries; a raw copy of the
+     * map's values would add its button several times.
+     */
+    static List<AnAction> toolbarActions(Map<TaskMenu.Item, AnAction> actions) {
+        List<AnAction> toolbar = new ArrayList<>();
+        for (TaskMenu.Item item : TaskMenu.Item.values()) {
+            AnAction action = actions.get(item);
+            if (action != null && !toolbar.contains(action)) {
+                toolbar.add(action);
+            }
+        }
+        return List.copyOf(toolbar);
+    }
+
+    /** Whether Ask Agent to Review Changes applies: the agent runs, whatever its mode. Pure. */
     static boolean reviewsChanges(TaskRow row) {
         return row.running();
     }
@@ -185,16 +266,61 @@ final class TaskActions {
         return row.running() ? DefaultActivation.SWITCH_TO_RUNNING : DefaultActivation.RESUME_HERE;
     }
 
+    /**
+     * Sets the Resume action's label and icon from the row: "Resume" only
+     * when the task has a conversation to resume into, "Start" otherwise
+     * (A6, A10, A11).
+     */
+    private static void resumesHere(Presentation presentation, TaskRow row) {
+        presentation.setText(lifecycleText(row.resumable(), false));
+        presentation.setIcon(row.resumable() ? SessionCommands.Lifecycle.RESUME.icon()
+                : SessionCommands.Lifecycle.START.icon());
+    }
+
+    /** The own-window variant: the same honest label, the move-elsewhere icon. */
+    private static void resumesInOwnWindow(Presentation presentation, TaskRow row) {
+        presentation.setText(lifecycleText(row.resumable(), true));
+        presentation.setIcon(SessionCommands.Command.OWN_PROJECT.icon());
+    }
+
     private interface RowAction {
         void run(Project project, TaskRow row);
     }
 
-    private static AnAction task(String text, String description, Icon icon, Predicate<TaskRow> enabled,
+    /** Optional per-row presentation beyond show/hide/grey: the lifecycle actions' label and icon. */
+    private interface Presenter {
+        Presenter NONE = (presentation, row) -> {
+        };
+
+        void show(Presentation presentation, TaskRow row);
+    }
+
+    private static AnAction task(String text, String description, Icon icon, Predicate<TaskRow> applies,
                                  RowAction action) {
+        return task(text, description, icon, applies, row -> true, Presenter.NONE, action);
+    }
+
+    private static AnAction task(String text, String description, Icon icon, Predicate<TaskRow> applies,
+                                 Predicate<TaskRow> enabled, RowAction action) {
+        return task(text, description, icon, applies, enabled, Presenter.NONE, action);
+    }
+
+    /**
+     * One tree action: shown where {@code applies} holds, greyed while the
+     * busy guard ({@code enabled}) or applicability says no, with an optional
+     * per-row {@code presenter} beyond that (the lifecycle label). While busy
+     * the action is disabled, never hidden — the row is still a task.
+     */
+    private static AnAction task(String text, String description, Icon icon, Predicate<TaskRow> applies,
+                                 Predicate<TaskRow> enabled, Presenter presenter, RowAction action) {
         return new DumbAwareAction(text, description, icon) {
             @Override
             public void update(@NotNull AnActionEvent e) {
-                present(e, e.getData(TaskTreePanel.SELECTED_NODE) instanceof TaskRow row && enabled.test(row));
+                TaskRow row = e.getData(TaskTreePanel.SELECTED_NODE) instanceof TaskRow selected ? selected : null;
+                present(e, row != null && applies.test(row), row != null && enabled.test(row));
+                if (row != null) {
+                    presenter.show(e.getPresentation(), row);
+                }
             }
 
             @Override
@@ -209,67 +335,6 @@ final class TaskActions {
                 }
             }
         };
-    }
-
-    /**
-     * Stops {@code row}'s agent, asking first when it is mid-task; with
-     * {@code closeWindow}, then closes the window it ran in. EDT.
-     */
-    static void stop(Project from, TaskRow row, boolean closeWindow) {
-        ManagedSessionId id = row.session().id();
-        if (SessionTransfer.inProgress(id)) {
-            return;
-        }
-        AgentExecutionRegistry registry = AgentExecutionRegistry.getInstance();
-        if (!registry.isRunning(id)) {
-            return;   // ended meanwhile
-        }
-        if (StopAgentsPlan.isWorking(row.activity())) {
-            String agent = AgentLabels.displayName(DrydockPluginService.getInstance().registry(),
-                    row.session().agentKind());
-            if (!StopAgentsDialog.confirmTreeStop(from,
-                    SessionDots.dotIcon(SessionStatus.RUNNING, row.activity()),
-                    StopAgentsPlan.row(row.session().displayName(), agent, Optional.empty()), closeWindow)) {
-                return;
-            }
-        }
-        // The window showing it, if any: an agent no window shows still stops.
-        Optional<Project> window = registry.host(id).filter(project -> !project.isDisposed());
-        registry.stop(id);
-        if (closeWindow && window.isPresent()) {
-            whenStopped(from, id, () -> {
-                if (!window.get().isDisposed()) {
-                    ProjectManager.getInstance().closeAndDispose(window.get());
-                }
-            });
-        }
-    }
-
-    /**
-     * "Done with this task…" from the tree. A running agent is stopped first
-     * — asking, as Stop does, when it is mid-task — so the dialog's check of
-     * the worktree sees what the agent left, not what it is still writing.
-     */
-    static void done(Project from, TaskRow row) {
-        if (SessionTransfer.inProgress(row.session().id())) {
-            return;
-        }
-        AgentExecutionRegistry registry = AgentExecutionRegistry.getInstance();
-        if (!registry.isRunning(row.session().id())) {
-            SessionDone.show(from, row.session());
-            return;
-        }
-        if (StopAgentsPlan.isWorking(row.activity())) {
-            String agent = AgentLabels.displayName(DrydockPluginService.getInstance().registry(),
-                    row.session().agentKind());
-            if (!StopAgentsDialog.confirmTreeStop(from,
-                    SessionDots.dotIcon(SessionStatus.RUNNING, row.activity()),
-                    StopAgentsPlan.row(row.session().displayName(), agent, Optional.empty()), false)) {
-                return;
-            }
-        }
-        registry.stop(row.session().id());
-        whenStopped(from, row.session().id(), () -> SessionDone.show(from, row.session()));
     }
 
     /**
@@ -482,46 +547,5 @@ final class TaskActions {
                 }
             }
         });
-    }
-
-    /**
-     * Runs {@code then} on the EDT once {@code id}'s agent has ended; if it
-     * still runs after {@link #STOP_WAIT_MILLIS}, says so instead, in
-     * {@code from}. Closing before the process has ended would make the
-     * window's own close confirmation list the agent being stopped, and Done
-     * would read a worktree the agent is still writing.
-     */
-    private static void whenStopped(Project from, ManagedSessionId id, Runnable then) {
-        AgentExecutionRegistry registry = AgentExecutionRegistry.getInstance();
-        DrydockPluginService.getInstance().executor().execute(() -> {
-            long deadline = System.currentTimeMillis() + STOP_WAIT_MILLIS;
-            boolean running;
-            while ((running = registry.isRunning(id)) && System.currentTimeMillis() < deadline) {
-                try {
-                    Thread.sleep(STOP_POLL_MILLIS);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    return;
-                }
-            }
-            boolean stillRunning = running;
-            ApplicationManager.getApplication().invokeLater(() -> {
-                if (stillRunning) {
-                    // Never carry on regardless: closing would ask about the
-                    // agent again, and Done would read a tree it still writes.
-                    Messages.showInfoMessage(from, StopAgentsPlan.notStoppedYet(taskName(id)), "Drydock");
-                    return;
-                }
-                then.run();
-            }, ModalityState.nonModal());
-        });
-    }
-
-    private static String taskName(ManagedSessionId id) {
-        return DrydockPluginService.getInstance().stateStore().state().sessions().stream()
-                .filter(session -> session.id().equals(id))
-                .map(ManagedAgentSession::displayName)
-                .findFirst()
-                .orElse("The agent");
     }
 }

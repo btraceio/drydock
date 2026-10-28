@@ -4,6 +4,7 @@ import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.SessionActivity;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.GhCliService.OpenPullRequest;
+import app.drydock.intellij.agent.SessionCommands;
 import app.drydock.projects.SharedProject;
 
 import java.nio.file.Path;
@@ -104,15 +105,31 @@ public sealed interface TaskNode {
     /**
      * One task: an agent session, and where its agent is shown.
      * {@code folderMissing}: it runs, and its worktree folder is gone.
+     * {@code resumable}: it is stopped and has a conversation to resume into
+     * (the model's answer, warmed by {@link ResumabilityCache}); always
+     * {@code false} while it runs.
      */
     record TaskRow(ManagedAgentSession session, Optional<SessionActivity> activity, boolean running,
-                   Optional<String> branch, TaskPlacement placement, boolean readOnly, boolean folderMissing)
+                   Optional<String> branch, TaskPlacement placement, boolean readOnly, boolean folderMissing,
+                   boolean resumable)
             implements TaskNode {
         public TaskRow {
             Objects.requireNonNull(session, "session");
             Objects.requireNonNull(activity, "activity");
             Objects.requireNonNull(branch, "branch");
             Objects.requireNonNull(placement, "placement");
+        }
+
+        /**
+         * The shape before the model carried the warmed answer: resumable is
+         * the cold fallback ({@link SessionCommands#resumable} with no known
+         * answer), which keeps Resume for a session that has an agent session
+         * id the provider was never asked about.
+         */
+        public TaskRow(ManagedAgentSession session, Optional<SessionActivity> activity, boolean running,
+                       Optional<String> branch, TaskPlacement placement, boolean readOnly, boolean folderMissing) {
+            this(session, activity, running, branch, placement, readOnly, folderMissing,
+                    SessionCommands.resumable(Optional.empty(), session.agentSessionId().isPresent()));
         }
 
         /** Whether the task works in this window's own worktree, running here or idle. */

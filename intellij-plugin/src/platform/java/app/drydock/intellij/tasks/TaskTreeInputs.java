@@ -12,6 +12,7 @@ import app.drydock.git.GhCliService.PullRequestListing;
 import app.drydock.git.WorktreeService;
 import app.drydock.git.WorktreeService.Worktree;
 import app.drydock.intellij.DrydockPluginService;
+import app.drydock.intellij.agent.AgentConsoles;
 import app.drydock.intellij.agent.AgentExecutionRegistry;
 import app.drydock.intellij.agent.HostedLifecycle;
 import app.drydock.intellij.project.ProjectIdentity;
@@ -64,6 +65,7 @@ final class TaskTreeInputs implements AutoCloseable {
     private final Map<Path, Instant> activityCache = new ConcurrentHashMap<>();
     private final Map<IssueKey, CachedIssues> issueCache = new ConcurrentHashMap<>();
     private final Map<PullRequestKey, CachedPullRequests> pullRequestCache = new ConcurrentHashMap<>();
+    private final ResumabilityCache resumability = new ResumabilityCache();
 
     private record IssueKey(Path root, Optional<String> repository) { }
 
@@ -76,6 +78,7 @@ final class TaskTreeInputs implements AutoCloseable {
     void invalidateWorktrees() {
         worktreeCache.clear();
         activityCache.clear();
+        resumability.clear();
     }
 
     void invalidateGitHub() {
@@ -93,6 +96,36 @@ final class TaskTreeInputs implements AutoCloseable {
         pullRequestCache.keySet().removeIf(key -> key.root().equals(root));
     }
 
+    /**
+     * Whether {@code root}'s listing is fetched on the next gather. The
+     * view that is the listing ({@code ISSUES} for issues, {@code
+     * PULL_REQUESTS} for pull requests) wants every project's listing, so
+     * those views load without an expansion click; every other view wants
+     * only the roots the user opened here. Pure.
+     */
+    static boolean listingWanted(TaskTreeModel.ViewFilter view, TaskTreeModel.ViewFilter listingView,
+                                 Set<Path> requested, Path root) {
+        return view == listingView || requested.contains(root);
+    }
+
+    /**
+     * Whether {@code root}'s GitHub listing is requested by the next gather: the
+     * view/section rules of {@link #listingWanted}, with the search box's explicit
+     * {@code /<glob>/} project scope applied first. A scoped-out project's row
+     * is not shown at all, so fetching its listing — or the worktree list the
+     * pull-request dedup needs — would be pure waste. Ordinary unscoped text is
+     * not a scope: a plain search still spans projects. The one predicate gates
+     * the listing request and the dedup worktree read alike. Pure.
+     */
+    static boolean githubListingWanted(TaskTreeModel.ViewFilter view, TaskTreeModel.ViewFilter listingView,
+                                       Set<Path> requested, Path root, TaskTreeModel.ProjectScope scope,
+                                       String displayName) {
+        if (scope.scoped() && !scope.matchesProject(displayName)) {
+            return false;
+        }
+        return listingWanted(view, listingView, requested, root);
+    }
+
     TaskTreeModel.Inputs gather(Project here, String filter, TaskTreeModel.ViewFilter viewFilter,
                                 Set<Path> requestedWorktrees, Set<Path> requestedIssues,
                                 Set<Path> requestedPullRequests) {
@@ -107,6 +140,7 @@ final class TaskTreeInputs implements AutoCloseable {
         Set<Path> pullRequestContainers = new HashSet<>();
         Map<Path, List<Worktree>> pullRequestDedupWorktrees = new HashMap<>();
         Set<Path> missing = new HashSet<>();
+        TaskTreeModel.ProjectScope scope = TaskTreeModel.parseFilter(filter);
         for (SharedProject project : plugin.sharedProjects().projects()) {
             if (project.isRemote()) {
                 projects.add(project);
@@ -124,13 +158,15 @@ final class TaskTreeInputs implements AutoCloseable {
             GitHubProjectSettings githubSettings = GitHubProjectSettings.load(project.id());
             if (githubSettings.issuesEnabled()) {
                 issueContainers.add(root);
-                if (requestedIssues.contains(root)) {
+                if (githubListingWanted(viewFilter, TaskTreeModel.ViewFilter.ISSUES, requestedIssues, root, scope,
+                        project.displayName())) {
                     issueRequests.put(root, issuesOf(root, githubSettings.repository()));
                 }
             }
             if (githubSettings.pullRequestsEnabled()) {
                 pullRequestContainers.add(root);
-                if (requestedPullRequests.contains(root)) {
+                if (githubListingWanted(viewFilter, TaskTreeModel.ViewFilter.PULL_REQUESTS, requestedPullRequests,
+                        root, scope, project.displayName())) {
                     pullRequestRequests.put(root, pullRequestsOf(root, githubSettings.repository()));
                     // Dedup needs the worktree list even when the user has never
                     // opened the Worktrees section (byMain is filled lazily), but
@@ -180,6 +216,11 @@ final class TaskTreeInputs implements AutoCloseable {
                             RepositoryCatalog.canonicalize(Path.of(window.getBasePath())),
                             ProjectIdentity.of(window).map(ProjectIdentity::repository).orElseGet(window::getName))));
         }
+        // Which stopped sessions still have a conversation to resume into —
+        // a blocking provider probe, cached (and pruned to the stopped
+        // catalog) by ResumabilityCache so a gather does not re-ask for it.
+        Map<ManagedSessionId, Boolean> resumable =
+                resumability.refresh(sessions, running, AgentConsoles::hasConversation);
         Map<RepositoryId, Path> recordedRoots = new HashMap<>();
         for (Repository repository : plugin.stateStore().state().repositories()) {
             if (!repository.isRemote()) {
@@ -228,7 +269,8 @@ final class TaskTreeInputs implements AutoCloseable {
         return new TaskTreeModel.Inputs(projects, sessions, byMain, mainRootOf, currentMain, currentWorking,
                 activity, running, hosts, missing, recordedRoots, worktreeContainers, issueContainers,
                 pullRequestContainers, openFolders, Map.copyOf(activityCache), Instant.now(),
-                issues, pullRequests, pullRequestDedupWorktrees, plugin.sharedProjects().problem(), filter, viewFilter);
+                issues, pullRequests, pullRequestDedupWorktrees, plugin.sharedProjects().problem(), filter, viewFilter,
+                resumable);
     }
 
     private CompletableFuture<IssueListing> issuesOf(Path root, Optional<String> repository) {
