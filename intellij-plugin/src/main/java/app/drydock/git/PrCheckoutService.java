@@ -32,16 +32,50 @@ import java.util.function.Supplier;
  * <em>main checkout</em> onto the PR branch -- exactly what a reviewer must
  * not have happen to them mid-task.</p>
  *
+ * <p>{@code gh} runs with {@code --force} because {@code pr-<n>} is
+ * drydock's naming convention for PR checkouts, and an earlier review of the
+ * same PR leaves it behind when its worktree is removed; a PR whose head
+ * moved by a rebase has diverged from that leftover branch by the time it is
+ * re-reviewed. Without {@code --force}, gh syncs the existing branch with
+ * {@code git merge --ff-only} and dies with "Not possible to
+ * fast-forward" -- a review that can never start again (verified against
+ * gh 2.102: the plugin's copy missed this flag while the standalone app's
+ * had it, so IDE reviews kept failing on re-reviewed PRs). With it, gh does
+ * {@code git reset --hard} to the PR's current head, which is what reviewing
+ * "the PR as it is now" means. That reset applies to any existing
+ * {@code pr-<n>}, including one a user made by hand: its old tip is then
+ * recoverable only from that branch's reflog. Nothing is reset under a live
+ * worktree: the path above was just verified absent, and if some other
+ * worktree still has {@code pr-<n>} checked out, git refuses the checkout
+ * before any reset.</p>
+ *
+ * <p>Even that is still one gh-version-dependent behaviour too many, so
+ * before {@code gh} runs, a leftover {@code pr-<n>} is deleted with git's
+ * safe delete ({@code -d}), which removes it only when it is fully merged:
+ * with no local {@code pr-<n>} to sync, gh only ever takes its clean
+ * {@code checkout -b --track} path, which every gh version has. An unmerged
+ * {@code pr-<n>} (a user's own commits, or a leftover a PR rebase diverged)
+ * or one checked out in some other live worktree is not deleted; it is
+ * handed to gh {@code --force}, which may reset an existing {@code pr-<n>}
+ * to the PR head (recoverable via its reflog) or, for a held branch,
+ * refuses and names that worktree, which is the actionable answer.</p>
+ *
  * <p>What this does instead, to the same end:</p>
  * <ol>
  *   <li>{@code git worktree add --detach <dir>} -- a new working tree at the
  *       current commit, main checkout untouched;</li>
- *   <li>{@code gh pr checkout <n> --branch <local>} run <em>inside</em> that
+ *   <li>{@code git branch -d pr-<n>} -- a {@code pr-<n>} left by an earlier
+ *       review, if one is left and fully merged; deleted rather than synced
+ *       so the step below has nothing to fast-forward over. An unmerged or
+ *       held {@code pr-<n>} is not deleted here; it is handed to step 3,
+ *       whose {@code --force} may reset an existing {@code pr-<n>} to the PR
+ *       head (recoverable via its reflog);</li>
+ *   <li>{@code gh pr checkout <n> --branch <local> --force} run <em>inside</em> that
  *       worktree, where {@code gh} resolves the repository from the working
  *       directory and checks the PR out there.</li>
  * </ol>
  *
- * <p>A failure at step 2 leaves a detached worktree behind, which is
+ * <p>A failure after step 1 leaves a detached worktree behind, which is
  * removed before the failure is reported: a half-made checkout is worse
  * than none, because the next attempt would then collide with it.</p>
  *
@@ -103,12 +137,17 @@ public final class PrCheckoutService implements AutoCloseable {
     }
 
     /**
-     * The PR number {@code branch} was checked out for, if it is one of
-     * ours. The inverse of {@link #localBranchFor(int)}, so a worktree can
-     * be recognised as the pull request it holds rather than as a branch
-     * that merely happens to be named {@code pr-something} -- a review
-     * queue that could not tell the difference filed a checked-out PR under
-     * AGENTS and diffed it against a guessed base.
+     * The PR number {@code branch} was checked out for, if its name follows
+     * drydock's {@code pr-<n>} checkout convention. The inverse of {@link
+     * #localBranchFor(int)}, so a worktree can be recognised as the pull
+     * request it holds rather than as a branch with a non-numeric
+     * {@code pr-} name such as {@code pr-fix-login} -- a review queue that
+     * could not tell the difference filed a checked-out PR under AGENTS and
+     * diffed it against a guessed base.
+     *
+     * <p>Recognition is by name alone: a hand-made {@code pr-<digits>}
+     * branch is also treated as a PR checkout, because {@code pr-<n>} is a
+     * naming convention, not a reserved or enforced namespace.</p>
      */
     public static Optional<Integer> pullRequestNumberOf(String branch) {
         if (branch == null || !branch.startsWith("pr-")) {
@@ -157,7 +196,7 @@ public final class PrCheckoutService implements AutoCloseable {
         }
 
         // Step 1: a detached worktree at the current commit. Detached on
-        // purpose -- gh assigns the branch in step 2, and creating one here
+        // purpose -- gh assigns the branch in step 3, and creating one here
         // would collide with it.
         ProcessResult added = run(List.of(git.toString(), "-C", repositoryRoot.toString(),
                 "worktree", "add", "--detach", worktree.toString()), repositoryRoot, GIT_TIMEOUT);
@@ -166,13 +205,45 @@ public final class PrCheckoutService implements AutoCloseable {
                     + ProcessRunner.excerpt(added.stderr()));
         }
 
-        // Step 2: gh resolves the repository from its working directory, so
+        // Step 3: gh resolves the repository from its working directory, so
         // running it INSIDE the new worktree checks the PR out there and
         // leaves the main checkout alone.
+        //
+        // Step 2, before it runs: a pr-<n> left by an earlier review of this
+        // PR is removed with git's safe delete, and only when it is fully
+        // merged, so gh has no local branch to "sync" -- with one present,
+        // gh's behaviour depends on its version and flags (merge --ff-only by
+        // default, reset only with --force), and the merge dies on a branch a
+        // PR rebase has diverged from. An unmerged pr-<n> (a user's own
+        // commits, or a leftover a PR rebase diverged) or one checked out in
+        // some other worktree is not deleted here and is handed to gh: its
+        // --force resets an existing branch to the PR head, and for a held
+        // branch its refusal names that worktree, which is the actionable
+        // answer. Inside the same try as gh itself so a failure here cannot
+        // strand the worktree of step 1.
         String branch = localBranchFor(prNumber);
         try {
+            // -d, never -D: git refuses to delete a branch with unmerged
+            // commits. Any non-zero exit (unmerged, held, absent) only means
+            // "not deleted" and gh decides; an absent branch goes unlogged.
+            // The delete runs under LC_ALL=C: the absent-branch suppression
+            // below matches git's C-locale stderr wording ("error: branch
+            // 'x' not found"), and under the host's LANG a localized git
+            // words it differently ("nicht gefunden", …), which would log a
+            // misleading WARNING on every first review. Exit codes cannot
+            // discriminate -- absent, unmerged and held all exit 1 -- so the
+            // pinned locale is the only deterministic discriminator. LC_ALL
+            // outranks every other locale variable, so this holds regardless
+            // of the inherited environment; ProcessRunner adds it to the
+            // inherited env rather than replacing it.
+            ProcessResult deleted = run(List.of(git.toString(), "-C", repositoryRoot.toString(),
+                    "branch", "-d", branch), repositoryRoot, GIT_TIMEOUT, Map.of("LC_ALL", "C"));
+            if (deleted.exitCode() != 0 && !deleted.stderr().contains("not found")) {
+                LOG.log(Level.WARNING, "Left the existing branch " + branch + " in place before checking out PR #"
+                        + prNumber + "; gh --force will decide: " + ProcessRunner.excerpt(deleted.stderr()));
+            }
             ProcessResult checkedOut = run(List.of(gh.toString(), "pr", "checkout",
-                    String.valueOf(prNumber), "--branch", branch), worktree, CHECKOUT_TIMEOUT);
+                    String.valueOf(prNumber), "--branch", branch, "--force"), worktree, CHECKOUT_TIMEOUT);
             if (checkedOut.exitCode() == 0) {
                 return worktree;
             }
@@ -202,6 +273,12 @@ public final class PrCheckoutService implements AutoCloseable {
     }
 
     private ProcessResult run(List<String> command, Path workingDirectory, Duration timeout) {
+        return run(command, workingDirectory, timeout, Map.of());
+    }
+
+    /** As {@link #run(List, Path, Duration)} with extra env entries ADDED to the child's inherited environment. */
+    private ProcessResult run(List<String> command, Path workingDirectory, Duration timeout,
+                              Map<String, String> extraEnv) {
         // The child gets the process PATH (the IDE's own, already repaired by
         // IntelliJ; currentRealPath() is System.getenv("PATH") here) with the
         // known real-install locations appended. Those appended dirs are the
@@ -222,10 +299,16 @@ public final class PrCheckoutService implements AutoCloseable {
         }
         try {
             if (childPath == null) {
-                return ProcessRunner.run(command, workingDirectory, timeout);
+                if (extraEnv.isEmpty()) {
+                    return ProcessRunner.run(command, workingDirectory, timeout);
+                }
+                return ProcessRunner.run(command, new ProcessRunner.Options(
+                        workingDirectory, timeout, false, extraEnv));
             }
+            java.util.Map<String, String> env = new java.util.HashMap<>(extraEnv);
+            env.put("PATH", childPath);
             return ProcessRunner.run(command, new ProcessRunner.Options(
-                    workingDirectory, timeout, false, Map.of("PATH", childPath)));
+                    workingDirectory, timeout, false, env));
         } catch (IOException e) {
             throw new PrCheckoutException("Could not run " + command.get(0) + ": " + e.getMessage(), e);
         } catch (ProcessTimeoutException e) {

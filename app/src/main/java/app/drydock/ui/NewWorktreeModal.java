@@ -108,6 +108,9 @@ final class NewWorktreeModal extends VBox {
     private final ComboBox<String> baseField = new ComboBox<>();
     private final TextField directoryField = new TextField();
     private final TextArea taskField = new TextArea();
+
+    /** The task field's group, hidden for TERMINAL (typed text would be executed by the shell). */
+    private final VBox taskGroup;
     private final AgentSelector agentSelector;
     private final ModelSelector modelSelector;
     private final CheckBox evalMode = new CheckBox("Eval mode");
@@ -227,10 +230,16 @@ final class NewWorktreeModal extends VBox {
         taskField.setWrapText(true);
 
         modelSelector = new ModelSelector(agentRegistry, lastUsedModel);
+        taskGroup = fieldGroup("Start the agent with a task", taskField);
         agentSelector = new AgentSelector(agentRegistry, preselected, requireRemoteCapability, kind -> {
             boolean terminal = kind == AgentKind.TERMINAL;
             modelSelector.setManaged(!terminal);
             modelSelector.setVisible(!terminal);
+            // The task field is hidden for the same reason StartSessionModal
+            // hides it: the task is typed into the session, and a shell would
+            // execute it as a command the moment the session starts.
+            taskGroup.setManaged(!terminal);
+            taskGroup.setVisible(!terminal);
             if (!terminal) {
                 modelSelector.setAgent(kind);
             }
@@ -246,10 +255,13 @@ final class NewWorktreeModal extends VBox {
             }
         });
         // AgentSelector fires its callback only on click, so set the initial
-        // checkbox state for the preselected agent here too.
+        // state for the preselected agent here too (the same hiding the
+        // callback above does, for a dialog opened straight onto TERMINAL).
         if (preselected == AgentKind.TERMINAL) {
             modelSelector.setManaged(false);
             modelSelector.setVisible(false);
+            taskGroup.setManaged(false);
+            taskGroup.setVisible(false);
         } else {
             modelSelector.setAgent(preselected);
         }
@@ -385,7 +397,7 @@ final class NewWorktreeModal extends VBox {
                     : branchText();
             onCreate.create(mode, lastState.outcome(), branch, baseText(),
                     Path.of(directoryField.getText().strip()).toAbsolutePath().normalize(),
-                    task.isEmpty() ? Optional.empty() : Optional.of(task), agentSelector.selected(),
+                    StartSessionModal.taskFor(agentSelector.selected(), task), agentSelector.selected(),
                     modelSelector.selected(), evalMode.isSelected());
         });
         Region footerSpacer = new Region();
@@ -399,7 +411,7 @@ final class NewWorktreeModal extends VBox {
                 fieldGroup("Worktree directory", directoryField),
                 agentSelector,
                 modelSelector,
-                fieldGroup("Start the agent with a task", taskField),
+                taskGroup,
                 evalMode,
                 commandPreview, hintRow, errorLine, buttons);
 

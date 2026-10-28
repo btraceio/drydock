@@ -180,9 +180,8 @@ final class StartSessionModal extends VBox {
         Button start = new Button("Start session ▸");
         start.getStyleClass().add("worktree-create-button");
         start.setOnAction(e -> {
-            String task = taskField.getText() == null ? "" : taskField.getText().strip();
             onClose.run();
-            onStart.start(task.isEmpty() ? Optional.empty() : Optional.of(task), selector.selected(),
+            onStart.start(StartSessionModal.taskFor(selector.selected(), taskField.getText()), selector.selected(),
                     modelSelector.selected(), evalMode.isSelected());
         });
         Region footerSpacer = new Region();
@@ -234,5 +233,22 @@ final class StartSessionModal extends VBox {
                 .map(Agent::displayName)
                 .findFirst()
                 .orElse(kind.persistedName());
+    }
+
+    /**
+     * The task a session launch carries, given the selected harness and what
+     * the (possibly hidden) task field held: a TERMINAL session has no agent
+     * to hand a task to, and typed text would be EXECUTED by the shell --
+     * including text typed for another harness before the Terminal toggle was
+     * clicked, which hiding the field (see {@code applyAgent}) does not clear.
+     * Pure, and shared with {@code NewWorktreeModal}, whose task field needs
+     * the same guard.
+     */
+    static Optional<String> taskFor(AgentKind kind, String typed) {
+        if (kind == AgentKind.TERMINAL) {
+            return Optional.empty();
+        }
+        String task = typed == null ? "" : typed.strip();
+        return task.isEmpty() ? Optional.empty() : Optional.of(task);
     }
 }

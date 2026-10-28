@@ -138,16 +138,52 @@ public final class GhCliService implements AutoCloseable {
      * Empty when {@code gh} is missing, not authenticated, or no PR exists
      * for the branch -- callers treat all of those the same (no
      * information, not an error).
+     *
+     * <p>A {@code pr-<n>} checkout is looked up by the PR number its branch
+     * name encodes, not by the branch: the alias is drydock's naming
+     * convention for PR checkouts ({@link PrCheckoutService#localBranchFor}),
+     * and gh resolves a branch to a PR by its HEAD name -- {@code gh pr view
+     * pr-664} answers "no pull requests found for branch pr-664" because the
+     * PR's head branch is the author's name, not the {@code pr-<n>} checkout
+     * name. Going by the number is what makes a session started
+     * from a PR able to find that PR again at all.</p>
      */
     public CompletableFuture<Optional<PrInfo>> viewPr(Path root, String branch) {
         return CompletableFuture.supplyAsync(() -> viewPrBlocking(root, branch), executor);
     }
 
+    /**
+     * The selector {@code gh pr view} is given for a checkout's
+     * {@code branch}: the PR number when the branch has drydock's
+     * {@code pr-<n>} checkout name (see {@link #viewPr}), the branch name
+     * itself otherwise. Pure so the alias rule is unit-testable without a gh.
+     *
+     * <p>Namespace assumption: a {@code pr-<digits>} branch is assumed to be
+     * a drydock PR checkout ({@link PrCheckoutService#localBranchFor}). That
+     * is drydock's naming convention, not a reserved or enforced namespace:
+     * the match goes by name alone and nothing records whether drydock
+     * created the branch, so a hand-made {@code pr-664} is looked up as PR
+     * #664. This is deliberate and not narrowed here: {@link
+     * PrCheckoutService#pullRequestNumberOf} is the app-wide identity of a PR
+     * worktree, and review scopes and the repository's PR listing match on it
+     * too. Lookalikes that are not all digits ({@code pr-fix-login},
+     * {@code pr-664x}) are passed through as branch names.</p>
+     */
+    static String prSelector(String branch) {
+        return PrCheckoutService.pullRequestNumberOf(branch)
+                .map(String::valueOf)
+                .orElse(branch);
+    }
+
     Optional<PrInfo> viewPrBlocking(Path root, String branch) {
-        Path gh = locate().orElse(null);
-        if (gh == null) {
-            return Optional.empty();
-        }
+        return locate().flatMap(gh -> viewPrWith(gh, root, branch));
+    }
+
+    /**
+     * The lookup with {@code gh} already resolved; package-private and static
+     * so the argv gh receives is testable with a scripted gh.
+     */
+    static Optional<PrInfo> viewPrWith(Path gh, Path root, String branch) {
         // gh has no --end-of-options; a branch name that looks like an option
         // must never reach its argv as one.
         if (branch.isBlank() || branch.startsWith("-")) {
@@ -155,7 +191,7 @@ public final class GhCliService implements AutoCloseable {
             return Optional.empty();
         }
         ProcessResult result = runIn(root,
-                List.of(gh.toString(), "pr", "view", branch, "--json", "number,state,url"));
+                List.of(gh.toString(), "pr", "view", prSelector(branch), "--json", "number,state,url"));
         if (result == null) {
             return Optional.empty();
         }

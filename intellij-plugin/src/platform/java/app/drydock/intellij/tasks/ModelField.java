@@ -19,6 +19,7 @@ import java.awt.BorderLayout;
 import java.awt.event.FocusAdapter;
 import java.awt.event.FocusEvent;
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -37,7 +38,7 @@ import java.util.function.Function;
  * same contract.
  *
  * <p>Search filters the popup's items (case-insensitive substring, over the
- * retained {@code allItems}, so clearing the query restores the full list) while the
+ * selected harness's retained suggestions, so clearing the query restores the full list) while the
  * editor keeps the query being typed — the model list is a SUGGESTION, never
  * a whitelist. Free text is a first-class input: Claude and Codex have no
  * model-listing command, so their suggestions are a handful of aliases or
@@ -48,9 +49,17 @@ import java.util.function.Function;
  * back does not silently drop a model the human typed by hand. Each
  * harness's first visit seeds from the repository's last-used model, and its
  * suggestion load runs once ({@code suggestions} may block — Pi spawns a
- * {@code pi --list-models} subprocess) on a pooled thread, merging in when
- * it arrives; the picker is usable from the first keystroke with just the
- * remembered model.</p>
+ * {@code pi --list-models} subprocess) on a pooled thread, landing in the
+ * picker when it arrives; the picker is usable from the first keystroke with
+ * just the remembered model.</p>
+ *
+ * <p>The popup's list is the SELECTED harness's, never a merge: a harness's
+ * suggestions replace the previous harness's wholesale on switch, because a
+ * merged list reads as one harness's offering while carrying another's ids
+ * (Pi's whole catalog under Claude's or Codex's toggle — the defect this
+ * scoping fixes; the standalone app's {@code ModelSelector} had it too). A
+ * harness whose catalog has not loaded yet shows an empty list until it
+ * lands; the editor's remembered model stays usable throughout.</p>
  */
 final class ModelField extends JPanel {
 
@@ -62,15 +71,22 @@ final class ModelField extends JPanel {
     /** What the editor held for each harness, so switching agents and back restores it. */
     private final Map<AgentKind, String> textByKind = new HashMap<>();
 
+    /**
+     * Each harness's loaded suggestions, kept per kind so switching back
+     * shows its own list again without a second load (see {@link #setAgent}).
+     * The selected harness's entry is also the ONLY source of the popup's
+     * items: {@link #applyFilter} filters it directly, no copy is kept.
+     * Written on the EDT only: {@link #setAgent} runs on the dialog's thread
+     * and the load's merge hops through {@code invokeLater}.
+     */
+    private final Map<AgentKind, List<String>> suggestionsByKind = new EnumMap<>(AgentKind.class);
+
     /** Harnesses whose suggestion load has been kicked off (one subprocess per harness per picker). */
     private final Set<AgentKind> requested = new LinkedHashSet<>();
 
     private final Function<AgentKind, List<String>> suggestions;
     private final JComboBox<String> combo = new JComboBox<>();
     private final SuggestionModel model = new SuggestionModel();
-
-    /** Every suggestion merged so far; the combo's items are always this list filtered by the editor query. */
-    private final List<String> allItems = new ArrayList<>();
 
     /** True while this class itself writes the editor text or the items, so the listener stays idle. */
     private boolean updating;
@@ -106,11 +122,16 @@ final class ModelField extends JPanel {
 
     /**
      * Points the picker at {@code kind}: restores what the editor held for it
-     * (seeded from the repository's last-used model on first visit) and kicks
-     * off the suggestion load.
+     * (seeded from the repository's last-used model on first visit), swaps the
+     * popup's list to this harness's own suggestions, and kicks off the
+     * suggestion load when it is the first visit.
      */
     void setAgent(AgentKind kind, Function<AgentKind, Optional<String>> lastUsedModel) {
         currentKind = kind;
+        // The list is scoped to the harness: currentKind is set first, so
+        // setText's re-filter already shows this harness's own cached list
+        // (empty until its first load lands), and one harness's catalog never
+        // reads as another's offering.
         setText(textByKind.computeIfAbsent(kind, k -> lastUsedModel.apply(k).orElse("")));
         if (requested.add(kind)) {
             loadSuggestions(kind);
@@ -144,7 +165,8 @@ final class ModelField extends JPanel {
     }
 
     /**
-     * Rebuilds the popup's items from {@code allItems} to those matching
+     * Rebuilds the popup's items from the selected harness's cached
+     * suggestions ({@code suggestionsByKind}) to those matching
      * {@code query}, so a shorter query (or clearing it) brings back items an
      * earlier query hid. The selection is set to the RAW editor text, so the
      * combo UI's configureEditor writes back the identical string and never
@@ -153,8 +175,11 @@ final class ModelField extends JPanel {
     private void applyFilter(String query) {
         updating = true;
         try {
+            List<String> source = currentKind == null
+                    ? List.of()
+                    : suggestionsByKind.getOrDefault(currentKind, List.of());
             List<String> items = new ArrayList<>();
-            for (String item : allItems) {
+            for (String item : source) {
                 if (matches(item, query)) {
                     items.add(item);
                 }
@@ -199,10 +224,12 @@ final class ModelField extends JPanel {
     }
 
     /**
-     * Merges the harness's suggestions in on a pooled thread (the probe may
+     * Loads the harness's suggestions on a pooled thread (the probe may
      * spawn a subprocess and block); the picker stays usable meanwhile with
-     * the remembered model. Guarded by kind, so a slow catalog for an agent
-     * the human already switched away from never lands in the wrong picker.
+     * the remembered model. The result is stored per kind — returning to a
+     * harness shows its own list without a second load — and swapped in only
+     * when it is still the selected kind, so a slow catalog for an agent the
+     * human already switched away from never lands in the wrong picker.
      */
     private void loadSuggestions(AgentKind kind) {
         ApplicationManager.getApplication().executeOnPooledThread(() -> {
@@ -217,16 +244,15 @@ final class ModelField extends JPanel {
             // under any active modality; the kind guard above and the field's
             // own filter keep a late merge harmless.
             ApplicationManager.getApplication().invokeLater(() -> {
+                // Deduped HERE, at store time, so the setAgent swap replays
+                // the same list the load showed (a repeated id — two catalog
+                // sources listing the same model — must appear once).
+                suggestionsByKind.put(kind, List.copyOf(new LinkedHashSet<>(found)));
                 if (currentKind != kind) {
                     return;
                 }
-                for (String suggestion : found) {
-                    if (!allItems.contains(suggestion)) {
-                        allItems.add(suggestion);
-                    }
-                }
                 // A query typed before the catalog arrived must still hold:
-                // merged items are filtered against it like the rest (empty query = all).
+                // the new list is filtered against it like the rest (empty query = all).
                 applyFilter(editorText());
             }, ModalityState.any());
         });
