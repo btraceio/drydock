@@ -14,10 +14,13 @@ import app.drydock.git.GhCliService.IssueListing;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.GhCliService.OpenPullRequest;
 import app.drydock.git.GhCliService.PullRequestListing;
+import app.drydock.git.JiraIssue;
+import app.drydock.git.JiraIssueListing;
 import app.drydock.git.WorktreeService.Worktree;
 import app.drydock.intellij.tasks.TaskNode.AddCurrentProject;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
 import app.drydock.intellij.tasks.TaskNode.IssueRow;
+import app.drydock.intellij.tasks.TaskNode.JiraIssueRow;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.intellij.tasks.TaskNode.PullRequestRow;
 import app.drydock.intellij.tasks.TaskNode.Section;
@@ -73,6 +76,7 @@ class TaskTreeModelTest {
         final Set<Path> openFolders = new HashSet<>();
         final Map<Path, Instant> lastActivity = new HashMap<>();
         final Map<Path, IssueListing> issues = new HashMap<>();
+        final Map<Path, JiraIssueListing> jiraIssues = new HashMap<>();
         final Map<Path, PullRequestListing> pullRequests = new HashMap<>();
         final Map<Path, List<Worktree>> pullRequestDedupWorktrees = new HashMap<>();
         Map<ManagedSessionId, Boolean> resumable = Map.of();
@@ -104,7 +108,8 @@ class TaskTreeModelTest {
             return new TaskTreeModel.Inputs(projects, sessions, worktrees, mainRootOf, currentMain, currentWorking,
                     activity, running, hosts, missing, recordedRoots, worktreeContainers, issueContainers,
                     pullRequestContainers, openFolders, lastActivity, T,
-                    issues, pullRequests, pullRequestDedupWorktrees, problem, filter, viewFilter, resumable);
+                    issues, jiraIssues, pullRequests, pullRequestDedupWorktrees, problem, filter, viewFilter,
+                    resumable);
         }
     }
 
@@ -166,6 +171,21 @@ class TaskTreeModelTest {
 
     private static OpenPullRequest pullRequest(int number, String title, String headBranch, boolean draft) {
         return new OpenPullRequest(number, title, headBranch, "main", draft, Optional.empty(), Optional.empty());
+    }
+
+    private static JiraIssue jiraIssue(String key, String summary, List<String> labels, Optional<Instant> updatedAt) {
+        return new JiraIssue(key, summary, "https://acme.atlassian.net/browse/" + key, labels, updatedAt);
+    }
+
+    /** "#9" for a GitHub row, the key for a Jira row: one merged section's children as comparable ids. */
+    private static String issueRowId(TaskNode node) {
+        if (node instanceof IssueRow issue) {
+            return "#" + issue.issue().number();
+        }
+        if (node instanceof JiraIssueRow jira) {
+            return jira.issue().key();
+        }
+        throw new AssertionError("unexpected Issues child: " + node);
     }
 
     @Test
@@ -378,6 +398,155 @@ class TaskTreeModelTest {
 
         IssueRow issue = assertInstanceOf(IssueRow.class, issueNodes(row).getFirst());
         assertEquals(9, issue.issue().number());
+    }
+
+    @Test
+    void mixedSourcesGiveOneIssuesSectionInterleavedByMostRecentlyUpdated() {
+        In in = new In().project(BTRACE);
+        in.issueContainers.add(BTRACE);
+        in.issues.put(BTRACE, new IssueListing.Listed(List.of(
+                new OpenIssue(4, "GitHub middle", Optional.empty(), List.of(), List.of(), Optional.of(T)),
+                new OpenIssue(9, "GitHub newest", Optional.empty(), List.of(), List.of(), Optional.of(T.plusSeconds(60))),
+                new OpenIssue(2, "GitHub no timestamp", Optional.empty(), List.of(), List.of(), Optional.empty()))));
+        in.jiraIssues.put(BTRACE, new JiraIssueListing.Listed(List.of(
+                jiraIssue("PROJ-1", "Jira second", List.of(), Optional.of(T.plusSeconds(30))),
+                jiraIssue("PROJ-2", "Jira no timestamp", List.of(), Optional.empty()))));
+
+        ProjectRow row = projectRow(TaskTreeModel.build(in.build()), BTRACE);
+
+        // One section, newest first, a row with no timestamp sorts as EPOCH,
+        // and the stable sort keeps the GitHub row ahead of the Jira row on
+        // the EPOCH tie.
+        assertEquals(1, row.children().stream().filter(node -> node instanceof Section section
+                && section.kind() == SectionKind.ISSUES).count());
+        assertEquals(List.of("#9", "PROJ-1", "#4", "#2", "PROJ-2"),
+                issueNodes(row).stream().map(TaskTreeModelTest::issueRowId).toList());
+    }
+
+    @Test
+    void jiraOnlyGivesJiraRowsAndStaysDeferredUntilRequested() {
+        In in = new In().project(BTRACE);
+        in.issueContainers.add(BTRACE);
+
+        assertEquals(List.of(new TaskNode.Deferred("Loading issues…")),
+                section(projectRow(TaskTreeModel.build(in.build()), BTRACE), SectionKind.ISSUES)
+                        .orElseThrow().children());
+
+        in.jiraIssues.put(BTRACE, new JiraIssueListing.Listed(List.of(
+                jiraIssue("PROJ-123", "Fix allocation accounting", List.of("profiling"), Optional.of(T)))));
+
+        assertEquals(List.of("PROJ-123"), issueNodes(projectRow(TaskTreeModel.build(in.build()), BTRACE))
+                .stream().map(TaskTreeModelTest::issueRowId).toList());
+    }
+
+    @Test
+    void neitherSourceGivesNoIssuesSection() {
+        In in = new In().project(BTRACE);
+
+        assertTrue(section(projectRow(TaskTreeModel.build(in.build()), BTRACE), SectionKind.ISSUES).isEmpty());
+    }
+
+    @Test
+    void jiraFailureKeepsTheGitHubRowsAndAddsAProblemRow() {
+        In in = new In().project(BTRACE);
+        in.issueContainers.add(BTRACE);
+        in.issues.put(BTRACE, new IssueListing.Listed(List.of(
+                new OpenIssue(9, "Allocation regression", Optional.empty(), List.of("profiling"), List.of(),
+                        Optional.of(T)))));
+        in.jiraIssues.put(BTRACE, new JiraIssueListing.Failed("boom"));
+
+        List<TaskNode> children = issueNodes(projectRow(TaskTreeModel.build(in.build()), BTRACE));
+
+        assertEquals(new TaskNode.ListProblem("Jira issues: boom"), children.get(0));
+        assertEquals(List.of("#9"), children.stream().skip(1).map(TaskTreeModelTest::issueRowId).toList());
+    }
+
+    @Test
+    void githubFailureKeepsTheJiraRowsAndAddsAProblemRow() {
+        In in = new In().project(BTRACE);
+        in.issueContainers.add(BTRACE);
+        in.issues.put(BTRACE, new IssueListing.Failed("gh exited 1"));
+        in.jiraIssues.put(BTRACE, new JiraIssueListing.Listed(List.of(
+                jiraIssue("PROJ-123", "Fix allocation accounting", List.of("profiling"), Optional.of(T)))));
+
+        List<TaskNode> children = issueNodes(projectRow(TaskTreeModel.build(in.build()), BTRACE));
+
+        assertEquals(new TaskNode.ListProblem("GitHub issues: gh exited 1"), children.get(0));
+        assertEquals(List.of("PROJ-123"), children.stream().skip(1).map(TaskTreeModelTest::issueRowId).toList());
+    }
+
+    @Test
+    void bothSourcesFailingGivesBothProblemRowsGitHubFirst() {
+        In in = new In().project(BTRACE);
+        in.issueContainers.add(BTRACE);
+        in.issues.put(BTRACE, new IssueListing.Failed("gh exited 1"));
+        in.jiraIssues.put(BTRACE, new JiraIssueListing.Failed("boom"));
+
+        List<TaskNode> children = issueNodes(projectRow(TaskTreeModel.build(in.build()), BTRACE));
+
+        assertEquals(List.of(new TaskNode.ListProblem("GitHub issues: gh exited 1"),
+                new TaskNode.ListProblem("Jira issues: boom")), children);
+    }
+
+    @Test
+    void jiraUnsupportedAddsNoRowAndBothUnsupportedGiveNoSection() {
+        In in = new In().project(BTRACE);
+        in.issueContainers.add(BTRACE);
+        in.issues.put(BTRACE, new IssueListing.Listed(List.of(
+                new OpenIssue(9, "Allocation regression", Optional.empty(), List.of(), List.of(), Optional.of(T)))));
+        in.jiraIssues.put(BTRACE, new JiraIssueListing.Unsupported());
+
+        assertEquals(List.of("#9"), issueNodes(projectRow(TaskTreeModel.build(in.build()), BTRACE))
+                .stream().map(TaskTreeModelTest::issueRowId).toList());
+
+        in.issues.put(BTRACE, new IssueListing.Unsupported());
+
+        assertTrue(section(projectRow(TaskTreeModel.build(in.build()), BTRACE), SectionKind.ISSUES).isEmpty());
+    }
+
+    @Test
+    void searchMatchesJiraKeysSummariesLabelsAndGitHubNumbers() {
+        List<OpenIssue> github = List.of(
+                new OpenIssue(9, "Allocation regression", Optional.empty(), List.of("bug"), List.of(),
+                        Optional.of(T)));
+        List<JiraIssue> jira = List.of(
+                jiraIssue("PROJ-123", "Fix allocation accounting", List.of("profiling"), Optional.of(T)),
+                jiraIssue("OPS-7", "Inspect the agent loader", List.of("triage"), Optional.of(T)));
+
+        assertEquals(List.of("PROJ-123"), issueIdsMatching("proj-12", github, jira));
+        assertEquals(List.of("OPS-7"), issueIdsMatching("inspect", github, jira));
+        assertEquals(List.of("OPS-7"), issueIdsMatching("TRIAGE", github, jira));
+        assertEquals(List.of("#9"), issueIdsMatching("#9", github, jira));
+    }
+
+    private static List<String> issueIdsMatching(String filter, List<OpenIssue> github, List<JiraIssue> jira) {
+        In in = new In().project(BTRACE);
+        in.issueContainers.add(BTRACE);
+        in.issues.put(BTRACE, new IssueListing.Listed(github));
+        in.jiraIssues.put(BTRACE, new JiraIssueListing.Listed(jira));
+        in.filter = filter;
+
+        return issueNodes(projectRow(TaskTreeModel.build(in.build()), BTRACE)).stream()
+                .map(TaskTreeModelTest::issueRowId).toList();
+    }
+
+    @Test
+    void issuesViewFilterShowsJiraRows() {
+        In in = new In().project(BTRACE);
+        in.issueContainers.add(BTRACE);
+        in.sessions.add(session("Allocation session", BTRACE));
+        in.issues.put(BTRACE, new IssueListing.Listed(List.of(
+                new OpenIssue(9, "Allocation regression", Optional.empty(), List.of("profiling"), List.of(),
+                        Optional.of(T)))));
+        in.jiraIssues.put(BTRACE, new JiraIssueListing.Listed(List.of(
+                jiraIssue("PROJ-123", "Fix allocation accounting", List.of("profiling"), Optional.of(T)))));
+        in.viewFilter = ViewFilter.ISSUES;
+
+        ProjectRow row = projectRow(TaskTreeModel.build(in.build()), BTRACE);
+
+        assertTrue(section(row, SectionKind.SESSIONS).isEmpty());
+        assertEquals(List.of("#9", "PROJ-123"), issueNodes(row).stream()
+                .map(TaskTreeModelTest::issueRowId).toList());
     }
 
     @Test

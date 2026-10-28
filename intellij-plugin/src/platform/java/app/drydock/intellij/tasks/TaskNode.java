@@ -4,6 +4,7 @@ import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.SessionActivity;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.GhCliService.OpenPullRequest;
+import app.drydock.git.JiraIssue;
 import app.drydock.intellij.agent.SessionCommands;
 import app.drydock.projects.SharedProject;
 
@@ -152,6 +153,14 @@ public sealed interface TaskNode {
     /** One open GitHub issue belonging to the containing registered project. */
     record IssueRow(Path mainRoot, OpenIssue issue) implements TaskNode {
         public IssueRow {
+            Objects.requireNonNull(mainRoot, "mainRoot");
+            Objects.requireNonNull(issue, "issue");
+        }
+    }
+
+    /** One open Jira issue belonging to the containing registered project, in the same Issues section as GitHub rows. */
+    record JiraIssueRow(Path mainRoot, JiraIssue issue) implements TaskNode {
+        public JiraIssueRow {
             Objects.requireNonNull(mainRoot, "mainRoot");
             Objects.requireNonNull(issue, "issue");
         }

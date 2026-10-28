@@ -9,6 +9,8 @@ import app.drydock.domain.SessionActivity;
 import app.drydock.git.GhCliService;
 import app.drydock.git.GhCliService.IssueListing;
 import app.drydock.git.GhCliService.PullRequestListing;
+import app.drydock.git.JiraIssueListing;
+import app.drydock.git.JiraService;
 import app.drydock.git.WorktreeService;
 import app.drydock.git.WorktreeService.Worktree;
 import app.drydock.intellij.DrydockPluginService;
@@ -57,10 +59,17 @@ final class TaskTreeInputs implements AutoCloseable {
 
     private static final long GIT_TIMEOUT_SECONDS = 15;
     private static final long GITHUB_TIMEOUT_SECONDS = 20;
+    // The tree waits longer than the client's own bound (connect + request
+    // plus slack): the client timeout turns a slow site into a Failed
+    // listing, and this outer bound only guards a future that somehow never
+    // completes at all.
+    private static final long JIRA_TIMEOUT_SECONDS =
+            JiraService.CONNECT_TIMEOUT.plus(JiraService.REQUEST_TIMEOUT).plusSeconds(5).toSeconds();
     private static final long ISSUE_CACHE_NANOS = TimeUnit.MINUTES.toNanos(1);
 
     private final WorktreeService worktrees = new WorktreeService();
     private final GhCliService github = new GhCliService();
+    private final JiraIssueSource jira = new JiraIssueSource();
     private final Map<Path, List<Worktree>> worktreeCache = new ConcurrentHashMap<>();
     private final Map<Path, Instant> activityCache = new ConcurrentHashMap<>();
     private final Map<IssueKey, CachedIssues> issueCache = new ConcurrentHashMap<>();
@@ -84,6 +93,11 @@ final class TaskTreeInputs implements AutoCloseable {
     void invalidateGitHub() {
         issueCache.clear();
         pullRequestCache.clear();
+    }
+
+    /** Forgets every cached Jira listing, so the next gather re-queries each project. */
+    void invalidateJira() {
+        jira.invalidate();
     }
 
     /** Forgets {@code root}'s cached issue listing, so the next gather re-queries it. */
@@ -126,6 +140,11 @@ final class TaskTreeInputs implements AutoCloseable {
         return listingWanted(view, listingView, requested, root);
     }
 
+    /** Forgets {@code root}'s cached Jira listing, so the next gather re-queries it. */
+    void invalidateJiraIssues(Path root) {
+        jira.invalidate(root);
+    }
+
     TaskTreeModel.Inputs gather(Project here, String filter, TaskTreeModel.ViewFilter viewFilter,
                                 Set<Path> requestedWorktrees, Set<Path> requestedIssues,
                                 Set<Path> requestedPullRequests) {
@@ -134,6 +153,7 @@ final class TaskTreeInputs implements AutoCloseable {
         Map<Path, List<Worktree>> byMain = new HashMap<>();
         Map<Path, Path> mainRootOf = new HashMap<>();
         Map<Path, CompletableFuture<IssueListing>> issueRequests = new LinkedHashMap<>();
+        Map<Path, CompletableFuture<JiraIssueListing>> jiraRequests = new LinkedHashMap<>();
         Map<Path, CompletableFuture<PullRequestListing>> pullRequestRequests = new LinkedHashMap<>();
         Set<Path> worktreeContainers = new HashSet<>();
         Set<Path> issueContainers = new HashSet<>();
@@ -156,11 +176,19 @@ final class TaskTreeInputs implements AutoCloseable {
             mainRootOf.put(root, root);
             worktreeContainers.add(root);
             GitHubProjectSettings githubSettings = GitHubProjectSettings.load(project.id());
-            if (githubSettings.issuesEnabled()) {
+            JiraProjectSettings jiraSettings = JiraProjectSettings.load(project.id());
+            if (githubSettings.issuesEnabled() || jiraSettings.enabled()) {
                 issueContainers.add(root);
                 if (githubListingWanted(viewFilter, TaskTreeModel.ViewFilter.ISSUES, requestedIssues, root, scope,
                         project.displayName())) {
                     issueRequests.put(root, issuesOf(root, githubSettings.repository()));
+                }
+                // The Jira listing follows the same view/scope rule as the
+                // GitHub one; only the settings gate and the request map
+                // differ.
+                if (jiraSettings.enabled() && githubListingWanted(viewFilter, TaskTreeModel.ViewFilter.ISSUES,
+                        requestedIssues, root, scope, project.displayName())) {
+                    jiraRequests.put(root, jira.issuesOf(root, jiraSettings));
                 }
             }
             if (githubSettings.pullRequestsEnabled()) {
@@ -253,6 +281,19 @@ final class TaskTreeInputs implements AutoCloseable {
                 issues.put(entry.getKey(), new IssueListing.Failed("GitHub issue lookup did not complete"));
             }
         }
+        Map<Path, JiraIssueListing> jiraIssues = new HashMap<>();
+        for (Map.Entry<Path, CompletableFuture<JiraIssueListing>> entry : jiraRequests.entrySet()) {
+            try {
+                jiraIssues.put(entry.getKey(), entry.getValue().get(JIRA_TIMEOUT_SECONDS, TimeUnit.SECONDS));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            } catch (ExecutionException | TimeoutException | RuntimeException e) {
+                LOG.log(Level.DEBUG, () -> "No Jira issues for " + entry.getKey()
+                        + ": " + e.getClass().getSimpleName());
+                jiraIssues.put(entry.getKey(), new JiraIssueListing.Failed("Jira issue lookup did not complete"));
+            }
+        }
         Map<Path, PullRequestListing> pullRequests = new HashMap<>();
         for (Map.Entry<Path, CompletableFuture<PullRequestListing>> entry : pullRequestRequests.entrySet()) {
             try {
@@ -269,8 +310,8 @@ final class TaskTreeInputs implements AutoCloseable {
         return new TaskTreeModel.Inputs(projects, sessions, byMain, mainRootOf, currentMain, currentWorking,
                 activity, running, hosts, missing, recordedRoots, worktreeContainers, issueContainers,
                 pullRequestContainers, openFolders, Map.copyOf(activityCache), Instant.now(),
-                issues, pullRequests, pullRequestDedupWorktrees, plugin.sharedProjects().problem(), filter, viewFilter,
-                resumable);
+                issues, jiraIssues, pullRequests, pullRequestDedupWorktrees, plugin.sharedProjects().problem(),
+                filter, viewFilter, resumable);
     }
 
     private CompletableFuture<IssueListing> issuesOf(Path root, Optional<String> repository) {
@@ -347,5 +388,6 @@ final class TaskTreeInputs implements AutoCloseable {
     public void close() {
         worktrees.close();
         github.close();
+        jira.close();
     }
 }
