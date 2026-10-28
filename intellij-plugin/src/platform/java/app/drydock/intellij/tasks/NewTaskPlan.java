@@ -233,13 +233,19 @@ public final class NewTaskPlan {
     private static final String CLARIFY_FIRST = "Before writing any code, thoroughly clarify this request: "
             + "brainstorm to pin down the exact requirements, and confirm them before implementing.\n\n";
 
+    private static final String TITLE_GUIDANCE = "Quickly understand the gist of this task, then call session_rename "
+            + "with a short, descriptive title before substantial investigation or implementation. "
+            + "Keep the title updated when the task materially changes. Respect a title pinned by the human; "
+            + "if another session already uses your title, choose a distinct one. "
+            + "Rename only the session, not its branch or worktree folder.\n\n";
+
     /**
-     * What the agent is told on start: the instructions behind a clarify-first directive, or nothing. Never the name.
-     * A launch that carries a composed subagent model rule gets it appended, after a blank line.
+     * What the agent is told on start: clarify-first and title guidance, then the instructions, or nothing.
+     * Never send the temporary name. A composed subagent model rule follows after a blank line.
      */
     public static Optional<String> initialPrompt(Choice choice) {
         return choice.instructions().filter(text -> !text.isBlank())
-                .map(CLARIFY_FIRST::concat)
+                .map(text -> CLARIFY_FIRST + TITLE_GUIDANCE + text)
                 .map(text -> choice.subagentModelRule()
                         .map(rule -> text + "\n\n" + rule)
                         .orElse(text));

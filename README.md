@@ -172,6 +172,9 @@ other.
 New task gives each new worktree a random three-word branch name, such as
 `curious-mossy-otter`, and a `<repo>-<branch>` folder. The generated name stays
 fixed while you edit the task; both fields remain editable under **Change…**.
+A nonblank task prompt asks the agent to name the session for the work and keep
+that title current as the task changes, while respecting a human-pinned title.
+An empty description starts the agent at its own prompt without sending a message.
 
 It needs IntelliJ IDEA **2026.3 or newer** (an EAP build until 2026.3 ships)
 with the bundled Git and Terminal plugins enabled, and at least one agent CLI

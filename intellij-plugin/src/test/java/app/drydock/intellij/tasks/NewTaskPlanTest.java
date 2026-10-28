@@ -80,6 +80,15 @@ class NewTaskPlanTest {
     }
 
     @Test
+    void blankInstructionsSendNothingEvenWithASubagentModelRule() {
+        Choice chat = new Choice("New task", Optional.of(" \n "), AgentKind.PI, SessionMode.WRITES,
+                WorkIn.MAIN_CHECKOUT, "", "origin/main", ROOT, OpenIn.THIS_WINDOW,
+                Optional.empty(), Optional.empty(), Optional.of("Use the remembered subagent models."));
+
+        assertEquals(Optional.empty(), NewTaskPlan.initialPrompt(chat));
+    }
+
+    @Test
     void initialPromptPrependsClarifyFirst() {
         Choice choice = choice("Farewell", Optional.of("Add farewell() to Greeter.\nKeep it short."),
                 SessionMode.WRITES, WorkIn.NEW_WORKTREE, "farewell", Path.of("/b/drydock-farewell"));
@@ -87,6 +96,24 @@ class NewTaskPlanTest {
         String prompt = NewTaskPlan.initialPrompt(choice).orElseThrow();
         assertTrue(prompt.startsWith("Before writing any code"), prompt);
         assertTrue(prompt.endsWith("Add farewell() to Greeter.\nKeep it short."), prompt);
+    }
+
+    @Test
+    void initialPromptAsksForAnEarlyTitleAndKeepsItCurrentInEveryWorkLocation() {
+        for (WorkIn workIn : WorkIn.values()) {
+            Choice task = choice("Temporary label", Optional.of("Fix the parser."), SessionMode.WRITES,
+                    workIn, "curious-mossy-otter", Path.of("/b/parser"));
+
+            String prompt = NewTaskPlan.initialPrompt(task).orElseThrow();
+            assertTrue(prompt.contains("call session_rename"), prompt);
+            assertTrue(prompt.contains("before substantial investigation or implementation"), prompt);
+            assertTrue(prompt.contains("when the task materially changes"), prompt);
+            assertTrue(prompt.contains("title pinned by the human"), prompt);
+            assertTrue(prompt.contains("not its branch or worktree folder"), prompt);
+            assertTrue(prompt.indexOf("session_rename") < prompt.indexOf("Fix the parser."), prompt);
+            assertTrue(prompt.endsWith("Fix the parser."), prompt);
+            assertFalse(prompt.contains("Temporary label"), prompt);
+        }
     }
 
     @Test
@@ -102,7 +129,7 @@ class NewTaskPlanTest {
     }
 
     @Test
-    void initialPromptWithoutARuleIsJustTheClarifiedTask() {
+    void initialPromptWithoutAModelRuleAddsNoSubagentRules() {
         Choice noRule = new Choice("Farewell", Optional.of("Do the thing."), AgentKind.CLAUDE,
                 SessionMode.WRITES, WorkIn.NEW_WORKTREE, "farewell", "origin/main", Path.of("/b/f"),
                 OpenIn.OWN_WINDOW, Optional.empty(), Optional.empty(), Optional.empty());

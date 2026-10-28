@@ -226,6 +226,9 @@ public class NewTaskDialogPlatformTest extends BasePlatformTestCase {
                 assertTrue(choice.branch(), choice.branch().matches("[a-z]+-[a-z]+-[a-z]+"));
                 assertEquals(Path.of("/tmp/profiler-" + choice.branch()), choice.folder());
                 assertEquals("#42 Fix allocation accounting", choice.name());
+                String prompt = NewTaskPlan.initialPrompt(choice).orElseThrow();
+                assertTrue(prompt, prompt.contains("call session_rename"));
+                assertTrue(prompt, prompt.contains(choice.instructions().orElseThrow()));
             } finally {
                 Disposer.dispose(dialog.getDisposable());
             }
