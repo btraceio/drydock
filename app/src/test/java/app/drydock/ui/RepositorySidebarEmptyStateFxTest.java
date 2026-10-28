@@ -319,6 +319,15 @@ class RepositorySidebarEmptyStateFxTest extends FxTest {
                                            SessionReviewScopes.Choice choice) { }
 
         @Override
+        public void startSphinxReviewForWorktree(Repository repository, WorktreeService.Worktree worktree) { }
+
+        @Override
+        public void startSphinxReviewInSession(ManagedSessionId sessionId) { }
+
+        @Override
+        public void startSphinxReviewForPullRequest(Repository repository, GhCliService.OpenPullRequest pullRequest) { }
+
+        @Override
         public void startReviewForPullRequest(Repository repository, GhCliService.OpenPullRequest pullRequest) { }
     }
 
