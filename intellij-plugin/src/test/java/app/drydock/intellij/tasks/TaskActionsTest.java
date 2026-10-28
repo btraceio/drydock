@@ -9,9 +9,11 @@ import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.git.GhCliService.OpenIssue;
+import app.drydock.git.JiraIssue;
 import app.drydock.git.GhCliService.OpenPullRequest;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
 import app.drydock.intellij.tasks.TaskNode.IssueRow;
+import app.drydock.intellij.tasks.TaskNode.JiraIssueRow;
 import app.drydock.intellij.tasks.TaskNode.ListProblem;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.intellij.tasks.TaskNode.PullRequestRow;
@@ -218,6 +220,8 @@ class TaskActionsTest {
                 row(false, new TaskPlacement.Idle(false)),
                 pullRequest(Optional.of("https://github.com/DataDog/repo/pull/7")),
                 issue(Optional.of("https://github.com/DataDog/repo/issues/9")),
+                new JiraIssueRow(Path.of("/repo"), new JiraIssue("PROJ-9", "Fix the thing",
+                        "https://acme.atlassian.net/browse/PROJ-9", List.of(), Optional.of(Instant.EPOCH))),
                 worktree,
                 new StaleWorktrees(List.of(worktree)),
                 new WorktreeGroup(Path.of("/wt/fix"), "fix", List.of()),

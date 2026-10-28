@@ -16,6 +16,7 @@ import app.drydock.projects.SharedProject;
 import app.drydock.intellij.tasks.TaskNode.AddCurrentProject;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
 import app.drydock.intellij.tasks.TaskNode.IssueRow;
+import app.drydock.intellij.tasks.TaskNode.JiraIssueRow;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.intellij.tasks.TaskNode.PullRequestRow;
 import app.drydock.intellij.tasks.TaskNode.Section;
@@ -160,6 +161,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         @Override
         public void invalidateAll() {
             inputs.invalidateGitHub();
+            inputs.invalidateJira();
         }
 
         @Override
@@ -170,6 +172,11 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         @Override
         public void invalidatePullRequests(Path root) {
             inputs.invalidatePullRequests(root);
+        }
+
+        @Override
+        public void invalidateJiraIssues(Path root) {
+            inputs.invalidateJiraIssues(root);
         }
 
         @Override
@@ -357,7 +364,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 "Create a writable task and worktree for this issue", AllIcons.Actions.Execute) {
             @Override
             public void update(@NotNull AnActionEvent e) {
-                TaskActions.present(e, e.getData(SELECTED_NODE) instanceof IssueRow);
+                TaskActions.present(e, e.getData(SELECTED_NODE) instanceof IssueRow
+                        || e.getData(SELECTED_NODE) instanceof JiraIssueRow);
             }
 
             @Override
@@ -369,6 +377,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             public void actionPerformed(@NotNull AnActionEvent e) {
                 if (e.getData(SELECTED_NODE) instanceof IssueRow issue) {
                     TaskLauncher.implement(project, issue.mainRoot(), issue.issue());
+                } else if (e.getData(SELECTED_NODE) instanceof JiraIssueRow jira) {
+                    TaskLauncher.implement(project, jira.mainRoot(), jira.issue());
                 }
             }
         };
@@ -376,7 +386,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 "Validate and prioritize this issue against the current source", AllIcons.Actions.Show) {
             @Override
             public void update(@NotNull AnActionEvent e) {
-                TaskActions.present(e, e.getData(SELECTED_NODE) instanceof IssueRow);
+                TaskActions.present(e, e.getData(SELECTED_NODE) instanceof IssueRow
+                        || e.getData(SELECTED_NODE) instanceof JiraIssueRow);
             }
 
             @Override
@@ -388,6 +399,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             public void actionPerformed(@NotNull AnActionEvent e) {
                 if (e.getData(SELECTED_NODE) instanceof IssueRow issue) {
                     TaskLauncher.triage(project, issue.mainRoot(), issue.issue());
+                } else if (e.getData(SELECTED_NODE) instanceof JiraIssueRow jira) {
+                    TaskLauncher.triage(project, jira.mainRoot(), jira.issue());
                 }
             }
         };
@@ -417,6 +430,11 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         menuActions.put(TaskMenu.Item.IMPLEMENT, implement);
         menuActions.put(TaskMenu.Item.TRIAGE, triage);
         menuActions.put(TaskMenu.Item.GITHUB_SETTINGS, githubSettings);
+        menuActions.put(TaskMenu.Item.OPEN_IN_JIRA, JiraTreeActions.openInJira());
+        menuActions.put(TaskMenu.Item.JIRA_SETTINGS, JiraTreeActions.settings(project, root -> {
+            inputs.invalidateJira();
+            requestRebuild(false);
+        }));
         menuActions.put(TaskMenu.Item.REFRESH, refresh);
         PopupHandler.installPopupMenu(tree, new TreeMenu(menuActions), "Drydock.TaskTree.Popup");
 
@@ -485,6 +503,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                     activate(task);
                 } else if (node instanceof IssueRow issue && primaryButton && event.getClickCount() == 2) {
                     issue.issue().url().ifPresent(BrowserUtil::browse);
+                } else if (node instanceof JiraIssueRow jira && primaryButton && event.getClickCount() == 2) {
+                    BrowserUtil.browse(jira.issue().url());
                 } else if (node instanceof PullRequestRow pullRequest && primaryButton
                         && event.getClickCount() == 2) {
                     pullRequest.pullRequest().url().ifPresent(BrowserUtil::browse);
@@ -567,8 +587,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
      */
     static Set<TaskMenu.Item> panelMenuItems() {
         return EnumSet.of(TaskMenu.Item.SWITCH_TO_TASK, TaskMenu.Item.NEW_TASK, TaskMenu.Item.NEW_TASK_IN_MAIN,
-                TaskMenu.Item.OPEN_IN_GITHUB, TaskMenu.Item.QUICK_REVIEW, TaskMenu.Item.REVIEW,
-                TaskMenu.Item.IMPLEMENT, TaskMenu.Item.TRIAGE, TaskMenu.Item.GITHUB_SETTINGS, TaskMenu.Item.REFRESH);
+                TaskMenu.Item.OPEN_IN_GITHUB, TaskMenu.Item.OPEN_IN_JIRA, TaskMenu.Item.QUICK_REVIEW,
+                TaskMenu.Item.REVIEW, TaskMenu.Item.IMPLEMENT, TaskMenu.Item.TRIAGE,
+                TaskMenu.Item.GITHUB_SETTINGS, TaskMenu.Item.JIRA_SETTINGS, TaskMenu.Item.REFRESH);
     }
 
     /**
@@ -580,7 +601,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
      */
     interface RefreshTarget {
 
-        /** The global gesture: every project's GitHub listings. */
+        /** The global gesture: every project's GitHub and Jira listings. */
         void invalidateAll();
 
         /** One project's issue listing only. */
@@ -588,6 +609,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
         /** One project's pull-request listing only. */
         void invalidatePullRequests(Path root);
+
+        /** One project's cached Jira listing only. */
+        void invalidateJiraIssues(Path root);
 
         /** Records the user's intent to see {@code root}'s listing of {@code kind}. */
         void requestListing(SectionKind kind, Path root);
@@ -603,7 +627,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
      * what the tree selection is (see {@link #refresh}).
      */
     static AnAction refreshAction(RefreshTarget target) {
-        return new DumbAwareAction("Refresh", "Re-read projects, worktrees, and GitHub listings",
+        return new DumbAwareAction("Refresh", "Re-read projects, worktrees, and issue and pull-request listings",
                 AllIcons.Actions.Refresh) {
             @Override
             public void actionPerformed(@NotNull AnActionEvent e) {
@@ -639,6 +663,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                     return;
                 }
                 target.invalidateIssues(root);
+                target.invalidateJiraIssues(root);
                 target.requestListing(SectionKind.ISSUES, root);
                 target.requestRebuild(false);
             }
@@ -763,6 +788,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             case IdleWorktree ignored -> Optional.of(new NewTaskTarget(mainRoot, worktreeOf(node, mainRoot)));
             case TaskRow ignored -> Optional.of(new NewTaskTarget(mainRoot, worktreeOf(node, mainRoot)));
             case IssueRow ignoredIssue -> Optional.empty();
+            case JiraIssueRow ignored -> Optional.empty();
             case PullRequestRow ignoredPullRequest -> Optional.empty();
             case null, default -> Optional.empty();
         };
@@ -1064,7 +1090,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         apply(TaskTreeModel.withoutWorktrees(displayedNodes, removed), displayedFilter, displayedViewFilter);
     }
 
-    private static String emptyText(String appliedFilter, ViewFilter appliedViewFilter) {
+    static String emptyText(String appliedFilter, ViewFilter appliedViewFilter) {
         if (!appliedFilter.isBlank()) {
             return "Nothing in " + appliedViewFilter.label().toLowerCase(Locale.ROOT) + " matches the search.";
         }

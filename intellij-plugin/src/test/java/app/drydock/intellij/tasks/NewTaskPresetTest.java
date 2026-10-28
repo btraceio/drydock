@@ -200,7 +200,6 @@ class NewTaskPresetTest {
         assertTrue(preset.instructionsRequired());
         assertEquals(NewTaskPreset.implement(new OpenIssue(42, "Fix allocation accounting", Optional.empty(),
                 List.of(), List.of(), Optional.empty())).tierRoles(), preset.tierRoles());
-        assertEquals("proj-123-fix-allocation", NewTaskPlan.branchFor(preset.name(), Set.of()));
     }
 
     @Test

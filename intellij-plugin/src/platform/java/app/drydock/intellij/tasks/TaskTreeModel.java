@@ -132,7 +132,7 @@ public final class TaskTreeModel {
         NEEDS_YOU("Needs you", "Show only running sessions waiting for your answer",
                 "No sessions need you."),
         PULL_REQUESTS("PRs", "Show only open GitHub pull requests", "No open pull requests."),
-        ISSUES("Issues", "Show only open GitHub issues", "No open GitHub issues.");
+        ISSUES("Issues", "Show only open issues (GitHub and Jira)", "No open issues.");
 
         private final String label;
         private final String tooltip;

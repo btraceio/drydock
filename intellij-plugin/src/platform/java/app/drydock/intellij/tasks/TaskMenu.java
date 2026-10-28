@@ -3,6 +3,7 @@ package app.drydock.intellij.tasks;
 import app.drydock.intellij.agent.SessionTransfer;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
 import app.drydock.intellij.tasks.TaskNode.IssueRow;
+import app.drydock.intellij.tasks.TaskNode.JiraIssueRow;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.intellij.tasks.TaskNode.PullRequestRow;
 import app.drydock.intellij.tasks.TaskNode.Section;
@@ -59,9 +60,13 @@ final class TaskMenu {
         QUICK_REVIEW,
         REVIEW,
         OPEN_IN_GITHUB,
+        /** Open the Jira issue's page; only a Jira row offers it. */
+        OPEN_IN_JIRA,
         IMPLEMENT,
         TRIAGE,
         GITHUB_SETTINGS,
+        /** Per-project Jira configuration: site, credentials, query. */
+        JIRA_SETTINGS,
         REFRESH,
         NEW_TASK_IN_MAIN,
         REMOVE_WORKTREE,
@@ -102,6 +107,9 @@ final class TaskMenu {
             case IssueRow ignored -> nonEmpty(List.of(
                     List.of(Item.IMPLEMENT, Item.TRIAGE),
                     section(urlOf(node).isPresent() ? Item.OPEN_IN_GITHUB : null, Item.GITHUB_SETTINGS)));
+            case JiraIssueRow ignored -> nonEmpty(List.of(
+                    List.of(Item.IMPLEMENT, Item.TRIAGE),
+                    List.of(Item.OPEN_IN_JIRA, Item.JIRA_SETTINGS)));
             case IdleWorktree idleWorktree -> nonEmpty(List.of(
                     List.of(Item.NEW_TASK, Item.QUICK_REVIEW, Item.REVIEW),
                     // Locked or open worktrees cannot be removed from here.
@@ -110,7 +118,9 @@ final class TaskMenu {
             case WorktreeGroup ignored -> List.of(List.of(Item.NEW_TASK));
             case Section section when section.kind() == SectionKind.ISSUES
                     || section.kind() == SectionKind.PULL_REQUESTS ->
-                    List.of(List.of(Item.REFRESH, Item.GITHUB_SETTINGS));
+                    section.kind() == SectionKind.ISSUES
+                            ? List.of(List.of(Item.REFRESH, Item.GITHUB_SETTINGS, Item.JIRA_SETTINGS))
+                            : List.of(List.of(Item.REFRESH, Item.GITHUB_SETTINGS));
             case ProjectRow project -> project(project);
             default -> List.of();
         };
@@ -140,7 +150,7 @@ final class TaskMenu {
     private static List<List<Item>> project(ProjectRow row) {
         return nonEmpty(List.of(
                 List.of(Item.NEW_TASK, Item.NEW_TASK_IN_MAIN),
-                List.of(Item.REFRESH, Item.GITHUB_SETTINGS),
+                List.of(Item.REFRESH, Item.GITHUB_SETTINGS, Item.JIRA_SETTINGS),
                 section(TaskActions.removable(row).isEmpty() ? null : Item.REMOVE_INACTIVE_WORKTREES,
                         Item.REMOVE_FROM_DRYDOCK)));
     }
@@ -176,6 +186,8 @@ final class TaskMenu {
     static Optional<String> urlOf(TaskNode node) {
         return switch (node) {
             case IssueRow issue -> issue.issue().url();
+            // A Jira row's URL is Jira's, opened by its own action.
+            case JiraIssueRow ignored -> Optional.empty();
             case PullRequestRow pullRequest -> pullRequest.pullRequest().url();
             case null, default -> Optional.empty();
         };
