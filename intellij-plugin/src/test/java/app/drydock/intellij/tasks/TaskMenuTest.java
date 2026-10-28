@@ -8,9 +8,11 @@ import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.git.GhCliService.OpenIssue;
+import app.drydock.git.JiraIssue;
 import app.drydock.git.GhCliService.OpenPullRequest;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
 import app.drydock.intellij.tasks.TaskNode.IssueRow;
+import app.drydock.intellij.tasks.TaskNode.JiraIssueRow;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.intellij.tasks.TaskNode.PullRequestRow;
 import app.drydock.intellij.tasks.TaskNode.Section;
@@ -66,6 +68,11 @@ class TaskMenuTest {
     private static IssueRow issue(Optional<String> url) {
         return new IssueRow(ROOT, new OpenIssue(42, "Fix allocation profile", url, List.of(), List.of(),
                 Optional.of(NOW)));
+    }
+
+    private static JiraIssueRow jiraIssue() {
+        return new JiraIssueRow(ROOT, new JiraIssue("PROJ-123", "Fix allocation profile",
+                "https://acme.atlassian.net/browse/PROJ-123", List.of(), Optional.of(NOW)));
     }
 
     private static PullRequestRow pullRequest(Optional<String> url) {
@@ -183,6 +190,14 @@ class TaskMenuTest {
     }
 
     @Test
+    void jiraRowOffersImplementTriageThenOpenInJiraAndSettings() {
+        assertEquals(List.of(
+                List.of(TaskMenu.Item.IMPLEMENT, TaskMenu.Item.TRIAGE),
+                List.of(TaskMenu.Item.OPEN_IN_JIRA, TaskMenu.Item.JIRA_SETTINGS)),
+                sectionsOf(jiraIssue()));
+    }
+
+    @Test
     void idleWorktreeOffersRemoveOnlyWhenItIsNeitherLockedNorOpen() {
         assertEquals(List.of(
                 List.of(TaskMenu.Item.NEW_TASK, TaskMenu.Item.QUICK_REVIEW, TaskMenu.Item.REVIEW),
@@ -209,7 +224,8 @@ class TaskMenuTest {
 
     @Test
     void listingSectionsOfferRefreshAndSettingsOthersNothing() {
-        assertEquals(List.of(List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.GITHUB_SETTINGS)),
+        assertEquals(List.of(List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.GITHUB_SETTINGS,
+                        TaskMenu.Item.JIRA_SETTINGS)),
                 sectionsOf(new Section(SectionKind.ISSUES, List.of(issue(Optional.empty())))));
         assertEquals(List.of(List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.GITHUB_SETTINGS)),
                 sectionsOf(new Section(SectionKind.PULL_REQUESTS, List.of(pullRequest(Optional.empty())))));
@@ -222,17 +238,17 @@ class TaskMenuTest {
     void projectRowOffersInactiveRemovalOnlyWhenOneApplies() {
         assertEquals(List.of(
                 List.of(TaskMenu.Item.NEW_TASK, TaskMenu.Item.NEW_TASK_IN_MAIN),
-                List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.GITHUB_SETTINGS),
+                List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.GITHUB_SETTINGS, TaskMenu.Item.JIRA_SETTINGS),
                 List.of(TaskMenu.Item.REMOVE_INACTIVE_WORKTREES, TaskMenu.Item.REMOVE_FROM_DRYDOCK)),
                 sectionsOf(project(worktree(false, false))));
         assertEquals(List.of(
                 List.of(TaskMenu.Item.NEW_TASK, TaskMenu.Item.NEW_TASK_IN_MAIN),
-                List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.GITHUB_SETTINGS),
+                List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.GITHUB_SETTINGS, TaskMenu.Item.JIRA_SETTINGS),
                 List.of(TaskMenu.Item.REMOVE_FROM_DRYDOCK)),
                 sectionsOf(project(worktree(true, false))));
         assertEquals(List.of(
                 List.of(TaskMenu.Item.NEW_TASK, TaskMenu.Item.NEW_TASK_IN_MAIN),
-                List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.GITHUB_SETTINGS),
+                List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.GITHUB_SETTINGS, TaskMenu.Item.JIRA_SETTINGS),
                 List.of(TaskMenu.Item.REMOVE_FROM_DRYDOCK)),
                 sectionsOf(project()));
     }

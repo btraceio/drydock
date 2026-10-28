@@ -11,6 +11,7 @@ import app.drydock.git.BranchListing;
 import app.drydock.git.BranchRef;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.GhCliService.OpenIssue;
+import app.drydock.git.JiraIssue;
 import app.drydock.git.WorktreeService;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.actions.SessionDialogs;
@@ -132,6 +133,16 @@ public final class TaskLauncher {
 
     /** Opens a main-checkout task prefilled to validate and prioritize a GitHub issue. */
     static void triage(Project from, Path mainRoot, OpenIssue issue) {
+        open(from, Optional.of(mainRoot), Optional.empty(), NewTaskPreset.triage(issue));
+    }
+
+    /** Opens a writable new-worktree task prefilled from a Jira issue. */
+    static void implement(Project from, Path mainRoot, JiraIssue issue) {
+        open(from, Optional.of(mainRoot), Optional.empty(), NewTaskPreset.implement(issue));
+    }
+
+    /** Opens a main-checkout task prefilled to validate and prioritize a Jira issue. */
+    static void triage(Project from, Path mainRoot, JiraIssue issue) {
         open(from, Optional.of(mainRoot), Optional.empty(), NewTaskPreset.triage(issue));
     }
 

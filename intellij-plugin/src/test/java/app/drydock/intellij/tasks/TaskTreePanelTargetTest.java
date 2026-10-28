@@ -8,9 +8,11 @@ import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.git.GhCliService.OpenIssue;
+import app.drydock.git.JiraIssue;
 import app.drydock.intellij.tasks.TaskNode.Deferred;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
 import app.drydock.intellij.tasks.TaskNode.IssueRow;
+import app.drydock.intellij.tasks.TaskNode.JiraIssueRow;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.intellij.tasks.TaskNode.Section;
 import app.drydock.intellij.tasks.TaskNode.SectionKind;
@@ -315,6 +317,11 @@ class TaskTreePanelTargetTest {
         }
 
         @Override
+        public void invalidateJiraIssues(Path root) {
+            calls.add("jiraIssues:" + root);
+        }
+
+        @Override
         public void requestListing(SectionKind kind, Path root) {
             calls.add("listing:" + kind + ":" + root);
         }
@@ -362,6 +369,7 @@ class TaskTreePanelTargetTest {
         TaskTreePanel.refresh(target, true, section(SectionKind.ISSUES), REGISTERED_ROOT);
 
         assertEquals(List.of("issues:" + REGISTERED_ROOT,
+                "jiraIssues:" + REGISTERED_ROOT,
                 "listing:ISSUES:" + REGISTERED_ROOT, "rebuild:false"), target.calls);
     }
 
@@ -397,5 +405,54 @@ class TaskTreePanelTargetTest {
 
             assertTrue(target.calls.isEmpty(), kind + " must not dispatch a fetch");
         }
+    }
+
+    @Test
+    void jiraIssueRowDoesNotOfferTheGenericNewTaskAction() {
+        JiraIssueRow row = new JiraIssueRow(REGISTERED_ROOT, new JiraIssue("PROJ-123",
+                "Fix allocation accounting", "https://acme.atlassian.net/browse/PROJ-123",
+                List.of(), Optional.of(NOW)));
+
+        assertEquals(Optional.empty(), TaskTreePanel.newTaskTarget(row, REGISTERED_ROOT));
+    }
+
+    @Test
+    void jiraSettingsAreReachableFromProjectIssuesSectionAndJiraRows() {
+        SharedProject registered = SharedProject.local(
+                RepositoryId.newId(), REGISTERED_ROOT, "profiling-backend", NOW);
+        ProjectRow project = new ProjectRow(registered, false, false, List.of(), List.of(), 0);
+        Section issues = new Section(SectionKind.ISSUES, List.of(new Deferred("Loading issues…")));
+        JiraIssueRow jira = new JiraIssueRow(REGISTERED_ROOT, new JiraIssue("PROJ-123",
+                "Fix allocation accounting", "https://acme.atlassian.net/browse/PROJ-123",
+                List.of(), Optional.of(NOW)));
+
+        assertTrue(JiraTreeActions.settingsNode(project));
+        assertTrue(JiraTreeActions.settingsNode(issues));
+        assertTrue(JiraTreeActions.settingsNode(jira));
+    }
+
+    @Test
+    void jiraSettingsAreNotOfferedOnIssueRowsOrPullRequestSections() {
+        IssueRow issue = new IssueRow(REGISTERED_ROOT, new OpenIssue(42, "Fix allocation profile",
+                Optional.of("https://github.com/DataDog/profiling-backend/issues/42"), List.of(), List.of(),
+                Optional.of(NOW)));
+        Section pullRequests = new Section(SectionKind.PULL_REQUESTS,
+                List.of(new Deferred("Loading pull requests…")));
+
+        assertFalse(JiraTreeActions.settingsNode(issue));
+        assertFalse(JiraTreeActions.settingsNode(pullRequests));
+    }
+
+    @Test
+    void issueStringsDoNotReadAsGitHubOnly() {
+        // AC21: neither the ISSUES tooltip nor its empty text keeps the
+        // GitHub-only phrasing. The tooltip names both sources, so the guard
+        // is the old "GitHub issues" wording; the empty text names no source.
+        // The strings live on the ViewFilter enum since the ribbon refactor.
+        assertEquals("Show only open issues (GitHub and Jira)",
+                ViewFilter.ISSUES.tooltip());
+        assertFalse(ViewFilter.ISSUES.tooltip().contains("GitHub issues"));
+        assertEquals("No open issues.", TaskTreePanel.emptyText("", ViewFilter.ISSUES));
+        assertFalse(TaskTreePanel.emptyText("", ViewFilter.ISSUES).contains("GitHub"));
     }
 }

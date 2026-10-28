@@ -63,6 +63,11 @@ public class TaskTreeRefreshPlatformTest extends BasePlatformTestCase {
         }
 
         @Override
+        public void invalidateJiraIssues(Path root) {
+            calls.add("jiraIssues:" + root);
+        }
+
+        @Override
         public void requestListing(SectionKind kind, Path root) {
             calls.add("listing:" + kind + ":" + root);
         }
@@ -112,6 +117,7 @@ public class TaskTreeRefreshPlatformTest extends BasePlatformTestCase {
                 section(SectionKind.ISSUES), REGISTERED_ROOT));
 
         assertEquals(List.of("issues:" + REGISTERED_ROOT,
+                "jiraIssues:" + REGISTERED_ROOT,
                 "listing:ISSUES:" + REGISTERED_ROOT, "rebuild:false"), target.calls);
     }
 

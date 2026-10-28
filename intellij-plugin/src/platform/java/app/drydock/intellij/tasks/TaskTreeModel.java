@@ -9,11 +9,14 @@ import app.drydock.git.GhCliService.IssueListing;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.GhCliService.OpenPullRequest;
 import app.drydock.git.GhCliService.PullRequestListing;
+import app.drydock.git.JiraIssue;
+import app.drydock.git.JiraIssueListing;
 import app.drydock.git.WorktreeService.Worktree;
 import app.drydock.intellij.agent.SessionCommands;
 import app.drydock.intellij.tasks.TaskNode.AddCurrentProject;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
 import app.drydock.intellij.tasks.TaskNode.IssueRow;
+import app.drydock.intellij.tasks.TaskNode.JiraIssueRow;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.review.RepositoryPullRequests;
 import app.drydock.intellij.tasks.TaskNode.PullRequestRow;
@@ -129,7 +132,7 @@ public final class TaskTreeModel {
         NEEDS_YOU("Needs you", "Show only running sessions waiting for your answer",
                 "No sessions need you."),
         PULL_REQUESTS("PRs", "Show only open GitHub pull requests", "No open pull requests."),
-        ISSUES("Issues", "Show only open GitHub issues", "No open GitHub issues.");
+        ISSUES("Issues", "Show only open issues (GitHub and Jira)", "No open issues.");
 
         private final String label;
         private final String tooltip;
@@ -187,6 +190,7 @@ public final class TaskTreeModel {
                          Set<Path> pullRequestContainers,
                          Set<Path> openFolders, Map<Path, Instant> lastActivity, Instant now,
                          Map<Path, IssueListing> issuesByMainRoot,
+                         Map<Path, JiraIssueListing> jiraIssuesByMainRoot,
                          Map<Path, PullRequestListing> pullRequestsByMainRoot,
                          Map<Path, List<Worktree>> pullRequestDedupWorktrees,
                          Optional<String> listProblem, String filter,
@@ -210,6 +214,7 @@ public final class TaskTreeModel {
             lastActivity = Map.copyOf(lastActivity);
             Objects.requireNonNull(now, "now");
             issuesByMainRoot = Map.copyOf(issuesByMainRoot);
+            jiraIssuesByMainRoot = Map.copyOf(jiraIssuesByMainRoot);
             pullRequestsByMainRoot = Map.copyOf(pullRequestsByMainRoot);
             pullRequestDedupWorktrees = Map.copyOf(pullRequestDedupWorktrees);
             Objects.requireNonNull(listProblem, "listProblem");
@@ -228,7 +233,8 @@ public final class TaskTreeModel {
             this(projects, sessions, worktreesByMainRoot, mainRootOf, currentMainRoot, currentWorkingRoot,
                     activity, running, Map.of(), missingFolders, recordedRoots,
                     worktreesByMainRoot.keySet(), issuesByMainRoot.keySet(), Set.of(), Set.of(), Map.of(), Instant.EPOCH,
-                    issuesByMainRoot, Map.of(), Map.of(), listProblem, filter, ViewFilter.ALL, Map.of());
+                    issuesByMainRoot, Map.of(), Map.of(), Map.of(), listProblem, filter, ViewFilter.ALL,
+                    Map.of());
         }
 
         /** Compatibility constructor for model callers with no GitHub issue input. */
@@ -241,7 +247,7 @@ public final class TaskTreeModel {
             this(projects, sessions, worktreesByMainRoot, mainRootOf, currentMainRoot, currentWorkingRoot,
                     activity, running, Map.of(), missingFolders, recordedRoots,
                     worktreesByMainRoot.keySet(), Set.of(), Set.of(), Set.of(), Map.of(), Instant.EPOCH,
-                    Map.of(), Map.of(), Map.of(), listProblem, filter, ViewFilter.ALL, Map.of());
+                    Map.of(), Map.of(), Map.of(), Map.of(), listProblem, filter, ViewFilter.ALL, Map.of());
         }
     }
 
@@ -453,7 +459,8 @@ public final class TaskTreeModel {
             children.add(new Section(SectionKind.WORKTREES, sessionlessWorktrees));
         }
         if (in.viewFilter() == ViewFilter.ALL || in.viewFilter() == ViewFilter.ISSUES) {
-            if (in.issueContainers().contains(main) && !in.issuesByMainRoot().containsKey(main)) {
+            if (in.issueContainers().contains(main) && !in.issuesByMainRoot().containsKey(main)
+                    && !in.jiraIssuesByMainRoot().containsKey(main)) {
                 children.add(new Section(SectionKind.ISSUES,
                         List.of(new TaskNode.Deferred("Loading issues…"))));
             } else {
@@ -511,21 +518,54 @@ public final class TaskTreeModel {
         };
     }
 
+    /**
+     * The project's Issues section children: one merged list from every
+     * enabled source. GitHub rows and Jira rows interleave, newest
+     * {@code updatedAt} first (a row with no timestamp sorts as
+     * {@code Instant.EPOCH}, and the stable sort keeps GitHub ahead of
+     * Jira on a tie). Each source's failure is a {@code ListProblem} row
+     * at the top of the section, so one broken source never hides the
+     * other's rows; an unconfigured ({@code Unsupported}) or absent source
+     * adds nothing. Empty sections are never emitted (spec AC16–AC18).
+     */
     private static Optional<List<TaskNode>> issueChildren(Inputs in, Path main, String itemFilter) {
-        return switch (in.issuesByMainRoot().get(main)) {
-            case IssueListing.Listed listed -> {
-                List<TaskNode> rows = listed.issues().stream()
-                        .filter(issue -> matches(itemFilter, issue))
-                        .sorted(Comparator.comparing((OpenIssue issue) -> issue.updatedAt().orElse(Instant.EPOCH))
-                                .reversed())
-                        .map(issue -> (TaskNode) new IssueRow(main, issue))
-                        .toList();
-                yield rows.isEmpty() ? Optional.empty() : Optional.of(rows);
-            }
-            case IssueListing.Failed failed -> Optional.of(List.of(
-                    new TaskNode.ListProblem("GitHub issues: " + failed.message())));
-            case IssueListing.Unsupported ignored -> Optional.empty();
-            case null -> Optional.empty();
+        List<TaskNode> problems = new ArrayList<>();
+        List<TaskNode> rows = new ArrayList<>();
+        switch (in.issuesByMainRoot().get(main)) {
+            case IssueListing.Listed listed -> listed.issues().stream()
+                    .filter(issue -> matches(itemFilter, issue))
+                    .forEach(issue -> rows.add(new IssueRow(main, issue)));
+            case IssueListing.Failed failed ->
+                    problems.add(new TaskNode.ListProblem("GitHub issues: " + failed.message()));
+            case IssueListing.Unsupported ignored -> { }
+            case null -> { }
+        }
+        switch (in.jiraIssuesByMainRoot().get(main)) {
+            case JiraIssueListing.Listed listed -> listed.issues().stream()
+                    .filter(issue -> matches(itemFilter, issue))
+                    .forEach(issue -> rows.add(new JiraIssueRow(main, issue)));
+            case JiraIssueListing.Failed failed ->
+                    problems.add(new TaskNode.ListProblem("Jira issues: " + failed.message()));
+            case JiraIssueListing.Unsupported ignored -> { }
+            case null -> { }
+        }
+        // List.sort is stable, so a GitHub row stays ahead of a Jira row
+        // with the same timestamp: the incumbent source keeps the tie.
+        rows.sort(Comparator.comparing((TaskNode row) -> rowUpdatedAt(row).orElse(Instant.EPOCH)).reversed());
+        if (problems.isEmpty() && rows.isEmpty()) {
+            return Optional.empty();
+        }
+        List<TaskNode> children = new ArrayList<>(problems);
+        children.addAll(rows);
+        return Optional.of(children);
+    }
+
+    /** The row's issue timestamp, whatever source the row came from. */
+    private static Optional<Instant> rowUpdatedAt(TaskNode row) {
+        return switch (row) {
+            case IssueRow issue -> issue.issue().updatedAt();
+            case JiraIssueRow jira -> jira.issue().updatedAt();
+            default -> Optional.empty();
         };
     }
 
@@ -577,6 +617,13 @@ public final class TaskTreeModel {
         return filter.isEmpty() || contains(pullRequest.title(), filter)
                 || contains("#" + pullRequest.number(), filter)
                 || contains(pullRequest.headRefName(), filter);
+    }
+
+    /** A Jira row matches on its key, its summary or any label, case-insensitively. */
+    private static boolean matches(String filter, JiraIssue issue) {
+        return filter.isEmpty() || contains(issue.key(), filter)
+                || contains(issue.summary(), filter)
+                || issue.labels().stream().anyMatch(label -> contains(label, filter));
     }
 
     private static boolean contains(String text, String filter) {
