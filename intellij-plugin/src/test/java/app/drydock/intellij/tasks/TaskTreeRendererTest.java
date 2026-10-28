@@ -8,22 +8,42 @@ import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
+import app.drydock.git.GhCliService.OpenIssue;
+import app.drydock.git.JiraIssue;
+import app.drydock.intellij.tasks.TaskNode.IssueRow;
+import app.drydock.intellij.tasks.TaskNode.JiraIssueRow;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
 
 import org.junit.jupiter.api.Test;
 
+import javax.swing.Icon;
+
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class TaskTreeRendererTest {
 
     private static final Path DIR = Path.of("/wt/dd-jmc-fix");
+
+    private static final Path ROOT = Path.of("/wt/dd-main");
+
+    private static OpenIssue issue42() {
+        return new OpenIssue(42, "Fix allocation accounting", Optional.of("https://github.com/o/r/issues/42"),
+                List.of("profiling"), List.of(), Optional.empty());
+    }
+
+    private static JiraIssue jiraProj123() {
+        return new JiraIssue("PROJ-123", "Fix allocation accounting",
+                "https://acme.atlassian.net/browse/PROJ-123", List.of("profiling"), Optional.empty());
+    }
 
     private static TaskRow row(boolean running, TaskPlacement placement) {
         return row(running, placement, true);
@@ -100,5 +120,28 @@ class TaskTreeRendererTest {
     @Test
     void aRowShownElsewhereOffersNoInlineLink() {
         assertEquals(Optional.empty(), TaskTreeRenderer.link(row(true, new TaskPlacement.OwnWindow())));
+    }
+
+    @Test
+    void githubAndJiraIssueRowsCarryDifferentSourceIcons() {
+        Optional<Icon> github = TaskTreeRenderer.sourceIcon(new IssueRow(ROOT, issue42()));
+        Optional<Icon> jira = TaskTreeRenderer.sourceIcon(new JiraIssueRow(ROOT, jiraProj123()));
+
+        assertTrue(github.isPresent(), "a GitHub issue row shows GitHub's vendor icon");
+        assertTrue(jira.isPresent(), "a Jira issue row shows the bundled ticket glyph");
+        assertNotEquals(github.orElseThrow(), jira.orElseThrow(),
+                "the two sources must be told apart at a glance (AC20)");
+        assertTrue(TaskTreeRenderer.sourceIcon(new TaskNode.Deferred("Loading issues…")).isEmpty(),
+                "only issue rows carry a source icon");
+    }
+
+    @Test
+    void aGithubIssueRowSaysHashNumberAndTitle() {
+        assertEquals("#42 Fix allocation accounting", TaskTreeRenderer.issueText(issue42()));
+    }
+
+    @Test
+    void aJiraIssueRowSaysKeyAndSummary() {
+        assertEquals("PROJ-123 Fix allocation accounting", TaskTreeRenderer.issueText(jiraProj123()));
     }
 }

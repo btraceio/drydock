@@ -2,6 +2,8 @@ package app.drydock.intellij.tasks;
 
 import app.drydock.agent.api.AgentRegistry;
 import app.drydock.domain.SessionStatus;
+import app.drydock.git.GhCliService.OpenIssue;
+import app.drydock.git.JiraIssue;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.agent.AgentStripText;
 import app.drydock.intellij.tasks.TaskNode.AddCurrentProject;
@@ -17,10 +19,12 @@ import app.drydock.intellij.ui.SessionDots;
 import app.drydock.ui.AgentLabels;
 
 import com.intellij.icons.AllIcons;
+import com.intellij.openapi.util.IconLoader;
 import com.intellij.ui.ColoredTreeCellRenderer;
 import com.intellij.ui.SimpleTextAttributes;
 import org.jetbrains.annotations.NotNull;
 
+import javax.swing.Icon;
 import javax.swing.JTree;
 import javax.swing.tree.DefaultMutableTreeNode;
 
@@ -33,6 +37,13 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
 
     /** The tag on a row's link text ("Add", "Start ▸"): what a single click may act on. */
     static final Object LINK = new Object();
+
+    /**
+     * The neutral bundled Jira source mark (a ticket glyph, deliberately not
+     * Atlassian's logo; spec Q6, risk 8). Dark variant:
+     * {@code jiraIssue_dark.svg}.
+     */
+    static final Icon JIRA_ICON = IconLoader.getIcon("/icons/jiraIssue.svg", TaskTreeRenderer.class);
 
     /**
      * Whether a click on a row with a link acts: only the primary button, a
@@ -102,12 +113,21 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
                 append("Start ▸", SimpleTextAttributes.LINK_ATTRIBUTES, LINK);
             }
             case IssueRow issue -> {
-                setIcon(AllIcons.Vcs.Vendors.Github);
-                append("#" + issue.issue().number() + " " + issue.issue().title());
+                sourceIcon(issue).ifPresent(this::setIcon);
+                append(issueText(issue.issue()));
                 if (!issue.issue().labels().isEmpty()) {
                     append("  " + String.join(", ", issue.issue().labels()),
                             SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
                 }
+            }
+            case TaskNode.JiraIssueRow jira -> {
+                setIcon(JIRA_ICON);
+                append(issueText(jira.issue()));
+                if (!jira.issue().labels().isEmpty()) {
+                    append("  " + String.join(", ", jira.issue().labels()),
+                            SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
+                }
+                setToolTipText("Jira issue " + jira.issue().key());
             }
             case PullRequestRow pullRequest -> {
                 setIcon(AllIcons.Vcs.Vendors.Github);
@@ -120,6 +140,29 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
             case TaskRow task -> paintTask(task);
             default -> append(String.valueOf(node.getUserObject()));
         }
+    }
+
+    /**
+     * Pure. The source mark of an issue row: GitHub's vendor icon, the
+     * neutral Jira ticket, nothing for every other node (pull requests keep
+     * the GitHub mark they always had).
+     */
+    static Optional<Icon> sourceIcon(TaskNode node) {
+        return switch (node) {
+            case IssueRow ignored -> Optional.of(AllIcons.Vcs.Vendors.Github);
+            case TaskNode.JiraIssueRow ignored -> Optional.of(JIRA_ICON);
+            default -> Optional.empty();
+        };
+    }
+
+    /** Pure. A GitHub row's text: {@code #<number> <title>}. */
+    static String issueText(OpenIssue issue) {
+        return "#" + issue.number() + " " + issue.title();
+    }
+
+    /** Pure. A Jira row's text: {@code <KEY> <summary>}. */
+    static String issueText(JiraIssue issue) {
+        return issue.key() + " " + issue.summary();
     }
 
     /** Entity count rather than immediate child count (Sessions may contain Active/Inactive folders). */
