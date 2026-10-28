@@ -2,6 +2,7 @@ package app.drydock.intellij.agent;
 
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.SessionActivity;
+import app.drydock.domain.SessionStatus;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.ui.SessionDots;
 
@@ -30,6 +31,9 @@ import java.util.Optional;
  * paint.</p>
  */
 public final class AgentConsoleTabPresentation implements EditorTabTitleProvider, FileIconProvider {
+
+    /** One bounded snapshot of the catalog for id lookups, not a per-session cache. */
+    private static final CatalogSessionIndex INDEX = new CatalogSessionIndex();
 
     @Override
     public String getEditorTabTitle(Project project, VirtualFile file) {
@@ -61,13 +65,56 @@ public final class AgentConsoleTabPresentation implements EditorTabTitleProvider
         if (session == null || project == null) {
             return null;
         }
-        boolean running = AgentExecutionService.getInstance(project).isRunning(session.id());
-        Optional<SessionActivity> activity = running
+        boolean runningHere = AgentExecutionService.getInstance(project).isRunning(session.id());
+        // The registry's live-anywhere fact joins the window's own: a
+        // detached live session keeps the live mark (the strip beside it
+        // says Running · not shown here), and only a session dead
+        // everywhere falls to the strip's stale-row correction — a row stuck
+        // in the running band must not paint a live color on a tab whose
+        // agent is not running.
+        boolean runningAnywhere = AgentExecutionRegistry.getInstance().isRunning(session.id());
+        Optional<SessionActivity> activity = runningHere
                 ? DrydockPluginService.getInstance().activityMonitor().current(session.id())
                 : Optional.empty();
-        // Same correction as the strip's: a row stuck in the running band
-        // must not paint a live color on a tab whose agent is not running.
-        return SessionDots.drydockIcon(AgentStripText.displayStatus(session.status(), running), activity);
+        TabIcon icon = iconState(session.status(), runningHere, runningAnywhere, activity);
+        return SessionDots.drydockIcon(icon.status(), icon.activity());
+    }
+
+    /** The tab icon's decision: what status the mark paints, and with what activity. */
+    record TabIcon(SessionStatus status, Optional<SessionActivity> activity) {
+    }
+
+    /**
+     * The status and activity the tab icon paints for a session, as pure
+     * functions of the live facts and the persisted row — the one decision
+     * {@link #getIcon} makes, extracted so a test can pin it without an IDE.
+     *
+     * <p>A detached live session — running somewhere in this IDE, not in
+     * this window — gets the strip's generic live rule (A6): RUNNING with
+     * no activity, because the activity a monitor could report belongs to a
+     * process this window does not host. Without that rule the tab read only
+     * the window-local fact, so the same session whose strip said Running ·
+     * not shown here painted a hollow stopped mark on its tab. It outranks
+     * the stale-row correction, which would rewrite a persisted RUNNING row
+     * to stopped — right for a genuinely dead session, wrong for a live one
+     * elsewhere. A session running here keeps its real monitor activity, and
+     * a genuinely stopped one keeps the strip's persisted-status correction
+     * (see {@link AgentStripText#displayStatus}).</p>
+     *
+     * @param persisted    the session row's last written status
+     * @param runningHere  whether this window shows a live process for it
+     * @param runningAnywhere whether a live process for it exists anywhere
+     *                     in this IDE
+     * @param localActivity the monitor's current activity, meaningful only
+     *                     when {@code runningHere} — read once by the caller
+     */
+    static TabIcon iconState(SessionStatus persisted, boolean runningHere, boolean runningAnywhere,
+                             Optional<SessionActivity> localActivity) {
+        if (runningAnywhere && !runningHere) {
+            return new TabIcon(SessionStatus.RUNNING, Optional.empty());
+        }
+        return new TabIcon(AgentStripText.displayStatus(persisted, runningHere),
+                runningHere ? localActivity : Optional.empty());
     }
 
     /**
@@ -87,11 +134,8 @@ public final class AgentConsoleTabPresentation implements EditorTabTitleProvider
             // and a paint is the wrong place to learn that.
             return null;
         }
-        for (ManagedAgentSession candidate : plugin.stateStore().state().sessions()) {
-            if (candidate.id().equals(console.sessionId())) {
-                return candidate;
-            }
-        }
-        return null;
+        // The catalog list instance only changes when the state does, so
+        // this is an O(1) lookup against the index's current snapshot.
+        return INDEX.find(plugin.stateStore().state().sessions(), console.sessionId());
     }
 }

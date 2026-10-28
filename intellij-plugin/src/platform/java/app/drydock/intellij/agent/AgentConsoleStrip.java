@@ -10,6 +10,7 @@ import com.intellij.ui.components.ActionLink;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.util.ui.JBUI;
 import com.intellij.util.ui.UIUtil;
+import com.intellij.util.ui.WrapLayout;
 
 import javax.swing.Box;
 import javax.swing.BoxLayout;
@@ -20,6 +21,7 @@ import javax.swing.SwingUtilities;
 import javax.swing.Timer;
 
 import java.awt.Dimension;
+import java.awt.FlowLayout;
 import java.awt.Font;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
@@ -35,13 +37,19 @@ import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
 /**
- * The band above an agent console: what the session is doing, and the two or
- * three things to do about it.
+ * The band above an agent console: what the session is, and the commands
+ * that apply to it — a wrapping ribbon of icon+text buttons rather than a
+ * single clipped line (A4).
  *
  * <p>Structure and copy come from the UX handoff; every colour and inset comes
  * from the LaF, so the strip reads as part of the IDE in any theme. The one
  * exception is the status dot, whose palette is drydock's own
- * ({@link SessionDots}).</p>
+ * ({@link SessionDots}). The first child is one identity panel (title, state,
+ * chip, secondary, provenance) so the session stays readable as a unit; the
+ * commands after it wrap onto further rows instead of ever hiding Done (A5).
+ * Which command exists, which is clickable and what the lifecycle one says
+ * are not decided here — {@link SessionCommands} decides for every surface,
+ * and the strip only places the buttons.</p>
  *
  * <p>The strip holds no state of its own and derives nothing: the editor
  * passes a resolved session plus the few facts that are not on it, and every
@@ -50,16 +58,17 @@ import java.util.function.Consumer;
  */
 final class AgentConsoleStrip extends JPanel {
 
-    /** Roughly the handoff's 36 px, scaled with the IDE's own scaling. */
-    private static final int HEIGHT = 36;
-
     /**
      * What the strip can ask the editor to do. {@code START} and
      * {@code RESUME} are distinct because they are different agent commands —
      * a fresh conversation versus one resumed by id — and only one of them is
-     * ever offered.
+     * ever offered. {@code DEACTIVATE}, {@code SHOW_AGENT} and {@code DONE}
+     * share the names of their {@link SessionCommands} counterparts so the
+     * strip and the tab surfaces cannot drift apart; {@code SHOW_AGENT} is
+     * the detached tab's reconnect (A6) — the agent runs, just not in this
+     * window, and the command reaches it without starting anything.
      */
-    enum StripAction { STOP, RESUME, START, TRANSFER, RENAME, SHOW_CHANGES, OPEN_PROJECT_WINDOW, SESSION_MENU }
+    enum StripAction { DEACTIVATE, RESUME, START, SHOW_AGENT, TRANSFER, RENAME, SHOW_CHANGES, OPEN_PROJECT_WINDOW, DONE }
 
     private final ActionLink title;
     private final JBLabel state = new JBLabel();
@@ -67,6 +76,12 @@ final class AgentConsoleStrip extends JPanel {
     private final JBLabel secondary = new JBLabel();
     /** {@code from <repo> ⑂ <branch>}: only on a tab hosted from another worktree. */
     private final JBLabel provenance = new JBLabel();
+    /**
+     * The identity block — title, state, chip, secondary, provenance — as the
+     * wrapping ribbon's first child, so it moves as one unit and never has a
+     * command wedged inside it.
+     */
+    private final JPanel identity = new JPanel();
     /** The inline rename editor; created on first use, swapped in over {@link #title}. */
     private final JTextField renameField = new JTextField();
     /**
@@ -81,11 +96,11 @@ final class AgentConsoleStrip extends JPanel {
     private String titleText = "";
     /** The editor's action handler, kept for the title link's single click. */
     private final Consumer<StripAction> onAction;
-    private final ActionLink openWindow;
-    private final ActionLink changes;
-    private final ActionLink transfer;
+    private final JButton openWindow;
+    private final JButton changes;
+    private final JButton transfer;
     private final JButton primary = new JButton();
-    private final ActionLink more;
+    private final JButton done;
 
     /** Which action {@link #primary} currently performs; see {@link #update}. */
     private StripAction primaryAction = StripAction.START;
@@ -101,16 +116,18 @@ final class AgentConsoleStrip extends JPanel {
         // click of a double-click pair.
         this.title = new ActionLink("", (ActionListener) event -> { });
         installTitleClicks();
-        this.changes = new ActionLink("Changes",
-                (ActionListener) event -> onAction.accept(StripAction.SHOW_CHANGES));
-        this.openWindow = new ActionLink("Open project window ↗",
-                (ActionListener) event -> onAction.accept(StripAction.OPEN_PROJECT_WINDOW));
-        this.transfer = new ActionLink("Transfer to…",
-                (ActionListener) event -> onAction.accept(StripAction.TRANSFER));
-        this.more = new ActionLink("⋯",
-                (ActionListener) event -> onAction.accept(StripAction.SESSION_MENU));
+        this.openWindow = commandButton(StripAction.OPEN_PROJECT_WINDOW,
+                SessionCommands.Command.OWN_PROJECT);
+        this.changes = commandButton(StripAction.SHOW_CHANGES, SessionCommands.Command.CHANGES);
+        this.transfer = commandButton(StripAction.TRANSFER, SessionCommands.Command.TRANSFER);
+        this.done = commandButton(StripAction.DONE, SessionCommands.Command.DONE);
+        this.done.setToolTipText("Done with this session…");
+        primary.setMargin(JBUI.insets(1, 6));
+        primary.addActionListener(event -> onAction.accept(primaryAction));
 
-        setLayout(new BoxLayout(this, BoxLayout.X_AXIS));
+        // WrapLayout, not a fixed-height single row: a narrow editor grows a
+        // second row instead of clipping the last command (A4, A5).
+        setLayout(new WrapLayout(FlowLayout.LEFT, JBUI.scale(8), JBUI.scale(4)));
         setBackground(UIUtil.getPanelBackground());
         setBorder(JBUI.Borders.compound(
                 JBUI.Borders.customLineBottom(JBColor.border()),
@@ -126,31 +143,33 @@ final class AgentConsoleStrip extends JPanel {
                 JBUI.Borders.empty(0, 4)));
         secondary.setForeground(UIUtil.getContextHelpForeground());
         provenance.setForeground(UIUtil.getContextHelpForeground());
-        more.setToolTipText("Done with this session…");
-        primary.addActionListener(event -> onAction.accept(primaryAction));
 
-        add(title);
-        add(Box.createHorizontalStrut(JBUI.scale(10)));
-        add(state);
-        add(Box.createHorizontalStrut(JBUI.scale(8)));
-        add(chip);
-        add(Box.createHorizontalStrut(JBUI.scale(8)));
-        add(secondary);
-        add(Box.createHorizontalStrut(JBUI.scale(12)));
-        add(provenance);
-        // A fixed gap as well as the glue: in a narrow editor the glue
-        // collapses, and the provenance ran straight into the link.
-        add(Box.createHorizontalStrut(JBUI.scale(10)));
-        add(Box.createHorizontalGlue());
+        identity.setLayout(new BoxLayout(identity, BoxLayout.X_AXIS));
+        identity.setOpaque(false);
+        identity.add(title);
+        identity.add(Box.createHorizontalStrut(JBUI.scale(10)));
+        identity.add(state);
+        identity.add(Box.createHorizontalStrut(JBUI.scale(8)));
+        identity.add(chip);
+        identity.add(Box.createHorizontalStrut(JBUI.scale(8)));
+        identity.add(secondary);
+        identity.add(Box.createHorizontalStrut(JBUI.scale(12)));
+        identity.add(provenance);
+
+        add(identity);
         add(openWindow);
-        add(Box.createHorizontalStrut(JBUI.scale(10)));
         add(changes);
-        add(Box.createHorizontalStrut(JBUI.scale(10)));
         add(transfer);
-        add(Box.createHorizontalStrut(JBUI.scale(10)));
         add(primary);
-        add(Box.createHorizontalStrut(JBUI.scale(10)));
-        add(more);
+        add(done);
+    }
+
+    /** A command button — icon and text from the shared command, compact margins. */
+    private JButton commandButton(StripAction action, SessionCommands.Command command) {
+        JButton button = new JButton(command.label(), command.icon());
+        button.setMargin(JBUI.insets(1, 6));
+        button.addActionListener(event -> onAction.accept(action));
+        return button;
     }
 
     /** The rename commit, wired by the owning editor; see {@link #onRenamed}. */
@@ -215,16 +234,16 @@ final class AgentConsoleStrip extends JPanel {
 
     /** EDT: swaps the title for an inline editor; Enter pins, blur commits, Esc cancels. */
     private void startInlineRename() {
-        if (renameField.getParent() == this) {
+        if (renameField.getParent() == identity) {
             return;
         }
         cancelSingleClickDialog();
         renameField.setText(titleText);
         renameField.setFont(title.getFont());
         renameField.setColumns(16);
-        int at = getComponentZOrder(title);
-        remove(title);
-        add(renameField, at);
+        int at = identity.getComponentZOrder(title);
+        identity.remove(title);
+        identity.add(renameField, at);
         revalidate();
         repaint();
         renameField.requestFocusInWindow();
@@ -233,7 +252,7 @@ final class AgentConsoleStrip extends JPanel {
 
     /** EDT: restores the title; a changed name is committed with the caller's pin. */
     private void commitInlineRename(boolean pin) {
-        if (renameField.getParent() != this) {
+        if (renameField.getParent() != identity) {
             return;
         }
         String newName = renameField.getText() == null ? "" : renameField.getText().strip();
@@ -248,9 +267,9 @@ final class AgentConsoleStrip extends JPanel {
 
     private void endInlineRename() {
         cancelSingleClickDialog();
-        int at = getComponentZOrder(renameField);
-        remove(renameField);
-        add(title, at);
+        int at = identity.getComponentZOrder(renameField);
+        identity.remove(renameField);
+        identity.add(title, at);
         revalidate();
         repaint();
     }
@@ -258,7 +277,7 @@ final class AgentConsoleStrip extends JPanel {
     /**
      * The strip's one primary control, so a tab with no running agent can
      * hand keyboard focus to something that does anything at all — the
-     * Resume button. A real focusable {@code JButton}, so Enter and Space
+     * lifecycle button. A real focusable {@code JButton}, so Enter and Space
      * trigger it (AGENTS.md's keyboard-access rule).
      */
     JButton primaryButton() {
@@ -266,58 +285,63 @@ final class AgentConsoleStrip extends JPanel {
     }
 
     @Override
-    public Dimension getPreferredSize() {
-        return new Dimension(super.getPreferredSize().width, JBUI.scale(HEIGHT));
-    }
-
-    @Override
     public Dimension getMaximumSize() {
-        return new Dimension(Integer.MAX_VALUE, JBUI.scale(HEIGHT));
+        // Width stays unbounded so the strip stretches with the editor; the
+        // height is the layout's own — WrapLayout wraps onto another row
+        // instead of being clipped to one.
+        return new Dimension(Integer.MAX_VALUE, super.getMaximumSize().height);
     }
 
     /**
      * Repaints the strip for {@code session}. EDT only.
      *
+     * @param activity         the live process's current activity, when running
      * @param running          whether this window has a live process for it
      * @param readOnlyEnforced whether the agent CLI can actually hold it to reading
+     * @param agentName        the agent's display name, for the secondary line
      * @param age              how long since the session was last started
      * @param changedFiles     files changed against the base, when known
-     * @param resumable        whether the session has a recorded conversation
-     *                         to resume into; when it does not, the primary
-     *                         button starts a fresh one instead of offering a
-     *                         Resume that could only reach a picker
      * @param estimatedTokens  the resume cost estimate, when known
-     * @param indexing         whether the project is still in dumb mode
+     * @param indexing          whether the project is still in dumb mode
      * @param hostedFrom       where the agent comes from, when this tab hosts
      *                         it from another worktree; adds the provenance
      *                         and the jump to its own window
      * @param folderMissing    whether a hosted agent's worktree folder is gone
      * @param checkoutGone     whether the session's checkout directory is gone
-     *                         or is not a git checkout — the Changes link could
-     *                         resolve no review there, so it is disabled with a
-     *                         tooltip saying so rather than clicking into nothing
-     * @param moving           whether the console is on its way to the
-     *                         agent's own window: the strip says so and its
-     *                         actions wait (typing still reaches the agent)
-     * @param transferTarget   destination agent while an in-place transfer
-     *                         owns the session, including the gap with no
-     *                         running process
+     *                         or is not a git checkout — the Changes button
+     *                         could resolve no review there, so it is disabled
+     *                         with a tooltip saying so rather than clicking
+     *                         into nothing
+     * @param commands        the session's command state: what is clickable
+     *                         while an operation is in flight, and which
+     *                         lifecycle command applies — decided once in
+     *                         {@link SessionCommands} for the strip, the tab
+     *                         header and the tree alike
      */
     void update(ManagedAgentSession session, Optional<SessionActivity> activity, boolean running,
                 boolean readOnlyEnforced, String agentName, Duration age, Optional<Integer> changedFiles,
-                boolean resumable, Optional<Integer> estimatedTokens, boolean indexing,
-                Optional<SessionPlace> hostedFrom, boolean folderMissing, boolean checkoutGone, boolean moving,
-                Optional<String> transferTarget) {
+                Optional<Integer> estimatedTokens, boolean indexing,
+                Optional<SessionPlace> hostedFrom, boolean folderMissing, boolean checkoutGone,
+                SessionCommands.State commands) {
         // The window, not the catalog, is the authority on what is alive in
-        // it: a row left in the running band with nothing running here reads
-        // as not running (see AgentStripText.displayStatus).
-        SessionStatus shown = AgentStripText.displayStatus(session.status(), running);
+        // it (see AgentStripText.displayStatus). A detached tab must not read
+        // that authority as "stopped": the agent is live somewhere — another
+        // window, or none at all — so the dot and the word stay live and the
+        // qualifier says where it is not, instead of a hollow dot and "Not
+        // running" implying the globally live agent stopped (A6).
+        boolean detached = commands.detachedFromThisWindow();
+        SessionStatus shown = detached
+                ? SessionStatus.RUNNING
+                : AgentStripText.displayStatus(session.status(), running);
         titleText = session.displayName();
         title.setText(session.displayName());
         title.setToolTipText("Rename \"" + session.displayName() + "\"");
         state.setIcon(SessionDots.dotIcon(shown, activity));
-        state.setText(SessionDots.statusWord(shown, activity));
-        state.setToolTipText(SessionDots.tooltip(shown, activity));
+        state.setText(SessionDots.statusWord(shown, activity)
+                + (detached ? " · not shown here" : ""));
+        state.setToolTipText(detached
+                ? "The agent is running — just not in this window. Show agent opens its live console"
+                : SessionDots.tooltip(shown, activity));
 
         Optional<String> chipText = AgentStripText.readOnlyChip(session, readOnlyEnforced);
         chip.setText(chipText.orElse(""));
@@ -330,32 +354,42 @@ final class AgentConsoleStrip extends JPanel {
         changes.setVisible(running);
         // A hosted tab's Changes opens in the agent's own window (F2/F3).
         changes.setText(hostedFrom.isPresent() ? "Changes ↗" : "Changes");
-        provenance.setText(hostedFrom.map(place -> moving ? JumpPlan.opening(place)
-                : place.provenance() + (folderMissing ? " · folder missing" : "")).orElse(""));
-        provenance.setVisible(hostedFrom.isPresent());
-        openWindow.setVisible(hostedFrom.isPresent());
-        openWindow.setEnabled(!moving);
         // A checkout that is gone (a deleted worktree, or a directory that
-        // no longer holds a git checkout) cannot produce a review: the link
-        // says so instead of clicking into a silent nothing.
-        changes.setEnabled(!moving && !checkoutGone);
+        // no longer holds a git checkout) cannot produce a review: the
+        // button says so instead of clicking into a silent nothing.
+        changes.setEnabled(!commands.moving() && !checkoutGone);
         changes.setToolTipText(checkoutGone
                 ? "The session's checkout is gone or is not a git repository"
                 : null);
-        boolean transferring = transferTarget.isPresent();
-        transfer.setVisible(!transferring && running && SessionTransfer.available(session, activity));
-        transfer.setEnabled(!moving);
-        more.setEnabled(!moving);
+        provenance.setText(hostedFrom.map(place -> commands.moving() ? JumpPlan.opening(place)
+                : place.provenance() + (folderMissing ? " · folder missing" : "")).orElse(""));
+        provenance.setVisible(hostedFrom.isPresent());
+        // A jump only exists for a tab hosting another worktree's agent;
+        // the owning window already is the project window (A8).
+        openWindow.setVisible(hostedFrom.isPresent());
+        openWindow.setEnabled(SessionCommands.ownProjectEnabled(commands));
 
-        primaryAction = running ? StripAction.STOP
-                : resumable ? StripAction.RESUME
-                : StripAction.START;
-        primary.setText(transferTarget.map(target -> "Transferring to " + target + "…")
-                .orElseGet(() -> running ? "■ Deactivate" : AgentStripText.primaryLabel(resumable, estimatedTokens)));
-        // Nothing to resume for an agent this build cannot run: the resume
-        // would pick a provider at random or fail at the command builder.
-        primary.setEnabled(!transferring && !moving
-                && (running || session.status() != SessionStatus.UNSUPPORTED_AGENT));
+        transfer.setVisible(running && !commands.transferring()
+                && SessionTransfer.available(session, activity));
+        transfer.setEnabled(!commands.moving());
+
+        SessionCommands.Lifecycle lifecycle = SessionCommands.lifecycle(commands);
+        primaryAction = switch (lifecycle) {
+            case DEACTIVATE -> StripAction.DEACTIVATE;
+            case SHOW_AGENT -> StripAction.SHOW_AGENT;
+            case RESUME -> StripAction.RESUME;
+            case START -> StripAction.START;
+        };
+        // The shared busy label while an operation is in flight; otherwise
+        // the lifecycle's own words, with the strip's resume-cost copy for a
+        // stopped session.
+        Optional<String> busy = SessionCommands.busyLabel(commands);
+        primary.setText(busy.orElseGet(() -> commands.running()
+                ? lifecycle.label()
+                : AgentStripText.primaryLabel(commands.resumable(), estimatedTokens)));
+        primary.setIcon(lifecycle.icon());
+        primary.setEnabled(SessionCommands.lifecycleEnabled(commands));
+        done.setEnabled(SessionCommands.doneEnabled(commands));
 
         revalidate();
         repaint();

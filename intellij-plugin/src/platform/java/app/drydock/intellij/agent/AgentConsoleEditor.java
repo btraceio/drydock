@@ -8,7 +8,6 @@ import app.drydock.domain.RepositoryCatalog;
 import app.drydock.domain.SessionActivity;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.DrydockSessionsListener;
-import app.drydock.intellij.review.ReviewTabOpener;
 import app.drydock.ui.AgentLabels;
 
 import com.intellij.openapi.application.ApplicationActivationListener;
@@ -123,6 +122,15 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
     private volatile ManagedAgentSession session;
 
     /**
+     * The window-scoped command state the strip was last painted with — the
+     * presentation a later click was invited under. A lifecycle click
+     * dispatches on this (the click's intent) while the shared handler guards
+     * on the state recomputed at click time, so a stale paint cannot stop a
+     * moved agent or start an ended one (A6); see {@link #performAction}.
+     */
+    private volatile SessionCommands.State paintedCommands;
+
+    /**
      * Whether this tab has ever resolved its session. A tab opened by the
      * create flow exists before the row is persisted, so "not in the catalog"
      * means two different things: not yet, or gone. Only the second is worth
@@ -204,6 +212,13 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
 
             @Override
             public void executionMoving(ManagedSessionId sessionId, boolean moving) {
+                if (sessionId.equals(file.sessionId())) {
+                    refreshLater();
+                }
+            }
+
+            @Override
+            public void executionStarting(ManagedSessionId sessionId, boolean starting) {
                 if (sessionId.equals(file.sessionId())) {
                     refreshLater();
                 }
@@ -347,6 +362,25 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
         return Optional.of(new SessionPlace(repository, Optional.empty()));
     }
 
+    /**
+     * The resumable fact this editor worked out off the EDT, for the tab
+     * header and popup surfaces: empty until the session resolved — a cold
+     * caller falls back to the strip's own rules — a definite answer after.
+     * Memory-only.
+     */
+    Optional<Boolean> knownResumable() {
+        return session == null ? Optional.empty() : Optional.of(resumable);
+    }
+
+    /**
+     * Whether the session's checkout is gone, as this editor knows it: empty
+     * until the session resolved, so the Changes command can hide itself
+     * rather than guess. Memory-only.
+     */
+    Optional<Boolean> knownCheckoutGone() {
+        return session == null ? Optional.empty() : Optional.of(checkoutGone);
+    }
+
     private static ManagedAgentSession findSession(DrydockPluginService plugin, ManagedSessionId sessionId) {
         for (ManagedAgentSession candidate : plugin.stateStore().state().sessions()) {
             if (candidate.id().equals(sessionId)) {
@@ -424,6 +458,15 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
                 // "working" with nothing running.
                 : Optional.empty();
 
+        // The window-scoped command state (A6): the same memory-only read
+        // the global scope makes, plus this window's own isRunning — so a
+        // tab whose session runs elsewhere (or with no window at all) is
+        // detached here and offers Show agent, never a Deactivate of an
+        // agent this window does not show. The task tree keeps the global
+        // scope, where a live session is never detached.
+        SessionCommands.State commands = SessionCommands.stateOf(current, knownResumable(), running);
+        paintedCommands = commands;
+
         strip.update(current, activity, running,
                 DrydockPluginService.getInstance().registry().enforcesReadOnly(current.agentKind()),
                 AgentLabels.displayName(DrydockPluginService.getInstance().registry(), current.agentKind()),
@@ -432,16 +475,15 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
                 // Absent prints nothing, which is honest; a zero would read
                 // as a claim.
                 Optional.empty(),
-                // Resumable only with a recorded conversation to resume into.
-                // Without one, Resume could reach nothing but the provider's
-                // own picker, so the button starts a fresh conversation on
-                // this same row instead.
-                resumable, resumeTokens,
+                resumeTokens,
                 DumbService.isDumb(project),
                 hostedFrom.map(place -> execution.map(AgentExecution::place).orElse(place)), folderMissing,
                 checkoutGone,
-                AgentExecutionRegistry.getInstance().moving().contains(current.id()),
-                SessionTransfer.destination(current.id()));
+                // One memory-only command-state read: the strip's enablement
+                // and lifecycle label come from SessionCommands, never
+                // re-derived here and never from a copy of the registry's
+                // in-flight sets.
+                commands);
 
         String stoppedLine = AgentStripText.stoppedFooter(
                 AgentStripText.displayStatus(current.status(), false),
@@ -449,6 +491,16 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
         Optional<TerminalExecutionConsole> console = execution.flatMap(AgentExecution::console);
         if (console.isPresent() && running) {
             showBody(console.get().getComponent());
+        } else if (commands.detachedFromThisWindow()) {
+            // The agent is live — in another window, or with none at all —
+            // so the stopped footer would be a lie: this tab is a remote
+            // control for a running agent, and says how to reach it instead
+            // (A6). Show agent attaches or raises the existing execution;
+            // nothing restarts on its own.
+            placeholder.setText(current.displayName()
+                    + " is running, but not in this window. "
+                    + "Show agent above opens its live console.");
+            showBody(placeholder);
         } else if (console.isPresent()) {
             // Stopped in this window: the transcript is still here to read,
             // dimmed so it cannot be mistaken for a live agent.
@@ -553,26 +605,44 @@ final class AgentConsoleEditor extends UserDataHolderBase implements FileEditor 
 
     // ---- strip actions -----------------------------------------------------------
 
+    /**
+     * The command state this tab last presented — the strip's own paint, so
+     * a lifecycle click carries the intent it was offered under. Never null
+     * after the first refresh painted the strip; a click landing before any
+     * paint falls back to the current window-scoped state.
+     */
+    private SessionCommands.State presentedCommands(ManagedAgentSession current) {
+        SessionCommands.State painted = paintedCommands;
+        return painted != null ? painted
+                : SessionCommands.stateOf(current, knownResumable(),
+                        AgentExecutionService.getInstance(project).isRunning(current.id()));
+    }
+
     private void performAction(AgentConsoleStrip.StripAction action) {
         ManagedAgentSession current = session;
         if (current == null) {
             return;
         }
+        // The stop and Done dialogs and the jump targets are shared with the
+        // tab header and popup (SessionCommandHandlers); the strip keeps no
+        // policy of its own, so it cannot drift from what the tree does.
         switch (action) {
-            case STOP -> AgentExecutionService.getInstance(project).stop(current.id());
-            case RESUME -> AgentConsoles.resume(project, current.id());
-            case START -> AgentConsoles.startFresh(project, current.id());
+            // Every primary lifecycle case goes through the one shared
+            // handler (A6). The strip's own strict resume diverged from the
+            // header and popup's restore semantics; the handler guards on
+            // the recomputed current window-scoped state (a move in flight
+            // holds this tab's lifecycle off, and the tab closes itself
+            // once the console is shown in another window, so a paint from
+            // before a move cannot stop the moved agent) and dispatches on
+            // this tab's presented one — the click's intent — so a Show
+            // agent whose execution ended before the click starts nothing.
+            case DEACTIVATE, RESUME, START, SHOW_AGENT -> SessionCommandHandlers.lifecycle(
+                    project, current, presentedCommands(current), knownResumable(), this::refreshLater);
             case TRANSFER -> SessionTransfer.show(project, current, this::refreshLater);
             case RENAME -> SessionRename.show(project, current);
-            case SESSION_MENU -> SessionDone.show(project, current);
-            case SHOW_CHANGES -> {
-                if (hostedFrom.isPresent()) {
-                    AgentConsoles.jumpToOwnWindow(project, current.id(), true);
-                } else {
-                    ReviewTabOpener.open(project, Optional.of(current));
-                }
-            }
-            case OPEN_PROJECT_WINDOW -> AgentConsoles.jumpToOwnWindow(project, current.id(), false);
+            case DONE -> SessionCommandHandlers.done(project, current);
+            case SHOW_CHANGES -> SessionCommandHandlers.showChanges(project, current, hostedFrom.isPresent());
+            case OPEN_PROJECT_WINDOW -> SessionCommandHandlers.openOwnProject(project, current);
         }
     }
 
