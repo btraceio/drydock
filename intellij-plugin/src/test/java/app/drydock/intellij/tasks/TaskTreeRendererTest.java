@@ -10,8 +10,14 @@ import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.JiraIssue;
+import app.drydock.intellij.tasks.TaskNode.Deferred;
 import app.drydock.intellij.tasks.TaskNode.IssueRow;
+import app.drydock.intellij.tasks.TaskNode.JiraGroupRow;
 import app.drydock.intellij.tasks.TaskNode.JiraIssueRow;
+import app.drydock.intellij.tasks.TaskNode.ListProblem;
+import app.drydock.intellij.tasks.TaskNode.Placeholder;
+import app.drydock.intellij.tasks.TaskNode.Section;
+import app.drydock.intellij.tasks.TaskNode.SectionKind;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
 
 import org.junit.jupiter.api.Test;
@@ -143,5 +149,100 @@ class TaskTreeRendererTest {
     @Test
     void aJiraIssueRowSaysKeyAndSummary() {
         assertEquals("PROJ-123 Fix allocation accounting", TaskTreeRenderer.issueText(jiraProj123()));
+    }
+
+    private static final JiraGroup SPRINT = new JiraGroup("g1", "Sprint", "project = DRY");
+
+    private static JiraIssueRow jiraRow(String key) {
+        return new JiraIssueRow(ROOT, new JiraIssue(key, "Fix allocation accounting",
+                "https://acme.atlassian.net/browse/" + key, List.of(), Optional.empty()));
+    }
+
+    private static JiraGroupRow jiraGroup(TaskNode... children) {
+        return new JiraGroupRow(ROOT, SPRINT, List.of(children));
+    }
+
+    @Test
+    void aFailedJiraGroupShowsNoIssueCount() {
+        assertEquals(Optional.empty(), TaskTreeRenderer.issueCountBadge(
+                jiraGroup(new ListProblem("Jira group \"Sprint\": boom"))));
+    }
+
+    @Test
+    void aLoadingJiraGroupShowsNoIssueCount() {
+        assertEquals(Optional.empty(), TaskTreeRenderer.issueCountBadge(jiraGroup(new Deferred("Loading…"))));
+    }
+
+    @Test
+    void aListedJiraGroupCountsItsIssues() {
+        assertEquals(Optional.of("1 issue"), TaskTreeRenderer.issueCountBadge(
+                jiraGroup(new JiraIssueRow(ROOT, jiraProj123()))));
+        assertEquals(Optional.of("2 issues"), TaskTreeRenderer.issueCountBadge(
+                jiraGroup(jiraRow("PROJ-1"), jiraRow("PROJ-2"))));
+    }
+
+    @Test
+    void anEmptyListedJiraGroupSaysZeroIssues() {
+        assertEquals(Optional.of("0 issues"), TaskTreeRenderer.issueCountBadge(
+                jiraGroup(new Placeholder("No issues"))));
+    }
+
+    @Test
+    void aMixedJiraGroupShowsNoIssueCount() {
+        assertEquals(Optional.empty(), TaskTreeRenderer.issueCountBadge(
+                jiraGroup(jiraRow("PROJ-1"), new ListProblem("Jira group \"Sprint\": boom"))));
+    }
+
+    @Test
+    void aSectionStillLoadingShowsNoCount() {
+        assertEquals(Optional.empty(), TaskTreeRenderer.sectionCountBadge(
+                new Section(SectionKind.ISSUES, List.of(new Deferred("Loading issues…")))));
+    }
+
+    @Test
+    void aSectionWithALoadingJiraGroupShowsNoCount() {
+        assertEquals(Optional.empty(), TaskTreeRenderer.sectionCountBadge(
+                new Section(SectionKind.ISSUES, List.of(jiraGroup(new Deferred("Loading…"))))));
+        assertEquals(Optional.empty(), TaskTreeRenderer.sectionCountBadge(
+                new Section(SectionKind.ISSUES, List.of(new IssueRow(ROOT, issue42()),
+                        jiraGroup(new Deferred("Loading…"))))));
+    }
+
+    @Test
+    void aSectionCountsTheIssuesInsideItsJiraGroups() {
+        assertEquals(Optional.of("3"), TaskTreeRenderer.sectionCountBadge(
+                new Section(SectionKind.ISSUES, List.of(new IssueRow(ROOT, issue42()),
+                        jiraGroup(jiraRow("PROJ-1"), jiraRow("PROJ-2"))))));
+    }
+
+    @Test
+    void aSectionDoesNotCountProblemRowsBesideItems() {
+        assertEquals(Optional.of("1"), TaskTreeRenderer.sectionCountBadge(
+                new Section(SectionKind.ISSUES, List.of(new ListProblem("GitHub issues: boom"),
+                        new IssueRow(ROOT, issue42())))));
+        assertEquals(Optional.of("1"), TaskTreeRenderer.sectionCountBadge(
+                new Section(SectionKind.ISSUES, List.of(jiraGroup(new Placeholder("No issues")),
+                        new IssueRow(ROOT, issue42())))));
+    }
+
+    @Test
+    void aFailedOnlySectionShowsNoCount() {
+        assertEquals(Optional.empty(), TaskTreeRenderer.sectionCountBadge(
+                new Section(SectionKind.PULL_REQUESTS, List.of(new ListProblem("GitHub pull requests: boom")))));
+    }
+
+    @Test
+    void aSectionWhoseOnlyJiraGroupFailedShowsNoCount() {
+        assertEquals(Optional.empty(), TaskTreeRenderer.sectionCountBadge(
+                new Section(SectionKind.ISSUES, List.of(
+                        jiraGroup(new ListProblem("Jira group \"Sprint\": boom"))))));
+    }
+
+    @Test
+    void anEmptyListedJiraGroupSectionSaysZero() {
+        assertEquals(Optional.of("0"), TaskTreeRenderer.sectionCountBadge(
+                new Section(SectionKind.ISSUES, List.of(jiraGroup(new Placeholder("No issues"))))));
+        assertEquals(Optional.of("1"), TaskTreeRenderer.sectionCountBadge(
+                new Section(SectionKind.ISSUES, List.of(new IssueRow(ROOT, issue42())))));
     }
 }

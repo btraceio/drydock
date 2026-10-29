@@ -12,6 +12,7 @@ import app.drydock.git.JiraIssue;
 import app.drydock.git.GhCliService.OpenPullRequest;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
 import app.drydock.intellij.tasks.TaskNode.IssueRow;
+import app.drydock.intellij.tasks.TaskNode.JiraGroupRow;
 import app.drydock.intellij.tasks.TaskNode.JiraIssueRow;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.intellij.tasks.TaskNode.PullRequestRow;
@@ -43,8 +44,9 @@ class TaskMenuTest {
     private static final Path WORKTREE = Path.of("/work/profiling-backend-fix");
     private static final Instant NOW = Instant.parse("2026-10-20T17:00:00Z");
 
-    private static final TaskMenu.MenuFacts TRANSFER = new TaskMenu.MenuFacts(true);
-    private static final TaskMenu.MenuFacts NO_TRANSFER = new TaskMenu.MenuFacts(false);
+    private static final TaskMenu.MenuFacts TRANSFER = new TaskMenu.MenuFacts(true, false);
+    private static final TaskMenu.MenuFacts NO_TRANSFER = new TaskMenu.MenuFacts(false, false);
+    private static final TaskMenu.MenuFacts JIRA = new TaskMenu.MenuFacts(false, true);
 
     private static TaskRow task(boolean running, TaskPlacement placement) {
         ManagedAgentSession session = new ManagedAgentSession.Builder(
@@ -195,6 +197,34 @@ class TaskMenuTest {
                 List.of(TaskMenu.Item.IMPLEMENT, TaskMenu.Item.TRIAGE),
                 List.of(TaskMenu.Item.OPEN_IN_JIRA, TaskMenu.Item.JIRA_SETTINGS)),
                 sectionsOf(jiraIssue()));
+    }
+
+    @Test
+    void jiraGroupRowOffersEditDeleteThenRefreshAndNothingElse() {
+        JiraGroupRow group = new JiraGroupRow(ROOT,
+                new JiraGroup("g-1", "Sprint", "project = DRY"), List.of(jiraIssue()));
+        assertEquals(List.of(
+                List.of(TaskMenu.Item.EDIT_JIRA_GROUP, TaskMenu.Item.DELETE_JIRA_GROUP),
+                List.of(TaskMenu.Item.REFRESH)),
+                sectionsOf(group));
+    }
+
+    @Test
+    void addJiraGroupIsOfferedOnlyWhenTheFactsSayJiraIsEnabled() {
+        TaskNode issues = new Section(SectionKind.ISSUES, List.of(issue(Optional.empty())));
+        assertEquals(List.of(List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.ADD_JIRA_GROUP,
+                        TaskMenu.Item.GITHUB_SETTINGS, TaskMenu.Item.JIRA_SETTINGS)),
+                TaskMenu.sections(issues, List.of(), JIRA));
+        // Disabled Jira: the old menu, Add would only ever fetch nothing.
+        assertEquals(List.of(List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.GITHUB_SETTINGS,
+                        TaskMenu.Item.JIRA_SETTINGS)),
+                sectionsOf(issues));
+        assertEquals(List.of(
+                List.of(TaskMenu.Item.NEW_TASK, TaskMenu.Item.NEW_TASK_IN_MAIN),
+                List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.GITHUB_SETTINGS, TaskMenu.Item.JIRA_SETTINGS,
+                        TaskMenu.Item.ADD_JIRA_GROUP),
+                List.of(TaskMenu.Item.REMOVE_FROM_DRYDOCK)),
+                TaskMenu.sections(project(), List.of(), JIRA));
     }
 
     @Test

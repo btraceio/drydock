@@ -13,8 +13,10 @@ import app.drydock.git.JiraIssue;
 import app.drydock.git.GhCliService.OpenPullRequest;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
 import app.drydock.intellij.tasks.TaskNode.IssueRow;
+import app.drydock.intellij.tasks.TaskNode.JiraGroupRow;
 import app.drydock.intellij.tasks.TaskNode.JiraIssueRow;
 import app.drydock.intellij.tasks.TaskNode.ListProblem;
+import app.drydock.intellij.tasks.TaskNode.Placeholder;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.intellij.tasks.TaskNode.PullRequestRow;
 import app.drydock.intellij.tasks.TaskNode.Section;
@@ -213,7 +215,8 @@ class TaskActionsTest {
 
     /** Every {@link TaskMenu.Item} a menu can offer, over one row of each kind. */
     private static Set<TaskMenu.Item> usedByTaskMenu() {
-        TaskMenu.MenuFacts transfer = new TaskMenu.MenuFacts(true);
+        // Jira enabled, so the group items a menu can offer are all reachable.
+        TaskMenu.MenuFacts transfer = new TaskMenu.MenuFacts(true, true);
         IdleWorktree worktree = new IdleWorktree(Path.of("/wt/fix"), "fix", Optional.empty(), false, false);
         List<TaskNode> shapes = List.of(
                 row(true, new TaskPlacement.OwnWindow()),
@@ -222,6 +225,8 @@ class TaskActionsTest {
                 issue(Optional.of("https://github.com/DataDog/repo/issues/9")),
                 new JiraIssueRow(Path.of("/repo"), new JiraIssue("PROJ-9", "Fix the thing",
                         "https://acme.atlassian.net/browse/PROJ-9", List.of(), Optional.of(Instant.EPOCH))),
+                new JiraGroupRow(Path.of("/repo"), new JiraGroup("g-sprint", "Sprint", "project = DRY"),
+                        List.of(new Placeholder("No issues"))),
                 worktree,
                 new StaleWorktrees(List.of(worktree)),
                 new WorktreeGroup(Path.of("/wt/fix"), "fix", List.of()),
