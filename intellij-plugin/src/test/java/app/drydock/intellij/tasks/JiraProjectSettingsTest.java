@@ -15,22 +15,20 @@ import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JiraProjectSettingsTest {
 
     private static final RepositoryId ID = new RepositoryId(UUID.randomUUID());
 
-    /** The five, and only the five, properties the record persists (AC13). */
+    /** The four, and only the four, properties the record persists (AC13). */
     private static Set<String> keys(RepositoryId id) {
         String prefix = "drydock.jira." + id;
         return Set.of(
                 prefix + ".enabled",
                 prefix + ".deployment",
                 prefix + ".baseUrl",
-                prefix + ".email",
-                prefix + ".jql");
+                prefix + ".email");
     }
 
     @Test
@@ -39,8 +37,7 @@ class JiraProjectSettingsTest {
                 true,
                 Deployment.DATA_CENTER,
                 "https://jira.example.com/jira/",
-                Optional.of("  ops@example.com  "),
-                Optional.of("  project = DRY ORDER BY updated ASC  "));
+                Optional.of("  ops@example.com  "));
         Map<String, String> store = new HashMap<>();
         settings.write(store::put, ID);
 
@@ -53,34 +50,18 @@ class JiraProjectSettingsTest {
         assertEquals(Deployment.DATA_CENTER, read.deployment());
         assertEquals("https://jira.example.com/jira", read.baseUrl());
         assertEquals(Optional.of("ops@example.com"), read.email());
-        assertEquals(Optional.of("project = DRY ORDER BY updated ASC"), read.jqlOverride());
         assertEquals(settings, read);
     }
 
     @Test
-    void aBlankJqlReadsBackEmptyAndEffectiveJqlIsTheDefault() {
+    void writeTouchesOnlyTheFourNonSecretKeys() {
         JiraProjectSettings settings = new JiraProjectSettings(
-                true, Deployment.CLOUD, "https://acme.atlassian.net", Optional.of("me@acme.com"), Optional.of("   "));
-        assertTrue(settings.jqlOverride().isEmpty());
-        assertEquals(JiraConnection.DEFAULT_JQL, settings.effectiveJql());
-
-        Map<String, String> store = new HashMap<>();
-        settings.write(store::put, ID);
-        assertNull(store.get("drydock.jira." + ID + ".jql"));
-        JiraProjectSettings read = JiraProjectSettings.read(store::get, ID);
-        assertTrue(read.jqlOverride().isEmpty());
-        assertEquals(JiraConnection.DEFAULT_JQL, read.effectiveJql());
-    }
-
-    @Test
-    void writeTouchesOnlyTheFiveNonSecretKeys() {
-        JiraProjectSettings settings = new JiraProjectSettings(
-                true, Deployment.CLOUD, "https://acme.atlassian.net", Optional.of("me@acme.com"), Optional.empty());
+                true, Deployment.CLOUD, "https://acme.atlassian.net", Optional.of("me@acme.com"));
         Map<String, String> store = new HashMap<>();
         settings.write(store::put, ID);
         assertEquals(keys(ID), store.keySet());
         // The record holds no secret component, so no stored value can be one.
-        assertEquals(5, store.size());
+        assertEquals(4, store.size());
     }
 
     @Test
@@ -90,9 +71,7 @@ class JiraProjectSettingsTest {
         assertEquals(Deployment.CLOUD, settings.deployment());
         assertEquals("", settings.baseUrl());
         assertTrue(settings.email().isEmpty());
-        assertTrue(settings.jqlOverride().isEmpty());
-        assertEquals(JiraConnection.DEFAULT_JQL, settings.effectiveJql());
-        assertEquals(Optional.empty(), settings.connection());
+        assertEquals(Optional.empty(), settings.connection("assignee = currentUser()"));
     }
 
     @Test
@@ -167,15 +146,14 @@ class JiraProjectSettingsTest {
     }
 
     @Test
-    void connectionIsEmptyWhenDisabledAndCarriesTheOverrideWhenEnabled() {
+    void connectionIsEmptyWhenDisabledAndCarriesTheGroupQueryWhenEnabled() {
         JiraProjectSettings disabled = new JiraProjectSettings(
-                false, Deployment.CLOUD, "https://acme.atlassian.net", Optional.of("me@acme.com"), Optional.empty());
-        assertTrue(disabled.connection().isEmpty());
+                false, Deployment.CLOUD, "https://acme.atlassian.net", Optional.of("me@acme.com"));
+        assertTrue(disabled.connection("project = DRY").isEmpty());
 
         JiraProjectSettings enabled = new JiraProjectSettings(
-                true, Deployment.CLOUD, "https://acme.atlassian.net/", Optional.of("me@acme.com"),
-                Optional.of("project = DRY"));
-        JiraConnection connection = enabled.connection().orElseThrow();
+                true, Deployment.CLOUD, "https://acme.atlassian.net/", Optional.of("me@acme.com"));
+        JiraConnection connection = enabled.connection("project = DRY").orElseThrow();
         assertEquals(Deployment.CLOUD, connection.deployment());
         assertEquals("https://acme.atlassian.net", connection.baseUrl());
         assertEquals(Optional.of("me@acme.com"), connection.email());
