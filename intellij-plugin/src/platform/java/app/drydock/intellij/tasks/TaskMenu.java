@@ -3,6 +3,7 @@ package app.drydock.intellij.tasks;
 import app.drydock.intellij.agent.SessionTransfer;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
 import app.drydock.intellij.tasks.TaskNode.IssueRow;
+import app.drydock.intellij.tasks.TaskNode.JiraGroupRow;
 import app.drydock.intellij.tasks.TaskNode.JiraIssueRow;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.intellij.tasks.TaskNode.PullRequestRow;
@@ -67,8 +68,14 @@ final class TaskMenu {
         IMPLEMENT,
         TRIAGE,
         GITHUB_SETTINGS,
-        /** Per-project Jira configuration: site, credentials, query. */
+        /** Per-project Jira configuration: site, credentials. */
         JIRA_SETTINGS,
+        /** Add a user-defined Jira group (name + JQL) to the Issues section. */
+        ADD_JIRA_GROUP,
+        /** Rename a Jira group or change its JQL; only a group node offers it. */
+        EDIT_JIRA_GROUP,
+        /** Delete a Jira group, after confirmation; only a group node offers it. */
+        DELETE_JIRA_GROUP,
         REFRESH,
         NEW_TASK_IN_MAIN,
         REMOVE_WORKTREE,
@@ -78,8 +85,8 @@ final class TaskMenu {
         REMOVE_WORKTREES
     }
 
-    /** The non-pure answer of one menu build, computed once by {@link #factsFor}. */
-    record MenuFacts(boolean transferAvailable) {
+    /** The non-pure answers of one menu build, computed once by {@link #factsFor}. */
+    record MenuFacts(boolean transferAvailable, boolean jiraEnabled) {
     }
 
     private TaskMenu() {
@@ -112,6 +119,9 @@ final class TaskMenu {
             case JiraIssueRow ignored -> nonEmpty(List.of(
                     List.of(Item.IMPLEMENT, Item.TRIAGE),
                     List.of(Item.OPEN_IN_JIRA, Item.JIRA_SETTINGS)));
+            case JiraGroupRow ignored -> nonEmpty(List.of(
+                    List.of(Item.EDIT_JIRA_GROUP, Item.DELETE_JIRA_GROUP),
+                    List.of(Item.REFRESH)));
             case IdleWorktree idleWorktree -> nonEmpty(List.of(
                     List.of(Item.NEW_TASK, Item.QUICK_REVIEW, Item.REVIEW, Item.REVIEW_IN_SPHINX),
                     // Locked or open worktrees cannot be removed from here.
@@ -121,9 +131,11 @@ final class TaskMenu {
             case Section section when section.kind() == SectionKind.ISSUES
                     || section.kind() == SectionKind.PULL_REQUESTS ->
                     section.kind() == SectionKind.ISSUES
-                            ? List.of(List.of(Item.REFRESH, Item.GITHUB_SETTINGS, Item.JIRA_SETTINGS))
+                            ? nonEmpty(List.of(section(Item.REFRESH,
+                                    facts.jiraEnabled() ? Item.ADD_JIRA_GROUP : null,
+                                    Item.GITHUB_SETTINGS, Item.JIRA_SETTINGS)))
                             : List.of(List.of(Item.REFRESH, Item.GITHUB_SETTINGS));
-            case ProjectRow project -> project(project);
+            case ProjectRow project -> project(project, facts);
             default -> List.of();
         };
     }
@@ -149,10 +161,12 @@ final class TaskMenu {
                 List.of(Item.DONE_WITH_TASK)));
     }
 
-    private static List<List<Item>> project(ProjectRow row) {
+    /** A project: new tasks, the listings' refresh and settings, then cleanup. */
+    private static List<List<Item>> project(ProjectRow row, MenuFacts facts) {
         return nonEmpty(List.of(
                 List.of(Item.NEW_TASK, Item.NEW_TASK_IN_MAIN),
-                List.of(Item.REFRESH, Item.GITHUB_SETTINGS, Item.JIRA_SETTINGS),
+                section(Item.REFRESH, Item.GITHUB_SETTINGS, Item.JIRA_SETTINGS,
+                        facts.jiraEnabled() ? Item.ADD_JIRA_GROUP : null),
                 section(TaskActions.removable(row).isEmpty() ? null : Item.REMOVE_INACTIVE_WORKTREES,
                         Item.REMOVE_FROM_DRYDOCK)));
     }
@@ -196,16 +210,18 @@ final class TaskMenu {
     }
 
     /**
-     * EDT: the one non-pure answer a menu build needs, computed once here
+     * EDT: the non-pure answers a menu build needs, computed once here
      * instead of per action. Transfer eligibility reads the registry's O(1)
      * probes, the transfer table, and the provider registry — memory-only,
      * but not pure, so {@link #sections} takes the answer as
-     * {@link MenuFacts} instead.
+     * {@link MenuFacts} instead. {@code jiraEnabled} is the selected
+     * project's connection flag as the caller read it; whether to offer
+     * adding a group hinges on it (the Jira settings entry is always offered).
      */
-    static MenuFacts factsFor(TaskNode lead) {
+    static MenuFacts factsFor(TaskNode lead, boolean jiraEnabled) {
         ApplicationManager.getApplication().assertIsDispatchThread();
         return new MenuFacts(lead instanceof TaskRow row
-                && SessionTransfer.available(row.session(), row.activity()));
+                && SessionTransfer.available(row.session(), row.activity()), jiraEnabled);
     }
 
     /**
@@ -215,11 +231,12 @@ final class TaskMenu {
      * the panel's action instances; an {@link Item} without one is skipped
      * rather than shown broken.
      */
-    static ActionGroup group(TaskNode lead, List<TaskNode> selection, Map<Item, AnAction> actions) {
+    static ActionGroup group(TaskNode lead, List<TaskNode> selection, Map<Item, AnAction> actions,
+                             boolean jiraEnabled) {
         ApplicationManager.getApplication().assertIsDispatchThread();
         DefaultActionGroup menu = new DefaultActionGroup();
         boolean separated = false;
-        for (List<Item> section : sections(lead, selection, factsFor(lead))) {
+        for (List<Item> section : sections(lead, selection, factsFor(lead, jiraEnabled))) {
             List<AnAction> present = new ArrayList<>();
             for (Item item : section) {
                 AnAction action = actions.get(item);

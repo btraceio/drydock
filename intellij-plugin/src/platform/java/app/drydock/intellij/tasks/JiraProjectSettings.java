@@ -11,19 +11,23 @@ import java.util.function.BiConsumer;
 import java.util.function.Function;
 
 /**
- * Non-secret Jira presentation settings for one registered Drydock
+ * Non-secret Jira connection settings for one registered Drydock
  * project, stored under {@code drydock.jira.<RepositoryId>.*} exactly the
  * way {@link GitHubProjectSettings} stores the GitHub ones. The secret
  * never travels through this record: it stays in the IDE password safe
  * behind {@link JiraCredentials}, so no {@code drydock.jira.*} property
  * can ever hold the token (spec AC13).
+ *
+ * <p>The queries Jira rows come from are the project's user-defined
+ * groups ({@link JiraGroups}), not a setting here: a connection record is
+ * built per group, with that group's JQL. A legacy {@code .jql} property
+ * from before the groups existed is simply ignored.</p>
  */
 record JiraProjectSettings(
         boolean enabled,
         JiraConnection.Deployment deployment,
         String baseUrl,
-        Optional<String> email,
-        Optional<String> jqlOverride) {
+        Optional<String> email) {
 
     private static final String PREFIX = "drydock.jira.";
 
@@ -42,10 +46,8 @@ record JiraProjectSettings(
     JiraProjectSettings {
         Objects.requireNonNull(deployment, "deployment");
         Objects.requireNonNull(email, "email");
-        Objects.requireNonNull(jqlOverride, "jqlOverride");
         baseUrl = JiraConnection.normalizeBaseUrl(baseUrl);
         email = email.map(String::strip).filter(value -> !value.isEmpty());
-        jqlOverride = jqlOverride.map(String::strip).filter(value -> !value.isEmpty());
     }
 
     /**
@@ -60,12 +62,11 @@ record JiraProjectSettings(
                 Boolean.parseBoolean(get.apply(prefix + ".enabled")),
                 deploymentOf(get.apply(prefix + ".deployment")),
                 get.apply(prefix + ".baseUrl"),
-                optionalOf(get.apply(prefix + ".email")),
-                optionalOf(get.apply(prefix + ".jql")));
+                optionalOf(get.apply(prefix + ".email")));
     }
 
     /**
-     * Writes exactly the five non-secret keys. A null value means unset —
+     * Writes exactly the four non-secret keys. A null value means unset —
      * a consumer like {@code PropertiesComponent.setValue} removes such a
      * key, and the pure readers see the default again.
      */
@@ -75,7 +76,6 @@ record JiraProjectSettings(
         put.accept(prefix + ".deployment", deployment.name());
         put.accept(prefix + ".baseUrl", baseUrl);
         put.accept(prefix + ".email", email.orElse(null));
-        put.accept(prefix + ".jql", jqlOverride.orElse(null));
     }
 
     static JiraProjectSettings load(RepositoryId id) {
@@ -88,20 +88,17 @@ record JiraProjectSettings(
         write(properties::setValue, id);
     }
 
-    /** The query to run: the override, or the pinned default when there is none. */
-    String effectiveJql() {
-        return jqlOverride.orElse(JiraConnection.DEFAULT_JQL);
-    }
-
     /**
-     * The connection to make, or empty when Jira is disabled for the
-     * project; a disabled project must not produce requests at all.
+     * The connection to make for the group query {@code jql}, or empty
+     * when Jira is disabled for the project; a disabled project must not
+     * produce requests at all. Each group builds its own connection, so
+     * the query travels with the group, not with the settings.
      */
-    Optional<JiraConnection> connection() {
+    Optional<JiraConnection> connection(String jql) {
         if (!enabled) {
             return Optional.empty();
         }
-        return Optional.of(new JiraConnection(deployment, baseUrl, email, effectiveJql()));
+        return Optional.of(new JiraConnection(deployment, baseUrl, email, jql));
     }
 
     /**

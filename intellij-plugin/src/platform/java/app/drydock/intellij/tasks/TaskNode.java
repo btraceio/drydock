@@ -84,6 +84,31 @@ public sealed interface TaskNode {
         }
     }
 
+    /** A muted non-actionable line, e.g. a group whose query returned nothing. */
+    record Placeholder(String text) implements TaskNode {
+        public Placeholder {
+            Objects.requireNonNull(text, "text");
+        }
+    }
+
+    /**
+     * One user-defined Jira group: the named subnode of a project's Issues
+     * section whose JQL scopes its rows. Jira rows appear nowhere else — a
+     * project whose {@link JiraGroups} is empty shows no Jira content. The
+     * children are Jira rows, or a single loading, problem or empty-state
+     * child; a group whose search filter matches nothing inside is omitted.
+     */
+    record JiraGroupRow(Path mainRoot, JiraGroup group, List<TaskNode> children) implements TaskNode {
+        public JiraGroupRow {
+            Objects.requireNonNull(mainRoot, "mainRoot");
+            Objects.requireNonNull(group, "group");
+            children = List.copyOf(children);
+            if (children.isEmpty()) {
+                throw new IllegalArgumentException("a Jira group must not be empty");
+            }
+        }
+    }
+
     /** A worktree with more than one task: {@code ⑂ <branch>} with its tasks beneath. */
     record WorktreeGroup(Path worktree, String branch, List<TaskRow> tasks) implements TaskNode {
         public WorktreeGroup {

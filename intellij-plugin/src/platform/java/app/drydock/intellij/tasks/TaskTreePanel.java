@@ -87,6 +87,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
 
 /**
@@ -474,6 +475,15 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             inputs.invalidateJira();
             requestRebuild(false);
         }));
+        // Group edits only ever touch the project's own group storage and
+        // listings: one project's Jira caches drop, nothing else.
+        Consumer<Path> afterJiraGroupChange = root -> {
+            inputs.invalidateJiraIssues(root);
+            requestRebuild(false);
+        };
+        menuActions.put(TaskMenu.Item.ADD_JIRA_GROUP, JiraTreeActions.addGroup(project, afterJiraGroupChange));
+        menuActions.put(TaskMenu.Item.EDIT_JIRA_GROUP, JiraTreeActions.editGroup(project, afterJiraGroupChange));
+        menuActions.put(TaskMenu.Item.DELETE_JIRA_GROUP, JiraTreeActions.deleteGroup(project, afterJiraGroupChange));
         menuActions.put(TaskMenu.Item.REFRESH, refresh);
         PopupHandler.installPopupMenu(tree, new TreeMenu(menuActions), "Drydock.TaskTree.Popup");
 
@@ -629,7 +639,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 TaskMenu.Item.OPEN_IN_GITHUB, TaskMenu.Item.OPEN_IN_JIRA, TaskMenu.Item.QUICK_REVIEW,
                 TaskMenu.Item.REVIEW, TaskMenu.Item.REVIEW_IN_SPHINX,
                 TaskMenu.Item.IMPLEMENT, TaskMenu.Item.TRIAGE,
-                TaskMenu.Item.GITHUB_SETTINGS, TaskMenu.Item.JIRA_SETTINGS, TaskMenu.Item.REFRESH);
+                TaskMenu.Item.GITHUB_SETTINGS, TaskMenu.Item.JIRA_SETTINGS,
+                TaskMenu.Item.ADD_JIRA_GROUP, TaskMenu.Item.EDIT_JIRA_GROUP, TaskMenu.Item.DELETE_JIRA_GROUP,
+                TaskMenu.Item.REFRESH);
     }
 
     /**
@@ -650,7 +662,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         /** One project's pull-request listing only. */
         void invalidatePullRequests(Path root);
 
-        /** One project's cached Jira listing only. */
+        /** One project's cached Jira group listings only. */
         void invalidateJiraIssues(Path root);
 
         /** Records the user's intent to see {@code root}'s listing of {@code kind}. */
@@ -692,6 +704,18 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
      * {@code target}'s effects; EDT.
      */
     static void refresh(RefreshTarget target, boolean fromContextMenu, TaskNode node, Path root) {
+        if (fromContextMenu && node instanceof TaskNode.JiraGroupRow) {
+            // A group's refresh re-queries its project's Jira groups and
+            // records the listing intent, so a group that is visible but
+            // not yet fetched actually loads instead of staying deferred.
+            if (root == null) {
+                return;
+            }
+            target.invalidateJiraIssues(root);
+            target.requestListing(SectionKind.ISSUES, root);
+            target.requestRebuild(false);
+            return;
+        }
         if (!fromContextMenu || !(node instanceof Section section)) {
             target.invalidateAll();
             target.requestRebuild(true);
@@ -752,7 +776,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             if (e == null) {
                 return AnAction.EMPTY_ARRAY;
             }
-            return TaskMenu.group(selected().orElse(null), selectedNodes(), actions).getChildren(e);
+            return TaskMenu.group(selected().orElse(null), selectedNodes(), actions,
+                    selectedProjectRoot().map(JiraTreeActions::jiraEnabled).orElse(false)).getChildren(e);
         }
     }
 

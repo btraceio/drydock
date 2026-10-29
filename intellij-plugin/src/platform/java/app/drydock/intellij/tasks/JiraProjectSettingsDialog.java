@@ -41,7 +41,6 @@ final class JiraProjectSettingsDialog extends DialogWrapper {
     private final JBTextField email = new JBTextField();
     private final JBLabel secretLabel = new JBLabel("API token:");
     private final JBPasswordField secret = new JBPasswordField();
-    private final JBTextField jql = new JBTextField();
 
     JiraProjectSettingsDialog(Project project, SharedProject registered, JiraProjectSettings current, String currentSecret) {
         super(project, true);
@@ -51,9 +50,7 @@ final class JiraProjectSettingsDialog extends DialogWrapper {
         baseUrl.setText(current.baseUrl());
         email.setText(current.email().orElse(""));
         secret.setText(currentSecret == null ? "" : currentSecret);
-        jql.setText(current.jqlOverride().orElse(""));
         baseUrl.getEmptyText().setText("https://your-site.atlassian.net");
-        jql.getEmptyText().setText(JiraConnection.DEFAULT_JQL);
         deployment.addActionListener(event -> updateDeploymentUi());
         updateDeploymentUi();
         setTitle("Jira — " + registered.displayName());
@@ -61,14 +58,13 @@ final class JiraProjectSettingsDialog extends DialogWrapper {
         init();
     }
 
-    /** The saved form: the six visible fields minus the secret, normalized by the record. */
+    /** The saved form: the visible fields minus the secret, normalized by the record. */
     JiraProjectSettings settings() {
         return new JiraProjectSettings(
                 enabled.isSelected(),
                 selectedDeployment(),
                 baseUrl.getText(),
-                Optional.of(email.getText()),
-                Optional.of(jql.getText()));
+                Optional.of(email.getText()));
     }
 
     /** The typed token, possibly empty; an empty value removes the stored credential. */
@@ -81,8 +77,6 @@ final class JiraProjectSettingsDialog extends DialogWrapper {
     protected @Nullable JComponent createCenterPanel() {
         JBLabel secretHint = new JBLabel("Stored in the IDE password safe. Clear it and Save to remove it.");
         secretHint.setForeground(UIUtil.getContextHelpForeground());
-        JBLabel jqlHint = new JBLabel("Leave empty to use the default query.");
-        jqlHint.setForeground(UIUtil.getContextHelpForeground());
         JPanel form = FormBuilder.createFormBuilder()
                 .addComponent(enabled)
                 .addLabeledComponent("Deployment:", deployment)
@@ -90,9 +84,6 @@ final class JiraProjectSettingsDialog extends DialogWrapper {
                 .addLabeledComponent("Account email:", email)
                 .addLabeledComponent(secretLabel, secret)
                 .addComponentToRightColumn(secretHint)
-                .addSeparator()
-                .addLabeledComponent("JQL override:", jql)
-                .addComponentToRightColumn(jqlHint)
                 .getPanel();
         JPanel panel = new JPanel(new BorderLayout());
         panel.setBorder(JBUI.Borders.empty(4));

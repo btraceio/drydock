@@ -16,6 +16,7 @@ import app.drydock.intellij.agent.SessionCommands;
 import app.drydock.intellij.tasks.TaskNode.AddCurrentProject;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
 import app.drydock.intellij.tasks.TaskNode.IssueRow;
+import app.drydock.intellij.tasks.TaskNode.JiraGroupRow;
 import app.drydock.intellij.tasks.TaskNode.JiraIssueRow;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.review.RepositoryPullRequests;
@@ -190,7 +191,7 @@ public final class TaskTreeModel {
                          Set<Path> pullRequestContainers,
                          Set<Path> openFolders, Map<Path, Instant> lastActivity, Instant now,
                          Map<Path, IssueListing> issuesByMainRoot,
-                         Map<Path, JiraIssueListing> jiraIssuesByMainRoot,
+                         Map<Path, List<JiraGroups.Listing>> jiraGroupsByMainRoot,
                          Map<Path, PullRequestListing> pullRequestsByMainRoot,
                          Map<Path, List<Worktree>> pullRequestDedupWorktrees,
                          Optional<String> listProblem, String filter,
@@ -214,7 +215,8 @@ public final class TaskTreeModel {
             lastActivity = Map.copyOf(lastActivity);
             Objects.requireNonNull(now, "now");
             issuesByMainRoot = Map.copyOf(issuesByMainRoot);
-            jiraIssuesByMainRoot = Map.copyOf(jiraIssuesByMainRoot);
+            jiraGroupsByMainRoot = Map.copyOf(jiraGroupsByMainRoot);
+            jiraGroupsByMainRoot.values().forEach(children -> children.forEach(Objects::requireNonNull));
             pullRequestsByMainRoot = Map.copyOf(pullRequestsByMainRoot);
             pullRequestDedupWorktrees = Map.copyOf(pullRequestDedupWorktrees);
             Objects.requireNonNull(listProblem, "listProblem");
@@ -459,12 +461,17 @@ public final class TaskTreeModel {
             children.add(new Section(SectionKind.WORKTREES, sessionlessWorktrees));
         }
         if (in.viewFilter() == ViewFilter.ALL || in.viewFilter() == ViewFilter.ISSUES) {
+            List<JiraGroups.Listing> groups = in.jiraGroupsByMainRoot().getOrDefault(main, List.of());
+            // A container no listing has reached yet stays deferred only while
+            // it would show nothing else: defined groups are visible at once
+            // (so they can be edited or deleted), each with its own loading
+            // child until its query has run.
             if (in.issueContainers().contains(main) && !in.issuesByMainRoot().containsKey(main)
-                    && !in.jiraIssuesByMainRoot().containsKey(main)) {
+                    && groups.isEmpty()) {
                 children.add(new Section(SectionKind.ISSUES,
                         List.of(new TaskNode.Deferred("Loading issues…"))));
             } else {
-                issueChildren(in, main, itemFilter).ifPresent(issueChildren ->
+                issueChildren(in, main, itemFilter, groups).ifPresent(issueChildren ->
                         children.add(new Section(SectionKind.ISSUES, issueChildren)));
             }
         }
@@ -519,16 +526,19 @@ public final class TaskTreeModel {
     }
 
     /**
-     * The project's Issues section children: one merged list from every
-     * enabled source. GitHub rows and Jira rows interleave, newest
-     * {@code updatedAt} first (a row with no timestamp sorts as
-     * {@code Instant.EPOCH}, and the stable sort keeps GitHub ahead of
-     * Jira on a tie). Each source's failure is a {@code ListProblem} row
-     * at the top of the section, so one broken source never hides the
-     * other's rows; an unconfigured ({@code Unsupported}) or absent source
-     * adds nothing. Empty sections are never emitted (spec AC16–AC18).
+     * The project's Issues section children: GitHub's open issues as one
+     * merged flat list (newest {@code updatedAt} first), then one node per
+     * user-defined Jira group, in the order they were defined. Jira rows
+     * appear only inside their group — a project with no groups defined
+     * shows no Jira content at all.
+     *
+     * <p>Each source's failure is a {@code ListProblem} row, so one broken
+     * source never hides the others' rows; an unconfigured
+     * ({@code Unsupported}) or absent source adds nothing. Empty sections
+     * are never emitted (spec AC16–AC18).</p>
      */
-    private static Optional<List<TaskNode>> issueChildren(Inputs in, Path main, String itemFilter) {
+    private static Optional<List<TaskNode>> issueChildren(Inputs in, Path main, String itemFilter,
+                                                          List<JiraGroups.Listing> groups) {
         List<TaskNode> problems = new ArrayList<>();
         List<TaskNode> rows = new ArrayList<>();
         switch (in.issuesByMainRoot().get(main)) {
@@ -540,24 +550,51 @@ public final class TaskTreeModel {
             case IssueListing.Unsupported ignored -> { }
             case null -> { }
         }
-        switch (in.jiraIssuesByMainRoot().get(main)) {
-            case JiraIssueListing.Listed listed -> listed.issues().stream()
-                    .filter(issue -> matches(itemFilter, issue))
-                    .forEach(issue -> rows.add(new JiraIssueRow(main, issue)));
-            case JiraIssueListing.Failed failed ->
-                    problems.add(new TaskNode.ListProblem("Jira issues: " + failed.message()));
-            case JiraIssueListing.Unsupported ignored -> { }
-            case null -> { }
-        }
-        // List.sort is stable, so a GitHub row stays ahead of a Jira row
-        // with the same timestamp: the incumbent source keeps the tie.
+        // The flat list is GitHub's alone; each Jira group's row order is
+        // whatever the group's own JQL ordered, so a deliberate ORDER BY
+        // in a user query is not silently overridden here.
         rows.sort(Comparator.comparing((TaskNode row) -> rowUpdatedAt(row).orElse(Instant.EPOCH)).reversed());
-        if (problems.isEmpty() && rows.isEmpty()) {
-            return Optional.empty();
-        }
         List<TaskNode> children = new ArrayList<>(problems);
         children.addAll(rows);
-        return Optional.of(children);
+        groups.stream()
+                .map(listing -> jiraGroupChildren(in, main, listing, itemFilter))
+                .flatMap(Optional::stream)
+                .forEach(children::add);
+        if (children.isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(List.copyOf(children));
+    }
+
+    /**
+     * One group's node, or empty when the search filter leaves it nothing
+     * to show: the group's name matching the filter keeps the whole group
+     * (its query is the answer, as with a name-matched project), otherwise
+     * the rows inside are filtered like any other row. A failed query
+     * stays visible under any filter — its problem row is diagnostics,
+     * and the same rule keeps GitHub's problem rows unfiltered.
+     */
+    private static Optional<TaskNode> jiraGroupChildren(Inputs in, Path main, JiraGroups.Listing listing,
+                                                        String itemFilter) {
+        boolean groupMatches = itemFilter.isEmpty() || contains(listing.group().name(), itemFilter);
+        List<TaskNode> children = new ArrayList<>();
+        switch (listing.listing().orElse(null)) {
+            case null -> children.add(new TaskNode.Deferred("Loading…"));
+            case JiraIssueListing.Failed failed ->
+                    children.add(new TaskNode.ListProblem(
+                            "Jira group \"" + listing.group().name() + "\": " + failed.message()));
+            case JiraIssueListing.Unsupported ignored -> { }
+            case JiraIssueListing.Listed listed -> listed.issues().stream()
+                    .filter(issue -> groupMatches || matches(itemFilter, issue))
+                    .forEach(issue -> children.add(new JiraIssueRow(main, issue)));
+        }
+        if (children.isEmpty() && listing.listing().orElse(null) instanceof JiraIssueListing.Listed) {
+            if (!groupMatches) {
+                return Optional.empty();
+            }
+            children.add(new TaskNode.Placeholder("No issues"));
+        }
+        return Optional.of(new JiraGroupRow(main, listing.group(), children));
     }
 
     /** The row's issue timestamp, whatever source the row came from. */

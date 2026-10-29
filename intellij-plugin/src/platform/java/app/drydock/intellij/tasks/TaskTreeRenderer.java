@@ -80,12 +80,20 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
             case Section section -> {
                 setIcon(AllIcons.Nodes.Folder);
                 append(section.kind().label(), SimpleTextAttributes.REGULAR_ATTRIBUTES);
-                if (section.children().stream().noneMatch(TaskNode.Deferred.class::isInstance)) {
-                    append("  " + itemCount(section), SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
-                }
+                sectionCountBadge(section).ifPresent(badge ->
+                        append("  " + badge, SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES));
             }
             case TaskNode.Deferred deferred ->
                     append(deferred.message(), SimpleTextAttributes.GRAYED_ATTRIBUTES);
+            case TaskNode.Placeholder placeholder ->
+                    append(placeholder.text(), SimpleTextAttributes.GRAYED_ATTRIBUTES);
+            case TaskNode.JiraGroupRow group -> {
+                setIcon(AllIcons.Nodes.Folder);
+                append(group.group().name(), SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES);
+                issueCountBadge(group).ifPresent(badge ->
+                        append("  " + badge, SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES));
+                setToolTipText("Jira group · " + group.group().jql());
+            }
             case WorktreeGroup group -> {
                 append("⑂ " + group.branch(), SimpleTextAttributes.GRAYED_ATTRIBUTES);
                 append("  " + group.tasks().size() + " tasks", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
@@ -151,6 +159,8 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
         return switch (node) {
             case IssueRow ignored -> Optional.of(AllIcons.Vcs.Vendors.Github);
             case TaskNode.JiraIssueRow ignored -> Optional.of(JIRA_ICON);
+            // A group is a folder of rows, and its rows carry the source marks.
+            case TaskNode.JiraGroupRow ignored -> Optional.empty();
             default -> Optional.empty();
         };
     }
@@ -165,13 +175,59 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
         return issue.key() + " " + issue.summary();
     }
 
-    /** Entity count rather than immediate child count (Sessions may contain Active/Inactive folders). */
+    /**
+     * Pure. A Jira group's issue count, shown only when the children ARE the
+     * answer (issue rows, or the empty-result placeholder). A loading or
+     * failed group, or any other shape, shows none: no badge beats a false
+     * "0 issues".
+     */
+    static Optional<String> issueCountBadge(TaskNode.JiraGroupRow group) {
+        boolean answered = group.children().stream().allMatch(child ->
+                child instanceof TaskNode.JiraIssueRow || child instanceof TaskNode.Placeholder);
+        if (!answered) {
+            return Optional.empty();
+        }
+        long issues = group.children().stream().filter(TaskNode.JiraIssueRow.class::isInstance).count();
+        return Optional.of(issues + (issues == 1 ? " issue" : " issues"));
+    }
+
+    /**
+     * Pure. A section's item count, or none while any of it is still loading
+     * (a deferred child, or a Jira group still waiting on its query) or when
+     * nothing countable is there besides a failure — a failed lookup is not
+     * "0". Issue rows inside Jira groups count; problem rows never do.
+     */
+    static Optional<String> sectionCountBadge(Section section) {
+        boolean loading = section.children().stream().anyMatch(child ->
+                child instanceof TaskNode.Deferred
+                        || child instanceof TaskNode.JiraGroupRow group
+                        && group.children().stream().anyMatch(TaskNode.Deferred.class::isInstance));
+        if (loading) {
+            return Optional.empty();
+        }
+        int count = itemCount(section);
+        boolean problem = section.children().stream().anyMatch(child ->
+                child instanceof TaskNode.ListProblem
+                        || child instanceof TaskNode.JiraGroupRow group
+                        && group.children().stream().anyMatch(TaskNode.ListProblem.class::isInstance));
+        return count == 0 && problem ? Optional.empty() : Optional.of(String.valueOf(count));
+    }
+
+    /**
+     * Entity count rather than immediate child count (Sessions may contain
+     * Active/Inactive folders; a Jira group contributes its issue rows).
+     * Loading, problem and placeholder rows count nothing.
+     */
     private static int itemCount(Section section) {
         if (section.children().stream().allMatch(TaskNode.Deferred.class::isInstance)) {
             return 0;
         }
         return section.children().stream().mapToInt(node -> switch (node) {
             case TaskNode.Deferred ignored -> 0;
+            case TaskNode.ListProblem ignored -> 0;
+            case TaskNode.Placeholder ignored -> 0;
+            case TaskNode.JiraGroupRow group ->
+                    (int) group.children().stream().filter(TaskNode.JiraIssueRow.class::isInstance).count();
             case Section nested -> itemCount(nested);
             case StaleWorktrees stale -> stale.worktrees().size();
             case WorktreeGroup group -> group.tasks().size();
