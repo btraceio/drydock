@@ -88,9 +88,13 @@ class JiraIssueSourceTest {
         }
     }
 
-    private static JiraProjectSettings enabled(String jql) {
+    private static JiraProjectSettings enabled() {
         return new JiraProjectSettings(true, Deployment.CLOUD, "https://acme.atlassian.net",
-                Optional.of("me@acme.com"), Optional.ofNullable(jql));
+                Optional.of("me@acme.com"));
+    }
+
+    private static JiraGroup group(String id, String jql) {
+        return new JiraGroup(id, "Group " + id, jql);
     }
 
     private static JiraIssueListing listed() {
@@ -108,9 +112,9 @@ class JiraIssueSourceTest {
     @Test
     void aDisabledProjectIsUnsupportedWithNoFetchAndNoSecretRead() {
         JiraProjectSettings disabled = new JiraProjectSettings(
-                false, Deployment.CLOUD, "https://acme.atlassian.net", Optional.of("me@acme.com"), Optional.empty());
+                false, Deployment.CLOUD, "https://acme.atlassian.net", Optional.of("me@acme.com"));
 
-        JiraIssueListing listing = source.issuesOf(A, disabled).join();
+        JiraIssueListing listing = source.issuesOf(A, disabled, group("g1", "assignee = currentUser()")).join();
 
         assertInstanceOf(JiraIssueListing.Unsupported.class, listing);
         assertEquals(0, fetch.calls);
@@ -119,9 +123,9 @@ class JiraIssueSourceTest {
 
     @Test
     void twoCallsWithinAMinuteFetchOnce() {
-        CompletableFuture<JiraIssueListing> first = source.issuesOf(A, enabled(null));
+        CompletableFuture<JiraIssueListing> first = source.issuesOf(A, enabled(), group("g1", JiraConnection.DEFAULT_JQL));
         clock.advance(MINUTE - 1);
-        CompletableFuture<JiraIssueListing> second = source.issuesOf(A, enabled(null));
+        CompletableFuture<JiraIssueListing> second = source.issuesOf(A, enabled(), group("g1", JiraConnection.DEFAULT_JQL));
 
         assertSame(first, second);
         assertInstanceOf(JiraIssueListing.Listed.class, second.join());
@@ -132,9 +136,9 @@ class JiraIssueSourceTest {
     void aFailedListingIsServedFromTheCacheWithinTheMinute() {
         fetch.answers.add(new JiraIssueListing.Failed("Jira refused the credentials (HTTP 401)"));
 
-        CompletableFuture<JiraIssueListing> first = source.issuesOf(A, enabled(null));
+        CompletableFuture<JiraIssueListing> first = source.issuesOf(A, enabled(), group("g1", JiraConnection.DEFAULT_JQL));
         clock.advance(MINUTE - 1);
-        CompletableFuture<JiraIssueListing> second = source.issuesOf(A, enabled(null));
+        CompletableFuture<JiraIssueListing> second = source.issuesOf(A, enabled(), group("g1", JiraConnection.DEFAULT_JQL));
 
         assertSame(first, second);
         assertInstanceOf(JiraIssueListing.Failed.class, second.join());
@@ -143,9 +147,9 @@ class JiraIssueSourceTest {
 
     @Test
     void advancingTheClockPastAMinuteRefetches() {
-        CompletableFuture<JiraIssueListing> first = source.issuesOf(A, enabled(null));
+        CompletableFuture<JiraIssueListing> first = source.issuesOf(A, enabled(), group("g1", JiraConnection.DEFAULT_JQL));
         clock.advance(MINUTE + 1);
-        CompletableFuture<JiraIssueListing> second = source.issuesOf(A, enabled(null));
+        CompletableFuture<JiraIssueListing> second = source.issuesOf(A, enabled(), group("g1", JiraConnection.DEFAULT_JQL));
 
         assertNotSame(first, second);
         assertInstanceOf(JiraIssueListing.Listed.class, second.join());
@@ -154,62 +158,62 @@ class JiraIssueSourceTest {
 
     @Test
     void invalidatingOneRootRefetchesOnlyThatRoot() {
-        CompletableFuture<JiraIssueListing> a = source.issuesOf(A, enabled(null));
-        CompletableFuture<JiraIssueListing> b = source.issuesOf(B, enabled(null));
+        CompletableFuture<JiraIssueListing> a = source.issuesOf(A, enabled(), group("g1", JiraConnection.DEFAULT_JQL));
+        CompletableFuture<JiraIssueListing> b = source.issuesOf(B, enabled(), group("g1", JiraConnection.DEFAULT_JQL));
         assertEquals(2, fetch.calls);
 
         source.invalidate(A);
-        assertNotSame(a, source.issuesOf(A, enabled(null)));
+        assertNotSame(a, source.issuesOf(A, enabled(), group("g1", JiraConnection.DEFAULT_JQL)));
         assertEquals(3, fetch.calls);
 
         // B was never invalidated, so it is still the cached future.
-        assertSame(b, source.issuesOf(B, enabled(null)));
+        assertSame(b, source.issuesOf(B, enabled(), group("g1", JiraConnection.DEFAULT_JQL)));
         assertEquals(3, fetch.calls);
     }
 
     @Test
     void invalidatingEverythingRefetchesAllRoots() {
-        CompletableFuture<JiraIssueListing> a = source.issuesOf(A, enabled(null));
-        CompletableFuture<JiraIssueListing> b = source.issuesOf(B, enabled(null));
+        CompletableFuture<JiraIssueListing> a = source.issuesOf(A, enabled(), group("g1", JiraConnection.DEFAULT_JQL));
+        CompletableFuture<JiraIssueListing> b = source.issuesOf(B, enabled(), group("g1", JiraConnection.DEFAULT_JQL));
         assertEquals(2, fetch.calls);
 
         source.invalidate();
-        assertNotSame(a, source.issuesOf(A, enabled(null)));
-        assertNotSame(b, source.issuesOf(B, enabled(null)));
+        assertNotSame(a, source.issuesOf(A, enabled(), group("g1", JiraConnection.DEFAULT_JQL)));
+        assertNotSame(b, source.issuesOf(B, enabled(), group("g1", JiraConnection.DEFAULT_JQL)));
         assertEquals(4, fetch.calls);
     }
 
     @Test
     void aDifferentJqlGetsItsOwnEntry() {
-        CompletableFuture<JiraIssueListing> defaultQuery = source.issuesOf(A, enabled(null));
-        CompletableFuture<JiraIssueListing> override = source.issuesOf(A, enabled("project = DRY ORDER BY updated ASC"));
+        CompletableFuture<JiraIssueListing> defaultQuery = source.issuesOf(A, enabled(), group("g1", JiraConnection.DEFAULT_JQL));
+        CompletableFuture<JiraIssueListing> override = source.issuesOf(A, enabled(), group("g1", "project = DRY ORDER BY updated ASC"));
 
         assertNotSame(defaultQuery, override);
         assertInstanceOf(JiraIssueListing.Listed.class, override.join());
         assertEquals(2, fetch.calls);
 
         // Each entry is then cached independently of the other.
-        assertSame(defaultQuery, source.issuesOf(A, enabled(null)));
-        assertSame(override, source.issuesOf(A, enabled("project = DRY ORDER BY updated ASC")));
+        assertSame(defaultQuery, source.issuesOf(A, enabled(), group("g1", JiraConnection.DEFAULT_JQL)));
+        assertSame(override, source.issuesOf(A, enabled(), group("g1", "project = DRY ORDER BY updated ASC")));
         assertEquals(2, fetch.calls);
     }
 
     @Test
     void theSecretIsReadOnlyWhenTheFetchCallsTheSupplier() {
         // A fetch that never touches the supplier costs no secret read...
-        source.issuesOf(A, enabled(null));
+        source.issuesOf(A, enabled(), group("g1", JiraConnection.DEFAULT_JQL));
         assertEquals(1, fetch.calls);
         assertEquals(0, secrets.reads);
 
         // ...and a cache hit does not call the fetch at all.
-        source.issuesOf(A, enabled(null));
+        source.issuesOf(A, enabled(), group("g1", JiraConnection.DEFAULT_JQL));
         assertEquals(1, fetch.calls);
         assertEquals(0, secrets.reads);
 
         // Only a fetch that invokes the supplier reads the secret — once.
         fetch.readSecret = true;
         clock.advance(MINUTE + 1);
-        source.issuesOf(A, enabled(null));
+        source.issuesOf(A, enabled(), group("g1", JiraConnection.DEFAULT_JQL));
         assertEquals(2, fetch.calls);
         assertEquals(1, secrets.reads);
     }

@@ -42,6 +42,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.Function;
 
 /**
  * Collects what {@link TaskTreeModel} needs: the shared projects, the
@@ -61,8 +62,8 @@ final class TaskTreeInputs implements AutoCloseable {
     private static final long GITHUB_TIMEOUT_SECONDS = 20;
     // The tree waits longer than the client's own bound (connect + request
     // plus slack): the client timeout turns a slow site into a Failed
-    // listing, and this outer bound only guards a future that somehow never
-    // completes at all.
+    // listing. This outer bound is ONE deadline shared by every group of a
+    // gather, so a hung future costs one budget, never one per group.
     private static final long JIRA_TIMEOUT_SECONDS =
             JiraService.CONNECT_TIMEOUT.plus(JiraService.REQUEST_TIMEOUT).plusSeconds(5).toSeconds();
     private static final long ISSUE_CACHE_NANOS = TimeUnit.MINUTES.toNanos(1);
@@ -75,6 +76,9 @@ final class TaskTreeInputs implements AutoCloseable {
     private final Map<IssueKey, CachedIssues> issueCache = new ConcurrentHashMap<>();
     private final Map<PullRequestKey, CachedPullRequests> pullRequestCache = new ConcurrentHashMap<>();
     private final ResumabilityCache resumability = new ResumabilityCache();
+
+    /** One Jira group listing request: a group id is unique per project, and the map spans projects. */
+    private record JiraRequestKey(Path root, String groupId) { }
 
     private record IssueKey(Path root, Optional<String> repository) { }
 
@@ -152,8 +156,10 @@ final class TaskTreeInputs implements AutoCloseable {
         List<SharedProject> projects = new ArrayList<>();
         Map<Path, List<Worktree>> byMain = new HashMap<>();
         Map<Path, Path> mainRootOf = new HashMap<>();
+        Map<Path, List<JiraGroups.Listing>> jiraGroupListings = new HashMap<>();
         Map<Path, CompletableFuture<IssueListing>> issueRequests = new LinkedHashMap<>();
-        Map<Path, CompletableFuture<JiraIssueListing>> jiraRequests = new LinkedHashMap<>();
+        Map<JiraRequestKey, CompletableFuture<JiraIssueListing>> jiraRequests = new LinkedHashMap<>();
+        Map<Path, List<JiraGroup>> jiraGroupRequests = new LinkedHashMap<>();
         Map<Path, CompletableFuture<PullRequestListing>> pullRequestRequests = new LinkedHashMap<>();
         Set<Path> worktreeContainers = new HashSet<>();
         Set<Path> issueContainers = new HashSet<>();
@@ -177,18 +183,35 @@ final class TaskTreeInputs implements AutoCloseable {
             worktreeContainers.add(root);
             GitHubProjectSettings githubSettings = GitHubProjectSettings.load(project.id());
             JiraProjectSettings jiraSettings = JiraProjectSettings.load(project.id());
-            if (githubSettings.issuesEnabled() || jiraSettings.enabled()) {
+            // Groups exist only under an enabled connection, and a project
+            // with none shows no Jira content at all — so the section's
+            // container status follows GitHub's setting and the defined
+            // groups, never the enabled flag alone.
+            List<JiraGroup> jiraGroups = jiraSettings.enabled()
+                    ? JiraGroups.load(project.id()).groups() : List.of();
+            if (githubSettings.issuesEnabled() || !jiraGroups.isEmpty()) {
                 issueContainers.add(root);
-                if (githubListingWanted(viewFilter, TaskTreeModel.ViewFilter.ISSUES, requestedIssues, root, scope,
-                        project.displayName())) {
+                // The GitHub listing needs its own gate: before the groups
+                // existed, an enabled Jira connection alone reached here and
+                // listed GitHub issues the user had switched off.
+                if (githubSettings.issuesEnabled() && githubListingWanted(viewFilter,
+                        TaskTreeModel.ViewFilter.ISSUES, requestedIssues, root, scope, project.displayName())) {
                     issueRequests.put(root, issuesOf(root, githubSettings.repository()));
                 }
-                // The Jira listing follows the same view/scope rule as the
-                // GitHub one; only the settings gate and the request map
-                // differ.
-                if (jiraSettings.enabled() && githubListingWanted(viewFilter, TaskTreeModel.ViewFilter.ISSUES,
+                // Each group's listing follows the same view/scope rule as
+                // the GitHub one; the group definitions always travel, so
+                // the tree can offer edit and delete before any fetch.
+                if (githubListingWanted(viewFilter, TaskTreeModel.ViewFilter.ISSUES,
                         requestedIssues, root, scope, project.displayName())) {
-                    jiraRequests.put(root, jira.issuesOf(root, jiraSettings));
+                    for (JiraGroup group : jiraGroups) {
+                        jiraRequests.put(new JiraRequestKey(root, group.id()),
+                                jira.issuesOf(root, jiraSettings, group));
+                    }
+                    jiraGroupRequests.put(root, jiraGroups);
+                } else if (!jiraGroups.isEmpty()) {
+                    jiraGroupListings.put(root, jiraGroups.stream()
+                            .map(group -> new JiraGroups.Listing(group, Optional.<JiraIssueListing>empty()))
+                            .toList());
                 }
             }
             if (githubSettings.pullRequestsEnabled()) {
@@ -281,18 +304,13 @@ final class TaskTreeInputs implements AutoCloseable {
                 issues.put(entry.getKey(), new IssueListing.Failed("GitHub issue lookup did not complete"));
             }
         }
-        Map<Path, JiraIssueListing> jiraIssues = new HashMap<>();
-        for (Map.Entry<Path, CompletableFuture<JiraIssueListing>> entry : jiraRequests.entrySet()) {
-            try {
-                jiraIssues.put(entry.getKey(), entry.getValue().get(JIRA_TIMEOUT_SECONDS, TimeUnit.SECONDS));
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                break;
-            } catch (ExecutionException | TimeoutException | RuntimeException e) {
-                LOG.log(Level.DEBUG, () -> "No Jira issues for " + entry.getKey()
-                        + ": " + e.getClass().getSimpleName());
-                jiraIssues.put(entry.getKey(), new JiraIssueListing.Failed("Jira issue lookup did not complete"));
-            }
+        // One deadline for every group of every project, computed once here,
+        // right before the first Jira wait, never per project or per group.
+        long jiraDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(JIRA_TIMEOUT_SECONDS);
+        for (Map.Entry<Path, List<JiraGroup>> entry : jiraGroupRequests.entrySet()) {
+            Path root = entry.getKey();
+            jiraGroupListings.put(root, jiraListings(root, entry.getValue(),
+                    group -> jiraRequests.get(new JiraRequestKey(root, group.id())), jiraDeadline));
         }
         Map<Path, PullRequestListing> pullRequests = new HashMap<>();
         for (Map.Entry<Path, CompletableFuture<PullRequestListing>> entry : pullRequestRequests.entrySet()) {
@@ -310,8 +328,45 @@ final class TaskTreeInputs implements AutoCloseable {
         return new TaskTreeModel.Inputs(projects, sessions, byMain, mainRootOf, currentMain, currentWorking,
                 activity, running, hosts, missing, recordedRoots, worktreeContainers, issueContainers,
                 pullRequestContainers, openFolders, Map.copyOf(activityCache), Instant.now(),
-                issues, jiraIssues, pullRequests, pullRequestDedupWorktrees, plugin.sharedProjects().problem(),
+                issues, jiraGroupListings, pullRequests, pullRequestDedupWorktrees, plugin.sharedProjects().problem(),
                 filter, viewFilter, resumable);
+    }
+
+    /**
+     * One group's future against the gather's shared deadline (an absolute
+     * {@link System#nanoTime()} value): it waits only for the time left, so N
+     * groups together never wait longer than one budget. A future already done
+     * answers even past the deadline; one still running becomes a
+     * {@code Failed} listing and is left running (never cancelled — the source
+     * caches it).
+     */
+    static JiraIssueListing resolveJira(Path root, CompletableFuture<JiraIssueListing> future,
+                                        long deadlineNanos) {
+        try {
+            return future.get(Math.max(0L, deadlineNanos - System.nanoTime()), TimeUnit.NANOSECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return new JiraIssueListing.Failed("The Jira lookup was interrupted");
+        } catch (ExecutionException | TimeoutException | RuntimeException e) {
+            LOG.log(Level.DEBUG, () -> "No Jira issues for " + root + ": " + e.getClass().getSimpleName());
+            return new JiraIssueListing.Failed("The Jira lookup did not complete");
+        }
+    }
+
+    /**
+     * One project's group listings, in group order: every group yields exactly
+     * one listing (a {@code Failed} one when its future misses the deadline),
+     * so no group is ever dropped or left looking "not requested".
+     */
+    static List<JiraGroups.Listing> jiraListings(Path root, List<JiraGroup> groups,
+                                                 Function<JiraGroup, CompletableFuture<JiraIssueListing>> futureOf,
+                                                 long deadlineNanos) {
+        List<JiraGroups.Listing> listings = new ArrayList<>();
+        for (JiraGroup group : groups) {
+            listings.add(new JiraGroups.Listing(group,
+                    Optional.of(resolveJira(root, futureOf.apply(group), deadlineNanos))));
+        }
+        return listings;
     }
 
     private CompletableFuture<IssueListing> issuesOf(Path root, Optional<String> repository) {

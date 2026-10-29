@@ -25,7 +25,7 @@ import java.util.function.Supplier;
 
 /**
  * The tool window's Jira data path: it owns one {@link JiraService}, keeps
- * each project's listing in a one-minute cache, and reads the secret lazily
+ * each Jira group's listing in a one-minute cache, and reads the secret lazily
  * — only when the service actually asks for it, on the service's own
  * executor, never on the EDT and never on a cache hit. A disabled project
  * answers {@link JiraIssueListing.Unsupported} without any fetch, network
@@ -59,8 +59,8 @@ final class JiraIssueSource implements AutoCloseable {
     private final LongSupplier nanoClock;
     private final ConcurrentHashMap<Key, Cached> cache = new ConcurrentHashMap<>();
 
-    /** The cache identity: one project root with one settings value, so a JQL change misses. */
-    private record Key(Path root, JiraProjectSettings settings) { }
+    /** The cache identity: one project root with one settings value and one group query, so a JQL change misses. */
+    private record Key(Path root, JiraProjectSettings settings, String groupId, String jql) { }
 
     /** One cached listing and when it stops being served. */
     private record Cached(long expiresAt, CompletableFuture<JiraIssueListing> listing) { }
@@ -87,7 +87,10 @@ final class JiraIssueSource implements AutoCloseable {
     }
 
     /**
-     * The project's Jira issues, cached per (root, settings) for one minute.
+     * One Jira group's issues, cached per (root, settings, group, jql) for
+     * one minute. The query is the group's own JQL — the tree builds one
+     * connection per group, and {@code JiraGroups} with no members never
+     * reaches here, so a project with no groups sends no request at all.
      *
      * <p>A disabled project gets a completed
      * {@link JiraIssueListing.Unsupported} with no fetch and no secret
@@ -99,20 +102,22 @@ final class JiraIssueSource implements AutoCloseable {
      * handed to the fetch runs on the service executor when (and only when)
      * the service calls it, so a cached answer costs no password-safe read.</p>
      */
-    CompletableFuture<JiraIssueListing> issuesOf(Path root, JiraProjectSettings settings) {
+    CompletableFuture<JiraIssueListing> issuesOf(Path root, JiraProjectSettings settings, JiraGroup group) {
         Objects.requireNonNull(root, "root");
         Objects.requireNonNull(settings, "settings");
-        Optional<JiraConnection> connection = settings.connection();
-        if (connection.isEmpty()) {
-            return CompletableFuture.completedFuture(new JiraIssueListing.Unsupported());
-        }
-        Key key = new Key(root, settings);
+        Objects.requireNonNull(group, "group");
+        Key key = new Key(root, settings, group.id(), group.jql());
         long now = nanoClock.getAsLong();
         Cached cached = cache.get(key);
         if (cached != null && cached.expiresAt() > now) {
             return cached.listing();
         }
-        CompletableFuture<JiraIssueListing> listing = fetch.openIssues(connection, () -> secrets.apply(settings));
+        Optional<JiraConnection> connection = settings.connection(group.jql());
+        if (connection.isEmpty()) {
+            return CompletableFuture.completedFuture(new JiraIssueListing.Unsupported());
+        }
+        CompletableFuture<JiraIssueListing> listing =
+                fetch.openIssues(connection, () -> secrets.apply(settings));
         cache.put(key, new Cached(now + TTL_NANOS, listing));
         return listing;
     }
