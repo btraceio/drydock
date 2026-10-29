@@ -11,9 +11,11 @@ import app.drydock.domain.SessionWorkspace;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.JiraIssue;
 import app.drydock.intellij.tasks.TaskNode.Deferred;
+import app.drydock.intellij.tasks.TaskNode.GitHubNode;
 import app.drydock.intellij.tasks.TaskNode.IssueRow;
 import app.drydock.intellij.tasks.TaskNode.JiraGroupRow;
 import app.drydock.intellij.tasks.TaskNode.JiraIssueRow;
+import app.drydock.intellij.tasks.TaskNode.JiraNode;
 import app.drydock.intellij.tasks.TaskNode.ListProblem;
 import app.drydock.intellij.tasks.TaskNode.Placeholder;
 import app.drydock.intellij.tasks.TaskNode.Section;
@@ -171,6 +173,10 @@ class TaskTreeRendererTest {
     @Test
     void aLoadingJiraGroupShowsNoIssueCount() {
         assertEquals(Optional.empty(), TaskTreeRenderer.issueCountBadge(jiraGroup(new Deferred("Loading…"))));
+        // "Not loaded" — the group the user has never opened — is not an
+        // answer either: no badge beats a false "0 issues".
+        assertEquals(Optional.empty(), TaskTreeRenderer.issueCountBadge(
+                jiraGroup(new Placeholder(TaskTreeModel.NOT_LOADED))));
     }
 
     @Test
@@ -193,36 +199,49 @@ class TaskTreeRendererTest {
                 jiraGroup(jiraRow("PROJ-1"), new ListProblem("Jira group \"Sprint\": boom"))));
     }
 
+    private static GitHubNode githubNode(TaskNode... children) {
+        return new GitHubNode(ROOT, List.of(children));
+    }
+
+    private static JiraNode jiraNodeOf(TaskNode... groups) {
+        return new JiraNode(ROOT, List.of(groups));
+    }
+
     @Test
-    void aSectionStillLoadingShowsNoCount() {
+    void anUnloadedGitHubNodeSectionShowsNoCount() {
         assertEquals(Optional.empty(), TaskTreeRenderer.sectionCountBadge(
-                new Section(SectionKind.ISSUES, List.of(new Deferred("Loading issues…")))));
+                new Section(SectionKind.ISSUES, List.of(githubNode(new Placeholder(TaskTreeModel.NOT_LOADED))))));
+    }
+
+    @Test
+    void aListedGitHubNodeCountsItsIssues() {
+        assertEquals(Optional.of("1"), TaskTreeRenderer.sectionCountBadge(
+                new Section(SectionKind.ISSUES, List.of(githubNode(new IssueRow(ROOT, issue42()))))));
+    }
+
+    @Test
+    void aSectionCountsTheIssuesInsideItsJiraNode() {
+        assertEquals(Optional.of("2"), TaskTreeRenderer.sectionCountBadge(
+                new Section(SectionKind.ISSUES, List.of(jiraNodeOf(jiraGroup(jiraRow("PROJ-1"), jiraRow("PROJ-2")))))));
     }
 
     @Test
     void aSectionWithALoadingJiraGroupShowsNoCount() {
         assertEquals(Optional.empty(), TaskTreeRenderer.sectionCountBadge(
-                new Section(SectionKind.ISSUES, List.of(jiraGroup(new Deferred("Loading…"))))));
+                new Section(SectionKind.ISSUES, List.of(jiraNodeOf(jiraGroup(new Deferred("Loading…")))))));
         assertEquals(Optional.empty(), TaskTreeRenderer.sectionCountBadge(
-                new Section(SectionKind.ISSUES, List.of(new IssueRow(ROOT, issue42()),
-                        jiraGroup(new Deferred("Loading…"))))));
-    }
-
-    @Test
-    void aSectionCountsTheIssuesInsideItsJiraGroups() {
-        assertEquals(Optional.of("3"), TaskTreeRenderer.sectionCountBadge(
-                new Section(SectionKind.ISSUES, List.of(new IssueRow(ROOT, issue42()),
-                        jiraGroup(jiraRow("PROJ-1"), jiraRow("PROJ-2"))))));
+                new Section(SectionKind.ISSUES, List.of(githubNode(new IssueRow(ROOT, issue42())),
+                        jiraNodeOf(jiraGroup(new Deferred("Loading…")))))));
     }
 
     @Test
     void aSectionDoesNotCountProblemRowsBesideItems() {
         assertEquals(Optional.of("1"), TaskTreeRenderer.sectionCountBadge(
-                new Section(SectionKind.ISSUES, List.of(new ListProblem("GitHub issues: boom"),
-                        new IssueRow(ROOT, issue42())))));
+                new Section(SectionKind.ISSUES, List.of(githubNode(new ListProblem("GitHub issues: boom")),
+                        jiraNodeOf(jiraGroup(jiraRow("PROJ-1")))))));
         assertEquals(Optional.of("1"), TaskTreeRenderer.sectionCountBadge(
-                new Section(SectionKind.ISSUES, List.of(jiraGroup(new Placeholder("No issues")),
-                        new IssueRow(ROOT, issue42())))));
+                new Section(SectionKind.ISSUES, List.of(jiraNodeOf(jiraGroup(new Placeholder("No issues"))),
+                        githubNode(new IssueRow(ROOT, issue42()))))));
     }
 
     @Test
@@ -241,8 +260,8 @@ class TaskTreeRendererTest {
     @Test
     void anEmptyListedJiraGroupSectionSaysZero() {
         assertEquals(Optional.of("0"), TaskTreeRenderer.sectionCountBadge(
-                new Section(SectionKind.ISSUES, List.of(jiraGroup(new Placeholder("No issues"))))));
+                new Section(SectionKind.ISSUES, List.of(jiraNodeOf(jiraGroup(new Placeholder("No issues")))))));
         assertEquals(Optional.of("1"), TaskTreeRenderer.sectionCountBadge(
-                new Section(SectionKind.ISSUES, List.of(new IssueRow(ROOT, issue42())))));
+                new Section(SectionKind.ISSUES, List.of(githubNode(new IssueRow(ROOT, issue42()))))));
     }
 }

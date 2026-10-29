@@ -1,10 +1,14 @@
 package app.drydock.intellij.tasks;
 
 import app.drydock.intellij.agent.SessionTransfer;
+import app.drydock.intellij.tasks.TaskNode.Ghost;
+import app.drydock.intellij.tasks.TaskNode.GhostSource;
+import app.drydock.intellij.tasks.TaskNode.GitHubNode;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
 import app.drydock.intellij.tasks.TaskNode.IssueRow;
 import app.drydock.intellij.tasks.TaskNode.JiraGroupRow;
 import app.drydock.intellij.tasks.TaskNode.JiraIssueRow;
+import app.drydock.intellij.tasks.TaskNode.JiraNode;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.intellij.tasks.TaskNode.PullRequestRow;
 import app.drydock.intellij.tasks.TaskNode.Section;
@@ -122,6 +126,13 @@ final class TaskMenu {
             case JiraGroupRow ignored -> nonEmpty(List.of(
                     List.of(Item.EDIT_JIRA_GROUP, Item.DELETE_JIRA_GROUP),
                     List.of(Item.REFRESH)));
+            case GitHubNode ignored -> List.of(List.of(Item.REFRESH, Item.GITHUB_SETTINGS));
+            // The Jira node is where its groups are added; its refresh loads
+            // every group it shows.
+            case JiraNode ignored -> List.of(List.of(Item.REFRESH, Item.ADD_JIRA_GROUP, Item.JIRA_SETTINGS));
+            case Ghost ghost -> ghost.source() == GhostSource.GITHUB
+                    ? List.of(List.of(Item.GITHUB_SETTINGS))
+                    : List.of(List.of(Item.JIRA_SETTINGS));
             case IdleWorktree idleWorktree -> nonEmpty(List.of(
                     List.of(Item.NEW_TASK, Item.QUICK_REVIEW, Item.REVIEW, Item.REVIEW_IN_SPHINX),
                     // Locked or open worktrees cannot be removed from here.

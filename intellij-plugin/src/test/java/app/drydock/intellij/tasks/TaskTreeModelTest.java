@@ -18,10 +18,14 @@ import app.drydock.git.JiraIssue;
 import app.drydock.git.JiraIssueListing;
 import app.drydock.git.WorktreeService.Worktree;
 import app.drydock.intellij.tasks.TaskNode.AddCurrentProject;
+import app.drydock.intellij.tasks.TaskNode.Ghost;
+import app.drydock.intellij.tasks.TaskNode.GhostSource;
+import app.drydock.intellij.tasks.TaskNode.GitHubNode;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
 import app.drydock.intellij.tasks.TaskNode.IssueRow;
 import app.drydock.intellij.tasks.TaskNode.JiraGroupRow;
 import app.drydock.intellij.tasks.TaskNode.JiraIssueRow;
+import app.drydock.intellij.tasks.TaskNode.JiraNode;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.intellij.tasks.TaskNode.PullRequestRow;
 import app.drydock.intellij.tasks.TaskNode.Section;
@@ -74,8 +78,11 @@ class TaskTreeModelTest {
         final Set<Path> missing = new HashSet<>();
         final Map<RepositoryId, Path> recordedRoots = new HashMap<>();
         final Set<Path> worktreeContainers = new HashSet<>();
-        final Set<Path> issueContainers = new HashSet<>();
         final Set<Path> pullRequestContainers = new HashSet<>();
+        final Set<Path> githubIssueRoots = new HashSet<>();
+        final Set<Path> githubGhostRoots = new HashSet<>();
+        final Set<Path> jiraRoots = new HashSet<>();
+        final Set<Path> jiraGhostRoots = new HashSet<>();
         final Set<Path> openFolders = new HashSet<>();
         final Map<Path, Instant> lastActivity = new HashMap<>();
         final Map<Path, IssueListing> issues = new HashMap<>();
@@ -95,6 +102,30 @@ class TaskTreeModelTest {
             return this;
         }
 
+        /** GitHub issues enabled with a configured repository: the real, lazy node. */
+        In githubIssues(Path root) {
+            githubIssueRoots.add(root);
+            return this;
+        }
+
+        /** GitHub issues enabled but with nothing to auto-detect from: the ghost. */
+        In githubGhost(Path root) {
+            githubGhostRoots.add(root);
+            return this;
+        }
+
+        /** The Jira connection enabled: the Jira node with its group definitions. */
+        In jira(Path root) {
+            jiraRoots.add(root);
+            return this;
+        }
+
+        /** The Jira connection disabled: the ghost. */
+        In jiraGhost(Path root) {
+            jiraGhostRoots.add(root);
+            return this;
+        }
+
         In worktree(Path main, Path dir, String branch) {
             worktrees.computeIfAbsent(main, r -> new ArrayList<>()).add(linked(dir, branch));
             mainRootOf.put(dir, main);
@@ -109,8 +140,9 @@ class TaskTreeModelTest {
 
         TaskTreeModel.Inputs build() {
             return new TaskTreeModel.Inputs(projects, sessions, worktrees, mainRootOf, currentMain, currentWorking,
-                    activity, running, hosts, missing, recordedRoots, worktreeContainers, issueContainers,
-                    pullRequestContainers, openFolders, lastActivity, T,
+                    activity, running, hosts, missing, recordedRoots, worktreeContainers,
+                    pullRequestContainers, githubIssueRoots, githubGhostRoots, jiraRoots, jiraGhostRoots,
+                    openFolders, lastActivity, T,
                     issues, jiraGroups, pullRequests, pullRequestDedupWorktrees, problem, filter, viewFilter,
                     resumable);
         }
@@ -168,6 +200,16 @@ class TaskTreeModelTest {
         return section(row, SectionKind.ISSUES).orElseThrow().children();
     }
 
+    private static GitHubNode githubNode(ProjectRow row) {
+        return issueNodes(row).stream().filter(GitHubNode.class::isInstance).map(GitHubNode.class::cast)
+                .findFirst().orElseThrow();
+    }
+
+    private static JiraNode jiraNode(ProjectRow row) {
+        return issueNodes(row).stream().filter(JiraNode.class::isInstance).map(JiraNode.class::cast)
+                .findFirst().orElseThrow();
+    }
+
     private static List<TaskNode> pullRequestNodes(ProjectRow row) {
         return section(row, SectionKind.PULL_REQUESTS).orElseThrow().children();
     }
@@ -194,15 +236,20 @@ class TaskTreeModelTest {
         if (node instanceof JiraIssueRow jira) {
             return jira.issue().key();
         }
-        throw new AssertionError("unexpected Issues child: " + node);
+        throw new AssertionError("unexpected issue row: " + node);
     }
 
-    /** A section child's row ids, descending into Jira group nodes. */
-    private static Stream<String> flattenedIssueIds(TaskNode node) {
-        if (node instanceof JiraGroupRow group) {
-            return group.children().stream().map(TaskTreeModelTest::issueRowId);
-        }
-        return Stream.of(issueRowId(node));
+    /** A section's GitHub rows: the rows inside its GitHub node. */
+    private static List<String> githubRowIds(ProjectRow row) {
+        return githubNode(row).children().stream().map(TaskTreeModelTest::issueRowId).toList();
+    }
+
+    /** A section's Jira rows: the rows inside the named group of its Jira node. */
+    private static List<String> jiraRowIds(ProjectRow row, String groupName) {
+        return jiraNode(row).children().stream()
+                .filter(JiraGroupRow.class::isInstance).map(JiraGroupRow.class::cast)
+                .filter(group -> group.group().name().equals(groupName)).findFirst().orElseThrow()
+                .children().stream().map(TaskTreeModelTest::issueRowId).toList();
     }
 
     @Test
@@ -297,18 +344,17 @@ class TaskTreeModelTest {
 
     @Test
     void unloadedWorktreesAndIssuesStayDeferredWhileSessionsArePresent() {
-        In in = new In().project(BTRACE);
+        In in = new In().project(BTRACE).githubIssues(BTRACE);
         in.sessions.add(session("Eager session", BTRACE));
         in.worktrees.remove(BTRACE);
-        in.issueContainers.add(BTRACE);
 
         ProjectRow row = projectRow(TaskTreeModel.build(in.build()), BTRACE);
 
         assertEquals("Eager session", ((TaskRow) sessionNodes(row).getFirst()).session().displayName());
         assertInstanceOf(TaskNode.Deferred.class,
                 section(row, SectionKind.WORKTREES).orElseThrow().children().getFirst());
-        assertInstanceOf(TaskNode.Deferred.class,
-                section(row, SectionKind.ISSUES).orElseThrow().children().getFirst());
+        // The GitHub node exists from its settings alone, unfetched.
+        assertEquals(List.of(new TaskNode.Placeholder(TaskTreeModel.NOT_LOADED)), githubNode(row).children());
     }
 
     @Test
@@ -389,7 +435,7 @@ class TaskTreeModelTest {
 
     @Test
     void issuesIncludeUnassignedItemsAndSortByMostRecentlyUpdated() {
-        In in = new In().project(BTRACE);
+        In in = new In().project(BTRACE).githubIssues(BTRACE);
         OpenIssue olderAssigned = new OpenIssue(4, "Assigned issue", Optional.of("https://example/4"),
                 List.of("bug"), List.of("somebody"), Optional.of(T));
         OpenIssue newerUnassigned = new OpenIssue(9, "Unassigned issue", Optional.of("https://example/9"),
@@ -398,13 +444,13 @@ class TaskTreeModelTest {
 
         ProjectRow row = projectRow(TaskTreeModel.build(in.build()), BTRACE);
 
-        assertEquals(List.of(9, 4), issueNodes(row).stream()
-                .map(IssueRow.class::cast).map(issue -> issue.issue().number()).toList());
+        assertEquals(List.of(9, 4), githubRowIds(row).stream()
+                .map(id -> Integer.parseInt(id.substring(1))).toList());
     }
 
     @Test
     void issueSearchMatchesNumberTitleAndLabel() {
-        In in = new In().project(BTRACE);
+        In in = new In().project(BTRACE).githubIssues(BTRACE);
         in.issues.put(BTRACE, new IssueListing.Listed(List.of(
                 new OpenIssue(9, "Allocation regression", Optional.empty(), List.of("profiling"), List.of(),
                         Optional.of(T)),
@@ -413,14 +459,12 @@ class TaskTreeModelTest {
 
         ProjectRow row = projectRow(TaskTreeModel.build(in.build()), BTRACE);
 
-        IssueRow issue = assertInstanceOf(IssueRow.class, issueNodes(row).getFirst());
-        assertEquals(9, issue.issue().number());
+        assertEquals(List.of("#9"), githubRowIds(row));
     }
 
     @Test
-    void githubRowsStayFlatAndJiraRowsLiveOnlyInsideTheirGroups() {
-        In in = new In().project(BTRACE);
-        in.issueContainers.add(BTRACE);
+    void githubRowsLiveOnlyInsideTheGitHubNodeAndJiraRowsOnlyInsideTheirGroups() {
+        In in = new In().project(BTRACE).githubIssues(BTRACE).jira(BTRACE);
         in.issues.put(BTRACE, new IssueListing.Listed(List.of(
                 new OpenIssue(4, "GitHub middle", Optional.empty(), List.of(), List.of(), Optional.of(T)),
                 new OpenIssue(9, "GitHub newest", Optional.empty(), List.of(), List.of(), Optional.of(T.plusSeconds(60))))));
@@ -432,69 +476,79 @@ class TaskTreeModelTest {
         ProjectRow row = projectRow(TaskTreeModel.build(in.build()), BTRACE);
         List<TaskNode> children = issueNodes(row);
 
-        // GitHub's flat rows first, newest first; then the group node, whose
-        // rows keep the order the group's own JQL returned — the model does
-        // not re-sort a user query's deliberate ORDER BY.
-        assertEquals(List.of("#9", "#4"), children.stream().limit(2).map(TaskTreeModelTest::issueRowId).toList());
-        JiraGroupRow group = assertInstanceOf(JiraGroupRow.class, children.get(2));
-        assertEquals("Sprint", group.group().name());
-        assertEquals(List.of("PROJ-1", "PROJ-2"), group.children().stream()
-                .map(TaskTreeModelTest::issueRowId).toList());
+        // GitHub's node first, its rows newest first; then the Jira node,
+        // whose group's rows keep the order the group's own JQL returned —
+        // the model does not re-sort a user query's deliberate ORDER BY.
+        assertEquals(2, children.size());
+        assertInstanceOf(GitHubNode.class, children.get(0));
+        assertInstanceOf(JiraNode.class, children.get(1));
+        assertEquals(List.of("#9", "#4"), githubRowIds(row));
+        assertEquals(List.of("PROJ-1", "PROJ-2"), jiraRowIds(row, "Sprint"));
     }
 
     @Test
     void groupsAppearInTheOrderTheyWereDefined() {
-        In in = new In().project(BTRACE);
-        in.issueContainers.add(BTRACE);
+        In in = new In().project(BTRACE).jira(BTRACE);
         in.jiraGroups.put(BTRACE, List.of(
                 listedGroup("Sprint", List.of(jiraIssue("PROJ-1", "One", List.of(), Optional.of(T)))),
                 listedGroup("Bugs", List.of(jiraIssue("OPS-7", "Two", List.of(), Optional.of(T))))));
 
-        List<TaskNode> children = issueNodes(projectRow(TaskTreeModel.build(in.build()), BTRACE));
+        List<TaskNode> groups = jiraNode(projectRow(TaskTreeModel.build(in.build()), BTRACE)).children();
 
-        assertEquals(List.of("Sprint", "Bugs"), children.stream().map(JiraGroupRow.class::cast)
+        assertEquals(List.of("Sprint", "Bugs"), groups.stream().map(JiraGroupRow.class::cast)
                 .map(group -> group.group().name()).toList());
     }
 
     @Test
-    void aDeferredGroupShowsItsLoadingChildUntilTheListingArrives() {
-        In in = new In().project(BTRACE);
-        in.issueContainers.add(BTRACE);
+    void anUnopenedGroupShowsItsNotLoadedChildUntilTheListingArrives() {
+        In in = new In().project(BTRACE).jira(BTRACE);
         JiraGroup group = new JiraGroup("g-sprint", "Sprint", "project = DRY");
         in.jiraGroups.put(BTRACE, List.of(new JiraGroups.Listing(group, Optional.empty())));
 
         JiraGroupRow row = assertInstanceOf(JiraGroupRow.class,
-                issueNodes(projectRow(TaskTreeModel.build(in.build()), BTRACE)).getFirst());
-        assertEquals(List.of(new TaskNode.Deferred("Loading…")), row.children());
+                jiraNode(projectRow(TaskTreeModel.build(in.build()), BTRACE)).children().getFirst());
+        assertEquals(List.of(new TaskNode.Placeholder(TaskTreeModel.NOT_LOADED)), row.children());
 
         in.jiraGroups.put(BTRACE, List.of(listedGroup("Sprint", List.of(
                 jiraIssue("PROJ-123", "Fix allocation accounting", List.of("profiling"), Optional.of(T))))));
         row = assertInstanceOf(JiraGroupRow.class,
-                issueNodes(projectRow(TaskTreeModel.build(in.build()), BTRACE)).getFirst());
+                jiraNode(projectRow(TaskTreeModel.build(in.build()), BTRACE)).children().getFirst());
         assertEquals(List.of("PROJ-123"), row.children().stream().map(TaskTreeModelTest::issueRowId).toList());
     }
 
     @Test
-    void aContainerWithNoListingsAndNoGroupsStaysDeferred() {
-        In in = new In().project(BTRACE);
-        in.issueContainers.add(BTRACE);
+    void aConfiguredGitHubNodeWithoutAListingShowsItsNotLoadedChild() {
+        In in = new In().project(BTRACE).githubIssues(BTRACE).jira(BTRACE);
 
-        assertEquals(List.of(new TaskNode.Deferred("Loading issues…")),
-                section(projectRow(TaskTreeModel.build(in.build()), BTRACE), SectionKind.ISSUES)
-                        .orElseThrow().children());
+        List<TaskNode> children = issueNodes(projectRow(TaskTreeModel.build(in.build()), BTRACE));
+
+        GitHubNode github = assertInstanceOf(GitHubNode.class, children.get(0));
+        assertEquals(List.of(new TaskNode.Placeholder(TaskTreeModel.NOT_LOADED)), github.children());
+        // The Jira node stands beside it; with no groups defined it says so.
+        JiraNode jira = assertInstanceOf(JiraNode.class, children.get(1));
+        assertEquals(List.of(new TaskNode.Placeholder("No Jira groups")), jira.children());
     }
 
     @Test
-    void neitherSourceGivesNoIssuesSection() {
+    void neitherSourceConfiguredGivesNoIssuesSection() {
         In in = new In().project(BTRACE);
 
         assertTrue(section(projectRow(TaskTreeModel.build(in.build()), BTRACE), SectionKind.ISSUES).isEmpty());
     }
 
     @Test
+    void anUndetectableRepositoryAndADisabledConnectionShowGhosts() {
+        In in = new In().project(BTRACE).githubGhost(BTRACE).jiraGhost(BTRACE);
+
+        List<TaskNode> children = issueNodes(projectRow(TaskTreeModel.build(in.build()), BTRACE));
+
+        assertEquals(new Ghost(BTRACE, GhostSource.GITHUB), children.get(0));
+        assertEquals(new Ghost(BTRACE, GhostSource.JIRA), children.get(1));
+    }
+
+    @Test
     void aFailedGroupSaysSoInsideTheGroupAndKeepsTheGitHubRows() {
-        In in = new In().project(BTRACE);
-        in.issueContainers.add(BTRACE);
+        In in = new In().project(BTRACE).githubIssues(BTRACE).jira(BTRACE);
         in.issues.put(BTRACE, new IssueListing.Listed(List.of(
                 new OpenIssue(9, "Allocation regression", Optional.empty(), List.of("profiling"), List.of(),
                         Optional.of(T)))));
@@ -502,72 +556,126 @@ class TaskTreeModelTest {
         in.jiraGroups.put(BTRACE, List.of(
                 new JiraGroups.Listing(group, Optional.of(new JiraIssueListing.Failed("boom")))));
 
-        List<TaskNode> children = issueNodes(projectRow(TaskTreeModel.build(in.build()), BTRACE));
+        ProjectRow row = projectRow(TaskTreeModel.build(in.build()), BTRACE);
 
-        assertEquals("#9", issueRowId(children.get(0)));
-        JiraGroupRow row = assertInstanceOf(JiraGroupRow.class, children.get(1));
-        assertEquals(List.of(new TaskNode.ListProblem("Jira group \"Sprint\": boom")), row.children());
+        assertEquals(List.of("#9"), githubRowIds(row));
+        JiraGroupRow failed = assertInstanceOf(JiraGroupRow.class, jiraNode(row).children().getFirst());
+        assertEquals(List.of(new TaskNode.ListProblem("Jira group \"Sprint\": boom")), failed.children());
     }
 
     @Test
-    void aFailedGitHubListingAddsAProblemRowAndTheGroupsStay() {
-        In in = new In().project(BTRACE);
-        in.issueContainers.add(BTRACE);
+    void aFailedGitHubListingAddsAProblemRowInsideItsNodeAndTheGroupsStay() {
+        In in = new In().project(BTRACE).githubIssues(BTRACE).jira(BTRACE);
         in.issues.put(BTRACE, new IssueListing.Failed("gh exited 1"));
         in.jiraGroups.put(BTRACE, List.of(listedGroup("Sprint", List.of(
                 jiraIssue("PROJ-123", "Fix allocation accounting", List.of("profiling"), Optional.of(T))))));
 
-        List<TaskNode> children = issueNodes(projectRow(TaskTreeModel.build(in.build()), BTRACE));
+        ProjectRow row = projectRow(TaskTreeModel.build(in.build()), BTRACE);
 
-        assertEquals(new TaskNode.ListProblem("GitHub issues: gh exited 1"), children.get(0));
-        JiraGroupRow row = assertInstanceOf(JiraGroupRow.class, children.get(1));
-        assertEquals(List.of("PROJ-123"), row.children().stream().map(TaskTreeModelTest::issueRowId).toList());
+        GitHubNode github = githubNode(row);
+        assertEquals(List.of(new TaskNode.ListProblem("GitHub issues: gh exited 1")), github.children());
+        assertEquals(List.of("PROJ-123"), jiraRowIds(row, "Sprint"));
     }
 
     @Test
     void anEmptyGroupKeepsShowingWithAPlaceholder() {
-        In in = new In().project(BTRACE);
-        in.issueContainers.add(BTRACE);
+        In in = new In().project(BTRACE).jira(BTRACE);
         in.jiraGroups.put(BTRACE, List.of(listedGroup("Sprint", List.of())));
 
         JiraGroupRow row = assertInstanceOf(JiraGroupRow.class,
-                issueNodes(projectRow(TaskTreeModel.build(in.build()), BTRACE)).getFirst());
+                jiraNode(projectRow(TaskTreeModel.build(in.build()), BTRACE)).children().getFirst());
         assertEquals(List.of(new TaskNode.Placeholder("No issues")), row.children());
     }
 
     @Test
-    void searchFiltersInsideGroupsAndDropsGroupsThatMatchNothing() {
-        In in = new In().project(BTRACE);
-        in.issueContainers.add(BTRACE);
+    void searchFiltersInsideGroupsAndDropsEmptyNodesAndGroups() {
+        In in = new In().project(BTRACE).jira(BTRACE);
         in.jiraGroups.put(BTRACE, List.of(listedGroup("Sprint", List.of(
                 jiraIssue("PROJ-123", "Fix allocation accounting", List.of("profiling"), Optional.of(T)),
                 jiraIssue("OPS-7", "Inspect the agent loader", List.of("triage"), Optional.of(T))))));
         ProjectRow projectOf = projectRow(TaskTreeModel.build(in.build()), BTRACE);
-        JiraGroupRow group = assertInstanceOf(JiraGroupRow.class, issueNodes(projectOf).getFirst());
+        JiraGroupRow group = assertInstanceOf(JiraGroupRow.class, jiraNode(projectOf).children().getFirst());
         assertEquals(2, group.children().size());
 
         in.filter = "ops-7";
-        group = assertInstanceOf(JiraGroupRow.class,
-                issueNodes(projectRow(TaskTreeModel.build(in.build()), BTRACE)).getFirst());
-        assertEquals(List.of("OPS-7"), group.children().stream().map(TaskTreeModelTest::issueRowId).toList());
+        assertEquals(List.of("OPS-7"), jiraRowIds(
+                projectRow(TaskTreeModel.build(in.build()), BTRACE), "Sprint"));
 
-        // A filter nothing inside matches drops the whole group — and with
-        // it the section and the project, so the tree never shows a husk.
+        // A filter nothing inside matches drops the whole group — and with it
+        // the Jira node, the section and the project, so the tree never shows
+        // a husk.
         in.filter = "nothing-matches-this";
         assertTrue(projectRoots(TaskTreeModel.build(in.build())).isEmpty());
     }
 
     @Test
     void aGroupNameMatchingTheSearchShowsTheWholeGroup() {
-        In in = new In().project(BTRACE);
-        in.issueContainers.add(BTRACE);
+        In in = new In().project(BTRACE).jira(BTRACE);
         in.jiraGroups.put(BTRACE, List.of(listedGroup("Sprint", List.of(
                 jiraIssue("PROJ-123", "Fix allocation accounting", List.of("profiling"), Optional.of(T))))));
         in.filter = "sprin";
 
         JiraGroupRow group = assertInstanceOf(JiraGroupRow.class,
-                issueNodes(projectRow(TaskTreeModel.build(in.build()), BTRACE)).getFirst());
+                jiraNode(projectRow(TaskTreeModel.build(in.build()), BTRACE)).children().getFirst());
         assertEquals(List.of("PROJ-123"), group.children().stream().map(TaskTreeModelTest::issueRowId).toList());
+    }
+
+    @Test
+    void aSearchThatDoesNotNameJiraDropsAGrouplessJiraNode() {
+        // No groups defined: a filter that does not name the node leaves no husk.
+        In in = new In().project(BTRACE).jira(BTRACE);
+        in.filter = "nothing-matches-this";
+        assertTrue(projectRoots(TaskTreeModel.build(in.build())).isEmpty());
+
+        // With a matching GitHub row the project survives — but not the Jira husk.
+        In withGitHub = new In().project(BTRACE).jira(BTRACE).githubIssues(BTRACE);
+        withGitHub.issues.put(BTRACE, new IssueListing.Listed(List.of(
+                new OpenIssue(9, "nothing-matches-this", Optional.empty(), List.of(), List.of(), Optional.of(T)))));
+        withGitHub.filter = "nothing-matches-this";
+        ProjectRow row = projectRow(TaskTreeModel.build(withGitHub.build()), BTRACE);
+        assertTrue(issueNodes(row).stream().noneMatch(JiraNode.class::isInstance));
+
+        // A scope that names the project with an item part left still drops it.
+        in.filter = "/btr*/foo";
+        ProjectRow scoped = projectRow(TaskTreeModel.build(in.build()), BTRACE);
+        assertTrue(section(scoped, SectionKind.ISSUES)
+                .map(issues -> issues.children().stream().noneMatch(JiraNode.class::isInstance))
+                .orElse(true));
+    }
+
+    @Test
+    void aGrouplessJiraNodeStaysWhenTheItemFilterIsEmptyOrNamesJira() {
+        for (String filter : List.of("", "btr", "/btr*/", "jir")) {
+            In in = new In().project(BTRACE).jira(BTRACE);
+            in.filter = filter;
+            JiraNode jira = jiraNode(projectRow(TaskTreeModel.build(in.build()), BTRACE));
+            assertEquals(List.of(new TaskNode.Placeholder("No Jira groups")), jira.children(), filter);
+        }
+    }
+
+    @Test
+    void anAnsweredEmptyListingUsesTheSharedNoIssuesText() {
+        In in = new In().project(BTRACE).githubIssues(BTRACE).jira(BTRACE);
+        in.issues.put(BTRACE, new IssueListing.Listed(List.of()));
+        in.jiraGroups.put(BTRACE, List.of(listedGroup("Sprint", List.of())));
+        ProjectRow row = projectRow(TaskTreeModel.build(in.build()), BTRACE);
+
+        assertEquals(List.of(new TaskNode.Placeholder(TaskTreeModel.NO_ISSUES)), githubNode(row).children());
+        JiraGroupRow group = assertInstanceOf(JiraGroupRow.class, jiraNode(row).children().getFirst());
+        assertEquals(List.of(new TaskNode.Placeholder(TaskTreeModel.NO_ISSUES)), group.children());
+    }
+
+    @Test
+    void anAnsweredEmptyListingBadgesZeroIssues() {
+        // Model output fed to the renderer's discriminator: the two must agree on the text.
+        In in = new In().project(BTRACE).githubIssues(BTRACE).jira(BTRACE);
+        in.issues.put(BTRACE, new IssueListing.Listed(List.of()));
+        in.jiraGroups.put(BTRACE, List.of(listedGroup("Sprint", List.of())));
+        ProjectRow row = projectRow(TaskTreeModel.build(in.build()), BTRACE);
+
+        assertEquals(Optional.of("0 issues"), TaskTreeRenderer.githubIssueCountBadge(githubNode(row)));
+        JiraGroupRow group = assertInstanceOf(JiraGroupRow.class, jiraNode(row).children().getFirst());
+        assertEquals(Optional.of("0 issues"), TaskTreeRenderer.issueCountBadge(group));
     }
 
     @Test
@@ -586,20 +694,32 @@ class TaskTreeModelTest {
     }
 
     private static List<String> issueIdsMatching(String filter, List<OpenIssue> github, List<JiraIssue> jira) {
-        In in = new In().project(BTRACE);
-        in.issueContainers.add(BTRACE);
+        In in = new In().project(BTRACE).githubIssues(BTRACE).jira(BTRACE);
         in.issues.put(BTRACE, new IssueListing.Listed(github));
         in.jiraGroups.put(BTRACE, List.of(listedGroup("All", jira)));
         in.filter = filter;
 
-        return issueNodes(projectRow(TaskTreeModel.build(in.build()), BTRACE)).stream()
-                .flatMap(TaskTreeModelTest::flattenedIssueIds).toList();
+        ProjectRow row = projectRow(TaskTreeModel.build(in.build()), BTRACE);
+        List<String> ids = new ArrayList<>();
+        // An unfetched GitHub node stays visible under any filter — its rows
+        // could still match — but only a present node contributes rows.
+        if (issueNodes(row).stream().anyMatch(GitHubNode.class::isInstance)) {
+            ids.addAll(githubRowIds(row));
+        }
+        // The Jira node goes the way of its groups: present when it has
+        // something to show (definitions or rows), gone when every group
+        // was dropped.
+        issueNodes(row).stream().filter(JiraNode.class::isInstance).map(JiraNode.class::cast).findFirst()
+                .ifPresent(node -> node.children().stream().filter(JiraGroupRow.class::isInstance)
+                        .map(JiraGroupRow.class::cast)
+                        .forEach(group -> group.children().stream().map(TaskTreeModelTest::issueRowId)
+                                .forEach(ids::add)));
+        return ids;
     }
 
     @Test
-    void issuesViewKeepsGitHubRowsFlatAndGroupsBeneathThem() {
-        In in = new In().project(BTRACE);
-        in.issueContainers.add(BTRACE);
+    void issuesViewKeepsTheGitHubNodeAndTheJiraNodeAsItsOnlyContent() {
+        In in = new In().project(BTRACE).githubIssues(BTRACE).jira(BTRACE);
         in.sessions.add(session("Allocation session", BTRACE));
         in.issues.put(BTRACE, new IssueListing.Listed(List.of(
                 new OpenIssue(9, "Allocation regression", Optional.empty(), List.of("profiling"), List.of(),
@@ -612,9 +732,23 @@ class TaskTreeModelTest {
 
         assertTrue(section(row, SectionKind.SESSIONS).isEmpty());
         List<TaskNode> children = issueNodes(row);
-        assertEquals("#9", issueRowId(children.get(0)));
-        JiraGroupRow group = assertInstanceOf(JiraGroupRow.class, children.get(1));
-        assertEquals(List.of("PROJ-123"), group.children().stream().map(TaskTreeModelTest::issueRowId).toList());
+        assertEquals(2, children.size());
+        assertEquals(List.of("#9"), githubRowIds(row));
+        assertEquals(List.of("PROJ-123"), jiraRowIds(row, "Sprint"));
+    }
+
+    @Test
+    void anIssuesViewProjectWithNothingLoadedStillShowsItsNodes() {
+        In in = new In().project(BTRACE).githubIssues(BTRACE);
+        in.sessions.add(session("Allocation session", BTRACE));
+        in.viewFilter = ViewFilter.ISSUES;
+
+        ProjectRow row = projectRow(TaskTreeModel.build(in.build()), BTRACE);
+
+        // Strictly lazy: the view is a filter, never a load. The GitHub node
+        // stands unfetched, and the project stays visible to offer it.
+        assertTrue(section(row, SectionKind.SESSIONS).isEmpty());
+        assertEquals(List.of(new TaskNode.Placeholder(TaskTreeModel.NOT_LOADED)), githubNode(row).children());
     }
 
 
@@ -654,7 +788,7 @@ class TaskTreeModelTest {
 
     @Test
     void issuesViewContainsOnlyIssuesAndComposesWithSearch() {
-        In in = new In().project(BTRACE).project(ALPHA);
+        In in = new In().project(BTRACE).project(ALPHA).githubIssues(BTRACE).githubIssues(ALPHA);
         in.sessions.add(session("Allocation session", BTRACE));
         in.issues.put(BTRACE, new IssueListing.Listed(List.of(
                 new OpenIssue(9, "Allocation regression", Optional.empty(), List.of("profiling"), List.of(),
@@ -665,11 +799,12 @@ class TaskTreeModelTest {
 
         List<TaskNode> nodes = TaskTreeModel.build(in.build());
 
-        assertEquals(List.of(BTRACE), projectRoots(nodes));
+        // Alpha's GitHub node is unfetched — its rows could still match, so
+        // the project keeps showing with the not-loaded node.
+        assertEquals(List.of(ALPHA, BTRACE), projectRoots(nodes));
         ProjectRow row = projectRow(nodes, BTRACE);
         assertTrue(section(row, SectionKind.SESSIONS).isEmpty());
-        assertEquals(List.of(9), issueNodes(row).stream().map(IssueRow.class::cast)
-                .map(issue -> issue.issue().number()).toList());
+        assertEquals(List.of("#9"), githubRowIds(row));
     }
 
     @Test

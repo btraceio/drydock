@@ -9,6 +9,7 @@ import app.drydock.domain.SessionActivity;
 import app.drydock.git.GhCliService;
 import app.drydock.git.GhCliService.IssueListing;
 import app.drydock.git.GhCliService.PullRequestListing;
+import app.drydock.git.GitExecutableLocator;
 import app.drydock.git.JiraIssueListing;
 import app.drydock.git.JiraService;
 import app.drydock.git.WorktreeService;
@@ -18,15 +19,20 @@ import app.drydock.intellij.agent.AgentConsoles;
 import app.drydock.intellij.agent.AgentExecutionRegistry;
 import app.drydock.intellij.agent.HostedLifecycle;
 import app.drydock.intellij.project.ProjectIdentity;
+import app.drydock.process.ProcessResult;
+import app.drydock.process.ProcessRunner;
+import app.drydock.process.ProcessTimeoutException;
 import app.drydock.projects.SharedProject;
 
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.project.ProjectManager;
 
+import java.io.IOException;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -71,8 +77,10 @@ final class TaskTreeInputs implements AutoCloseable {
     private final WorktreeService worktrees = new WorktreeService();
     private final GhCliService github = new GhCliService();
     private final JiraIssueSource jira = new JiraIssueSource();
+    private final GitExecutableLocator gitLocator = new GitExecutableLocator();
     private final Map<Path, List<Worktree>> worktreeCache = new ConcurrentHashMap<>();
     private final Map<Path, Instant> activityCache = new ConcurrentHashMap<>();
+    private final Map<Path, Boolean> remoteCache = new ConcurrentHashMap<>();
     private final Map<IssueKey, CachedIssues> issueCache = new ConcurrentHashMap<>();
     private final Map<PullRequestKey, CachedPullRequests> pullRequestCache = new ConcurrentHashMap<>();
     private final ResumabilityCache resumability = new ResumabilityCache();
@@ -88,6 +96,12 @@ final class TaskTreeInputs implements AutoCloseable {
 
     private record CachedPullRequests(long expiresAt, CompletableFuture<PullRequestListing> listing) { }
 
+    /** One {@code git remote get-url origin} run in {@code root}; throws when git gave no answer. */
+    @FunctionalInterface
+    interface OriginProbe {
+        ProcessResult getUrl(Path git, Path root) throws IOException, InterruptedException;
+    }
+
     void invalidateWorktrees() {
         worktreeCache.clear();
         activityCache.clear();
@@ -97,6 +111,7 @@ final class TaskTreeInputs implements AutoCloseable {
     void invalidateGitHub() {
         issueCache.clear();
         pullRequestCache.clear();
+        remoteCache.clear();
     }
 
     /** Forgets every cached Jira listing, so the next gather re-queries each project. */
@@ -115,33 +130,72 @@ final class TaskTreeInputs implements AutoCloseable {
     }
 
     /**
-     * Whether {@code root}'s listing is fetched on the next gather. The
-     * view that is the listing ({@code ISSUES} for issues, {@code
-     * PULL_REQUESTS} for pull requests) wants every project's listing, so
-     * those views load without an expansion click; every other view wants
-     * only the roots the user opened here. Pure.
+     * Whether {@code root}'s GitHub listing is fetched on the next gather:
+     * only when the user opened the project's GitHub node here — the view
+     * never asks for issues on its own (issues are strictly lazy, unlike
+     * pull requests). Pure.
      */
-    static boolean listingWanted(TaskTreeModel.ViewFilter view, TaskTreeModel.ViewFilter listingView,
-                                 Set<Path> requested, Path root) {
-        return view == listingView || requested.contains(root);
+    static boolean githubIssuesWanted(Set<Path> requested, Path root) {
+        return requested.contains(root);
     }
 
     /**
-     * Whether {@code root}'s GitHub listing is requested by the next gather: the
-     * view/section rules of {@link #listingWanted}, with the search box's explicit
-     * {@code /<glob>/} project scope applied first. A scoped-out project's row
-     * is not shown at all, so fetching its listing — or the worktree list the
+     * Whether {@code root}'s GitHub issue listing is requested by the next gather:
+     * the opened-node rule of {@link #githubIssuesWanted(Set, Path)}, with the search
+     * box's explicit {@code /<glob>/} project scope applied first — the same rule as
+     * {@link #pullRequestsWanted(TaskTreeModel.ViewFilter, Set, Path, TaskTreeModel.ProjectScope, String)}.
+     * A scoped-out project's row is not shown at all, so fetching its listing would
+     * be pure waste. Ordinary unscoped text is not a scope. Pure.
+     */
+    static boolean githubIssuesWanted(Set<Path> requested, Path root,
+                                      TaskTreeModel.ProjectScope scope, String displayName) {
+        if (scope.scoped() && !scope.matchesProject(displayName)) {
+            return false;
+        }
+        return githubIssuesWanted(requested, root);
+    }
+
+    /**
+     * Whether one Jira group's listing is fetched on the next gather: only
+     * when the user opened that group here, and — as for GitHub issues and
+     * pull requests — never for a project the search box's explicit
+     * {@code /<glob>/} scope hides. Ordinary unscoped text is not a scope.
+     * The group definitions travel regardless; this gates the fetch only. Pure.
+     */
+    static boolean jiraGroupWanted(Set<ListingExpansionTracker.GroupKey> requested,
+                                   ListingExpansionTracker.GroupKey group,
+                                   TaskTreeModel.ProjectScope scope, String displayName) {
+        if (scope.scoped() && !scope.matchesProject(displayName)) {
+            return false;
+        }
+        return requested.contains(group);
+    }
+
+    /**
+     * Whether {@code root}'s pull-request listing is fetched on the next
+     * gather: the PRs view wants every project's listing, so that view
+     * loads without an expansion click; every other view wants only the
+     * roots the user opened here. Pure.
+     */
+    static boolean pullRequestsWanted(TaskTreeModel.ViewFilter view, Set<Path> requested, Path root) {
+        return view == TaskTreeModel.ViewFilter.PULL_REQUESTS || requested.contains(root);
+    }
+
+    /**
+     * Whether {@code root}'s pull-request listing is requested by the next gather:
+     * the view/section rule of {@link #pullRequestsWanted}, with the search box's
+     * explicit {@code /<glob>/} project scope applied first. A scoped-out project's
+     * row is not shown at all, so fetching its listing — or the worktree list the
      * pull-request dedup needs — would be pure waste. Ordinary unscoped text is
      * not a scope: a plain search still spans projects. The one predicate gates
      * the listing request and the dedup worktree read alike. Pure.
      */
-    static boolean githubListingWanted(TaskTreeModel.ViewFilter view, TaskTreeModel.ViewFilter listingView,
-                                       Set<Path> requested, Path root, TaskTreeModel.ProjectScope scope,
-                                       String displayName) {
+    static boolean pullRequestsWanted(TaskTreeModel.ViewFilter view, Set<Path> requested, Path root,
+                                      TaskTreeModel.ProjectScope scope, String displayName) {
         if (scope.scoped() && !scope.matchesProject(displayName)) {
             return false;
         }
-        return listingWanted(view, listingView, requested, root);
+        return pullRequestsWanted(view, requested, root);
     }
 
     /** Forgets {@code root}'s cached Jira listing, so the next gather re-queries it. */
@@ -150,7 +204,8 @@ final class TaskTreeInputs implements AutoCloseable {
     }
 
     TaskTreeModel.Inputs gather(Project here, String filter, TaskTreeModel.ViewFilter viewFilter,
-                                Set<Path> requestedWorktrees, Set<Path> requestedIssues,
+                                Set<Path> requestedWorktrees, Set<Path> requestedGitHubIssues,
+                                Set<ListingExpansionTracker.GroupKey> requestedJiraGroups,
                                 Set<Path> requestedPullRequests) {
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         List<SharedProject> projects = new ArrayList<>();
@@ -162,11 +217,16 @@ final class TaskTreeInputs implements AutoCloseable {
         Map<Path, List<JiraGroup>> jiraGroupRequests = new LinkedHashMap<>();
         Map<Path, CompletableFuture<PullRequestListing>> pullRequestRequests = new LinkedHashMap<>();
         Set<Path> worktreeContainers = new HashSet<>();
-        Set<Path> issueContainers = new HashSet<>();
         Set<Path> pullRequestContainers = new HashSet<>();
+        Set<Path> githubIssueRoots = new HashSet<>();
+        Set<Path> githubGhostRoots = new HashSet<>();
+        Set<Path> jiraRoots = new HashSet<>();
+        Set<Path> jiraGhostRoots = new HashSet<>();
         Map<Path, List<Worktree>> pullRequestDedupWorktrees = new HashMap<>();
         Set<Path> missing = new HashSet<>();
         TaskTreeModel.ProjectScope scope = TaskTreeModel.parseFilter(filter);
+        // Resolved once per pass, not once per project: remote detection reuses it.
+        Optional<Path> git = gitLocator.locate();
         for (SharedProject project : plugin.sharedProjects().projects()) {
             if (project.isRemote()) {
                 projects.add(project);
@@ -183,41 +243,54 @@ final class TaskTreeInputs implements AutoCloseable {
             worktreeContainers.add(root);
             GitHubProjectSettings githubSettings = GitHubProjectSettings.load(project.id());
             JiraProjectSettings jiraSettings = JiraProjectSettings.load(project.id());
-            // Groups exist only under an enabled connection, and a project
-            // with none shows no Jira content at all — so the section's
-            // container status follows GitHub's setting and the defined
-            // groups, never the enabled flag alone.
+            // Groups exist only under an enabled connection.
             List<JiraGroup> jiraGroups = jiraSettings.enabled()
                     ? JiraGroups.load(project.id()).groups() : List.of();
-            if (githubSettings.issuesEnabled() || !jiraGroups.isEmpty()) {
-                issueContainers.add(root);
-                // The GitHub listing needs its own gate: before the groups
-                // existed, an enabled Jira connection alone reached here and
-                // listed GitHub issues the user had switched off.
-                if (githubSettings.issuesEnabled() && githubListingWanted(viewFilter,
-                        TaskTreeModel.ViewFilter.ISSUES, requestedIssues, root, scope, project.displayName())) {
-                    issueRequests.put(root, issuesOf(root, githubSettings.repository()));
+            if (githubSettings.issuesEnabled()) {
+                // The node's presence is decided from settings alone; only
+                // the user's opening the node decides the fetch. An empty
+                // repository setting is not unconfigured — gh auto-detects
+                // from origin — but no origin to detect from is: that is the
+                // ghost, not a broken listing. An explicit /glob/ scope that
+                // hides the project skips the fetch, as for pull requests.
+                if (githubSettings.repository().isPresent() || githubRemoteDetectable(root, git)) {
+                    githubIssueRoots.add(root);
+                    if (githubIssuesWanted(requestedGitHubIssues, root, scope, project.displayName())) {
+                        issueRequests.put(root, issuesOf(root, githubSettings.repository()));
+                    }
+                } else {
+                    githubGhostRoots.add(root);
                 }
-                // Each group's listing follows the same view/scope rule as
-                // the GitHub one; the group definitions always travel, so
-                // the tree can offer edit and delete before any fetch.
-                if (githubListingWanted(viewFilter, TaskTreeModel.ViewFilter.ISSUES,
-                        requestedIssues, root, scope, project.displayName())) {
-                    for (JiraGroup group : jiraGroups) {
+            }
+            if (jiraSettings.enabled()) {
+                jiraRoots.add(root);
+                // Each group's listing is its own fetch trigger: only the
+                // groups the user opened here are queried, the definitions
+                // always travel so the tree can offer edit and delete before
+                // any fetch — and, like the other listings, none of a project
+                // an explicit /glob/ scope hides.
+                for (JiraGroup group : jiraGroups) {
+                    if (jiraGroupWanted(requestedJiraGroups,
+                            new ListingExpansionTracker.GroupKey(root, group.id()), scope, project.displayName())) {
                         jiraRequests.put(new JiraRequestKey(root, group.id()),
                                 jira.issuesOf(root, jiraSettings, group));
                     }
-                    jiraGroupRequests.put(root, jiraGroups);
-                } else if (!jiraGroups.isEmpty()) {
-                    jiraGroupListings.put(root, jiraGroups.stream()
-                            .map(group -> new JiraGroups.Listing(group, Optional.<JiraIssueListing>empty()))
-                            .toList());
                 }
+                if (!jiraGroups.isEmpty()) {
+                    jiraGroupRequests.put(root, jiraGroups);
+                }
+            } else {
+                // One flag means both "never configured" and "switched off":
+                // either way the tree says so and offers the settings dialog.
+                jiraGhostRoots.add(root);
             }
             if (githubSettings.pullRequestsEnabled()) {
                 pullRequestContainers.add(root);
-                if (githubListingWanted(viewFilter, TaskTreeModel.ViewFilter.PULL_REQUESTS, requestedPullRequests,
-                        root, scope, project.displayName())) {
+                // A scoped-out project's row is not shown at all, so fetching
+                // its listing — or the worktree list the dedup needs — would
+                // be pure waste. Ordinary unscoped text is not a scope: a
+                // plain search still spans projects.
+                if (pullRequestsWanted(viewFilter, requestedPullRequests, root, scope, project.displayName())) {
                     pullRequestRequests.put(root, pullRequestsOf(root, githubSettings.repository()));
                     // Dedup needs the worktree list even when the user has never
                     // opened the Worktrees section (byMain is filled lazily), but
@@ -326,8 +399,9 @@ final class TaskTreeInputs implements AutoCloseable {
             }
         }
         return new TaskTreeModel.Inputs(projects, sessions, byMain, mainRootOf, currentMain, currentWorking,
-                activity, running, hosts, missing, recordedRoots, worktreeContainers, issueContainers,
-                pullRequestContainers, openFolders, Map.copyOf(activityCache), Instant.now(),
+                activity, running, hosts, missing, recordedRoots, worktreeContainers,
+                pullRequestContainers, githubIssueRoots, githubGhostRoots, jiraRoots, jiraGhostRoots,
+                openFolders, Map.copyOf(activityCache), Instant.now(),
                 issues, jiraGroupListings, pullRequests, pullRequestDedupWorktrees, plugin.sharedProjects().problem(),
                 filter, viewFilter, resumable);
     }
@@ -355,18 +429,77 @@ final class TaskTreeInputs implements AutoCloseable {
 
     /**
      * One project's group listings, in group order: every group yields exactly
-     * one listing (a {@code Failed} one when its future misses the deadline),
-     * so no group is ever dropped or left looking "not requested".
+     * one listing, so no group is ever dropped or left looking "not requested".
+     * A group the user has not opened has no future — its listing stays empty
+     * (the tree's "Not loaded" state); one the user opened is waited for
+     * against the shared deadline and answers even when it misses it, as a
+     * {@code Failed} listing.
      */
     static List<JiraGroups.Listing> jiraListings(Path root, List<JiraGroup> groups,
                                                  Function<JiraGroup, CompletableFuture<JiraIssueListing>> futureOf,
                                                  long deadlineNanos) {
         List<JiraGroups.Listing> listings = new ArrayList<>();
         for (JiraGroup group : groups) {
-            listings.add(new JiraGroups.Listing(group,
-                    Optional.of(resolveJira(root, futureOf.apply(group), deadlineNanos))));
+            CompletableFuture<JiraIssueListing> future = futureOf.apply(group);
+            listings.add(new JiraGroups.Listing(group, future == null ? Optional.empty()
+                    : Optional.of(resolveJira(root, future, deadlineNanos))));
         }
         return listings;
+    }
+
+    /**
+     * Whether {@code root} has an {@code origin} remote for {@code gh} to
+     * auto-detect the repository from. Presence decides the GitHub node vs
+     * its ghost: with any origin, {@code gh} can at least try (and a
+     * remote it cannot map fails its fetch into an error row that names
+     * the problem); with none, it can never succeed, so the tree shows the
+     * ghost instead of a node that could only ever fail. Only git's
+     * definitive answer is cached per root (see {@link #remoteDetectable});
+     * a timeout, an I/O failure, an interrupt or a missing git executable
+     * is inconclusive: it shows the ghost for that pass only and is asked
+     * again on the next gather, never pinned for the session. The cache is
+     * dropped together with the GitHub caches, so fixing the checkout or
+     * the settings is seen on the next pass. {@code git} is resolved once
+     * per gather by the caller.
+     */
+    private boolean githubRemoteDetectable(Path root, Optional<Path> git) {
+        return remoteDetectable(remoteCache, root, git, (executable, dir) -> ProcessRunner.run(
+                List.of(executable.toString(), "remote", "get-url", "origin"), dir,
+                Duration.ofSeconds(GIT_TIMEOUT_SECONDS)));
+    }
+
+    /**
+     * Whether {@code root} has an {@code origin} remote, caching only git's
+     * definitive answer in {@code cache}: exit 0 with a non-blank URL is
+     * {@code true}; a non-zero exit ("No such remote", not a repository) or
+     * blank output is {@code false}. A timeout, an I/O failure, an interrupt
+     * (flag restored) or no git executable answers {@code false} for this
+     * pass only and stores nothing, so the next call asks git again. Pure
+     * apart from {@code cache} and {@code probe}.
+     */
+    static boolean remoteDetectable(Map<Path, Boolean> cache, Path root, Optional<Path> git,
+                                    OriginProbe probe) {
+        if (git.isEmpty()) {
+            // Inconclusive (no git to ask), never cached: a git installed later is seen next pass.
+            return false;
+        }
+        Boolean detectable = cache.computeIfAbsent(root, key -> {
+            try {
+                ProcessResult result = probe.getUrl(git.get(), key);
+                return result.exitCode() == 0 && !result.stdout().isBlank();
+            } catch (ProcessTimeoutException e) {
+                LOG.log(Level.DEBUG, () -> "Origin remote of " + key + " undetermined: timed out; not cached");
+                return null;
+            } catch (IOException e) {
+                LOG.log(Level.DEBUG, () -> "Origin remote of " + key + " undetermined: " + e + "; not cached");
+                return null;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return null;
+            }
+        });
+        // null: inconclusive, no mapping recorded — not detectable for this pass only.
+        return Boolean.TRUE.equals(detectable);
     }
 
     private CompletableFuture<IssueListing> issuesOf(Path root, Optional<String> repository) {

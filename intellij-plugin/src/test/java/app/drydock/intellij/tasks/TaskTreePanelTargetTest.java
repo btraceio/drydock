@@ -11,10 +11,15 @@ import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.JiraIssue;
 import app.drydock.git.JiraIssueListing;
 import app.drydock.intellij.tasks.TaskNode.Deferred;
+import app.drydock.intellij.tasks.TaskNode.Ghost;
+import app.drydock.intellij.tasks.TaskNode.GhostSource;
+import app.drydock.intellij.tasks.TaskNode.GitHubNode;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
 import app.drydock.intellij.tasks.TaskNode.IssueRow;
 import app.drydock.intellij.tasks.TaskNode.JiraGroupRow;
 import app.drydock.intellij.tasks.TaskNode.JiraIssueRow;
+import app.drydock.intellij.tasks.TaskNode.JiraNode;
+import app.drydock.intellij.tasks.TaskNode.Placeholder;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.intellij.tasks.TaskNode.Section;
 import app.drydock.intellij.tasks.TaskNode.SectionKind;
@@ -117,24 +122,25 @@ class TaskTreePanelTargetTest {
     }
 
     @Test
-    void theListingViewExpandsItsOwnSectionsWithoutARequest() {
-        assertTrue(TaskTreePanel.expandsListing(SectionKind.ISSUES, ViewFilter.ISSUES, false));
+    void thePullRequestsViewExpandsItsOwnSectionsWithoutARequest() {
         assertTrue(TaskTreePanel.expandsListing(SectionKind.PULL_REQUESTS, ViewFilter.PULL_REQUESTS, false));
-        assertTrue(TaskTreePanel.expandsListing(SectionKind.ISSUES, ViewFilter.ISSUES, true));
         assertTrue(TaskTreePanel.expandsListing(SectionKind.PULL_REQUESTS, ViewFilter.PULL_REQUESTS, true));
     }
 
     @Test
-    void aListingSectionFollowsTheRequestInEveryOtherView() {
+    void anIssuesSectionIsStrictlyLazyInEveryView() {
+        // The Issues view is a filter, never a load: no view opens an Issues
+        // section (or anything under it) for free.
         for (ViewFilter view : ViewFilter.values()) {
-            if (view == ViewFilter.ISSUES) {
-                continue;
-            }
             assertFalse(TaskTreePanel.expandsListing(SectionKind.ISSUES, view, false),
                     view + " should not expand Issues sections on its own");
             assertTrue(TaskTreePanel.expandsListing(SectionKind.ISSUES, view, true),
                     view + " keeps the user's expansion");
         }
+    }
+
+    @Test
+    void aPullRequestSectionFollowsTheRequestInEveryOtherView() {
         for (ViewFilter view : ViewFilter.values()) {
             if (view == ViewFilter.PULL_REQUESTS) {
                 continue;
@@ -144,9 +150,6 @@ class TaskTreePanelTargetTest {
             assertTrue(TaskTreePanel.expandsListing(SectionKind.PULL_REQUESTS, view, true),
                     view + " keeps the user's expansion");
         }
-        // The listing views never open each other's sections for free.
-        assertFalse(TaskTreePanel.expandsListing(SectionKind.ISSUES, ViewFilter.PULL_REQUESTS, false));
-        assertFalse(TaskTreePanel.expandsListing(SectionKind.PULL_REQUESTS, ViewFilter.ISSUES, false));
     }
 
     @Test
@@ -159,20 +162,11 @@ class TaskTreePanelTargetTest {
     }
 
     @Test
-    void theIssuesViewExpandsEveryJiraGroupWithoutARequest() {
-        assertTrue(TaskTreePanel.expandsGroup(ViewFilter.ISSUES, false));
-        assertTrue(TaskTreePanel.expandsGroup(ViewFilter.ISSUES, true));
-    }
-
-    @Test
-    void aJiraGroupFollowsTheRequestInEveryOtherView() {
+    void anIssuesContainerNodeFollowsTheRequestAloneInEveryView() {
         for (ViewFilter view : ViewFilter.values()) {
-            if (view == ViewFilter.ISSUES) {
-                continue;
-            }
-            assertFalse(TaskTreePanel.expandsGroup(view, false),
-                    view + " should not expand a Jira group on its own");
-            assertTrue(TaskTreePanel.expandsGroup(view, true),
+            assertFalse(TaskTreePanel.expandsIssuesNode(false),
+                    view + " must not open a GitHub node, a Jira node or a Jira group on its own");
+            assertTrue(TaskTreePanel.expandsIssuesNode(true),
                     view + " keeps the user's expansion");
         }
     }
@@ -266,13 +260,13 @@ class TaskTreePanelTargetTest {
         // The real expansion events fired — but no intent was recorded and no rebuild asked for.
         assertTrue(tree.isExpanded(sections.get("profiling-backend:ISSUES")));
         assertTrue(tree.isExpanded(sections.get("drydock:ISSUES")));
-        assertTrue(tracker.requested(SectionKind.ISSUES).isEmpty());
+        assertTrue(tracker.requestedIssueSections().isEmpty());
         assertTrue(tracker.requested(SectionKind.PULL_REQUESTS).isEmpty());
         assertTrue(rebuilds.isEmpty());
     }
 
     @Test
-    void manualExpansionThroughTheRealTreeEventRecordsIntent() {
+    void manualIssuesSectionExpansionRecordsStateButFetchesNothing() {
         Map<String, TreePath> sections = new HashMap<>();
         List<Boolean> rebuilds = new ArrayList<>();
         ListingExpansionTracker tracker = new ListingExpansionTracker(
@@ -281,13 +275,62 @@ class TaskTreePanelTargetTest {
 
         tree.expandPath(sections.get("profiling-backend:ISSUES"));
 
-        assertEquals(Set.of(REGISTERED_ROOT), tracker.requested(SectionKind.ISSUES));
-        assertEquals(List.of(Boolean.FALSE), rebuilds);
+        // The section's children travel without a fetch — opening it is pure
+        // UI state, and no rebuild is asked for.
+        assertEquals(Set.of(REGISTERED_ROOT), tracker.requestedIssueSections());
+        assertTrue(rebuilds.isEmpty());
         assertTrue(tracker.requested(SectionKind.PULL_REQUESTS).isEmpty());
-        // Re-opening a section the user already opened asks for nothing new.
+        // Re-opening a section the user already opened records nothing new.
         tree.collapsePath(sections.get("profiling-backend:ISSUES"));
         tree.expandPath(sections.get("profiling-backend:ISSUES"));
-        assertEquals(List.of(Boolean.FALSE), rebuilds);
+        assertEquals(Set.of(REGISTERED_ROOT), tracker.requestedIssueSections());
+    }
+
+    @Test
+    void requestedRejectsSectionKindsItDoesNotTrack() {
+        ListingExpansionTracker tracker = new ListingExpansionTracker(changed -> { },
+                TaskTreePanel::projectRootOf);
+        for (SectionKind kind : SectionKind.values()) {
+            if (kind == SectionKind.WORKTREES || kind == SectionKind.PULL_REQUESTS) {
+                continue;
+            }
+            assertThrows(IllegalArgumentException.class, () -> tracker.requested(kind), kind.toString());
+        }
+        // The tracked kinds stay live, mutable sets.
+        tracker.requested(SectionKind.PULL_REQUESTS).add(REGISTERED_ROOT);
+        assertEquals(Set.of(REGISTERED_ROOT), tracker.requested(SectionKind.PULL_REQUESTS));
+        tracker.requested(SectionKind.WORKTREES).add(REGISTERED_ROOT);
+        assertEquals(Set.of(REGISTERED_ROOT), tracker.requested(SectionKind.WORKTREES));
+    }
+
+    @Test
+    void expandingNonListingSectionsNeverReachesRequested() {
+        ListingExpansionTracker tracker = new ListingExpansionTracker(changed -> { },
+                TaskTreePanel::projectRootOf);
+        DefaultMutableTreeNode root = new DefaultMutableTreeNode();
+        DefaultMutableTreeNode project = new DefaultMutableTreeNode(new ProjectRow(
+                SharedProject.local(RepositoryId.newId(), REGISTERED_ROOT, "profiling-backend", NOW),
+                false, false, List.of(), List.of(), 0));
+        List<SectionKind> kinds = List.of(SectionKind.SESSIONS, SectionKind.ACTIVE,
+                SectionKind.INACTIVE, SectionKind.ISSUES);
+        for (SectionKind kind : kinds) {
+            DefaultMutableTreeNode section = new DefaultMutableTreeNode(new Section(kind,
+                    List.of(new Deferred("Reading…"))));
+            section.add(new DefaultMutableTreeNode(new Deferred("Reading…")));
+            project.add(section);
+        }
+        root.add(project);
+        JTree tree = new JTree(new DefaultTreeModel(root));
+        tree.setRootVisible(true);
+        tree.addTreeWillExpandListener(tracker);
+        tree.expandPath(new TreePath(project.getPath()));
+
+        for (int i = 0; i < project.getChildCount(); i++) {
+            TreePath path = new TreePath(((DefaultMutableTreeNode) project.getChildAt(i)).getPath());
+            assertDoesNotThrow(() -> tree.expandPath(path), kinds.get(i).toString());
+            assertTrue(tree.isExpanded(path), kinds.get(i).toString());
+        }
+        assertEquals(Set.of(REGISTERED_ROOT), tracker.requestedIssueSections());
     }
 
     /** A tree whose Issues section holds one Jira group with a loading child. */
@@ -332,9 +375,9 @@ class TaskTreePanelTargetTest {
         assertTrue(tree.isExpanded(groupPath[0]));
         assertEquals(Set.of(new ListingExpansionTracker.GroupKey(REGISTERED_ROOT, "g-sprint")),
                 tracker.requestedJiraGroups());
-        // The group's listing already travelled with its section: opening it
-        // re-requests nothing, it only survives the next rebuild.
-        assertTrue(rebuilds.isEmpty());
+        // The group's listing is its own fetch now: opening it asks for one
+        // rebuild so the next gather queries it, and the record survives it.
+        assertEquals(List.of(Boolean.FALSE), rebuilds);
     }
 
     @Test
@@ -364,7 +407,7 @@ class TaskTreePanelTargetTest {
         }));
         // The finally cleared the guard: the next real user expansion records.
         tree.expandPath(sections.get("profiling-backend:ISSUES"));
-        assertEquals(Set.of(REGISTERED_ROOT), tracker.requested(SectionKind.ISSUES));
+        assertEquals(Set.of(REGISTERED_ROOT), tracker.requestedIssueSections());
     }
 
     @Test
@@ -413,7 +456,8 @@ class TaskTreePanelTargetTest {
 
         tree.expandPath(new TreePath(section.getPath()));
 
-        assertTrue(tracker.requested(SectionKind.ISSUES).isEmpty());
+        assertTrue(tracker.requestedIssueSections().isEmpty());
+        assertTrue(tracker.requested(SectionKind.PULL_REQUESTS).isEmpty());
         assertTrue(rebuilds.isEmpty());
     }
 
@@ -445,8 +489,18 @@ class TaskTreePanelTargetTest {
         }
 
         @Override
-        public void requestListing(SectionKind kind, Path root) {
-            calls.add("listing:" + kind + ":" + root);
+        public void requestPullRequests(Path root) {
+            calls.add("listing:PULL_REQUESTS:" + root);
+        }
+
+        @Override
+        public void requestGitHubIssues(Path root) {
+            calls.add("githubIssues:" + root);
+        }
+
+        @Override
+        public void requestJiraGroup(Path root, String groupId) {
+            calls.add("jiraGroup:" + root + ":" + groupId);
         }
 
         @Override
@@ -486,14 +540,21 @@ class TaskTreePanelTargetTest {
     }
 
     @Test
-    void anIssuesSectionContextMenuRefreshTouchesOnlyThatProject() {
+    void anIssuesSectionContextMenuRefreshFetchesItsGitHubNodeAndGroups() {
         RecordingRefresh target = new RecordingRefresh();
 
-        TaskTreePanel.refresh(target, true, section(SectionKind.ISSUES), REGISTERED_ROOT);
+        TaskTreePanel.refresh(target, true,
+                new Section(SectionKind.ISSUES, List.of(
+                        new GitHubNode(REGISTERED_ROOT, List.of(new Placeholder(TaskTreeModel.NOT_LOADED))),
+                        new JiraNode(REGISTERED_ROOT, List.of(new JiraGroupRow(REGISTERED_ROOT,
+                                new JiraGroup("g-sprint", "Sprint", "project = DRY"),
+                                List.of(new Placeholder(TaskTreeModel.NOT_LOADED))))))),
+                REGISTERED_ROOT);
 
         assertEquals(List.of("issues:" + REGISTERED_ROOT,
                 "jiraIssues:" + REGISTERED_ROOT,
-                "listing:ISSUES:" + REGISTERED_ROOT, "rebuild:false"), target.calls);
+                "githubIssues:" + REGISTERED_ROOT,
+                "jiraGroup:" + REGISTERED_ROOT + ":g-sprint", "rebuild:false"), target.calls);
     }
 
     @Test
@@ -705,15 +766,17 @@ class TaskTreePanelTargetTest {
     }
 
     @Test
-    void theIssuesViewRestorationOpensEveryGroupUnrecorded() {
+    void theIssuesViewRestorationOpensOnlyWhatWasRequested() {
         DefaultMutableTreeNode root = modelTree(issuesProject(REGISTERED_ROOT, REGISTERED_ROOT, "g-sprint"));
         ListingExpansionTracker tracker = tracker();
 
         List<TreePath> expanded = walk(root, ViewFilter.ISSUES, tracker);
 
-        assertTrue(expanded.contains(pathAt(root, 0, 0)), "the Issues view opens its sections");
-        assertTrue(expanded.contains(pathAt(root, 0, 0, 0)), "and every group in them");
-        // The walk only expands; it never records intent.
+        // Strictly lazy: the Issues view opens nothing on its own — not the
+        // section, not a group. Only the always-eager project row expands.
+        // The walk only expands; it never records.
+        assertEquals(List.of(pathAt(root, 0)), expanded);
+        assertTrue(tracker.requestedIssueSections().isEmpty());
         assertTrue(tracker.requestedJiraGroups().isEmpty());
     }
 

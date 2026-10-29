@@ -92,11 +92,63 @@ public sealed interface TaskNode {
     }
 
     /**
-     * One user-defined Jira group: the named subnode of a project's Issues
-     * section whose JQL scopes its rows. Jira rows appear nowhere else — a
-     * project whose {@link JiraGroups} is empty shows no Jira content. The
-     * children are Jira rows, or a single loading, problem or empty-state
-     * child; a group whose search filter matches nothing inside is omitted.
+     * The project's GitHub issues container, the first child of its Issues
+     * section. Its listing is fetched only when the user opens the node —
+     * never with the section, never with a view. The children are GitHub
+     * rows, or a single not-loaded, loading, problem or empty-state child;
+     * a node whose search filter matches nothing inside is omitted.
+     */
+    record GitHubNode(Path mainRoot, List<TaskNode> children) implements TaskNode {
+        public GitHubNode {
+            Objects.requireNonNull(mainRoot, "mainRoot");
+            children = List.copyOf(children);
+            if (children.isEmpty()) {
+                throw new IllegalArgumentException("a GitHub node must not be empty");
+            }
+        }
+    }
+
+    /**
+     * The project's Jira container, the second child of its Issues section,
+     * shown whenever the project's Jira connection is enabled. Expanding it
+     * fetches nothing: its children are the user-defined groups as stored
+     * (or a single empty-state child), each fetching only when the group
+     * itself is opened.
+     */
+    record JiraNode(Path mainRoot, List<TaskNode> children) implements TaskNode {
+        public JiraNode {
+            Objects.requireNonNull(mainRoot, "mainRoot");
+            children = List.copyOf(children);
+            if (children.isEmpty()) {
+                throw new IllegalArgumentException("a Jira node must not be empty");
+            }
+        }
+    }
+
+    /**
+     * A source the project cannot list issues from yet: a muted row naming
+     * the source, whose click opens that source's settings. No children, no
+     * loading — a ghost never fetches.
+     */
+    record Ghost(Path mainRoot, GhostSource source) implements TaskNode {
+        public Ghost {
+            Objects.requireNonNull(mainRoot, "mainRoot");
+            Objects.requireNonNull(source, "source");
+        }
+    }
+
+    /** The source a {@link Ghost} points at, deciding its text and its settings dialog. */
+    enum GhostSource {
+        GITHUB, JIRA
+    }
+
+    /**
+     * One user-defined Jira group: a subnode of the project's Jira node
+     * whose JQL scopes its rows. Jira rows appear nowhere else — a project
+     * whose {@link JiraGroups} is empty shows no Jira content. The children
+     * are Jira rows, or a single not-loaded, problem or empty-state child;
+     * a group whose search filter matches nothing inside is omitted. A
+     * group's listing is fetched only when the user opens the group.
      */
     record JiraGroupRow(Path mainRoot, JiraGroup group, List<TaskNode> children) implements TaskNode {
         public JiraGroupRow {
@@ -183,7 +235,7 @@ public sealed interface TaskNode {
         }
     }
 
-    /** One open Jira issue belonging to the containing registered project, in the same Issues section as GitHub rows. */
+    /** One open Jira issue belonging to the containing registered project, inside its group under the Jira node. */
     record JiraIssueRow(Path mainRoot, JiraIssue issue) implements TaskNode {
         public JiraIssueRow {
             Objects.requireNonNull(mainRoot, "mainRoot");
