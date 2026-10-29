@@ -2,16 +2,23 @@ package app.drydock.intellij.tasks;
 
 import app.drydock.git.JiraIssueListing;
 import app.drydock.intellij.tasks.TaskTreeModel.ViewFilter;
+import app.drydock.process.ProcessResult;
+import app.drydock.process.ProcessTimeoutException;
 
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -19,9 +26,9 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * {@link TaskTreeInputs#listingWanted} — a pure table, no plugin service —
- * and the Jira gather's shared-deadline waits ({@code resolveJira},
- * {@code jiraListings}).
+ * {@link TaskTreeInputs}' pure fetch gates — no plugin service — and the
+ * Jira gather's shared-deadline waits ({@code resolveJira}, {@code
+ * jiraListings}).
  */
 class TaskTreeInputsTest {
 
@@ -29,52 +36,42 @@ class TaskTreeInputsTest {
     private static final Path OTHER = Path.of("/work/drydock");
 
     @Test
-    void theListingViewWantsEveryRootWithoutAnExpansionClick() {
-        assertTrue(TaskTreeInputs.listingWanted(
-                ViewFilter.ISSUES, ViewFilter.ISSUES, Set.of(), ROOT));
-        assertTrue(TaskTreeInputs.listingWanted(
-                ViewFilter.ISSUES, ViewFilter.ISSUES, Set.of(OTHER), ROOT));
-        assertTrue(TaskTreeInputs.listingWanted(
-                ViewFilter.PULL_REQUESTS, ViewFilter.PULL_REQUESTS, Set.of(), ROOT));
-        assertTrue(TaskTreeInputs.listingWanted(
-                ViewFilter.PULL_REQUESTS, ViewFilter.PULL_REQUESTS, Set.of(OTHER), ROOT));
+    void githubIssuesAreFetchedOnlyWhenTheirNodeWasOpened() {
+        // No view loads issues on its own — strictly lazy.
+        for (ViewFilter view : ViewFilter.values()) {
+            assertFalse(TaskTreeInputs.githubIssuesWanted(Set.of(), ROOT),
+                    view + " must not fetch issues without an opened node");
+        }
+        // The opened node is fetched in every view.
+        for (ViewFilter view : ViewFilter.values()) {
+            assertTrue(TaskTreeInputs.githubIssuesWanted(Set.of(ROOT), ROOT),
+                    view + " keeps the request");
+        }
+        // Only the root the user opened, not every registered project.
+        assertFalse(TaskTreeInputs.githubIssuesWanted(Set.of(OTHER), ROOT));
     }
 
     @Test
-    void everyOtherViewWantsOnlyRequestedRoots() {
-        for (ViewFilter view : new ViewFilter[] {ViewFilter.ALL, ViewFilter.ACTIVE,
-                ViewFilter.INACTIVE, ViewFilter.NEEDS_YOU, ViewFilter.PULL_REQUESTS}) {
-            assertFalse(TaskTreeInputs.listingWanted(view, ViewFilter.ISSUES, Set.of(), ROOT),
-                    view + " should not fetch issues eagerly");
-        }
+    void thePullRequestsViewWantsEveryRootWithoutAnExpansionClick() {
+        assertTrue(TaskTreeInputs.pullRequestsWanted(
+                ViewFilter.PULL_REQUESTS, Set.of(), ROOT));
+        assertTrue(TaskTreeInputs.pullRequestsWanted(
+                ViewFilter.PULL_REQUESTS, Set.of(OTHER), ROOT));
+    }
+
+    @Test
+    void everyOtherViewWantsOnlyRequestedPullRequestRoots() {
         for (ViewFilter view : new ViewFilter[] {ViewFilter.ALL, ViewFilter.ACTIVE,
                 ViewFilter.INACTIVE, ViewFilter.NEEDS_YOU, ViewFilter.ISSUES}) {
-            assertFalse(TaskTreeInputs.listingWanted(view, ViewFilter.PULL_REQUESTS, Set.of(), ROOT),
+            assertFalse(TaskTreeInputs.pullRequestsWanted(view, Set.of(), ROOT),
                     view + " should not fetch pull requests eagerly");
         }
-        assertTrue(TaskTreeInputs.listingWanted(
-                ViewFilter.ALL, ViewFilter.ISSUES, Set.of(ROOT), ROOT));
-        assertTrue(TaskTreeInputs.listingWanted(
-                ViewFilter.ALL, ViewFilter.PULL_REQUESTS, Set.of(ROOT), ROOT));
-        assertTrue(TaskTreeInputs.listingWanted(
-                ViewFilter.ISSUES, ViewFilter.PULL_REQUESTS, Set.of(ROOT), ROOT));
-        assertTrue(TaskTreeInputs.listingWanted(
-                ViewFilter.PULL_REQUESTS, ViewFilter.ISSUES, Set.of(ROOT), ROOT));
-    }
-
-    @Test
-    void aRequestedRootStaysRequestedInEveryView() {
         for (ViewFilter view : ViewFilter.values()) {
-            assertTrue(TaskTreeInputs.listingWanted(
-                    view, ViewFilter.ISSUES, Set.of(ROOT), ROOT), view + " keeps the request");
-            assertTrue(TaskTreeInputs.listingWanted(
-                    view, ViewFilter.PULL_REQUESTS, Set.of(ROOT), ROOT), view + " keeps the request");
+            assertTrue(TaskTreeInputs.pullRequestsWanted(view, Set.of(ROOT), ROOT),
+                    view + " keeps the request");
         }
-        // Only the root the user opened here, not every recorded project.
-        assertFalse(TaskTreeInputs.listingWanted(
-                ViewFilter.PULL_REQUESTS, ViewFilter.ISSUES, Set.of(OTHER), ROOT));
-        assertFalse(TaskTreeInputs.listingWanted(
-                ViewFilter.ALL, ViewFilter.PULL_REQUESTS, Set.of(OTHER), ROOT));
+        assertFalse(TaskTreeInputs.pullRequestsWanted(
+                ViewFilter.ISSUES, Set.of(OTHER), ROOT));
     }
 
     @Test
@@ -84,20 +81,15 @@ class TaskTreeInputsTest {
         // The PRs view wants every project's listing — but the scope is applied
         // first: the excluded project costs no gh listing and no PR-dedup
         // `git worktree list` (gather keys both off this one predicate).
-        assertTrue(TaskTreeInputs.githubListingWanted(ViewFilter.PULL_REQUESTS, ViewFilter.PULL_REQUESTS,
+        assertTrue(TaskTreeInputs.pullRequestsWanted(ViewFilter.PULL_REQUESTS,
                 Set.of(), OTHER, scope, "drydock"));
-        assertFalse(TaskTreeInputs.githubListingWanted(ViewFilter.PULL_REQUESTS, ViewFilter.PULL_REQUESTS,
-                Set.of(), ROOT, scope, "profiling-backend"));
-        // Same for the Issues view and the issues listing.
-        assertTrue(TaskTreeInputs.githubListingWanted(ViewFilter.ISSUES, ViewFilter.ISSUES,
-                Set.of(), OTHER, scope, "drydock"));
-        assertFalse(TaskTreeInputs.githubListingWanted(ViewFilter.ISSUES, ViewFilter.ISSUES,
+        assertFalse(TaskTreeInputs.pullRequestsWanted(ViewFilter.PULL_REQUESTS,
                 Set.of(), ROOT, scope, "profiling-backend"));
         // Even a section the user opened here is not fetched once the scope
         // excludes its project: the scope hides that project row entirely.
-        assertFalse(TaskTreeInputs.githubListingWanted(ViewFilter.ALL, ViewFilter.ISSUES,
+        assertFalse(TaskTreeInputs.pullRequestsWanted(ViewFilter.ALL,
                 Set.of(ROOT), ROOT, scope, "profiling-backend"));
-        assertTrue(TaskTreeInputs.githubListingWanted(ViewFilter.ALL, ViewFilter.ISSUES,
+        assertTrue(TaskTreeInputs.pullRequestsWanted(ViewFilter.ALL,
                 Set.of(OTHER), OTHER, scope, "drydock"));
     }
 
@@ -105,13 +97,13 @@ class TaskTreeInputsTest {
     void ordinaryUnscopedTextStillFetchesListingsAcrossProjects() {
         // A plain search is not a project scope: a PR-title search spans projects.
         TaskTreeModel.ProjectScope plain = TaskTreeModel.parseFilter("allocation");
-        assertTrue(TaskTreeInputs.githubListingWanted(ViewFilter.PULL_REQUESTS, ViewFilter.PULL_REQUESTS,
+        assertTrue(TaskTreeInputs.pullRequestsWanted(ViewFilter.PULL_REQUESTS,
                 Set.of(), OTHER, plain, "drydock"));
-        assertTrue(TaskTreeInputs.githubListingWanted(ViewFilter.PULL_REQUESTS, ViewFilter.PULL_REQUESTS,
+        assertTrue(TaskTreeInputs.pullRequestsWanted(ViewFilter.PULL_REQUESTS,
                 Set.of(), ROOT, plain, "profiling-backend"));
         // An empty scope (//) matches every project.
         TaskTreeModel.ProjectScope every = TaskTreeModel.parseFilter("//");
-        assertTrue(TaskTreeInputs.githubListingWanted(ViewFilter.ISSUES, ViewFilter.ISSUES,
+        assertTrue(TaskTreeInputs.pullRequestsWanted(ViewFilter.PULL_REQUESTS,
                 Set.of(), ROOT, every, "profiling-backend"));
     }
 
@@ -231,5 +223,159 @@ class TaskTreeInputsTest {
         assertEquals(List.of(g1, g2), listings.stream().map(JiraGroups.Listing::group).toList());
         assertSame(listed1, listings.get(0).listing().orElseThrow());
         assertSame(listed2, listings.get(1).listing().orElseThrow());
+    }
+
+    // --- Origin-remote detection: only git's definitive answer is cached ---
+
+    private static final Optional<Path> GIT = Optional.of(Path.of("/usr/bin/git"));
+
+    /** A scripted probe: each call counts, then answers or throws what {@code next} holds. */
+    private static final class ScriptedProbe implements TaskTreeInputs.OriginProbe {
+        final AtomicInteger calls = new AtomicInteger();
+        final AtomicReference<Object> next = new AtomicReference<>();
+
+        ScriptedProbe answering(Object outcome) {
+            next.set(outcome);
+            return this;
+        }
+
+        @Override
+        public ProcessResult getUrl(Path git, Path root) throws IOException, InterruptedException {
+            calls.incrementAndGet();
+            Object outcome = next.get();
+            if (outcome instanceof IOException e) {
+                throw e;
+            }
+            if (outcome instanceof InterruptedException e) {
+                throw e;
+            }
+            if (outcome instanceof RuntimeException e) {
+                throw e;
+            }
+            return (ProcessResult) outcome;
+        }
+    }
+
+    private static ProcessTimeoutException gitTimeout() {
+        return new ProcessTimeoutException(List.of("git"), Duration.ofSeconds(15));
+    }
+
+    @Test
+    void aRemoteGitAnswersIsCachedAsDetectable() {
+        Map<Path, Boolean> cache = new ConcurrentHashMap<>();
+        ScriptedProbe probe = new ScriptedProbe().answering(new ProcessResult(0, "git@github.com:o/r.git\n", ""));
+
+        assertTrue(TaskTreeInputs.remoteDetectable(cache, ROOT, GIT, probe));
+        assertEquals(Map.of(ROOT, true), cache);
+        assertTrue(TaskTreeInputs.remoteDetectable(cache, ROOT, GIT, probe));
+        assertEquals(1, probe.calls.get(), "the second answer comes from the cache");
+    }
+
+    @Test
+    void noOriginIsADefinitiveCachedAnswer() {
+        for (ProcessResult answer : List.of(
+                new ProcessResult(2, "", "error: No such remote 'origin'"),
+                new ProcessResult(0, "  \n", ""),
+                new ProcessResult(128, "", "fatal: not a git repository"))) {
+            Map<Path, Boolean> cache = new ConcurrentHashMap<>();
+            ScriptedProbe probe = new ScriptedProbe().answering(answer);
+
+            assertFalse(TaskTreeInputs.remoteDetectable(cache, ROOT, GIT, probe), answer.toString());
+            assertEquals(Map.of(ROOT, false), cache, answer.toString());
+            assertFalse(TaskTreeInputs.remoteDetectable(cache, ROOT, GIT, probe));
+            assertEquals(1, probe.calls.get(), answer + " is git's answer: asked once");
+        }
+    }
+
+    @Test
+    void aGitTimeoutIsNotCachedAndIsRetriedNextPass() {
+        Map<Path, Boolean> cache = new ConcurrentHashMap<>();
+        ScriptedProbe probe = new ScriptedProbe().answering(gitTimeout());
+
+        assertFalse(TaskTreeInputs.remoteDetectable(cache, ROOT, GIT, probe));
+        assertTrue(cache.isEmpty(), "a timeout is inconclusive, never pinned");
+
+        probe.answering(new ProcessResult(0, "git@github.com:o/r.git", ""));
+        assertTrue(TaskTreeInputs.remoteDetectable(cache, ROOT, GIT, probe));
+        assertEquals(2, probe.calls.get());
+        assertEquals(Map.of(ROOT, true), cache);
+    }
+
+    @Test
+    void anIoFailureIsNotCached() {
+        Map<Path, Boolean> cache = new ConcurrentHashMap<>();
+        ScriptedProbe probe = new ScriptedProbe().answering(new IOException("boom"));
+
+        assertFalse(TaskTreeInputs.remoteDetectable(cache, ROOT, GIT, probe));
+        assertTrue(cache.isEmpty());
+        assertFalse(TaskTreeInputs.remoteDetectable(cache, ROOT, GIT, probe));
+        assertEquals(2, probe.calls.get(), "the next pass asks git again");
+    }
+
+    @Test
+    void anInterruptIsNotCachedAndKeepsTheInterrupt() {
+        Map<Path, Boolean> cache = new ConcurrentHashMap<>();
+        ScriptedProbe probe = new ScriptedProbe().answering(new InterruptedException());
+        try {
+            assertFalse(TaskTreeInputs.remoteDetectable(cache, ROOT, GIT, probe));
+            assertTrue(cache.isEmpty());
+            assertTrue(Thread.currentThread().isInterrupted(), "the interrupt flag is restored");
+        } finally {
+            Thread.interrupted();
+        }
+    }
+
+    @Test
+    void noGitExecutableIsNotCachedAndSpawnsNothing() {
+        Map<Path, Boolean> cache = new ConcurrentHashMap<>();
+        ScriptedProbe probe = new ScriptedProbe().answering(new ProcessResult(0, "url", ""));
+
+        assertFalse(TaskTreeInputs.remoteDetectable(cache, ROOT, Optional.empty(), probe));
+        assertTrue(cache.isEmpty(), "a missing git is inconclusive: a git installed later is seen");
+        assertEquals(0, probe.calls.get());
+    }
+
+    // --- Scoped fetch gates: a hidden row means no fetch ---
+
+    @Test
+    void anExplicitProjectScopeSkipsTheGitHubIssueListingOfAHiddenProject() {
+        TaskTreeModel.ProjectScope scope = TaskTreeModel.parseFilter("/dry*/");
+
+        assertFalse(TaskTreeInputs.githubIssuesWanted(Set.of(ROOT), ROOT, scope, "profiling-backend"),
+                "an opened node of a scoped-out project is not fetched");
+        assertTrue(TaskTreeInputs.githubIssuesWanted(Set.of(OTHER), OTHER, scope, "drydock"));
+    }
+
+    @Test
+    void aScopeNeverAddsAGitHubIssueFetch() {
+        assertFalse(TaskTreeInputs.githubIssuesWanted(Set.of(), OTHER,
+                TaskTreeModel.parseFilter("/dry*/"), "drydock"));
+    }
+
+    @Test
+    void ordinaryTextAndTheEmptyScopeKeepTheGitHubIssueFetch() {
+        for (String filter : List.of("allocation", "//")) {
+            assertTrue(TaskTreeInputs.githubIssuesWanted(Set.of(ROOT), ROOT,
+                    TaskTreeModel.parseFilter(filter), "profiling-backend"), filter);
+        }
+    }
+
+    @Test
+    void jiraGroupFetchesFollowTheSameScopeRule() {
+        ListingExpansionTracker.GroupKey key = new ListingExpansionTracker.GroupKey(ROOT, "g-sprint");
+
+        assertFalse(TaskTreeInputs.jiraGroupWanted(Set.of(key), key,
+                TaskTreeModel.parseFilter("/dry*/"), "profiling-backend"));
+        assertTrue(TaskTreeInputs.jiraGroupWanted(Set.of(key), key,
+                TaskTreeModel.parseFilter("/prof*/"), "profiling-backend"));
+        assertFalse(TaskTreeInputs.jiraGroupWanted(Set.of(), key,
+                TaskTreeModel.parseFilter("/prof*/"), "profiling-backend"));
+        for (String filter : List.of("allocation", "//")) {
+            assertTrue(TaskTreeInputs.jiraGroupWanted(Set.of(key), key,
+                    TaskTreeModel.parseFilter(filter), "profiling-backend"), filter);
+        }
+        assertFalse(TaskTreeInputs.jiraGroupWanted(
+                Set.of(new ListingExpansionTracker.GroupKey(ROOT, "g-bugs")), key,
+                TaskTreeModel.parseFilter("allocation"), "profiling-backend"));
     }
 }

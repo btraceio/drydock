@@ -43,12 +43,14 @@ final class JiraTreeActions {
 
     /**
      * Whether the Jira settings action applies to the selected row: a
-     * registered project, its Issues section, or one of its Jira rows (spec
-     * AC11). Pure.
+     * registered project, its Issues section, its Jira node, one of its Jira
+     * rows, or its Jira ghost (spec AC11). Pure.
      */
     static boolean settingsNode(TaskNode node) {
         return node instanceof ProjectRow
                 || node instanceof Section section && section.kind() == SectionKind.ISSUES
+                || node instanceof TaskNode.JiraNode
+                || node instanceof TaskNode.Ghost ghost && ghost.source() == TaskNode.GhostSource.JIRA
                 || node instanceof JiraIssueRow;
     }
 
@@ -111,20 +113,30 @@ final class JiraTreeActions {
                 if (root == null) {
                     return;
                 }
-                DrydockPluginService.getInstance().sharedProjects().byRoot(root)
-                        .ifPresent(registered -> editSettings(project, root, registered, afterSave));
+                openSettings(project, root, afterSave);
             }
         };
     }
 
     /**
+     * Opens {@code Jira Settings…} for {@code root}'s project directly —
+     * the ghost node's click reuses the action's whole flow — and runs
+     * {@code afterSave} with the root once the save completed.
+     */
+    static void openSettings(Project project, Path root, Consumer<Path> afterSave) {
+        DrydockPluginService.getInstance().sharedProjects().byRoot(root)
+                .ifPresent(registered -> editSettings(project, root, registered, afterSave));
+    }
+
+    /**
      * Whether {@code Add Jira Group…} applies to the selected row: a
-     * registered project or its Issues section — the group lands there.
-     * Pure.
+     * registered project, its Issues section, or its Jira node — the group
+     * lands there. Pure.
      */
     static boolean groupTargetNode(TaskNode node) {
         return node instanceof ProjectRow
-                || node instanceof Section section && section.kind() == SectionKind.ISSUES;
+                || node instanceof Section section && section.kind() == SectionKind.ISSUES
+                || node instanceof TaskNode.JiraNode;
     }
 
     /**

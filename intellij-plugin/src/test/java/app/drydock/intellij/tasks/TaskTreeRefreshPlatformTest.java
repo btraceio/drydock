@@ -5,6 +5,12 @@ import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.intellij.tasks.TaskNode.Section;
 import app.drydock.intellij.tasks.TaskNode.SectionKind;
 import app.drydock.intellij.tasks.TaskNode.Deferred;
+import app.drydock.intellij.tasks.TaskNode.Ghost;
+import app.drydock.intellij.tasks.TaskNode.GhostSource;
+import app.drydock.intellij.tasks.TaskNode.GitHubNode;
+import app.drydock.intellij.tasks.TaskNode.JiraGroupRow;
+import app.drydock.intellij.tasks.TaskNode.JiraNode;
+import app.drydock.intellij.tasks.TaskNode.Placeholder;
 import app.drydock.projects.SharedProject;
 
 import com.intellij.openapi.actionSystem.ActionPlaces;
@@ -68,8 +74,18 @@ public class TaskTreeRefreshPlatformTest extends BasePlatformTestCase {
         }
 
         @Override
-        public void requestListing(SectionKind kind, Path root) {
-            calls.add("listing:" + kind + ":" + root);
+        public void requestPullRequests(Path root) {
+            calls.add("listing:PULL_REQUESTS:" + root);
+        }
+
+        @Override
+        public void requestGitHubIssues(Path root) {
+            calls.add("githubIssues:" + root);
+        }
+
+        @Override
+        public void requestJiraGroup(Path root, String groupId) {
+            calls.add("jiraGroup:" + root + ":" + groupId);
         }
 
         @Override
@@ -112,13 +128,22 @@ public class TaskTreeRefreshPlatformTest extends BasePlatformTestCase {
         assertEquals(List.of("all", "rebuild:true"), target.calls);
     }
 
-    public void testAnIssuesSectionContextMenuRefreshTouchesOnlyThatProject() {
+    public void testAnIssuesSectionContextMenuRefreshFetchesItsGitHubNodeAndGroups() {
         refresh.actionPerformed(event(ActionUiKind.POPUP, ActionPlaces.POPUP,
-                section(SectionKind.ISSUES), REGISTERED_ROOT));
+                new Section(SectionKind.ISSUES, List.of(
+                        new GitHubNode(REGISTERED_ROOT, List.of(new Placeholder(TaskTreeModel.NOT_LOADED))),
+                        new JiraNode(REGISTERED_ROOT, List.of(new JiraGroupRow(REGISTERED_ROOT,
+                                new JiraGroup("g-sprint", "Sprint", "project = DRY"),
+                                List.of(new Placeholder(TaskTreeModel.NOT_LOADED))))))),
+                REGISTERED_ROOT));
 
+        // The section's refresh loads what it shows: the GitHub node's
+        // listing and every group the Jira node displays, even if none of
+        // them was ever opened.
         assertEquals(List.of("issues:" + REGISTERED_ROOT,
                 "jiraIssues:" + REGISTERED_ROOT,
-                "listing:ISSUES:" + REGISTERED_ROOT, "rebuild:false"), target.calls);
+                "githubIssues:" + REGISTERED_ROOT,
+                "jiraGroup:" + REGISTERED_ROOT + ":g-sprint", "rebuild:false"), target.calls);
     }
 
     public void testAPullRequestSectionContextMenuRefreshTouchesOnlyThatProject() {
@@ -127,6 +152,48 @@ public class TaskTreeRefreshPlatformTest extends BasePlatformTestCase {
 
         assertEquals(List.of("pullRequests:" + REGISTERED_ROOT,
                 "listing:PULL_REQUESTS:" + REGISTERED_ROOT, "rebuild:false"), target.calls);
+    }
+
+    public void testAGithubNodeContextMenuRefreshTouchesOnlyItsListing() {
+        refresh.actionPerformed(event(ActionUiKind.POPUP, ActionPlaces.POPUP,
+                new GitHubNode(REGISTERED_ROOT, List.of(new Placeholder(TaskTreeModel.NOT_LOADED))),
+                REGISTERED_ROOT));
+
+        assertEquals(List.of("issues:" + REGISTERED_ROOT,
+                "githubIssues:" + REGISTERED_ROOT, "rebuild:false"), target.calls);
+    }
+
+    public void testAJiraNodeContextMenuRefreshFetchesEveryGroupItShows() {
+        refresh.actionPerformed(event(ActionUiKind.POPUP, ActionPlaces.POPUP,
+                new JiraNode(REGISTERED_ROOT, List.of(
+                        new JiraGroupRow(REGISTERED_ROOT, new JiraGroup("g-1", "Sprint", "project = DRY"),
+                                List.of(new Placeholder(TaskTreeModel.NOT_LOADED))),
+                        new JiraGroupRow(REGISTERED_ROOT, new JiraGroup("g-2", "Bugs", "labels = bug"),
+                                List.of(new Placeholder(TaskTreeModel.NOT_LOADED))))),
+                REGISTERED_ROOT));
+
+        assertEquals(List.of("jiraIssues:" + REGISTERED_ROOT,
+                "jiraGroup:" + REGISTERED_ROOT + ":g-1",
+                "jiraGroup:" + REGISTERED_ROOT + ":g-2", "rebuild:false"), target.calls);
+    }
+
+    public void testAJiraGroupContextMenuRefreshTouchesOnlyItsOwnQuery() {
+        refresh.actionPerformed(event(ActionUiKind.POPUP, ActionPlaces.POPUP,
+                new JiraGroupRow(REGISTERED_ROOT, new JiraGroup("g-sprint", "Sprint", "project = DRY"),
+                        List.of(new Placeholder(TaskTreeModel.NOT_LOADED))),
+                REGISTERED_ROOT));
+
+        assertEquals(List.of("jiraIssues:" + REGISTERED_ROOT,
+                "jiraGroup:" + REGISTERED_ROOT + ":g-sprint", "rebuild:false"), target.calls);
+    }
+
+    public void testAGhostContextMenuRefreshFetchesNothing() {
+        refresh.actionPerformed(event(ActionUiKind.POPUP, ActionPlaces.POPUP,
+                new Ghost(REGISTERED_ROOT, GhostSource.JIRA), REGISTERED_ROOT));
+
+        // A ghost has no listing; a stray dispatch must not become a global
+        // fetch either.
+        assertEquals(List.of(), target.calls);
     }
 
     public void testAProjectRowContextMenuRefreshKeepsTheGlobalScope() {
