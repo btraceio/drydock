@@ -9,14 +9,18 @@ import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.JiraIssue;
+import app.drydock.git.JiraIssueListing;
 import app.drydock.intellij.tasks.TaskNode.Deferred;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
 import app.drydock.intellij.tasks.TaskNode.IssueRow;
+import app.drydock.intellij.tasks.TaskNode.JiraGroupRow;
 import app.drydock.intellij.tasks.TaskNode.JiraIssueRow;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.intellij.tasks.TaskNode.Section;
 import app.drydock.intellij.tasks.TaskNode.SectionKind;
+import app.drydock.intellij.tasks.TaskNode.StaleWorktrees;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
+import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
 import app.drydock.intellij.tasks.TaskTreeModel.ViewFilter;
 import app.drydock.projects.SharedProject;
 import org.junit.jupiter.api.Test;
@@ -30,13 +34,19 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -148,6 +158,58 @@ class TaskTreePanelTargetTest {
         assertTrue(TaskTreePanel.expandsListing(SectionKind.WORKTREES, ViewFilter.ISSUES, true));
     }
 
+    @Test
+    void theIssuesViewExpandsEveryJiraGroupWithoutARequest() {
+        assertTrue(TaskTreePanel.expandsGroup(ViewFilter.ISSUES, false));
+        assertTrue(TaskTreePanel.expandsGroup(ViewFilter.ISSUES, true));
+    }
+
+    @Test
+    void aJiraGroupFollowsTheRequestInEveryOtherView() {
+        for (ViewFilter view : ViewFilter.values()) {
+            if (view == ViewFilter.ISSUES) {
+                continue;
+            }
+            assertFalse(TaskTreePanel.expandsGroup(view, false),
+                    view + " should not expand a Jira group on its own");
+            assertTrue(TaskTreePanel.expandsGroup(view, true),
+                    view + " keeps the user's expansion");
+        }
+    }
+
+    /**
+     * The reported defect, at its seam: a group whose model children never
+     * reach the Swing node is a leaf — rendered with its badge, but with no
+     * handle and no way to open it.
+     */
+    @Test
+    void aJiraGroupNodeCarriesItsChildrenSoTheTreeCanExpandIt() {
+        JiraGroupRow group = new JiraGroupRow(REGISTERED_ROOT, new JiraGroup("g-sprint", "Sprint", "project = DRY"),
+                List.of(new JiraIssueRow(REGISTERED_ROOT, jiraIssue("DRY-1", "Fix the profiler")),
+                        new JiraIssueRow(REGISTERED_ROOT, jiraIssue("DRY-2", "Ship the fix"))));
+
+        DefaultMutableTreeNode node = TaskTreePanel.treeNode(group, Optional.empty(),
+                new DefaultMutableTreeNode[1]);
+
+        assertFalse(node.isLeaf(), "a group with issues must not be a Swing leaf");
+        assertEquals(2, node.getChildCount());
+        assertEquals(List.of("DRY-1", "DRY-2"), childrenKeys(node));
+    }
+
+    private static JiraIssue jiraIssue(String key, String summary) {
+        return new JiraIssue(key, summary, "https://acme.atlassian.net/browse/" + key, List.of(),
+                Optional.of(NOW));
+    }
+
+    private static List<String> childrenKeys(DefaultMutableTreeNode node) {
+        List<String> keys = new ArrayList<>();
+        for (int i = 0; i < node.getChildCount(); i++) {
+            DefaultMutableTreeNode child = (DefaultMutableTreeNode) node.getChildAt(i);
+            keys.add(((JiraIssueRow) child.getUserObject()).issue().key());
+        }
+        return keys;
+    }
+
     private static final Path OTHER_ROOT = Path.of("/work/drydock");
 
     /** Sections of both projects, keyed "<file name>:<SectionKind>", with the real paths of a live tree. */
@@ -226,6 +288,67 @@ class TaskTreePanelTargetTest {
         tree.collapsePath(sections.get("profiling-backend:ISSUES"));
         tree.expandPath(sections.get("profiling-backend:ISSUES"));
         assertEquals(List.of(Boolean.FALSE), rebuilds);
+    }
+
+    /** A tree whose Issues section holds one Jira group with a loading child. */
+    private static JTree groupTree(ListingExpansionTracker tracker, TreePath[] groupPath) {
+        DefaultMutableTreeNode root = new DefaultMutableTreeNode();
+        DefaultMutableTreeNode project = new DefaultMutableTreeNode(new ProjectRow(
+                SharedProject.local(RepositoryId.newId(), REGISTERED_ROOT, "profiling-backend", NOW),
+                false, false, List.of(), List.of(), 0));
+        JiraGroupRow group = new JiraGroupRow(REGISTERED_ROOT,
+                new JiraGroup("g-sprint", "Sprint", "project = DRY"),
+                List.of(new Deferred("Loading…")));
+        DefaultMutableTreeNode section = new DefaultMutableTreeNode(new Section(SectionKind.ISSUES, List.of(group)));
+        DefaultMutableTreeNode groupNode = new DefaultMutableTreeNode(group);
+        groupNode.add(new DefaultMutableTreeNode(new Deferred("Loading…")));
+        section.add(groupNode);
+        project.add(section);
+        root.add(project);
+        JTree tree = new JTree(new DefaultTreeModel(root));
+        tree.setRootVisible(true);
+        tree.addTreeWillExpandListener(tracker);
+        // The panel's own restoration opens the way to the group: neither the
+        // project row nor a guarded section expansion is user intent.
+        tracker.runProgrammatic(() -> {
+            tree.expandPath(new TreePath(root.getPath()));
+            tree.expandPath(new TreePath(project.getPath()));
+            tree.expandPath(new TreePath(section.getPath()));
+        });
+        groupPath[0] = new TreePath(groupNode.getPath());
+        return tree;
+    }
+
+    @Test
+    void manualGroupExpansionRecordsTheGroupWithoutARebuild() {
+        List<Boolean> rebuilds = new ArrayList<>();
+        ListingExpansionTracker tracker = new ListingExpansionTracker(
+                changed -> rebuilds.add(changed), TaskTreePanel::projectRootOf);
+        TreePath[] groupPath = new TreePath[1];
+        JTree tree = groupTree(tracker, groupPath);
+
+        tree.expandPath(groupPath[0]);
+
+        assertTrue(tree.isExpanded(groupPath[0]));
+        assertEquals(Set.of(new ListingExpansionTracker.GroupKey(REGISTERED_ROOT, "g-sprint")),
+                tracker.requestedJiraGroups());
+        // The group's listing already travelled with its section: opening it
+        // re-requests nothing, it only survives the next rebuild.
+        assertTrue(rebuilds.isEmpty());
+    }
+
+    @Test
+    void programmaticGroupExpansionRecordsNoGroup() {
+        ListingExpansionTracker tracker = new ListingExpansionTracker(changed -> { },
+                TaskTreePanel::projectRootOf);
+        TreePath[] groupPath = new TreePath[1];
+        JTree tree = groupTree(tracker, groupPath);
+
+        // A pass through the Issues view: the panel itself opens every group.
+        tracker.runProgrammatic(() -> tree.expandPath(groupPath[0]));
+
+        assertTrue(tree.isExpanded(groupPath[0]));
+        assertTrue(tracker.requestedJiraGroups().isEmpty());
     }
 
     @Test
@@ -454,5 +577,290 @@ class TaskTreePanelTargetTest {
         assertFalse(ViewFilter.ISSUES.tooltip().contains("GitHub issues"));
         assertEquals("No open issues.", TaskTreePanel.emptyText("", ViewFilter.ISSUES));
         assertFalse(TaskTreePanel.emptyText("", ViewFilter.ISSUES).contains("GitHub"));
+    }
+
+    // --- Jira group expansion state: restoration walk and eviction ------------------
+
+    private static ListingExpansionTracker tracker() {
+        return new ListingExpansionTracker(changed -> { }, TaskTreePanel::projectRootOf);
+    }
+
+    private static void recordGroup(ListingExpansionTracker tracker, Path root, String groupId) {
+        tracker.requestedJiraGroups().add(new ListingExpansionTracker.GroupKey(root, groupId));
+    }
+
+    private static JiraGroups.Listing listing(String groupId) {
+        return new JiraGroups.Listing(new JiraGroup(groupId, "Name " + groupId, "project = DRY"), Optional.empty());
+    }
+
+    private static ProjectRow projectRow(Path root, List<TaskNode> children) {
+        return new ProjectRow(SharedProject.local(RepositoryId.newId(), root, root.getFileName().toString(), NOW),
+                false, false, children, List.of(), 0);
+    }
+
+    private static JiraGroupRow groupRow(Path mainRoot, String groupId) {
+        return new JiraGroupRow(mainRoot, new JiraGroup(groupId, "Name " + groupId, "project = DRY"),
+                List.of(new Deferred("Loading…")));
+    }
+
+    /** {@code ProjectRow(projectRoot) > Section(ISSUES) > JiraGroupRow(groupMainRoot, groupId)}. */
+    private static ProjectRow issuesProject(Path projectRoot, Path groupMainRoot, String... groupIds) {
+        List<TaskNode> groups = new ArrayList<>();
+        for (String id : groupIds) {
+            groups.add(groupRow(groupMainRoot, id));
+        }
+        return projectRow(projectRoot, List.of(new Section(SectionKind.ISSUES, groups)));
+    }
+
+    /** The invisible root the panel builds, holding the model rows mapped exactly as the panel maps them. */
+    private static DefaultMutableTreeNode modelTree(TaskNode... nodes) {
+        DefaultMutableTreeNode root = new DefaultMutableTreeNode();
+        for (TaskNode node : nodes) {
+            root.add(TaskTreePanel.treeNode(node, Optional.empty(), new DefaultMutableTreeNode[1]));
+        }
+        return root;
+    }
+
+    /** The path of the node reached from {@code root} by these child indices. */
+    private static TreePath pathAt(DefaultMutableTreeNode root, int... indices) {
+        DefaultMutableTreeNode node = root;
+        for (int index : indices) {
+            node = (DefaultMutableTreeNode) node.getChildAt(index);
+        }
+        return new TreePath(node.getPath());
+    }
+
+    /** Runs the panel's restoration walk from the invisible root, collecting what it expands, in order. */
+    private static List<TreePath> walk(DefaultMutableTreeNode root, ViewFilter view, ListingExpansionTracker tracker) {
+        List<TreePath> collected = new ArrayList<>();
+        TaskTreePanel.restoreExpansions(root, new TreePath(root.getPath()), null, view, tracker, collected::add);
+        return collected;
+    }
+
+    @Test
+    void aRecordedJiraGroupIsReExpandedByTheRestorationWalk() {
+        DefaultMutableTreeNode root = modelTree(issuesProject(REGISTERED_ROOT, REGISTERED_ROOT, "g-sprint"));
+        ListingExpansionTracker tracker = tracker();
+        recordGroup(tracker, REGISTERED_ROOT, "g-sprint");
+
+        List<TreePath> expanded = walk(root, ViewFilter.ALL, tracker);
+
+        assertTrue(expanded.contains(pathAt(root, 0, 0, 0)), "the recorded group is restored");
+        assertTrue(expanded.contains(pathAt(root, 0)), "project rows stay eager");
+        // A group request is not a section request: the unrequested Issues
+        // section stays collapsed outside the Issues view.
+        assertFalse(expanded.contains(pathAt(root, 0, 0)));
+    }
+
+    @Test
+    void aGroupRecordedUnderAnotherProjectStaysCollapsed() {
+        DefaultMutableTreeNode root = modelTree(issuesProject(REGISTERED_ROOT, REGISTERED_ROOT, "g-sprint"));
+        ListingExpansionTracker tracker = tracker();
+        recordGroup(tracker, OTHER_ROOT, "g-sprint");
+
+        assertFalse(walk(root, ViewFilter.ALL, tracker).contains(pathAt(root, 0, 0, 0)));
+
+        // Two projects owning a group with the same id: the root is the
+        // nearest project row's, carried down the walk.
+        DefaultMutableTreeNode both = modelTree(issuesProject(REGISTERED_ROOT, REGISTERED_ROOT, "g-sprint"),
+                issuesProject(OTHER_ROOT, OTHER_ROOT, "g-sprint"));
+        List<TreePath> expanded = walk(both, ViewFilter.ALL, tracker);
+        assertFalse(expanded.contains(pathAt(both, 0, 0, 0)));
+        assertTrue(expanded.contains(pathAt(both, 1, 0, 0)));
+    }
+
+    @Test
+    void theGroupKeyRootIsTheProjectRowsNotTheGroupRowsOwn() {
+        // A group whose own main root differs from its project row's: the key
+        // is what treeWillExpand records, the nearest project row's root.
+        DefaultMutableTreeNode root = modelTree(issuesProject(REGISTERED_ROOT, OTHER_ROOT, "g-sprint"));
+
+        ListingExpansionTracker underProject = tracker();
+        recordGroup(underProject, REGISTERED_ROOT, "g-sprint");
+        assertTrue(walk(root, ViewFilter.ALL, underProject).contains(pathAt(root, 0, 0, 0)));
+
+        ListingExpansionTracker underGroupRow = tracker();
+        recordGroup(underGroupRow, OTHER_ROOT, "g-sprint");
+        assertFalse(walk(root, ViewFilter.ALL, underGroupRow).contains(pathAt(root, 0, 0, 0)));
+    }
+
+    @Test
+    void aJiraGroupWithNoProjectAboveItNeverExpands() {
+        DefaultMutableTreeNode root = modelTree(groupRow(REGISTERED_ROOT, "g-sprint"));
+        ListingExpansionTracker tracker = tracker();
+        // Keys that would match if the guard were dropped (null root) or if
+        // the key used the row's own main root.
+        recordGroup(tracker, null, "g-sprint");
+        recordGroup(tracker, REGISTERED_ROOT, "g-sprint");
+
+        for (ViewFilter view : List.of(ViewFilter.ISSUES, ViewFilter.ALL)) {
+            List<TreePath> expanded = assertDoesNotThrow(() -> walk(root, view, tracker));
+            assertFalse(expanded.contains(pathAt(root, 0)), view + " must not expand a group with no project");
+        }
+
+        // The section guard is unchanged: no project, no expansion, even in its own view.
+        DefaultMutableTreeNode bareSection = modelTree(new Section(SectionKind.ISSUES,
+                List.of(new Deferred("Reading…"))));
+        assertFalse(walk(bareSection, ViewFilter.ISSUES, tracker).contains(pathAt(bareSection, 0)));
+    }
+
+    @Test
+    void theIssuesViewRestorationOpensEveryGroupUnrecorded() {
+        DefaultMutableTreeNode root = modelTree(issuesProject(REGISTERED_ROOT, REGISTERED_ROOT, "g-sprint"));
+        ListingExpansionTracker tracker = tracker();
+
+        List<TreePath> expanded = walk(root, ViewFilter.ISSUES, tracker);
+
+        assertTrue(expanded.contains(pathAt(root, 0, 0)), "the Issues view opens its sections");
+        assertTrue(expanded.contains(pathAt(root, 0, 0, 0)), "and every group in them");
+        // The walk only expands; it never records intent.
+        assertTrue(tracker.requestedJiraGroups().isEmpty());
+    }
+
+    @Test
+    void restorationKeepsEagerAndListingRulesInParentFirstOrder() {
+        DefaultMutableTreeNode root = modelTree(projectRow(REGISTERED_ROOT, List.of(
+                new Section(SectionKind.SESSIONS, List.of(new Deferred("Reading…"))),
+                new Section(SectionKind.WORKTREES, List.of(new Deferred("Reading…"))),
+                new Section(SectionKind.ISSUES, List.of(new Deferred("Reading…"))),
+                new Section(SectionKind.PULL_REQUESTS, List.of(new Deferred("Reading…"))),
+                new WorktreeGroup(LINKED_WORKTREE, "fix", List.of()),
+                new StaleWorktrees(List.of(new IdleWorktree(LINKED_WORKTREE, "fix", Optional.empty(),
+                        false, false))))));
+        ListingExpansionTracker tracker = tracker();
+        tracker.requested(SectionKind.WORKTREES).add(REGISTERED_ROOT);
+
+        assertEquals(List.of(pathAt(root, 0), pathAt(root, 0, 0), pathAt(root, 0, 1), pathAt(root, 0, 3),
+                        pathAt(root, 0, 4), pathAt(root, 0, 5)),
+                walk(root, ViewFilter.PULL_REQUESTS, tracker));
+        assertEquals(List.of(pathAt(root, 0), pathAt(root, 0, 0), pathAt(root, 0, 1),
+                        pathAt(root, 0, 4), pathAt(root, 0, 5)),
+                walk(root, ViewFilter.ALL, tracker));
+    }
+
+    @Test
+    void theDefinedGroupsAreEveryRootTimesEveryDefinedId() {
+        assertEquals(Set.of(new ListingExpansionTracker.GroupKey(REGISTERED_ROOT, "g1"),
+                        new ListingExpansionTracker.GroupKey(REGISTERED_ROOT, "g2"),
+                        new ListingExpansionTracker.GroupKey(OTHER_ROOT, "g3")),
+                ListingExpansionTracker.definedJiraGroups(Map.of(
+                        REGISTERED_ROOT, List.of(listing("g1"), listing("g2")),
+                        OTHER_ROOT, List.of(listing("g3")))));
+        assertTrue(ListingExpansionTracker.definedJiraGroups(Map.of()).isEmpty());
+    }
+
+    @Test
+    void aCompletedGatherForgetsGroupsItNoLongerDefines() {
+        ListingExpansionTracker tracker = tracker();
+        recordGroup(tracker, REGISTERED_ROOT, "g1");
+        recordGroup(tracker, REGISTERED_ROOT, "g2");
+        recordGroup(tracker, OTHER_ROOT, "g3");
+        Set<ListingExpansionTracker.GroupKey> before = tracker.requestedJiraGroups();
+
+        // g2 was deleted; OTHER_ROOT was unregistered or its Jira disabled.
+        Map<Path, List<JiraGroups.Listing>> defined = Map.of(REGISTERED_ROOT, List.of(listing("g1")));
+        tracker.retainDefinedJiraGroups(defined);
+
+        assertEquals(Set.of(new ListingExpansionTracker.GroupKey(REGISTERED_ROOT, "g1")),
+                tracker.requestedJiraGroups());
+        assertTrue(tracker.requestedJiraGroups().size() <= 1, "bounded by the defined groups");
+        assertSame(before, tracker.requestedJiraGroups(), "the live set is pruned, not replaced");
+    }
+
+    @Test
+    void aGatherWithNoDefinedGroupsForgetsEveryGroup() {
+        ListingExpansionTracker tracker = tracker();
+        recordGroup(tracker, REGISTERED_ROOT, "g1");
+        recordGroup(tracker, OTHER_ROOT, "g2");
+
+        tracker.retainDefinedJiraGroups(Map.of());
+
+        assertTrue(tracker.requestedJiraGroups().isEmpty());
+    }
+
+    @Test
+    void aStillDefinedGroupStaysRecordedWhateverItsListing() {
+        ListingExpansionTracker tracker = tracker();
+        recordGroup(tracker, REGISTERED_ROOT, "g1");
+        ListingExpansionTracker.GroupKey key = new ListingExpansionTracker.GroupKey(REGISTERED_ROOT, "g1");
+
+        // Edited in place (same id, new name and JQL), its query not run yet.
+        tracker.retainDefinedJiraGroups(Map.of(REGISTERED_ROOT, List.of(new JiraGroups.Listing(
+                new JiraGroup("g1", "Renamed", "project = OTHER"), Optional.empty()))));
+        assertTrue(tracker.requestedJiraGroups().contains(key));
+
+        // Its query ran and failed.
+        tracker.retainDefinedJiraGroups(Map.of(REGISTERED_ROOT, List.of(new JiraGroups.Listing(
+                new JiraGroup("g1", "Renamed", "project = OTHER"),
+                Optional.of(new JiraIssueListing.Failed("Jira refused the credentials (HTTP 401)"))))));
+        assertTrue(tracker.requestedJiraGroups().contains(key));
+    }
+
+    @Test
+    void anEvictedGroupIsNotReExpandedButAKeptOneIs() {
+        DefaultMutableTreeNode root = modelTree(issuesProject(REGISTERED_ROOT, REGISTERED_ROOT, "g1", "g2"));
+        ListingExpansionTracker tracker = tracker();
+        recordGroup(tracker, REGISTERED_ROOT, "g1");
+        recordGroup(tracker, REGISTERED_ROOT, "g2");
+
+        tracker.retainDefinedJiraGroups(Map.of(REGISTERED_ROOT, List.of(listing("g1"))));
+        List<TreePath> expanded = walk(root, ViewFilter.ALL, tracker);
+
+        assertTrue(expanded.contains(pathAt(root, 0, 0, 0)));
+        assertFalse(expanded.contains(pathAt(root, 0, 0, 1)));
+    }
+
+    /**
+     * Best-effort smoke check, not deterministic: pruning on the rebuild
+     * thread while the EDT records opens must neither throw nor lose a
+     * defined group. A plain {@code HashSet} would likely fail it; the
+     * concurrent field type is what actually guarantees this.
+     */
+    @Test
+    void pruningRacesUserOpensWithoutLosingADefinedGroup() throws InterruptedException {
+        ListingExpansionTracker tracker = tracker();
+        List<JiraGroups.Listing> listings = new ArrayList<>();
+        Set<ListingExpansionTracker.GroupKey> definedKeys = new HashSet<>();
+        for (int i = 0; i < 200; i++) {
+            listings.add(listing("d" + i));
+            definedKeys.add(new ListingExpansionTracker.GroupKey(REGISTERED_ROOT, "d" + i));
+        }
+        Map<Path, List<JiraGroups.Listing>> defined = Map.of(REGISTERED_ROOT, listings);
+        CountDownLatch start = new CountDownLatch(1);
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread opens = new Thread(() -> {
+            try {
+                start.await();
+                for (int i = 0; i < 200; i++) {
+                    recordGroup(tracker, REGISTERED_ROOT, "d" + i);
+                    recordGroup(tracker, OTHER_ROOT, "u" + i);
+                }
+            } catch (Throwable t) {
+                failure.compareAndSet(null, t);
+            }
+        });
+        Thread prunes = new Thread(() -> {
+            try {
+                start.await();
+                for (int i = 0; i < 1_000; i++) {
+                    tracker.retainDefinedJiraGroups(defined);
+                }
+            } catch (Throwable t) {
+                failure.compareAndSet(null, t);
+            }
+        });
+        opens.start();
+        prunes.start();
+        start.countDown();
+        opens.join(TimeUnit.SECONDS.toMillis(30));
+        prunes.join(TimeUnit.SECONDS.toMillis(30));
+
+        assertFalse(opens.isAlive(), "the opening thread finished");
+        assertFalse(prunes.isAlive(), "the pruning thread finished");
+        if (failure.get() != null) {
+            throw new AssertionError("a worker thread failed", failure.get());
+        }
+        tracker.retainDefinedJiraGroups(defined);
+        assertEquals(definedKeys, tracker.requestedJiraGroups());
     }
 }

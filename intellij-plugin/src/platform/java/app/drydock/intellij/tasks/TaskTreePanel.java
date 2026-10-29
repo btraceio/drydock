@@ -16,6 +16,7 @@ import app.drydock.projects.SharedProject;
 import app.drydock.intellij.tasks.TaskNode.AddCurrentProject;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
 import app.drydock.intellij.tasks.TaskNode.IssueRow;
+import app.drydock.intellij.tasks.TaskNode.JiraGroupRow;
 import app.drydock.intellij.tasks.TaskNode.JiraIssueRow;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.intellij.tasks.TaskNode.PullRequestRow;
@@ -1066,11 +1067,15 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 inputs.invalidateWorktrees();
             }
             repositoryIdsByRoot = repositoryIdsByRoot(plugin);
-            List<TaskNode> nodes = TaskTreeModel.build(
-                    inputs.gather(project, requestedFilter, requestedViewFilter,
-                            Set.copyOf(expansions.requested(SectionKind.WORKTREES)),
-                            Set.copyOf(expansions.requested(SectionKind.ISSUES)),
-                            Set.copyOf(expansions.requested(SectionKind.PULL_REQUESTS))));
+            TaskTreeModel.Inputs gathered = inputs.gather(project, requestedFilter, requestedViewFilter,
+                    Set.copyOf(expansions.requested(SectionKind.WORKTREES)),
+                    Set.copyOf(expansions.requested(SectionKind.ISSUES)),
+                    Set.copyOf(expansions.requested(SectionKind.PULL_REQUESTS)));
+            // Only a completed gather knows which groups still exist: a deleted
+            // group, an unregistered project or a disabled connection stops being
+            // remembered as open. A failed gather never gets here and forgets nothing.
+            expansions.retainDefinedJiraGroups(gathered.jiraGroupsByMainRoot());
+            List<TaskNode> nodes = TaskTreeModel.build(gathered);
             ApplicationManager.getApplication().invokeLater(
                     () -> finishRebuild(requestedVersion, requestedFilter, requestedViewFilter, nodes, null),
                     ModalityState.any(), project.getDisposed());
@@ -1129,15 +1134,15 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         // Restoration, not intent: every expansion in this span (and any a
         // selection could cause) records no user request.
         expansions.runProgrammatic(() -> {
-            expandEagerAndRequested(root, new TreePath(root.getPath()), null, appliedViewFilter);
+            restoreExpansions(root, new TreePath(root.getPath()), null, appliedViewFilter, expansions,
+                    tree::expandPath);
             if (toSelect[0] != null) {
                 tree.setSelectionPath(new TreePath(toSelect[0].getPath()));
             }
         });
     }
 
-    /**
-     * Whether a lazy listing section expands: always in the view that is
+    /** Whether a lazy listing section expands: always in the view that is
      * that listing (the Issues view opens every Issues section, the PRs
      * view every Pull Requests section), otherwise only after the user
      * opened it here. Sections with no view of their own (worktrees) follow
@@ -1153,12 +1158,32 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         return requested;
     }
 
-    /** Sessions stay eager; worktree and issue containers expand only after the user opened them. */
-    private void expandEagerAndRequested(DefaultMutableTreeNode node, TreePath path, Path projectRoot,
-                                        ViewFilter view) {
+    /**
+     * Whether a Jira group expands: always in the view that is its
+     * section's listing (the Issues view opens every group, as it opens
+     * every Issues section), otherwise only after the user opened it
+     * here — a rebuild re-collapses nothing the user had open. Pure.
+     */
+    static boolean expandsGroup(ViewFilter view, boolean requested) {
+        return view == ViewFilter.ISSUES || requested;
+    }
+
+    /**
+     * The panel's restoration walk: expands, through {@code expand}, every
+     * eager node and every lazy section or Jira group this view or the
+     * user's requests open — each node before its children, children in
+     * order. The project root of a node is its nearest project row's main
+     * root, carried down the walk; a section or group with none never
+     * expands, in any view. Static and panel-free (the side effect is the
+     * {@code expand} callback) so the tests can walk a model tree without a
+     * live project.
+     */
+    static void restoreExpansions(DefaultMutableTreeNode node, TreePath path, Path projectRoot,
+                                  ViewFilter view, ListingExpansionTracker expansions,
+                                  Consumer<TreePath> expand) {
         Object value = node.getUserObject();
         Path root = value instanceof ProjectRow row ? row.project().root() : projectRoot;
-        boolean expand = switch (value) {
+        boolean expanded = switch (value) {
             case null -> false;
             case ProjectRow ignored -> true;
             case WorktreeGroup ignored -> true;
@@ -1172,14 +1197,17 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 case PULL_REQUESTS -> root != null && expandsListing(SectionKind.PULL_REQUESTS, view,
                         expansions.requested(SectionKind.PULL_REQUESTS).contains(root));
             };
+            case JiraGroupRow group -> root != null && expandsGroup(view,
+                    expansions.requestedJiraGroups().contains(
+                            new ListingExpansionTracker.GroupKey(root, group.group().id())));
             default -> false;
         };
-        if (expand) {
-            tree.expandPath(path);
+        if (expanded) {
+            expand.accept(path);
         }
         for (int i = 0; i < node.getChildCount(); i++) {
             DefaultMutableTreeNode child = (DefaultMutableTreeNode) node.getChildAt(i);
-            expandEagerAndRequested(child, path.pathByAddingChild(child), root, view);
+            restoreExpansions(child, path.pathByAddingChild(child), root, view, expansions, expand);
         }
     }
 
@@ -1199,8 +1227,15 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         return appliedViewFilter.emptyText();
     }
 
-    private static DefaultMutableTreeNode treeNode(TaskNode node, Optional<ManagedSessionId> selected,
-                                                   DefaultMutableTreeNode[] toSelect) {
+    /**
+     * The Swing node of one model node, attaching every child a folder node
+     * holds (a project, a section, a worktree or Jira group) — a node whose
+     * children are never attached is a leaf the tree cannot expand, however
+     * expandable the model says it is. Package-private so the dispatch tests
+     * can assert the mapping directly.
+     */
+    static DefaultMutableTreeNode treeNode(TaskNode node, Optional<ManagedSessionId> selected,
+                                            DefaultMutableTreeNode[] toSelect) {
         DefaultMutableTreeNode treeNode = new DefaultMutableTreeNode(node);
         switch (node) {
             case ProjectRow project -> project.children().forEach(
@@ -1211,6 +1246,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                     worktree -> treeNode.add(treeNode(worktree, selected, toSelect)));
             case WorktreeGroup group -> group.tasks().forEach(
                     task -> treeNode.add(treeNode(task, selected, toSelect)));
+            case JiraGroupRow group -> group.children().forEach(
+                    child -> treeNode.add(treeNode(child, selected, toSelect)));
             case TaskRow task -> {
                 if (selected.map(task.session().id()::equals).orElse(false)) {
                     toSelect[0] = treeNode;
