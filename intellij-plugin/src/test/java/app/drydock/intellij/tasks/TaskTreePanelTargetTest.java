@@ -124,46 +124,6 @@ class TaskTreePanelTargetTest {
     }
 
     @Test
-    void thePullRequestsViewExpandsItsOwnSectionsWithoutARequest() {
-        assertTrue(TaskTreePanel.expandsListing(SectionKind.PULL_REQUESTS, ViewFilter.PULL_REQUESTS, false));
-        assertTrue(TaskTreePanel.expandsListing(SectionKind.PULL_REQUESTS, ViewFilter.PULL_REQUESTS, true));
-    }
-
-    @Test
-    void anIssuesSectionIsStrictlyLazyInEveryView() {
-        // The Issues view is a filter, never a load: no view opens an Issues
-        // section (or anything under it) for free.
-        for (ViewFilter view : ViewFilter.values()) {
-            assertFalse(TaskTreePanel.expandsListing(SectionKind.ISSUES, view, false),
-                    view + " should not expand Issues sections on its own");
-            assertTrue(TaskTreePanel.expandsListing(SectionKind.ISSUES, view, true),
-                    view + " keeps the user's expansion");
-        }
-    }
-
-    @Test
-    void aPullRequestSectionFollowsTheRequestInEveryOtherView() {
-        for (ViewFilter view : ViewFilter.values()) {
-            if (view == ViewFilter.PULL_REQUESTS) {
-                continue;
-            }
-            assertFalse(TaskTreePanel.expandsListing(SectionKind.PULL_REQUESTS, view, false),
-                    view + " should not expand Pull Requests sections on its own");
-            assertTrue(TaskTreePanel.expandsListing(SectionKind.PULL_REQUESTS, view, true),
-                    view + " keeps the user's expansion");
-        }
-    }
-
-    @Test
-    void aSectionWithNoViewOfItsOwnFollowsTheRequestAlone() {
-        assertFalse(TaskTreePanel.expandsListing(SectionKind.WORKTREES, ViewFilter.ALL, false));
-        assertFalse(TaskTreePanel.expandsListing(SectionKind.WORKTREES, ViewFilter.ISSUES, false));
-        assertFalse(TaskTreePanel.expandsListing(SectionKind.WORKTREES, ViewFilter.PULL_REQUESTS, false));
-        assertTrue(TaskTreePanel.expandsListing(SectionKind.WORKTREES, ViewFilter.ALL, true));
-        assertTrue(TaskTreePanel.expandsListing(SectionKind.WORKTREES, ViewFilter.ISSUES, true));
-    }
-
-    @Test
     void anIssuesContainerNodeFollowsTheRequestAloneInEveryView() {
         for (ViewFilter view : ViewFilter.values()) {
             assertFalse(TaskTreePanel.expandsIssuesNode(false),
@@ -629,19 +589,6 @@ class TaskTreePanelTargetTest {
         assertFalse(JiraTreeActions.settingsNode(pullRequests));
     }
 
-    @Test
-    void issueStringsDoNotReadAsGitHubOnly() {
-        // AC21: neither the ISSUES tooltip nor its empty text keeps the
-        // GitHub-only phrasing. The tooltip names both sources, so the guard
-        // is the old "GitHub issues" wording; the empty text names no source.
-        // The strings live on the ViewFilter enum since the ribbon refactor.
-        assertEquals("Show only open issues (GitHub and Jira)",
-                ViewFilter.ISSUES.tooltip());
-        assertFalse(ViewFilter.ISSUES.tooltip().contains("GitHub issues"));
-        assertEquals("No open issues.", TaskTreePanel.emptyText("", ViewFilter.ISSUES));
-        assertFalse(TaskTreePanel.emptyText("", ViewFilter.ISSUES).contains("GitHub"));
-    }
-
     // --- Jira group expansion state: restoration walk and eviction ------------------
 
     private static ListingExpansionTracker tracker() {
@@ -694,9 +641,9 @@ class TaskTreePanelTargetTest {
     }
 
     /** Runs the panel's restoration walk from the invisible root, collecting what it expands, in order. */
-    private static List<TreePath> walk(DefaultMutableTreeNode root, ViewFilter view, ListingExpansionTracker tracker) {
+    private static List<TreePath> walk(DefaultMutableTreeNode root, ListingExpansionTracker tracker) {
         List<TreePath> collected = new ArrayList<>();
-        TaskTreePanel.restoreExpansions(root, new TreePath(root.getPath()), null, view, tracker, collected::add);
+        TaskTreePanel.restoreExpansions(root, new TreePath(root.getPath()), null, tracker, collected::add);
         return collected;
     }
 
@@ -706,7 +653,7 @@ class TaskTreePanelTargetTest {
         ListingExpansionTracker tracker = tracker();
         recordGroup(tracker, REGISTERED_ROOT, "g-sprint");
 
-        List<TreePath> expanded = walk(root, ViewFilter.ALL, tracker);
+        List<TreePath> expanded = walk(root, tracker);
 
         assertTrue(expanded.contains(pathAt(root, 0, 0, 0)), "the recorded group is restored");
         assertTrue(expanded.contains(pathAt(root, 0)), "project rows stay eager");
@@ -721,13 +668,13 @@ class TaskTreePanelTargetTest {
         ListingExpansionTracker tracker = tracker();
         recordGroup(tracker, OTHER_ROOT, "g-sprint");
 
-        assertFalse(walk(root, ViewFilter.ALL, tracker).contains(pathAt(root, 0, 0, 0)));
+        assertFalse(walk(root, tracker).contains(pathAt(root, 0, 0, 0)));
 
         // Two projects owning a group with the same id: the root is the
         // nearest project row's, carried down the walk.
         DefaultMutableTreeNode both = modelTree(issuesProject(REGISTERED_ROOT, REGISTERED_ROOT, "g-sprint"),
                 issuesProject(OTHER_ROOT, OTHER_ROOT, "g-sprint"));
-        List<TreePath> expanded = walk(both, ViewFilter.ALL, tracker);
+        List<TreePath> expanded = walk(both, tracker);
         assertFalse(expanded.contains(pathAt(both, 0, 0, 0)));
         assertTrue(expanded.contains(pathAt(both, 1, 0, 0)));
     }
@@ -740,11 +687,11 @@ class TaskTreePanelTargetTest {
 
         ListingExpansionTracker underProject = tracker();
         recordGroup(underProject, REGISTERED_ROOT, "g-sprint");
-        assertTrue(walk(root, ViewFilter.ALL, underProject).contains(pathAt(root, 0, 0, 0)));
+        assertTrue(walk(root, underProject).contains(pathAt(root, 0, 0, 0)));
 
         ListingExpansionTracker underGroupRow = tracker();
         recordGroup(underGroupRow, OTHER_ROOT, "g-sprint");
-        assertFalse(walk(root, ViewFilter.ALL, underGroupRow).contains(pathAt(root, 0, 0, 0)));
+        assertFalse(walk(root, underGroupRow).contains(pathAt(root, 0, 0, 0)));
     }
 
     @Test
@@ -756,30 +703,13 @@ class TaskTreePanelTargetTest {
         recordGroup(tracker, null, "g-sprint");
         recordGroup(tracker, REGISTERED_ROOT, "g-sprint");
 
-        for (ViewFilter view : List.of(ViewFilter.ISSUES, ViewFilter.ALL)) {
-            List<TreePath> expanded = assertDoesNotThrow(() -> walk(root, view, tracker));
-            assertFalse(expanded.contains(pathAt(root, 0)), view + " must not expand a group with no project");
-        }
+        List<TreePath> expanded = assertDoesNotThrow(() -> walk(root, tracker));
+        assertFalse(expanded.contains(pathAt(root, 0)), "must not expand a group with no project");
 
-        // The section guard is unchanged: no project, no expansion, even in its own view.
+        // The section guard is unchanged: no project, no expansion.
         DefaultMutableTreeNode bareSection = modelTree(new Section(SectionKind.ISSUES,
                 List.of(new Deferred("Reading…"))));
-        assertFalse(walk(bareSection, ViewFilter.ISSUES, tracker).contains(pathAt(bareSection, 0)));
-    }
-
-    @Test
-    void theIssuesViewRestorationOpensOnlyWhatWasRequested() {
-        DefaultMutableTreeNode root = modelTree(issuesProject(REGISTERED_ROOT, REGISTERED_ROOT, "g-sprint"));
-        ListingExpansionTracker tracker = tracker();
-
-        List<TreePath> expanded = walk(root, ViewFilter.ISSUES, tracker);
-
-        // Strictly lazy: the Issues view opens nothing on its own — not the
-        // section, not a group. Only the always-eager project row expands.
-        // The walk only expands; it never records.
-        assertEquals(List.of(pathAt(root, 0)), expanded);
-        assertTrue(tracker.requestedIssueSections().isEmpty());
-        assertTrue(tracker.requestedJiraGroups().isEmpty());
+        assertFalse(walk(bareSection, tracker).contains(pathAt(bareSection, 0)));
     }
 
     // --- Collapse: a closed lazy node stays closed across rebuilds -------------------
@@ -848,13 +778,13 @@ class TaskTreePanelTargetTest {
         DefaultMutableTreeNode root = modelTree(issuesSourcesProject(REGISTERED_ROOT));
         ListingExpansionTracker tracker = tracker();
         tracker.requestedGitHubIssues().add(REGISTERED_ROOT);
-        assertTrue(walk(root, ViewFilter.ALL, tracker).contains(pathAt(root, 0, 0, 0)));
+        assertTrue(walk(root, tracker).contains(pathAt(root, 0, 0, 0)));
 
         collapse(tracker, pathAt(root, 0, 0, 0));
 
         assertTrue(tracker.requestedGitHubIssues().isEmpty(),
                 "the closed GitHub node's fetch trigger is forgotten, so the next rebuild keeps it closed");
-        assertFalse(walk(root, ViewFilter.ALL, tracker).contains(pathAt(root, 0, 0, 0)));
+        assertFalse(walk(root, tracker).contains(pathAt(root, 0, 0, 0)));
     }
 
     @Test
@@ -869,7 +799,7 @@ class TaskTreePanelTargetTest {
         assertTrue(tracker.requestedJiraNodes().isEmpty());
         assertTrue(tracker.requestedJiraGroups().isEmpty(),
                 "a recorded group would re-open the closed Jira node through the restoration's ancestor expansion");
-        List<TreePath> expanded = walk(root, ViewFilter.ALL, tracker);
+        List<TreePath> expanded = walk(root, tracker);
         assertFalse(expanded.contains(pathAt(root, 0, 0, 1)));
         assertFalse(expanded.contains(pathAt(root, 0, 0, 1, 0)));
     }
@@ -889,9 +819,9 @@ class TaskTreePanelTargetTest {
         assertTrue(tracker.requestedGitHubIssues().isEmpty());
         assertTrue(tracker.requestedJiraNodes().isEmpty());
         assertTrue(tracker.requestedJiraGroups().isEmpty());
-        assertTrue(walk(root, ViewFilter.ALL, tracker).contains(pathAt(root, 0)),
+        assertTrue(walk(root, tracker).contains(pathAt(root, 0)),
                 "the eager project row is unaffected");
-        assertEquals(List.of(pathAt(root, 0)), walk(root, ViewFilter.ALL, tracker));
+        assertEquals(List.of(pathAt(root, 0)), walk(root, tracker));
     }
 
     @Test
@@ -904,7 +834,7 @@ class TaskTreePanelTargetTest {
 
         collapse(tracker, pathAt(root, 0, 0, 0));
 
-        List<TreePath> expanded = walk(root, ViewFilter.ALL, tracker);
+        List<TreePath> expanded = walk(root, tracker);
         assertFalse(expanded.contains(pathAt(root, 0, 0, 0)));
         assertTrue(expanded.contains(pathAt(root, 1, 0, 0)));
     }
@@ -923,8 +853,8 @@ class TaskTreePanelTargetTest {
         assertTrue(tracker.requested(SectionKind.WORKTREES).isEmpty());
         assertTrue(tracker.requested(SectionKind.PULL_REQUESTS).contains(REGISTERED_ROOT),
                 "collapsing one section never touches a sibling's record");
-        assertFalse(walk(root, ViewFilter.ALL, tracker).contains(pathAt(root, 0, 0)));
-        assertTrue(walk(root, ViewFilter.ALL, tracker).contains(pathAt(root, 0, 1)));
+        assertFalse(walk(root, tracker).contains(pathAt(root, 0, 0)));
+        assertTrue(walk(root, tracker).contains(pathAt(root, 0, 1)));
     }
 
     @Test
@@ -1002,7 +932,7 @@ class TaskTreePanelTargetTest {
         assertEquals(Set.of(REGISTERED_ROOT), tracker.requestedIssueSections());
         assertEquals(Set.of(REGISTERED_ROOT), tracker.requestedGitHubIssues());
 
-        List<TreePath> expanded = walk(root, ViewFilter.ALL, tracker);
+        List<TreePath> expanded = walk(root, tracker);
         assertFalse(expanded.contains(pathAt(root, 0, 0, 0, 0)), "the closed group stays closed");
         assertTrue(expanded.contains(pathAt(root, 0, 0, 0, 1)), "its sibling group is still restored");
     }
@@ -1093,12 +1023,9 @@ class TaskTreePanelTargetTest {
         ListingExpansionTracker tracker = tracker();
         tracker.requested(SectionKind.WORKTREES).add(REGISTERED_ROOT);
 
-        assertEquals(List.of(pathAt(root, 0), pathAt(root, 0, 0), pathAt(root, 0, 1), pathAt(root, 0, 3),
-                        pathAt(root, 0, 4), pathAt(root, 0, 5)),
-                walk(root, ViewFilter.PULL_REQUESTS, tracker));
         assertEquals(List.of(pathAt(root, 0), pathAt(root, 0, 0), pathAt(root, 0, 1),
                         pathAt(root, 0, 4), pathAt(root, 0, 5)),
-                walk(root, ViewFilter.ALL, tracker));
+                walk(root, tracker));
     }
 
     @Test
@@ -1167,7 +1094,7 @@ class TaskTreePanelTargetTest {
         recordGroup(tracker, REGISTERED_ROOT, "g2");
 
         tracker.retainDefinedJiraGroups(Map.of(REGISTERED_ROOT, List.of(listing("g1"))));
-        List<TreePath> expanded = walk(root, ViewFilter.ALL, tracker);
+        List<TreePath> expanded = walk(root, tracker);
 
         assertTrue(expanded.contains(pathAt(root, 0, 0, 0)));
         assertFalse(expanded.contains(pathAt(root, 0, 0, 1)));

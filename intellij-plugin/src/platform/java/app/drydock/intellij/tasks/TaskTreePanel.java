@@ -9,6 +9,7 @@ import app.drydock.domain.SessionMode;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.DrydockSessionsListener;
 import app.drydock.intellij.actions.SessionDialogs;
+import app.drydock.intellij.agent.AgentConsoleFile;
 import app.drydock.intellij.agent.AgentConsoles;
 import app.drydock.intellij.agent.AgentExecutionListener;
 import app.drydock.intellij.agent.SessionActivityListener;
@@ -46,11 +47,15 @@ import com.intellij.openapi.actionSystem.DefaultActionGroup;
 import com.intellij.openapi.actionSystem.UiDataProvider;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
+import com.intellij.openapi.fileEditor.FileEditorManager;
+import com.intellij.openapi.fileEditor.FileEditorManagerEvent;
+import com.intellij.openapi.fileEditor.FileEditorManagerListener;
 import com.intellij.openapi.project.DumbAware;
 import com.intellij.openapi.project.DumbAwareAction;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.Messages;
 import com.intellij.openapi.ui.SimpleToolWindowPanel;
+import com.intellij.openapi.vfs.VirtualFile;
 
 import com.intellij.ui.DocumentAdapter;
 import com.intellij.ui.PopupHandler;
@@ -222,7 +227,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
         tree.setRootVisible(false);
         tree.setShowsRootHandles(true);
-        tree.setCellRenderer(new TaskTreeRenderer());
+        TaskTreeRenderer renderer = new TaskTreeRenderer();
+        tree.setCellRenderer(renderer);
         // The first read runs git once per project; a blank "Nothing to show"
         // meanwhile looked like a broken window.
         tree.getEmptyText().setText("Loading Drydock projects…");
@@ -528,16 +534,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         query.add(new ViewFilterRibbon(viewFilter, candidate -> {
             // The ribbon owns only the chips; the chosen view stays here,
             // and every real change (not a re-click of the selected chip)
-            // narrows the tree the same way the old chip row did. Issues is
-            // strictly lazy — a filter, never a load — so only the PRs view
-            // fetches on the next pass and needs the busy wait.
+            // narrows the tree. No view loads a listing — each is a filter.
             viewFilter = candidate;
-            if (candidate == ViewFilter.PULL_REQUESTS) {
-                ((DefaultTreeModel) tree.getModel()).setRoot(new DefaultMutableTreeNode());
-                displayedNodes = List.of();
-                tree.getEmptyText().setText("Loading pull requests…");
-                tree.setPaintBusy(true);
-            }
             requestRebuild(false);
         }), BorderLayout.SOUTH);
         top.add(query, BorderLayout.SOUTH);
@@ -611,6 +609,26 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 }, SEARCH_DEBOUNCE_MILLIS);
             }
         });
+
+        // The row of the session whose console tab is selected in the editor
+        // area is highlighted; a selection change repaints, never rebuilds.
+        Runnable syncActiveSession = () -> {
+            renderer.setActiveSession(activeSessionOf(FileEditorManager.getInstance(project).getSelectedFiles()));
+            tree.repaint();
+        };
+        project.getMessageBus().connect(this).subscribe(FileEditorManagerListener.FILE_EDITOR_MANAGER,
+                new FileEditorManagerListener() {
+                    @Override
+                    public void selectionChanged(@NotNull FileEditorManagerEvent event) {
+                        syncActiveSession.run();
+                    }
+
+                    @Override
+                    public void fileClosed(@NotNull FileEditorManager source, @NotNull VirtualFile file) {
+                        syncActiveSession.run();
+                    }
+                });
+        syncActiveSession.run();
 
         MessageBusConnection bus = ApplicationManager.getApplication().getMessageBus().connect(this);
         bus.subscribe(DrydockSessionsListener.TOPIC, (DrydockSessionsListener) () -> requestRebuild(true));
@@ -1216,24 +1234,12 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         // Restoration, not intent: every expansion in this span (and any a
         // selection could cause) records no user request.
         expansions.runProgrammatic(() -> {
-            restoreExpansions(root, new TreePath(root.getPath()), null, appliedViewFilter, expansions,
+            restoreExpansions(root, new TreePath(root.getPath()), null, expansions,
                     tree::expandPath);
             if (toSelect[0] != null) {
                 tree.setSelectionPath(new TreePath(toSelect[0].getPath()));
             }
         });
-    }
-
-    /** Whether a lazy listing section expands: the PRs view opens every Pull Requests
-     * section; every other section follows the request alone. Issues sections are
-     * strictly lazy — the view is a filter, never a load — so they follow the
-     * request in every view. Pure.
-     */
-    static boolean expandsListing(SectionKind kind, ViewFilter view, boolean requested) {
-        if (kind == SectionKind.PULL_REQUESTS) {
-            return view == ViewFilter.PULL_REQUESTS || requested;
-        }
-        return requested;
     }
 
     /**
@@ -1257,7 +1263,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
      * live project.
      */
     static void restoreExpansions(DefaultMutableTreeNode node, TreePath path, Path projectRoot,
-                                  ViewFilter view, ListingExpansionTracker expansions,
+                                  ListingExpansionTracker expansions,
                                   Consumer<TreePath> expand) {
         Object value = node.getUserObject();
         Path root = value instanceof ProjectRow row ? row.project().root() : projectRoot;
@@ -1268,12 +1274,12 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             case StaleWorktrees ignored -> true;
             case Section section -> switch (section.kind()) {
                 case SESSIONS, ACTIVE, INACTIVE -> true;
-                case WORKTREES -> root != null && expandsListing(SectionKind.WORKTREES, view,
-                        expansions.requested(SectionKind.WORKTREES).contains(root));
+                case WORKTREES -> root != null
+                        && expansions.requested(SectionKind.WORKTREES).contains(root);
                 case ISSUES -> root != null
                         && expansions.requestedIssueSections().contains(root);
-                case PULL_REQUESTS -> root != null && expandsListing(SectionKind.PULL_REQUESTS, view,
-                        expansions.requested(SectionKind.PULL_REQUESTS).contains(root));
+                case PULL_REQUESTS -> root != null
+                        && expansions.requested(SectionKind.PULL_REQUESTS).contains(root);
             };
             case GitHubNode ignored -> root != null
                     && expandsIssuesNode(expansions.requestedGitHubIssues().contains(root));
@@ -1289,8 +1295,18 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         }
         for (int i = 0; i < node.getChildCount(); i++) {
             DefaultMutableTreeNode child = (DefaultMutableTreeNode) node.getChildAt(i);
-            restoreExpansions(child, path.pathByAddingChild(child), root, view, expansions, expand);
+            restoreExpansions(child, path.pathByAddingChild(child), root, expansions, expand);
         }
+    }
+
+    /** The session of the selected editor files' agent console tab, or null when none is. */
+    private static ManagedSessionId activeSessionOf(VirtualFile[] selected) {
+        for (VirtualFile file : selected) {
+            if (file instanceof AgentConsoleFile console) {
+                return console.sessionId();
+            }
+        }
+        return null;
     }
 
     /** EDT: hides confirmed removals before the slower authoritative rescan finishes. */

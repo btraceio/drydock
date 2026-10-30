@@ -79,6 +79,19 @@ class TaskTreeRendererTest {
     }
 
     @Test
+    void onlyTheEditorsActiveSessionRowIsHighlighted() {
+        TaskRow active = row(true, new TaskPlacement.Here());
+        TaskRow other = row(true, new TaskPlacement.Here());
+        ManagedSessionId id = active.session().id();
+
+        assertTrue(TaskTreeRenderer.highlightsAsActive(active, id, false));
+        assertFalse(TaskTreeRenderer.highlightsAsActive(other, id, false));
+        assertFalse(TaskTreeRenderer.highlightsAsActive(active, id, true), "the selection fill wins");
+        assertFalse(TaskTreeRenderer.highlightsAsActive(active, null, false), "no console tab selected");
+        assertFalse(TaskTreeRenderer.highlightsAsActive(new Placeholder("x"), id, false));
+    }
+
+    @Test
     void aSecondaryClickNeverActivatesTheRow() {
         assertFalse(TaskTreeRenderer.clickActs(false, true, 1),
                 "right-clicking Start must open the context menu, not start a task");

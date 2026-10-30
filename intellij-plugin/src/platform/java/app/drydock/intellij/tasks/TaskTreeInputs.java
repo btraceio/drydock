@@ -143,7 +143,7 @@ final class TaskTreeInputs implements AutoCloseable {
      * Whether {@code root}'s GitHub issue listing is requested by the next gather:
      * the opened-node rule of {@link #githubIssuesWanted(Set, Path)}, with the search
      * box's explicit {@code /<glob>/} project scope applied first — the same rule as
-     * {@link #pullRequestsWanted(TaskTreeModel.ViewFilter, Set, Path, TaskTreeModel.ProjectScope, String)}.
+     * {@link #pullRequestsWanted(Set, Path, TaskTreeModel.ProjectScope, String)}.
      * A scoped-out project's row is not shown at all, so fetching its listing would
      * be pure waste. Ordinary unscoped text is not a scope. Pure.
      */
@@ -173,29 +173,27 @@ final class TaskTreeInputs implements AutoCloseable {
 
     /**
      * Whether {@code root}'s pull-request listing is fetched on the next
-     * gather: the PRs view wants every project's listing, so that view
-     * loads without an expansion click; every other view wants only the
-     * roots the user opened here. Pure.
+     * gather: only the roots the user opened here. Pure.
      */
-    static boolean pullRequestsWanted(TaskTreeModel.ViewFilter view, Set<Path> requested, Path root) {
-        return view == TaskTreeModel.ViewFilter.PULL_REQUESTS || requested.contains(root);
+    static boolean pullRequestsWanted(Set<Path> requested, Path root) {
+        return requested.contains(root);
     }
 
     /**
      * Whether {@code root}'s pull-request listing is requested by the next gather:
-     * the view/section rule of {@link #pullRequestsWanted}, with the search box's
+     * the opened-node rule of {@link #pullRequestsWanted}, with the search box's
      * explicit {@code /<glob>/} project scope applied first. A scoped-out project's
      * row is not shown at all, so fetching its listing — or the worktree list the
      * pull-request dedup needs — would be pure waste. Ordinary unscoped text is
      * not a scope: a plain search still spans projects. The one predicate gates
      * the listing request and the dedup worktree read alike. Pure.
      */
-    static boolean pullRequestsWanted(TaskTreeModel.ViewFilter view, Set<Path> requested, Path root,
+    static boolean pullRequestsWanted(Set<Path> requested, Path root,
                                       TaskTreeModel.ProjectScope scope, String displayName) {
         if (scope.scoped() && !scope.matchesProject(displayName)) {
             return false;
         }
-        return pullRequestsWanted(view, requested, root);
+        return pullRequestsWanted(requested, root);
     }
 
     /** Forgets {@code root}'s cached Jira listing, so the next gather re-queries it. */
@@ -290,7 +288,7 @@ final class TaskTreeInputs implements AutoCloseable {
                 // its listing — or the worktree list the dedup needs — would
                 // be pure waste. Ordinary unscoped text is not a scope: a
                 // plain search still spans projects.
-                if (pullRequestsWanted(viewFilter, requestedPullRequests, root, scope, project.displayName())) {
+                if (pullRequestsWanted(requestedPullRequests, root, scope, project.displayName())) {
                     pullRequestRequests.put(root, pullRequestsOf(root, githubSettings.repository()));
                     // Dedup needs the worktree list even when the user has never
                     // opened the Worktrees section (byMain is filled lazily), but

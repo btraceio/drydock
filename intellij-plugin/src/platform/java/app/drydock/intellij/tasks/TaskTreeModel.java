@@ -141,9 +141,7 @@ public final class TaskTreeModel {
         INACTIVE("Inactive", "Show only sessions whose agent is not running",
                 "No inactive sessions."),
         NEEDS_YOU("Needs you", "Show only running sessions waiting for your answer",
-                "No sessions need you."),
-        PULL_REQUESTS("PRs", "Show only open GitHub pull requests", "No open pull requests."),
-        ISSUES("Issues", "Show only open issues (GitHub and Jira)", "No open issues.");
+                "No sessions need you.");
 
         private final String label;
         private final String tooltip;
@@ -447,11 +445,9 @@ public final class TaskTreeModel {
         } else if (!sessionlessWorktrees.isEmpty()) {
             children.add(new Section(SectionKind.WORKTREES, sessionlessWorktrees));
         }
-        if (in.viewFilter() == ViewFilter.ALL || in.viewFilter() == ViewFilter.ISSUES) {
+        if (in.viewFilter() == ViewFilter.ALL) {
             issueChildren(in, main, itemFilter).ifPresent(issueChildren ->
                     children.add(new Section(SectionKind.ISSUES, issueChildren)));
-        }
-        if (in.viewFilter() == ViewFilter.ALL || in.viewFilter() == ViewFilter.PULL_REQUESTS) {
             if (in.pullRequestContainers().contains(main) && !in.pullRequestsByMainRoot().containsKey(main)) {
                 children.add(new Section(SectionKind.PULL_REQUESTS,
                         List.of(new TaskNode.Deferred("Loading pull requests…"))));
@@ -472,7 +468,6 @@ public final class TaskTreeModel {
             // stopped session's leftover activity never counts.
             case NEEDS_YOU -> task.running()
                     && task.activity().equals(Optional.of(SessionActivity.NEEDS_ATTENTION));
-            case PULL_REQUESTS, ISSUES -> false;
         };
     }
 

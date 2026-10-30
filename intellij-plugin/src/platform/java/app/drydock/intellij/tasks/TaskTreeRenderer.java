@@ -1,6 +1,7 @@
 package app.drydock.intellij.tasks;
 
 import app.drydock.agent.api.AgentRegistry;
+import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.SessionStatus;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.JiraIssue;
@@ -27,6 +28,7 @@ import app.drydock.ui.AgentLabels;
 import com.intellij.icons.AllIcons;
 import com.intellij.openapi.util.IconLoader;
 import com.intellij.ui.ColoredTreeCellRenderer;
+import com.intellij.ui.JBColor;
 import com.intellij.ui.SimpleTextAttributes;
 import org.jetbrains.annotations.NotNull;
 
@@ -61,6 +63,22 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
         return primaryButton && (clickCount == 2 || (onLink && clickCount == 1));
     }
 
+    /** Background of the row whose session is the one selected in the editor area. */
+    private static final JBColor ACTIVE_SESSION_BACKGROUND = new JBColor(0xE3EDFC, 0x2B3A52);
+
+    /** The session whose console tab is selected in this window's editor area; EDT only. */
+    private ManagedSessionId activeSession;
+
+    void setActiveSession(ManagedSessionId sessionId) {
+        this.activeSession = sessionId;
+    }
+
+    /** Pure. Whether a row is painted as the editor's active session: never the selected row, which has its own fill. */
+    static boolean highlightsAsActive(Object userObject, ManagedSessionId active, boolean selected) {
+        return !selected && active != null
+                && userObject instanceof TaskRow task && task.session().id().equals(active);
+    }
+
     @Override
     public void customizeCellRenderer(@NotNull JTree tree, Object value, boolean selected, boolean expanded,
                                       boolean leaf, int row, boolean hasFocus) {
@@ -69,6 +87,10 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
         setToolTipText(null);
         if (!(value instanceof DefaultMutableTreeNode node)) {
             return;
+        }
+        if (highlightsAsActive(node.getUserObject(), activeSession, selected)) {
+            setOpaque(true);
+            setBackground(ACTIVE_SESSION_BACKGROUND);
         }
         switch (node.getUserObject()) {
             case TaskNode.ListProblem problem -> {

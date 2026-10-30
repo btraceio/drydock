@@ -52,59 +52,38 @@ class TaskTreeInputsTest {
     }
 
     @Test
-    void thePullRequestsViewWantsEveryRootWithoutAnExpansionClick() {
-        assertTrue(TaskTreeInputs.pullRequestsWanted(
-                ViewFilter.PULL_REQUESTS, Set.of(), ROOT));
-        assertTrue(TaskTreeInputs.pullRequestsWanted(
-                ViewFilter.PULL_REQUESTS, Set.of(OTHER), ROOT));
-    }
-
-    @Test
-    void everyOtherViewWantsOnlyRequestedPullRequestRoots() {
-        for (ViewFilter view : new ViewFilter[] {ViewFilter.ALL, ViewFilter.ACTIVE,
-                ViewFilter.INACTIVE, ViewFilter.NEEDS_YOU, ViewFilter.ISSUES}) {
-            assertFalse(TaskTreeInputs.pullRequestsWanted(view, Set.of(), ROOT),
-                    view + " should not fetch pull requests eagerly");
-        }
-        for (ViewFilter view : ViewFilter.values()) {
-            assertTrue(TaskTreeInputs.pullRequestsWanted(view, Set.of(ROOT), ROOT),
-                    view + " keeps the request");
-        }
-        assertFalse(TaskTreeInputs.pullRequestsWanted(
-                ViewFilter.ISSUES, Set.of(OTHER), ROOT));
+    void pullRequestsAreFetchedOnlyForRequestedRoots() {
+        assertFalse(TaskTreeInputs.pullRequestsWanted(Set.of(), ROOT));
+        assertTrue(TaskTreeInputs.pullRequestsWanted(Set.of(ROOT), ROOT));
+        assertFalse(TaskTreeInputs.pullRequestsWanted(Set.of(OTHER), ROOT));
     }
 
     @Test
     void anExplicitProjectScopeSkipsListingsAndDedupWorktreesOfExcludedProjects() {
         TaskTreeModel.ProjectScope scope = TaskTreeModel.parseFilter("/dry*/");
 
-        // The PRs view wants every project's listing — but the scope is applied
-        // first: the excluded project costs no gh listing and no PR-dedup
-        // `git worktree list` (gather keys both off this one predicate).
-        assertTrue(TaskTreeInputs.pullRequestsWanted(ViewFilter.PULL_REQUESTS,
-                Set.of(), OTHER, scope, "drydock"));
-        assertFalse(TaskTreeInputs.pullRequestsWanted(ViewFilter.PULL_REQUESTS,
-                Set.of(), ROOT, scope, "profiling-backend"));
-        // Even a section the user opened here is not fetched once the scope
-        // excludes its project: the scope hides that project row entirely.
-        assertFalse(TaskTreeInputs.pullRequestsWanted(ViewFilter.ALL,
+        // The scope is applied first: the excluded project costs no gh listing
+        // and no PR-dedup `git worktree list` (gather keys both off this one
+        // predicate), even for a section the user opened here — the scope
+        // hides that project row entirely.
+        assertFalse(TaskTreeInputs.pullRequestsWanted(
                 Set.of(ROOT), ROOT, scope, "profiling-backend"));
-        assertTrue(TaskTreeInputs.pullRequestsWanted(ViewFilter.ALL,
+        assertTrue(TaskTreeInputs.pullRequestsWanted(
                 Set.of(OTHER), OTHER, scope, "drydock"));
     }
 
     @Test
-    void ordinaryUnscopedTextStillFetchesListingsAcrossProjects() {
-        // A plain search is not a project scope: a PR-title search spans projects.
+    void ordinaryUnscopedTextStillFetchesRequestedListingsAcrossProjects() {
+        // A plain search is not a project scope: it does not exclude opened projects.
         TaskTreeModel.ProjectScope plain = TaskTreeModel.parseFilter("allocation");
-        assertTrue(TaskTreeInputs.pullRequestsWanted(ViewFilter.PULL_REQUESTS,
-                Set.of(), OTHER, plain, "drydock"));
-        assertTrue(TaskTreeInputs.pullRequestsWanted(ViewFilter.PULL_REQUESTS,
-                Set.of(), ROOT, plain, "profiling-backend"));
+        assertTrue(TaskTreeInputs.pullRequestsWanted(
+                Set.of(OTHER), OTHER, plain, "drydock"));
+        assertTrue(TaskTreeInputs.pullRequestsWanted(
+                Set.of(ROOT), ROOT, plain, "profiling-backend"));
         // An empty scope (//) matches every project.
         TaskTreeModel.ProjectScope every = TaskTreeModel.parseFilter("//");
-        assertTrue(TaskTreeInputs.pullRequestsWanted(ViewFilter.PULL_REQUESTS,
-                Set.of(), ROOT, every, "profiling-backend"));
+        assertTrue(TaskTreeInputs.pullRequestsWanted(
+                Set.of(ROOT), ROOT, every, "profiling-backend"));
     }
 
     private static final JiraIssueListing.Failed DID_NOT_COMPLETE =

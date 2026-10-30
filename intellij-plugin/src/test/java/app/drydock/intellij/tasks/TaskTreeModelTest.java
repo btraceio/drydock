@@ -717,40 +717,6 @@ class TaskTreeModelTest {
         return ids;
     }
 
-    @Test
-    void issuesViewKeepsTheGitHubNodeAndTheJiraNodeAsItsOnlyContent() {
-        In in = new In().project(BTRACE).githubIssues(BTRACE).jira(BTRACE);
-        in.sessions.add(session("Allocation session", BTRACE));
-        in.issues.put(BTRACE, new IssueListing.Listed(List.of(
-                new OpenIssue(9, "Allocation regression", Optional.empty(), List.of("profiling"), List.of(),
-                        Optional.of(T)))));
-        in.jiraGroups.put(BTRACE, List.of(listedGroup("Sprint", List.of(
-                jiraIssue("PROJ-123", "Fix allocation accounting", List.of("profiling"), Optional.of(T))))));
-        in.viewFilter = ViewFilter.ISSUES;
-
-        ProjectRow row = projectRow(TaskTreeModel.build(in.build()), BTRACE);
-
-        assertTrue(section(row, SectionKind.SESSIONS).isEmpty());
-        List<TaskNode> children = issueNodes(row);
-        assertEquals(2, children.size());
-        assertEquals(List.of("#9"), githubRowIds(row));
-        assertEquals(List.of("PROJ-123"), jiraRowIds(row, "Sprint"));
-    }
-
-    @Test
-    void anIssuesViewProjectWithNothingLoadedStillShowsItsNodes() {
-        In in = new In().project(BTRACE).githubIssues(BTRACE);
-        in.sessions.add(session("Allocation session", BTRACE));
-        in.viewFilter = ViewFilter.ISSUES;
-
-        ProjectRow row = projectRow(TaskTreeModel.build(in.build()), BTRACE);
-
-        // Strictly lazy: the view is a filter, never a load. The GitHub node
-        // stands unfetched, and the project stays visible to offer it.
-        assertTrue(section(row, SectionKind.SESSIONS).isEmpty());
-        assertEquals(List.of(new TaskNode.Placeholder(TaskTreeModel.NOT_LOADED)), githubNode(row).children());
-    }
-
 
     @Test
     void activeViewContainsOnlyRunningSessions() {
@@ -787,29 +753,8 @@ class TaskTreeModelTest {
     }
 
     @Test
-    void issuesViewContainsOnlyIssuesAndComposesWithSearch() {
-        In in = new In().project(BTRACE).project(ALPHA).githubIssues(BTRACE).githubIssues(ALPHA);
-        in.sessions.add(session("Allocation session", BTRACE));
-        in.issues.put(BTRACE, new IssueListing.Listed(List.of(
-                new OpenIssue(9, "Allocation regression", Optional.empty(), List.of("profiling"), List.of(),
-                        Optional.of(T)),
-                new OpenIssue(10, "Documentation", Optional.empty(), List.of("docs"), List.of(), Optional.of(T)))));
-        in.viewFilter = ViewFilter.ISSUES;
-        in.filter = "profiling";
-
-        List<TaskNode> nodes = TaskTreeModel.build(in.build());
-
-        // Alpha's GitHub node is unfetched — its rows could still match, so
-        // the project keeps showing with the not-loaded node.
-        assertEquals(List.of(ALPHA, BTRACE), projectRoots(nodes));
-        ProjectRow row = projectRow(nodes, BTRACE);
-        assertTrue(section(row, SectionKind.SESSIONS).isEmpty());
-        assertEquals(List.of("#9"), githubRowIds(row));
-    }
-
-    @Test
     void viewFilterOrderMatchesTheRibbon() {
-        assertEquals(List.of("All", "Active", "Inactive", "Needs you", "PRs", "Issues"),
+        assertEquals(List.of("All", "Active", "Inactive", "Needs you"),
                 Arrays.stream(ViewFilter.values()).map(ViewFilter::label).toList());
     }
 
@@ -871,62 +816,6 @@ class TaskTreeModelTest {
 
         assertEquals(List.of(BTRACE), projectRoots(nodes));
         assertEquals(List.of("Waiting here"), sessionNames(nodes, BTRACE));
-    }
-
-    @Test
-    void prsViewShowsOnlySelectablePullRequestsAndComposesWithSearch() {
-        Path taken = Path.of("/wt/drydock-feature");
-        In in = new In().project(DRYDOCK).project(ALPHA).worktree(DRYDOCK, taken, "feature/taken");
-        in.pullRequestContainers.addAll(Set.of(DRYDOCK, ALPHA));
-        in.pullRequests.put(DRYDOCK, new PullRequestListing.Listed(List.of(
-                pullRequest(12, "Allocation regression", "feature/alloc", false),
-                pullRequest(40, "New one", "feature/new", false),
-                pullRequest(41, "A draft", "feature/draft", true),
-                pullRequest(42, "Already local", "feature/taken", false))));
-        in.pullRequestDedupWorktrees.put(DRYDOCK, List.of(linked(taken, "feature/taken")));
-        in.pullRequests.put(ALPHA, new PullRequestListing.Listed(List.of(
-                pullRequest(7, "Unrelated", "feature/x", false))));
-        in.sessions.add(session("A task", DRYDOCK));
-        in.issues.put(DRYDOCK, new IssueListing.Listed(List.of(
-                new OpenIssue(9, "Allocation regression", Optional.empty(), List.of(), List.of(),
-                        Optional.of(T)))));
-        in.viewFilter = ViewFilter.PULL_REQUESTS;
-        in.filter = "alloc";
-
-        List<TaskNode> nodes = TaskTreeModel.build(in.build());
-
-        // Alpha's single PR does not match the search, so Alpha is hidden.
-        assertEquals(List.of(DRYDOCK), projectRoots(nodes));
-        ProjectRow row = projectRow(nodes, DRYDOCK);
-        assertTrue(section(row, SectionKind.SESSIONS).isEmpty(), "no session rows in the PRs view");
-        assertTrue(section(row, SectionKind.WORKTREES).isEmpty(), "worktrees render in All only");
-        assertTrue(section(row, SectionKind.ISSUES).isEmpty(), "issues render in All or Issues only");
-        assertEquals(List.of(12), pullRequestNodes(row).stream().map(PullRequestRow.class::cast)
-                .map(pullRequestRow -> pullRequestRow.pullRequest().number()).toList());
-    }
-
-    @Test
-    void prsViewShowsTheDeferredRowWhileTheListingHasNotArrived() {
-        In in = new In().project(DRYDOCK);
-        in.pullRequestContainers.add(DRYDOCK);
-        in.viewFilter = ViewFilter.PULL_REQUESTS;
-
-        List<TaskNode> children = section(projectRow(TaskTreeModel.build(in.build()), DRYDOCK),
-                SectionKind.PULL_REQUESTS).orElseThrow().children();
-
-        assertEquals(List.of(new TaskNode.Deferred("Loading pull requests…")), children);
-    }
-
-    @Test
-    void prsViewShowsTheFailedRow() {
-        In in = new In().project(DRYDOCK);
-        in.pullRequestContainers.add(DRYDOCK);
-        in.pullRequests.put(DRYDOCK, new PullRequestListing.Failed("gh pr list exited 1"));
-        in.viewFilter = ViewFilter.PULL_REQUESTS;
-
-        List<TaskNode> children = pullRequestNodes(projectRow(TaskTreeModel.build(in.build()), DRYDOCK));
-
-        assertEquals(List.of(new TaskNode.ListProblem("GitHub pull requests: gh pr list exited 1")), children);
     }
 
     @Test
