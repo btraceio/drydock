@@ -1,6 +1,5 @@
 package app.drydock.intellij.review;
 
-import app.drydock.review.Severity;
 import com.intellij.icons.AllIcons;
 import com.intellij.openapi.application.Application;
 import com.intellij.openapi.application.ApplicationManager;
@@ -15,7 +14,6 @@ import com.intellij.ui.JBColor;
 import com.intellij.ui.SimpleTextAttributes;
 import org.jetbrains.annotations.NotNull;
 
-import javax.swing.Icon;
 import javax.swing.JTree;
 import javax.swing.tree.DefaultTreeModel;
 import javax.swing.tree.TreeNode;
@@ -395,22 +393,21 @@ public final class ReviewTabBrowser extends AsyncChangesBrowserBase {
 
     /** The finding child's text: severity, title, then {@code :<line>} parsed from the start key. */
     static String findingText(ReviewTabModel.FindingRow row) {
-        return row.severity().wireName() + ": " + row.title()
-                + row.startLine().map(line -> ":" + line).orElse("");
+        return row.title() + findingLocation(row);
     }
 
-    /** The finding child's tooltip: the drift hint when its start key is not in the current diff. */
+    /** The finding row's greyed location suffix: {@code  :<line>} when the start key maps to a line, else nothing. */
+    static String findingLocation(ReviewTabModel.FindingRow row) {
+        return row.startLine().map(line -> "  :" + line).orElse("");
+    }
+
+    /**
+     * The finding child's tooltip: the severity the icon stands for, and
+     * the drift hint when its start key is not in the current diff.
+     */
     static Optional<String> findingTooltip(ReviewTabModel.FindingRow row) {
-        return row.driftHint();
-    }
-
-    /** A finding's icon, by severity. */
-    static Icon severityIcon(Severity severity) {
-        return switch (severity) {
-            case BLOCKING, DEVIATION -> AllIcons.General.Warning;
-            case QUESTION -> AllIcons.General.Information;
-            case NIT -> AllIcons.General.Note;
-        };
+        String severity = SeverityPresentation.label(row.severity());
+        return Optional.of(row.driftHint().map(hint -> severity + " · " + hint).orElse(severity));
     }
 
     /** A file row: the path plus its mark, the mark colored by its kind. */
@@ -452,8 +449,9 @@ public final class ReviewTabBrowser extends AsyncChangesBrowserBase {
         public void render(@NotNull JTree tree, @NotNull ChangesBrowserNodeRenderer renderer,
                            boolean selected, boolean expanded, boolean hasFocus) {
             ReviewTabModel.FindingRow finding = getUserObject();
-            renderer.append(findingText(finding), SimpleTextAttributes.REGULAR_ATTRIBUTES);
-            renderer.setIcon(severityIcon(finding.severity()));
+            renderer.append(finding.title(), SimpleTextAttributes.REGULAR_ATTRIBUTES);
+            renderer.append(findingLocation(finding), SimpleTextAttributes.GRAYED_ATTRIBUTES);
+            renderer.setIcon(SeverityPresentation.icon(finding.severity()));
             renderer.setToolTipText(findingTooltip(finding).orElse(null));
         }
     }

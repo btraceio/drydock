@@ -122,6 +122,16 @@ class FindingInlayCardTest {
         onEdt(() -> assertEquals(List.of("Confirm", "Dismiss"), buttonTexts(card)));
     }
 
+    /** The state tag names the decision in the scope's own words: a confirmed PR finding reads "Confirmed". */
+    @Test
+    void theStateTagFollowsTheTriageVerb() {
+        FindingInlayCard card = card(finding(Triage.CONFIRMED, AnnotationStatus.OPEN), new Recording());
+
+        onEdt(() -> card.setTriageLabels("Confirm", "Dismiss"));
+
+        onEdt(() -> assertEquals("Confirmed", card.stateText()));
+    }
+
     @Test
     void confirmedAndDismissedKeepTheCardAndExposeUndo() {
         FindingInlayCard confirmed = card(finding(Triage.CONFIRMED, AnnotationStatus.OPEN), new Recording());
@@ -130,9 +140,9 @@ class FindingInlayCardTest {
         onEdt(() -> {
             assertEquals(List.of("Undo"), buttonTexts(confirmed));
             assertTrue(confirmed.stateVisible());
-            assertEquals("confirmed", confirmed.stateText());
+            assertEquals("Agreed", confirmed.stateText());
             assertEquals(List.of("Undo"), buttonTexts(dismissed));
-            assertEquals("dismissed", dismissed.stateText());
+            assertEquals("Won't fix", dismissed.stateText());
         });
     }
 
@@ -142,7 +152,7 @@ class FindingInlayCardTest {
 
         onEdt(() -> {
             assertTrue(card.stateVisible());
-            assertEquals("sent", card.stateText());
+            assertEquals("Sent", card.stateText());
             // no invented reply: the thread shows exactly the finding's own messages
             assertEquals(List.of(FIRST_MESSAGE), card.threadLines());
             assertEquals(List.of("Agree", "Won't fix"), buttonTexts(card));
@@ -169,7 +179,7 @@ class FindingInlayCardTest {
         FindingInlayCard card = card(withTwoMessages, new Recording());
 
         onEdt(() -> {
-            assertEquals("blocking · Leak", headerText(card));
+            assertEquals("Leak", headerText(card));
             assertEquals("reviewer · " + AGO_2H, metaText(card));
             assertEquals(List.of(FIRST_MESSAGE, "You · 5m ago: Why here?"), card.threadLines());
         });
@@ -331,7 +341,7 @@ class FindingInlayCardTest {
         onEdt(() -> card.update(next));
 
         onEdt(() -> {
-            assertEquals("confirmed · sent", card.stateText());
+            assertEquals("Agreed · Sent", card.stateText());
             assertEquals(List.of("Undo"), buttonTexts(card));
             assertEquals(List.of(FIRST_MESSAGE, "You · now: on it"), card.threadLines());
             assertTrue(card.isBusy(), "a rebuild during an in-flight action keeps the card busy");
@@ -452,54 +462,50 @@ class FindingInlayCardTest {
         });
     }
 
-    /** The text blocks are selectable for copy-paste but never editable. */
+    /** The text blocks are the IDE's HTML panes: selectable for copy-paste but never editable. */
     @Test
     void textBlocksAreSelectableAndNotEditable() {
         FindingInlayCard card = card(finding(Triage.PROPOSED, AnnotationStatus.OPEN), new Recording());
 
         onEdt(() -> {
-            List<javax.swing.JTextArea> areas = all(card).stream()
-                    .filter(c -> c instanceof javax.swing.JTextArea)
-                    .map(c -> (javax.swing.JTextArea) c)
+            List<javax.swing.JEditorPane> panes = all(card).stream()
+                    .filter(c -> c instanceof javax.swing.JEditorPane)
+                    .map(c -> (javax.swing.JEditorPane) c)
                     .toList();
-            assertTrue(areas.size() >= 3, "header, drift and thread are text blocks");
-            for (javax.swing.JTextArea area : areas) {
-                assertFalse(area.isEditable(), "the reviewer copies, never edits, the card's words");
-                assertTrue(area.getWrapStyleWord(), "wrapping breaks at word ends");
+            assertTrue(panes.size() >= 2, "title and body are text blocks");
+            for (javax.swing.JEditorPane pane : panes) {
+                assertFalse(pane.isEditable(), "the reviewer copies, never edits, the card's words");
+                assertTrue(pane.isEnabled(), "a disabled pane cannot be selected from");
             }
         });
     }
 
-    /** The action buttons sit at the card's right edge, not under the text. */
+    /**
+     * The actions are links in a row under the comment box, left-aligned
+     * with it — the shape of a review thread's own Reply/Resolve footer —
+     * never buttons floated to the card's right edge.
+     */
     @Test
-    void actionsAlignToTheRightEdge() {
+    void actionsAreLinksInARowUnderTheCommentBox() {
         FindingInlayCard card = card(finding(Triage.PROPOSED, AnnotationStatus.OPEN), new Recording());
 
         onEdt(() -> {
-            javax.swing.JPanel actionsPanel = all(card).stream()
-                    .filter(c -> c instanceof javax.swing.JPanel panel
-                            && panel.getLayout() instanceof java.awt.BorderLayout
-                            && panel.getComponentCount() > 0
-                            && ((java.awt.BorderLayout) panel.getLayout())
-                                    .getLayoutComponent(java.awt.BorderLayout.EAST) != null)
-                    .map(c -> (javax.swing.JPanel) c)
-                    .findFirst()
-                    .orElseThrow(() -> new AssertionError("no right-aligned actions row"));
-            java.awt.FlowLayout layout = (java.awt.FlowLayout) all(actionsPanel).stream()
-                    .filter(c -> c instanceof javax.swing.JPanel panel
-                            && panel.getLayout() instanceof java.awt.FlowLayout)
-                    .map(c -> (javax.swing.JPanel) c)
-                    .findFirst()
-                    .orElseThrow(() -> new AssertionError("no buttons row"))
-                    .getLayout();
-            assertEquals(java.awt.FlowLayout.RIGHT, layout.getAlignment());
+            JButton agree = button(card, "Agree");
+            assertTrue(agree instanceof com.intellij.ui.components.ActionLink, "triage actions are links");
+            java.awt.Container row = agree.getParent();
+            assertTrue(row.getLayout() instanceof java.awt.FlowLayout flow
+                    && flow.getAlignment() == java.awt.FlowLayout.LEADING, "the actions row leads left");
+            java.awt.Container footer = row.getParent();
+            List<Component> children = List.of(footer.getComponents());
+            assertTrue(children.indexOf(commentField(card)) < children.indexOf(row),
+                    "the comment box sits above the actions");
         });
     }
 
     private static List<java.awt.Dimension> blockPreferredSizes(FindingInlayCard card) {
         return all(card).stream()
-                .filter(c -> c instanceof javax.swing.JTextArea)
-                .map(c -> ((javax.swing.JTextArea) c).getPreferredSize())
+                .filter(c -> c instanceof javax.swing.JEditorPane)
+                .map(c -> ((javax.swing.JEditorPane) c).getPreferredSize())
                 .toList();
     }
 }

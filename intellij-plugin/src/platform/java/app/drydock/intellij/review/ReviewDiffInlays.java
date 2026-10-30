@@ -1,6 +1,5 @@
 package app.drydock.intellij.review;
 
-import app.drydock.review.AnnotationStatus;
 import app.drydock.review.ReviewAnnotation;
 
 import com.intellij.collaboration.ui.codereview.editor.EditorComponentInlaysUtilKt;
@@ -11,7 +10,6 @@ import com.intellij.diff.tools.util.base.DiffViewerBase;
 import com.intellij.diff.tools.util.base.DiffViewerListener;
 import com.intellij.diff.tools.util.side.TwosideTextDiffViewer;
 import com.intellij.diff.util.Side;
-import com.intellij.icons.AllIcons;
 import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.editor.Editor;
@@ -21,6 +19,7 @@ import com.intellij.openapi.editor.ex.EditorEx;
 import com.intellij.openapi.editor.markup.GutterIconRenderer;
 import com.intellij.openapi.editor.markup.HighlighterLayer;
 import com.intellij.openapi.editor.markup.RangeHighlighter;
+import com.intellij.util.ui.JBUI;
 
 import java.awt.EventQueue;
 import java.awt.FontMetrics;
@@ -37,7 +36,6 @@ import java.util.Set;
 
 import javax.swing.Icon;
 import javax.swing.JComponent;
-import javax.swing.border.EmptyBorder;
 import kotlin.jvm.functions.Function1;
 
 /**
@@ -456,7 +454,7 @@ public final class ReviewDiffInlays {
                 // the anchor line's own indentation becomes the card's left
                 // inset, so the card reads as belonging to that code.
                 int indent = indentWidth(editor, line);
-                card.setBorder(new EmptyBorder(2, indent + 4, 2, 12));
+                card.setBorder(JBUI.Borders.empty(4, indent + 4, 4, 12));
                 FindingInlayContainer container = new FindingInlayContainer(card,
                         () -> textWidth(editor), () -> heightCap(editor));
                 Inlay<?> inlay = EditorComponentInlaysUtilKt.insertComponentAfter(
@@ -587,14 +585,7 @@ public final class ReviewDiffInlays {
             this.finding = Objects.requireNonNull(finding, "finding");
         }
 
-        @Override public Icon getIcon() {
-            return switch (finding.effectiveSeverity()) {
-                case BLOCKING -> AllIcons.General.Error;
-                case QUESTION -> AllIcons.General.QuestionDialog;
-                case DEVIATION -> AllIcons.General.Warning;
-                case NIT -> AllIcons.General.Information;
-            };
-        }
+        @Override public Icon getIcon() { return SeverityPresentation.icon(finding.effectiveSeverity()); }
 
         @Override public String getTooltipText() { return finding.displayTitle(); }
 
