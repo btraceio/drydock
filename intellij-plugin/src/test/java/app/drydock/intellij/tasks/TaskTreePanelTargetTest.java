@@ -31,7 +31,9 @@ import app.drydock.projects.SharedProject;
 import org.junit.jupiter.api.Test;
 
 import javax.swing.JTree;
+import javax.swing.event.TreeExpansionEvent;
 import javax.swing.tree.DefaultMutableTreeNode;
+import javax.swing.tree.ExpandVetoException;
 import javax.swing.tree.DefaultTreeModel;
 import javax.swing.tree.TreePath;
 
@@ -778,6 +780,304 @@ class TaskTreePanelTargetTest {
         assertEquals(List.of(pathAt(root, 0)), expanded);
         assertTrue(tracker.requestedIssueSections().isEmpty());
         assertTrue(tracker.requestedJiraGroups().isEmpty());
+    }
+
+    // --- Collapse: a closed lazy node stays closed across rebuilds -------------------
+
+    /** {@code ProjectRow > Section(ISSUES) > GitHubNode, JiraNode > JiraGroupRow(g-sprint)}. */
+    private static ProjectRow issuesSourcesProject(Path projectRoot) {
+        return projectRow(projectRoot, List.of(new Section(SectionKind.ISSUES, List.of(
+                new GitHubNode(projectRoot, List.of(new Placeholder(TaskTreeModel.NOT_LOADED))),
+                new JiraNode(projectRoot, List.of(groupRow(projectRoot, "g-sprint")))))));
+    }
+
+    /** Simulates the user's collapsing gesture at {@code path}. */
+    private static void collapse(ListingExpansionTracker tracker, TreePath path) throws ExpandVetoException {
+        tracker.treeWillCollapse(new TreeExpansionEvent(new JTree(), path));
+    }
+
+    /** {@link #collapse} for a lambda: the tracker never vetoes, so the checked exception is a failure. */
+    private static void collapseQuietly(ListingExpansionTracker tracker, TreePath path) {
+        assertDoesNotThrow(() -> collapse(tracker, path));
+    }
+
+    /** Simulates an expansion event at {@code path} (a user's gesture or the panel's restoration). */
+    private static void expand(ListingExpansionTracker tracker, TreePath path) {
+        assertDoesNotThrow(() -> tracker.treeWillExpand(new TreeExpansionEvent(new JTree(), path)));
+    }
+
+    /** Copies of all six record sets, in a fixed order, so before/after can be compared. */
+    private static List<Set<?>> records(ListingExpansionTracker tracker) {
+        return List.of(
+                Set.copyOf(tracker.requested(SectionKind.WORKTREES)),
+                Set.copyOf(tracker.requested(SectionKind.PULL_REQUESTS)),
+                Set.copyOf(tracker.requestedIssueSections()),
+                Set.copyOf(tracker.requestedGitHubIssues()),
+                Set.copyOf(tracker.requestedJiraNodes()),
+                Set.copyOf(tracker.requestedJiraGroups()));
+    }
+
+    /** Records {@code root} in every set, and its "g-sprint" group. */
+    private static void recordEverything(ListingExpansionTracker tracker, Path root) {
+        tracker.requested(SectionKind.WORKTREES).add(root);
+        tracker.requested(SectionKind.PULL_REQUESTS).add(root);
+        tracker.requestedIssueSections().add(root);
+        tracker.requestedGitHubIssues().add(root);
+        tracker.requestedJiraNodes().add(root);
+        recordGroup(tracker, root, "g-sprint");
+    }
+
+    /**
+     * {@code ProjectRow > [Section(ISSUES) > [GitHubNode, JiraNode > JiraGroupRow(g-sprint)],
+     * Section(WORKTREES), Section(PULL_REQUESTS), Section(SESSIONS)]}.
+     * Paths: project 0; ISSUES 0,0; GitHub 0,0,0; Jira 0,0,1; group 0,0,1,0;
+     * WORKTREES 0,1; PULL_REQUESTS 0,2; SESSIONS 0,3.
+     */
+    private static ProjectRow everyCollapsibleKind(Path root) {
+        return projectRow(root, List.of(
+                new Section(SectionKind.ISSUES, List.of(
+                        new GitHubNode(root, List.of(new Placeholder(TaskTreeModel.NOT_LOADED))),
+                        new JiraNode(root, List.of(groupRow(root, "g-sprint"))))),
+                new Section(SectionKind.WORKTREES, List.of(new Deferred("Reading…"))),
+                new Section(SectionKind.PULL_REQUESTS, List.of(new Deferred("Reading…"))),
+                new Section(SectionKind.SESSIONS, List.of(new Deferred("Reading…")))));
+    }
+
+    @Test
+    void aClosedLazyNodeStaysClosedAcrossRebuilds() throws ExpandVetoException {
+        DefaultMutableTreeNode root = modelTree(issuesSourcesProject(REGISTERED_ROOT));
+        ListingExpansionTracker tracker = tracker();
+        tracker.requestedGitHubIssues().add(REGISTERED_ROOT);
+        assertTrue(walk(root, ViewFilter.ALL, tracker).contains(pathAt(root, 0, 0, 0)));
+
+        collapse(tracker, pathAt(root, 0, 0, 0));
+
+        assertTrue(tracker.requestedGitHubIssues().isEmpty(),
+                "the closed GitHub node's fetch trigger is forgotten, so the next rebuild keeps it closed");
+        assertFalse(walk(root, ViewFilter.ALL, tracker).contains(pathAt(root, 0, 0, 0)));
+    }
+
+    @Test
+    void closingTheJiraNodeForgetsItsGroups() throws ExpandVetoException {
+        DefaultMutableTreeNode root = modelTree(issuesSourcesProject(REGISTERED_ROOT));
+        ListingExpansionTracker tracker = tracker();
+        tracker.requestedJiraNodes().add(REGISTERED_ROOT);
+        recordGroup(tracker, REGISTERED_ROOT, "g-sprint");
+
+        collapse(tracker, pathAt(root, 0, 0, 1));
+
+        assertTrue(tracker.requestedJiraNodes().isEmpty());
+        assertTrue(tracker.requestedJiraGroups().isEmpty(),
+                "a recorded group would re-open the closed Jira node through the restoration's ancestor expansion");
+        List<TreePath> expanded = walk(root, ViewFilter.ALL, tracker);
+        assertFalse(expanded.contains(pathAt(root, 0, 0, 1)));
+        assertFalse(expanded.contains(pathAt(root, 0, 0, 1, 0)));
+    }
+
+    @Test
+    void closingTheIssuesSectionForgetsEveryLazyDescendant() throws ExpandVetoException {
+        DefaultMutableTreeNode root = modelTree(issuesSourcesProject(REGISTERED_ROOT));
+        ListingExpansionTracker tracker = tracker();
+        tracker.requestedIssueSections().add(REGISTERED_ROOT);
+        tracker.requestedGitHubIssues().add(REGISTERED_ROOT);
+        tracker.requestedJiraNodes().add(REGISTERED_ROOT);
+        recordGroup(tracker, REGISTERED_ROOT, "g-sprint");
+
+        collapse(tracker, pathAt(root, 0, 0));
+
+        assertTrue(tracker.requestedIssueSections().isEmpty());
+        assertTrue(tracker.requestedGitHubIssues().isEmpty());
+        assertTrue(tracker.requestedJiraNodes().isEmpty());
+        assertTrue(tracker.requestedJiraGroups().isEmpty());
+        assertTrue(walk(root, ViewFilter.ALL, tracker).contains(pathAt(root, 0)),
+                "the eager project row is unaffected");
+        assertEquals(List.of(pathAt(root, 0)), walk(root, ViewFilter.ALL, tracker));
+    }
+
+    @Test
+    void closingOneProjectsNodeLeavesAnotherProjectsRecord() throws ExpandVetoException {
+        DefaultMutableTreeNode root = modelTree(
+                issuesSourcesProject(REGISTERED_ROOT), issuesSourcesProject(OTHER_ROOT));
+        ListingExpansionTracker tracker = tracker();
+        tracker.requestedGitHubIssues().add(REGISTERED_ROOT);
+        tracker.requestedGitHubIssues().add(OTHER_ROOT);
+
+        collapse(tracker, pathAt(root, 0, 0, 0));
+
+        List<TreePath> expanded = walk(root, ViewFilter.ALL, tracker);
+        assertFalse(expanded.contains(pathAt(root, 0, 0, 0)));
+        assertTrue(expanded.contains(pathAt(root, 1, 0, 0)));
+    }
+
+    @Test
+    void closingTheWorktreesSectionForgetsItsRootOnly() throws ExpandVetoException {
+        DefaultMutableTreeNode root = modelTree(projectRow(REGISTERED_ROOT, List.of(
+                new Section(SectionKind.WORKTREES, List.of(new Deferred("Reading…"))),
+                new Section(SectionKind.PULL_REQUESTS, List.of(new Deferred("Reading…"))))));
+        ListingExpansionTracker tracker = tracker();
+        tracker.requested(SectionKind.WORKTREES).add(REGISTERED_ROOT);
+        tracker.requested(SectionKind.PULL_REQUESTS).add(REGISTERED_ROOT);
+
+        collapse(tracker, pathAt(root, 0, 0));
+
+        assertTrue(tracker.requested(SectionKind.WORKTREES).isEmpty());
+        assertTrue(tracker.requested(SectionKind.PULL_REQUESTS).contains(REGISTERED_ROOT),
+                "collapsing one section never touches a sibling's record");
+        assertFalse(walk(root, ViewFilter.ALL, tracker).contains(pathAt(root, 0, 0)));
+        assertTrue(walk(root, ViewFilter.ALL, tracker).contains(pathAt(root, 0, 1)));
+    }
+
+    @Test
+    void aProgrammaticCollapseForgetsNothing() throws ExpandVetoException {
+        DefaultMutableTreeNode root = modelTree(everyCollapsibleKind(REGISTERED_ROOT));
+        ListingExpansionTracker tracker = tracker();
+        recordEverything(tracker, REGISTERED_ROOT);
+        List<Set<?>> before = records(tracker);
+
+        // The panel's own restoration collapses every kind of lazy node: leaves
+        // first, then the containers that would clear several sets at once.
+        List<TreePath> paths = List.of(pathAt(root, 0, 0, 1, 0), pathAt(root, 0, 0, 0), pathAt(root, 0, 0, 1),
+                pathAt(root, 0, 1), pathAt(root, 0, 2), pathAt(root, 0, 0));
+        tracker.runProgrammatic(() -> paths.forEach(path -> collapseQuietly(tracker, path)));
+
+        assertEquals(before, records(tracker), "a programmatic collapse is not intent: every record survives");
+
+        // Control: the guard is cleared afterwards, so the same collapse by the user forgets.
+        collapse(tracker, pathAt(root, 0, 0, 0));
+        assertEquals(Set.of(), tracker.requestedGitHubIssues());
+        collapse(tracker, pathAt(root, 0, 2));
+        assertEquals(Set.of(), tracker.requested(SectionKind.PULL_REQUESTS));
+    }
+
+    @Test
+    void aCollapseWithNoProjectAboveItForgetsNothing() {
+        List<TaskNode> bare = List.of(
+                groupRow(REGISTERED_ROOT, "g-sprint"),
+                new GitHubNode(REGISTERED_ROOT, List.of(new Placeholder(TaskTreeModel.NOT_LOADED))),
+                new JiraNode(REGISTERED_ROOT, List.of(groupRow(REGISTERED_ROOT, "g-sprint"))),
+                new Section(SectionKind.ISSUES, List.of(new Deferred("Reading…"))),
+                new Section(SectionKind.WORKTREES, List.of(new Deferred("Reading…"))),
+                new Section(SectionKind.PULL_REQUESTS, List.of(new Deferred("Reading…"))));
+        for (TaskNode node : bare) {
+            String kind = node instanceof Section section ? section.kind().name() : node.getClass().getSimpleName();
+            DefaultMutableTreeNode root = modelTree(node);
+            ListingExpansionTracker tracker = tracker();
+            recordEverything(tracker, REGISTERED_ROOT);
+            // The key a dropped guard would build for a group: GroupKey(null, id).
+            recordGroup(tracker, null, "g-sprint");
+            List<Set<?>> before = records(tracker);
+
+            assertDoesNotThrow(() -> collapse(tracker, pathAt(root, 0)), kind);
+
+            assertEquals(before, records(tracker), kind + " with no project above it must forget nothing");
+        }
+    }
+
+    @Test
+    void closingAJiraGroupForgetsOnlyThatGroup() throws ExpandVetoException {
+        // The group rows' own main root (OTHER_ROOT) deliberately differs from
+        // their project row's (REGISTERED_ROOT): the key is the project row's.
+        DefaultMutableTreeNode root = modelTree(
+                projectRow(REGISTERED_ROOT, List.of(new Section(SectionKind.ISSUES, List.of(
+                        new JiraNode(REGISTERED_ROOT, List.of(
+                                groupRow(OTHER_ROOT, "g-sprint"), groupRow(OTHER_ROOT, "g-other"))))))),
+                issuesSourcesProject(OTHER_ROOT));
+        ListingExpansionTracker tracker = tracker();
+        tracker.requestedIssueSections().add(REGISTERED_ROOT);
+        tracker.requestedGitHubIssues().add(REGISTERED_ROOT);
+        tracker.requestedJiraNodes().add(REGISTERED_ROOT);
+        tracker.requestedJiraNodes().add(OTHER_ROOT);
+        recordGroup(tracker, REGISTERED_ROOT, "g-sprint");
+        recordGroup(tracker, REGISTERED_ROOT, "g-other");
+        recordGroup(tracker, OTHER_ROOT, "g-sprint");
+
+        collapse(tracker, pathAt(root, 0, 0, 0, 0));
+
+        assertEquals(Set.of(new ListingExpansionTracker.GroupKey(REGISTERED_ROOT, "g-other"),
+                        new ListingExpansionTracker.GroupKey(OTHER_ROOT, "g-sprint")),
+                tracker.requestedJiraGroups(),
+                "only the closed group's record, under its project row's root, is forgotten");
+        assertEquals(Set.of(REGISTERED_ROOT, OTHER_ROOT), tracker.requestedJiraNodes(),
+                "closing a group is not closing its Jira node");
+        assertEquals(Set.of(REGISTERED_ROOT), tracker.requestedIssueSections());
+        assertEquals(Set.of(REGISTERED_ROOT), tracker.requestedGitHubIssues());
+
+        List<TreePath> expanded = walk(root, ViewFilter.ALL, tracker);
+        assertFalse(expanded.contains(pathAt(root, 0, 0, 0, 0)), "the closed group stays closed");
+        assertTrue(expanded.contains(pathAt(root, 0, 0, 0, 1)), "its sibling group is still restored");
+    }
+
+    @Test
+    void closingThePullRequestsSectionForgetsItsRootOnly() throws ExpandVetoException {
+        DefaultMutableTreeNode root = modelTree(projectRow(REGISTERED_ROOT, List.of(
+                new Section(SectionKind.WORKTREES, List.of(new Deferred("Reading…"))),
+                new Section(SectionKind.PULL_REQUESTS, List.of(new Deferred("Reading…"))))));
+        ListingExpansionTracker tracker = tracker();
+        tracker.requested(SectionKind.WORKTREES).add(REGISTERED_ROOT);
+        tracker.requested(SectionKind.PULL_REQUESTS).add(REGISTERED_ROOT);
+        tracker.requested(SectionKind.PULL_REQUESTS).add(OTHER_ROOT);
+
+        collapse(tracker, pathAt(root, 0, 1));
+
+        assertEquals(Set.of(OTHER_ROOT), tracker.requested(SectionKind.PULL_REQUESTS));
+        assertEquals(Set.of(REGISTERED_ROOT), tracker.requested(SectionKind.WORKTREES),
+                "collapsing one section never touches a sibling's record");
+    }
+
+    @Test
+    void collapsingAProjectRowOrAnUnlistedSectionForgetsNothing() throws ExpandVetoException {
+        DefaultMutableTreeNode root = modelTree(everyCollapsibleKind(REGISTERED_ROOT));
+        ListingExpansionTracker tracker = tracker();
+        recordEverything(tracker, REGISTERED_ROOT);
+        List<Set<?>> before = records(tracker);
+
+        collapse(tracker, pathAt(root, 0));     // the ProjectRow: treeWillCollapse's default
+        collapse(tracker, pathAt(root, 0, 3));  // Section(SESSIONS): closeSection's default
+
+        assertEquals(before, records(tracker));
+    }
+
+    @Test
+    void programmaticExpansionOfTheIssueSourcesRecordsNothing() {
+        DefaultMutableTreeNode root = modelTree(issuesSourcesProject(REGISTERED_ROOT));
+        List<Boolean> rebuilds = new ArrayList<>();
+        ListingExpansionTracker tracker = new ListingExpansionTracker(
+                changed -> rebuilds.add(changed), TaskTreePanel::projectRootOf);
+
+        tracker.runProgrammatic(() -> {
+            expand(tracker, pathAt(root, 0, 0, 0));   // GitHubNode
+            expand(tracker, pathAt(root, 0, 0, 1));   // JiraNode
+        });
+        assertEquals(Set.of(), tracker.requestedGitHubIssues());
+        assertEquals(Set.of(), tracker.requestedJiraNodes());
+        assertTrue(rebuilds.isEmpty());
+
+        // The user's own opening records both; only the GitHub node is a fetch trigger.
+        expand(tracker, pathAt(root, 0, 0, 0));
+        expand(tracker, pathAt(root, 0, 0, 1));
+        assertEquals(Set.of(REGISTERED_ROOT), tracker.requestedGitHubIssues());
+        assertEquals(Set.of(REGISTERED_ROOT), tracker.requestedJiraNodes());
+        assertEquals(List.of(Boolean.FALSE), rebuilds);
+    }
+
+    /**
+     * The {@code r != null} guard on the Worktrees / Pull requests expansion branch,
+     * which {@link #aSectionWithNoProjectAboveItRecordsNothing} (an Issues section) cannot reach.
+     */
+    @Test
+    void aListingSectionWithNoProjectAboveItRecordsNothing() {
+        for (SectionKind kind : List.of(SectionKind.WORKTREES, SectionKind.PULL_REQUESTS)) {
+            DefaultMutableTreeNode root = modelTree(new Section(kind, List.of(new Deferred("Reading…"))));
+            List<Boolean> rebuilds = new ArrayList<>();
+            ListingExpansionTracker tracker = new ListingExpansionTracker(
+                    changed -> rebuilds.add(changed), TaskTreePanel::projectRootOf);
+
+            expand(tracker, pathAt(root, 0));
+
+            assertTrue(tracker.requested(SectionKind.WORKTREES).isEmpty(), kind.name());
+            assertTrue(tracker.requested(SectionKind.PULL_REQUESTS).isEmpty(), kind.name());
+            assertTrue(rebuilds.isEmpty(), kind.name());
+        }
     }
 
     @Test
