@@ -38,6 +38,16 @@ import java.util.function.Function;
  * (the other node, the group definitions) travel without any fetch, so
  * there is nothing to request.</p>
  *
+ * <p>Closing a lazy node forgets its record, so the next rebuild's
+ * restoration keeps it closed. Without this, every rebuild — activity
+ * events arrive roughly every second — re-opened every node the user had
+ * ever opened, making one node's load look as if it had opened all the
+ * others. Closing a container also forgets its lazy descendants' records:
+ * a recorded child would re-open the closed container through the restore
+ * walk's ancestor expansion. The fetched listing is not dropped here: with
+ * the record gone the next gather stops fetching it, and the listing
+ * cache's own TTL makes a quick re-open instant.</p>
+ *
  * <p>A Jira group's record lasts only while a completed gather still
  * defines the group: deleting the group, unregistering its project or
  * disabling its Jira connection forgets it, and a failed pass forgets
@@ -195,6 +205,41 @@ final class ListingExpansionTracker implements TreeWillExpandListener {
 
     @Override
     public void treeWillCollapse(TreeExpansionEvent event) throws ExpandVetoException {
+        Object component = event.getPath().getLastPathComponent();
+        if (programmatic || !(component instanceof DefaultMutableTreeNode node)) {
+            return;
+        }
+        Path root = projectRootOf.apply(event.getPath()).orElse(null);
+        if (root == null) {
+            return;
+        }
+        switch (node.getUserObject()) {
+            case TaskNode.GitHubNode ignored -> githubIssues.remove(root);
+            case TaskNode.JiraGroupRow group -> jiraGroups.remove(new GroupKey(root, group.group().id()));
+            case TaskNode.JiraNode ignored -> closeJiraUnder(root);
+            case TaskNode.Section section -> closeSection(section, root);
+            default -> { }
+        }
+    }
+
+    /** Forgets the Jira node's open record and every group record under it. */
+    private void closeJiraUnder(Path root) {
+        jiraNodes.remove(root);
+        jiraGroups.removeIf(key -> key.root().equals(root));
+    }
+
+    /** Forgets a closed section's record — and, for Issues, its lazy children's. */
+    private void closeSection(TaskNode.Section section, Path root) {
+        switch (section.kind()) {
+            case ISSUES -> {
+                issueSections.remove(root);
+                githubIssues.remove(root);
+                closeJiraUnder(root);
+            }
+            case PULL_REQUESTS -> pullRequests.remove(root);
+            case WORKTREES -> worktrees.remove(root);
+            default -> { }
+        }
     }
 
     /** Runs the panel's own expansion/selection restoration, recording no user intent. */
