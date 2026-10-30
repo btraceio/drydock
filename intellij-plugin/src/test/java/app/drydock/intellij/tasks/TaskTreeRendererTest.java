@@ -25,6 +25,8 @@ import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import org.junit.jupiter.api.Test;
 
 import javax.swing.Icon;
+import javax.swing.JTree;
+import javax.swing.tree.DefaultMutableTreeNode;
 
 import java.nio.file.Path;
 import java.time.Duration;
@@ -35,6 +37,7 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class TaskTreeRendererTest {
@@ -263,5 +266,20 @@ class TaskTreeRendererTest {
                 new Section(SectionKind.ISSUES, List.of(jiraNodeOf(jiraGroup(new Placeholder("No issues")))))));
         assertEquals(Optional.of("1"), TaskTreeRenderer.sectionCountBadge(
                 new Section(SectionKind.ISSUES, List.of(githubNode(new IssueRow(ROOT, issue42()))))));
+    }
+
+    @Test
+    void aJiraRowTooltipDoesNotLeakOntoOtherRows() {
+        // One shared renderer paints every row: the JQL tooltip set for a
+        // Jira group row must not surface when hovering any other node.
+        TaskTreeRenderer renderer = new TaskTreeRenderer();
+        JTree tree = new JTree();
+        renderer.customizeCellRenderer(tree, new DefaultMutableTreeNode(
+                jiraGroup(new Placeholder(TaskTreeModel.NOT_LOADED))), false, false, false, 0, false);
+        assertEquals("Jira group · " + SPRINT.jql(), renderer.getToolTipText());
+
+        renderer.customizeCellRenderer(tree, new DefaultMutableTreeNode(
+                githubNode(new Placeholder(TaskTreeModel.NOT_LOADED))), false, false, false, 0, false);
+        assertNull(renderer.getToolTipText(), "the shared renderer must not leak the Jira group's JQL tooltip");
     }
 }

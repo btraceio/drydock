@@ -64,6 +64,9 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
     @Override
     public void customizeCellRenderer(@NotNull JTree tree, Object value, boolean selected, boolean expanded,
                                       boolean leaf, int row, boolean hasFocus) {
+        // One shared renderer instance paints every row: a tooltip set for a
+        // Jira row would otherwise leak onto every node hovered afterwards.
+        setToolTipText(null);
         if (!(value instanceof DefaultMutableTreeNode node)) {
             return;
         }
