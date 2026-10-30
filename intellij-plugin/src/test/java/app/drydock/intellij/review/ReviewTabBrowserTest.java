@@ -182,12 +182,13 @@ class ReviewTabBrowserTest {
         ReviewTabBrowser.FileRowDisplay row = ReviewTabBrowser.nodeRows(snapshot).get(0);
         assertEquals("a.txt  ◆ 3", row.text());
         assertEquals(3, row.findings().size()); // resolved and dismissed are hidden
-        assertEquals("blocking: leak:1", row.findings().get(0).text());
-        assertTrue(row.findings().get(0).tooltip().isEmpty());
-        assertEquals("nit: orphan:99", row.findings().get(1).text());
-        assertEquals(Optional.of(ReviewTabModel.DRIFT_HINT), row.findings().get(1).tooltip());
-        assertEquals("question: odd key", row.findings().get(2).text()); // malformed key: no :line
-        assertEquals(Optional.of(ReviewTabModel.DRIFT_HINT), row.findings().get(2).tooltip());
+        // severity is the row's icon and tooltip, never a prefix in the text
+        assertEquals("leak  :1", row.findings().get(0).text());
+        assertEquals(Optional.of("Blocking"), row.findings().get(0).tooltip());
+        assertEquals("orphan  :99", row.findings().get(1).text());
+        assertEquals(Optional.of("Nit · " + ReviewTabModel.DRIFT_HINT), row.findings().get(1).tooltip());
+        assertEquals("odd key", row.findings().get(2).text()); // malformed key: no :line
+        assertEquals(Optional.of("Question · " + ReviewTabModel.DRIFT_HINT), row.findings().get(2).tooltip());
         assertEquals(Optional.of("2 resolved findings hidden"), row.footer());
     }
 
@@ -215,7 +216,7 @@ class ReviewTabBrowserTest {
         assertEquals("a.txt", a.getUserObject().path());
         assertEquals(2, a.getChildCount()); // the finding child, then the footer
         ReviewTabBrowser.FindingNode finding = (ReviewTabBrowser.FindingNode) a.getChildAt(0);
-        assertEquals("blocking: leak:1", finding.getTextPresentation());
+        assertEquals("leak  :1", finding.getTextPresentation());
         assertEquals("leak", finding.getUserObject().title());
         ReviewTabBrowser.FooterNode footer = (ReviewTabBrowser.FooterNode) a.getChildAt(1);
         assertEquals("1 resolved findings hidden", footer.getUserObject());

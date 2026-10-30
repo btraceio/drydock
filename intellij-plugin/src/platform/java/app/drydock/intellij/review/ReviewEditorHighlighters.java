@@ -2,7 +2,6 @@ package app.drydock.intellij.review;
 
 import app.drydock.review.Severity;
 
-import com.intellij.icons.AllIcons;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.AnActionEvent;
@@ -443,12 +442,7 @@ public final class ReviewEditorHighlighters {
     }
 
     private static Icon icon(Severity severity, int count) {
-        Icon base = switch (severity) {
-            case BLOCKING -> AllIcons.General.Error;
-            case QUESTION -> AllIcons.General.QuestionDialog;
-            case DEVIATION -> AllIcons.General.Warning;
-            case NIT -> AllIcons.General.Information;
-        };
+        Icon base = SeverityPresentation.icon(severity);
         return count > 1 ? new CountBadgeIcon(base, count) : base;
     }
 

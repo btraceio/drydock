@@ -1,5 +1,7 @@
 package app.drydock.intellij.review;
 
+import com.intellij.ui.components.JBScrollPane;
+
 import javax.swing.JComponent;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
@@ -43,7 +45,7 @@ final class FindingInlayContainer extends JPanel {
         this.maxHeight = Objects.requireNonNull(maxHeight, "maxHeight");
         setLayout(new BorderLayout());
         setOpaque(false);
-        JScrollPane scroll = new JScrollPane(card,
+        JScrollPane scroll = new JBScrollPane(card,
                 ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED,
                 ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
         scroll.setBorder(null);
