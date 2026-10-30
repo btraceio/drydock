@@ -10,17 +10,19 @@ import java.util.Deque;
  *
  * <p>Capped, because a TUI's history is unbounded: at most
  * {@link #MAX_LINES} lines or {@link #MAX_CHARS} characters, whichever is
- * reached first. The oldest output goes first, and a trimmed replay starts
+ * reached first. The line cap is the console's own scrollback cap: a
+ * replay longer than that would only be dropped by the console it fills. The oldest output goes first, and a trimmed replay starts
  * with {@link #TRIMMED} so nobody reads a cut-off screen as the whole
- * conversation. The cap is in UTF-16 characters, not bytes: close enough to
- * the handoff's 8 MB for terminal output, and free to measure.</p>
+ * conversation. The cap is in UTF-16 characters, not bytes, and free to
+ * measure: 2 M characters is about 400 per line at the line cap, room for
+ * a TUI's escape sequences.</p>
  *
  * <p>Not thread-safe; {@link OutputRouter} holds the one lock it needs.</p>
  */
 final class ReplayBuffer {
 
-    static final int MAX_LINES = 20_000;
-    static final int MAX_CHARS = 8 * 1024 * 1024;
+    static final int MAX_LINES = AgentTerminalSettings.MAX_HISTORY_LINES;
+    static final int MAX_CHARS = 2 * 1024 * 1024;
     static final String TRIMMED = "… earlier output trimmed\r\n";
 
     private final int maxLines;

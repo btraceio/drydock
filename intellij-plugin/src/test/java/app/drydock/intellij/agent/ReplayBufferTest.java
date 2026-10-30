@@ -46,7 +46,7 @@ class ReplayBufferTest {
 
     @Test
     void theDefaultsAreTheSpecs() {
-        assertEquals(20_000, ReplayBuffer.MAX_LINES);
-        assertEquals(8 * 1024 * 1024, ReplayBuffer.MAX_CHARS);
+        assertEquals(AgentTerminalSettings.MAX_HISTORY_LINES, ReplayBuffer.MAX_LINES);
+        assertEquals(2 * 1024 * 1024, ReplayBuffer.MAX_CHARS);
     }
 }

@@ -375,7 +375,8 @@ public final class AgentExecutionRegistry implements Disposable {
             throw new IllegalStateException("No agent for " + sessionId);
         }
         Optional<TerminalExecutionConsole> previous = execution.console();
-        TerminalExecutionConsole console = new TerminalExecutionConsole(target, INITIAL_COLUMNS, INITIAL_ROWS, null);
+        TerminalExecutionConsole console = new TerminalExecutionConsole(target, INITIAL_COLUMNS, INITIAL_ROWS, null,
+                new AgentTerminalSettings());
         // The window's service is the parent: a console is built for one
         // project and must not outlive it, even if a close path missed it.
         Disposer.register(AgentExecutionService.getInstance(target), console);

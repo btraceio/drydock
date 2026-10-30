@@ -311,7 +311,8 @@ DECISION.md, SPIKE-RESULTS.md). Plan, with its rulings R1–R10:
 **Built.**
 - An app service, `AgentExecutionRegistry`, owns every agent process.
   A window only shows an agent: showing it elsewhere builds a fresh console
-  there and replays a capped buffer into it (20,000 lines / 8 MB).
+  there and replays a capped buffer into it (5,000 lines / 2 M chars;
+  the console's own scrollback is capped at the same 5,000 lines).
 - New tasks open as a tab in this window (Open in: This window, default /
   Its own window). A task from another worktree is hosted: its tab reads
   `<repo> · <title>` and its strip `from <repo> ⑂ <branch>`, with
