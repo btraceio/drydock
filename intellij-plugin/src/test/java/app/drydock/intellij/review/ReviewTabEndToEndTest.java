@@ -41,7 +41,7 @@ import app.drydock.state.json.JsonValue.JsonString;
 import app.drydock.state.json.JsonWriter;
 import com.intellij.diff.fragments.LineFragment;
 import com.intellij.diff.requests.DiffRequest;
-import com.intellij.diff.requests.LoadingDiffRequest;
+import com.intellij.diff.requests.MessageDiffRequest;
 import com.intellij.diff.util.Side;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -309,7 +309,7 @@ class ReviewTabEndToEndTest {
         ReviewDiffEditor editor = new ReviewDiffEditor(tabs,
                 requestContext -> {
                     built.add(requestContext);
-                    return new LoadingDiffRequest();
+                    return new MessageDiffRequest(requestContext.path());
                 },
                 viewer -> { });
         onEdt(() -> {

@@ -6,7 +6,7 @@ import com.intellij.diff.FrameDiffTool;
 import com.intellij.diff.impl.DiffRequestProcessor;
 import com.intellij.diff.impl.DiffRequestProcessorListener;
 import com.intellij.diff.requests.DiffRequest;
-import com.intellij.diff.requests.LoadingDiffRequest;
+import com.intellij.diff.requests.MessageDiffRequest;
 import com.intellij.diff.tools.util.base.TextDiffSettingsHolder;
 import com.intellij.diff.util.DiffUserDataKeysEx;
 import com.intellij.openapi.Disposable;
@@ -46,6 +46,9 @@ public final class ReviewDiffEditor {
      * from the IDE's other diffs.
      */
     public static final String PLACE = "DrydockReviewWorkbench";
+
+    /** What the diff says before a file is picked. */
+    static final String NO_FILE_TEXT = "Select a file to see its diff.";
 
     /**
      * Opens (or reopens) the review workbench tab. Production opens the
@@ -205,14 +208,15 @@ public final class ReviewDiffEditor {
 
     /**
      * The request a newly created processor is seeded with: the current
-     * context's request (the seeding the spike demanded), or the platform's
-     * own loading placeholder when no context exists yet. EDT — the tab's
-     * processor is created while the EDT opens the tab.
+     * context's request (the seeding the spike demanded), or, when no file
+     * has been picked yet, a message asking for one ({@link #NO_FILE_TEXT};
+     * the platform's loading request is internal API on 263). EDT — the
+     * tab's processor is created while the EDT opens the tab.
      */
     DiffRequest seedRequest() {
         requireEdt();
         ReviewDiffRequests.RequestContext current = context;
-        return current == null ? new LoadingDiffRequest() : requests.build(current);
+        return current == null ? new MessageDiffRequest(NO_FILE_TEXT) : requests.build(current);
     }
 
     /** The processor the platform just created for the (re)opened tab; also the tests' install point. */

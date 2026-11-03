@@ -3,6 +3,7 @@ package app.drydock.intellij.review;
 import com.intellij.diff.FrameDiffTool;
 import com.intellij.diff.fragments.LineFragment;
 import com.intellij.diff.requests.DiffRequest;
+import com.intellij.diff.requests.MessageDiffRequest;
 import com.intellij.diff.util.Side;
 
 import org.junit.jupiter.api.Test;
@@ -87,6 +88,16 @@ class ReviewDiffEditorTest {
     }
 
     // ---- first request seeding ---------------------------------------------
+
+    @Test
+    void aProcessorCreatedBeforeAnyFileIsPickedAsksForOne() {
+        ReviewDiffEditor editor = editor(new RecordingOpener(), new RecordingRequests());
+
+        DiffRequest seed = onEdtGet(editor::seedRequest);
+
+        assertTrue(seed instanceof MessageDiffRequest, "a public message request, not the internal loading one");
+        assertEquals(ReviewDiffEditor.NO_FILE_TEXT, ((MessageDiffRequest) seed).getMessage());
+    }
 
     @Test
     void firstShowOpensTheTabAndItsNewProcessorIsSeededWithTheCurrentRequest() {

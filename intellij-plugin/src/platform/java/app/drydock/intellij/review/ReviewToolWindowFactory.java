@@ -97,11 +97,10 @@ public final class ReviewToolWindowFactory implements ToolWindowFactory, DumbAwa
      * Event kinds that re-align: a window moved (anchor, side-tool, or
      * combined moves), the layout was switched, or an availability
      * flipped — the first-available preference must be re-evaluated
-     * because it can change the target host. The same set covers
-     * host-named events and windowless ones: 263's
-     * {@code ToolWindowManagerImpl.fireStateChanged} publishes the
-     * anchor and side kinds through the 2-arg windowless overload too
-     * (a null source window), not only {@code SetLayout}.
+     * because it can change the target host. The listener hears every
+     * event through the public windowless {@code stateChanged} overload
+     * (see {@link #subscribeToHostMoves}), so these kinds realign whichever
+     * window the event was about.
      */
     private static final Set<ToolWindowManagerEventType> REALIGN_EVENTS = EnumSet.of(
             ToolWindowManagerEventType.SetToolWindowAnchor,
@@ -116,12 +115,6 @@ public final class ReviewToolWindowFactory implements ToolWindowFactory, DumbAwa
      * overrides the descriptor's default anchor from the first
      * registration on, so this — not {@link #createToolWindowContent} —
      * is where startup placement is made deterministic.
-     *
-     * <p>263 note: the source-carrying {@code stateChanged} overload this
-     * class listens on is {@code @ApiStatus.Internal}/{@code Experimental}
-     * in 263.7031.23 bytecode — it is the only callback that names the
-     * event's window, so ignoring Review's own events (below) requires it.
-     * </p>
      */
     @Override
     public void init(@NotNull ToolWindow toolWindow) {
@@ -209,30 +202,15 @@ public final class ReviewToolWindowFactory implements ToolWindowFactory, DumbAwa
     }
 
     /**
-     * Whether one manager event should re-align Review. Self events are
-     * ignored first — Review's own setAnchor fires
-     * SetToolWindowAnchor for its id, and realigning to it is the loop.
-     * A host's move or availability flip realigns. A <em>windowless</em>
-     * event of a realign kind realigns too: 263's fireStateChanged
-     * publishes SetToolWindowAnchor and the side kinds through the 2-arg
-     * windowless overload (a null source window), not only SetLayout —
-     * realigning on those closes a window in which the re-correction was
-     * missed until the next qualifying event. A self-<em>caused</em>
-     * windowless anchor event (Review's own setAnchor naming no window)
-     * is safe: the self-id filter cannot drop what named no window, so
-     * the second guard breaks the loop instead — {@link #targetAnchor}
-     * returns null once Review already sits at the host's anchor, and
-     * the realign is a no-op. Every other window's events do not
-     * realign.
+     * Whether one manager event should re-align Review: a move, a layout
+     * switch or an availability flip, of any window (the event does not
+     * name it; see {@link #subscribeToHostMoves}). A realign is idempotent
+     * — {@link #targetAnchor} answers null once Review sits at the host's
+     * anchor — so another window's move costs one no-op, and Review's own
+     * setAnchor, which fires an anchor event itself, cannot loop.
      */
-    static boolean reactsToEvent(String selfId, @Nullable String eventWindowId, ToolWindowManagerEventType type) {
-        if (eventWindowId != null && eventWindowId.equals(selfId)) {
-            return false; // the Review window's own anchor write, not a host signal
-        }
-        if (eventWindowId == null) {
-            return REALIGN_EVENTS.contains(type);
-        }
-        return CHANGES_HOST_IDS.contains(eventWindowId) && REALIGN_EVENTS.contains(type);
+    static boolean reactsToEvent(ToolWindowManagerEventType type) {
+        return REALIGN_EVENTS.contains(type);
     }
 
     /**
@@ -248,10 +226,11 @@ public final class ReviewToolWindowFactory implements ToolWindowFactory, DumbAwa
      * while the window lives. The connection is parented to the tool
      * window's own disposable, so project close tears it down together
      * with the window — no listener survives it. The 263 listener surface used
-     * here ({@code toolWindowsRegistered}, the two stateChanged overloads)
-     * is the platform's actual bytecode — ToolWindowManagerImpl on
-     * 263.7031.23 publishes exactly these three, and the deprecated
-     * single-id toolWindowRegistered never fires.
+     * here is {@code toolWindowsRegistered} (the deprecated single-id
+     * toolWindowRegistered never fires) and the windowless
+     * {@code stateChanged}. The overload that names the event's window is
+     * internal API on 263; its default body calls the windowless one
+     * (bytecode), so overriding only the windowless one hears every event.
      */
     private static void subscribeToHostMoves(Project project, ToolWindow review, ToolWindowManager manager) {
         project.getMessageBus().connect(review.getDisposable())
@@ -273,17 +252,8 @@ public final class ReviewToolWindowFactory implements ToolWindowFactory, DumbAwa
                     }
 
                     @Override
-                    public void stateChanged(@NotNull ToolWindowManager source,
-                                             @NotNull ToolWindow sourceWindow,
-                                             @NotNull ToolWindowManagerEventType type) {
-                        if (reactsToEvent(TOOL_WINDOW_ID, sourceWindow.getId(), type)) {
-                            alignLater(review, manager);
-                        }
-                    }
-
-                    @Override
                     public void stateChanged(@NotNull ToolWindowManager source, @NotNull ToolWindowManagerEventType type) {
-                        if (reactsToEvent(TOOL_WINDOW_ID, null, type)) {
+                        if (reactsToEvent(type)) {
                             alignLater(review, manager);
                         }
                     }

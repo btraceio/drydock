@@ -17,7 +17,6 @@ import app.drydock.intellij.tasks.TaskNode.StaleWorktrees;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
 
-import com.intellij.openapi.actionSystem.ActionGroup;
 import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.DefaultActionGroup;
 import com.intellij.openapi.application.ApplicationManager;
@@ -242,8 +241,8 @@ final class TaskMenu {
      * the panel's action instances; an {@link Item} without one is skipped
      * rather than shown broken.
      */
-    static ActionGroup group(TaskNode lead, List<TaskNode> selection, Map<Item, AnAction> actions,
-                             boolean jiraEnabled) {
+    static DefaultActionGroup group(TaskNode lead, List<TaskNode> selection, Map<Item, AnAction> actions,
+                                    boolean jiraEnabled) {
         ApplicationManager.getApplication().assertIsDispatchThread();
         DefaultActionGroup menu = new DefaultActionGroup();
         boolean separated = false;

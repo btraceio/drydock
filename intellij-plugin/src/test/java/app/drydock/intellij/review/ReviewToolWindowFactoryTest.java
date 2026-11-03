@@ -80,15 +80,7 @@ class ReviewToolWindowFactoryTest {
     // ---- the event filter ----------------------------------------------------
 
     @Test
-    void theWindowsOwnEventsNeverRealignIt() {
-        for (ToolWindowManagerEventType type : ToolWindowManagerEventType.values()) {
-            assertFalse(ReviewToolWindowFactory.reactsToEvent(SELF, SELF, type),
-                    "the Review window's own " + type + " is dropped before any other rule runs");
-        }
-    }
-
-    @Test
-    void aHostsMovesAndAvailabilityFlipsRealignIt() {
+    void movesLayoutSwitchesAndAvailabilityFlipsRealignIt() {
         for (ToolWindowManagerEventType type : List.of(
                 ToolWindowManagerEventType.SetToolWindowAnchor,
                 ToolWindowManagerEventType.SetSideToolAndAnchor,
@@ -96,55 +88,28 @@ class ReviewToolWindowFactoryTest {
                 ToolWindowManagerEventType.SetLayout,
                 ToolWindowManagerEventType.ToolWindowAvailable,
                 ToolWindowManagerEventType.ToolWindowUnavailable)) {
-            assertTrue(ReviewToolWindowFactory.reactsToEvent(SELF, "Commit", type),
-                    "the Commit host's " + type + " moves or re-ranks the alignment target");
-            assertTrue(ReviewToolWindowFactory.reactsToEvent(SELF, "Version Control", type),
-                    "the Version Control host's " + type + " moves or re-ranks the alignment target");
+            assertTrue(ReviewToolWindowFactory.reactsToEvent(type),
+                    type + " can move or re-rank the alignment target");
         }
     }
 
     @Test
-    void otherWindowsAndQuietHostEventsDoNot() {
-        for (ToolWindowManagerEventType type : ToolWindowManagerEventType.values()) {
-            assertFalse(ReviewToolWindowFactory.reactsToEvent(SELF, "Project", type),
-                    "another window's " + type + " is not a host signal");
-        }
-        assertFalse(ReviewToolWindowFactory.reactsToEvent(SELF, "Commit", ToolWindowManagerEventType.ActivateToolWindow),
-                "the host being activated changes no placement");
-        assertFalse(ReviewToolWindowFactory.reactsToEvent(SELF, "Commit", ToolWindowManagerEventType.HideToolWindow),
-                "the host being hidden changes no placement");
-    }
-
-    @Test
-    void aWindowlessEventOfARealignKindRealignsItButQuietWindowlessOnesDoNot() {
-        for (ToolWindowManagerEventType type : List.of(
-                ToolWindowManagerEventType.SetToolWindowAnchor,
-                ToolWindowManagerEventType.SetSideToolAndAnchor,
-                ToolWindowManagerEventType.SetSideTool,
-                ToolWindowManagerEventType.SetLayout,
-                ToolWindowManagerEventType.ToolWindowAvailable,
-                ToolWindowManagerEventType.ToolWindowUnavailable)) {
-            assertTrue(ReviewToolWindowFactory.reactsToEvent(SELF, null, type),
-                    "a windowless " + type + " (263 publishes the anchor and side kinds"
-                            + " through the windowless overload too): re-correct the placement");
-        }
+    void quietEventsDoNot() {
         for (ToolWindowManagerEventType type : Set.of(
                 ToolWindowManagerEventType.ActivateToolWindow,
                 ToolWindowManagerEventType.ShowToolWindow,
                 ToolWindowManagerEventType.HideToolWindow,
                 ToolWindowManagerEventType.MovedOrResized)) {
-            assertFalse(ReviewToolWindowFactory.reactsToEvent(SELF, null, type),
-                    "a windowless " + type + " carries no placement change to follow");
+            assertFalse(ReviewToolWindowFactory.reactsToEvent(type), type + " carries no placement change to follow");
         }
     }
 
     @Test
-    void aSelfCausedWindowlessAnchorEventCannotLoopBecauseAlignmentNoOpsOnceEqual() {
-        assertTrue(ReviewToolWindowFactory.reactsToEvent(SELF, null, ToolWindowManagerEventType.SetToolWindowAnchor),
-                "Review's own setAnchor can publish a windowless anchor event:"
-                        + " the self-id filter cannot drop what named no window");
+    void aSelfCausedAnchorEventCannotLoopBecauseAlignmentNoOpsOnceEqual() {
+        assertTrue(ReviewToolWindowFactory.reactsToEvent(ToolWindowManagerEventType.SetToolWindowAnchor),
+                "Review's own setAnchor fires an anchor event, and the event does not name the window");
         assertNull(ReviewToolWindowFactory.targetAnchor(ToolWindowAnchor.LEFT, ToolWindowAnchor.LEFT),
-                "the second guard: once Review sits at the host's anchor, the realign"
+                "the guard: once Review sits at the host's anchor, the realign"
                         + " finds nothing to move and the loop is broken there");
     }
 
