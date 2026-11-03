@@ -1,6 +1,8 @@
 package app.drydock.intellij.tasks;
 
 import app.drydock.agent.api.AgentRegistry;
+import app.drydock.delayedtasks.DelayedTaskService;
+import app.drydock.delayedtasks.TaskStoreWatcher;
 import app.drydock.domain.SessionStatus;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.JiraIssue;
@@ -22,11 +24,15 @@ import app.drydock.intellij.tasks.TaskNode.StaleWorktrees;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
 import app.drydock.intellij.ui.SessionDots;
+import app.drydock.tasks.DelayedTaskRows;
+import app.drydock.tasks.TaskId;
+import app.drydock.tasks.TaskState;
 import app.drydock.ui.AgentLabels;
 
 import com.intellij.icons.AllIcons;
 import com.intellij.openapi.util.IconLoader;
 import com.intellij.ui.ColoredTreeCellRenderer;
+import com.intellij.ui.JBColor;
 import com.intellij.ui.SimpleTextAttributes;
 import org.jetbrains.annotations.NotNull;
 
@@ -34,12 +40,20 @@ import javax.swing.Icon;
 import javax.swing.JTree;
 import javax.swing.tree.DefaultMutableTreeNode;
 
+import java.awt.Color;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
-/** Paints one {@link TaskNode}: dot, name, and the grey where/what/age text. */
+/**
+ * Paints one {@link TaskNode}: dot, name, and the grey where/what/age text.
+ * The delayed-task layer (D9-D11) adds its rows here the same way: every
+ * status, age, blocker and session hint comes CARRIED on the row the task
+ * layer built (the {@code app.drydock.tasks} {@code TaskNode} values), so
+ * painting reads cached row data only - no disk lookup, no clock per row
+ * beyond the one paint-time read, and no hint is ever recomputed here.
+ */
 final class TaskTreeRenderer extends ColoredTreeCellRenderer {
 
     /** The tag on a row's link text ("Add", "Start ▸"): what a single click may act on. */
@@ -174,6 +188,15 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
                 append("Review ▸", SimpleTextAttributes.LINK_ATTRIBUTES, LINK);
             }
             case TaskRow task -> paintTask(task);
+            // Fully-qualified on purpose: the delayed-task layer reuses the
+            // simple name TaskNode in app.drydock.tasks; this class's own
+            // TaskNode (app.drydock.intellij.tasks) stays unqualified above.
+            case app.drydock.tasks.TaskNode.DelayedTaskRow task -> paintDelayedTask(task);
+            case app.drydock.tasks.TaskNode.SessionTasks session ->
+                    // A session row plus task children: the session row itself
+                    // renders exactly as it always did (below), unchanged.
+                    paintTask(session.session());
+            case app.drydock.tasks.TaskNode.TasksSection section -> paintTasksSection(section);
             default -> append(String.valueOf(node.getUserObject()));
         }
     }
@@ -350,6 +373,166 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
             append(" · ", SimpleTextAttributes.GRAYED_ATTRIBUTES);
             append(text, SimpleTextAttributes.LINK_ATTRIBUTES, LINK);
         });
+    }
+
+    /** Review's hint word: bold, so "in review" reads as waiting on YOU, not as just another state (D16). */
+    private static final SimpleTextAttributes REVIEW_HINT_ATTRIBUTES =
+            new SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, JBColor.GRAY);
+
+    /** Interrupted's hint word: italic, so a lost session reads different from a fresh ready one (D10). */
+    private static final SimpleTextAttributes INTERRUPTED_HINT_ATTRIBUTES =
+            new SimpleTextAttributes(SimpleTextAttributes.STYLE_ITALIC, JBColor.GRAY);
+
+    /** The stale flag's colour: the review tree's open-findings orange, dark- and light-theme aware. */
+    private static final SimpleTextAttributes STALE_ATTRIBUTES = new SimpleTextAttributes(
+            SimpleTextAttributes.STYLE_PLAIN, new JBColor(new Color(0xB5, 0x4A, 0x0E), new Color(0xD9, 0x8A, 0x5A)));
+
+    /**
+     * Paints one delayed task (D9-D11) from the CARRIED row only: the
+     * presentation's icon and hint word, the age and stale flag against one
+     * clock read for this paint, and the carried blocker texts - never a
+     * recomputation, a disk lookup or a per-row timer. The plan's stage/phase
+     * annotation (T40, P4.12) rides the same discipline: it is read from the
+     * service's CACHED publications only (published plan records, watched
+     * snapshot, live-session view), so the progress stays visible wherever
+     * the row sits -- in the section or under its session row (D10) -- and no
+     * plan file is ever read at paint time.
+     */
+    private void paintDelayedTask(app.drydock.tasks.TaskNode.DelayedTaskRow task) {
+        Instant now = Instant.now();
+        setIcon(delayedIcon(task));
+        append(task.title());
+        append("  " + delayedHint(task), delayedHintAttributes(task.presentation()));
+        Optional<DelayedTaskRows.PlanProgress> progress = planProgressOf(task.id());
+        progress.ifPresent(annotation -> append("  " + annotation.text(),
+                SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES));
+        String age = delayedAge(task, now);
+        if (!age.isEmpty()) {
+            append(" · " + age, SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
+        }
+        if (task.stale()) {
+            append(" · stale", STALE_ATTRIBUTES);
+        }
+        for (String blocker : task.blockers()) {
+            append(" · " + blocker, SimpleTextAttributes.GRAYED_ATTRIBUTES);
+        }
+        setToolTipText(delayedTooltip(task, now) + progress.map(annotation ->
+                " · plan " + annotation.text()).orElse(""));
+    }
+
+    /**
+     * The plan annotation of one delayed task (T40, P4.12), read from the
+     * service's IN-MEMORY publications only -- the published plan records,
+     * the cached watched snapshot and the live-session view; never a plan
+     * file, never a fresh scan, no clock read of its own. Empty when the
+     * service has published no snapshot yet or no persisted plan targets the
+     * task. Pure over those cached values; the derivation itself is
+     * {@link DelayedTaskRows#planProgress}.
+     */
+    static Optional<DelayedTaskRows.PlanProgress> planProgressOf(TaskId task) {
+        DelayedTaskService service = DrydockPluginService.getInstance().taskService();
+        TaskStoreWatcher.WatchedSnapshot watched = service.watchedSnapshot();
+        if (watched == null) {
+            return Optional.empty();
+        }
+        return DelayedTaskRows.planOf(service.publishedPlans(), task)
+                .flatMap(record -> DelayedTaskRows.planProgress(record, watched.snapshot(),
+                        service.liveSessionIds()));
+    }
+
+    /**
+     * Paints the task layer's section header (D9) in the existing section
+     * shape: folder icon, bold label, greyed count badge.
+     */
+    private void paintTasksSection(app.drydock.tasks.TaskNode.TasksSection section) {
+        setIcon(AllIcons.Nodes.Folder);
+        append(section.label(), SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES);
+        int count = section.children().size();
+        if (count > 0) {
+            append("  " + count + (count == 1 ? " task" : " tasks"), SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
+        }
+        setToolTipText("Delayed tasks · " + section.label());
+    }
+
+    /**
+     * Pure. The presentation's icon: every presentation reads at a glance,
+     * and review (an eye) and interrupted (a warning) are visibly not the
+     * ready one (D9, D16).
+     */
+    static Icon delayedIcon(app.drydock.tasks.TaskNode.DelayedTaskRow task) {
+        return switch (task.presentation()) {
+            case READY -> AllIcons.Actions.Execute;
+            case BLOCKED -> AllIcons.General.Information;
+            case REVIEW -> AllIcons.Actions.Preview;
+            case STARTED -> AllIcons.Actions.Forward;
+            case INTERRUPTED -> AllIcons.General.Warning;
+            case TERMINAL -> AllIcons.Actions.Checked;
+        };
+    }
+
+    /**
+     * Pure. The presentation's hint word, carried from the row's view - the
+     * distinct status text of D9/D10/D16. TERMINAL covers done and dropped
+     * and the row carries only the presentation, so the word says both
+     * rather than guessing one.
+     */
+    static String delayedHint(app.drydock.tasks.TaskNode.DelayedTaskRow task) {
+        return switch (task.presentation()) {
+            case READY -> "ready";
+            case BLOCKED -> "blocked";
+            case REVIEW -> "in review";
+            case STARTED -> "in session";
+            case INTERRUPTED -> "interrupted";
+            case TERMINAL -> "done or dropped";
+        };
+    }
+
+    /**
+     * Pure. The hint word's style: review and interrupted get their own look
+     * (bold / italic); every other presentation keeps the greyed small
+     * badge style of the rows around it.
+     */
+    static SimpleTextAttributes delayedHintAttributes(TaskState.Presentation presentation) {
+        return switch (presentation) {
+            case REVIEW -> REVIEW_HINT_ATTRIBUTES;
+            case INTERRUPTED -> INTERRUPTED_HINT_ATTRIBUTES;
+            default -> SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES;
+        };
+    }
+
+    /**
+     * Pure. D9's age text against the GIVEN clock (never read here), empty
+     * when the creation time is unknown - unknown is not zero.
+     */
+    static String delayedAge(app.drydock.tasks.TaskNode.DelayedTaskRow task, Instant now) {
+        return task.created()
+                .map(created -> AgentStripText.relativeAge(Duration.between(created, now)) + " old")
+                .orElse("");
+    }
+
+    /**
+     * Pure. The row's accessible one-line summary (the tooltip of a Jira
+     * row's shape): id, hint word, age and stale flag, the carried blocker
+     * texts (D9/D11), and the session hint - live sessions for a started
+     * task, the last session for an interrupted one (D10).
+     */
+    static String delayedTooltip(app.drydock.tasks.TaskNode.DelayedTaskRow task, Instant now) {
+        StringBuilder tip = new StringBuilder("Task ").append(task.id().text())
+                .append(" (").append(delayedHint(task)).append(')');
+        task.created().ifPresent(created -> tip.append(" · created ")
+                .append(AgentStripText.relativeAge(Duration.between(created, now))).append(" ago"));
+        if (task.stale()) {
+            tip.append(" · stale (older than ").append(DelayedTaskRows.STALE_AFTER.toDays()).append(" days)");
+        }
+        for (String blocker : task.blockers()) {
+            tip.append(" · ").append(blocker);
+        }
+        if (task.presentation() == TaskState.Presentation.INTERRUPTED) {
+            task.lastSession().ifPresent(session -> tip.append(" · last session ").append(session));
+        } else if (!task.liveSessions().isEmpty()) {
+            tip.append(" · session ").append(String.join(", ", task.liveSessions()));
+        }
+        return tip.toString();
     }
 
     /**

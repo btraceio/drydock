@@ -10,6 +10,12 @@ import app.drydock.intellij.tasks.NewTaskPlan.Choice;
 import app.drydock.intellij.tasks.NewTaskPlan.OpenIn;
 import app.drydock.intellij.tasks.NewTaskPlan.WorkIn;
 import app.drydock.review.ReviewInstructions;
+import app.drydock.tasks.DoneBy;
+import app.drydock.tasks.NewTaskLauncherResult;
+
+import static app.drydock.tasks.NewTaskPlan.SAVE_OK_LABEL;
+import static app.drydock.tasks.NewTaskPlan.startEnabled;
+import static app.drydock.tasks.NewTaskPlan.validatesStart;
 
 import com.intellij.icons.AllIcons;
 import com.intellij.openapi.application.ApplicationManager;
@@ -39,6 +45,7 @@ import org.jetbrains.annotations.Nullable;
 import javax.swing.Box;
 import javax.swing.ButtonGroup;
 import javax.swing.JButton;
+import javax.swing.JCheckBox;
 import javax.swing.JComponent;
 import javax.swing.JPanel;
 import javax.swing.event.DocumentEvent;
@@ -52,6 +59,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.Supplier;
@@ -68,6 +76,13 @@ import java.util.stream.Stream;
  * <p>The decisions are {@link NewTaskPlan}'s; this class only lays them
  * out. The generated branch is independent of the description and stays fixed
  * for this dialog; the folder follows the branch until the user edits it.</p>
+ *
+ * <p>Save-later mode (P5, D5): the "Save as task for later" box turns the
+ * OK button into "Save Task", switches off every start field and the Start
+ * validation, and makes OK return saved-task values instead of a launch
+ * choice ({@link NewTaskLauncherResult}); nothing is started, prepared or
+ * written until the dialog has closed. Launch mode keeps its wording and
+ * behavior unchanged.</p>
  */
 final class NewTaskDialog extends DialogWrapper {
 
@@ -111,6 +126,9 @@ final class NewTaskDialog extends DialogWrapper {
     private final JBLabel warning = new JBLabel();
     private final JBLabel base = new JBLabel();
 
+    /** The save-later switch (P5): checked, the dialog saves a task file and starts nothing. */
+    private final JCheckBox saveForLater = new JCheckBox("Save as task for later");
+
     /** Where generated folders go; starts as the inputs' and follows "Change base…". */
     private Path worktreeBase;
 
@@ -119,6 +137,8 @@ final class NewTaskDialog extends DialogWrapper {
      * The folder follows branch edits only until it has been edited itself.
      */
     private boolean branchEdited;
+    /** True once the user edits the composed instructions (T31a): a harness switch then never recomposes (T09). */
+    private boolean instructionsEdited;
     private boolean folderEdited;
     /** True once the user picks Work in; then it stops following the description's blankness. */
     private boolean workInEdited;
@@ -131,6 +151,13 @@ final class NewTaskDialog extends DialogWrapper {
      * not reconstruct a choice from Swing fields after the modal has closed.
      */
     private Choice acceptedChoice;
+
+    /**
+     * The accepted submission -- launch choice or saved-task values (T19a) --
+     * captured before the wrapper disposes its peers, like
+     * {@link #acceptedChoice}.
+     */
+    private NewTaskLauncherResult acceptedResult;
 
     /**
      * {@code refChooser} opens Git's own branch/tag picker when the
@@ -160,6 +187,7 @@ final class NewTaskDialog extends DialogWrapper {
         setTitle("New task in " + inputs.repoName());
         ownWindow.setSelected(preset.openIn() == OpenIn.OWN_WINDOW);
         thisWindow.setSelected(preset.openIn() == OpenIn.THIS_WINDOW);
+        saveForLater.addActionListener(e -> refresh());
         init();
         setResizable(true);
         defaultWorkIn();
@@ -194,6 +222,16 @@ final class NewTaskDialog extends DialogWrapper {
         if (agentButtons.values().stream().noneMatch(JBRadioButton::isSelected)) {
             agentButtons.values().stream().filter(JBRadioButton::isEnabled).findFirst()
                     .ifPresent(button -> button.setSelected(true));
+        }
+        // The single-project start (T31a): the composed segment prompt seeds
+        // the instructions for the selected harness, and a harness switch
+        // recomposes only while the user has not edited the text (T09's
+        // contract; the seed runs before the listener below is attached, so
+        // seeding is never an edit).
+        if (preset.composed().isPresent()) {
+            instructions.setText(NewTaskPreset.composedInstructions(selectedAgent(),
+                    preset.composed().get().plan(), preset.composed().get().segment()));
+            agentButtons.forEach((kind, button) -> button.addActionListener(e -> recomposeInstructions()));
         }
         // The model picker follows the selected harness: switching agents and
         // back restores what the editor held for each (seeded from the
@@ -265,6 +303,9 @@ final class NewTaskDialog extends DialogWrapper {
         instructions.getDocument().addDocumentListener(new DocumentAdapter() {
             @Override
             protected void textChanged(@NotNull DocumentEvent e) {
+                if (!updating) {
+                    instructionsEdited = true;
+                }
                 defaultWorkIn();
                 regenerate();
                 refresh();
@@ -278,6 +319,7 @@ final class NewTaskDialog extends DialogWrapper {
                 .addLabeledComponent("Model:", modelField)
                 .addComponent(tierRows, JBUI.scale(4))
                 .addLabeledComponent("Mode:", modes)
+                .addComponent(saveForLater, JBUI.scale(4))
                 .addComponent(summaryRow, JBUI.scale(8))
                 .addComponent(details)
                 .addComponent(warning, JBUI.scale(8))
@@ -387,6 +429,29 @@ final class NewTaskDialog extends DialogWrapper {
     }
 
     /**
+     * A harness switch recomposes the segment prompt only while the user has
+     * not edited it (T31a, T09's contract): an unedited generated text moves
+     * to the new harness's shape; a user edit survives every switch.
+     */
+    private void recomposeInstructions() {
+        if (preset.composed().isEmpty()) {
+            return;
+        }
+        NewTaskPreset.Composed composed = preset.composed().get();
+        String recomposed = NewTaskPreset.switchedInstructions(instructionsEdited, instructions.getText(),
+                NewTaskPreset.composedInstructions(selectedAgent(), composed.plan(), composed.segment()));
+        if (recomposed.equals(instructions.getText())) {
+            return;
+        }
+        updating = true;
+        try {
+            instructions.setText(recomposed);
+        } finally {
+            updating = false;
+        }
+    }
+
+    /**
      * A blank description is a chat-like task, which needs no branch: Work in
      * defaults to the main checkout, and back to a new worktree once the
      * description returns -- until the user picks explicitly, which stops the
@@ -425,31 +490,54 @@ final class NewTaskDialog extends DialogWrapper {
 
     /** Summary, warning, OK label, and the controls the mode allows. */
     private void refresh() {
+        boolean saving = saveForLater.isSelected();
         boolean fixed = inputs.fixedWorktree().isPresent();
-        newWorktree.setEnabled(preset.fixedWorkIn().isEmpty()
+        newWorktree.setEnabled(startEnabled(saving, preset.fixedWorkIn().isEmpty()
                 && preset.mode(readOnly.isSelected()) != SessionMode.READ_ONLY
-                && !fixed);
-        mainCheckout.setEnabled(preset.fixedWorkIn().isEmpty() && !fixed);
+                && !fixed));
+        mainCheckout.setEnabled(startEnabled(saving, preset.fixedWorkIn().isEmpty() && !fixed));
         boolean worktree = workIn() == WorkIn.NEW_WORKTREE;
-        branch.setEnabled(worktree);
-        start.setEnabled(worktree);
-        folder.setEnabled(worktree);
+        branch.setEnabled(startEnabled(saving, worktree));
+        start.setEnabled(startEnabled(saving, worktree));
+        folder.setEnabled(startEnabled(saving, worktree));
+        thisWindow.setEnabled(!saving);
+        ownWindow.setEnabled(!saving);
+        writes.setEnabled(startEnabled(saving, preset.fixedMode().isEmpty()));
+        readOnly.setEnabled(startEnabled(saving, preset.fixedMode().isEmpty()));
+        for (Agent agent : inputs.agents()) {
+            JBRadioButton button = agentButtons.get(agent.kind());
+            if (button != null) {
+                button.setEnabled(startEnabled(saving, agent.isAvailable()));
+            }
+        }
+        modelField.setEnabled(!saving);
+        boolean tiersVisible = !saving && tiersShown(selectedAgent());
+        boolean tiersWere = tierRows.isVisible();
+        tierRows.setVisible(tiersVisible);
+        change.setEnabled(!saving);
+        summary.setVisible(!saving);
         Choice choice = choice();
         // Wrapped at a fixed width: as plain text the line grew with the
         // branch and folder names and widened the dialog on every keystroke.
         int before = summary.getPreferredSize().height;
-        summary.setText("<html><div style=\"width:" + JBUI.scale(SUMMARY_WIDTH) + "px\">"
-                + StringUtil.escapeXmlEntities(NewTaskPlan.summary(inputs, choice)) + "</div></html>");
+        summary.setText(saving ? ""
+                : "<html><div style=\"width:" + JBUI.scale(SUMMARY_WIDTH) + "px\">"
+                        + StringUtil.escapeXmlEntities(NewTaskPlan.summary(inputs, choice)) + "</div></html>");
         boolean resized = summary.getPreferredSize().height != before;
         Optional<String> caution = NewTaskPlan.warning(inputs, choice);
+        if (saving) {
+            // The caution renames a warned Start; a Save Task button carries no launch warning.
+            caution = Optional.empty();
+        }
         warning.setText(caution.orElse(""));
         resized |= warning.isVisible() != caution.isPresent();
         warning.setVisible(caution.isPresent());
-        setOKButtonText(NewTaskPlan.primaryLabel(caution.isPresent()));
-        if (resized && summary.isShowing()) {
-            // The summary wrapped onto another line (or back), or the warning
-            // came or went: without a re-pack the dialog kept its height and
-            // cut off its last row.
+        setOKButtonText(saving ? SAVE_OK_LABEL : NewTaskPlan.primaryLabel(caution.isPresent()));
+        if ((resized || tiersWere != tiersVisible) && summary.isShowing()) {
+            // The summary wrapped onto another line (or back), the warning
+            // came or went, or the save-later box hid the launch-only rows:
+            // without a re-pack the dialog kept its height and cut off its
+            // last row.
             pack();
         }
     }
@@ -557,8 +645,25 @@ final class NewTaskDialog extends DialogWrapper {
         return acceptedChoice;
     }
 
+    /**
+     * The accepted submission of either mode -- a launch choice or a saved
+     * task's values (T19a); refuses before a confirmed OK.
+     */
+    NewTaskLauncherResult launcherResult() {
+        if (acceptedResult == null) {
+            throw new IllegalStateException("The task dialog has not accepted a result");
+        }
+        return acceptedResult;
+    }
+
     @Override
     protected @Nullable ValidationInfo doValidate() {
+        if (!validatesStart(saveForLater.isSelected())) {
+            // Start validation polices a launch -- the agent, the branch, the
+            // folder; a saved task prepares none of that, so nothing blocks
+            // Save Task, not even with zero agents installed.
+            return null;
+        }
         // A blank description no longer refuses: it names the task "New task"
         // and starts the agent at its own prompt -- a chat, not a task.
         // Folder occupancy is a disk read; it is checked on OK only, not on
@@ -570,6 +675,18 @@ final class NewTaskDialog extends DialogWrapper {
 
     @Override
     protected void doOKAction() {
+        if (saveForLater.isSelected()) {
+            // The save writes asynchronously after the dialog closes, through
+            // the task service (TaskLauncher.saveTask); OK only captures what
+            // was accepted. This dialog has no prerequisite picker and no
+            // done_by control, so the save carries no refs and the default
+            // HUMAN policy.
+            acceptedResult = NewTaskLauncherResult.savedTask(
+                    new app.drydock.tasks.NewTaskPlan(taskName(), instructions.getText(), List.of(),
+                            DoneBy.HUMAN, inputs.project().root(), inputs.repoName()));
+            close(OK_EXIT_CODE);
+            return;
+        }
         // The folder check reads the disk, so it runs off the EDT; OK stays
         // disabled meanwhile, and the dialog closes (or says why not) when
         // the answer comes back.
@@ -589,6 +706,7 @@ final class NewTaskDialog extends DialogWrapper {
                             preset.instructionsRequired() && choice.instructions().isEmpty() ? instructions : folder);
                 } else if (isShowing()) {
                     acceptedChoice = choice;
+                    acceptedResult = NewTaskLauncherResult.launched(choice);
                     close(OK_EXIT_CODE);
                 }
             }, modality);

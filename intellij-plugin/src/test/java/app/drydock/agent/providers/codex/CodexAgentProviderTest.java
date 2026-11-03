@@ -4,6 +4,7 @@ import app.drydock.agent.api.AgentContext;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.CreateContext;
 import app.drydock.agent.api.LaunchPlan;
+import app.drydock.agent.api.LaunchResources;
 import app.drydock.agent.api.McpAccess;
 import app.drydock.agent.api.McpDelivery;
 import app.drydock.agent.api.ResumeContext;
@@ -376,5 +377,159 @@ class CodexAgentProviderTest {
                 SOME_MCP, Optional.of("p"))).command();
         assertTrue(command.indexOf("-c 'mcp_servers") < command.indexOf(" resume "), command);
         assertTrue(command.endsWith("resume '019f9072-abc' -- 'p'"), command);
+    }
+
+    // ---- extra working directories (LaunchResources) -----------------------
+
+    /** The env prefix every codex command starts with (the scrubbed sandbox vars). */
+    private static final String CODEX_ENV = "env -u CODEX_SANDBOX -u CODEX_SANDBOX_NETWORK_DISABLED ";
+
+    /** One plain extra directory, the minimal request. */
+    private static final LaunchResources ONE_DIR = new LaunchResources(
+            List.of(Path.of("/wt/prereq")), Optional.empty());
+
+    /** Three extra directories whose paths carry a space, an embedded quote, and a leading dash. */
+    private static final LaunchResources NASTY_DIRS = new LaunchResources(List.of(
+            Path.of("/wt/prereq one"), Path.of("/wt/it's \"quoted\" wt"), Path.of("/-lead-dash/wt")),
+            Optional.empty());
+
+    /** The shell-quoted add-dir arguments NASTY_DIRS must render as. */
+    private static final String NASTY_ADD_DIRS = " --add-dir '/wt/prereq one' --add-dir '/wt/it'\\''s \"quoted\" wt'"
+            + " --add-dir '/-lead-dash/wt'";
+
+    /**
+     * Each requested extra working directory is one safely quoted
+     * {@code --add-dir} option (CodexAgentProvider.addDirFlags): a space
+     * stays one argument, an embedded quote is escaped the POSIX way, and a
+     * dash-leading path stays an option value, never prompt text.
+     */
+    @Test
+    void createRendersEachExtraDirectoryAsAQuotedAddDir() {
+        String command = provider().buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
+                Optional.empty(), Optional.empty(), Optional.empty(), false, false, Optional.empty(), List.of())
+                .withLaunchResources(NASTY_DIRS)).command();
+        assertEquals(CODEX_ENV + "codex --sandbox danger-full-access" + NASTY_ADD_DIRS, command);
+    }
+
+    /**
+     * The add-dir options are rendered in the global-option slot, before the
+     * {@code --} positional prompt, so the prompt stays last and a
+     * dash-leading prompt stays prompt text.
+     */
+    @Test
+    void createPutsExtraDirectoriesBeforeThePositionalPrompt() {
+        String command = provider().buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
+                Optional.empty(), Optional.empty(), Optional.empty(), false, false,
+                Optional.of("--fix the parser"), List.of()).withLaunchResources(ONE_DIR)).command();
+        assertEquals(CODEX_ENV + "codex --sandbox danger-full-access --add-dir '/wt/prereq'"
+                + " -- '--fix the parser'", command);
+    }
+
+    /**
+     * Like {@code --sandbox} and the {@code -c} overrides, each add-dir
+     * lands before the {@code resume} subcommand so codex parses it as a
+     * global option; the positional prompt, when carried, still goes last.
+     */
+    @Test
+    void resumeRendersExtraDirectoriesAsGlobalOptionsBeforeTheSubcommand() {
+        String bare = provider().buildResumeCommand(new ResumeContext(Optional.of("019f9072-abc"),
+                Optional.empty(), Path.of("/repo"), Optional.empty(), Optional.empty())
+                .withLaunchResources(NASTY_DIRS)).command();
+        assertEquals(CODEX_ENV + "codex --sandbox danger-full-access" + NASTY_ADD_DIRS
+                + " resume '019f9072-abc'", bare);
+
+        String prompted = provider().buildResumeCommand(new ResumeContext(Optional.of("019f9072-abc"),
+                Optional.empty(), Path.of("/repo"), Optional.empty(), Optional.empty(), false, false,
+                List.of(), Optional.of("--continue the task")).withLaunchResources(ONE_DIR)).command();
+        assertEquals(CODEX_ENV + "codex --sandbox danger-full-access --add-dir '/wt/prereq'"
+                + " resume '019f9072-abc' -- '--continue the task'", prompted);
+    }
+
+    /** Duplicates collapse to the first occurrence, in first-occurrence order. */
+    @Test
+    void createCollapsesDuplicateDirectoriesKeepingFirstOccurrenceOrder() {
+        LaunchResources dups = new LaunchResources(List.of(Path.of("/wt/a"), Path.of("/wt/b"),
+                Path.of("/wt/a"), Path.of("/wt/c"), Path.of("/wt/b")), Optional.empty());
+        String command = provider().buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
+                Optional.empty(), Optional.empty(), Optional.empty(), false, false, Optional.empty(), List.of())
+                .withLaunchResources(dups)).command();
+        assertEquals(CODEX_ENV + "codex --sandbox danger-full-access --add-dir '/wt/a'"
+                + " --add-dir '/wt/b' --add-dir '/wt/c'", command);
+        // Exactly three flags: no duplicate ever reaches the command line.
+        assertEquals(3, command.split(" --add-dir ", -1).length - 1, command);
+    }
+
+    /**
+     * A launch that requests no extra directories keeps exactly today's
+     * command, byte for byte: an absent {@link LaunchResources}, an empty
+     * one, and one carrying only the task-guidance location all render the
+     * same command (CodexAgentProvider.addDirFlags returns "" for all
+     * three).
+     */
+    @Test
+    void createAndResumeWithoutExtraDirectoriesKeepTodayExactCommand() {
+        String bareCreate = provider().buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
+                Optional.empty(), Optional.empty())).command();
+        String emptyCreate = provider().buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
+                Optional.empty(), Optional.empty(), Optional.empty(), false, false, Optional.empty(), List.of())
+                .withLaunchResources(new LaunchResources(List.of(), Optional.empty()))).command();
+        String guidanceOnlyCreate = provider().buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
+                Optional.empty(), Optional.empty(), Optional.empty(), false, false, Optional.empty(), List.of())
+                .withLaunchResources(new LaunchResources(List.of(), Optional.of(Path.of("/guidance")))))
+                .command();
+        assertEquals(CODEX_ENV + "codex --sandbox danger-full-access", bareCreate);
+        assertEquals(bareCreate, emptyCreate);
+        assertEquals(bareCreate, guidanceOnlyCreate);
+
+        String bareResume = provider().buildResumeCommand(new ResumeContext(Optional.of("019f9072-abc"),
+                Optional.empty(), Path.of("/repo"), Optional.empty(), Optional.empty())).command();
+        String emptyResume = provider().buildResumeCommand(new ResumeContext(Optional.of("019f9072-abc"),
+                Optional.empty(), Path.of("/repo"), Optional.empty(), Optional.empty())
+                .withLaunchResources(new LaunchResources(List.of(), Optional.empty()))).command();
+        String guidanceOnlyResume = provider().buildResumeCommand(new ResumeContext(Optional.of("019f9072-abc"),
+                Optional.empty(), Path.of("/repo"), Optional.empty(), Optional.empty())
+                .withLaunchResources(new LaunchResources(List.of(), Optional.of(Path.of("/guidance")))))
+                .command();
+        assertEquals(bareResume, emptyResume);
+        assertEquals(bareResume, guidanceOnlyResume);
+    }
+
+    /**
+     * Codex declines remote outright; a remote launch that also requests
+     * extra directories stays refused -- never launched without them.
+     */
+    @Test
+    void remoteStaysRefusedEvenWithRequestedExtraDirectories() {
+        LaunchPlan create = provider().buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
+                Optional.of(new SshRemote("host", "/remote/path")), Optional.empty(), Optional.empty(),
+                false, false, Optional.empty(), List.of()).withLaunchResources(ONE_DIR));
+        assertFalse(create.supported());
+
+        LaunchPlan resume = provider().buildResumeCommand(new ResumeContext(Optional.of("019f9072-abc"),
+                Optional.empty(), Path.of("/repo"), Optional.of(new SshRemote("host", "/remote/path")),
+                Optional.empty()).withLaunchResources(ONE_DIR));
+        assertFalse(resume.supported());
+    }
+
+    /**
+     * An eval codex session still runs the CLI as a local process (evalMode
+     * only marks the session), so its requested directories are served on
+     * both create and resume -- the exact commands of the non-eval paths.
+     */
+    @Test
+    void evalSessionsServeRequestedDirectoriesAsLocalProcesses() {
+        LaunchPlan created = provider().buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
+                Optional.empty(), Optional.empty(), Optional.empty(), true, false,
+                Optional.of("Add a farewell method"), List.of()).withLaunchResources(ONE_DIR));
+        assertTrue(created.supported());
+        assertEquals(CODEX_ENV + "codex --sandbox danger-full-access --add-dir '/wt/prereq'"
+                + " -- 'Add a farewell method'", created.command());
+
+        LaunchPlan resumed = provider().buildResumeCommand(new ResumeContext(Optional.of("019f9072-abc"),
+                Optional.empty(), Path.of("/repo"), Optional.empty(), Optional.empty(), true, false,
+                List.of(), Optional.empty()).withLaunchResources(ONE_DIR));
+        assertTrue(resumed.supported());
+        assertEquals(CODEX_ENV + "codex --sandbox danger-full-access --add-dir '/wt/prereq'"
+                + " resume '019f9072-abc'", resumed.command());
     }
 }

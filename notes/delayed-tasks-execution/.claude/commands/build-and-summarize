@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Session-local capture adapter, explicitly approved by the operator.
+set -u
+ROOT=/Users/jaroslav.bachorik/go/src/github.com/DataDog/.worktrees/drydock-sneaky-fluffy-corgi
+cd "$ROOT/intellij-plugin" || exit 2
+mkdir -p build/logs || exit 2
+LOG=$(mktemp "$PWD/build/logs/delayed-tasks-XXXXXXXX.log") || exit 2
+printf 'Running Gradle; log: %s\n' "$LOG"
+./gradlew "$@" >"$LOG" 2>&1
+RC=$?
+printf 'Gradle exit: %s\nLog: %s\n' "$RC" "$LOG"
+exit "$RC"

@@ -99,9 +99,22 @@
         <notificationGroup id="Drydock attention" displayType="BALLOON"/>
         <!-- "<task> moved": a hosted agent's console went to its own window. -->
         <notificationGroup id="Drydock moves" displayType="BALLOON"/>
+        <!-- "<task> is ready/review" and the plan halt/Continue balloons
+             (TaskNotifications, T39a). -->
+        <notificationGroup id="Drydock tasks" displayType="BALLOON"/>
 
         <postStartupActivity
                 implementation="app.drydock.intellij.startup.DrydockStartupActivity"/>
+
+        <!-- The [[id]] / [[project:id]] navigation in task documents
+             (T21a, P5): a caret inside a bracketed task reference in a
+             store-root task document navigates to the referenced task's
+             store file, resolved through the CACHED watched snapshot only
+             (never a synchronous store scan) over plain bracket scanning
+             in a bounded caret window - no Markdown dependency. Missing,
+             ambiguous, broken and not-yet-published cases offer nothing. -->
+        <gotoDeclarationHandler
+                implementation="app.drydock.delayedtasks.TaskGotoDeclarationHandler"/>
 
         <!-- The Review surface (P3): Drydock's own review marks over the
              checkout's diff, as a dedicated tool window — the P2
@@ -156,9 +169,6 @@
                   topic="app.drydock.intellij.agent.SessionActivityListener"/>
     </applicationListeners>
     <actions>
-        <!-- Drydock is reached through its tool window, not a menu: New Task
-             is outside it so the shortcut works anywhere, and New Task from
-             Branch so Git's branch menus can start one. -->
         <!-- The review diff's selection actions (ReviewSelectionAction): the
              composer in the workbench inbox, for the selected lines. -->
         <action id="Drydock.Review.CommentOnSelection"
@@ -174,10 +184,15 @@
             <add-to-group group-id="Diff.EditorPopupMenu" anchor="after"
                           relative-to-action="Drydock.Review.CommentOnSelection"/>
         </action>
+        <!-- Drydock is reached through its tool window, not a menu: New
+             Session is outside it so the shortcut works anywhere, and the
+             from-branch entry so Git's branch menus can start one. The
+             New Session label is the D5 rename; the action ids, classes
+             and shortcuts never changed. -->
         <action id="Drydock.NewTask"
                 class="app.drydock.intellij.tasks.NewTaskAction"
-                text="New Task…"
-                description="Start an agent on a new task"
+                text="New Session…"
+                description="Start an agent session"
                 icon="AllIcons.General.Add">
             <!-- $default "alt meta N" is ⌃⌥N on macOS (the keymaps swap meta
                  and control). Not ⌥⌘N: on macOS that is Refactor | Inline in
@@ -185,13 +200,49 @@
             <keyboard-shortcut keymap="$default" first-keystroke="alt meta N"/>
         </action>
         <!-- Git's per-branch menu: the Log's Branches pane and the branches
-             popup both build it from Git.Branch. -->
+             popup both build it from Git.Branch. Its label keeps the
+             task wording (D5 renames the session action's label, not this
+             class's text, which its own update() sets). -->
         <action id="Drydock.NewTaskFromBranch"
                 class="app.drydock.intellij.tasks.NewTaskFromBranchAction"
                 text="New Drydock Task from Branch…"
                 description="Start an agent on a new task from this branch">
             <add-to-group group-id="Git.Branch" anchor="first"/>
         </action>
+        <!-- The delayed-task layer's tree actions (T20a): the Drydock tree's
+             task-node context menu. Status writes ride the task service's
+             actor-aware seam (an agent may never drop, T07), Go to blocker
+             session resolves over the watched snapshot, and Drop is asked
+             first. No shortcuts: the tree is their only surface; the panel
+             looks the ids up and falls back to locally built instances. -->
+        <action id="Drydock.DelayedTask.Start"
+                class="app.drydock.intellij.delayedtasks.DelayedTaskActions$Start"
+                text="Start Session…"
+                description="Start one session for this task and its same-project plan"/>
+        <action id="Drydock.DelayedTask.Cancel"
+                class="app.drydock.intellij.delayedtasks.DelayedTaskActions$Cancel"
+                text="Cancel Plan"
+                description="Cancel this task's plan: future stages never start, started sessions keep running, unlaunched reservations are released"/>
+        <action id="Drydock.DelayedTask.Edit"
+                class="app.drydock.intellij.delayedtasks.DelayedTaskActions$Edit"
+                text="Edit"
+                description="Open the task's file in the editor"/>
+        <action id="Drydock.DelayedTask.Drop"
+                class="app.drydock.intellij.delayedtasks.DelayedTaskActions$Drop"
+                text="Drop…"
+                description="Drop this task; a dropped task is done for and only a human may drop it"/>
+        <action id="Drydock.DelayedTask.Confirm"
+                class="app.drydock.intellij.delayedtasks.DelayedTaskActions$Confirm"
+                text="Confirm Done"
+                description="Accept the agent's done; the plan continues"/>
+        <action id="Drydock.DelayedTask.Reopen"
+                class="app.drydock.intellij.delayedtasks.DelayedTaskActions$Reopen"
+                text="Reopen"
+                description="Set the task back to open"/>
+        <action id="Drydock.DelayedTask.GotoBlockerSession"
+                class="app.drydock.intellij.delayedtasks.DelayedTaskActions$GotoBlockerSession"
+                text="Go to Blocker Session"
+                description="Switch to the session that runs this task's blocker"/>
         <!-- The agent console tab's own commands (A7): the header shortcuts
              ride EditorTabActionGroup, the platform's per-tab label-action
              seam, so every agent console tab carries them and a click

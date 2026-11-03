@@ -1,5 +1,8 @@
 package app.drydock.intellij.tasks;
 
+import app.drydock.delayedtasks.DelayedTaskService;
+import app.drydock.delayedtasks.TaskStoreWatcher;
+import app.drydock.delayedtasks.TaskStoreWatcher.WatchedSnapshot;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.Repository;
@@ -24,8 +27,18 @@ import app.drydock.process.ProcessRunner;
 import app.drydock.process.ProcessTimeoutException;
 import app.drydock.projects.SharedProject;
 
+import com.intellij.openapi.application.Application;
+import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.project.ProjectManager;
+import com.intellij.openapi.vfs.VirtualFile;
+import com.intellij.openapi.vfs.VirtualFileManager;
+import com.intellij.openapi.vfs.VfsUtilCore;
+import com.intellij.openapi.vfs.newvfs.BulkFileListener;
+import com.intellij.openapi.vfs.newvfs.events.VFileEvent;
+import com.intellij.util.messages.MessageBusConnection;
+
+import org.jetbrains.annotations.NotNull;
 
 import java.io.IOException;
 import java.lang.System.Logger;
@@ -84,6 +97,39 @@ final class TaskTreeInputs implements AutoCloseable {
     private final Map<IssueKey, CachedIssues> issueCache = new ConcurrentHashMap<>();
     private final Map<PullRequestKey, CachedPullRequests> pullRequestCache = new ConcurrentHashMap<>();
     private final ResumabilityCache resumability = new ResumabilityCache();
+    /** Task-change notifications (T17a); production observes the VFS, fakes inject. */
+    private final TaskChanges taskChanges;
+    /** The task snapshot the last gather read (T17a); empty before any publication. */
+    private volatile Optional<WatchedSnapshot> watchedTasks = Optional.empty();
+    /** The task-change unsubscribe (T17a); subscribe and close both run on the EDT. */
+    private volatile Runnable unsubscribeTasks = () -> { };
+    private volatile boolean closedInputs;
+
+    /**
+     * Task-change notifications (T17a): production observes the platform's
+     * VFS events under the task store root (P5's "VFS listener on the
+     * store") -- the same events the T13a watcher debounces into a fresh
+     * scan and a snapshot publication, so file changes (IDE saves and,
+     * after any refresh, external edits) rebuild the tree; fakes deliver
+     * publications directly, which is the seam the artifact smoke drives.
+     */
+    @FunctionalInterface
+    interface TaskChanges {
+
+        /** Subscribes to task changes; answers the unsubscribe, which never throws. */
+        Runnable subscribe(Runnable onChange);
+    }
+
+    /** The production inputs: the store's own VFS change stream. */
+    TaskTreeInputs() {
+        this(TaskTreeInputs::subscribeStoreChanges);
+    }
+
+    /** Inputs whose task changes come from {@code taskChanges} (tests and sandboxes). */
+    TaskTreeInputs(TaskChanges taskChanges) {
+        this.taskChanges = Objects.requireNonNull(taskChanges, "taskChanges");
+    }
+
 
     /** One Jira group listing request: a group id is unique per project, and the map spans projects. */
     private record JiraRequestKey(Path root, String groupId) { }
@@ -398,6 +444,11 @@ final class TaskTreeInputs implements AutoCloseable {
                         new PullRequestListing.Failed("GitHub pull-request lookup did not complete"));
             }
         }
+        // T17a: the cached task snapshot, read here in this same background
+        // pass (a volatile read of the service's last publication, never a
+        // fresh scan and never the render thread); a missing one degrades
+        // the tree to session-only input.
+        watchedTasks = cachedTasks(plugin.taskService());
         return new TaskTreeModel.Inputs(projects, sessions, byMain, mainRootOf, currentMain, currentWorking,
                 activity, running, hosts, missing, recordedRoots, worktreeContainers,
                 pullRequestContainers, githubIssueRoots, githubGhostRoots, jiraRoots, jiraGhostRoots,
@@ -572,8 +623,99 @@ final class TaskTreeInputs implements AutoCloseable {
         });
     }
 
+    /**
+     * The task snapshot of one pass (T17a): the service's last published
+     * composition, or empty before its first publication (the
+     * session-only input). Pure volatile read -- the pass consumes what
+     * the watcher already published, never scans itself.
+     */
+    static Optional<WatchedSnapshot> cachedTasks(DelayedTaskService service) {
+        return Optional.ofNullable(service.watchedSnapshot());
+    }
+
+    /** The task snapshot the last gather read (T17a); empty when none was published yet. */
+    Optional<WatchedSnapshot> watchedTasks() {
+        return watchedTasks;
+    }
+
+    /**
+     * Subscribes {@code onChange} to task changes (T17a): the panel's single
+     * subscription, whose notifications ride the existing coalesced
+     * rebuild scheduler -- a burst of store events is one rebuild request
+     * stream, never one rebuild per event. {@link #close()} unsubscribes;
+     * a subscription made after close undoes itself, so no listener
+     * survives the panel. Subscribe and close both run on the EDT (the
+     * panel's constructor and its dispose).
+     */
+    void subscribeToTasks(Runnable onChange) {
+        Runnable unsubscribe = taskChanges.subscribe(Objects.requireNonNull(onChange, "onChange"));
+        if (closedInputs) {
+            unsubscribe.run();
+            return;
+        }
+        unsubscribeTasks = unsubscribe;
+    }
+
+    /**
+     * Production task changes (T17a, P5): the platform's VFS events under
+     * the plugin's task store root -- the input side of the service's
+     * snapshot publication. One notification per event batch that touches
+     * the store, delivered on the EDT; the unsubscribe disconnects the
+     * bus connection. Without a running IDE application there is nothing
+     * to observe, and the no-op unsubscribe keeps a headless
+     * construction session-only.
+     */
+    static Runnable subscribeStoreChanges(Runnable onChange) {
+        Application application;
+        try {
+            application = ApplicationManager.getApplication();
+        } catch (RuntimeException | LinkageError noIde) {
+            application = null;
+        }
+        if (application == null) {
+            return () -> { };
+        }
+        Path root;
+        try {
+            root = DrydockPluginService.getInstance().taskService().root();
+        } catch (RuntimeException noService) {
+            return () -> { };
+        }
+        MessageBusConnection connection = application.getMessageBus().connect();
+        connection.subscribe(VirtualFileManager.VFS_CHANGES, new BulkFileListener() {
+            @Override
+            public void after(@NotNull List<? extends VFileEvent> events) {
+                for (VFileEvent event : events) {
+                    if (underRoot(event, root)) {
+                        onChange.run();
+                        return;
+                    }
+                }
+            }
+        });
+        return connection::disconnect;
+    }
+
+    /** Whether one VFS event names a file under the store root; no disk access. */
+    private static boolean underRoot(VFileEvent event, Path root) {
+        try {
+            VirtualFile file = event.getFile();
+            Path path = file != null ? file.toNioPath()
+                    : Path.of(VfsUtilCore.urlToPath(event.getPath()));
+            return path.toAbsolutePath().normalize().startsWith(root);
+        } catch (RuntimeException notLocalOrUnparseable) {
+            return false;
+        }
+    }
+
     @Override
     public void close() {
+        closedInputs = true;
+        // T17a: the task subscription goes before the services below, so a
+        // publication racing the close cannot rebuild a disposed panel.
+        Runnable unsubscribe = unsubscribeTasks;
+        unsubscribeTasks = () -> { };
+        unsubscribe.run();
         worktrees.close();
         github.close();
         jira.close();

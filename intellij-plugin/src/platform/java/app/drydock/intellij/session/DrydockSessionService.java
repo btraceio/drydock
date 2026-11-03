@@ -6,6 +6,7 @@ import app.drydock.agent.api.AgentRegistry;
 import app.drydock.agent.api.ConversationSource;
 import app.drydock.agent.api.CreateContext;
 import app.drydock.agent.api.LaunchPlan;
+import app.drydock.agent.api.LaunchResources;
 import app.drydock.agent.api.McpAccess;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdDiscovery;
@@ -14,6 +15,7 @@ import app.drydock.agent.api.StdioMcpServer;
 import app.drydock.agent.providers.AgentCommands;
 import app.drydock.agent.spi.AgentProvider;
 import app.drydock.app.ApplicationStateStore;
+import app.drydock.delayedtasks.TaskLaunchResources;
 import app.drydock.domain.AgentBinding;
 import app.drydock.domain.ApplicationState;
 import app.drydock.domain.ManagedAgentSession;
@@ -42,6 +44,7 @@ import app.drydock.mcp.McpToolException;
 import app.drydock.mcp.PromptSafety;
 import app.drydock.process.ProcessResult;
 import app.drydock.process.ProcessRunner;
+import app.drydock.tasks.TaskGuidance;
 
 import java.io.IOException;
 import java.lang.System.Logger;
@@ -158,11 +161,29 @@ public final class DrydockSessionService implements AgentExecutionListener {
     /** The end-of-agent half: persistence, late id binding, and the id bookkeeping both halves share. */
     private final SessionEnds ends;
 
+    /**
+     * The launch-resources resolver (T29a): null is every pre-T29
+     * caller's path -- nothing resolves and every launch is
+     * byte-identical to before.
+     */
+    private final TaskLaunchResources taskLaunchResources;
+
     public DrydockSessionService(DrydockPluginService plugin, AgentConsoleHost consoles,
             ProjectRepositoryService repos, ExecutorService executor) {
         this(plugin.initialization(), plugin::stateStore, plugin::registry, plugin::watcher,
                 repos::repositoryIdFor, consoles, executor, IdeMcpServer::forWorktree, plugin.reviewAccess(),
-                AgentExecutionRegistry.getInstance().launchClaims());
+                AgentExecutionRegistry.getInstance().launchClaims(), taskLaunchResources(plugin));
+    }
+
+    /**
+     * The production launch-resources resolver (T29a): the per-user task
+     * store's retained receipts plus the guidance installed under that
+     * same root, gated on the live MCP surface actually serving the task
+     * tools (the router's own serving set, upstream of every provider).
+     */
+    private static TaskLaunchResources taskLaunchResources(DrydockPluginService plugin) {
+        Path tasksRoot = plugin.taskService().root();
+        return new TaskLaunchResources(tasksRoot, new TaskGuidance(tasksRoot), plugin::mcpServesTaskTools);
     }
 
     /**
@@ -177,6 +198,22 @@ public final class DrydockSessionService implements AgentExecutionListener {
             AgentConsoleHost consoles, ExecutorService executor,
             Function<Path, List<StdioMcpServer>> stdioMcpServers, SessionMcpAccess mcpAccess,
             LaunchClaims claims) {
+        this(initialization, stateStore, registry, watcher, repositoryIdFor, consoles, executor,
+                stdioMcpServers, mcpAccess, claims, null);
+    }
+
+    /**
+     * As above, with the launch-resources resolver (T29a): the resolver's
+     * blocking receipt and directory I/O runs on this service's executor
+     * stages, never the EDT. A null resolver is every pre-T29 caller's
+     * path, byte-identical.
+     */
+    DrydockSessionService(CompletableFuture<Void> initialization, Supplier<ApplicationStateStore> stateStore,
+            Supplier<AgentRegistry> registry, Supplier<SessionActivityWatcher> watcher,
+            Function<Path, CompletableFuture<RepositoryId>> repositoryIdFor,
+            AgentConsoleHost consoles, ExecutorService executor,
+            Function<Path, List<StdioMcpServer>> stdioMcpServers, SessionMcpAccess mcpAccess,
+            LaunchClaims claims, TaskLaunchResources taskLaunchResources) {
         this.initialization = Objects.requireNonNull(initialization, "initialization");
         this.stateStore = Objects.requireNonNull(stateStore, "stateStore");
         this.registry = Objects.requireNonNull(registry, "registry");
@@ -187,6 +224,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
         this.stdioMcpServers = Objects.requireNonNull(stdioMcpServers, "stdioMcpServers");
         this.mcpAccess = Objects.requireNonNull(mcpAccess, "mcpAccess");
         this.claims = Objects.requireNonNull(claims, "claims");
+        this.taskLaunchResources = taskLaunchResources;
         this.ends = new SessionEnds(stateStore, registry, executor, mcpAccess, claims);
     }
 
@@ -358,9 +396,16 @@ public final class DrydockSessionService implements AgentExecutionListener {
         Object snapshot = discovery.map(value -> value.snapshot(candidate.workingDirectory())).orElse(null);
         Instant launchedAt = Instant.now();
         Optional<McpAccess> access = mcpAccessFor(candidate.id(), provider);
+        // T29a: the replacement create resolves the SAME resources a direct
+        // create of this session would, before its context is built -- a
+        // transfer must not drop the session's task context.
+        Optional<LaunchResources> resources = launchResourcesFor(candidate.id(), access);
         CreateContext context = new CreateContext(candidate.displayName(), generatedId,
                 candidate.workingDirectory(), Optional.empty(), access, false,
                 candidate.readOnly(), initialPrompt).withStdioMcpServers(stdioMcpServersFor(candidate.workingDirectory()));
+        if (resources.isPresent()) {
+            context = context.withLaunchResources(resources.get());
+        }
         LaunchPlan plan = provider.buildCreateCommand(context);
         releaseIfUnused(candidate.id(), access, plan);
         if (!plan.supported()) {
@@ -599,9 +644,18 @@ public final class DrydockSessionService implements AgentExecutionListener {
         Instant launchedAt = Instant.now();
         ends.lastLaunchedAt().put(prepared.id(), launchedAt);
         Optional<McpAccess> access = mcpAccessFor(prepared.id(), provider);
+        // Resolved BEFORE the context is built (T29a): the receipt and
+        // directory I/O is blocking, and this whole pre-spawn stage runs on
+        // the executor, never the EDT (AGENTS.md). A receipt directory that
+        // cannot be resolved refuses the launch visibly here; no resources
+        // resolve to empty and the launch is byte-identical to before.
+        Optional<LaunchResources> resources = launchResourcesFor(prepared.id(), access);
         CreateContext ctx = new CreateContext(prepared.displayName(), generatedId, cwd,
                 Optional.empty(), access, model, false, prepared.readOnly(), initialPrompt, List.of())
                 .withStdioMcpServers(stdioMcpServersFor(cwd));
+        if (resources.isPresent()) {
+            ctx = ctx.withLaunchResources(resources.get());
+        }
         LaunchPlan plan = provider.buildCreateCommand(ctx);
         releaseIfUnused(prepared.id(), access, plan);
         if (!plan.supported()) {
@@ -687,6 +741,21 @@ public final class DrydockSessionService implements AgentExecutionListener {
             LOG.log(Level.WARNING, () -> started.prepared().agentKind() + " id discovery failed for "
                     + started.prepared().id() + "; resume will use the picker: " + e);
         }
+    }
+
+    /**
+     * The resources this launch carries (T29a), resolved on this executor
+     * stage BEFORE any context is built, never the EDT: the session's
+     * retained receipt directories plus the installed guidance when this
+     * launch's MCP access reaches a task-serving surface. A receipt
+     * directory that cannot be resolved is a visible refusal, never a
+     * silent empty-resources launch; a session carrying neither resolves
+     * to empty and its launch is byte-identical to the pre-task one. A
+     * null resolver (the pre-T29 seam) resolves nothing, byte-identically.
+     */
+    private Optional<LaunchResources> launchResourcesFor(ManagedSessionId id, Optional<McpAccess> access) {
+        TaskLaunchResources resolver = taskLaunchResources;
+        return resolver == null ? Optional.empty() : resolver.resolve(id, access);
     }
 
     /**
@@ -923,11 +992,18 @@ public final class DrydockSessionService implements AgentExecutionListener {
             // launch when available. The provider's own no-id branch is what a
             // session without an id gets (AC21).
             Optional<McpAccess> access = mcpAccessFor(session.id(), provider);
+            // T29a: resolved before the context, on this executor stage
+            // (never the EDT); a resumed task session re-receives exactly
+            // what its retained receipts and the MCP surface resolve now.
+            Optional<LaunchResources> resources = launchResourcesFor(session.id(), access);
             ResumeContext ctx = new ResumeContext(session.agentSessionId(), session.agentSessionName(),
                     session.workingDirectory(), Optional.empty(), access, false, session.readOnly(),
                     List.of(),
                     session.startedWithTask() ? Optional.of(RESUME_PROMPT) : Optional.empty())
                     .withStdioMcpServers(stdioMcpServersFor(session.workingDirectory()));
+            if (resources.isPresent()) {
+                ctx = ctx.withLaunchResources(resources.get());
+            }
             plan = provider.buildResumeCommand(ctx);
             releaseIfUnused(session.id(), access, plan);
         } catch (RuntimeException failure) {

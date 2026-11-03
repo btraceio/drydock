@@ -7,6 +7,7 @@ import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.ConversationSource;
 import app.drydock.agent.api.CreateContext;
 import app.drydock.agent.api.LaunchPlan;
+import app.drydock.agent.api.LaunchResources;
 import app.drydock.agent.api.McpAccess;
 import app.drydock.agent.api.McpDelivery;
 import app.drydock.agent.api.ResumeContext;
@@ -239,7 +240,8 @@ public final class PiAgentProvider implements AgentProvider {
         if (c.remote().isPresent() || !supportsLaunch(currentCapabilities())) {
             return LaunchPlan.unsupported();   // Pi declines remote
         }
-        PiCommand pi = piCommand(c.mcp(), c.stdioMcpServers(), c.evalMode(), c.initialPrompt(), c.model());
+        PiCommand pi = piCommand(c.mcp(), c.stdioMcpServers(), c.evalMode(), c.initialPrompt(),
+                c.model(), c.launchResources());
         // The extension submits after Pi has mounted its UI and initialized
         // the session. If its owner-only file could not be installed, retain
         // the CLI positional form as a degraded but functional fallback.
@@ -254,7 +256,8 @@ public final class PiAgentProvider implements AgentProvider {
         if (r.remote().isPresent() || !supportsLaunch(currentCapabilities())) {
             return LaunchPlan.unsupported();
         }
-        String pi = piCommand(r.mcp(), r.stdioMcpServers(), r.evalMode(), Optional.empty(), Optional.empty()).command();
+        String pi = piCommand(r.mcp(), r.stdioMcpServers(), r.evalMode(), Optional.empty(), Optional.empty(),
+                r.launchResources()).command();
         if (r.agentSessionId().isPresent()) {
             // The resume prompt rides pi's positional [messages...] after "--"
             // (verified against pi --help: messages are accepted in interactive
@@ -414,6 +417,12 @@ public final class PiAgentProvider implements AgentProvider {
 
     private PiCommand piCommand(Optional<McpAccess> access, List<StdioMcpServer> stdioServers, boolean eval,
                                 Optional<String> initialPrompt, Optional<String> model) {
+        return piCommand(access, stdioServers, eval, initialPrompt, model, Optional.empty());
+    }
+
+    private PiCommand piCommand(Optional<McpAccess> access, List<StdioMcpServer> stdioServers, boolean eval,
+                                Optional<String> initialPrompt, Optional<String> model,
+                                Optional<LaunchResources> launchResources) {
         Optional<Path> configFile = access.flatMap(McpAccess::credentialFile);
         // PI_SESSION_ID: the user's pi models.json sends `x-claude-code-session-id: $PI_SESSION_ID`
         // to omlx_proxy for per-session correlation, but pi does NOT set PI_SESSION_ID in its
@@ -494,7 +503,43 @@ public final class PiAgentProvider implements AgentProvider {
         // default. Launch-time only: buildResumeCommand never appends it, so a
         // resume keeps whatever model the conversation last used.
         model.ifPresent(m -> command.append(" --model ").append(AgentCommands.shellQuote(m)));
+        appendSkillFlag(command, launchResources, configFile);
         return new PiCommand(command.toString(), useInitialPrompt);
+    }
+
+    /**
+     * The guidance skill file as a safely quoted {@code --skill} option, on
+     * the task-tool gate the coordinator granted: the launch carries the
+     * guidance location AND MCP access (the credential file). The
+     * TASK_TOOLS intersection itself stays upstream, in whoever attaches
+     * the guidance -- no tool list is restated here. Appended in this COMMON
+     * construction, which every create/resume path builds on, before any
+     * {@code --}/positional prompt a caller adds after it returns -- so the
+     * flag survives both the initial-prompt injection path and the CLI
+     * positional fallback. Eval stays included: pi's eval routing runs in
+     * the same local process, which can see the host path. Empty whenever
+     * the gate does not hold -- guidance absent, or a launch without MCP
+     * access -- leaving the command byte-identical to today's; the flag is
+     * additive, never a launch blocker.
+     */
+    private static void appendSkillFlag(StringBuilder command, Optional<LaunchResources> resources,
+                                        Optional<Path> configFile) {
+        if (configFile.isEmpty()) {
+            return;
+        }
+        resources.flatMap(LaunchResources::taskGuidance)
+                .ifPresent(guidance -> command.append(" --skill ").append(AgentCommands.shellQuote(
+                        skillFileIn(guidance).toString())));
+    }
+
+    /**
+     * The SKILL.md file inside a guidance directory: the layout
+     * {@code app.drydock.tasks.TaskGuidance} materializes (its
+     * {@code piSkillFile()} seam), resolved from the provider-neutral
+     * directory {@link LaunchResources} carries.
+     */
+    private static Path skillFileIn(Path guidanceDirectory) {
+        return guidanceDirectory.resolve(Path.of("skills", "drydock-tasks", "SKILL.md"));
     }
 
     /**

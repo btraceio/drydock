@@ -7,6 +7,7 @@ import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.ConversationSource;
 import app.drydock.agent.api.CreateContext;
 import app.drydock.agent.api.LaunchPlan;
+import app.drydock.agent.api.LaunchResources;
 import app.drydock.agent.api.McpAccess;
 import app.drydock.agent.api.McpDelivery;
 import app.drydock.agent.api.ResumeContext;
@@ -285,9 +286,25 @@ public final class ClaudeAgentProvider implements AgentProvider {
     @Override
     public LaunchPlan buildCreateCommand(CreateContext c) {
         if (c.remote().isPresent()) {
+            // A remote claude runs on another host: an extra working directory
+            // or the task-guidance location is a path on THIS machine, invisible
+            // there. Refusing the launch is the honest answer (the
+            // LaunchResources consumer contract: a resource the provider
+            // cannot serve is never silently dropped, and a host path is never
+            // pushed through the ssh hop).
+            if (requestsHostPathResource(c.launchResources())) {
+                return LaunchPlan.unsupported();
+            }
             return LaunchPlan.of(
                     SshCommandBuilder.interactiveSessionCommand(c.remote().get(),
                             REMOTE_COMMAND_PREFIX + modelFlag(c.model())), false);
+        }
+        if (c.evalMode() && requestsHostPathResource(c.launchResources())) {
+            // An eval claude runs inside a container that mounts only the
+            // session worktree and the hook/activity dirs, so an extra
+            // directory or the guidance location on this host is invisible
+            // to it -- the same refusal stance as remote, for the same reason.
+            return LaunchPlan.unsupported();
         }
         ClaudeCapabilities caps = detectCaps();
         // Eval runs inside a container whose PATH has `claude` (installed by the
@@ -309,6 +326,9 @@ public final class ClaudeAgentProvider implements AgentProvider {
         command.append(mcpConfigFlag(caps, c.mcp().flatMap(McpAccess::credentialFile)));
         command.append(stdioMcpConfigFlag(caps, c.stdioMcpServers()));
         command.append(planModeFlag(caps, c.readOnly()));
+        command.append(addDirFlags(c.launchResources()));
+        command.append(pluginDirFlag(c.launchResources(),
+                c.mcp().flatMap(McpAccess::credentialFile)));
         // The task goes last, as claude's positional [prompt], so the session
         // opens already working on it. After "--" so a task that starts with
         // a dash is a prompt, never an option. Remote launches above do not
@@ -326,6 +346,12 @@ public final class ClaudeAgentProvider implements AgentProvider {
     @Override
     public LaunchPlan buildResumeCommand(ResumeContext r) {
         if (r.remote().isPresent()) {
+            // As on create: a remote claude cannot see this machine's extra
+            // working directories or task guidance, so a resume that requests
+            // them is refused rather than silently launching without them.
+            if (requestsHostPathResource(r.launchResources())) {
+                return LaunchPlan.unsupported();
+            }
             String exec = REMOTE_COMMAND_PREFIX + " --resume";
             if (r.agentSessionId().isPresent()) {
                 exec += " " + SshCommandBuilder.posixQuote(r.agentSessionId().get());
@@ -334,9 +360,17 @@ public final class ClaudeAgentProvider implements AgentProvider {
             }
             return LaunchPlan.of(SshCommandBuilder.interactiveSessionCommand(r.remote().get(), exec), false);
         }
+        if (r.evalMode() && requestsHostPathResource(r.launchResources())) {
+            // The eval container mounts only the session worktree and the
+            // hook dirs -- the create-path refusal, applied to resumes, now
+            // covering the guidance location too.
+            return LaunchPlan.unsupported();
+        }
         ClaudeCapabilities caps = detectCaps();
         String suffix = activitySettingsFlag(caps) + mcpConfigFlag(caps, r.mcp().flatMap(McpAccess::credentialFile))
-                + stdioMcpConfigFlag(caps, r.stdioMcpServers()) + planModeFlag(caps, r.readOnly());
+                + stdioMcpConfigFlag(caps, r.stdioMcpServers()) + planModeFlag(caps, r.readOnly())
+                + addDirFlags(r.launchResources())
+                + pluginDirFlag(r.launchResources(), r.mcp().flatMap(McpAccess::credentialFile));
         // Eval runs inside a container whose PATH has `claude`, not the host path.
         String binary = r.evalMode() ? "claude" : claudeBinary();
         // ddtool is not in the eval container and apiKeyHelper is stripped
@@ -465,6 +499,79 @@ public final class ClaudeAgentProvider implements AgentProvider {
         } catch (IOException e) {
             throw new IllegalStateException("Could not write eval entrypoint: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * Whether this launch requests extra working directories, whose rendering
+     * is this provider's to serve (the {@link LaunchResources} consumer
+     * contract). An absent or empty resource set is no request at all: those
+     * launches keep exactly today's command.
+     */
+    private static boolean requestsExtraDirectories(Optional<LaunchResources> resources) {
+        return resources.map(r -> !r.extraDirectories().isEmpty()).orElse(false);
+    }
+
+    /**
+     * Each extra working directory as a safely quoted {@code --add-dir}
+     * argument, positioned before any {@code --}/positional prompt so a
+     * directory is always an option, never prompt text. First-occurrence
+     * order is preserved: {@link LaunchResources} has already collapsed
+     * duplicates. Empty for a launch that requests none -- byte-identical to
+     * the pre-resource command.
+     */
+    private static String addDirFlags(Optional<LaunchResources> resources) {
+        if (resources.isEmpty()) {
+            return "";
+        }
+        StringBuilder flags = new StringBuilder();
+        for (Path dir : resources.get().extraDirectories()) {
+            flags.append(" --add-dir ").append(AgentCommands.shellQuote(dir.toString()));
+        }
+        return flags.toString();
+    }
+
+    /**
+     * Whether this launch requests the task guidance, whose rendering is
+     * this provider's to serve through Claude's {@code --plugin-dir}: the
+     * guidance location is present in {@link LaunchResources}. Absent
+     * guidance is no request at all (LaunchResources: empty means nothing
+     * was requested) -- those launches keep exactly today's command and the
+     * flag below stays off.
+     */
+    private static boolean requestsTaskGuidance(Optional<LaunchResources> resources) {
+        return resources.flatMap(LaunchResources::taskGuidance).isPresent();
+    }
+
+    /**
+     * Whether this launch requests a resource that is a path on THIS host
+     * (an extra working directory, or the task guidance): the remote/eval
+     * refusal predicate, since neither context can see host paths. An
+     * absent resource set is no request: remote and eval launches without
+     * resources keep exactly today's command.
+     */
+    private static boolean requestsHostPathResource(Optional<LaunchResources> resources) {
+        return requestsExtraDirectories(resources) || requestsTaskGuidance(resources);
+    }
+
+    /**
+     * The guidance directory as a safely quoted {@code --plugin-dir} option,
+     * rendered on the task-tool gate the coordinator granted: the launch
+     * carries the guidance location AND MCP access (the credential file).
+     * The TASK_TOOLS intersection itself stays upstream, in whoever attaches
+     * the guidance -- no tool list is restated here. Position follows the
+     * {@link #addDirFlags} precedent: an option, before any {@code --}/
+     * positional prompt, so it is never eaten as prompt text. Empty
+     * whenever the gate does not hold -- guidance absent, or a launch
+     * without MCP access -- leaving the command byte-identical to today's;
+     * the flag is additive, never a launch blocker.
+     */
+    private static String pluginDirFlag(Optional<LaunchResources> resources, Optional<Path> mcpCredential) {
+        if (mcpCredential.isEmpty()) {
+            return "";
+        }
+        return resources.flatMap(LaunchResources::taskGuidance)
+                .map(dir -> " --plugin-dir " + AgentCommands.shellQuote(dir.toString()))
+                .orElse("");
     }
 
     private String activitySettingsFlag(ClaudeCapabilities caps) {

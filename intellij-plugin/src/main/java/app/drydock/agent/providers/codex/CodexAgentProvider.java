@@ -7,6 +7,7 @@ import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.ConversationSource;
 import app.drydock.agent.api.CreateContext;
 import app.drydock.agent.api.LaunchPlan;
+import app.drydock.agent.api.LaunchResources;
 import app.drydock.agent.api.McpAccess;
 import app.drydock.agent.api.McpDelivery;
 import app.drydock.agent.api.ResumeContext;
@@ -131,12 +132,39 @@ public final class CodexAgentProvider implements AgentProvider {
         // to the eval account. See ManagedAgentSession.evalMode.
         // DISCOVERED: no id; no --settings
         //
+        // Extra directories are served in every context this provider can
+        // serve: remote is refused outright above, and an eval session runs
+        // the CLI as a local process (evalMode only marks the session, it
+        // does not relocate it), so the CLI can see any host path.
         String command = codexCommand(c.mcp(), c.readOnly()) + modelFlag(c.model())
-                + stdioOverrides(c.stdioMcpServers());
+                + stdioOverrides(c.stdioMcpServers()) + addDirFlags(c.launchResources());
         if (c.initialPrompt().isPresent()) {
             command += " -- " + AgentCommands.shellQuote(c.initialPrompt().get());
         }
         return LaunchPlan.of(command, false);
+    }
+
+    /**
+     * Each extra working directory as a safely quoted {@code --add-dir}
+     * argument, a GLOBAL option before any {@code resume} subcommand and
+     * before any {@code --}/positional prompt (the slot {@code --sandbox} and
+     * the {@code -c} overrides already use), so a directory is always an
+     * option, never prompt text. First-occurrence order is preserved:
+     * {@link LaunchResources} has already collapsed duplicates. Empty for a
+     * launch that requests none -- byte-identical to the pre-resource
+     * command. Every context this provider can serve runs the CLI locally
+     * (remote is refused outright, eval is a local process), so a requested
+     * directory is always renderable here: no refusal branch is needed.
+     */
+    private static String addDirFlags(Optional<LaunchResources> resources) {
+        if (resources.isEmpty()) {
+            return "";
+        }
+        StringBuilder flags = new StringBuilder();
+        for (Path dir : resources.get().extraDirectories()) {
+            flags.append(" --add-dir ").append(AgentCommands.shellQuote(dir.toString()));
+        }
+        return flags.toString();
     }
 
     /**
@@ -157,7 +185,8 @@ public final class CodexAgentProvider implements AgentProvider {
         if (r.remote().isPresent()) {
             return LaunchPlan.unsupported();
         }
-        String codex = codexCommand(r.mcp(), r.readOnly()) + stdioOverrides(r.stdioMcpServers());
+        String codex = codexCommand(r.mcp(), r.readOnly()) + stdioOverrides(r.stdioMcpServers())
+                + addDirFlags(r.launchResources());
         if (r.agentSessionId().isPresent()) {
             // codex resume [SESSION_ID] [PROMPT] — the prompt is a documented
             // positional (verified against `codex resume --help`), rendered

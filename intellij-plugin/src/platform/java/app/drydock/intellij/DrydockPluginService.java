@@ -7,6 +7,7 @@ import app.drydock.agent.api.AgentContext;
 import app.drydock.agent.api.McpAccess;
 import app.drydock.agent.api.McpDelivery;
 import app.drydock.app.ApplicationStateStore;
+import app.drydock.delayedtasks.DelayedTaskService;
 import app.drydock.intellij.agent.AgentExecution;
 import app.drydock.intellij.agent.AgentExecutionRegistry;
 import app.drydock.intellij.agent.QuitConfirmation;
@@ -21,6 +22,7 @@ import app.drydock.intellij.projects.SharedProjectsService;
 import app.drydock.intellij.startup.DrydockStartupActivity;
 import app.drydock.mcp.McpSessionContext;
 import app.drydock.mcp.McpSessionContext.RenameOutcome;
+import app.drydock.mcp.TaskTools;
 import app.drydock.intellij.review.ReviewBackend;
 import app.drydock.intellij.review.SessionMcpAccess;
 import app.drydock.projects.SharedProject;
@@ -32,6 +34,7 @@ import com.intellij.openapi.Disposable;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.PathManager;
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.util.Disposer;
 
 import java.io.IOException;
 import java.lang.System.Logger;
@@ -74,13 +77,42 @@ public final class DrydockPluginService implements Disposable {
     /** Bounded wait for init during disposal and for tests; generous next to the store's own flush timeout. */
     private static final Duration INIT_TIMEOUT = Duration.ofSeconds(30);
 
+    /**
+     * Bounded wait for the task service before the review backend is built
+     * with the task delegate (T14a): a wedged task store delays the plugin's
+     * initialization at most this long, then the backend degrades to the
+     * review+rename surface -- the plugin always finishes initializing.
+     */
+    private static final Duration TASK_INIT_TIMEOUT = Duration.ofSeconds(30);
+
+    /**
+     * The production backend factory (T14a), shared so initialize() can
+     * recognize the production service by identity: the production path
+     * receives the task delegate once the task service is up, and without
+     * one when it is not -- both through the five-argument create.
+     */
+    private static final BackendFactory PRODUCTION_BACKEND = new BackendFactory() {
+        @Override
+        public ReviewBackend create(Path baseDir, Supplier<List<ManagedAgentSession>> sessions,
+                                   Supplier<List<Repository>> repositories, AgentRegistry registry) {
+            return create(baseDir, sessions, repositories, registry, null);
+        }
+
+        @Override
+        public ReviewBackend create(Path baseDir, Supplier<List<ManagedAgentSession>> sessions,
+                                   Supplier<List<Repository>> repositories, AgentRegistry registry,
+                                   TaskTools taskTools) {
+            return productionBackend(baseDir, sessions, repositories, registry, taskTools);
+        }
+    };
+
     public static DrydockPluginService getInstance() {
         return ApplicationManager.getApplication().getService(DrydockPluginService.class);
     }
 
     public DrydockPluginService() {
         this(defaultBaseDir(), SharedProjectsFile.defaultFile(), DrydockPluginService::seedFromApp,
-                DrydockPluginService::productionBackend, INIT_TIMEOUT);
+                PRODUCTION_BACKEND, INIT_TIMEOUT);
         // The quit question, for as long as the plugin is loaded. Here, not in
         // plugin.xml: the quit veto is an ApplicationListener added through
         // the application, not a message-bus topic.
@@ -114,6 +146,19 @@ public final class DrydockPluginService implements Disposable {
     interface BackendFactory {
         ReviewBackend create(Path baseDir, Supplier<List<ManagedAgentSession>> sessions,
                              Supplier<List<Repository>> repositories, AgentRegistry registry);
+
+        /**
+         * As above, with the delayed-task delegate (T14a): the production
+         * factory builds the review+rename+task union surface from it, and a
+         * factory that does not know the delegate -- every injected test
+         * factory -- ignores it, so its behavior is exactly what it always
+         * was and the four-argument seams are unchanged.
+         */
+        default ReviewBackend create(Path baseDir, Supplier<List<ManagedAgentSession>> sessions,
+                                     Supplier<List<Repository>> repositories, AgentRegistry registry,
+                                     TaskTools taskTools) {
+            return create(baseDir, sessions, repositories, registry);
+        }
     }
 
     private DrydockPluginService(Path baseDir, Path sharedProjectsFile, Supplier<List<SharedProject>> appSeed,
@@ -129,6 +174,14 @@ public final class DrydockPluginService implements Disposable {
                 }));
         this.repository = new JsonApplicationStateRepository(baseDir.resolve("state.json"));
         this.executor = Executors.newVirtualThreadPerTaskExecutor();
+        // The application-level task domain (T12a): one per-user store root
+        // (never under this IDE's session-state dir), initialized on the
+        // shared executor; its failures are isolated and non-fatal, and it
+        // is closed -- flushing pending store writes -- as this service's
+        // Disposable child, before this executor shuts down.
+        this.taskService = new DelayedTaskService(DelayedTaskService.defaultRoot(), executor,
+                () -> catalogState().sessions(), () -> catalogState().repositories());
+        Disposer.register(this, taskService::close);
         this.initialization = CompletableFuture.runAsync(this::initialize, executor);
     }
 
@@ -138,6 +191,7 @@ public final class DrydockPluginService implements Disposable {
     private final ExecutorService executor;
     private final BackendFactory backends;
     private final Duration initTimeout;
+    private final DelayedTaskService taskService;
     private final AtomicBoolean disposed = new AtomicBoolean();
     private final CompletableFuture<Void> initialization;
 
@@ -156,12 +210,57 @@ public final class DrydockPluginService implements Disposable {
      * The production review backend, built after tree-sitter's native
      * libraries are pointed at this IDE's own directory ({@link
      * #useOwnTreeSitterLibraries}). The backend is what parses, so no
-     * library loads before this runs.
+     * library loads before this runs. {@code taskTools} is the task
+     * delegate (T14a) when the task service is up; without it the backend
+     * degrades to the review+rename surface.
      */
     private static ReviewBackend productionBackend(Path baseDir, Supplier<List<ManagedAgentSession>> sessions,
-                                                   Supplier<List<Repository>> repositories, AgentRegistry registry) {
+                                                   Supplier<List<Repository>> repositories, AgentRegistry registry,
+                                                   TaskTools taskTools) {
         useOwnTreeSitterLibraries(Path.of(PathManager.getSystemPath()).resolve("drydock").resolve("tree-sitter"));
-        return new ReviewBackend(baseDir, sessions, repositories, registry, DrydockPluginService::renameFromAgent);
+        return buildBackend(baseDir, sessions, repositories, registry, taskTools);
+    }
+
+    /**
+     * The review backend for {@code taskTools}: the review+rename+task
+     * union surface when it is present, the legacy review+rename surface
+     * when it is null -- the graceful degradation of a failed task service.
+     * Static and IDE-free, apart from the rename write it hands the backend
+     * (invoked only on a session_rename call, never during construction),
+     * so the artifact smoke can exercise both paths headlessly.
+     */
+    static ReviewBackend buildBackend(Path baseDir, Supplier<List<ManagedAgentSession>> sessions,
+                                      Supplier<List<Repository>> repositories, AgentRegistry registry,
+                                      TaskTools taskTools) {
+        return taskTools == null
+                ? new ReviewBackend(baseDir, sessions, repositories, registry,
+                        DrydockPluginService::renameFromAgent)
+                : new ReviewBackend(baseDir, sessions, repositories, registry,
+                        DrydockPluginService::renameFromAgent, taskTools);
+    }
+
+    /**
+     * The task-tool delegate for the review backend (T14a): the task
+     * service's {@link TaskTools}, once its initialization has completed
+     * -- service up, then the delegate, then the backend built with it. The
+     * wait is bounded, so a wedged task store cannot hang the plugin's
+     * initialization; any failure (init error or timeout) degrades to no
+     * delegate -- the backend keeps the review+rename surface -- and is
+     * logged, never fatal. Static and IDE-free so the artifact smoke can
+     * exercise the degradation path against the real decision.
+     */
+    static TaskTools taskDelegate(DelayedTaskService service) {
+        try {
+            service.initialize().get(TASK_INIT_TIMEOUT.toNanos(), TimeUnit.NANOSECONDS);
+            return service.taskTools();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        } catch (ExecutionException | TimeoutException e) {
+            LOG.log(Level.WARNING, "Drydock tasks are unavailable; the review backend serves review"
+                    + " and rename tools only", e);
+            return null;
+        }
     }
 
     /**
@@ -278,6 +377,33 @@ public final class DrydockPluginService implements Disposable {
     }
 
     /**
+     * Whether the MCP surface a credentialed launch reaches serves the
+     * four task tools (T29a): the live review backend's own serving set,
+     * false before initialization completes and for a degraded
+     * (review+rename only) backend -- the upstream task-tool-capability
+     * gate for launch resources, with no tool list restated here.
+     */
+    public boolean mcpServesTaskTools() {
+        ReviewBackend backend = reviewBackend;
+        return backend != null && backend.servesTaskTools();
+    }
+
+    /**
+     * The application-level delayed-task service: the per-user task store and
+     * the task MCP tool context, one instance for the whole IDE, independent
+     * of open projects. Usable at once; its store appears asynchronously.
+     */
+    public DelayedTaskService taskService() {
+        return taskService;
+    }
+
+    /** The live session/repository catalogs for the task service; empty until initialization. */
+    private ApplicationState catalogState() {
+        ApplicationStateStore store = stateStore;
+        return store == null ? ApplicationState.empty() : store.state();
+    }
+
+    /**
      * The registered projects shared with the standalone app: what the
      * Drydock tool window lists. Usable at once; its first read completes
      * shortly after the service starts.
@@ -346,8 +472,14 @@ public final class DrydockPluginService implements Disposable {
                 new AgentContext(baseDir, baseDir.resolve("activity"), executor),
                 DrydockPluginService.class.getClassLoader());
         try {
+            // T14a: the production factory receives the task delegate only
+            // after the task service is up (its failure or timeout builds the
+            // backend without it, keeping the review+rename surface); an
+            // injected factory keeps receiving exactly the four arguments it
+            // always did, so its behavior is unchanged.
             ReviewBackend backend = backends.create(baseDir,
-                    () -> stateStore.state().sessions(), () -> stateStore.state().repositories(), registry);
+                    () -> stateStore.state().sessions(), () -> stateStore.state().repositories(), registry,
+                    backends == PRODUCTION_BACKEND ? taskDelegate(taskService) : null);
             backend.start();
             publishOrClose(backend);
         } catch (RuntimeException e) {

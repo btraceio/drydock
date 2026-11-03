@@ -18,6 +18,7 @@ import app.drydock.mcp.McpSessionContext.RenameOutcome;
 import app.drydock.mcp.McpSessionRegistry;
 import app.drydock.mcp.McpSessionRegistry.Spawn;
 import app.drydock.mcp.McpToolRouter;
+import app.drydock.mcp.TaskTools;
 import app.drydock.mcp.WorkspaceMcpSessionContext;
 import app.drydock.review.AnnotationStore;
 import app.drydock.review.PendingQuestions;
@@ -31,11 +32,15 @@ import java.lang.System.Logger.Level;
 import java.net.InetSocketAddress;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiFunction;
 import java.util.function.Supplier;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * The review stack of the IntelliJ plugin: the annotation and tour stores,
@@ -65,6 +70,8 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
     private final McpSessionRegistry mcpRegistry;
     private final McpConfigWriter configWriter;
     private final McpServer server;
+    /** The router {@link #server} serves; the task-capability query reads its serving set. */
+    private final McpToolRouter router;
     private final SessionReviewScopeResolver scopeResolver;
     private final GhCliService pullRequests;
     private final AtomicBoolean closed = new AtomicBoolean();
@@ -128,6 +135,90 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
                 (session, draft) -> notServed("session_handoff"),
                 pendingQuestions);
         McpToolRouter router = new McpToolRouter(context, mcpRegistry, McpToolRouter.REVIEW_TOOLS_AND_RENAME);
+        this.router = router;
+        server = new McpServer(mcpRegistry, router);
+        pullRequests = new GhCliService();
+        scopeResolver = new SessionReviewScopeResolver(worktreeService, gitStatusService,
+                scopeRegistry, sessions, this::pullRequestCarriedBy);
+    }
+
+    /**
+     * The tools of a task-enabled backend: {@link McpToolRouter#REVIEW_TOOLS_AND_RENAME}
+     * plus exactly the four {@link McpToolRouter#TASK_TOOLS} -- the union the
+     * constructor below hands the router, computed here so the union policy
+     * lives in one place.
+     */
+    private static Set<String> reviewRenameAndTaskTools() {
+        return Stream.concat(McpToolRouter.REVIEW_TOOLS_AND_RENAME.stream(),
+                        McpToolRouter.TASK_TOOLS.stream())
+                .collect(Collectors.toUnmodifiableSet());
+    }
+
+    /**
+     * As the five-argument constructor, with the delayed-task delegate
+     * (T14a): {@code taskTools} is the {@link TaskTools} instance the router
+     * dispatches the four {@code task_*} tools to, and the backend's surface
+     * becomes the union of the review tools, {@code session_rename} and
+     * exactly those four task tools -- nothing else is added, nothing
+     * removed, and every error path (start failures, credential writes,
+     * close) is the one above. A backend built without a delegate, by either
+     * legacy constructor, serves exactly what it served before: no task
+     * tool is advertised or callable.
+     *
+     * <p>The body repeats the five-argument one instead of delegating to it
+     * on purpose: the existing constructors and the four/five-argument test
+     * seams stay byte-identical, so the only difference here is the router's
+     * allowed set and its delegate.</p>
+     *
+     * @throws NullPointerException if {@code taskTools} is null (build a
+     *         delegate-less backend through a legacy constructor instead)
+     */
+    public ReviewBackend(Path baseDir, Supplier<List<ManagedAgentSession>> sessions,
+                         Supplier<List<Repository>> repositories, AgentRegistry agentRegistry,
+                         BiFunction<ManagedSessionId, String, CompletableFuture<RenameOutcome>> sessionRenamer,
+                         TaskTools taskTools) {
+        Objects.requireNonNull(taskTools, "taskTools");
+        Path stateFile = baseDir.resolve("state.json");
+        annotationStore = new AnnotationStore(AnnotationStore.siblingOf(stateFile));
+        tourStore = new TourStore(TourStore.siblingOf(stateFile));
+        scopeRegistry = new ReviewScopeRegistry(annotationStore.scopeIdSecret());
+        diffService = new DiffService();
+        gitStatusService = new GitStatusService();
+        worktreeService = new WorktreeService();
+        // The workbench's "Ask Reviewer About Selection…" mints asks; an
+        // answer to one becomes a finding at the asked range (SelectionAsks).
+        selectionAsks = new SelectionAsks(annotationStore);
+        pendingQuestions = new PendingQuestions(selectionAsks::answered);
+        mcpRegistry = new McpSessionRegistry();
+        configWriter = new McpConfigWriter(baseDir);
+        // Both deliveries get a file so a credential is never a command-line
+        // argument; COMMAND_LINE gets the bare token.
+        credentialWriter = (id, delivery, endpointUrl, token) -> delivery == McpDelivery.COMMAND_LINE
+                ? configWriter.writeTokenFor(id, token)
+                : configWriter.writeFor(id, endpointUrl, token);
+        // The router serves the review tools, session_rename and the four
+        // task tools, and nothing more: the task delegate adds names, never
+        // privileges (P7), and the same allowlist gates every tool.
+        WorkspaceMcpSessionContext context = new WorkspaceMcpSessionContext(
+                sessions,
+                repositories,
+                annotationStore,
+                tourStore,
+                scopeRegistry,
+                agentRegistry,
+                diffService,
+                gitStatusService,
+                worktreeService,
+                UserConfig::load,
+                (worktree, prompt) -> notServed("session_start"),
+                sessionRenamer,
+                (session, conversation) -> notServed("session_reclaim"),
+                (session, draft) -> notServed("session_handoff"),
+                (session, draft) -> notServed("session_handoff"),
+                pendingQuestions);
+        McpToolRouter router = new McpToolRouter(context, mcpRegistry,
+                reviewRenameAndTaskTools(), taskTools);
+        this.router = router;
         server = new McpServer(mcpRegistry, router);
         pullRequests = new GhCliService();
         scopeResolver = new SessionReviewScopeResolver(worktreeService, gitStatusService,
@@ -189,6 +280,18 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
 
     public boolean ready() {
         return ready;
+    }
+
+    /**
+     * Whether this backend's MCP surface serves the four task tools (T29a):
+     * true exactly when the router's allowed set intersects {@link
+     * McpToolRouter#TASK_TOOLS} -- a backend built without the task
+     * delegate (a failed or still-initializing task service) serves none,
+     * so the launches it credentials are not task-tool-capable. Pure query
+     * over the router's own serving set; no tool list is restated here.
+     */
+    public boolean servesTaskTools() {
+        return McpToolRouter.TASK_TOOLS.stream().anyMatch(router::serves);
     }
 
     @Override

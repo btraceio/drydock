@@ -33,11 +33,19 @@ import java.util.Optional;
  * ({@code --resume} with no id, {@code codex resume} with no id) never
  * carry it — nobody has picked a conversation yet, so there is nothing to
  * re-orient.</p>
+ *
+ * <p>{@code launchResources} is the optional per-invocation set of extra
+ * directories and the installed task-guidance location (see {@link
+ * LaunchResources}); empty means a resume with no resources beyond the
+ * session's own worktree, exactly as before. Resources do not persist
+ * with the conversation: this resume carries exactly what it is given, so
+ * a task-tool-capable resumed session re-receives its resources here
+ * rather than via any global configuration.</p>
  */
 public record ResumeContext(Optional<String> agentSessionId, Optional<String> agentSessionName,
                             Path workingDirectory, Optional<SshRemote> remote, Optional<McpAccess> mcp,
                             boolean evalMode, boolean readOnly, List<StdioMcpServer> stdioMcpServers,
-                            Optional<String> resumePrompt) {
+                            Optional<String> resumePrompt, Optional<LaunchResources> launchResources) {
     public ResumeContext {
         Objects.requireNonNull(agentSessionId, "agentSessionId");
         Objects.requireNonNull(agentSessionName, "agentSessionName");
@@ -46,9 +54,19 @@ public record ResumeContext(Optional<String> agentSessionId, Optional<String> ag
         Objects.requireNonNull(mcp, "mcp");
         stdioMcpServers = List.copyOf(Objects.requireNonNull(stdioMcpServers, "stdioMcpServers"));
         Objects.requireNonNull(resumePrompt, "resumePrompt");
+        Objects.requireNonNull(launchResources, "launchResources");
         // A blank prompt is no prompt: rendering it would submit an empty
         // first message to the resumed conversation.
         resumePrompt = resumePrompt.filter(prompt -> !prompt.isBlank());
+    }
+
+    /** As the canonical constructor with no launch resources. */
+    public ResumeContext(Optional<String> agentSessionId, Optional<String> agentSessionName,
+                         Path workingDirectory, Optional<SshRemote> remote, Optional<McpAccess> mcp,
+                         boolean evalMode, boolean readOnly, List<StdioMcpServer> stdioMcpServers,
+                         Optional<String> resumePrompt) {
+        this(agentSessionId, agentSessionName, workingDirectory, remote, mcp, evalMode, readOnly,
+                stdioMcpServers, resumePrompt, Optional.empty());
     }
 
     public ResumeContext(Optional<String> agentSessionId, Optional<String> agentSessionName,
@@ -67,7 +85,14 @@ public record ResumeContext(Optional<String> agentSessionId, Optional<String> ag
     /** This context, with {@code servers} as the stdio MCP servers the agent starts. */
     public ResumeContext withStdioMcpServers(List<StdioMcpServer> servers) {
         return new ResumeContext(agentSessionId, agentSessionName, workingDirectory, remote, mcp, evalMode,
-                readOnly, servers, resumePrompt);
+                readOnly, servers, resumePrompt, launchResources);
+    }
+
+    /** This context, with {@code resources} as the launch resources. */
+    public ResumeContext withLaunchResources(LaunchResources resources) {
+        return new ResumeContext(agentSessionId, agentSessionName, workingDirectory, remote, mcp, evalMode,
+                readOnly, stdioMcpServers, resumePrompt,
+                Optional.of(Objects.requireNonNull(resources, "resources")));
     }
 
     /** As the canonical constructor with {@code readOnly = false} (a writing resume). */
