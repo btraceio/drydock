@@ -126,6 +126,8 @@
              review's diff hosted next to its navigator, inbox and outbox. -->
         <fileEditorProvider
                 implementation="app.drydock.intellij.review.ReviewWorkbenchEditorProvider"/>
+        <!-- "Drydock: files in this review" in Find Usages / Find in Files. -->
+        <searchScopesProvider implementation="app.drydock.intellij.review.ReviewSearchScopeProvider"/>
 
         <toolWindow id="Drydock Review" anchor="left" secondary="false"
                     icon="/icons/drydock.svg"

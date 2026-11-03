@@ -1673,6 +1673,23 @@ final class ReviewTabProvider {
         submitWorkbenchState();
     }
 
+    /** The live review's checkout root and latest snapshot, for the review search scope. */
+    record ReviewFiles(Path root, ReviewTabModel.Snapshot snapshot) {
+    }
+
+    /** The live review's files; empty before its first snapshot or without a live Review content. Any thread. */
+    static Optional<ReviewFiles> reviewFiles(Project project) {
+        ReviewTabProvider provider = project.getUserData(LIVE_PROVIDER);
+        if (provider == null || provider.disposed.get()) {
+            return Optional.empty();
+        }
+        ReviewScope scope = provider.scope;
+        ReviewTabModel.Snapshot snapshot = provider.snapshot;
+        return scope == null || snapshot == null
+                ? Optional.empty()
+                : Optional.of(new ReviewFiles(scope.diffRoot(), snapshot));
+    }
+
     /** The workbench's Changes only / Full file choice (EDT): the diff refolds, then the state is rebuilt. */
     private void workbenchViewChanged(WorkbenchState.View view) {
         workbenchView = Objects.requireNonNull(view, "view");
