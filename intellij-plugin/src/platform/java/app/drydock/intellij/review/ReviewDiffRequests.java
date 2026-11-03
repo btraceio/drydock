@@ -324,8 +324,9 @@ public final class ReviewDiffRequests {
      * and on the right the worktree file itself when its document holds the
      * reviewed text, a typed content otherwise. The request carries the file
      * path as its title, the user data of {@link #applyUserData(UserDataHolder,
-     * RequestContext)}, and how its right side is backed under
-     * {@link #RIGHT_SIDE_KEY}. EDT: the contents read the file's document.
+     * RequestContext)}, how its right side is backed under
+     * {@link #RIGHT_SIDE_KEY}, and the {@link ReviewDiffNotice} for a snapshot
+     * or a stale side. EDT: the contents read the file's document.
      */
     public static SimpleDiffRequest toRequest(Project project, Disposable disposable,
                                               RequestContext context) {
@@ -334,6 +335,8 @@ public final class ReviewDiffRequests {
         SimpleDiffRequest request = new SimpleDiffRequest(context.path(), sides.left(), sides.right(), null, null);
         applyUserData(request, context);
         request.putUserData(RIGHT_SIDE_KEY, sides.rightSide());
+        request.putUserData(DiffUserDataKeys.NOTIFICATION_PROVIDERS, List.of(ReviewDiffNotice.provider(
+                project, sides.rightSide(), request.getUserData(ReviewDiffContents.STALENESS_KEY))));
         return request;
     }
 

@@ -2,6 +2,8 @@ package app.drydock.intellij.review;
 
 import com.intellij.diff.contents.DocumentContent;
 import com.intellij.diff.requests.SimpleDiffRequest;
+import com.intellij.diff.util.DiffNotificationProvider;
+import com.intellij.diff.util.DiffUserDataKeys;
 import com.intellij.diff.util.Side;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.command.WriteCommandAction;
@@ -11,7 +13,9 @@ import com.intellij.openapi.util.Disposer;
 import com.intellij.openapi.vfs.LocalFileSystem;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.psi.PsiDocumentManager;
+import com.intellij.testFramework.PlatformTestUtil;
 import com.intellij.testFramework.fixtures.BasePlatformTestCase;
+import com.intellij.ui.EditorNotificationPanel;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -98,6 +102,35 @@ public class ReviewDiffContentsPlatformTest extends BasePlatformTestCase {
         assertNotNull(staleness);
         assertNotSame(staleness, second.getUserData(ReviewDiffContents.STALENESS_KEY));
         assertFalse(staleness.isStale());
+    }
+
+    public void testASnapshotRequestShowsTheSnapshotNotice() {
+        SimpleDiffRequest request = ReviewDiffRequests.toRequest(getProject(), parent,
+                new ReviewDiffRequests.RequestContext("e.txt", plan()));
+
+        EditorNotificationPanel notice = notice(request);
+        assertTrue(notice.isVisible());
+        assertEquals(ReviewDiffNotice.SNAPSHOT_TEXT, notice.getText());
+    }
+
+    public void testAFileBackedNoticeAppearsWhenTheRequestTurnsStale() throws IOException {
+        VirtualFile file = worktreeFile("f.txt", RIGHT);
+        SimpleDiffRequest request = ReviewDiffRequests.toRequest(getProject(), parent, context(file));
+        EditorNotificationPanel notice = notice(request);
+        assertFalse("silent while the file holds the reviewed text", notice.isVisible());
+
+        request.getUserData(ReviewDiffContents.STALENESS_KEY).markStale();
+        PlatformTestUtil.dispatchAllEventsInIdeEventQueue();
+
+        assertTrue(notice.isVisible());
+        assertEquals(ReviewDiffNotice.STALE_TEXT, notice.getText());
+    }
+
+    private static EditorNotificationPanel notice(SimpleDiffRequest request) {
+        List<DiffNotificationProvider> providers = request.getUserData(DiffUserDataKeys.NOTIFICATION_PROVIDERS);
+        assertNotNull(providers);
+        assertEquals(1, providers.size());
+        return (EditorNotificationPanel) providers.get(0).createNotification(null);
     }
 
     private VirtualFile worktreeFile(String name, String text) throws IOException {
