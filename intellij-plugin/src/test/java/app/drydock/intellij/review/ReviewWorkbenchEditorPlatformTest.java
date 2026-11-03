@@ -231,6 +231,8 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
         try {
             ToggleAction changesOnly = (ToggleAction) editor.viewActions.getChildActionsOrStubs()[0];
             ToggleAction fullFile = (ToggleAction) editor.viewActions.getChildActionsOrStubs()[1];
+            assertTrue("a text-only toggle shows its text", changesOnly.displayTextInToolbar());
+            assertTrue(fullFile.displayTextInToolbar());
             AnActionEvent event = TestActionEvent.createTestEvent();
             assertFalse(changesOnly.isSelected(event));
 
@@ -275,6 +277,8 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
                     new ReviewTabModel.Snapshot(List.of(), 0, 0), WorkbenchState.Filter.ALL, Optional.empty(),
                     WorkbenchState.View.CHANGES_ONLY));
 
+            assertTrue("a text-only toggle shows its text", local.displayTextInToolbar());
+            assertTrue(pr.displayTextInToolbar());
             AnActionEvent localEvent = TestActionEvent.createTestEvent(local);
             local.update(localEvent);
             assertTrue(local.isSelected(localEvent));

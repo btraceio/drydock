@@ -176,6 +176,11 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
         }
 
         @Override
+        public boolean displayTextInToolbar() {
+            return true; // a text-only toggle renders as a blank button otherwise
+        }
+
+        @Override
         public @NotNull ActionUpdateThread getActionUpdateThread() {
             return ActionUpdateThread.EDT;
         }
@@ -211,6 +216,11 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
         public void update(@NotNull AnActionEvent e) {
             super.update(e);
             e.getPresentation().setEnabled(shown != null);
+        }
+
+        @Override
+        public boolean displayTextInToolbar() {
+            return true; // a text-only toggle renders as a blank button otherwise
         }
 
         @Override
