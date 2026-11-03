@@ -20,6 +20,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -136,7 +137,7 @@ class ReviewDiffRequestsTest {
     // --- AC16: the request user data -----------------------------------------
 
     @Test
-    void requestUserDataCarriesExactlyTheFourReviewKeys() {
+    void requestUserDataCarriesExactlyTheReviewKeys() {
         Plan plan = planFor(file(add(2)));
         UserDataHolderBase holder = new UserDataHolderBase();
         ReviewDiffRequests.applyUserData(holder, plan);
@@ -146,7 +147,8 @@ class ReviewDiffRequestsTest {
                 DiffUserDataKeys.FORCE_READ_ONLY,
                 DiffUserDataKeysEx.CUSTOM_DIFF_COMPUTER,
                 DiffUserDataKeys.SCROLL_TO_LINE,
-                ReviewDiffRequests.REQUEST_KEY), keys);
+                ReviewDiffRequests.REQUEST_KEY,
+                ReviewDiffContents.STALENESS_KEY), keys);
     }
 
     @Test
@@ -162,15 +164,18 @@ class ReviewDiffRequestsTest {
     }
 
     @Test
-    void customDiffComputerReturnsThePrecomputedFragmentsWhateverItIsAsked() {
+    void customDiffComputerReturnsThePrecomputedFragmentsForTheReviewedTexts() {
         Plan plan = planFor(file(add(2)));
         UserDataHolderBase holder = new UserDataHolderBase();
         ReviewDiffRequests.applyUserData(holder, plan);
 
         DiffUserDataKeysEx.DiffComputer computer = holder.getUserData(DiffUserDataKeysEx.CUSTOM_DIFF_COMPUTER);
-        // Pure: the inputs are ignored, the precomputed list comes back.
-        assertSame(plan.fragments(), computer.compute("anything", "else", null, true, null));
-        assertSame(plan.fragments(), computer.compute(null, null, null, false, null));
+        // Pure while the viewer compares the reviewed texts: the precomputed
+        // list comes back, whatever the policy. Other texts are
+        // ReviewDiffContentsTest's (the platform comparison, a stale request).
+        assertSame(plan.fragments(), computer.compute(plan.leftText(), plan.rightText(), null, true, null));
+        assertSame(plan.fragments(), computer.compute(plan.leftText(), plan.rightText(), null, false, null));
+        assertFalse(holder.getUserData(ReviewDiffContents.STALENESS_KEY).isStale());
     }
 
     @Test
@@ -213,7 +218,7 @@ class ReviewDiffRequestsTest {
     // --- the widened creation: the request context (plan treated as read-only) ---
 
     @Test
-    void widenedUserDataCarriesTheFourReviewKeysPlusTheContext() {
+    void widenedUserDataCarriesTheReviewKeysPlusTheContext() {
         Plan plan = planFor(file(add(2)));
         ReviewDiffRequests.RequestContext context =
                 new ReviewDiffRequests.RequestContext("src/A.java", plan);
@@ -226,6 +231,7 @@ class ReviewDiffRequestsTest {
                 DiffUserDataKeysEx.CUSTOM_DIFF_COMPUTER,
                 DiffUserDataKeys.SCROLL_TO_LINE,
                 ReviewDiffRequests.REQUEST_KEY,
+                ReviewDiffContents.STALENESS_KEY,
                 ReviewDiffRequests.CONTEXT_KEY), keys);
         assertSame(context, holder.getUserData(ReviewDiffRequests.CONTEXT_KEY));
     }
@@ -243,7 +249,7 @@ class ReviewDiffRequestsTest {
         assertEquals(Pair.create(Side.LEFT, 8), holder.getUserData(DiffUserDataKeys.SCROLL_TO_LINE));
         assertEquals(Boolean.TRUE, holder.getUserData(ReviewDiffRequests.REQUEST_KEY));
         assertSame(plan.fragments(), holder.getUserData(DiffUserDataKeysEx.CUSTOM_DIFF_COMPUTER)
-                .compute("anything", "else", null, true, null));
+                .compute(plan.leftText(), plan.rightText(), null, true, null));
     }
 
     @Test

@@ -16,8 +16,10 @@ import com.intellij.openapi.util.Key;
 import com.intellij.openapi.util.Pair;
 import com.intellij.openapi.util.UserDataHolder;
 
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * The review tab's diff-request plan: a pure, headless-testable
@@ -81,6 +83,13 @@ public final class ReviewDiffRequests {
      * static instance, never re-{@code Key.create} the name.
      */
     public static final Key<RequestContext> CONTEXT_KEY = Key.create(REQUEST_CONTEXT_KEY_NAME);
+
+    /**
+     * How the context request's right side is backed
+     * ({@link ReviewDiffContents.RightSide}); absent on plan-only requests.
+     * Same identity rule as {@link #REQUEST_KEY}.
+     */
+    public static final Key<ReviewDiffContents.RightSide> RIGHT_SIDE_KEY = Key.create("drydock.review.diffRightSide");
 
     /**
      * One file's diff request before it becomes a platform request.
@@ -155,16 +164,28 @@ public final class ReviewDiffRequests {
      *   change.</li>
      * </ul>
      *
+     * <p>{@code worktreeFile} is the absolute path of the file the right
+     * side shows when that side is the working tree (empty for a base-scope
+     * review, whose right side is {@code HEAD}, and for a deleted file).
+     * {@link ReviewDiffContents} backs the right side with that file's
+     * document when it holds exactly the reviewed text.</p>
+     *
      * <p>Seeding matters because the first editor-tab request must reach a
      * freshly created processor: a request kept only on the reusable file
      * leaves the processor's request null, so its first
      * {@code selectNotify -> updateRequest} applies nothing and the tab
      * stays blank until the second selection.</p>
      */
-    public record RequestContext(String path, Plan plan) {
+    public record RequestContext(String path, Plan plan, Optional<Path> worktreeFile) {
         public RequestContext {
             Objects.requireNonNull(path, "path");
             Objects.requireNonNull(plan, "plan");
+            Objects.requireNonNull(worktreeFile, "worktreeFile");
+        }
+
+        /** A context whose right side is never the worktree file (typed contents only). */
+        public RequestContext(String path, Plan plan) {
+            this(path, plan, Optional.empty());
         }
     }
 
@@ -235,16 +256,23 @@ public final class ReviewDiffRequests {
 
     /**
      * Puts the review request user data on {@code target}: read-only, the
-     * precomputed-fragment computer, the scroll line, and the Drydock
-     * request key. Pure (no IDE state), so the headless tests assert the
-     * produced user data here; {@link #toRequest} adds nothing beyond it.
+     * guarded fragment computer and its {@link ReviewDiffContents.Staleness}
+     * (under {@link ReviewDiffContents#STALENESS_KEY}), the scroll line, and
+     * the Drydock request key. Pure (no IDE state) as long as the viewer
+     * compares the reviewed texts, so the headless tests assert the produced
+     * user data here.
      */
     static void applyUserData(UserDataHolder target, Plan plan) {
         target.putUserData(DiffUserDataKeys.FORCE_READ_ONLY, Boolean.TRUE);
-        // Pure per the Threading table: compute returns the precomputed
-        // fragments and reads nothing but the plan.
+        // The precomputed git fragments while the viewer compares the
+        // reviewed texts; once a file-backed side was edited, the platform's
+        // own comparison and a stale request (ReviewDiffContents.fragments).
+        ReviewDiffContents.Staleness staleness = new ReviewDiffContents.Staleness();
+        target.putUserData(ReviewDiffContents.STALENESS_KEY, staleness);
         target.putUserData(DiffUserDataKeysEx.CUSTOM_DIFF_COMPUTER,
-                (DiffUserDataKeysEx.DiffComputer) (text1, text2, policy, innerFragments, indicator) -> plan.fragments());
+                (DiffUserDataKeysEx.DiffComputer) (text1, text2, policy, innerFragments, indicator) ->
+                        ReviewDiffContents.fragments(plan, text1, text2, staleness,
+                                () -> ReviewDiffContents.platformComparison(text1, text2, policy, indicator)));
         target.putUserData(DiffUserDataKeys.SCROLL_TO_LINE,
                 Pair.create(plan.scrollToSide(), plan.scrollToLine()));
         target.putUserData(REQUEST_KEY, Boolean.TRUE);
@@ -252,7 +280,7 @@ public final class ReviewDiffRequests {
 
     /**
      * The context variant of {@link #applyUserData(UserDataHolder, Plan)}:
-     * the four review keys of the plan, plus the
+     * the plan's review user data, plus the
      * {@link RequestContext} (a value whose plan is treated as read-only)
      * under {@link #CONTEXT_KEY}. Pure; the headless
      * tests assert the produced user data here.
@@ -291,21 +319,21 @@ public final class ReviewDiffRequests {
     }
 
     /**
-     * The widened creation the reusable diff editor is fed: the request
-     * from {@link #toRequest(Project, Disposable, Plan)}'s plan, plus the
-     * file path as the request title and the
-     * {@link RequestContext} (a value whose plan is treated as read-only)
-     * under {@link #CONTEXT_KEY}. The four review
-     * keys ({@code FORCE_READ_ONLY}, {@code CUSTOM_DIFF_COMPUTER},
-     * {@code SCROLL_TO_LINE}, the request key) are exactly what the
-     * plan-only creation produces — the context is added, nothing is
-     * changed.
+     * The creation the reusable diff editor is fed. The contents come from
+     * {@link ReviewDiffContents#create}: a typed revision content on the left,
+     * and on the right the worktree file itself when its document holds the
+     * reviewed text, a typed content otherwise. The request carries the file
+     * path as its title, the user data of {@link #applyUserData(UserDataHolder,
+     * RequestContext)}, and how its right side is backed under
+     * {@link #RIGHT_SIDE_KEY}. EDT: the contents read the file's document.
      */
     public static SimpleDiffRequest toRequest(Project project, Disposable disposable,
                                               RequestContext context) {
         Objects.requireNonNull(context, "context");
-        SimpleDiffRequest request = assemble(project, context.path(), context.plan());
+        ReviewDiffContents.Sides sides = ReviewDiffContents.create(project, context);
+        SimpleDiffRequest request = new SimpleDiffRequest(context.path(), sides.left(), sides.right(), null, null);
         applyUserData(request, context);
+        request.putUserData(RIGHT_SIDE_KEY, sides.rightSide());
         return request;
     }
 

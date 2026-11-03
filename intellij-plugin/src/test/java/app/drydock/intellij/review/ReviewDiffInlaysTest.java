@@ -209,6 +209,24 @@ class ReviewDiffInlaysTest {
         public void onAfterRediff(Runnable decorate) {
             afterRediff.add(decorate);
         }
+
+        boolean stale;
+        final List<Runnable> onStale = new ArrayList<>();
+
+        @Override
+        public boolean stale() {
+            return stale;
+        }
+
+        @Override
+        public void onStale(Runnable callback) {
+            onStale.add(callback);
+        }
+
+        void turnStale() {
+            stale = true;
+            onStale.forEach(Runnable::run);
+        }
     }
 
     /** Real {@link FindingInlayCard}s (T4's component), so the release/disposal contract runs against the real card. */
@@ -356,6 +374,40 @@ class ReviewDiffInlaysTest {
 
         assertEquals(List.of(1), right.lines());
         assertEquals(List.of(2), left.lines());
+    }
+
+    @Test
+    void aStaleRequestDropsItsDecorationsAndDrawsNoNewOnes() {
+        FakeEditor left = new FakeEditor();
+        FakeEditor right = new FakeEditor();
+        FakeViewer viewer = new FakeViewer("src/A.java", left, right);
+        FakeEdt edt = new FakeEdt();
+        ReviewDiffInlays inlays = new ReviewDiffInlays(edt, new FixedHosts(viewer), new RecordingCards());
+        ReviewAnnotation onNew = finding("f1", "src/A.java", "n2", Triage.PROPOSED, AnnotationStatus.OPEN);
+
+        onEdt(() -> {
+            inlays.setDecorations(decorations("src/A.java", List.of(onNew), "n2"));
+            inlays.viewerChanged(ANY_VIEWER);
+            edt.pump();
+        });
+        int drawnBefore = right.inserted.size();
+        Inserted live = right.inserted.get(drawnBefore - 1);
+        assertFalse(live.inlay.released, "the card is live before the edit");
+
+        // The file is edited while the diff is open: its line keys no longer
+        // address its lines, so the card goes and no rebuild brings it back.
+        onEdt(() -> {
+            viewer.turnStale();
+            edt.pump();
+            edt.pump();
+            inlays.rebuildRequested();
+            edt.pump();
+        });
+        // (FakeEditor hands out the first matching entry's gutter mark for a
+        // redraw, so marks are checked on that entry, inlays on every entry.)
+        assertTrue(right.inserted.stream().allMatch(i -> i.inlay.released), "every drawn card is released");
+        assertTrue(right.inserted.get(0).mark.removed, "the gutter mark is removed");
+        assertEquals(drawnBefore, right.inserted.size(), "nothing new drawn on a stale request");
     }
 
     // ---- unified mapping ----------------------------------------------------

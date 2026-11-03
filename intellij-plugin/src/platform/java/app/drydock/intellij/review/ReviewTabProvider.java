@@ -3,6 +3,7 @@ package app.drydock.intellij.review;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.SessionActivity;
+import app.drydock.git.DiffScope;
 import app.drydock.git.DiffService;
 import app.drydock.git.GitExecutableLocator;
 import app.drydock.git.GitStatusService;
@@ -666,6 +667,11 @@ final class ReviewTabProvider {
         }
         mismatchMemo.reset(); // fresh data matched: the next mismatch again means a change
         List<LineFragment> fragments = ReviewFragments.fragmentsFor(file, left, right);
+        // The right side can be the worktree file itself (spec §2): its
+        // document is loaded here, off the EDT, so the EDT build that
+        // decides the backing finds it in memory.
+        Optional<Path> worktreeFile = worktreeFileOf(scope, file);
+        ReviewDiffContents.warm(worktreeFile);
         // The file's decorations — every unresolved finding, triaged or
         // not, so CONFIRMED/DISMISSED cards keep their Undo — read off the
         // EDT like everything store-side here.
@@ -698,7 +704,7 @@ final class ReviewTabProvider {
             // off-EDT texts and fragments; the editor drops it itself when
             // its own selection token says a newer selection won.
             editor.requestReady(selectionId,
-                    requestContextFor(selectionId, file, left, right, fragments));
+                    requestContextFor(selectionId, file, left, right, fragments, worktreeFile));
         });
     }
 
@@ -713,6 +719,18 @@ final class ReviewTabProvider {
     static ReviewDiffRequests.RequestContext requestContextFor(Object row, UnifiedDiff.FileDiff file,
                                                                CharSequence left, CharSequence right,
                                                                List<LineFragment> fragments) {
+        return requestContextFor(row, file, left, right, fragments, Optional.empty());
+    }
+
+    /**
+     * As {@link #requestContextFor(Object, UnifiedDiff.FileDiff, CharSequence,
+     * CharSequence, List)}, with the worktree file the right side may be
+     * backed by ({@link #worktreeFileOf}).
+     */
+    static ReviewDiffRequests.RequestContext requestContextFor(Object row, UnifiedDiff.FileDiff file,
+                                                               CharSequence left, CharSequence right,
+                                                               List<LineFragment> fragments,
+                                                               Optional<Path> worktreeFile) {
         Objects.requireNonNull(file, "file");
         ReviewDiffRequests.Plan plan;
         if (row instanceof ReviewTabModel.FindingRow finding) {
@@ -726,7 +744,25 @@ final class ReviewTabProvider {
         } else {
             plan = ReviewDiffRequests.plan(file, left, right, fragments);
         }
-        return new ReviewDiffRequests.RequestContext(file.path(), plan);
+        return new ReviewDiffRequests.RequestContext(file.path(), plan, worktreeFile);
+    }
+
+    /**
+     * The checkout file a request's right side may be backed by (pure): the
+     * file under the scope's {@link ReviewScope#diffRoot()}. Empty for a
+     * deleted file, and for a {@link DiffScope#BASE} scope with no worktree
+     * of its own, whose diff root is another checkout. Whether the file
+     * really backs the side is decided later, by comparing its document with
+     * the reviewed text ({@link ReviewDiffContents#choose}); a base scope's
+     * right side is {@code HEAD}, so it is file-backed only while the
+     * checkout matches {@code HEAD}.
+     */
+    static Optional<Path> worktreeFileOf(ReviewScope scope, UnifiedDiff.FileDiff file) {
+        if ("D".equals(file.kind())
+                || (scope.diffScope() == DiffScope.BASE && scope.worktree().isEmpty())) {
+            return Optional.empty();
+        }
+        return Optional.of(scope.diffRoot().resolve(file.path()));
     }
 
     /**

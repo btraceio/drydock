@@ -53,9 +53,9 @@ Rules for the new diff contents (`ReviewDiffContents`, glue):
      computer compares its `text2` argument with the reviewed right text and returns the
      git fragments only when they are equal. On a mismatch it does not return them. The
      request is then marked stale, the notice above is shown, and decorations keyed by
-     line keys (finding ranges, inlays, take panels) are hidden until Refresh. Which
-     fragments the computer returns on a mismatch (none, or the platform's own comparison
-     of the two texts) is not decided; neither was spiked.
+     line keys (finding ranges, inlays, take panels) are hidden until Refresh. On a
+     mismatch the computer returns the platform's own comparison of the two texts
+     (`ComparisonManager.compareLines`), so the highlighting matches the text on screen.
 3. **Left side = typed revision content** `create(project, baseText, filePath)` so it is
    highlighted with the right language. References on the left resolve (S1), but against
    the *current* project, not the base revision. A symbol that the change removed or

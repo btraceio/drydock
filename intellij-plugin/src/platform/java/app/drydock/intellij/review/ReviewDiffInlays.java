@@ -97,6 +97,19 @@ public final class ReviewDiffInlays {
 
         /** Registers the viewer-owned after-rediff callback. */
         void onAfterRediff(Runnable decorate);
+
+        /**
+         * The request no longer shows the reviewed text
+         * ({@link ReviewDiffContents.Staleness}): line keys no longer address
+         * its lines, so nothing keyed by them is drawn.
+         */
+        default boolean stale() {
+            return false;
+        }
+
+        /** Registers a callback for the moment the request turns {@link #stale()}; any thread. */
+        default void onStale(Runnable callback) {
+        }
     }
 
     /** Converts the platform's active viewer into a {@link ViewerHost}; null means "not decoratable". */
@@ -220,6 +233,9 @@ public final class ReviewDiffInlays {
         if (host == null) {
             return; // no editor lines to address (binary, unknown viewer)
         }
+        // A request turns stale on the viewer's rediff thread; the rebuild
+        // that follows on the EDT then finds it stale and draws nothing.
+        host.onStale(() -> edt.invokeLater(this::rebuildRequested));
         if (host.rediffPending()) {
             host.onAfterRediff(this::decorateNow);
         } else {
@@ -284,6 +300,9 @@ public final class ReviewDiffInlays {
         }
         if (!host.requestPath().map(current.path()::equals).orElse(false)) {
             return; // the viewer shows another file's request: never paint A's findings on B's diff
+        }
+        if (host.stale()) {
+            return; // the file was edited after the review: its line keys point at other lines now
         }
         for (ReviewAnnotation finding : current.findings()) {
             if (finding.resolved() || !finding.file().equals(current.path())) {
@@ -400,6 +419,22 @@ public final class ReviewDiffInlays {
         @Override public boolean rediffPending() { return viewer().hasPendingRediff(); }
 
         @Override public void onAfterRediff(Runnable decorate) { viewer().addListener(afterRediff(decorate)); }
+
+        @Override public boolean stale() {
+            ContentDiffRequest request = viewer().getRequest();
+            ReviewDiffContents.Staleness staleness =
+                    request == null ? null : request.getUserData(ReviewDiffContents.STALENESS_KEY);
+            return staleness != null && staleness.isStale();
+        }
+
+        @Override public void onStale(Runnable callback) {
+            ContentDiffRequest request = viewer().getRequest();
+            ReviewDiffContents.Staleness staleness =
+                    request == null ? null : request.getUserData(ReviewDiffContents.STALENESS_KEY);
+            if (staleness != null) {
+                staleness.onStale(callback);
+            }
+        }
     }
 
     /** The unified host: one oneside editor; side lines map through transferLineToOneside. */
