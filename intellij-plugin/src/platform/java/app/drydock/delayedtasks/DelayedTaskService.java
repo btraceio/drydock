@@ -7,9 +7,20 @@ import app.drydock.domain.RepositoryCatalog;
 import app.drydock.domain.RepositoryId;
 import app.drydock.mcp.TaskTools;
 import app.drydock.mcp.TaskToolContext;
+import app.drydock.intellij.tasks.NewTaskPlan.Choice;
+import app.drydock.tasks.PlanLaunch;
+import app.drydock.tasks.PlanLaunch.Origin;
+import app.drydock.tasks.PlanLaunch.Selection;
 import app.drydock.tasks.PlanProgress;
 import app.drydock.tasks.PlanStore;
+import app.drydock.tasks.PlanStore.Claim;
+import app.drydock.tasks.PlanStore.PlanRecord;
 import app.drydock.tasks.PlanStore.PlanStoreException;
+import app.drydock.tasks.RunningPlan;
+import app.drydock.tasks.RunningPlan.StageState;
+import app.drydock.tasks.StartPlan;
+import app.drydock.tasks.StartPlan.Segment;
+import app.drydock.tasks.StartPlan.Stage;
 import app.drydock.tasks.TaskDocument;
 import app.drydock.tasks.TaskFilePatch;
 import app.drydock.tasks.TaskFiles;
@@ -27,6 +38,8 @@ import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -36,7 +49,10 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
 
 /**
@@ -57,7 +73,10 @@ import java.util.function.Supplier;
  * init, once the catalog has normalized, it also recovers the persisted plans (T36a):
  * the Continue each needs is PUBLISHED but nothing ever launches during recovery (P4.10:
  * a restart is a human checkpoint), and on close the plan drivers stop and the task and
- * plan stores flush before the shared executor this service runs on shuts down.
+ * plan stores flush before the shared executor this service runs on shuts down. A
+ * freshly confirmed cross-project plan persists through this service first (T38): the
+ * approved done_by policy and the plan itself land BEFORE any launch effect, and a
+ * failed write refuses the whole start visibly.
  */
 public final class DelayedTaskService implements TaskToolContext, AutoCloseable {
 
@@ -371,6 +390,127 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
             ids.add(repository.id());
         }
         return Set.copyOf(ids);
+    }
+
+    /** Persists one freshly confirmed cross-project plan (T38, D8/D16/P4.5): the
+      * approved done_by policy changes land in the task store and the plan itself in
+      * the plan store, ALL BEFORE any launch effect -- either write failing refuses
+      * the WHOLE start visibly, so nothing ever launches half-confirmed work (a failed
+      * save is no launch permission, P4.13). The answer is the persisted record, ready
+      * to drive through {@link #continuePlan}: its explicit Continue launches stage 1
+      * through the caller-supplied launcher seam. */
+    public CompletableFuture<PlanRecord> persistConfirmedPlan(StartPlan plan, PlanLaunchChoices choices,
+            Origin origin) {
+        Objects.requireNonNull(plan, "plan");
+        Objects.requireNonNull(choices, "choices");
+        Objects.requireNonNull(origin, "origin");
+        TaskStore taskStore;
+        PlanStore planStore;
+        try {
+            taskStore = requireStore();
+            planStore = requirePlans();
+        } catch (IllegalStateException e) {
+            return CompletableFuture.failedFuture(e);
+        }
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                RunningPlan running = confirmedPlan(plan, choices, origin);
+                for (TaskDocument task : approvedPolicy(plan, choices)) { // the confirmed policy
+                    taskStore.update(task.id(), new TaskFilePatch.Updates(null, null,
+                            choices.doneByOf(task.id(), task.doneBy()), null, null, null));
+                }
+                return persistPlan(planStore, running); // the save IS the launch permission
+            } catch (TaskStoreException | RuntimeException e) {
+                // A plain IllegalStateException, never a CompletionException: a future
+                // completes with a CompletionException's CAUSE, which would drop this
+                // refusal text -- and the refusal is the answer a refused start gives.
+                throw new IllegalStateException("The confirmed plan of '" + plan.target().text()
+                        + "' could not be persisted: " + reason(e) + "; the whole start is refused"
+                        + " and nothing was started (P4.13)", e);
+            }
+        }, executor);
+    }
+
+    /** The persisted form of one confirmed plan (T38, D8): the confirmed stages, one
+      * launch selection per planned task (its segment's chosen harness and project),
+      * the origin the start ran from, and every stage unlaunched -- the driving
+      * Continue launches stage 1. The graph revision is the confirmation's own: 1,
+      * the first graph this plan was confirmed against. */
+    private static RunningPlan confirmedPlan(StartPlan plan, PlanLaunchChoices choices, Origin origin) {
+        Map<TaskId, Selection> selections = new LinkedHashMap<>();
+        List<StageState> stages = new ArrayList<>();
+        for (Stage stage : plan.stages()) {
+            List<TaskId> tasks = new ArrayList<>();
+            for (Segment segment : stage.segments()) {
+                Choice choice = choices.segments().get(segment.repository());
+                if (choice == null) {
+                    throw new IllegalStateException("the segment of '" + segment.projectName()
+                            + "' carries no confirmed launch choice");
+                }
+                for (TaskDocument task : segment.tasks()) {
+                    tasks.add(task.id());
+                    selections.put(task.id(), new Selection(choice.agent(), segment.repository(),
+                            segment.projectName()));
+                }
+            }
+            stages.add(new StageState(stage.number(), List.copyOf(tasks), false, false));
+        }
+        return new RunningPlan(new PlanLaunch(plan.target(), choices.confirmedStages(), selections,
+                1, List.of(), 0, origin), stages, RunningPlan.Status.RUNNING);
+    }
+
+    /** The approved done_by changes (D16): exactly the tasks whose confirmed policy
+      * differs from the stored one -- written before the plan, so a stage's review
+      * flow reads the confirmed policy from the task files. */
+    private static List<TaskDocument> approvedPolicy(StartPlan plan, PlanLaunchChoices choices) {
+        List<TaskDocument> changes = new ArrayList<>();
+        for (Segment segment : plan.segments()) {
+            for (TaskDocument task : segment.tasks()) {
+                if (choices.doneByOf(task.id(), task.doneBy()) != task.doneBy()) {
+                    changes.add(task);
+                }
+            }
+        }
+        return changes;
+    }
+
+    /** The plan's own persist (P4.13): a fresh claim, a create-revision save, the claim
+      * released again -- the driving Continue re-acquires it through the committed
+      * recovery wiring. A plan that already exists is refused visibly: a confirmed
+      * start never overwrites a persisted plan. */
+    private PlanRecord persistPlan(PlanStore planStore, RunningPlan running) {
+        TaskId id = running.launch().target();
+        Claim claim = answer(planStore.acquireClaim(id));
+        try {
+            if (answer(planStore.load(id)).isPresent()) {
+                throw new IllegalStateException("a plan for '" + id.text() + "' already exists;"
+                        + " a confirmed start never overwrites a persisted plan");
+            }
+            return answer(planStore.save(claim, 0, running, false));
+        } finally {
+            claim.close();
+        }
+    }
+
+    /** One bounded store wait; failure, interruption and timeout are visible. */
+    private static <T> T answer(CompletableFuture<T> future) {
+        try {
+            return future.get(10, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("interrupted while the plan store answered");
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause() == null ? e : e.getCause();
+            throw new IllegalStateException(reason(cause));
+        } catch (TimeoutException e) {
+            throw new IllegalStateException("the plan store did not answer within 10s");
+        }
+    }
+
+    /** One bounded failure reason. */
+    private static String reason(Throwable failure) {
+        String message = failure == null ? null : failure.getMessage();
+        return message != null && !message.isBlank() ? message : String.valueOf(failure);
     }
 
     /** The T36a plan store, or the same visible lifecycle refusal as the task store. */

@@ -4,13 +4,14 @@ import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionMode;
 import app.drydock.intellij.tasks.NewTaskPlan.Choice;
 import app.drydock.intellij.tasks.NewTaskPlan.OpenIn;
-import app.drydock.intellij.tasks.NewTaskPlan.WorkIn;
 import app.drydock.tasks.DoneBy;
 import app.drydock.tasks.StartPlan;
 import app.drydock.tasks.StartPlan.Segment;
 import app.drydock.tasks.TaskDocument;
 import app.drydock.tasks.TaskId;
 
+import com.intellij.openapi.application.ApplicationManager;
+import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.ui.DialogWrapper;
 import com.intellij.openapi.ui.ValidationInfo;
 import com.intellij.openapi.util.text.StringUtil;
@@ -34,6 +35,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * The multi-stage confirmation dialog (T37a, D8/D16/P4.5). It DISPLAYS the
@@ -60,6 +62,8 @@ import java.util.Optional;
  */
 public final class StartPlanDialog extends DialogWrapper {
 
+    private static final System.Logger LOG = System.getLogger(StartPlanDialog.class.getName());
+
     /**
      * The Configure seam: opens the EXISTING New Session dialog for one
      * segment and returns the accepted launch choice ONLY -- never a started
@@ -72,9 +76,30 @@ public final class StartPlanDialog extends DialogWrapper {
         Optional<Choice> configure(Segment segment);
     }
 
+    /**
+     * The Configure seam's ASYNC shape (T38, a coordinator-granted widening):
+     * the production seam runs the New Session dialog's git preparation OFF
+     * the EDT before its dialog can open, so the answer arrives as a future
+     * that completes on every path -- empty when the configuration was
+     * canceled, refused, or the parent was disposed mid-preparation. As with
+     * the synchronous seam, the answer is a {@link Choice} ONLY, never a
+     * started session, and a completed-empty future changes nothing.
+     */
+    @FunctionalInterface
+    public interface AsyncSegmentConfigurator {
+
+        /** One segment's launch choice when it arrives, over the given parent
+          * dialog (the modality its nested dialog opens in); empty when it did
+          * not land. Must complete on every path. */
+        CompletableFuture<Optional<Choice>> configure(Segment segment, DialogWrapper parent);
+    }
+
     private final StartPlan plan;
-    private final SegmentConfigurator configurator;
+    private final AsyncSegmentConfigurator configurator;
     private final Staging staging;
+    /** The Configure answers still outstanding: an outstanding answer keeps OK
+      * blocked, and a canceled parent completes them empty -- dispose-safe, no write. */
+    private final List<CompletableFuture<Optional<Choice>>> outstanding = new ArrayList<>();
     private final Map<RepositoryId, JBLabel> choiceLabels = new LinkedHashMap<>();
     private JButton firstFocus;
     /** The exact choices a confirmed OK accepted, captured before the peers go. */
@@ -83,6 +108,15 @@ public final class StartPlanDialog extends DialogWrapper {
     /** One dialog over one staged plan; the caller built the plan off the
       * EDT (one scan) and owns the Configure seam. */
     public StartPlanDialog(StartPlan plan, SegmentConfigurator configurator) {
+        this(plan, (segment, parent) -> CompletableFuture.completedFuture(
+                Objects.requireNonNull(configurator, "configurator").configure(segment)));
+    }
+
+    /** One dialog over one staged plan and the ASYNC Configure seam (T38's
+      * production wiring): the accepted choice is STAGED when its future
+      * completes -- still written only on a confirmed OK, exactly the capture
+      * discipline of the synchronous seam. */
+    private StartPlanDialog(StartPlan plan, AsyncSegmentConfigurator configurator) {
         super(true);
         this.plan = Objects.requireNonNull(plan, "plan");
         this.configurator = Objects.requireNonNull(configurator, "configurator");
@@ -91,6 +125,12 @@ public final class StartPlanDialog extends DialogWrapper {
         init();
         setResizable(true);
         setOKButtonText("Start stage 1");
+    }
+
+    /** The dialog over the ASYNC Configure seam (T38): the production seam's
+      * git preparation runs off the EDT, so its answer arrives as a future. */
+    public static StartPlanDialog overAsync(StartPlan plan, AsyncSegmentConfigurator configurator) {
+        return new StartPlanDialog(plan, configurator);
     }
 
     @Override
@@ -132,9 +172,13 @@ public final class StartPlanDialog extends DialogWrapper {
         return firstFocus;
     }
 
-    /** OK stays blocked while anything is unconfigured (P4.5). */
+    /** OK stays blocked while anything is unconfigured (P4.5) or while a Configure
+      * answer is still outstanding (T38: the frozen state is only what has landed). */
     @Override
     protected @Nullable ValidationInfo doValidate() {
+        if (!outstanding.isEmpty()) {
+            return new ValidationInfo("A segment's configuration is still running");
+        }
         return staging.refusal().map(ValidationInfo::new).orElse(null);
     }
 
@@ -145,6 +189,16 @@ public final class StartPlanDialog extends DialogWrapper {
         super.doOKAction();
     }
 
+    /** A canceled parent never writes and never strands an outstanding Configure:
+      * its answer completes empty, so the seam never opens its dialog (T38). */
+    @Override
+    public void doCancelAction() {
+        for (CompletableFuture<Optional<Choice>> answer : List.copyOf(outstanding)) {
+            answer.complete(Optional.empty());
+        }
+        super.doCancelAction();
+    }
+
     /** The accepted choices; refuses before a confirmed OK. */
     public PlanLaunchChoices choices() {
         if (accepted == null) {
@@ -153,12 +207,50 @@ public final class StartPlanDialog extends DialogWrapper {
         return accepted;
     }
 
-    /** The one code path the Configure button drives: the seam is asked,
-      * the answer is staged, the summary follows. A canceled Configure
-      * leaves every staged value exactly as it was. */
+    /** The one code path the Configure button drives: the seam is asked, the
+      * answer is staged when it lands -- immediately for a synchronous seam,
+      * on the EDT in this dialog's own modality for an async one -- and the
+      * summary follows. A canceled or refused Configure -- an empty answer --
+      * leaves every staged value exactly as it was, and an outstanding answer keeps
+      * OK blocked until it lands. */
     private void configure(Segment segment) {
-        configurator.configure(segment).ifPresent(choice -> staging.configure(segment, choice));
+        CompletableFuture<Optional<Choice>> answer;
+        try {
+            answer = configurator.configure(segment, this);
+        } catch (RuntimeException seamFailure) { // a throwing seam is a refused Configure
+            LOG.log(System.Logger.Level.WARNING, "The Configure seam of a segment threw", seamFailure);
+            refreshChoice(segment);
+            return;
+        }
+        outstanding.add(answer);
+        if (answer.isDone()) { // a synchronous seam lands immediately, byte-identically
+            landed(answer, segment, completedOf(answer));
+            return;
+        }
+        answer.whenComplete((choice, failure) -> ApplicationManager.getApplication().invokeLater(
+                () -> landed(answer, segment, failure == null ? choice : null),
+                ModalityState.stateForComponent(getContentPanel())));
+    }
+
+    /** One landed Configure answer, on the EDT: the OK block clears, an accepted
+      * choice is staged, the summary follows. A null answer -- canceled, refused or
+      * failed -- changes nothing, exactly a canceled Configure. */
+    private void landed(CompletableFuture<Optional<Choice>> answer, Segment segment,
+            Optional<Choice> choice) {
+        outstanding.remove(answer);
+        if (choice != null) {
+            choice.ifPresent(accepted -> staging.configure(segment, accepted));
+        }
         refreshChoice(segment);
+    }
+
+    /** A completed future's answer, or null when it completed exceptionally. */
+    private static Optional<Choice> completedOf(CompletableFuture<Optional<Choice>> answer) {
+        try {
+            return answer.join();
+        } catch (RuntimeException failed) { // a failed answer is a refused Configure
+            return null;
+        }
     }
 
     /** The informed-confirmation text (D8/D16/P4.5), one static truth. */

@@ -40,6 +40,7 @@ import com.intellij.openapi.progress.ProgressManager;
 import com.intellij.openapi.progress.Task;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.project.ProjectManager;
+import com.intellij.openapi.ui.DialogWrapper;
 import com.intellij.openapi.ui.Messages;
 import git4idea.repo.GitRepository;
 import git4idea.repo.GitRepositoryManager;
@@ -297,6 +298,84 @@ public final class TaskLauncher {
             report(from, "Could not show the New task dialog: " + WorktreeErrors.visibleMessage(e));
             chosen.complete(Optional.empty());
         }
+    }
+
+    /**
+     * T38's production Configure seam (a coordinator-granted addition): one
+     * segment's launch choice from the EXISTING New Session dialog, opened
+     * NESTED over the plan dialog. The git-backed ref chooser prepares OFF
+     * the EDT (never on the Configure button handler); the dialog then opens
+     * in the PARENT's own modality state ({@code ModalityState.stateForComponent},
+     * the T19b-verified nested-modal pattern this dialog's own OK dispatch
+     * uses), so it shows while the plan dialog is up -- unlike
+     * {@link #chooseTask}, whose non-modal invokeLater would wait for the
+     * parent to close. OK answers the accepted {@link Choice} ONLY, never a
+     * started session; a save-for-later OK saves through the existing path
+     * and answers empty; cancel answers empty. The future completes on every
+     * path, also when the parent was closed mid-preparation -- then empty,
+     * and no orphan dialog ever opens.
+     */
+    public static CompletableFuture<Optional<Choice>> chooseSegment(Project from, PreparedTask preparedTask,
+                                                                     NewTaskPreset preset,
+                                                                     DialogWrapper parent) {
+        Objects.requireNonNull(from, "from");
+        Objects.requireNonNull(preparedTask, "preparedTask");
+        Objects.requireNonNull(preset, "preset");
+        Objects.requireNonNull(parent, "parent");
+        CompletableFuture<Optional<Choice>> answer = new CompletableFuture<>();
+        ModalityState modality = ModalityState.stateForComponent(parent.getContentPanel());
+        Runnable prepare = () -> {
+            Optional<Supplier<Optional<String>>> refChooser;
+            try {
+                refChooser = refChooser(preparedTask.inputs().project().root());
+            } catch (RuntimeException e) {
+                LOG.log(Level.WARNING, "Could not prepare the New task dialog's ref chooser", e);
+                report(from, "Drydock could not prepare a new task: " + WorktreeErrors.visibleMessage(e));
+                answer.complete(Optional.empty());
+                return;
+            }
+            ApplicationManager.getApplication().invokeLater(() -> {
+                if (answer.isDone() || from.isDisposed()
+                        || parent.getContentPanel() == null || !parent.getContentPanel().isShowing()) {
+                    answer.complete(Optional.empty()); // the parent closed: never an orphan dialog
+                    return;
+                }
+                try {
+                    NewTaskDialog dialog = new NewTaskDialog(from, preparedTask.inputs(), refChooser, preset);
+                    if (dialog.showAndGet()) {
+                        NewTaskLauncherResult result = dialog.launcherResult();
+                        if (result.isLaunch()) {
+                            answer.complete(Optional.of(result.choice()));
+                        } else {
+                            saveTask(from, result.saved());
+                            answer.complete(Optional.empty());
+                        }
+                    } else {
+                        answer.complete(Optional.empty());
+                    }
+                } catch (RuntimeException e) {
+                    LOG.log(Level.WARNING, "Could not show the New task dialog", e);
+                    report(from, "Could not show the New task dialog: " + WorktreeErrors.visibleMessage(e));
+                    answer.complete(Optional.empty());
+                }
+            }, modality);
+        };
+        if (ApplicationManager.getApplication().isDispatchThread()) {
+            // the ref chooser blocks on git (worktree list): never on the EDT
+            ApplicationManager.getApplication().executeOnPooledThread(prepare);
+        } else {
+            prepare.run();
+        }
+        return answer;
+    }
+
+    /**
+     * One confirmed launch choice as the opaque {@link ChosenTask} (T38): the
+     * staged plan holds the confirmed {@link Choice} as a stored value, and the
+     * launch chain takes it back through this wrapper, never re-inspected.
+     */
+    public static ChosenTask chosen(Choice choice) {
+        return new ChosenTask(Objects.requireNonNull(choice, "choice"));
     }
 
     /**
