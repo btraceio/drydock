@@ -22,12 +22,15 @@ import javax.swing.BoxLayout;
 import javax.swing.JButton;
 import javax.swing.JComponent;
 import javax.swing.JPanel;
+import javax.swing.JViewport;
 import javax.swing.Scrollable;
 import javax.swing.SwingConstants;
 import java.awt.BorderLayout;
+import java.awt.Component;
 import java.awt.Dimension;
 import java.awt.EventQueue;
 import java.awt.FlowLayout;
+import java.awt.Insets;
 import java.awt.Rectangle;
 import java.time.Clock;
 import java.util.ArrayList;
@@ -151,9 +154,10 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
         ActionToolbar scopes = ActionManager.getInstance().createActionToolbar(TOOLBAR_PLACE, scopeActions, true);
         tabs.setTargetComponent(this);
         scopes.setTargetComponent(this);
+        // Two rows: the pane is narrow, and one row cut the scope toggles off.
         JPanel top = new JPanel(new BorderLayout());
-        top.add(tabs.getComponent(), BorderLayout.WEST);
-        top.add(scopes.getComponent(), BorderLayout.EAST);
+        top.add(tabs.getComponent(), BorderLayout.NORTH);
+        top.add(scopes.getComponent(), BorderLayout.SOUTH);
 
         stack.setLayout(new BoxLayout(stack, BoxLayout.Y_AXIS));
         stack.setBorder(JBUI.Borders.empty(4));
@@ -436,8 +440,37 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
         }
     }
 
-    /** The card stack: as wide as the viewport, so the cards wrap instead of scrolling sideways. */
+    /**
+     * The card stack: as wide as the viewport, so the cards wrap instead of
+     * scrolling sideways. A card reports its unwrapped height until it is
+     * given a width, so the stack hands its own width to every card before
+     * laying them out.
+     */
     private static final class TrackingPanel extends JPanel implements Scrollable {
+        /** Measured before laid out: the viewport asks for the preferred size first, so the width goes in here too. */
+        @Override public Dimension getPreferredSize() {
+            wrapCards(getParent() instanceof JViewport viewport ? viewport.getWidth() : getWidth());
+            return super.getPreferredSize();
+        }
+
+        @Override public void doLayout() {
+            wrapCards(getWidth());
+            super.doLayout();
+        }
+
+        private void wrapCards(int outerWidth) {
+            Insets insets = getInsets();
+            int width = outerWidth - insets.left - insets.right;
+            if (width <= 0) {
+                return;
+            }
+            for (Component child : getComponents()) {
+                if (child instanceof FindingInlayCard card) {
+                    card.setWrapWidth(width);
+                }
+            }
+        }
+
         @Override public Dimension getPreferredScrollableViewportSize() {
             return getPreferredSize();
         }

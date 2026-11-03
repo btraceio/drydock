@@ -22,6 +22,7 @@ import com.intellij.util.ui.HTMLEditorKitBuilder;
 import com.intellij.util.ui.JBUI;
 import com.intellij.util.ui.SingleComponentCenteringLayout;
 import com.intellij.util.ui.UIUtil;
+import com.intellij.util.ui.WrapLayout;
 import kotlin.Unit;
 
 import javax.swing.BorderFactory;
@@ -173,7 +174,8 @@ public final class FindingInlayCard extends JPanel {
     private final List<TextBlock> blocks = new ArrayList<>();
     private final JPanel items = new JPanel();
     private final JBTextField comment = new JBTextField();
-    private final JPanel actions = new JPanel(new FlowLayout(FlowLayout.LEADING, JBUI.scale(12), 0));
+    /** The links wrap onto further rows when the card is narrow (the inbox pane), instead of being cut off. */
+    private final JPanel actions = new JPanel(new WrapLayout(FlowLayout.LEADING, JBUI.scale(12), 0));
     private final JBLabel progress = new JBLabel(PROGRESS_TEXT, AnimatedIcon.Default.INSTANCE, SwingConstants.LEADING);
     /**
      * The triage actions' labels: "Agree"/"Won't fix" by default — the honest
@@ -352,6 +354,9 @@ public final class FindingInlayCard extends JPanel {
         for (TextBlock block : blocks) {
             block.wrapAt(width);
         }
+        // WrapLayout counts its rows against the panel's current width: a
+        // panel not laid out yet would be measured as one row, cutting links.
+        actions.setSize(width, actions.getHeight());
     }
 
     /**

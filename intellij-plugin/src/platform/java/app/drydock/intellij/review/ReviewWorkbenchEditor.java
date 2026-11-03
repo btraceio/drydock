@@ -103,7 +103,7 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
     final DefaultActionGroup modeActions;
     private final JBPanel<?> navigator = new JBPanel<>(new BorderLayout());
     final OnePixelSplitter navSplitter = new OnePixelSplitter(false, NAV_KEY, 0.2f);
-    final OnePixelSplitter inboxSplitter = new OnePixelSplitter(false, INBOX_KEY, 0.75f);
+    final OnePixelSplitter inboxSplitter = new OnePixelSplitter(false, INBOX_KEY, 0.68f);
     final OnePixelSplitter outboxSplitter = new OnePixelSplitter(true, OUTBOX_KEY, 0.8f);
 
     ReviewWorkbenchEditor(Project project, ReviewWorkbenchFile file, Host host) {
