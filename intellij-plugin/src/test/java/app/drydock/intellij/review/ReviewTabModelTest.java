@@ -120,6 +120,58 @@ class ReviewTabModelTest {
         return ReviewTabModel.snapshot(new ReviewTabModel.Inputs(diff, findings, verdicts, currentBase));
     }
 
+    // ---- the workbench navigator: hunk counter and the findings filter ------
+
+    @Test
+    void theHunkCounterCountsFreshApprovedHunksOnly() {
+        UnifiedDiff twoHunks = diff(file("a.txt", hunk(HUNK_A_LINES), hunk(HUNK_B_LINES)));
+
+        ReviewTabModel.FileRow none = row(snapshot(twoHunks, List.of(), List.of(), Optional.of(BASE)), "a.txt");
+        assertEquals(0, none.reviewedHunks());
+        assertEquals(2, none.totalHunks());
+        assertEquals(Optional.of("0/2 hunks"), none.hunkProgress());
+
+        ReviewTabModel.FileRow one = row(snapshot(twoHunks, List.of(),
+                List.of(verdict(digestA(), ReviewVerdict.Decision.APPROVED, BASE),
+                        verdict(digestB(), ReviewVerdict.Decision.CHANGES, BASE)),
+                Optional.of(BASE)), "a.txt");
+        assertEquals(Optional.of("1/2 hunks"), one.hunkProgress());
+
+        ReviewTabModel.FileRow agent = row(snapshot(twoHunks, List.of(),
+                List.of(verdict(digestA(), ReviewVerdict.Decision.AUTO_APPROVED, BASE),
+                        verdict(digestB(), ReviewVerdict.Decision.APPROVED, OLD_BASE)),
+                Optional.of(BASE)), "a.txt");
+        assertEquals(1, agent.reviewedHunks(), "the agent's approval counts, a stale one does not");
+
+        ReviewTabModel.FileRow noBase = row(snapshot(twoHunks, List.of(),
+                List.of(verdict(digestA(), ReviewVerdict.Decision.APPROVED, BASE)),
+                Optional.empty()), "a.txt");
+        assertEquals(0, noBase.reviewedHunks(), "no base commit vouches for no verdict");
+    }
+
+    @Test
+    void aFileWithoutHunksHasNoCounter() {
+        ReviewTabModel.FileRow binary = row(snapshot(diff(file("d.bin")), List.of(), List.of(), Optional.of(BASE)),
+                "d.bin");
+        assertEquals(Optional.empty(), binary.hunkProgress());
+    }
+
+    @Test
+    void theFindingsFilterKeepsFilesWithOpenFindingsAndTheKeptFile() {
+        ReviewTabModel.Snapshot all = snapshot(
+                diff(file("a.txt", hunk(HUNK_A_LINES)), file("b.txt", hunk(HUNK_A_LINES)),
+                        file("c.txt", hunk(HUNK_A_LINES))),
+                List.of(open("a.txt", "n2", "n2", Severity.BLOCKING, "leak")),
+                List.of(), Optional.of(BASE));
+
+        ReviewTabModel.Snapshot filtered = all.withFindingsOnly(Optional.empty());
+        assertEquals(List.of("a.txt"), filtered.files().stream().map(ReviewTabModel.FileRow::path).toList());
+        assertEquals(all.headerText(), filtered.headerText(), "the counts stay the whole review's");
+
+        assertEquals(List.of("a.txt", "c.txt"), all.withFindingsOnly(Optional.of("c.txt")).files().stream()
+                .map(ReviewTabModel.FileRow::path).toList());
+    }
+
     // ---- AC6: one mark per row, precedence Q3 -------------------------------
 
     /**
