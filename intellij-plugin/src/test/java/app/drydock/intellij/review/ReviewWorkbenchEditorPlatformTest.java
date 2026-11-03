@@ -227,6 +227,11 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
             public void changeView(Project project, WorkbenchState.View view) {
                 asked.add(view);
             }
+
+            @Override
+            public Optional<JComponent> hostInbox(Project project, Disposable parent) {
+                return Optional.empty();
+            }
         };
         ReviewWorkbenchEditor editor = new ReviewWorkbenchEditor(getProject(), ReviewWorkbenchFile.of(getProject()),
                 host);
@@ -271,6 +276,11 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
             @Override
             public void changeView(Project project, WorkbenchState.View view) {
             }
+
+            @Override
+            public Optional<JComponent> hostInbox(Project project, Disposable parent) {
+                return Optional.empty();
+            }
         };
         ReviewWorkbenchEditor editor = new ReviewWorkbenchEditor(getProject(), ReviewWorkbenchFile.of(getProject()),
                 host);
@@ -314,6 +324,11 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
         @Override
         public void changeView(Project project, WorkbenchState.View view) {
         }
+
+        @Override
+        public Optional<JComponent> hostInbox(Project project, Disposable parent) {
+            return Optional.empty();
+        }
     };
 
     private static ReviewWorkbenchEditor.Host diffOnly(ReviewDiffEditor diff) {
@@ -331,6 +346,11 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
 
             @Override
             public void changeView(Project project, WorkbenchState.View view) {
+            }
+
+            @Override
+            public Optional<JComponent> hostInbox(Project project, Disposable parent) {
+                return Optional.empty();
             }
         };
     }

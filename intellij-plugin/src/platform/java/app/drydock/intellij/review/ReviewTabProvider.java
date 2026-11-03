@@ -1498,7 +1498,7 @@ final class ReviewTabProvider {
      * app's {@code UiErrors.message} — which is JavaFX-bound and not part
      * of the plugin, so this is the tab's two-line form of it.
      */
-    private static String rootMessage(Throwable failure) {
+    static String rootMessage(Throwable failure) {
         Throwable t = failure;
         while (t instanceof CompletionException && t.getCause() != null) {
             t = t.getCause();
@@ -1730,6 +1730,100 @@ final class ReviewTabProvider {
     private void workbenchFilterChanged(WorkbenchState.Filter filter) {
         workbenchFilter = Objects.requireNonNull(filter, "filter");
         submitWorkbenchState();
+    }
+
+    /** What the inbox says when a finding is no longer in the store. */
+    static final String FINDING_GONE = "The finding is gone: the review changed since it was shown.";
+    /** What the inbox says before the review's backend is wired. */
+    static final String STILL_LOADING = "The review is still loading: nothing was changed.";
+
+    /** The inbox's text for a challenge outcome (pure); empty when there is nothing to report. */
+    static Optional<String> challengeMessage(ReviewTriageActions.ChallengeOutcome.State state) {
+        return switch (state) {
+            case DELIVERED -> Optional.of("Asked the agent. Its answer will appear in the thread.");
+            case BLANK -> Optional.empty();
+            case NO_SESSION -> Optional.of("No agent session is bound to this review: nothing was sent.");
+            case MISSING -> Optional.of(FINDING_GONE);
+            case REFUSED -> Optional.of("The agent's session did not take the question. Your comment is kept.");
+            case FAILED -> Optional.of("Sending the question failed. Your comment is kept.");
+        };
+    }
+
+    /**
+     * A findings inbox over the live review for a new workbench editor,
+     * rendered from every {@link WorkbenchState} until {@code parent} is
+     * disposed. Empty when the project has no live Review content. EDT.
+     */
+    static Optional<JComponent> hostedInbox(Project project, Disposable parent) {
+        ReviewTabProvider provider = project.getUserData(LIVE_PROVIDER);
+        if (provider == null || provider.disposed.get()) {
+            return Optional.empty();
+        }
+        ReviewWorkbenchInbox inbox = new ReviewWorkbenchInbox(provider.new InboxActions(), Clock.systemDefaultZone());
+        Disposer.register(parent, inbox);
+        provider.attachWorkbenchView(inbox::render, parent);
+        return Optional.of(inbox);
+    }
+
+    /** The inbox's actions on the live review: the triage write side, the navigators, the inbox choice. */
+    private final class InboxActions implements ReviewWorkbenchInbox.Actions {
+
+        @Override
+        public CompletableFuture<Optional<String>> requestFix(ReviewAnnotation finding) {
+            ReviewTriageActions actions = triage;
+            return actions == null ? loading() : actions.requestFix(finding.key()).thenApply(ReviewTabProvider::goneIfEmpty);
+        }
+
+        @Override
+        public CompletableFuture<Optional<String>> dismiss(ReviewAnnotation finding) {
+            ReviewTriageActions actions = triage;
+            return actions == null ? loading() : actions.dismiss(finding.key()).thenApply(ReviewTabProvider::goneIfEmpty);
+        }
+
+        @Override
+        public CompletableFuture<Optional<String>> undo(ReviewAnnotation finding) {
+            ReviewTriageActions actions = triage;
+            return actions == null ? loading() : actions.undo(finding.key()).thenApply(ReviewTabProvider::goneIfEmpty);
+        }
+
+        @Override
+        public CompletableFuture<Optional<String>> comment(ReviewAnnotation finding, String text) {
+            ReviewTriageActions actions = triage;
+            return actions == null ? loading() : actions.comment(finding.key(), text).thenApply(outcome ->
+                    outcome.state() == ReviewTriageActions.CommentOutcome.State.MISSING
+                            ? Optional.of(FINDING_GONE)
+                            : Optional.empty());
+        }
+
+        @Override
+        public CompletableFuture<Optional<String>> challenge(ReviewAnnotation finding, String text) {
+            ReviewTriageActions actions = triage;
+            ReviewScope current = scope;
+            return actions == null || current == null
+                    ? loading()
+                    : actions.challenge(finding.key(), text, current).thenApply(outcome -> challengeMessage(outcome.state()));
+        }
+
+        @Override
+        public void showInDiff(ReviewAnnotation finding) {
+            for (ReviewWorkbenchNavigator navigator : List.copyOf(navigators)) {
+                navigator.selectFinding(finding.file(), finding.id());
+            }
+        }
+
+        @Override
+        public void choose(WorkbenchState.InboxChoice choice) {
+            inboxChoice = Objects.requireNonNull(choice, "choice");
+            submitWorkbenchState();
+        }
+
+        private CompletableFuture<Optional<String>> loading() {
+            return CompletableFuture.completedFuture(Optional.of(STILL_LOADING));
+        }
+    }
+
+    private static Optional<String> goneIfEmpty(Optional<ReviewAnnotation> updated) {
+        return updated.isEmpty() ? Optional.of(FINDING_GONE) : Optional.empty();
     }
 
     /** The live review's checkout root and latest snapshot, for the review search scope. */
