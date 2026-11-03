@@ -7,6 +7,9 @@ import app.drydock.domain.RepositoryCatalog;
 import app.drydock.domain.RepositoryId;
 import app.drydock.mcp.TaskTools;
 import app.drydock.mcp.TaskToolContext;
+import app.drydock.tasks.PlanProgress;
+import app.drydock.tasks.PlanStore;
+import app.drydock.tasks.PlanStore.PlanStoreException;
 import app.drydock.tasks.TaskDocument;
 import app.drydock.tasks.TaskFilePatch;
 import app.drydock.tasks.TaskFiles;
@@ -26,11 +29,13 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.function.Supplier;
 
@@ -48,7 +53,11 @@ import java.util.function.Supplier;
  * moves make a scan see only committed files. A task tool call before init,
  * after a failed one, or after disposal answers a visibly failed future
  * naming why, never a silent no-op. An init failure is isolated, logged, non-fatal;
- * disposal, registered by the plugin as a Disposable child, flushes pending writes.
+ * disposal, registered by the plugin as a Disposable child, flushes pending writes. On
+ * init, once the catalog has normalized, it also recovers the persisted plans (T36a):
+ * the Continue each needs is PUBLISHED but nothing ever launches during recovery (P4.10:
+ * a restart is a human checkpoint), and on close the plan drivers stop and the task and
+ * plan stores flush before the shared executor this service runs on shuts down.
  */
 public final class DelayedTaskService implements TaskToolContext, AutoCloseable {
 
@@ -76,6 +85,21 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
     private volatile TaskStoreWatcher watcher;
     /** The last composition the watcher published (T13a): volatile, immutable. */
     private volatile TaskStoreWatcher.WatchedSnapshot watchedSnapshot;
+    /** The T36a plan store over the same root: built on init once the catalog normalized,
+      * flushed and closed on close -- always before the shared executor shuts down, because
+      * this close runs as the plugin's Disposable child (the T13a ordering). */
+    private volatile PlanStore plans;
+    /** The published Continue requirements (T36a): what every persisted plan needs after a
+      * restart; the recovery itself never launches anything (P4.10). */
+    private volatile PlanRecovery.Report recovery;
+    /** The drivers this service owns, one per continued plan (T36a): each is subscribed to the
+      * store watcher's snapshots and stopped on close before the stores flush. */
+    private final Map<TaskId, Subscription> drivers = new ConcurrentHashMap<>();
+
+    /** One owned driver subscription (T36a): the driver, its plan's task set, and the graph
+      * revision its events carry -- the plan's own, so watcher noise never reads as stale. */
+    private record Subscription(PlanDriver driver, Set<TaskId> tasks, long graphRevision) {
+    }
 
     /** The production service: the override chain's root, initialized on {@code executor}. */
     public DelayedTaskService(Executor executor, Supplier<List<ManagedAgentSession>> sessions,
@@ -128,6 +152,7 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
             TaskFiles.scan(root); // readable probe: a root that cannot be listed fails init
             if (publishOrClose(built)) {
                 startWatcher();
+                recoverPlans();
             }
         } catch (IOException | RuntimeException e) {
             initFailure = e.getMessage() != null ? e.getMessage() : e.toString();
@@ -173,9 +198,38 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
     }
 
     /** The watcher's publication seam (T13a): the volatile, immutable handoff
-     * the UI/MCP reads through {@link #watchedSnapshot()}. */
+     * the UI/MCP reads through {@link #watchedSnapshot()} -- and the T36a
+     * subscription the service owns: every published snapshot refreshes the
+     * recovery report and feeds the drivers it drives (a mid-run change never
+     * launches anything by itself; launches ride the explicit Continue). */
     void publishWatchedSnapshot(TaskStoreWatcher.WatchedSnapshot snapshot) {
         watchedSnapshot = snapshot;
+        if (closed || snapshot.snapshot() == null) {
+            return;
+        }
+        refreshRecovery(snapshot.snapshot());
+        for (Subscription subscription : drivers.values()) {
+            feed(subscription.driver(), subscription.tasks(), subscription.graphRevision(),
+                    snapshot.snapshot()).whenComplete((ignored, failure) -> {
+                if (failure != null) {
+                    LOG.log(Level.WARNING, "A plan driver on " + root + " could not observe the"
+                            + " store", failure);
+                }
+            });
+        }
+    }
+
+    /** Keeps the published report current (T36a): one read-only plan re-scan per published
+     * snapshot; still ZERO launches -- only the explicit Continue drives anything. */
+    private void refreshRecovery(TaskSnapshot catalog) {
+        if (plans == null) {
+            return;
+        }
+        try {
+            publishRecovery(PlanRecovery.scan(root, catalog, liveSessionIds()));
+        } catch (IOException | RuntimeException e) {
+            LOG.log(Level.WARNING, "The plans on " + root + " could not be re-scanned", e);
+        }
     }
 
     /** The last composition the watcher published (T13a), or null before its
@@ -183,6 +237,150 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
      * the save conflicts that refused a reload, and the root-level error. */
     public TaskStoreWatcher.WatchedSnapshot watchedSnapshot() {
         return watchedSnapshot;
+    }
+
+    /** The published Continue requirements (T36a), or null before the first recovery or
+     * when the plan scan failed: what every persisted plan needs after this or a previous
+     * restart. Recovery never launches anything (P4.10). */
+    public PlanRecovery.Report recovery() {
+        return recovery;
+    }
+
+    /** The T36a recovery, once the catalog normalized on init: build the plan store, scan
+     * the persisted plans and PUBLISH what each needs -- requirements only, ZERO launches
+     * (a restart is a human checkpoint, not a duplicate-launch trap, P4.10). */
+    private void recoverPlans() {
+        PlanStore built = new PlanStore(root);
+        if (!publishPlansOrClose(built)) {
+            return;
+        }
+        try {
+            publishRecovery(PlanRecovery.scan(root, scanFresh(), liveSessionIds()));
+        } catch (IOException | RuntimeException e) { // the catalog is live: plans degrade alone
+            LOG.log(Level.WARNING, "The plans on " + root + " could not be recovered; the plugin"
+                    + " keeps working without them", e);
+        }
+    }
+
+    /** Publishes the built plan store unless this service closed or a concurrent attempt
+     * won the race (the close/init race never leaks a plan store). */
+    private synchronized boolean publishPlansOrClose(PlanStore built) {
+        if (closed || plans != null) {
+            built.close();
+            return false;
+        }
+        plans = built;
+        return true;
+    }
+
+    /** Publishes a scanned report unless this service closed mid-scan (close/init race). */
+    private synchronized void publishRecovery(PlanRecovery.Report scanned) {
+        if (!closed) {
+            recovery = scanned;
+        }
+    }
+
+    /** The explicit Continue of one persisted plan (T36a, P4.10): reconcile its persisted
+     * launch intent with the catalog and receipts, revalidate its graph and choices, and --
+     * only when everything reconciles -- drive it through the CALLER-SUPPLIED launcher
+     * seam (the production composition is T38's). An ambiguous intent stays HALTED with its
+     * remediation and is never auto-retried; a foreign driver is refused visibly; NOTHING
+     * launches before this explicit call, and the sessions the receipts prove live are
+     * reused, never re-spawned. */
+    public CompletableFuture<PlanRecovery.Outcome> continuePlan(TaskId plan,
+            PlanDriver.SegmentLauncher launcher, PlanDriver.Listener listener) {
+        Objects.requireNonNull(plan, "plan");
+        Objects.requireNonNull(launcher, "launcher");
+        Objects.requireNonNull(listener, "listener");
+        try {
+            requireStore();
+            requirePlans();
+        } catch (IllegalStateException e) {
+            return CompletableFuture.failedFuture(e);
+        }
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                TaskSnapshot catalog = scanFresh();
+                PlanRecovery.Outcome outcome = PlanRecovery.continuePlan(root, plans, plan, catalog,
+                        liveSessionIds(), registeredRepositories());
+                if (!(outcome instanceof PlanRecovery.Proceed proceed)) {
+                    return CompletableFuture.<PlanRecovery.Outcome>completedFuture(outcome);
+                }
+                return drive(proceed, catalog, launcher, listener)
+                        .thenApply(ignored -> (PlanRecovery.Outcome) outcome);
+            } catch (IOException e) {
+                throw new CompletionException("The task store on " + root + " failed", e);
+            }
+        }, executor).thenCompose(outcome -> outcome);
+    }
+
+    /** Drives one reconciled plan (T36a): start its driver, subscribe it to this service's
+     * watcher snapshots, then feed the explicit Continue and the catalog's current
+     * statuses. Launches ride the caller's launcher seam only; the reused sessions of a
+     * reconciled stage never launch again. */
+    private CompletableFuture<Void> drive(PlanRecovery.Proceed proceed, TaskSnapshot catalog,
+            PlanDriver.SegmentLauncher launcher, PlanDriver.Listener listener) {
+        if (closed) {
+            return CompletableFuture.failedFuture(new IllegalStateException(
+                    "The Drydock task service on " + root + " is disposed"));
+        }
+        PlanDriver driver = new PlanDriver(executor, plans, launcher, listener);
+        return driver.start(proceed.plan()).thenCompose(record -> {
+            drivers.put(proceed.plan(), new Subscription(driver, Set.copyOf(proceed.tasks()),
+                    proceed.graphRevision()));
+            return driver.accept(new PlanProgress.ContinuePlan());
+        }).thenCompose(ignored -> feed(driver, Set.copyOf(proceed.tasks()), proceed.graphRevision(),
+                catalog)).whenComplete((ignored, failure) -> {
+            if (failure != null) { // a refused start or drive stops driving visibly, no leak
+                drivers.remove(proceed.plan());
+                driver.close(); // LAUNCHED SESSIONS KEEP RUNNING (P4.12)
+            }
+        });
+    }
+
+    /** Feeds one driver its plan tasks' catalog statuses (T36a): the service owns this
+     * subscription; a task is live when its document names a live catalog session. */
+    private CompletableFuture<Void> feed(PlanDriver driver, Set<TaskId> tasks, long graphRevision,
+            TaskSnapshot catalog) {
+        CompletableFuture<Void> done = CompletableFuture.completedFuture(null);
+        for (TaskId task : tasks) {
+            TaskDocument document = catalog.byId().get(task);
+            if (document == null) {
+                continue;
+            }
+            done = done.thenCompose(ignored -> driver.accept(new PlanProgress.TaskObserved(task,
+                    document.status(), live(document), graphRevision)));
+        }
+        return done;
+    }
+
+    /** Whether one of the document's sessions is a live catalog session. */
+    private boolean live(TaskDocument document) {
+        for (String session : document.sessions()) {
+            if (liveSessions.contains(session)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** The registered repository ids (T36a): the choices a Continue revalidates against. */
+    private Set<RepositoryId> registeredRepositories() {
+        Set<RepositoryId> ids = new LinkedHashSet<>();
+        for (Repository repository : repositories.get()) {
+            ids.add(repository.id());
+        }
+        return Set.copyOf(ids);
+    }
+
+    /** The T36a plan store, or the same visible lifecycle refusal as the task store. */
+    private PlanStore requirePlans() {
+        PlanStore planStore = plans;
+        if (planStore == null) {
+            requireStore(); // names the lifecycle state, or throws
+            throw new IllegalStateException("The plans on " + root + " are unavailable");
+        }
+        return planStore;
     }
 
     /** The task MCP tools over this context, built lazily once (the T11 delegate). */
@@ -282,9 +480,11 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
         });
     }
 
-    /** Flushes pending writes, removes the store watcher (T13a: no watch,
-     * listener or pending refresh survives), and closes the store; isolated,
-     * idempotent, never throws. */
+    /** Flushes pending writes, stops the plan drivers, removes the store watcher (T13a:
+     * no watch, listener or pending refresh survives), and closes both stores; isolated,
+     * idempotent, never throws. The drivers stop and the stores flush BEFORE the shared
+     * executor closes (T36a/T13a ordering): this close runs as the plugin's Disposable
+     * child, ahead of DrydockPluginService's executor shutdown. */
     @Override
     public void close() {
         TaskStore taskStore;
@@ -296,6 +496,16 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
             taskStore = store;
             store = null;
         }
+        // T36a: the drivers stop FIRST -- their lanes run on the shared executor and their
+        // plans must see no new work -- and LAUNCHED SESSIONS KEEP RUNNING (P4.12), always.
+        for (Subscription subscription : List.copyOf(drivers.values())) {
+            try {
+                subscription.driver().close();
+            } catch (RuntimeException e) {
+                LOG.log(Level.WARNING, "Could not stop a plan driver on " + root, e);
+            }
+        }
+        drivers.clear();
         TaskStoreWatcher ideWatcher = watcher;
         watcher = null;
         if (ideWatcher != null) {
@@ -317,6 +527,20 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
             taskStore.close();
         } catch (RuntimeException e) {
             LOG.log(Level.WARNING, "Could not close the Drydock task store on " + root, e);
+        }
+        PlanStore planStore = plans;
+        plans = null;
+        if (planStore != null) {
+            try {
+                planStore.flush();
+            } catch (PlanStoreException | RuntimeException e) {
+                LOG.log(Level.WARNING, "Could not flush the Drydock plan store on " + root, e);
+            }
+            try {
+                planStore.close();
+            } catch (RuntimeException e) {
+                LOG.log(Level.WARNING, "Could not close the Drydock plan store on " + root, e);
+            }
         }
     }
 
