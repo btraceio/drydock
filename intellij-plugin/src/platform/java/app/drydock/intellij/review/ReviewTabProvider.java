@@ -72,6 +72,7 @@ import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
+import java.util.function.UnaryOperator;
 
 /**
  * The dedicated Drydock Review window's content (P3): the header
@@ -223,6 +224,12 @@ final class ReviewTabProvider {
     /** The latest workbench state, for a view that attaches after it was built. */
     private volatile WorkbenchState workbenchState;
 
+    /**
+     * The scope's diff root as the project's own files name it
+     * ({@link #checkoutRoot}): where the review's paths resolve to
+     * project {@code VirtualFile}s. Set off the EDT with the scope.
+     */
+    private volatile Path checkoutRoot;
     /** The latest resolved scope; the commands and every reload target it. */
     private volatile ReviewScope scope;
     /** The latest snapshot; the file row of a selected finding is looked up in it. */
@@ -447,6 +454,8 @@ final class ReviewTabProvider {
                         onEdt(() -> renderStatus(state, state.message(error)));
                         return;
                     }
+                    ReviewTabProvider.this.checkoutRoot = checkoutRoot(scope.diffRoot(), base,
+                            ReviewTabProvider::realPathOrNull);
                     ReviewTabProvider.this.scope = scope;
                     onEdt(() -> nameWorkbench(scope));
                     // reload reports LOADING synchronously before any
@@ -701,7 +710,7 @@ final class ReviewTabProvider {
         // The right side can be the worktree file itself (spec §2): its
         // document is loaded here, off the EDT, so the EDT build that
         // decides the backing finds it in memory.
-        Optional<Path> worktreeFile = worktreeFileOf(scope, file);
+        Optional<Path> worktreeFile = worktreeFileOf(scope, rootFor(scope), file);
         ReviewDiffContents.warm(worktreeFile);
         // The file's decorations — every unresolved finding, triaged or
         // not, so CONFIRMED/DISMISSED cards keep their Undo — read off the
@@ -788,12 +797,45 @@ final class ReviewTabProvider {
      * right side is {@code HEAD}, so it is file-backed only while the
      * checkout matches {@code HEAD}.
      */
-    static Optional<Path> worktreeFileOf(ReviewScope scope, UnifiedDiff.FileDiff file) {
+    static Optional<Path> worktreeFileOf(ReviewScope scope, Path root, UnifiedDiff.FileDiff file) {
         if ("D".equals(file.kind())
                 || (scope.diffScope() == DiffScope.BASE && scope.worktree().isEmpty())) {
             return Optional.empty();
         }
-        return Optional.of(scope.diffRoot().resolve(file.path()));
+        return Optional.of(root.resolve(file.path()));
+    }
+
+    /**
+     * The root the review's paths resolve under (pure over {@code real}):
+     * the project's own base path when it is the same directory as the
+     * scope's diff root, the diff root otherwise. Git reports the diff root
+     * by its real path ({@code /private/tmp/...} on macOS) while the project
+     * may name it through a symlink ({@code /tmp/...}); the VFS gives the two
+     * spellings different {@code VirtualFile}s, so a review file resolved
+     * under the diff root would not be the project's file: not in a search
+     * scope over project files, and not the document the user edits.
+     */
+    static Path checkoutRoot(Path diffRoot, Path projectBase, UnaryOperator<Path> real) {
+        if (projectBase == null) {
+            return diffRoot;
+        }
+        Path realDiffRoot = real.apply(diffRoot);
+        return realDiffRoot != null && realDiffRoot.equals(real.apply(projectBase)) ? projectBase : diffRoot;
+    }
+
+    /** The checkout root for {@code scope}: the resolved one, or the scope's diff root before it is known. */
+    private Path rootFor(ReviewScope scope) {
+        Path root = checkoutRoot;
+        return root == null ? scope.diffRoot() : root;
+    }
+
+    /** {@link Path#toRealPath()}, or null when the path cannot be resolved. File I/O: never on the EDT. */
+    private static Path realPathOrNull(Path path) {
+        try {
+            return path.toRealPath();
+        } catch (IOException e) {
+            return null;
+        }
     }
 
     /**
@@ -1697,7 +1739,7 @@ final class ReviewTabProvider {
         ReviewTabModel.Snapshot snapshot = provider.snapshot;
         return scope == null || snapshot == null
                 ? Optional.empty()
-                : Optional.of(new ReviewFiles(scope.diffRoot(), snapshot));
+                : Optional.of(new ReviewFiles(provider.rootFor(scope), snapshot));
     }
 
     /** The workbench's Changes only / Full file choice (EDT): the diff refolds, then the state is rebuilt. */

@@ -11,6 +11,7 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.UnaryOperator;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -70,22 +71,40 @@ class ReviewDiffContentsTest {
         Path root = Path.of("/work/tree");
         ReviewScope worktree = scope(ReviewScope.Kind.WORKTREE, Optional.of(root));
         assertEquals(Optional.of(root.resolve("src/A.java")),
-                ReviewTabProvider.worktreeFileOf(worktree, file("src/A.java", "M")));
+                ReviewTabProvider.worktreeFileOf(worktree, root, file("src/A.java", "M")));
     }
 
     @Test
     void aDeletedFileHasNoWorktreeFile() {
         ReviewScope worktree = scope(ReviewScope.Kind.WORKTREE, Optional.of(Path.of("/work/tree")));
-        assertEquals(Optional.empty(), ReviewTabProvider.worktreeFileOf(worktree, file("src/A.java", "D")));
+        assertEquals(Optional.empty(), ReviewTabProvider.worktreeFileOf(worktree, worktree.diffRoot(), file("src/A.java", "D")));
     }
 
     @Test
     void aBaseScopeWithoutItsOwnCheckoutHasNoWorktreeFile() {
         ReviewScope pr = scope(ReviewScope.Kind.PR, Optional.empty());
-        assertEquals(Optional.empty(), ReviewTabProvider.worktreeFileOf(pr, file("src/A.java", "M")));
+        assertEquals(Optional.empty(), ReviewTabProvider.worktreeFileOf(pr, pr.diffRoot(), file("src/A.java", "M")));
         ReviewScope checkedOut = scope(ReviewScope.Kind.PR, Optional.of(Path.of("/pr/tree")));
         assertEquals(Optional.of(Path.of("/pr/tree/src/A.java")),
-                ReviewTabProvider.worktreeFileOf(checkedOut, file("src/A.java", "M")));
+                ReviewTabProvider.worktreeFileOf(checkedOut, checkedOut.diffRoot(), file("src/A.java", "M")));
+    }
+
+    @Test
+    void theProjectsOwnSpellingOfTheCheckoutWins() {
+        // git reports /private/tmp/wt; the project was opened as /tmp/wt (a symlink).
+        Path real = Path.of("/private/tmp/wt");
+        Path project = Path.of("/tmp/wt");
+        UnaryOperator<Path> resolve = path -> path.startsWith("/tmp") ? real : path;
+        assertEquals(project, ReviewTabProvider.checkoutRoot(real, project, resolve));
+    }
+
+    @Test
+    void anotherDirectoryOrNoProjectKeepsTheDiffRoot() {
+        Path diffRoot = Path.of("/work/a");
+        assertEquals(diffRoot, ReviewTabProvider.checkoutRoot(diffRoot, Path.of("/work/b"), path -> path));
+        assertEquals(diffRoot, ReviewTabProvider.checkoutRoot(diffRoot, null, path -> path));
+        assertEquals(diffRoot, ReviewTabProvider.checkoutRoot(diffRoot, Path.of("/work/a"), path -> null),
+                "an unresolvable path proves nothing");
     }
 
     private static ReviewScope scope(ReviewScope.Kind kind, Optional<Path> worktree) {
