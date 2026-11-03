@@ -5,8 +5,10 @@ import com.intellij.openapi.Disposable;
 import com.intellij.openapi.actionSystem.ActionManager;
 import com.intellij.openapi.actionSystem.ActionToolbar;
 import com.intellij.openapi.actionSystem.ActionUpdateThread;
+import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.actionSystem.DefaultActionGroup;
+import com.intellij.openapi.actionSystem.ex.ActionUtil;
 import com.intellij.openapi.fileEditor.FileEditor;
 import com.intellij.openapi.fileEditor.FileEditorState;
 import com.intellij.openapi.project.DumbAwareToggleAction;
@@ -135,6 +137,11 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
         preferredFocus = diff.map(HostedDiff::preferredFocus).orElse(() -> centre);
     }
 
+    /** A text-only toggle renders as a blank button in a toolbar unless its presentation asks for the text. */
+    static void showTextInToolbar(AnAction action) {
+        action.getTemplatePresentation().putClientProperty(ActionUtil.SHOW_TEXT_IN_TOOLBAR, true);
+    }
+
     /** The header for {@code state}: the review's subject and its progress. EDT. */
     private void renderHeader(WorkbenchState state) {
         shown = state;
@@ -154,6 +161,7 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
         ModeChip(WorkbenchState.Mode mode) {
             super(mode.label());
             this.mode = mode;
+            showTextInToolbar(this);
         }
 
         @Override
@@ -176,11 +184,6 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
         }
 
         @Override
-        public boolean displayTextInToolbar() {
-            return true; // a text-only toggle renders as a blank button otherwise
-        }
-
-        @Override
         public @NotNull ActionUpdateThread getActionUpdateThread() {
             return ActionUpdateThread.EDT;
         }
@@ -197,6 +200,7 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
             this.project = project;
             this.host = host;
             this.view = view;
+            showTextInToolbar(this);
         }
 
         @Override
@@ -216,11 +220,6 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
         public void update(@NotNull AnActionEvent e) {
             super.update(e);
             e.getPresentation().setEnabled(shown != null);
-        }
-
-        @Override
-        public boolean displayTextInToolbar() {
-            return true; // a text-only toggle renders as a blank button otherwise
         }
 
         @Override

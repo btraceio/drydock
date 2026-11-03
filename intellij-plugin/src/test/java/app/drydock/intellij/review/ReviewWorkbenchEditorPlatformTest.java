@@ -11,6 +11,7 @@ import com.intellij.ide.util.PropertiesComponent;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.actionSystem.ToggleAction;
+import com.intellij.openapi.actionSystem.ex.ActionUtil;
 import com.intellij.openapi.fileEditor.FileEditorProvider;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.Disposer;
@@ -231,8 +232,10 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
         try {
             ToggleAction changesOnly = (ToggleAction) editor.viewActions.getChildActionsOrStubs()[0];
             ToggleAction fullFile = (ToggleAction) editor.viewActions.getChildActionsOrStubs()[1];
-            assertTrue("a text-only toggle shows its text", changesOnly.displayTextInToolbar());
-            assertTrue(fullFile.displayTextInToolbar());
+            assertEquals("a text-only toggle shows its text", Boolean.TRUE,
+                    changesOnly.getTemplatePresentation().getClientProperty(ActionUtil.SHOW_TEXT_IN_TOOLBAR));
+            assertEquals(Boolean.TRUE,
+                    fullFile.getTemplatePresentation().getClientProperty(ActionUtil.SHOW_TEXT_IN_TOOLBAR));
             AnActionEvent event = TestActionEvent.createTestEvent();
             assertFalse(changesOnly.isSelected(event));
 
@@ -277,8 +280,9 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
                     new ReviewTabModel.Snapshot(List.of(), 0, 0), WorkbenchState.Filter.ALL, Optional.empty(),
                     WorkbenchState.View.CHANGES_ONLY));
 
-            assertTrue("a text-only toggle shows its text", local.displayTextInToolbar());
-            assertTrue(pr.displayTextInToolbar());
+            assertEquals("a text-only toggle shows its text", Boolean.TRUE,
+                    local.getTemplatePresentation().getClientProperty(ActionUtil.SHOW_TEXT_IN_TOOLBAR));
+            assertEquals(Boolean.TRUE, pr.getTemplatePresentation().getClientProperty(ActionUtil.SHOW_TEXT_IN_TOOLBAR));
             AnActionEvent localEvent = TestActionEvent.createTestEvent(local);
             local.update(localEvent);
             assertTrue(local.isSelected(localEvent));
