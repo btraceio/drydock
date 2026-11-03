@@ -159,6 +159,14 @@
         <!-- Drydock is reached through its tool window, not a menu: New Task
              is outside it so the shortcut works anywhere, and New Task from
              Branch so Git's branch menus can start one. -->
+        <!-- The review diff's selection actions (ReviewSelectionAction): the
+             composer in the workbench inbox, for the selected lines. -->
+        <action id="Drydock.Review.CommentOnSelection"
+                class="app.drydock.intellij.review.ReviewSelectionAction$Comment"
+                text="Comment on Selection"
+                description="Add a review comment on the selected lines of the diff">
+            <add-to-group group-id="Diff.EditorPopupMenu" anchor="first"/>
+        </action>
         <action id="Drydock.NewTask"
                 class="app.drydock.intellij.tasks.NewTaskAction"
                 text="New Task…"

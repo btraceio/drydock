@@ -18,6 +18,7 @@ import app.drydock.intellij.agent.SessionActivityListener;
 import app.drydock.intellij.review.workbench.model.InboxModel;
 import app.drydock.intellij.review.workbench.model.WorkbenchState;
 import app.drydock.review.AnnotationStatus;
+import app.drydock.review.DiffSelection;
 import app.drydock.review.AnnotationStore;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewScope;
@@ -55,6 +56,7 @@ import java.io.UncheckedIOException;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -166,6 +168,8 @@ final class ReviewTabProvider {
     private JComponent panel;
     private JBLabel header;
     private JBLabel statusLabel;
+    /** The workbench inboxes showing this review (EDT only); the selection actions open their composer. */
+    private final List<ReviewWorkbenchInbox> inboxes = new ArrayList<>();
     /** The workbench navigators showing this review (EDT only); gutter targets land on them. */
     private final List<ReviewWorkbenchNavigator> navigators = new ArrayList<>();
     /** The disposal parent of the reusable diff editor and its inlay layer. */
@@ -382,6 +386,7 @@ final class ReviewTabProvider {
         header = null;
         statusLabel = null;
         navigators.clear(); // each is disposed with its workbench editor
+        inboxes.clear();
         diffParent = null;
         diffEditor = null;
         inlays = null;
@@ -1762,8 +1767,65 @@ final class ReviewTabProvider {
         ReviewWorkbenchInbox inbox = new ReviewWorkbenchInbox(provider.new InboxActions(), Clock.systemDefaultZone());
         Disposer.register(parent, inbox);
         provider.attachWorkbenchView(inbox::render, parent);
+        provider.inboxes.add(inbox);
+        Disposer.register(parent, () -> provider.inboxes.remove(inbox));
         return Optional.of(inbox);
     }
+
+    /** What the inbox says for a selection with no reviewable range. */
+    static final String NO_RANGE =
+            "Select changed lines of the diff: a review comment goes on the lines the change touches.";
+
+    /**
+     * Opens the inbox composer for a diff selection (the selection actions):
+     * the selection is resolved within one hunk of the shown file's diff; a
+     * selection with no range says why instead. EDT.
+     */
+    static void compose(Project project, Optional<ReviewSelection.Target> target,
+                        ReviewWorkbenchInbox.Composer.Mode mode) {
+        ReviewTabProvider provider = project.getUserData(LIVE_PROVIDER);
+        if (provider == null || provider.disposed.get()) {
+            return;
+        }
+        Optional<DiffSelection.Range> range = target.flatMap(provider::resolve);
+        for (ReviewWorkbenchInbox inbox : List.copyOf(provider.inboxes)) {
+            range.ifPresentOrElse(r -> inbox.openComposer(new ReviewWorkbenchInbox.Composer(mode, r)),
+                    () -> inbox.notice(NO_RANGE));
+        }
+    }
+
+    /** A selection target's range in the latest snapshot's file diff; empty when the file or the range is not there. */
+    private Optional<DiffSelection.Range> resolve(ReviewSelection.Target target) {
+        ReviewTabModel.Snapshot current = snapshot;
+        if (current == null) {
+            return Optional.empty();
+        }
+        return current.files().stream()
+                .filter(row -> row.path().equals(target.path()))
+                .findFirst()
+                .flatMap(row -> DiffSelection.resolve(row.diff(), target.side(), target.first(), target.last()));
+    }
+
+    /**
+     * Stores the reviewer's comment as a human finding at the range: confirmed
+     * and, in a local review, not posted to a PR — it is an instruction for
+     * the session. Off the EDT, on the plugin's executor.
+     */
+    private CompletableFuture<Optional<String>> addComment(DiffSelection.Range range, String text) {
+        AnnotationStore annotations = store;
+        ReviewScope current = scope;
+        if (annotations == null || current == null) {
+            return CompletableFuture.completedFuture(Optional.of(STILL_LOADING));
+        }
+        return CompletableFuture.supplyAsync(() -> {
+            annotations.upsert(ReviewAnnotation.human(current.id(), range.file(), range.startKey(), range.endKey(),
+                    new ReviewAnnotation.Message("You", Instant.now(), text)).withPostToPr(false));
+            return Optional.of(COMMENT_ADDED);
+        }, plugin.executor());
+    }
+
+    /** What the inbox says once a comment is stored. */
+    static final String COMMENT_ADDED = "Comment added to the Outbox.";
 
     /** The inbox's actions on the live review: the triage write side, the navigators, the inbox choice. */
     private final class InboxActions implements ReviewWorkbenchInbox.Actions {
@@ -1815,6 +1877,15 @@ final class ReviewTabProvider {
         public void choose(WorkbenchState.InboxChoice choice) {
             inboxChoice = Objects.requireNonNull(choice, "choice");
             submitWorkbenchState();
+        }
+
+        @Override
+        public CompletableFuture<Optional<String>> submit(ReviewWorkbenchInbox.Composer composer, String text) {
+            return switch (composer.mode()) {
+                case COMMENT -> addComment(composer.range(), text);
+                case ASK -> CompletableFuture.failedFuture(
+                        new IllegalStateException("Asking about a selection is not wired yet"));
+            };
         }
 
         private CompletableFuture<Optional<String>> loading() {

@@ -4,6 +4,7 @@ import app.drydock.intellij.review.workbench.model.InboxModel;
 import app.drydock.intellij.review.workbench.model.WorkbenchState;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.Confidence;
+import app.drydock.review.DiffSelection;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.Severity;
 import app.drydock.review.Triage;
@@ -14,6 +15,7 @@ import com.intellij.testFramework.PlatformTestUtil;
 import com.intellij.testFramework.TestActionEvent;
 import com.intellij.testFramework.fixtures.BasePlatformTestCase;
 import com.intellij.ui.components.JBLabel;
+import com.intellij.ui.components.JBTextArea;
 import com.intellij.util.ui.UIUtil;
 
 import javax.swing.AbstractButton;
@@ -43,6 +45,9 @@ public class ReviewWorkbenchInboxPlatformTest extends BasePlatformTestCase {
         @Override public CompletableFuture<Optional<String>> challenge(ReviewAnnotation f, String t) { return record("challenge " + f.id()); }
         @Override public void showInDiff(ReviewAnnotation f) { calls.add("showInDiff " + f.id()); }
         @Override public void choose(WorkbenchState.InboxChoice c) { calls.add("choose " + c.tab() + " " + c.scope()); }
+        @Override public CompletableFuture<Optional<String>> submit(ReviewWorkbenchInbox.Composer c, String text) {
+            return record("submit " + c.mode() + " " + c.range().startKey() + " " + text);
+        }
     };
 
     private CompletableFuture<Optional<String>> record(String call) {
@@ -114,6 +119,52 @@ public class ReviewWorkbenchInboxPlatformTest extends BasePlatformTestCase {
         } finally {
             Disposer.dispose(inbox);
         }
+    }
+
+    public void testTheComposerSubmitsItsRangeAndClosesWhenTheWriteSucceeds() {
+        next = CompletableFuture.completedFuture(Optional.of(ReviewTabProvider.COMMENT_ADDED));
+        ReviewWorkbenchInbox inbox = new ReviewWorkbenchInbox(actions, Clock.fixed(Instant.EPOCH, ZoneOffset.UTC));
+        try {
+            ReviewWorkbenchInbox.Composer composer = new ReviewWorkbenchInbox.Composer(
+                    ReviewWorkbenchInbox.Composer.Mode.COMMENT, new DiffSelection.Range("A.java", "n10", "n12", false));
+            inbox.openComposer(composer);
+            assertEquals(Optional.of(composer), inbox.composer());
+
+            JBTextArea text = UIUtil.uiTraverser(inbox).filter(JBTextArea.class).first();
+            text.setText("  Use a try-with-resources here.  ");
+            submitButton(inbox, "Add Comment").doClick();
+            PlatformTestUtil.dispatchAllEventsInIdeEventQueue();
+
+            assertEquals(List.of("submit COMMENT n10 Use a try-with-resources here."), calls);
+            assertEquals(Optional.empty(), inbox.composer());
+        } finally {
+            Disposer.dispose(inbox);
+        }
+    }
+
+    public void testAFailedWriteKeepsTheComposerOpenWithItsText() {
+        next = CompletableFuture.failedFuture(new IllegalStateException("disk full"));
+        ReviewWorkbenchInbox inbox = new ReviewWorkbenchInbox(actions, Clock.fixed(Instant.EPOCH, ZoneOffset.UTC));
+        try {
+            inbox.openComposer(new ReviewWorkbenchInbox.Composer(
+                    ReviewWorkbenchInbox.Composer.Mode.COMMENT, new DiffSelection.Range("A.java", "n10", "n10", false)));
+            JBTextArea text = UIUtil.uiTraverser(inbox).filter(JBTextArea.class).first();
+            text.setText("Rename this.");
+            submitButton(inbox, "Add Comment").doClick();
+            PlatformTestUtil.dispatchAllEventsInIdeEventQueue();
+
+            assertTrue(inbox.composer().isPresent());
+            assertEquals("Rename this.", text.getText());
+            assertTrue(text.isEnabled());
+        } finally {
+            Disposer.dispose(inbox);
+        }
+    }
+
+    private static AbstractButton submitButton(ReviewWorkbenchInbox inbox, String text) {
+        return UIUtil.uiTraverser(inbox).filter(AbstractButton.class).toList().stream()
+                .filter(button -> text.equals(button.getText())).findFirst()
+                .orElseThrow(() -> new AssertionError("no " + text));
     }
 
     public void testTheChallengeMessagesSayWhatHappened() {

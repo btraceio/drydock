@@ -2,6 +2,7 @@ package app.drydock.intellij.review;
 
 import app.drydock.intellij.review.workbench.model.InboxModel;
 import app.drydock.intellij.review.workbench.model.WorkbenchState;
+import app.drydock.review.DiffSelection;
 import app.drydock.review.ReviewAnnotation;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.actionSystem.ActionManager;
@@ -12,11 +13,13 @@ import com.intellij.openapi.actionSystem.DefaultActionGroup;
 import com.intellij.openapi.project.DumbAwareToggleAction;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBScrollPane;
+import com.intellij.ui.components.JBTextArea;
 import com.intellij.util.ui.JBUI;
 import com.intellij.util.ui.UIUtil;
 import org.jetbrains.annotations.NotNull;
 
 import javax.swing.BoxLayout;
+import javax.swing.JButton;
 import javax.swing.JComponent;
 import javax.swing.JPanel;
 import javax.swing.Scrollable;
@@ -24,6 +27,7 @@ import javax.swing.SwingConstants;
 import java.awt.BorderLayout;
 import java.awt.Dimension;
 import java.awt.EventQueue;
+import java.awt.FlowLayout;
 import java.awt.Rectangle;
 import java.time.Clock;
 import java.util.ArrayList;
@@ -70,6 +74,50 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
 
         /** The inbox's tab or scope changed. */
         void choose(WorkbenchState.InboxChoice choice);
+
+        /** The composer was submitted with {@code text} (never blank). */
+        CompletableFuture<Optional<String>> submit(Composer composer, String text);
+    }
+
+    /**
+     * What the composer writes: a comment on the selected lines, or a
+     * question about them, over a range already resolved within one hunk.
+     */
+    record Composer(Mode mode, DiffSelection.Range range) {
+        enum Mode { COMMENT, ASK }
+
+        Composer {
+            Objects.requireNonNull(mode, "mode");
+            Objects.requireNonNull(range, "range");
+        }
+
+        /** The composer's title (pure): "Comment on A.java, lines 10–12". */
+        String title() {
+            String verb = mode == Mode.COMMENT ? "Comment on " : "Ask about ";
+            return verb + range.file() + ", " + lines(range.startKey(), range.endKey());
+        }
+
+        /** The note under the title when the selection was cut at its hunk; empty otherwise. */
+        Optional<String> note() {
+            return range.clamped()
+                    ? Optional.of("The selection is cut at the end of its hunk: a review comment cannot span hunks.")
+                    : Optional.empty();
+        }
+
+        String submitText() {
+            return mode == Mode.COMMENT ? "Add Comment" : "Ask";
+        }
+
+        private static String lines(String startKey, String endKey) {
+            return startKey.equals(endKey)
+                    ? "line " + line(startKey)
+                    : "lines " + line(startKey) + "–" + line(endKey);
+        }
+
+        /** A key as the line a reader sees: {@code n10} is 10, {@code o10} is "old 10". */
+        private static String line(String key) {
+            return key.startsWith("o") ? "old " + key.substring(1) : key.substring(1);
+        }
     }
 
     private final Actions actions;
@@ -79,6 +127,12 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
     final DefaultActionGroup tabActions = new DefaultActionGroup();
     final DefaultActionGroup scopeActions = new DefaultActionGroup();
     private final Map<String, FindingInlayCard> cards = new LinkedHashMap<>();
+    private final JPanel composerPanel = new JPanel(new BorderLayout());
+    private final JBLabel composerTitle = new JBLabel();
+    private final JBLabel composerNote = new JBLabel();
+    private final JBTextArea composerText = new JBTextArea(3, 20);
+    private final JButton composerSubmit = new JButton();
+    private Composer composer;
     private InboxModel.Snapshot shown = InboxModel.Snapshot.empty(InboxModel.Tab.TO_TRIAGE, InboxModel.Scope.ALL);
     /** The To Triage order when a decision was taken, and the decided id: where auto-advance starts. */
     private List<String> advanceOrder;
@@ -107,10 +161,93 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
         notice.setForeground(UIUtil.getContextHelpForeground());
         notice.setVisible(false);
 
-        add(top, BorderLayout.NORTH);
+        buildComposer();
+        JPanel north = new JPanel(new BorderLayout());
+        north.add(top, BorderLayout.NORTH);
+        north.add(composerPanel, BorderLayout.CENTER);
+        add(north, BorderLayout.NORTH);
         add(new JBScrollPane(stack), BorderLayout.CENTER);
         add(notice, BorderLayout.SOUTH);
         render(shown);
+    }
+
+    private void buildComposer() {
+        composerTitle.setBorder(JBUI.Borders.empty(4, 8, 0, 8));
+        composerNote.setForeground(UIUtil.getContextHelpForeground());
+        composerNote.setBorder(JBUI.Borders.empty(0, 8));
+        composerText.setLineWrap(true);
+        composerText.setWrapStyleWord(true);
+        JButton cancel = new JButton("Cancel");
+        cancel.addActionListener(e -> closeComposer());
+        composerSubmit.addActionListener(e -> submitComposer());
+        JPanel buttons = new JPanel(new FlowLayout(FlowLayout.RIGHT, JBUI.scale(4), 0));
+        buttons.add(cancel);
+        buttons.add(composerSubmit);
+        JPanel labels = new JPanel(new BorderLayout());
+        labels.add(composerTitle, BorderLayout.NORTH);
+        labels.add(composerNote, BorderLayout.SOUTH);
+        JBScrollPane text = new JBScrollPane(composerText);
+        text.setBorder(JBUI.Borders.compound(JBUI.Borders.empty(4, 8), text.getBorder()));
+        composerPanel.add(labels, BorderLayout.NORTH);
+        composerPanel.add(text, BorderLayout.CENTER);
+        composerPanel.add(buttons, BorderLayout.SOUTH);
+        composerPanel.setVisible(false);
+    }
+
+    /** Opens the composer for {@code next}, replacing any open one. EDT. */
+    void openComposer(Composer next) {
+        requireEdt();
+        composer = Objects.requireNonNull(next, "next");
+        composerTitle.setText(next.title());
+        composerNote.setText(next.note().orElse(""));
+        composerNote.setVisible(next.note().isPresent());
+        composerSubmit.setText(next.submitText());
+        composerSubmit.setEnabled(true);
+        composerText.setText("");
+        composerText.setEnabled(true);
+        composerPanel.setVisible(true);
+        revalidate();
+        composerText.requestFocusInWindow();
+    }
+
+    /** The composer currently open, if any. */
+    Optional<Composer> composer() {
+        return Optional.ofNullable(composer);
+    }
+
+    /** Shows {@code text} in the notice line. EDT. */
+    void notice(String text) {
+        requireEdt();
+        report(Optional.of(text));
+    }
+
+    private void submitComposer() {
+        Composer current = composer;
+        String text = composerText.getText().strip();
+        if (current == null || text.isEmpty()) {
+            return;
+        }
+        composerSubmit.setEnabled(false);
+        composerText.setEnabled(false);
+        actions.submit(current, text).whenComplete((outcome, error) -> EventQueue.invokeLater(() -> {
+            if (composer != current) {
+                return; // a newer composer replaced this one meanwhile
+            }
+            if (error == null) {
+                closeComposer();
+                report(outcome);
+            } else {
+                composerSubmit.setEnabled(true);
+                composerText.setEnabled(true);
+                report(Optional.of(ReviewTabProvider.rootMessage(error)));
+            }
+        }));
+    }
+
+    private void closeComposer() {
+        composer = null;
+        composerPanel.setVisible(false);
+        revalidate();
     }
 
     /** Shows {@code state}'s inbox. */
