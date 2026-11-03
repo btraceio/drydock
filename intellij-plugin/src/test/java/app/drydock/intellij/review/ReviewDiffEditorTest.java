@@ -22,7 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * inlays"): first request seeding, in-place swap, reopen after close with
  * a disposed processor ignored, stale selection completions dropped, and
  * the EDT contract. Everything runs headless through the seams — the
- * platform plumbing ({@code DiffVirtualFile.createProcessor}) is the thin
+ * platform plumbing (the workbench editor's {@code host}) is the thin
  * bridge this state machine sits under, exercised live in the IDE gate.
  */
 class ReviewDiffEditorTest {
@@ -104,7 +104,7 @@ class ReviewDiffEditorTest {
         assertEquals("src/A.java", onEdtGet(() -> editor.seedRequest().getTitle()));
         assertEquals(List.of("src/A.java"),
                 requests.contexts.stream().map(ReviewDiffRequests.RequestContext::path).toList());
-        assertEquals("src/A.java", onEdtGet(editor::currentTitle));
+        assertEquals("src/A.java", onEdtGet(() -> editor.seedRequest().getTitle()));
     }
 
     // ---- swap in place ------------------------------------------------------
@@ -122,7 +122,7 @@ class ReviewDiffEditorTest {
 
         assertEquals(1, opener.opens);
         assertEquals(List.of(requests.built.get(0)), processor.applied);
-        assertEquals("src/B.java", onEdtGet(editor::currentTitle));
+        assertEquals("src/B.java", onEdtGet(() -> editor.seedRequest().getTitle()));
     }
 
     // ---- reopen after close -------------------------------------------------

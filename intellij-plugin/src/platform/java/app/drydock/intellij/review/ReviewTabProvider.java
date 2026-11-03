@@ -30,6 +30,7 @@ import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.actionSystem.DefaultActionGroup;
 import com.intellij.openapi.application.Application;
 import com.intellij.openapi.application.ApplicationManager;
+import com.intellij.openapi.fileEditor.ex.FileEditorManagerEx;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.Messages;
 import com.intellij.openapi.util.Disposer;
@@ -422,6 +423,7 @@ final class ReviewTabProvider {
                         return;
                     }
                     ReviewTabProvider.this.scope = scope;
+                    onEdt(() -> nameWorkbench(scope));
                     // reload reports LOADING synchronously before any
                     // background work starts, and every outcome of it is
                     // terminal (T11) — the placeholder always clears.
@@ -1596,6 +1598,27 @@ final class ReviewTabProvider {
      * A tab whose first load has not resolved its scope yet has nothing to
      * re-run — that load reads fresh state. EDT.
      */
+    /**
+     * The live review's diff for a new workbench editor
+     * ({@link ReviewWorkbenchEditor.Host}): empty when the project has no
+     * live Review content, or it is disposed. EDT.
+     */
+    static Optional<ReviewWorkbenchEditor.HostedDiff> hostedDiff(Project project, Disposable parent) {
+        ReviewTabProvider provider = project.getUserData(LIVE_PROVIDER);
+        ReviewDiffEditor editor = provider == null || provider.disposed.get() ? null : provider.diffEditor;
+        return editor == null ? Optional.empty() : Optional.of(editor.host(project, parent));
+    }
+
+    /** Names the workbench tab after the review's subject ({@link #subjectOf}). EDT. */
+    private void nameWorkbench(ReviewScope scope) {
+        if (disposed.get() || project.isDisposed()) {
+            return;
+        }
+        ReviewWorkbenchFile file = ReviewWorkbenchFile.of(project);
+        file.setSubject(subjectOf(scope));
+        FileEditorManagerEx.getInstanceEx(project).updateFilePresentation(file);
+    }
+
     static void reloadFromChangesLink(Project project) {
         ReviewTabProvider provider = project.getUserData(LIVE_PROVIDER);
         if (provider == null) {

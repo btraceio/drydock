@@ -1,7 +1,6 @@
 package app.drydock.intellij.review;
 
 import com.intellij.diff.FrameDiffTool;
-import com.intellij.diff.editor.DiffVirtualFile;
 import com.intellij.diff.impl.DiffRequestProcessor;
 import com.intellij.diff.impl.DiffRequestProcessorListener;
 import com.intellij.diff.requests.DiffRequest;
@@ -10,22 +9,22 @@ import com.intellij.diff.util.DiffUserDataKeysEx;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.fileEditor.FileEditorManager;
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.util.Disposer;
 
 import java.awt.EventQueue;
 import java.util.Objects;
 import java.util.function.Consumer;
 
 /**
- * The project-owned reusable editor-area diff (spec "Review surface and
- * diff inlays"): one {@link #file DiffVirtualFile} whose tab every file
- * selection reuses. {@link #show} swaps the current request into the live
- * processor in place; when the tab was closed (its processor disposed) it
- * reopens the tab, and the newly created processor is seeded with the
- * current request — a request kept only on the virtual file leaves the
- * processor's request null, so its first {@code selectNotify ->
- * updateRequest} applies nothing and the tab stays blank until the second
- * selection (cairn:
- * {@code intellij-findings-triage/2026-10-25-editor-area-diff-decoration-seam}).
+ * The review's one reusable diff: hosted in the review workbench tab
+ * ({@link ReviewWorkbenchEditor}), whose every file selection reuses it.
+ * {@link #show} swaps the current request into the live processor in place;
+ * when the workbench was closed (its processor disposed) it reopens the
+ * workbench, and the processor the new workbench editor creates
+ * ({@link #host}) is seeded with the current request — a processor whose
+ * request is null applies nothing on its first {@code selectNotify ->
+ * updateRequest}, and the tab would stay blank until the second selection
+ * (cairn: {@code intellij-findings-triage/2026-10-25-editor-area-diff-decoration-seam}).
  *
  * <p>The processor owns a {@link DiffRequestProcessorListener} parented to
  * the processor itself, so a closed tab retains nothing; each viewer change
@@ -38,14 +37,11 @@ import java.util.function.Consumer;
  */
 public final class ReviewDiffEditor {
 
-    /** The tab's title before the first request names it (then the file path). */
-    public static final String TAB_TITLE = "Drydock Review";
-
     /**
-     * Opens (or reopens) the single reusable tab. Production opens the
-     * editor-area tab through {@code FileEditorManager.openFile}, which is
-     * what makes the platform create the processor via the file's
-     * {@code createProcessor}.
+     * Opens (or reopens) the review workbench tab. Production opens the
+     * project's {@link ReviewWorkbenchFile} through
+     * {@code FileEditorManager.openFile}; the workbench editor the platform
+     * creates then asks {@link #host} for the processor.
      */
     public interface TabOpener {
         void open();
@@ -77,9 +73,6 @@ public final class ReviewDiffEditor {
     private final RequestFactory requests;
     private final Consumer<FrameDiffTool.DiffViewer> onViewerChanged;
 
-    /** The one reusable virtual file; null in tests, which never open a tab. */
-    private ReviewFile file;
-
     /** The current request context (read by getName on any thread). */
     private volatile ReviewDiffRequests.RequestContext context;
 
@@ -97,8 +90,8 @@ public final class ReviewDiffEditor {
     }
 
     /**
-     * The production wiring: one reusable {@link ReviewFile} whose tab is
-     * opened through {@code FileEditorManager}, requests built by
+     * The production wiring: the project's {@link ReviewWorkbenchFile} opened
+     * through {@code FileEditorManager}, requests built by
      * {@link ReviewDiffRequests}, viewer changes dispatched to
      * {@code inlays}.
      */
@@ -107,13 +100,22 @@ public final class ReviewDiffEditor {
         Objects.requireNonNull(project, "project");
         Objects.requireNonNull(parent, "parent");
         Objects.requireNonNull(inlays, "inlays");
-        ReviewDiffEditor[] self = new ReviewDiffEditor[1];
-        self[0] = new ReviewDiffEditor(
-                () -> FileEditorManager.getInstance(project).openFile(self[0].file, true),
+        return new ReviewDiffEditor(
+                () -> FileEditorManager.getInstance(project).openFile(ReviewWorkbenchFile.of(project), true),
                 context -> ReviewDiffRequests.toRequest(project, parent, context),
                 inlays::viewerChanged);
-        self[0].file = new ReviewFile(self[0]);
-        return self[0];
+    }
+
+    /**
+     * The diff for a newly created workbench editor: a processor seeded with
+     * the current request ({@link #newProcessor}), disposed with
+     * {@code parent}. EDT.
+     */
+    ReviewWorkbenchEditor.HostedDiff host(Project project, Disposable parent) {
+        requireEdt();
+        DiffRequestProcessor created = newProcessor(project);
+        Disposer.register(parent, created);
+        return new ReviewWorkbenchEditor.HostedDiff(created.getComponent(), created::getPreferredFocusedComponent);
     }
 
     /**
@@ -182,14 +184,8 @@ public final class ReviewDiffEditor {
         processor = Objects.requireNonNull(created, "created");
     }
 
-    /** The title the tab shows: the current file path, or the default title. */
-    String currentTitle() {
-        ReviewDiffRequests.RequestContext current = context;
-        return current == null ? TAB_TITLE : current.path();
-    }
-
     /**
-     * The processor for a newly (re)opened tab: seeded with
+     * The processor for a newly (re)opened workbench: seeded with
      * {@link #seedRequest()}, reporting viewer changes to the injected
      * consumer through a listener parented to the processor itself.
      */
@@ -204,32 +200,6 @@ public final class ReviewDiffEditor {
     private static void requireEdt() {
         if (!EventQueue.isDispatchThread()) {
             throw new IllegalStateException("ReviewDiffEditor must be used on the EDT");
-        }
-    }
-
-    /**
-     * The reusable editor-area tab: {@code DiffFileEditorProvider} accepts
-     * it ({@code instanceof DiffViewerVirtualFile}) and calls
-     * {@link #createProcessor} when the tab opens or reopens — the platform
-     * route through which every processor is created.
-     */
-    private static final class ReviewFile extends DiffVirtualFile {
-
-        private final ReviewDiffEditor owner;
-
-        ReviewFile(ReviewDiffEditor owner) {
-            super(TAB_TITLE);
-            this.owner = Objects.requireNonNull(owner, "owner");
-        }
-
-        @Override
-        public DiffRequestProcessor createProcessor(Project project) {
-            return owner.newProcessor(project);
-        }
-
-        @Override
-        public String getName() {
-            return owner.currentTitle();
         }
     }
 
