@@ -185,7 +185,7 @@ class TaskTreePanelTargetTest {
                         new JiraIssueRow(REGISTERED_ROOT, jiraIssue("DRY-2", "Ship the fix"))));
 
         DefaultMutableTreeNode node = TaskTreePanel.treeNode(group, Optional.empty(),
-                new DefaultMutableTreeNode[1]);
+                Optional.empty(), null, new DefaultMutableTreeNode[1]);
 
         assertFalse(node.isLeaf(), "a group with issues must not be a Swing leaf");
         assertEquals(2, node.getChildCount());
@@ -679,7 +679,7 @@ class TaskTreePanelTargetTest {
     private static DefaultMutableTreeNode modelTree(TaskNode... nodes) {
         DefaultMutableTreeNode root = new DefaultMutableTreeNode();
         for (TaskNode node : nodes) {
-            root.add(TaskTreePanel.treeNode(node, Optional.empty(), new DefaultMutableTreeNode[1]));
+            root.add(TaskTreePanel.treeNode(node, Optional.empty(), Optional.empty(), null, new DefaultMutableTreeNode[1]));
         }
         return root;
     }
