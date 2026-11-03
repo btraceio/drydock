@@ -92,7 +92,11 @@ import java.util.Optional;
  */
 public final class FindingInlayCard extends JPanel {
 
-    /** What the card asks its owner to do; the card itself stays pure Swing. */
+    /**
+     * What the card asks its owner to do; the card itself stays pure Swing.
+     * The inbox-only actions throw by default: a surface that does not
+     * offer them ({@link #actionsFor}) can never fire them by accident.
+     */
     public interface Callbacks {
         void confirm();
 
@@ -101,10 +105,49 @@ public final class FindingInlayCard extends JPanel {
         void undo();
 
         void comment(String text);
+
+        /** Request fix (inbox): confirmed for the session lane, not the PR. */
+        default void requestFix() {
+            throw new IllegalStateException("Request fix is not offered on this surface");
+        }
+
+        /** Challenge (inbox): {@code text} is the reviewer's question, never blank. */
+        default void challenge(String text) {
+            throw new IllegalStateException("Challenge is not offered on this surface");
+        }
+
+        /** Show in diff (inbox): select the finding in the review diff. */
+        default void showInDiff() {
+            throw new IllegalStateException("Show in diff is not offered on this surface");
+        }
+    }
+
+    /** Where a card is shown: inside the diff (an inlay) or in the workbench's inbox. */
+    public enum Surface { INLAY, INBOX }
+
+    /** The links a card offers. */
+    enum Action { CONFIRM, DISMISS, UNDO, REQUEST_FIX, CHALLENGE, SHOW_IN_DIFF }
+
+    /**
+     * The links a card shows (pure). In the diff a proposed finding offers
+     * Confirm and Dismiss, a decided one Undo. In the inbox (local review) a
+     * proposed finding offers Request fix, Dismiss, Challenge and Show in
+     * diff, a decided one Undo and Show in diff; posting to the PR arrives
+     * with the PR lane.
+     */
+    static List<Action> actionsFor(ReviewAnnotation finding, Surface surface) {
+        boolean proposed = finding.triage() == Triage.PROPOSED;
+        if (surface == Surface.INLAY) {
+            return proposed ? List.of(Action.CONFIRM, Action.DISMISS) : List.of(Action.UNDO);
+        }
+        return proposed
+                ? List.of(Action.REQUEST_FIX, Action.DISMISS, Action.CHALLENGE, Action.SHOW_IN_DIFF)
+                : List.of(Action.UNDO, Action.SHOW_IN_DIFF);
     }
 
     private static final String PROGRESS_TEXT = "Working…";
     private static final String COMMENT_HINT = "Add a comment… Enter to send";
+    private static final String CHALLENGE_HINT = "Write your question here, then Challenge";
     /** The review bubble's corner radius — the platform's inlay panel uses the same. */
     private static final int BUBBLE_ARC = 10;
     /** The state tags' corner radius, a pill at the small font's height. */
@@ -125,6 +168,7 @@ public final class FindingInlayCard extends JPanel {
 
     private final Clock clock;
     private final Callbacks callbacks;
+    private final Surface surface;
     /** Every wrapped text pane currently shown, re-wrapped together when the width changes. */
     private final List<TextBlock> blocks = new ArrayList<>();
     private final JPanel items = new JPanel();
@@ -156,6 +200,13 @@ public final class FindingInlayCard extends JPanel {
     /** {@code driftHint} is present exactly when the placement fell back to the first hunk (T3). */
     public FindingInlayCard(ReviewAnnotation finding, Optional<String> driftHint,
                             Clock clock, Callbacks callbacks) {
+        this(finding, driftHint, clock, callbacks, Surface.INLAY);
+    }
+
+    /** A card for {@code surface}: its links follow {@link #actionsFor}. */
+    public FindingInlayCard(ReviewAnnotation finding, Optional<String> driftHint,
+                            Clock clock, Callbacks callbacks, Surface surface) {
+        this.surface = Objects.requireNonNull(surface, "surface");
         this.finding = Objects.requireNonNull(finding, "finding");
         this.driftHint = Objects.requireNonNull(driftHint, "driftHint");
         this.clock = Objects.requireNonNull(clock, "clock");
@@ -521,23 +572,56 @@ public final class FindingInlayCard extends JPanel {
 
     private void renderActions() {
         actions.removeAll();
-        if (finding.triage() == Triage.PROPOSED) {
-            ActionLink confirm = link(confirmLabel, callbacks::confirm);
-            confirm.setToolTipText("The finding is valid: it is included when this review is submitted,"
-                    + " and in the next decisions hand-off to the agent.");
-            ActionLink dismiss = link(dismissLabel, callbacks::dismiss);
-            dismiss.setToolTipText("The finding is dismissed: reported to the agent as a decision"
-                    + " with the next hand-off, and left out of the review submission.");
-            actions.add(confirm);
-            actions.add(dismiss);
-        } else {
-            ActionLink undo = link("Undo", callbacks::undo);
-            undo.setToolTipText("Back to proposed.");
-            actions.add(undo);
+        for (Action action : actionsFor(finding, surface)) {
+            actions.add(switch (action) {
+                case CONFIRM -> link(confirmLabel, callbacks::confirm, "The finding is valid: it is included when"
+                        + " this review is submitted, and in the next decisions hand-off to the agent.");
+                case DISMISS -> link(dismissLabel, callbacks::dismiss, "The finding is dismissed: reported to the"
+                        + " agent as a decision with the next hand-off, and left out of the review submission.");
+                case UNDO -> link("Undo", callbacks::undo, "Back to proposed.");
+                case REQUEST_FIX -> link("Request fix", callbacks::requestFix, "The finding is valid: the agent"
+                        + " fixes it with the next decisions hand-off. It is not posted to a pull request.");
+                case CHALLENGE -> challengeLink();
+                case SHOW_IN_DIFF -> showInDiffLink();
+            });
         }
         actions.add(progress);
         setControlsEnabled(!busy && !disposed);
         actions.revalidate();
+    }
+
+    private ActionLink link(String text, Runnable onClick, String tooltip) {
+        ActionLink link = link(text, onClick);
+        link.setToolTipText(tooltip);
+        return link;
+    }
+
+    /**
+     * Challenge sends the comment field's text as the question. With the
+     * field empty it asks for the question instead of sending nothing.
+     */
+    private ActionLink challengeLink() {
+        ActionListener listener = e -> {
+            String text = comment.getText().strip();
+            if (text.isEmpty()) {
+                comment.getEmptyText().setText(CHALLENGE_HINT);
+                comment.requestFocusInWindow();
+                return;
+            }
+            run(() -> callbacks.challenge(text));
+        };
+        ActionLink link = new ActionLink("Challenge", listener);
+        link.setToolTipText("Ask the agent about this finding: the comment above is sent to its session,"
+                + " and the answer arrives in this thread.");
+        return link;
+    }
+
+    /** Show in diff changes nothing in the store, so it neither marks the card busy nor waits for completion. */
+    private ActionLink showInDiffLink() {
+        ActionListener listener = e -> callbacks.showInDiff();
+        ActionLink link = new ActionLink("Show in diff", listener);
+        link.setToolTipText("Open the finding's file in the diff, at the finding.");
+        return link;
     }
 
     private ActionLink link(String text, Runnable onClick) {

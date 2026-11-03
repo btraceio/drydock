@@ -91,12 +91,91 @@ class FindingInlayCardTest {
         @Override public void dismiss() { record("dismiss"); }
         @Override public void undo() { record("undo"); }
         @Override public void comment(String text) { record("comment:" + text); }
+        @Override public void requestFix() { record("requestFix"); }
+        @Override public void challenge(String text) { record("challenge:" + text); }
+        @Override public void showInDiff() { record("showInDiff"); }
 
         void record(String what) {
             calls.add(what);
             busyAtCall.add(card.isBusy());
             progressAtCall.add(card.progressVisible());
         }
+    }
+
+    private static FindingInlayCard inboxCard(ReviewAnnotation finding, Recording owner) {
+        FindingInlayCard[] out = new FindingInlayCard[1];
+        onEdt(() -> out[0] = new FindingInlayCard(finding, Optional.empty(), clock(), owner,
+                FindingInlayCard.Surface.INBOX));
+        owner.card = out[0];
+        return out[0];
+    }
+
+    // ---- actions per surface (workbench inbox) --------------------------------
+
+    @Test
+    void theActionsFollowTheSurfaceAndTheTriage() {
+        ReviewAnnotation proposed = finding(Triage.PROPOSED, AnnotationStatus.OPEN);
+        ReviewAnnotation decided = finding(Triage.CONFIRMED, AnnotationStatus.OPEN);
+        assertEquals(List.of(FindingInlayCard.Action.CONFIRM, FindingInlayCard.Action.DISMISS),
+                FindingInlayCard.actionsFor(proposed, FindingInlayCard.Surface.INLAY));
+        assertEquals(List.of(FindingInlayCard.Action.UNDO),
+                FindingInlayCard.actionsFor(decided, FindingInlayCard.Surface.INLAY));
+        assertEquals(List.of(FindingInlayCard.Action.REQUEST_FIX, FindingInlayCard.Action.DISMISS,
+                        FindingInlayCard.Action.CHALLENGE, FindingInlayCard.Action.SHOW_IN_DIFF),
+                FindingInlayCard.actionsFor(proposed, FindingInlayCard.Surface.INBOX));
+        assertEquals(List.of(FindingInlayCard.Action.UNDO, FindingInlayCard.Action.SHOW_IN_DIFF),
+                FindingInlayCard.actionsFor(decided, FindingInlayCard.Surface.INBOX));
+    }
+
+    @Test
+    void anInboxCardOffersRequestFixDismissChallengeAndShowInDiff() {
+        Recording owner = new Recording();
+        FindingInlayCard card = inboxCard(finding(Triage.PROPOSED, AnnotationStatus.OPEN), owner);
+
+        onEdt(() -> {
+            assertEquals(List.of("Request fix", "Won't fix", "Challenge", "Show in diff"), buttonTexts(card));
+            button(card, "Request fix").doClick();
+        });
+        assertEquals(List.of("requestFix"), owner.calls);
+        assertTrue(owner.busyAtCall.get(0), "a store change: the card is busy until its owner completes it");
+    }
+
+    @Test
+    void challengeSendsTheCommentFieldAndAsksForAQuestionWhenItIsEmpty() {
+        Recording owner = new Recording();
+        FindingInlayCard card = inboxCard(finding(Triage.PROPOSED, AnnotationStatus.OPEN), owner);
+
+        onEdt(() -> button(card, "Challenge").doClick());
+        assertTrue(owner.calls.isEmpty(), "no question, nothing sent");
+
+        onEdt(() -> {
+            commentField(card).setText("  Is it really leaking?  ");
+            button(card, "Challenge").doClick();
+        });
+        assertEquals(List.of("challenge:Is it really leaking?"), owner.calls);
+    }
+
+    @Test
+    void showInDiffNeitherWritesNorWaits() {
+        Recording owner = new Recording();
+        FindingInlayCard card = inboxCard(finding(Triage.CONFIRMED, AnnotationStatus.OPEN), owner);
+
+        onEdt(() -> button(card, "Show in diff").doClick());
+        assertEquals(List.of("showInDiff"), owner.calls);
+        assertFalse(owner.busyAtCall.get(0), "navigation leaves the card usable");
+    }
+
+    @Test
+    void anInlayCardNeverFiresAnInboxAction() {
+        FindingInlayCard.Callbacks inlayOnly = new FindingInlayCard.Callbacks() {
+            @Override public void confirm() { }
+            @Override public void dismiss() { }
+            @Override public void undo() { }
+            @Override public void comment(String text) { }
+        };
+        assertThrows(IllegalStateException.class, inlayOnly::requestFix);
+        assertThrows(IllegalStateException.class, () -> inlayOnly.challenge("x"));
+        assertThrows(IllegalStateException.class, inlayOnly::showInDiff);
     }
 
     // ---- component state matrix ----------------------------------------------
