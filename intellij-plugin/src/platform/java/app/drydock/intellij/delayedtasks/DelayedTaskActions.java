@@ -11,6 +11,8 @@ import app.drydock.intellij.tasks.TaskNavigator;
 import app.drydock.intellij.worktree.WorktreeErrors;
 import app.drydock.mcp.TaskToolContext;
 import app.drydock.delayedtasks.DelayedTaskStart;
+import app.drydock.tasks.DelayedTaskRows;
+import app.drydock.tasks.PlanStore.PlanRecord;
 import app.drydock.tasks.TaskDocument;
 import app.drydock.tasks.TaskGraph;
 import app.drydock.tasks.TaskId;
@@ -46,6 +48,7 @@ import java.lang.System.Logger.Level;
 import java.nio.file.Path;
 import java.util.EnumSet;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -68,8 +71,11 @@ import java.util.function.Function;
  */
 public final class DelayedTaskActions {
 
-    /** What a task node's menu can do (T20a; Start added by T31): one entry per action. */
-    public enum Item { START, EDIT, DROP, CONFIRM, REOPEN, GOTO_BLOCKER_SESSION }
+    /** What a task node's menu can do (T20a; Start added by T31, Cancel by
+     * T40): one entry per action. CANCEL keys on the task's PLAN, not its
+     * presentation, so it never appears in {@link #applicable} -- the Cancel
+     * action resolves the CURRENT published plan record (P4.12). */
+    public enum Item { START, CANCEL, EDIT, DROP, CONFIRM, REOPEN, GOTO_BLOCKER_SESSION }
 
     /** The selected delayed-task row, for the task-node actions (T20a). */
     public static final DataKey<DelayedTaskRow> SELECTED_TASK = DataKey.create("drydock.delayedTask.node");
@@ -86,11 +92,12 @@ public final class DelayedTaskActions {
 
     private DelayedTaskActions() { }
 
-    /** The task node's menu entries, in menu order (T20a; Start first, T31). */
+    /** The task node's menu entries, in menu order (T20a; Start first, T31; Cancel after
+     * it, T40). */
     public static Entry[] menu() {
-        return new Entry[] { new Entry(Start.ID, new Start()), new Entry(Edit.ID, new Edit()),
-                new Entry(Drop.ID, new Drop()), new Entry(Confirm.ID, new Confirm()),
-                new Entry(Reopen.ID, new Reopen()),
+        return new Entry[] { new Entry(Start.ID, new Start()), new Entry(Cancel.ID, new Cancel()),
+                new Entry(Edit.ID, new Edit()), new Entry(Drop.ID, new Drop()),
+                new Entry(Confirm.ID, new Confirm()), new Entry(Reopen.ID, new Reopen()),
                 new Entry(GotoBlockerSession.ID, new GotoBlockerSession()) };
     }
 
@@ -137,6 +144,47 @@ public final class DelayedTaskActions {
     private static void refuse(Project from, String message) {
         ApplicationManager.getApplication().invokeLater(() -> Messages.showErrorDialog(from, message,
                 "Drydock"), ModalityState.nonModal(), from.getDisposed());
+    }
+
+    /** Pure (T40, P4.12): whether the task's CURRENT published plan still
+     * offers Cancel -- a RUNNING plan with unfinished work. The canceled or
+     * completed snapshot never does, and neither does a task no plan targets;
+     * the tree resolves the current published record, never a captured
+     * stale one. */
+    public static boolean cancelOffered(List<PlanRecord> published, TaskId task) {
+        return DelayedTaskRows.planOf(published, task)
+                .map(record -> DelayedTaskRows.cancelOffered(record.plan()))
+                .orElse(false);
+    }
+
+    /** The Cancel write (T40, P4.12): immediate visible progress, the service's
+     * cancel seam off the EDT -- the driver's own lane for a plan this Drydock
+     * drives, the plan store's claim otherwise -- and a visible refusal on every
+     * path: canceled, refused, failed, interrupted. Nothing here decides the
+     * effect mapping; the seam owns it (future effects disabled, launched
+     * sessions left alone, unlaunched reservations released). */
+    static void cancel(Project from, DelayedTaskRow row) {
+        DelayedTaskService service = DrydockPluginService.getInstance().taskService();
+        ProgressManager.getInstance().run(new Task.Backgroundable(from,
+                "Canceling the plan of '" + row.title() + "'…", true) {
+            @Override
+            public void run(@NotNull ProgressIndicator indicator) {
+                indicator.setText("Canceling the plan of '" + row.title() + "'");
+                try {
+                    DelayedTaskService.PlanCancel outcome = service.cancelPlan(row.id())
+                            .get(60, TimeUnit.SECONDS);
+                    if (!outcome.canceled()) {
+                        refuse(from, "Drydock did not cancel the plan of '" + row.title() + "'.");
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } catch (ExecutionException | TimeoutException | RuntimeException e) {
+                    LOG.log(Level.WARNING, "Could not cancel the plan of " + row.id().text(), e);
+                    refuse(from, "Drydock could not cancel the plan of '" + row.title() + "': "
+                            + WorktreeErrors.visibleMessage(e));
+                }
+            }
+        });
     }
 
     /** The write path every task-node status action rides (T20a): the actor rules
@@ -319,6 +367,30 @@ public final class DelayedTaskActions {
         public Start() { super(Item.START, "Start Session…",
                 "Start one session for this task and its same-project plan", AllIcons.Actions.Execute); }
         @Override void dispatch(Project project, DelayedTaskRow row) { DelayedTaskStart.start(project, row); }
+    }
+
+    /** Cancel Plan (T40, P4.12): offered wherever the row sits -- in the section
+      * or the target beneath its session row -- while the task's plan still
+      * runs. Registered in plugin.xml. */
+    public static final class Cancel extends TaskNodeAction {
+        public static final String ID = "Drydock.DelayedTask.Cancel";
+        public Cancel() { super(Item.CANCEL, "Cancel Plan",
+                "Cancel this task's plan: future stages never start, started sessions keep running,"
+                        + " unlaunched reservations are released", AllIcons.Actions.Suspend); }
+
+        /** The offer keys on the task's CURRENT published plan (P4.12), not the
+          * presentation -- so this reads the service's in-memory publications,
+          * exactly the cache the renderer paints from. */
+        @Override
+        public void update(@NotNull AnActionEvent e) {
+            DelayedTaskRow row = e.getData(SELECTED_TASK);
+            boolean applies = row != null && cancelOffered(
+                    DrydockPluginService.getInstance().taskService().publishedPlans(), row.id());
+            e.getPresentation().setVisible(applies || !e.isFromContextMenu());
+            e.getPresentation().setEnabled(applies);
+        }
+
+        @Override void dispatch(Project project, DelayedTaskRow row) { cancel(project, row); }
     }
 
     /** Edit: the task's own file in the editor (P5). Registered in plugin.xml. */

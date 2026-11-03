@@ -1,6 +1,8 @@
 package app.drydock.intellij.tasks;
 
 import app.drydock.agent.api.AgentRegistry;
+import app.drydock.delayedtasks.DelayedTaskService;
+import app.drydock.delayedtasks.TaskStoreWatcher;
 import app.drydock.domain.SessionStatus;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.JiraIssue;
@@ -23,6 +25,7 @@ import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
 import app.drydock.intellij.ui.SessionDots;
 import app.drydock.tasks.DelayedTaskRows;
+import app.drydock.tasks.TaskId;
 import app.drydock.tasks.TaskState;
 import app.drydock.ui.AgentLabels;
 
@@ -388,13 +391,21 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
      * Paints one delayed task (D9-D11) from the CARRIED row only: the
      * presentation's icon and hint word, the age and stale flag against one
      * clock read for this paint, and the carried blocker texts - never a
-     * recomputation, a disk lookup or a per-row timer.
+     * recomputation, a disk lookup or a per-row timer. The plan's stage/phase
+     * annotation (T40, P4.12) rides the same discipline: it is read from the
+     * service's CACHED publications only (published plan records, watched
+     * snapshot, live-session view), so the progress stays visible wherever
+     * the row sits -- in the section or under its session row (D10) -- and no
+     * plan file is ever read at paint time.
      */
     private void paintDelayedTask(app.drydock.tasks.TaskNode.DelayedTaskRow task) {
         Instant now = Instant.now();
         setIcon(delayedIcon(task));
         append(task.title());
         append("  " + delayedHint(task), delayedHintAttributes(task.presentation()));
+        Optional<DelayedTaskRows.PlanProgress> progress = planProgressOf(task.id());
+        progress.ifPresent(annotation -> append("  " + annotation.text(),
+                SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES));
         String age = delayedAge(task, now);
         if (!age.isEmpty()) {
             append(" · " + age, SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
@@ -405,7 +416,28 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
         for (String blocker : task.blockers()) {
             append(" · " + blocker, SimpleTextAttributes.GRAYED_ATTRIBUTES);
         }
-        setToolTipText(delayedTooltip(task, now));
+        setToolTipText(delayedTooltip(task, now) + progress.map(annotation ->
+                " · plan " + annotation.text()).orElse(""));
+    }
+
+    /**
+     * The plan annotation of one delayed task (T40, P4.12), read from the
+     * service's IN-MEMORY publications only -- the published plan records,
+     * the cached watched snapshot and the live-session view; never a plan
+     * file, never a fresh scan, no clock read of its own. Empty when the
+     * service has published no snapshot yet or no persisted plan targets the
+     * task. Pure over those cached values; the derivation itself is
+     * {@link DelayedTaskRows#planProgress}.
+     */
+    static Optional<DelayedTaskRows.PlanProgress> planProgressOf(TaskId task) {
+        DelayedTaskService service = DrydockPluginService.getInstance().taskService();
+        TaskStoreWatcher.WatchedSnapshot watched = service.watchedSnapshot();
+        if (watched == null) {
+            return Optional.empty();
+        }
+        return DelayedTaskRows.planOf(service.publishedPlans(), task)
+                .flatMap(record -> DelayedTaskRows.planProgress(record, watched.snapshot(),
+                        service.liveSessionIds()));
     }
 
     /**

@@ -28,6 +28,15 @@ import java.util.function.Function;
  * {@link TaskState}'s views (T07a), never recomputed; the age flag uses the
  * proposed 14-day threshold (D9) against the injected clock, never
  * {@code System.now}.
+ *
+ * <p>T40 adds the plan layer's derivations (P4.12): the progress
+ * annotation of the target task of one staged plan -- stage n/m plus a
+ * running/waiting/halted/canceled/completed phase -- and the Cancel offer
+ * rule. Both are PURE over values the CALLER holds in memory (the plan's
+ * published record, the task snapshot, the live-session set): no plan
+ * file is ever read here, so a render path that composes only these
+ * functions cannot touch the plan store's files even when they are
+ * unreadable.</p>
  */
 public final class DelayedTaskRows {
 
@@ -35,6 +44,169 @@ public final class DelayedTaskRows {
     public static final Duration STALE_AFTER = Duration.ofDays(14);
 
     private DelayedTaskRows() {
+    }
+
+    // ---- T40: the plan's visible progress on its target task (P4.12) ----
+
+    /**
+     * The plan's visible phase on its target task (T40, P4.12): the plan
+     * drives its current stage (RUNNING), waits on the human (WAITING: a
+     * review that is all that holds a launched stage, D16, or a durably
+     * paused plan awaiting its explicit Continue, P4.10), is halted by a
+     * task that lost its session or was reopened (HALTED, P4.8/D16), or is
+     * terminal (CANCELED, COMPLETED). The labels are the tree's display
+     * contract; never rename an existing one.
+     */
+    public enum PlanPhase {
+        RUNNING("running"), WAITING("waiting"), HALTED("halted"), CANCELED("canceled"),
+        COMPLETED("completed");
+
+        private final String label;
+
+        PlanPhase(String label) {
+            this.label = label;
+        }
+
+        /** The label the tree shows next to the stage count ("stage 2/3 running"). */
+        public String label() {
+            return label;
+        }
+    }
+
+    /**
+     * One plan's progress on its target task (T40, P4.12): the current
+     * stage's number out of the plan's total, and the phase the task
+     * snapshot and live sessions derive. A value type; the derivation is
+     * {@link #planProgress}.
+     */
+    public record PlanProgress(int stage, int stages, PlanPhase phase) {
+
+        public PlanProgress {
+            if (stage < 1) {
+                throw new IllegalArgumentException("Stage numbers start at 1, got: " + stage);
+            }
+            if (stages < 1) {
+                throw new IllegalArgumentException("A plan has at least one stage");
+            }
+            if (stage > stages) {
+                throw new IllegalArgumentException("Stage " + stage + " exceeds the plan's "
+                        + stages + " stages");
+            }
+            Objects.requireNonNull(phase, "phase");
+        }
+
+        /** The P4.12 annotation text: "stage 2/3 running". */
+        public String text() {
+            return "stage " + stage + "/" + stages + " " + phase.label();
+        }
+    }
+
+    /**
+     * The plan whose target is {@code task} (T40, P4.12), from the PUBLISHED
+     * records the caller holds in memory: at most one exists, because the
+     * plan store keys every plan by its target task. Pure -- no plan file
+     * is read here; the caller's list is the service's cached publication.
+     */
+    public static Optional<PlanStore.PlanRecord> planOf(List<PlanStore.PlanRecord> published, TaskId task) {
+        Objects.requireNonNull(published, "published");
+        Objects.requireNonNull(task, "task");
+        for (PlanStore.PlanRecord record : published) {
+            if (record.plan().launch().target().equals(task)) {
+                return Optional.of(record);
+            }
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * The plan's progress annotation for its target task (T40, P4.12),
+     * derived from the plan's own record, the task snapshot and the
+     * live-session set -- PURE: no plan-file I/O, no clock, no session
+     * object, nothing recomputed from the plan's graph. The current stage
+     * is the first unfinished one. A durably paused plan waits for its
+     * explicit Continue (P4.10). A task of a LAUNCHED stage that reads OPEN
+     * was reopened mid-plan, and a current-stage task that reads STARTED
+     * with no live session was interrupted -- both halt, exactly as the
+     * T34 reducer derives them (P4.8/D16). A launched stage whose only
+     * unfinished work is review waits on the human's confirmation (D16).
+     * Empty when the plan's target is no longer a task of the snapshot:
+     * no target, no annotation.
+     */
+    public static Optional<PlanProgress> planProgress(PlanStore.PlanRecord record, TaskSnapshot snapshot,
+            Set<String> liveSessions) {
+        Objects.requireNonNull(record, "record");
+        Objects.requireNonNull(snapshot, "snapshot");
+        Objects.requireNonNull(liveSessions, "liveSessions");
+        RunningPlan plan = record.plan();
+        if (snapshot.find(plan.launch().target()).isEmpty()) {
+            return Optional.empty();
+        }
+        RunningPlan.StageState current = null;
+        for (RunningPlan.StageState stage : plan.stages()) {
+            if (!stage.finished()) {
+                current = stage;
+                break;
+            }
+        }
+        int total = plan.stages().size();
+        if (current == null) { // every stage finished: the plan's own terminal word
+            return Optional.of(new PlanProgress(total, total,
+                    plan.status() == RunningPlan.Status.CANCELED ? PlanPhase.CANCELED
+                            : PlanPhase.COMPLETED));
+        }
+        if (plan.status() == RunningPlan.Status.CANCELED) {
+            return Optional.of(new PlanProgress(current.stage(), total, PlanPhase.CANCELED));
+        }
+        if (record.paused()) { // the restart pause: only an explicit Continue resumes (P4.10)
+            return Optional.of(new PlanProgress(current.stage(), total, PlanPhase.WAITING));
+        }
+        for (RunningPlan.StageState stage : plan.stages()) {
+            if (!stage.launched()) {
+                continue; // unlaunched work: an open task there is simply not started yet
+            }
+            for (TaskId task : stage.tasks()) {
+                if (snapshot.find(task).map(TaskDocument::status).orElse(null) == TaskStatus.OPEN) {
+                    return Optional.of(new PlanProgress(current.stage(), total, PlanPhase.HALTED));
+                }
+            }
+        }
+        boolean reviewOnly = current.launched();
+        for (TaskId task : current.tasks()) {
+            TaskDocument document = snapshot.find(task).orElse(null);
+            TaskStatus status = document == null ? null : document.status();
+            if (status == TaskStatus.STARTED && noneLive(document, liveSessions)) {
+                return Optional.of(new PlanProgress(current.stage(), total, PlanPhase.HALTED));
+            }
+            if (status != TaskStatus.REVIEW && status != TaskStatus.DONE
+                    && status != TaskStatus.DROPPED) {
+                reviewOnly = false;
+            }
+        }
+        return Optional.of(new PlanProgress(current.stage(), total,
+                reviewOnly ? PlanPhase.WAITING : PlanPhase.RUNNING));
+    }
+
+    /** Whether none of the document's stored sessions is in the live set (D10's interrupt shape). */
+    private static boolean noneLive(TaskDocument document, Set<String> liveSessions) {
+        for (String session : document.sessions()) {
+            if (liveSessions.contains(session)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Whether the plan still offers Cancel (T40, P4.12): a RUNNING plan
+     * with unfinished work; the canceled snapshot no longer offers it,
+     * and neither does a completed one. Pure over the plan's own record;
+     * the tree resolves the CURRENT published record, never a captured
+     * stale one.
+     */
+    public static boolean cancelOffered(RunningPlan plan) {
+        Objects.requireNonNull(plan, "plan");
+        return plan.status() == RunningPlan.Status.RUNNING
+                && plan.stages().stream().anyMatch(stage -> !stage.finished());
     }
 
     /** Every row of the service's watched snapshot composition (T12a/T13a input). */

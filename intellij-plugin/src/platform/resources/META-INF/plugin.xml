@@ -99,6 +99,9 @@
         <notificationGroup id="Drydock attention" displayType="BALLOON"/>
         <!-- "<task> moved": a hosted agent's console went to its own window. -->
         <notificationGroup id="Drydock moves" displayType="BALLOON"/>
+        <!-- "<task> is ready/review" and the plan halt/Continue balloons
+             (TaskNotifications, T39a). -->
+        <notificationGroup id="Drydock tasks" displayType="BALLOON"/>
 
         <postStartupActivity
                 implementation="app.drydock.intellij.startup.DrydockStartupActivity"/>
@@ -201,6 +204,10 @@
                 class="app.drydock.intellij.delayedtasks.DelayedTaskActions$Start"
                 text="Start Session…"
                 description="Start one session for this task and its same-project plan"/>
+        <action id="Drydock.DelayedTask.Cancel"
+                class="app.drydock.intellij.delayedtasks.DelayedTaskActions$Cancel"
+                text="Cancel Plan"
+                description="Cancel this task's plan: future stages never start, started sessions keep running, unlaunched reservations are released"/>
         <action id="Drydock.DelayedTask.Edit"
                 class="app.drydock.intellij.delayedtasks.DelayedTaskActions$Edit"
                 text="Edit"
