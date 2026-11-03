@@ -1,13 +1,17 @@
 package app.drydock.mcp;
 
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.RepositoryId;
 import app.drydock.mcp.McpSessionRegistry.Spawn;
+import app.drydock.review.ChangeGraph;
 import app.drydock.state.json.JsonParser;
 import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonValue.JsonObject;
 import app.drydock.state.json.JsonValue.JsonString;
+import app.drydock.state.json.JsonWriter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -25,6 +29,7 @@ import static app.drydock.mcp.JsonPeek.array;
 import static app.drydock.mcp.JsonPeek.field;
 import static app.drydock.mcp.JsonPeek.str;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class McpToolRouterSubsetTest {
@@ -35,6 +40,7 @@ class McpToolRouterSubsetTest {
             "review_recheck");
 
     private final ManagedSessionId caller = ManagedSessionId.newId();
+    @TempDir Path taskRoot;
     private FakeMcpSessionContext context;
     private McpSessionRegistry registry;
 
@@ -122,6 +128,58 @@ class McpToolRouterSubsetTest {
             assertEquals(REVIEW_NAMES, names(array(result, "tools")));
         } finally {
             server.close();
+        }
+    }
+
+    // 4. Without the delegate: no task name is advertised or callable, and
+    // a task name cannot even enter a delegate-less allowlist.
+    @Test
+    void delegateLessRouterTreatsTaskNamesAsUnknown() {
+        McpToolRouter router = new McpToolRouter(context, registry);
+        Set<String> listed = names(router.toolDescriptors());
+        for (String task : McpToolRouter.TASK_TOOLS) {
+            assertFalse(listed.contains(task), task + " must not be advertised");
+            assertEquals("Unknown tool: " + task, assertThrows(McpToolException.class,
+                    () -> router.call(caller, task, JsonObject.empty())).getMessage());
+        }
+        assertThrows(IllegalArgumentException.class,
+                () -> new McpToolRouter(context, registry, Set.of("repos_list", "task_get")));
+    }
+
+    // 5. Every pre-existing constructor still works and builds a
+    // delegate-less router with identical listing behavior.
+    @Test
+    void preservedConstructorsBuildIdenticalDelegateLessListings() {
+        Set<String> listed = names(new McpToolRouter(context, registry).toolDescriptors());
+        assertEquals(listed, names(new McpToolRouter(context, registry, ChangeGraph::of)
+                .toolDescriptors()), "the graph-seam constructor keeps the default set");
+        Set<String> full = new HashSet<>(REVIEW_NAMES);
+        full.addAll(Set.of("worktree_create", "session_start", "session_rename", "session_handoff",
+                "repos_list", "sessions_list"));
+        assertEquals(listed, names(new McpToolRouter(context, registry, full).toolDescriptors()),
+                "the allowed-set constructor reaches the same listing");
+    }
+
+    // 6. An allowlisted non-task tool still lists and calls normally with
+    // the delegate present: the task path changes nothing about it.
+    @Test
+    void allowlistedNonTaskToolIsUnaffectedByTheDelegate() throws Exception {
+        Set<String> allowed = new HashSet<>(McpToolRouter.TASK_TOOLS);
+        allowed.add("session_rename");
+        McpToolRouterTaskTest.StoreContext tasks =
+                new McpToolRouterTaskTest.StoreContext(taskRoot, RepositoryId.newId());
+        McpToolRouter withDelegate = new McpToolRouter(context, registry, allowed,
+                new TaskTools(tasks));
+        JsonObject title = JsonObject.empty().put("title", new JsonString("Cover the login fix"));
+        try {
+            assertEquals(allowed, names(withDelegate.toolDescriptors()));
+            JsonValue renamed = withDelegate.call(caller, "session_rename", title);
+            assertEquals("renamed", str(renamed, "outcome"));
+            assertEquals(JsonWriter.write(new McpToolRouter(context, registry, Set.of("session_rename"))
+                    .call(caller, "session_rename", title)), JsonWriter.write(renamed),
+                    "the call answers exactly as without the delegate");
+        } finally {
+            tasks.store.close();
         }
     }
 }

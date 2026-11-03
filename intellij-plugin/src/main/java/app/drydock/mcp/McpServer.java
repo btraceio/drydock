@@ -228,8 +228,8 @@ public final class McpServer implements AutoCloseable {
      * already hunting for one -- a tool description is read at selection
      * time, not at the moment the agent learns what its work is. Only the
      * paragraphs for tools the router serves are sent; a router that serves
-     * neither {@code session_rename} nor {@code session_handoff} sends no
-     * instructions.
+     * none of {@code session_rename}, {@code session_handoff} or a task tool
+     * sends no instructions.
      */
     static final String RENAME_INSTRUCTIONS = """
             Drydock hosts this session in a tab a human is watching. As soon as you know what \
@@ -247,21 +247,65 @@ public final class McpServer implements AutoCloseable {
             """;
 
     /**
+     * The task paragraph (D17/P7a): a short pointer at the full tasks skill
+     * plus the review pause -- the pause and the prose-is-not-policy rule are
+     * the two things an agent must not have to fetch a skill to learn, and
+     * the rest of the skill ships with the plugin (T25/T26 pass it at
+     * launch). Served only to a router that serves a task tool, so a
+     * session whose harness was never given the task tools reads nothing
+     * about them.
+     */
+    static final String TASK_INSTRUCTIONS = """
+            Drydock also gives this session task tools -- task_get and task_list read any \
+            project's tasks, task_update reports status on this session's own, task_create \
+            records follow-up work -- and the tasks skill that ships with drydock covers \
+            planning with them; follow it when your launch carries it. A task's done_by \
+            defaults to human, so your done report on such a task stores review and only \
+            that human confirms it; proposing a different done_by in prose changes nothing. \
+            Record work you discover beyond your task with task_create instead of widening \
+            this one.\
+            """;
+
+    /**
      * The handshake instructions for {@code router}: the rename paragraph when
-     * it serves {@code session_rename} and the handoff paragraph when it serves
-     * {@code session_handoff}, joined by a blank line; empty when it serves
-     * neither.
+     * it serves {@code session_rename}, the handoff paragraph when it serves
+     * {@code session_handoff}, and the task paragraph when it serves any task
+     * tool (D17), each joined by a blank line; empty when it serves none of
+     * them. A router without task tools gets exactly the pre-task text, so
+     * the task paragraph is the only change this ever makes to a handshake.
      */
     static Optional<String> instructionsFor(McpToolRouter router) {
-        boolean rename = router.serves("session_rename");
-        boolean handoff = router.serves("session_handoff");
-        if (rename && handoff) {
-            return Optional.of(RENAME_INSTRUCTIONS + "\n\n" + HANDOFF_INSTRUCTIONS);
+        if (!servesAnyTaskTool(router)) {
+            // The pre-task text, unchanged: only a task-serving router gets
+            // anything new (the committed golden in McpServerTest).
+            boolean rename = router.serves("session_rename");
+            boolean handoff = router.serves("session_handoff");
+            if (rename && handoff) {
+                return Optional.of(RENAME_INSTRUCTIONS + "\n\n" + HANDOFF_INSTRUCTIONS);
+            }
+            if (rename) {
+                return Optional.of(RENAME_INSTRUCTIONS);
+            }
+            return handoff ? Optional.of(HANDOFF_INSTRUCTIONS) : Optional.empty();
         }
-        if (rename) {
-            return Optional.of(RENAME_INSTRUCTIONS);
+        StringBuilder instructions = new StringBuilder(TASK_INSTRUCTIONS);
+        if (router.serves("session_rename")) {
+            instructions.append("\n\n").append(RENAME_INSTRUCTIONS);
         }
-        return handoff ? Optional.of(HANDOFF_INSTRUCTIONS) : Optional.empty();
+        if (router.serves("session_handoff")) {
+            instructions.append("\n\n").append(HANDOFF_INSTRUCTIONS);
+        }
+        return Optional.of(instructions.toString());
+    }
+
+    /**
+     * Whether {@code router} serves any of the four task tools: the task
+     * paragraph is keyed on the tools a session can actually call, not on the
+     * delegate's presence alone -- a router built with a delegate but an
+     * allowed set without task names advertises none, so it is taught none.
+     */
+    private static boolean servesAnyTaskTool(McpToolRouter router) {
+        return McpToolRouter.TASK_TOOLS.stream().anyMatch(router::serves);
     }
 
     private final class McpHandler implements HttpHandler {
