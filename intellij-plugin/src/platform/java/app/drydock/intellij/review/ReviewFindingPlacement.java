@@ -64,6 +64,16 @@ public final class ReviewFindingPlacement {
      * plus whether the placement is the drift fallback (in which case
      * {@link #driftHint()} carries {@link ReviewTabModel#DRIFT_HINT}).
      */
+    /** A finding's line range on one side: 0-based editor lines, {@code startLine <= endLine}. */
+    public record Range(Side side, int startLine, int endLine) {
+        public Range {
+            Objects.requireNonNull(side, "side");
+            if (startLine < 0 || endLine < startLine) {
+                throw new IllegalArgumentException("not a line range: " + startLine + ".." + endLine);
+            }
+        }
+    }
+
     public record Placement(Side side, int line, boolean drifted) {
 
         /** The hint a drifted placement carries; empty for an exact one. */
@@ -146,6 +156,28 @@ public final class ReviewFindingPlacement {
             return new Placement(key.side(), key.gitLine() - 1, false);
         }
         return new Placement(fileFallback.side(), fileFallback.line(), true);
+    }
+
+    /**
+     * The line range a finding covers, {@code startKey..endKey}, on the start
+     * key's side. Empty when the start key is malformed or not in the current
+     * diff (a drifted finding has no trustworthy range). The range ends at the
+     * start line when the end key is malformed, not in the current diff, on
+     * the other side, or before the start: never a guessed span.
+     */
+    public static Optional<Range> range(String startKey, String endKey, Set<String> currentRowKeys) {
+        Objects.requireNonNull(currentRowKeys, "currentRowKeys");
+        LineKey start = tryParse(startKey);
+        if (start == null || !currentRowKeys.contains(startKey)) {
+            return Optional.empty();
+        }
+        int startLine = start.gitLine() - 1;
+        LineKey end = tryParse(endKey);
+        int endLine = end != null && currentRowKeys.contains(endKey) && end.side() == start.side()
+                && end.gitLine() - 1 >= startLine
+                ? end.gitLine() - 1
+                : startLine;
+        return Optional.of(new Range(start.side(), startLine, endLine));
     }
 
     /**

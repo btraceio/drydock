@@ -12,13 +12,16 @@ import com.intellij.diff.tools.util.side.TwosideTextDiffViewer;
 import com.intellij.diff.util.Side;
 import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.application.ApplicationManager;
+import com.intellij.openapi.editor.Document;
 import com.intellij.openapi.editor.Editor;
 import com.intellij.openapi.editor.Inlay;
 import com.intellij.openapi.editor.colors.EditorFontType;
 import com.intellij.openapi.editor.ex.EditorEx;
 import com.intellij.openapi.editor.markup.GutterIconRenderer;
 import com.intellij.openapi.editor.markup.HighlighterLayer;
+import com.intellij.openapi.editor.markup.HighlighterTargetArea;
 import com.intellij.openapi.editor.markup.RangeHighlighter;
+import com.intellij.openapi.editor.markup.TextAttributes;
 import com.intellij.util.ui.JBUI;
 
 import java.awt.EventQueue;
@@ -126,6 +129,16 @@ public final class ReviewDiffInlays {
 
         /** Adds the severity gutter mark at {@code line}; the handle removes the highlighter. */
         Owned addGutterMark(int line, ReviewAnnotation finding);
+
+        /**
+         * Marks the finding's lines {@code startLine..endLine} (inclusive) with
+         * a range highlighter whose error-stripe mark shows on the scrollbar
+         * ruler in the severity's colour; the handle removes it. An editor
+         * that cannot draw ranges draws none.
+         */
+        default Owned addFindingRange(int startLine, int endLine, ReviewAnnotation finding) {
+            return () -> { };
+        }
     }
 
     /** One decoration the layer owns: release() removes it (inlay dispose / highlighter removal). */
@@ -319,6 +332,14 @@ public final class ReviewDiffInlays {
             inlays.add(editor.insertCardAfter(line, card));
             liveCards.add(card);
             marks.add(editor.addGutterMark(line, finding));
+            ReviewFindingPlacement.range(finding.startKey(), finding.endKey(), current.rowKeys())
+                    .ifPresent(range -> {
+                        int start = host.oneSideLine(range.side(), range.startLine());
+                        int end = host.oneSideLine(range.side(), range.endLine());
+                        if (start >= 0 && end >= start && end < editor.lineCount()) {
+                            marks.add(editor.addFindingRange(start, end, finding));
+                        }
+                    });
         }
     }
 
@@ -531,6 +552,24 @@ public final class ReviewDiffInlays {
                     editor.getScrollPane().removeComponentListener(resize);
                     if (inlay.isValid()) {
                         inlay.dispose();
+                    }
+                };
+            }
+
+            @Override public Owned addFindingRange(int startLine, int endLine, ReviewAnnotation finding) {
+                Document document = editor.getDocument();
+                TextAttributes attributes = new TextAttributes();
+                attributes.setErrorStripeColor(editor.getColorsScheme()
+                        .getAttributes(SeverityPresentation.stripeKey(finding.effectiveSeverity()))
+                        .getErrorStripeColor());
+                RangeHighlighter highlighter = editor.getMarkupModel().addRangeHighlighter(
+                        document.getLineStartOffset(startLine), document.getLineEndOffset(endLine),
+                        HighlighterLayer.ADDITIONAL_SYNTAX, attributes, HighlighterTargetArea.LINES_IN_RANGE);
+                highlighter.setErrorStripeTooltip(finding.displayTitle());
+                highlighter.setThinErrorStripeMark(false);
+                return () -> {
+                    if (!editor.isDisposed() && highlighter.isValid()) {
+                        editor.getMarkupModel().removeHighlighter(highlighter);
                     }
                 };
             }

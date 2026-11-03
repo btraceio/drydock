@@ -2,11 +2,13 @@ package app.drydock.intellij.review;
 
 import app.drydock.review.Severity;
 import com.intellij.icons.AllIcons;
+import com.intellij.openapi.editor.colors.CodeInsightColors;
+import com.intellij.openapi.editor.colors.TextAttributesKey;
 
 import javax.swing.Icon;
 
 /**
- * The one place a finding's severity becomes an icon or a word in the IDE:
+ * The one place a finding's severity becomes an icon, a colour or a word in the IDE:
  * the diff inlay card, the diff's gutter mark, the source editor's grouped
  * gutter mark and the Review tree's finding rows all read it here, so a
  * blocking finding looks the same wherever it shows. Platform icons only —
@@ -25,6 +27,20 @@ final class SeverityPresentation {
             case QUESTION -> AllIcons.General.QuestionDialog;
             case DEVIATION -> AllIcons.General.Warning;
             case NIT -> AllIcons.General.Information;
+        };
+    }
+
+    /**
+     * The editor colour key whose error-stripe colour marks a finding's range
+     * on the diff's scrollbar ruler: the IDE's own error, warning, weak
+     * warning and information colours, so the ruler reads like the IDE's.
+     */
+    static TextAttributesKey stripeKey(Severity severity) {
+        return switch (severity) {
+            case BLOCKING -> CodeInsightColors.ERRORS_ATTRIBUTES;
+            case DEVIATION -> CodeInsightColors.WARNINGS_ATTRIBUTES;
+            case QUESTION -> CodeInsightColors.WEAK_WARNING_ATTRIBUTES;
+            case NIT -> CodeInsightColors.INFORMATION_ATTRIBUTES;
         };
     }
 
