@@ -1,0 +1,15 @@
+16fab3b229633c3123ff60ccfc8aa356f0b5c1663e0514517bb1f5db6f87a553  AGENTS.md
+7105f4586d6d97f48cdbbc80958d8003a13e65420094ae72887cdf3d82060104  intellij-plugin/build.gradle.kts
+a46ad61a18f5624e8dc315cfdc9992b27998acc76b07363afa02843129cc3f21  intellij-plugin/src/main/java/app/drydock/tasks/DoneBy.java
+b59aab192630037eef282f4fe485a70fea6b12cf43f06e1a7eb1fdc902c56c55  intellij-plugin/src/main/java/app/drydock/tasks/TaskDocument.java
+0465bd610da90f41d3dae7baec857f5de08d4d29dec74863192f8a2cd1928e3c  intellij-plugin/src/main/java/app/drydock/tasks/TaskFileEnvelope.java
+cc6503a5fc5bf51e90cb3af1d9d4ddef7a33d62ddfe162b7141d122e5f936ef8  intellij-plugin/src/main/java/app/drydock/tasks/TaskFileReader.java
+a9e0f5c2a1702fba850a8d08ddd4e69293373bb3da786da853c129af1fde7c11  intellij-plugin/src/main/java/app/drydock/tasks/TaskFormatException.java
+6e3c3ff43061103a5615d6da3ef54657165bbf5b4ca090bb0e63d53cbeb28edf  intellij-plugin/src/main/java/app/drydock/tasks/TaskId.java
+1f278bccadb99eb3e4098cda773ad67629088e98335faa8350293466e14a7405  intellij-plugin/src/main/java/app/drydock/tasks/TaskStatus.java
+7354aacbc6acc4fafdee3e230e5238cb7c418f6900a27c2edf0e85554f61165a  intellij-plugin/src/main/java/app/drydock/agent/api/CreateContext.java
+e09dfa017040ac50852c363a3b362f77d06d07e21c982e9de5fb985e9c2abb3b  intellij-plugin/src/main/java/app/drydock/agent/api/ResumeContext.java
+f2f75449e6fd7eadd76cd3e8dbfcf0ac9df7c35f98b1e0c34856dd0b79f0c9dc  intellij-plugin/src/main/java/app/drydock/agent/api/LaunchResources.java
+8ab69f364b370b426057f92464b2769a3e561e651781a1f7b80ec308d074bfb0  intellij-plugin/src/test/java/app/drydock/tasks/TaskDocumentTest.java
+03eaa14b0bebb84bde54ec29b4bbacf7d1e024c321e5598a09bb6346c4d8a836  intellij-plugin/src/test/java/app/drydock/tasks/TaskFileEnvelopeTest.java
+b7cd75735584c0d890343539abe8a57d72f9d2edee70695654066288a67dd357  intellij-plugin/src/test/java/app/drydock/tasks/TaskFileReaderTest.java
