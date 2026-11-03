@@ -1,13 +1,16 @@
 package app.drydock.intellij.review;
 
 import com.intellij.diff.fragments.LineFragment;
+import com.intellij.diff.requests.DiffRequest;
 import app.drydock.intellij.review.workbench.model.WorkbenchState;
 import com.intellij.diff.DiffContentFactory;
+import com.intellij.diff.tools.util.base.TextDiffSettingsHolder;
 import com.intellij.diff.requests.SimpleDiffRequest;
 import com.intellij.diff.util.Side;
 import com.intellij.ide.util.PropertiesComponent;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.actionSystem.AnActionEvent;
+import com.intellij.openapi.actionSystem.ToggleAction;
 import com.intellij.openapi.fileEditor.FileEditorProvider;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.Disposer;
@@ -154,6 +157,96 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
         }
     }
 
+    public void testAViewIsTheDiffPlacesCollapseSetting() {
+        TextDiffSettingsHolder.TextDiffSettings settings =
+                TextDiffSettingsHolder.TextDiffSettings.getSettings(ReviewDiffEditor.PLACE);
+        boolean saved = settings.isExpandByDefault();
+        try {
+            ReviewDiffEditor.applyView(settings, WorkbenchState.View.CHANGES_ONLY);
+            assertFalse(settings.isExpandByDefault());
+            assertEquals(WorkbenchState.View.CHANGES_ONLY, ReviewDiffEditor.storedView());
+            ReviewDiffEditor.applyView(settings, WorkbenchState.View.FULL_FILE);
+            assertTrue(settings.isExpandByDefault());
+            assertEquals(WorkbenchState.View.FULL_FILE, ReviewDiffEditor.storedView());
+        } finally {
+            settings.setExpandByDefault(saved);
+        }
+    }
+
+    public void testShowingAViewReappliesTheCurrentRequest() {
+        TextDiffSettingsHolder.TextDiffSettings settings =
+                TextDiffSettingsHolder.TextDiffSettings.getSettings(ReviewDiffEditor.PLACE);
+        boolean saved = settings.isExpandByDefault();
+        List<String> built = new ArrayList<>();
+        List<String> applied = new ArrayList<>();
+        ReviewDiffEditor diff = new ReviewDiffEditor(() -> { }, context -> {
+            built.add(context.path());
+            return new SimpleDiffRequest(context.path(), DiffContentFactory.getInstance().createEmpty(),
+                    DiffContentFactory.getInstance().createEmpty(), null, null);
+        }, viewer -> { });
+        try {
+            diff.show(context("src/A.java"));
+            diff.processorReady(new ReviewDiffEditor.ProcessorHandle() {
+                @Override
+                public void apply(DiffRequest request) {
+                    applied.add(request.getTitle());
+                }
+
+                @Override
+                public boolean isDisposed() {
+                    return false;
+                }
+            });
+            diff.showView(WorkbenchState.View.CHANGES_ONLY);
+            assertFalse(settings.isExpandByDefault());
+            assertEquals(List.of("src/A.java"), applied);
+        } finally {
+            settings.setExpandByDefault(saved);
+        }
+    }
+
+    public void testTheHeaderTogglesAskForTheirViewOnceAStateIsShown() {
+        List<WorkbenchState.View> asked = new ArrayList<>();
+        List<Consumer<WorkbenchState>> headers = new ArrayList<>();
+        ReviewWorkbenchEditor.Host host = new ReviewWorkbenchEditor.Host() {
+            @Override
+            public Optional<ReviewWorkbenchEditor.HostedDiff> hostDiff(Project project, Disposable parent) {
+                return Optional.empty();
+            }
+
+            @Override
+            public Optional<JComponent> hostNavigator(Project project, Disposable parent,
+                                                      Consumer<WorkbenchState> header) {
+                headers.add(header);
+                return Optional.empty();
+            }
+
+            @Override
+            public void changeView(Project project, WorkbenchState.View view) {
+                asked.add(view);
+            }
+        };
+        ReviewWorkbenchEditor editor = new ReviewWorkbenchEditor(getProject(), ReviewWorkbenchFile.of(getProject()),
+                host);
+        try {
+            ToggleAction changesOnly = (ToggleAction) editor.viewActions.getChildActionsOrStubs()[0];
+            ToggleAction fullFile = (ToggleAction) editor.viewActions.getChildActionsOrStubs()[1];
+            AnActionEvent event = TestActionEvent.createTestEvent();
+            assertFalse(changesOnly.isSelected(event));
+
+            headers.get(0).accept(WorkbenchState.of("drydock", WorkbenchState.Mode.LOCAL,
+                    new ReviewTabModel.Snapshot(List.of(), 0, 0), WorkbenchState.Filter.ALL, Optional.empty(),
+                    WorkbenchState.View.CHANGES_ONLY));
+            assertTrue(changesOnly.isSelected(event));
+            assertFalse(fullFile.isSelected(event));
+
+            fullFile.setSelected(event, true);
+            assertEquals(List.of(WorkbenchState.View.FULL_FILE), asked);
+        } finally {
+            Disposer.dispose(editor);
+        }
+    }
+
     private static final ReviewWorkbenchEditor.Host NO_REVIEW = new ReviewWorkbenchEditor.Host() {
         @Override
         public Optional<ReviewWorkbenchEditor.HostedDiff> hostDiff(Project project, Disposable parent) {
@@ -164,6 +257,10 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
         public Optional<JComponent> hostNavigator(Project project, Disposable parent,
                                                   Consumer<WorkbenchState> header) {
             return Optional.empty();
+        }
+
+        @Override
+        public void changeView(Project project, WorkbenchState.View view) {
         }
     };
 
@@ -178,6 +275,10 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
             public Optional<JComponent> hostNavigator(Project project, Disposable parent,
                                                       Consumer<WorkbenchState> header) {
                 return Optional.empty();
+            }
+
+            @Override
+            public void changeView(Project project, WorkbenchState.View view) {
             }
         };
     }

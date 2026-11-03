@@ -215,8 +215,8 @@ final class ReviewTabProvider {
     private final List<WorkbenchView> workbenchViews = new ArrayList<>();
     /** The workbench navigator's filter; set on the EDT, read when the state is rebuilt. */
     private volatile WorkbenchState.Filter workbenchFilter = WorkbenchState.Filter.ALL;
-    /** The workbench diff's view; set on the EDT, read when the state is rebuilt. */
-    private volatile WorkbenchState.View workbenchView = WorkbenchState.View.CHANGES_ONLY;
+    /** The workbench diff's view, starting from the stored setting; set on the EDT, read when the state is rebuilt. */
+    private volatile WorkbenchState.View workbenchView = ReviewDiffEditor.storedView();
     /** The latest workbench state, for a view that attaches after it was built. */
     private volatile WorkbenchState workbenchState;
 
@@ -1671,6 +1671,24 @@ final class ReviewTabProvider {
     private void workbenchFilterChanged(WorkbenchState.Filter filter) {
         workbenchFilter = Objects.requireNonNull(filter, "filter");
         submitWorkbenchState();
+    }
+
+    /** The workbench's Changes only / Full file choice (EDT): the diff refolds, then the state is rebuilt. */
+    private void workbenchViewChanged(WorkbenchState.View view) {
+        workbenchView = Objects.requireNonNull(view, "view");
+        ReviewDiffEditor editor = diffEditor;
+        if (editor != null) {
+            editor.showView(view);
+        }
+        submitWorkbenchState();
+    }
+
+    /** Routes a workbench editor's view choice to the live review; nothing happens without one. EDT. */
+    static void changeView(Project project, WorkbenchState.View view) {
+        ReviewTabProvider provider = project.getUserData(LIVE_PROVIDER);
+        if (provider != null && !provider.disposed.get()) {
+            provider.workbenchViewChanged(view);
+        }
     }
 
     /**

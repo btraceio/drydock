@@ -2,8 +2,14 @@ package app.drydock.intellij.review;
 
 import app.drydock.intellij.review.workbench.model.WorkbenchState;
 import com.intellij.openapi.Disposable;
+import com.intellij.openapi.actionSystem.ActionManager;
+import com.intellij.openapi.actionSystem.ActionToolbar;
+import com.intellij.openapi.actionSystem.ActionUpdateThread;
+import com.intellij.openapi.actionSystem.AnActionEvent;
+import com.intellij.openapi.actionSystem.DefaultActionGroup;
 import com.intellij.openapi.fileEditor.FileEditor;
 import com.intellij.openapi.fileEditor.FileEditorState;
+import com.intellij.openapi.project.DumbAwareToggleAction;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.UserDataHolderBase;
 import com.intellij.openapi.vfs.VirtualFile;
@@ -43,6 +49,9 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
     static final String INBOX_EMPTY_TEXT = "Findings to triage will appear here.";
     static final String OUTBOX_EMPTY_TEXT = "Decisions to send will appear here.";
     static final String NAVIGATOR_EMPTY_TEXT = "No files to review.";
+    static final String CHANGES_ONLY = "Changes Only";
+    static final String FULL_FILE = "Full File";
+    private static final String TOOLBAR_PLACE = "DrydockReviewWorkbenchHeader";
 
     /** Navigator | rest. */
     static final String NAV_KEY = "drydock.review.nav";
@@ -70,12 +79,19 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
          * Empty when no review is live. EDT.
          */
         Optional<JComponent> hostNavigator(Project project, Disposable parent, Consumer<WorkbenchState> header);
+
+        /** The user picked Changes only or Full file. EDT. */
+        void changeView(Project project, WorkbenchState.View view);
     }
 
     private final ReviewWorkbenchFile file;
     private final JComponent root;
     private final Supplier<JComponent> preferredFocus;
     private final JBLabel header = new JBLabel();
+    /** The last state rendered; the header's toggles read it. EDT. */
+    private WorkbenchState shown;
+    /** The header's Changes only / Full file toggles. */
+    final DefaultActionGroup viewActions;
     private final JBPanel<?> navigator = new JBPanel<>(new BorderLayout());
     final OnePixelSplitter navSplitter = new OnePixelSplitter(false, NAV_KEY, 0.2f);
     final OnePixelSplitter inboxSplitter = new OnePixelSplitter(false, INBOX_KEY, 0.75f);
@@ -96,8 +112,16 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
         outboxSplitter.setSecondComponent(emptyState(OUTBOX_EMPTY_TEXT));
 
         header.setBorder(JBUI.Borders.empty(4, 8));
+        viewActions = new DefaultActionGroup(
+                new ViewToggle(project, host, WorkbenchState.View.CHANGES_ONLY, CHANGES_ONLY),
+                new ViewToggle(project, host, WorkbenchState.View.FULL_FILE, FULL_FILE));
+        ActionToolbar toolbar = ActionManager.getInstance().createActionToolbar(TOOLBAR_PLACE, viewActions, true);
+        JBPanel<?> top = new JBPanel<>(new BorderLayout());
+        top.add(header, BorderLayout.CENTER);
+        top.add(toolbar.getComponent(), BorderLayout.EAST);
         JBPanel<?> panel = new JBPanel<>(new BorderLayout());
-        panel.add(header, BorderLayout.NORTH);
+        toolbar.setTargetComponent(panel);
+        panel.add(top, BorderLayout.NORTH);
         panel.add(outboxSplitter, BorderLayout.CENTER);
         root = panel;
         preferredFocus = diff.map(HostedDiff::preferredFocus).orElse(() -> centre);
@@ -105,7 +129,46 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
 
     /** The header for {@code state}: the review's subject and its progress. EDT. */
     private void renderHeader(WorkbenchState state) {
+        shown = state;
         header.setText(headerText(state));
+    }
+
+    /** One of the two view choices; selected when the rendered state shows that view. */
+    private final class ViewToggle extends DumbAwareToggleAction {
+        private final Project project;
+        private final Host host;
+        private final WorkbenchState.View view;
+
+        ViewToggle(Project project, Host host, WorkbenchState.View view, String text) {
+            super(text);
+            this.project = project;
+            this.host = host;
+            this.view = view;
+        }
+
+        @Override
+        public boolean isSelected(@NotNull AnActionEvent e) {
+            WorkbenchState state = shown;
+            return state != null && state.view() == view;
+        }
+
+        @Override
+        public void setSelected(@NotNull AnActionEvent e, boolean selected) {
+            if (selected) {
+                host.changeView(project, view);
+            }
+        }
+
+        @Override
+        public void update(@NotNull AnActionEvent e) {
+            super.update(e);
+            e.getPresentation().setEnabled(shown != null);
+        }
+
+        @Override
+        public @NotNull ActionUpdateThread getActionUpdateThread() {
+            return ActionUpdateThread.EDT;
+        }
     }
 
     /** The header text (pure): "subject · k / n reviewed". */
@@ -131,6 +194,11 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
             public Optional<JComponent> hostNavigator(Project project, Disposable parent,
                                                       Consumer<WorkbenchState> header) {
                 return ReviewTabProvider.hostedNavigator(project, parent, header);
+            }
+
+            @Override
+            public void changeView(Project project, WorkbenchState.View view) {
+                ReviewTabProvider.changeView(project, view);
             }
         };
     }

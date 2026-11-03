@@ -1,10 +1,13 @@
 package app.drydock.intellij.review;
 
+import app.drydock.intellij.review.workbench.model.WorkbenchState;
+
 import com.intellij.diff.FrameDiffTool;
 import com.intellij.diff.impl.DiffRequestProcessor;
 import com.intellij.diff.impl.DiffRequestProcessorListener;
 import com.intellij.diff.requests.DiffRequest;
 import com.intellij.diff.requests.LoadingDiffRequest;
+import com.intellij.diff.tools.util.base.TextDiffSettingsHolder;
 import com.intellij.diff.util.DiffUserDataKeysEx;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.fileEditor.FileEditorManager;
@@ -36,6 +39,13 @@ import java.util.function.Consumer;
  * editor listener or Swing component walk — the spike disproved all four.</p>
  */
 public final class ReviewDiffEditor {
+
+    /**
+     * The diff settings place of the review's diff: its viewer settings
+     * (collapse unchanged, context range, viewer mode) are its own, apart
+     * from the IDE's other diffs.
+     */
+    public static final String PLACE = "DrydockReviewWorkbench";
 
     /**
      * Opens (or reopens) the review workbench tab. Production opens the
@@ -167,6 +177,33 @@ public final class ReviewDiffEditor {
     }
 
     /**
+     * Shows {@code view} (EDT): sets the place's collapse-unchanged setting
+     * and shows the current request again, so the viewer refolds with the
+     * new setting. Nothing to show yet only stores the setting.
+     */
+    public void showView(WorkbenchState.View view) {
+        requireEdt();
+        applyView(TextDiffSettingsHolder.TextDiffSettings.getSettings(PLACE), view);
+        ReviewDiffRequests.RequestContext current = context;
+        ProcessorHandle live = processor;
+        if (current != null && live != null && !live.isDisposed()) {
+            live.apply(requests.build(current));
+        }
+    }
+
+    /** The view's setting (pure over the settings object): the whole file expands, changes only collapses. */
+    static void applyView(TextDiffSettingsHolder.TextDiffSettings settings, WorkbenchState.View view) {
+        settings.setExpandByDefault(view == WorkbenchState.View.FULL_FILE);
+    }
+
+    /** The view the place's stored setting stands for: the setting persists with the IDE's diff settings. */
+    static WorkbenchState.View storedView() {
+        return TextDiffSettingsHolder.TextDiffSettings.getSettings(PLACE).isExpandByDefault()
+                ? WorkbenchState.View.FULL_FILE
+                : WorkbenchState.View.CHANGES_ONLY;
+    }
+
+    /**
      * The request a newly created processor is seeded with: the current
      * context's request (the seeding the spike demanded), or the platform's
      * own loading placeholder when no context exists yet. EDT — the tab's
@@ -214,7 +251,7 @@ public final class ReviewDiffEditor {
         private DiffRequest request;
 
         Processor(Project project, DiffRequest seed) {
-            super(project);
+            super(project, PLACE);
             this.request = Objects.requireNonNull(seed, "seed");
         }
 
