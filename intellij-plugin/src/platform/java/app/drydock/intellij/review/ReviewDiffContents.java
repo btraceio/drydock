@@ -102,7 +102,7 @@ public final class ReviewDiffContents {
     }
 
     /**
-     * The request's two contents (EDT, read access). The left side is always
+     * The request's two contents (EDT; reads the document in a read action). The left side is always
      * a typed revision content with the file's path, so it is highlighted in
      * the file's language. The right side follows {@link #choose}.
      */
@@ -115,8 +115,12 @@ public final class ReviewDiffContents {
         VirtualFile file = context.worktreeFile()
                 .map(path -> LocalFileSystem.getInstance().findFileByNioFile(path))
                 .orElse(null);
-        Document document = file == null ? null : FileDocumentManager.getInstance().getDocument(file);
-        RightSide side = choose(document == null ? null : document.getImmutableCharSequence(), right);
+        // The document read needs read access; an EDT caller does not always
+        // hold the write-intent lock that would imply it (a plain Swing event).
+        RightSide side = ReadAction.compute(() -> {
+            Document document = file == null ? null : FileDocumentManager.getInstance().getDocument(file);
+            return choose(document == null ? null : document.getImmutableCharSequence(), right);
+        });
         FilePath filePath = file != null
                 ? VcsUtil.getFilePath(file)
                 : VcsUtil.getFilePath(context.worktreeFile().map(Path::toString).orElse(context.path()), false);
