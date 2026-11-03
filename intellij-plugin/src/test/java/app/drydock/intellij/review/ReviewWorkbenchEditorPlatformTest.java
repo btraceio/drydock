@@ -17,10 +17,13 @@ import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.Disposer;
 import com.intellij.testFramework.LightVirtualFile;
 import com.intellij.testFramework.TestActionEvent;
+import com.intellij.testFramework.PlatformTestUtil;
+import com.intellij.util.ui.UIUtil;
 import com.intellij.testFramework.fixtures.BasePlatformTestCase;
 import com.intellij.ui.components.JBLabel;
 
 import javax.swing.JComponent;
+import javax.swing.JLabel;
 import javax.swing.SwingUtilities;
 import java.util.ArrayList;
 import java.util.List;
@@ -304,6 +307,22 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
             assertFalse(pr.isSelected(prEvent));
             assertFalse("the PR mode arrives with W5", prEvent.getPresentation().isEnabled());
             assertEquals(ReviewWorkbenchEditor.PR_LATER, prEvent.getPresentation().getDescription());
+        } finally {
+            Disposer.dispose(editor);
+        }
+    }
+
+    public void testAWorkbenchOpenedBeforeAnySelectionShowsTheSeededMessageNotTheLoadingState() {
+        ReviewDiffEditor diff = new ReviewDiffEditor(() -> { }, context -> {
+            throw new AssertionError("nothing is selected: no request is built");
+        }, viewer -> { });
+        ReviewWorkbenchEditor editor = new ReviewWorkbenchEditor(getProject(), ReviewWorkbenchFile.of(getProject()),
+                diffOnly(diff));
+        try {
+            PlatformTestUtil.dispatchAllEventsInIdeEventQueue();
+            List<String> texts = UIUtil.uiTraverser(editor.getComponent()).filter(JLabel.class).toList().stream()
+                    .map(JLabel::getText).filter(text -> text != null).toList();
+            assertTrue(texts.toString(), texts.stream().anyMatch(text -> text.contains(ReviewDiffEditor.NO_FILE_TEXT)));
         } finally {
             Disposer.dispose(editor);
         }

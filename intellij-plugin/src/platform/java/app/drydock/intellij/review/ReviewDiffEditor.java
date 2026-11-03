@@ -135,6 +135,11 @@ public final class ReviewDiffEditor {
         requireEdt();
         DiffRequestProcessor created = newProcessor(project);
         Disposer.register(parent, created);
+        // A DiffVirtualFile tab's editor applies the seeded request on
+        // selection; an embedded processor has no such editor, so it applies
+        // it here, or it would show the platform's loading state until the
+        // next selection.
+        created.updateRequest();
         return new ReviewWorkbenchEditor.HostedDiff(created.getComponent(), created::getPreferredFocusedComponent);
     }
 
