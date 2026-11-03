@@ -1,5 +1,7 @@
 package app.drydock.intellij.agent;
 
+import app.drydock.delayedtasks.SessionTaskCompletion;
+import app.drydock.delayedtasks.TaskWorktreeUse;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.PrState;
 import app.drydock.git.GitStatusService;
@@ -11,6 +13,7 @@ import app.drydock.intellij.agent.SessionDonePlan.Choice;
 import app.drydock.intellij.agent.SessionDonePlan.Risks;
 import app.drydock.intellij.startup.DrydockStartupActivity;
 import app.drydock.intellij.worktree.WorktreeErrors;
+import app.drydock.tasks.TaskId;
 
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
@@ -28,9 +31,11 @@ import java.lang.System.Logger.Level;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.stream.Collectors;
 
 /**
  * "Done with this task…", from the strip's {@code ⋯} or the Drydock tool
@@ -46,6 +51,11 @@ import java.util.concurrent.TimeoutException;
  * or rebase merge leaves commits "ahead" of main that are merged all the
  * same. A status that cannot be read never reads as clean: it blocks the
  * removal instead.</p>
+ *
+ * <p>The session's tasks are snapshotted before the dialog too, and on
+ * acceptance their completions and run receipts commit BEFORE the session
+ * is deleted (T30a); a failed save blocks the deletion, and cancelling
+ * the dialog writes nothing.</p>
  *
  * <p>Everything blocking runs in a background task with the IDE's own
  * progress, and every path out of that task ends it (AGENTS.md).</p>
@@ -72,12 +82,16 @@ public final class SessionDone {
         ProgressManager.getInstance().run(new Task.Backgroundable(from, "Checking worktree…", true) {
             @Override
             public void run(@NotNull ProgressIndicator indicator) {
-                Resolved resolved = resolve(session);
+                SessionTaskCompletion completion = captureTasks(session);
+                Resolved resolved = resolve(session, completion);
                 ApplicationManager.getApplication().invokeLater(() -> {
                     SessionDoneDialog dialog = new SessionDoneDialog(from, resolved.inputs());
                     if (dialog.showAndGet()) {
-                        perform(from, session, dialog.choice(), dialog.deleteBranch(), resolved);
+                        perform(from, session, dialog.choice(), dialog.deleteBranch(), resolved, completion,
+                                dialog.selectedTasks());
                     }
+                    // Cancelled: nothing was captured that writes, so there is
+                    // nothing to undo -- cancelling the dialog writes nothing.
                 }, ModalityState.nonModal(), from.getDisposed());
             }
         });
@@ -86,7 +100,24 @@ public final class SessionDone {
     private record Resolved(SessionDoneDialog.Inputs inputs, Optional<Path> mainCheckout) {
     }
 
-    private static Resolved resolve(ManagedAgentSession session) {
+    /** The pre-dialog task snapshot (T30a), captured once off the EDT with the live catalog
+     * ids; a store that cannot be read degrades to no tasks, never to a broken flow. */
+    private static SessionTaskCompletion captureTasks(ManagedAgentSession session) {
+        try {
+            DrydockPluginService plugin = DrydockPluginService.getInstance();
+            Set<String> live = plugin.stateStore().state().sessions().stream()
+                    .map(row -> row.id().toString())
+                    .collect(Collectors.toUnmodifiableSet());
+            return SessionTaskCompletion.capture(plugin.taskService().root(), live,
+                    session.id().toString(), session.workingDirectory());
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, () -> "Could not capture the tasks of " + session.id() + ": " + e);
+            return SessionTaskCompletion.captureFailed(session.id().toString(), session.workingDirectory(),
+                    "Drydock tasks could not be read: " + WorktreeErrors.visibleMessage(e));
+        }
+    }
+
+    private static Resolved resolve(ManagedAgentSession session, SessionTaskCompletion completion) {
         Path directory = WorktreeService.canonical(session.workingDirectory());
         List<String> otherTasks = DrydockPluginService.getInstance().stateStore().state().sessions().stream()
                 .filter(other -> !other.id().equals(session.id()))
@@ -105,6 +136,13 @@ public final class SessionDone {
             Optional<String> blocker = SessionDonePlan.removalBlocker(
                     own.map(Worktree::mainCheckout).orElse(false), own.isPresent() && mainCheckout.isPresent(),
                     otherTasks);
+            // T41: a live dependent session still using this worktree as
+            // prerequisite context blocks the removal offer before the
+            // dialog opens -- the warn and the prevent in one place, from
+            // the receipts, off the EDT. The removal path rechecks under the
+            // claim, so a consumer arriving after the dialog cannot slip in.
+            blocker = blocker.or(() -> TaskWorktreeUse.guard(
+                    DrydockPluginService.getInstance().taskService().root(), directory, liveSessionIds()));
             Optional<String> branch = own.flatMap(Worktree::branch);
             Risks risks = new Risks(0, 0, 0, true);
             if (blocker.isEmpty()) {
@@ -113,15 +151,17 @@ public final class SessionDone {
                         session.prState() == PrState.MERGED);
             }
             return new Resolved(new SessionDoneDialog.Inputs(risks, blocker,
-                    blocker.isEmpty() ? branch : Optional.empty()), mainCheckout);
+                    blocker.isEmpty() ? branch : Optional.empty(), completion.tasks(),
+                    Optional.ofNullable(completion.captureProblem())), mainCheckout);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            return unknown("Interrupted while checking the worktree.");
+            return unknown("Interrupted while checking the worktree.", completion);
         } catch (ExecutionException | TimeoutException | RuntimeException e) {
             // Never "clean" by default: a status that could not be read must
             // not become an offer to remove without a data-loss warning.
             LOG.log(Level.WARNING, () -> "Could not inspect the worktree of " + session.id() + ": " + e);
-            return unknown("Could not read the worktree's status: " + WorktreeErrors.visibleMessage(e));
+            return unknown("Could not read the worktree's status: " + WorktreeErrors.visibleMessage(e),
+                    completion);
         }
     }
 
@@ -158,23 +198,47 @@ public final class SessionDone {
         }
     }
 
-    private static Resolved unknown(String reason) {
+    private static Resolved unknown(String reason, SessionTaskCompletion completion) {
         return new Resolved(new SessionDoneDialog.Inputs(new Risks(0, 0, 0, true), Optional.of(reason),
-                Optional.empty()), Optional.empty());
+                Optional.empty(), completion.tasks(), Optional.ofNullable(completion.captureProblem())),
+                Optional.empty());
+    }
+
+    /** The live catalog session ids (T07: a session id is live while the catalog holds its row). */
+    private static Set<String> liveSessionIds() {
+        return DrydockPluginService.getInstance().stateStore().state().sessions().stream()
+                .map(row -> row.id().toString())
+                .collect(Collectors.toUnmodifiableSet());
     }
 
     private static void perform(Project from, ManagedAgentSession session, Choice choice, boolean deleteBranch,
-                                Resolved resolved) {
+                                Resolved resolved, SessionTaskCompletion completion, Set<TaskId> selected) {
         ProgressManager.getInstance().run(new Task.Backgroundable(from, "Forgetting task…", false) {
             @Override
             public void run(@NotNull ProgressIndicator indicator) {
+                // The completions and receipts commit BEFORE the session is
+                // deleted (the plan's hard ordering); a worktree that is about
+                // to be removed is reserved first so nothing can race it (T41
+                // consumes the reservation; a blocked delete releases it).
+                if (choice == Choice.FORGET_AND_REMOVE) {
+                    completion.reservePendingWorktreeRemoval();
+                }
+                SessionTaskCompletion.Result committed = completion.commit(selected);
+                if (!committed.deletionAllowed()) {
+                    completion.releaseWorktreeRemovalReservation();
+                    report(from, "Could not save this session's task completions, so it was NOT forgotten: "
+                            + reasons(committed));
+                    return;
+                }
                 try {
                     DrydockStartupActivity.sessions(from).deleteSession(session.id())
                             .get(QUERY_TIMEOUT_SECONDS, TimeUnit.SECONDS);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
+                    completion.releaseWorktreeRemovalReservation();
                     return;
                 } catch (ExecutionException | TimeoutException e) {
+                    completion.releaseWorktreeRemovalReservation();
                     report(from, "Could not forget this task: " + WorktreeErrors.visibleMessage(e));
                     return;
                 }
@@ -186,10 +250,18 @@ public final class SessionDone {
                     if (choice == Choice.FORGET) {
                         return;
                     }
-                    removeWorktree(session, deleteBranch, resolved);
+                    removeWorktree(session, deleteBranch, resolved, completion);
                 }, ModalityState.nonModal());
             }
         });
+    }
+
+    /** One line per failure of the completions commit (T30a). */
+    private static String reasons(SessionTaskCompletion.Result committed) {
+        return committed.failures().stream()
+                .map(failure -> (failure.task() == null ? "" : "task '" + failure.task().text() + "': ")
+                        + failure.reason())
+                .collect(Collectors.joining("; "));
     }
 
     /** The forgotten session no longer has a useful editor, wherever it was hosted. EDT only. */
@@ -202,13 +274,26 @@ public final class SessionDone {
         }
     }
 
-    private static void removeWorktree(ManagedAgentSession session, boolean deleteBranch, Resolved resolved) {
+    private static void removeWorktree(ManagedAgentSession session, boolean deleteBranch, Resolved resolved,
+            SessionTaskCompletion completion) {
         Path directory = session.workingDirectory();
         Path mainCheckout = resolved.mainCheckout().orElseThrow();
         Optional<String> branch = deleteBranch ? resolved.inputs().branch() : Optional.empty();
         ProgressManager.getInstance().run(new Task.Backgroundable(null, "Removing worktree…", false) {
             @Override
             public void run(@NotNull ProgressIndicator indicator) {
+                // T41: the recheck runs under the reservation (claimed after
+                // the dialog's warning) just before the deletion, so a
+                // dependent launch that arrived since the dialog cannot lose
+                // its context silently. A refusal keeps the folder -- the
+                // done statuses and the forget already committed are a
+                // separate, earlier step and stay committed.
+                Optional<String> refusal = TaskWorktreeUse.guard(
+                        DrydockPluginService.getInstance().taskService().root(), directory, liveSessionIds());
+                if (refusal.isPresent()) {
+                    report(null, "The worktree was not removed: " + refusal.get());
+                    return;
+                }
                 try (WorktreeService worktrees = new WorktreeService()) {
                     // Choosing "Forget + remove worktree" authorizes deleting
                     // the folder. Always use the lock-preserving force mode:
@@ -228,6 +313,10 @@ public final class SessionDone {
                 } catch (ExecutionException | TimeoutException | RuntimeException e) {
                     LOG.log(Level.WARNING, () -> "Could not remove worktree " + directory + ": " + e);
                     report(null, "Could not remove " + directory + ": " + WorktreeErrors.visibleMessage(e));
+                } finally {
+                    // The removal path this reservation waited for has run,
+                    // one way or another: consume it (T30a/T41 boundary).
+                    completion.releaseWorktreeRemovalReservation();
                 }
             }
         });

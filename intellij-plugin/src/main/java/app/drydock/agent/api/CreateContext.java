@@ -47,11 +47,19 @@ import java.util.Optional;
  * default — a first-class choice, not an omission. It is a LAUNCH-TIME input
  * only: a later resume of the same conversation carries no model, so
  * resuming keeps whatever model the conversation last used.</p>
+ *
+ * <p>{@code launchResources} is the optional per-invocation set of extra
+ * directories and the installed task-guidance location (see {@link
+ * LaunchResources}); empty means a launch with no resources beyond the
+ * session's own worktree, exactly as before. Like {@code initialPrompt}
+ * it is a create-time input: what the launch carries, not a session
+ * property, and resuming a conversation re-receives whatever resources
+ * that resume is given rather than inheriting these.</p>
  */
 public record CreateContext(String displayName, String sessionId, Path workingDirectory,
                             Optional<SshRemote> remote, Optional<McpAccess> mcp, Optional<String> model,
                             boolean evalMode, boolean readOnly, Optional<String> initialPrompt,
-                            List<StdioMcpServer> stdioMcpServers) {
+                            List<StdioMcpServer> stdioMcpServers, Optional<LaunchResources> launchResources) {
     public CreateContext {
         Objects.requireNonNull(displayName, "displayName");
         Objects.requireNonNull(sessionId, "sessionId");
@@ -60,22 +68,39 @@ public record CreateContext(String displayName, String sessionId, Path workingDi
         Objects.requireNonNull(mcp, "mcp");
         Objects.requireNonNull(initialPrompt, "initialPrompt");
         stdioMcpServers = List.copyOf(Objects.requireNonNull(stdioMcpServers, "stdioMcpServers"));
+        Objects.requireNonNull(launchResources, "launchResources");
         // A blank task is no task: rendering it would launch the agent with
         // an empty first message.
         initialPrompt = initialPrompt.filter(prompt -> !prompt.isBlank());
     }
 
+    /** As the canonical constructor with no launch resources. */
     public CreateContext(String displayName, String sessionId, Path workingDirectory,
-                         Optional<SshRemote> remote, Optional<McpAccess> mcp, boolean evalMode,
-                         boolean readOnly, Optional<String> initialPrompt) {
-        this(displayName, sessionId, workingDirectory, remote, mcp, Optional.empty(), evalMode, readOnly,
-                initialPrompt, List.of());
+                         Optional<SshRemote> remote, Optional<McpAccess> mcp, Optional<String> model,
+                         boolean evalMode, boolean readOnly, Optional<String> initialPrompt,
+                         List<StdioMcpServer> stdioMcpServers) {
+        this(displayName, sessionId, workingDirectory, remote, mcp, model, evalMode, readOnly,
+                initialPrompt, stdioMcpServers, Optional.empty());
     }
 
     /** This context, with {@code servers} as the stdio MCP servers the agent starts. */
     public CreateContext withStdioMcpServers(List<StdioMcpServer> servers) {
         return new CreateContext(displayName, sessionId, workingDirectory, remote, mcp, model, evalMode, readOnly,
-                initialPrompt, servers);
+                initialPrompt, servers, launchResources);
+    }
+
+    /** This context, with {@code resources} as the launch resources. */
+    public CreateContext withLaunchResources(LaunchResources resources) {
+        return new CreateContext(displayName, sessionId, workingDirectory, remote, mcp, model, evalMode, readOnly,
+                initialPrompt, stdioMcpServers, Optional.of(Objects.requireNonNull(resources, "resources")));
+    }
+
+    /** As the canonical constructor with no model and no stdio MCP servers. */
+    public CreateContext(String displayName, String sessionId, Path workingDirectory,
+                         Optional<SshRemote> remote, Optional<McpAccess> mcp, boolean evalMode,
+                         boolean readOnly, Optional<String> initialPrompt) {
+        this(displayName, sessionId, workingDirectory, remote, mcp, Optional.empty(), evalMode, readOnly,
+                initialPrompt, List.of());
     }
 
     /** As the canonical constructor with no initial prompt. */

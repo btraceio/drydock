@@ -51,6 +51,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.Optional;
 import java.util.Set;
@@ -93,6 +94,15 @@ import java.util.stream.Stream;
  * own session has nothing to do with; scoping that per repository (an allow
  * flag per registration) is the designed-in next step if that ever matters
  * in practice.</p>
+ *
+ * <p>The task tools ({@code task_get}/{@code task_list}/{@code task_update}/
+ * {@code task_create}) are the one surface this router does not itself
+ * implement: they ride an optional {@link TaskTools} delegate, and the
+ * router's part is routing only -- the allowed set alone decides both their
+ * listing and their call, a router without the delegate treats a task name
+ * like any other unknown tool, and routing them adds names, never
+ * privileges (P7: {@code session_start}/{@code worktree_create} stay
+ * exactly as forbidden as before).</p>
  */
 public final class McpToolRouter {
 
@@ -102,6 +112,15 @@ public final class McpToolRouter {
     private final McpSessionRegistry registry;
     private final Function<UnifiedDiff, ChangeGraph> graphBuilder;
     private final Set<String> allowedTools;
+
+    /**
+     * The optional task-tool delegate (T11): null on every router built the
+     * pre-task way. Null means a task tool name is not one of this router's
+     * tools at all -- the constructor rejects it in an allowed set, it is
+     * never advertised, and a call refuses on the wire -- so behavior for
+     * every existing client is byte-identical.
+     */
+    private final TaskTools taskTools;
 
     /** The ten {@code review_*} tools, for a router that serves review only. */
     public static final Set<String> REVIEW_TOOLS = Set.of(
@@ -128,6 +147,19 @@ public final class McpToolRouter {
             "review_finding", "review_answer", "review_ask_answer", "review_state",
             "review_recheck", "worktree_create", "session_start", "session_rename",
             "session_reclaim", "session_handoff", "repos_list", "sessions_list");
+
+    /**
+     * The four task tools (D14/P7), served only by a router built with BOTH a
+     * {@link TaskTools} delegate and these names in its allowed set. A null
+     * delegate keeps a task name outside the router entirely -- not listed,
+     * not callable, refused on the wire exactly like any other name the
+     * allowed set does not carry -- so every pre-task constructor and client
+     * is unaffected. Enabling them widens nothing else (P7): the allowlist
+     * decision for every other tool, {@code session_start} and {@code
+     * worktree_create} included, is made from the same set as before.
+     */
+    public static final Set<String> TASK_TOOLS = Set.of(
+            "task_get", "task_list", "task_update", "task_create");
 
     /**
      * One scope's change graph and out-of-diff caller scan, keyed by the diff
@@ -162,7 +194,7 @@ public final class McpToolRouter {
     }
 
     public McpToolRouter(McpSessionContext context, McpSessionRegistry registry) {
-        this(context, registry, ChangeGraph::of, ALL_TOOLS);
+        this(context, registry, ChangeGraph::of, ALL_TOOLS, null);
     }
 
     /**
@@ -175,7 +207,7 @@ public final class McpToolRouter {
      */
     public McpToolRouter(McpSessionContext context, McpSessionRegistry registry,
                          Set<String> allowedTools) {
-        this(context, registry, ChangeGraph::of, allowedTools);
+        this(context, registry, ChangeGraph::of, allowedTools, null);
     }
 
     /**
@@ -187,21 +219,70 @@ public final class McpToolRouter {
      */
     McpToolRouter(McpSessionContext context, McpSessionRegistry registry,
                   Function<UnifiedDiff, ChangeGraph> graphBuilder) {
-        this(context, registry, graphBuilder, ALL_TOOLS);
+        this(context, registry, graphBuilder, ALL_TOOLS, null);
+    }
+
+    /**
+     * Builds a full router that also serves the four task tools through
+     * {@code taskTools}: they are advertised and callable, and nothing else
+     * changes -- every other tool sits behind the same allowlist decision a
+     * delegate-less router makes (P7).
+     *
+     * @throws NullPointerException if {@code taskTools} is null (use a
+     *         delegate-less constructor for a router without task tools)
+     */
+    public McpToolRouter(McpSessionContext context, McpSessionRegistry registry, TaskTools taskTools) {
+        this(context, registry, ChangeGraph::of, allToolsAndTasks(),
+                Objects.requireNonNull(taskTools, "taskTools"));
+    }
+
+    /**
+     * Builds a router that serves {@code allowedTools}, which may name task
+     * tools only because {@code taskTools} serves them: the allowlist gates
+     * both the listing and the call of each task tool, exactly as it gates
+     * every other tool, and adding task names changes no other allowlist
+     * decision (P7).
+     *
+     * @throws IllegalArgumentException if a name is not a tool {@link #call} dispatches
+     */
+    public McpToolRouter(McpSessionContext context, McpSessionRegistry registry,
+                         Set<String> allowedTools, TaskTools taskTools) {
+        this(context, registry, ChangeGraph::of, allowedTools,
+                Objects.requireNonNull(taskTools, "taskTools"));
     }
 
     private McpToolRouter(McpSessionContext context, McpSessionRegistry registry,
                           Function<UnifiedDiff, ChangeGraph> graphBuilder,
-                          Set<String> allowedTools) {
+                          Set<String> allowedTools,
+                          TaskTools taskTools) {
         this.context = context;
         this.registry = registry;
         this.graphBuilder = graphBuilder;
+        this.taskTools = taskTools;
         this.allowedTools = Set.copyOf(allowedTools);
+        Set<String> dispatchable = dispatchableTools();
         for (String name : this.allowedTools) {
-            if (!ALL_TOOLS.contains(name)) {
+            if (!dispatchable.contains(name)) {
                 throw new IllegalArgumentException("Not a tool of this router: " + name);
             }
         }
+    }
+
+    /**
+     * Every tool name this router's {@link #call} can dispatch: the shared
+     * set, plus the task tools only when the delegate that serves them is
+     * present. This is the P7 boundary in one place -- a task name joins the
+     * dispatch table as a NEW entry, never as a widening of any existing
+     * one.
+     */
+    private Set<String> dispatchableTools() {
+        return taskTools == null ? ALL_TOOLS : allToolsAndTasks();
+    }
+
+    /** The full shared set plus the four task tools, for a task-enabled router. */
+    private static Set<String> allToolsAndTasks() {
+        return Stream.concat(ALL_TOOLS.stream(), TASK_TOOLS.stream())
+                .collect(Collectors.toUnmodifiableSet());
     }
 
     /** Whether {@link #call} serves {@code tool}: true only for a name in this router's allowed set. */
@@ -210,11 +291,24 @@ public final class McpToolRouter {
     }
 
     public List<JsonValue> toolDescriptors() {
-        return allDescriptors().stream()
+        List<JsonValue> descriptors = new ArrayList<>(allDescriptors().stream()
                 .filter(d -> d instanceof JsonObject o
                         && o.members().get("name") instanceof JsonString n
                         && allowedTools.contains(n.value()))
-                .toList();
+                .toList());
+        if (taskTools != null) {
+            // The allowlist gates the task tools' listing exactly as it
+            // gates their calls (T11): a task name the allowed set does not
+            // carry is not advertised at all. The filter mirrors the one
+            // above rather than sharing it, so the pre-task path stays
+            // byte-for-byte what it was.
+            descriptors.addAll(taskTools.toolDescriptors().stream()
+                    .filter(d -> d instanceof JsonObject o
+                            && o.members().get("name") instanceof JsonString n
+                            && allowedTools.contains(n.value()))
+                    .toList());
+        }
+        return descriptors;
     }
 
     private List<JsonValue> allDescriptors() {
@@ -457,6 +551,7 @@ public final class McpToolRouter {
             case "session_handoff" -> sessionHandoff(caller, arguments);
             case "repos_list" -> reposList(caller);
             case "sessions_list" -> sessionsList(caller);
+            case "task_get", "task_list", "task_update", "task_create" -> taskCall(caller, tool, arguments);
             default -> throw new McpToolException("Unknown tool: " + tool);
         };
     }
@@ -1572,6 +1667,30 @@ public final class McpToolRouter {
                 .toList());
 
         return JsonObject.empty().put("sessions", sessions);
+    }
+
+    // ---- the task surface (T11: routed here, owned by TaskTools) --------
+
+    /**
+     * The four task tools, dispatched to the delegate this router was built
+     * with. The router owns no task logic (that is {@link TaskTools} over its
+     * {@link TaskToolContext}); it owns the allowlist decision that already
+     * ran at the top of {@link #call}, which is what keeps a task-enabled
+     * router from widening anything else -- a session that may call task_get
+     * is no closer to any tool its allowlist does not carry (P7).
+     *
+     * <p>The null guard is unreachable through the public constructors -- a
+     * delegate-less router rejects a task name in its allowed set at
+     * construction -- but the refusal stays here so that "no delegate, no
+     * task tools" cannot regress into a NullPointerException through some
+     * future seam.</p>
+     */
+    private JsonValue taskCall(ManagedSessionId caller, String tool, JsonValue arguments)
+            throws McpToolException {
+        if (taskTools == null) {
+            throw new McpToolException("Unknown tool: " + tool);
+        }
+        return taskTools.call(caller, tool, asObject(arguments));
     }
 
     // ---- shared helpers -----------------------------------------------------

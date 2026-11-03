@@ -97,10 +97,14 @@ configurations {
 }
 
 dependencies {
-    // Structural parsing for the review change graph — the ONLY third-party
-    // dependency of the headless core. Same artifacts and versions as
-    // app/build.gradle.kts; a missing grammar degrades to the lexical path
-    // (GrammarRegistry), it is not an error. Declared on the core's own
+    // Structural parsing for the review change graph (tree-sitter) and
+    // bounded parsing of task front matter (snakeyaml) — the ONLY third-party
+    // dependencies of the headless core. The tree-sitter artifacts are the
+    // same versions as app/build.gradle.kts; a missing grammar degrades to
+    // the lexical path (GrammarRegistry), it is not an error. snakeyaml is
+    // pinned explicitly (not an IntelliJ transitive jar) and is used only
+    // through its bounded-load node-composition API, never as an arbitrary
+    // object constructor. Declared on the core's own
     // configuration so compileCoreJava's classpath provably holds no platform
     // jar; `main` picks them up transitively and the platform plugin packs
     // them into the plugin zip.
@@ -114,6 +118,7 @@ dependencies {
     "coreImplementation"("io.github.bonede:tree-sitter-rust:0.23.1")
     "coreImplementation"("io.github.bonede:tree-sitter-c:0.23.2")
     "coreImplementation"("io.github.bonede:tree-sitter-cpp:0.23.4")
+    "coreImplementation"("org.yaml:snakeyaml:2.5")
 
     "implementation"(coreJarDependency)
 
@@ -194,8 +199,12 @@ tasks {
     // Seeding still reads the real app's list, read-only.
     named<JavaExec>("runIde") {
         val sandboxProjects = layout.buildDirectory.file("sandbox-projects/projects.json")
+        // drydock.tasksDirectory: same sandbox isolation for the task store's
+        // per-user root (T12a), so a sandbox IDE never touches ~/.drydock/tasks.
+        val sandboxTasks = layout.buildDirectory.file("sandbox-tasks/tasks")
         jvmArgumentProviders.add(CommandLineArgumentProvider {
-            listOf("-Ddrydock.projectsFile=" + sandboxProjects.get().asFile.absolutePath)
+            listOf("-Ddrydock.projectsFile=" + sandboxProjects.get().asFile.absolutePath,
+                    "-Ddrydock.tasksDirectory=" + sandboxTasks.get().asFile.absolutePath)
         })
     }
 }
@@ -259,5 +268,12 @@ tasks.test {
     val testProjects = layout.buildDirectory.file("test-projects/projects.json")
     jvmArgumentProviders.add(CommandLineArgumentProvider {
         listOf("-Ddrydock.projectsFile=" + testProjects.get().asFile.absolutePath)
+    })
+    // The task store's per-user root is redirected the same way (T12a): the
+    // real DrydockPluginService the platform tests start owns a task service,
+    // and it must never touch the developer's ~/.drydock/tasks.
+    val testTasks = layout.buildDirectory.file("test-tasks/tasks")
+    jvmArgumentProviders.add(CommandLineArgumentProvider {
+        listOf("-Ddrydock.tasksDirectory=" + testTasks.get().asFile.absolutePath)
     })
 }

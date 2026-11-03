@@ -10,15 +10,16 @@ import org.jetbrains.annotations.NotNull;
 import java.util.Optional;
 
 /**
- * {@code ＋ New task} (⌃⌥N): always for this window's project. Row-relative
+ * {@code ＋ New Session} (⌃⌥N): always for this window's project. Row-relative
  * creation belongs to the task tree's context menu; selection in the shared
  * Drydock tree must not redirect the global shortcut or toolbar button to a
- * different registered project.
+ * different registered project. The label is the D5 rename: this action
+ * starts a session; its id, class and shortcut never changed.
  */
 public final class NewTaskAction extends DumbAwareAction {
 
     public NewTaskAction() {
-        super("New Task…", "Start an agent on a new task", AllIcons.General.Add);
+        super("New Session…", "Start an agent session", AllIcons.General.Add);
     }
 
     @Override

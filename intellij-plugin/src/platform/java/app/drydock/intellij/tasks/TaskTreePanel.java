@@ -1,6 +1,11 @@
 package app.drydock.intellij.tasks;
 
 import app.drydock.agent.api.AgentKind;
+import app.drydock.delayedtasks.DelayedTaskService;
+import app.drydock.delayedtasks.NewDelayedTaskDialog;
+import app.drydock.delayedtasks.TaskPrerequisitePicker;
+import app.drydock.delayedtasks.TaskStoreWatcher.WatchedSnapshot;
+import app.drydock.intellij.delayedtasks.DelayedTaskActions;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryCatalog;
@@ -30,6 +35,10 @@ import app.drydock.intellij.tasks.TaskNode.StaleWorktrees;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
 import app.drydock.intellij.tasks.TaskTreeModel.ViewFilter;
+import app.drydock.tasks.DelayedTaskRows;
+import app.drydock.tasks.TaskId;
+import app.drydock.tasks.TaskNode.DelayedTaskRow;
+import app.drydock.tasks.TaskSnapshot;
 
 import com.intellij.icons.AllIcons;
 import com.intellij.ide.BrowserUtil;
@@ -49,6 +58,9 @@ import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.project.DumbAware;
 import com.intellij.openapi.project.DumbAwareAction;
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.progress.ProgressIndicator;
+import com.intellij.openapi.progress.ProgressManager;
+import com.intellij.openapi.progress.Task;
 import com.intellij.openapi.ui.Messages;
 import com.intellij.openapi.ui.SimpleToolWindowPanel;
 
@@ -83,10 +95,12 @@ import java.awt.event.MouseEvent;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.EnumMap;
 import java.util.EnumSet;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -94,7 +108,11 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Predicate;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * The Drydock tool window: every registered project and its tasks, live.
@@ -160,6 +178,40 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     /** Guarded by {@code this}: subscribing after dispose() must undo itself. */
     private Runnable unsubscribeShared = () -> { };
     private volatile boolean disposed;
+    /** The delayed-task layer the last rebuild applied (T17a), for the fast
+     * worktree-rem acknowledgement, which re-applies the displayed rows. */
+    private TaskLayer displayedTasks = TaskLayer.EMPTY;
+    /**
+     * The task node's actions (T20a): the plugin.xml-registered instances
+     * when their ids resolve, locally built otherwise -- the same fallback
+     * shape the toolbar's own action lookup uses.
+     */
+    private final AnAction[] delayedTaskActions = taskNodeMenu();
+    /**
+     * The Tasks node's New Task (T20a, P5): the T18a creation form; a
+     * confirmed OK saves through the production saveTask core, a cancel
+     * writes nothing and starts nothing.
+     */
+    private final AnAction newDelayedTask = new DumbAwareAction("New Task…",
+            "Save a delayed task definition for later; it starts nothing", AllIcons.General.Add) {
+        @Override
+        public void update(@NotNull AnActionEvent e) {
+            TaskActions.present(e, selectedValue()
+                    instanceof app.drydock.tasks.TaskNode.TasksSection);
+        }
+
+        @Override
+        public @NotNull ActionUpdateThread getActionUpdateThread() {
+            return ActionUpdateThread.EDT;
+        }
+
+        @Override
+        public void actionPerformed(@NotNull AnActionEvent e) {
+            if (e.getProject() != null) {
+                newDelayedTask(e.getProject());
+            }
+        }
+    };
     /**
      * The refresh action's effects, tied to this panel's real caches and
      * rebuild scheduler: the seam the dispatch tests record against (F8).
@@ -573,6 +625,11 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 } else if (node instanceof TaskRow task && primaryButton && event.getClickCount() == 1
                         && onLink(path, event)) {
                     hereLink(task);
+                } else if (node instanceof DelayedTaskRow delayed && primaryButton
+                        && event.getClickCount() == 2) {
+                    // T20a: a task node's double-click is Edit (P5): its
+                    // own file in the editor, the dispatch the Edit action runs.
+                    DelayedTaskActions.edit(project, delayed);
                 } else if (node instanceof TaskRow task && primaryButton && event.getClickCount() == 2) {
                     activate(task);
                 } else if (node instanceof IssueRow issue && primaryButton && event.getClickCount() == 2) {
@@ -638,6 +695,12 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 requestRebuild(false);
             }
         });
+        // T17a: task changes (the service's snapshot publication, observed
+        // through the store's VFS events) rebuild through the same coalesced
+        // scheduler -- a burst of publications is one rebuild request stream,
+        // not one rebuild per event. The panel's dispose closes the inputs,
+        // which unsubscribes: no listener survives the panel.
+        inputs.subscribeToTasks(() -> requestRebuild(false));
         DrydockPluginService.getInstance().initialization().thenRun(() -> {
             // Initialization can finish after the tool window is gone; a
             // listener added then would outlive the panel.
@@ -853,6 +916,16 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             }
             // The built group's actions as they are: ActionGroup.getChildren
             // is override-only API, the platform's to call, not ours.
+            // T20a: a task node carries the delayed-task layer's own
+            // actions, and the Tasks node offers New Task over the T18a
+            // form -- everything else keeps the session-layer menu it had.
+            Object value = selectedValue();
+            if (value instanceof DelayedTaskRow) {
+                return delayedTaskActions;
+            }
+            if (value instanceof app.drydock.tasks.TaskNode.TasksSection) {
+                return new AnAction[] { newDelayedTask };
+            }
             return TaskMenu.group(selected().orElse(null), selectedNodes(), actions,
                     selectedProjectRoot().map(JiraTreeActions::jiraEnabled).orElse(false)).getChildActionsOrStubs();
         }
@@ -862,6 +935,11 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     public void uiDataSnapshot(@NotNull DataSink sink) {
         sink.set(WORKTREE_REMOVAL_UI, this::worktreesRemoved);
         selected().ifPresent(node -> sink.set(SELECTED_NODE, node));
+        // T20a: a task node is its own selection data -- the task-node
+        // actions key on it; selected() answers only session-layer rows.
+        if (selectedValue() instanceof DelayedTaskRow task) {
+            sink.set(DelayedTaskActions.SELECTED_TASK, task);
+        }
         List<TaskNode> selected = selectedNodes();
         if (!selected.isEmpty()) {
             sink.set(SELECTED_NODES, selected);
@@ -1044,6 +1122,105 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 .isPresent();
     }
 
+    /**
+     * The registered project's display name, else the folder's -- the name
+     * a saved task registers under (T19a's rule, D2). Lexical, never a
+     * canonicalizing probe: the caller already canonicalized off the EDT.
+     */
+    private static String repositoryDisplayName(DrydockPluginService plugin, Path root) {
+        return plugin.sharedProjects().byRoot(root).map(SharedProject::displayName)
+                .orElseGet(() -> String.valueOf(root.getFileName()));
+    }
+
+    /** The live catalog as the picker's project-slug mapping (P2), the same
+     * projection the task layer applies (T17a): read once from memory. */
+    private static Function<RepositoryId, String> taskSlugs(DrydockPluginService plugin) {
+        Map<RepositoryId, String> displayNames = displayNamesByRepository(plugin);
+        return repository -> slugOf(displayNames.get(repository));
+    }
+
+    /**
+     * The task node's actions (T20a): the plugin.xml-registered instances
+     * when their ids resolve, the locally built ones otherwise -- an
+     * unregistered id degrades the menu, never the tree.
+     */
+    private static AnAction[] taskNodeMenu() {
+        ActionManager manager = ActionManager.getInstance();
+        return Arrays.stream(DelayedTaskActions.menu()).map(entry -> {
+            AnAction registered = manager.getAction(entry.id());
+            return registered != null ? registered : entry.local();
+        }).toArray(AnAction[]::new);
+    }
+
+    /**
+     * The Tasks node's completion dispatch (T20a): what one ACCEPTED dialog
+     * result does, and the only thing the flow ever does with one -- a save
+     * through the production saveTask core. A canceled dialog answers no
+     * accepted result, so NO plan is built and NOTHING is written (P5's
+     * zero-write). Pure; the dialog's own behavior is the platform fixture's.
+     */
+    static Optional<app.drydock.tasks.NewTaskPlan> savedTaskPlan(
+            Optional<NewDelayedTaskDialog.Result> accepted, Path projectRoot, String projectName) {
+        return accepted.map(result -> new app.drydock.tasks.NewTaskPlan(result.title(), result.body(),
+                result.after(), result.doneBy(), projectRoot, projectName));
+    }
+
+    /**
+     * The Tasks node's New Task… (T20a, P5): the T18a creation form over one
+     * indexed snapshot -- the CACHED watched one when the watcher has
+     * published, else the service's own async scan; never a render-thread
+     * read. Immediate progress: the background task's own indicator; a
+     * canceled dialog writes nothing; failures surface in a dialog and the
+     * task ends on every path, so no progress is stranded.
+     */
+    private void newDelayedTask(Project from) {
+        DrydockPluginService plugin = DrydockPluginService.getInstance();
+        ProgressManager.getInstance().run(new Task.Backgroundable(from, "Reading tasks…", true) {
+            @Override
+            public void run(@NotNull ProgressIndicator indicator) {
+                try {
+                    DelayedTaskService service = plugin.taskService();
+                    WatchedSnapshot watched = service.watchedSnapshot();
+                    TaskSnapshot snapshot = watched != null ? watched.snapshot()
+                            : service.snapshot().get(60, TimeUnit.SECONDS);
+                    indicator.setText("Indexing tasks");
+                    TaskPrerequisitePicker.Index index =
+                            TaskPrerequisitePicker.Index.of(snapshot, taskSlugs(plugin));
+                    Path root = Optional.ofNullable(from.getBasePath()).map(Path::of)
+                            .map(RepositoryCatalog::canonicalize).orElse(null);
+                    if (root == null) {
+                        return;
+                    }
+                    String name = repositoryDisplayName(plugin, root);
+                    ApplicationManager.getApplication().invokeLater(
+                            () -> createTask(from, index, root, name),
+                            ModalityState.nonModal(), from.getDisposed());
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } catch (ExecutionException | TimeoutException | RuntimeException e) {
+                    LOG.log(Level.WARNING, "Could not open the New Task form", e);
+                    ApplicationManager.getApplication().invokeLater(() -> Messages.showErrorDialog(from,
+                            "Drydock could not open the New Task form: " + e.getMessage(), "Drydock"),
+                            ModalityState.nonModal(), from.getDisposed());
+                }
+            }
+        });
+    }
+
+    /**
+     * EDT: the T18a form over one index. A confirmed OK saves through the
+     * production saveTask core (the service's create seam -- no worktree, no
+     * agent, P5); a canceled dialog writes nothing.
+     */
+    private void createTask(Project from, TaskPrerequisitePicker.Index index,
+                            Path canonicalRoot, String projectName) {
+        NewDelayedTaskDialog dialog = new NewDelayedTaskDialog(index);
+        // A canceled dialog carries no accepted result: no plan, no write (P5).
+        savedTaskPlan(dialog.showAndGet() ? Optional.of(dialog.result()) : Optional.empty(),
+                canonicalRoot, projectName)
+                .ifPresent(plan -> TaskLauncher.saveTask(from, plan));
+    }
+
     private AnAction githubSettingsAction(Predicate<TaskNode> applies) {
         return new DumbAwareAction("GitHub Settings…",
                 "Configure GitHub issues for this Drydock project", AllIcons.General.Settings) {
@@ -1160,12 +1337,20 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             // remembered as open. A failed gather never gets here and forgets nothing.
             expansions.retainDefinedJiraGroups(gathered.jiraGroupsByMainRoot());
             List<TaskNode> nodes = TaskTreeModel.build(gathered);
+            // T17a: the task layer rides this same background pass -- the
+            // cached snapshot the gather read, the T15a row derivation, and
+            // the in-memory catalog for slugs; never a fresh scan, never
+            // the EDT.
+            TaskLayer tasks = taskLayer(nodes, inputs.watchedTasks(),
+                    plugin.taskService().liveSessionIds(), displayNamesByRepository(plugin),
+                    requestedFilter, Instant.now());
             ApplicationManager.getApplication().invokeLater(
-                    () -> finishRebuild(requestedVersion, requestedFilter, requestedViewFilter, nodes, null),
+                    () -> finishRebuild(requestedVersion, requestedFilter, requestedViewFilter, nodes, tasks, null),
                     ModalityState.any(), project.getDisposed());
         }, plugin.executor()).exceptionally(failure -> {
             ApplicationManager.getApplication().invokeLater(
-                    () -> finishRebuild(requestedVersion, requestedFilter, requestedViewFilter, List.of(), failure),
+                    () -> finishRebuild(requestedVersion, requestedFilter, requestedViewFilter, List.of(),
+                            TaskLayer.EMPTY, failure),
                     ModalityState.any(), project.getDisposed());
             return null;
         });
@@ -1173,7 +1358,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
     /** EDT: applies only the newest requested view, then schedules any request coalesced behind it. */
     private void finishRebuild(long requestedVersion, String requestedFilter, ViewFilter requestedViewFilter,
-                               List<TaskNode> nodes, Throwable failure) {
+                               List<TaskNode> nodes, TaskLayer tasks, Throwable failure) {
         boolean newerPassPending = requestedVersion != refreshRequests.version();
         if (failure != null) {
             // Never silent: an empty tree with no reason given is the worst
@@ -1189,7 +1374,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 }
             }
         } else if (requestedVersion == refreshRequests.version() && !disposed && !project.isDisposed()) {
-            apply(nodes, requestedFilter, requestedViewFilter);
+            apply(nodes, tasks, requestedFilter, requestedViewFilter);
         }
         refreshRequests.finishPass();
         if (!disposed && !project.isDisposed() && newerPassPending) {
@@ -1198,17 +1383,27 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     }
 
     /** EDT: swaps in the new rows, keeping the selected task selected. */
-    private void apply(List<TaskNode> nodes, String appliedFilter, ViewFilter appliedViewFilter) {
+    private void apply(List<TaskNode> nodes, TaskLayer tasks, String appliedFilter, ViewFilter appliedViewFilter) {
         displayedNodes = List.copyOf(nodes);
+        displayedTasks = tasks;
         displayedFilter = appliedFilter;
         displayedViewFilter = appliedViewFilter;
         Optional<ManagedSessionId> selectedSession = selected()
                 .filter(TaskRow.class::isInstance)
                 .map(node -> ((TaskRow) node).session().id());
+        Optional<TaskId> selectedTask = selectedTask();
+        // T17a: what the user collapsed stays collapsed across the rebuild
+        // -- keyed on the row identities the tree uses (session ids, the
+        // Tasks section's own node), never on Swing paths.
+        Set<String> collapsedSessions = collapsedSessionRows();
+        boolean tasksSectionCollapsed = tasksSectionCollapsed();
         DefaultMutableTreeNode root = new DefaultMutableTreeNode();
         DefaultMutableTreeNode[] toSelect = new DefaultMutableTreeNode[1];
+        for (app.drydock.tasks.TaskNode.TasksSection section : tasks.sections()) {
+            root.add(treeNode(section, selectedTask, toSelect));
+        }
         for (TaskNode node : nodes) {
-            root.add(treeNode(node, selectedSession, toSelect));
+            root.add(treeNode(node, selectedSession, selectedTask, tasks, toSelect));
         }
         ((DefaultTreeModel) tree.getModel()).setRoot(root);
         tree.getEmptyText().setText(emptyText(appliedFilter, appliedViewFilter));
@@ -1220,6 +1415,18 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         expansions.runProgrammatic(() -> {
             restoreExpansions(root, new TreePath(root.getPath()), null, appliedViewFilter, expansions,
                     tree::expandPath);
+            // T17a: the Tasks section and the session rows that gained task
+            // children (D10) open with their content; the user's collapse of
+            // them, snapshotted above, is restored instead.
+            if (!tasksSectionCollapsed) {
+                for (int i = 0; i < root.getChildCount(); i++) {
+                    if (root.getChildAt(i) instanceof DefaultMutableTreeNode child
+                            && child.getUserObject() instanceof app.drydock.tasks.TaskNode.TasksSection) {
+                        tree.expandPath(new TreePath(child.getPath()));
+                    }
+                }
+            }
+            expandSessionTaskRows(root, new TreePath(root.getPath()), collapsedSessions);
             if (toSelect[0] != null) {
                 tree.setSelectionPath(new TreePath(toSelect[0].getPath()));
             }
@@ -1301,7 +1508,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         if (disposed || project.isDisposed() || removed.isEmpty()) {
             return;
         }
-        apply(TaskTreeModel.withoutWorktrees(displayedNodes, removed), displayedFilter, displayedViewFilter);
+        apply(TaskTreeModel.withoutWorktrees(displayedNodes, removed), displayedTasks,
+                displayedFilter, displayedViewFilter);
     }
 
     static String emptyText(String appliedFilter, ViewFilter appliedViewFilter) {
@@ -1319,32 +1527,284 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
      * so the dispatch tests can assert the mapping directly.
      */
     static DefaultMutableTreeNode treeNode(TaskNode node, Optional<ManagedSessionId> selected,
-                                            DefaultMutableTreeNode[] toSelect) {
+                                           Optional<TaskId> selectedTask, TaskLayer tasks,
+                                           DefaultMutableTreeNode[] toSelect) {
         DefaultMutableTreeNode treeNode = new DefaultMutableTreeNode(node);
         switch (node) {
             case ProjectRow project -> project.children().forEach(
-                    child -> treeNode.add(treeNode(child, selected, toSelect)));
+                    child -> treeNode.add(treeNode(child, selected, selectedTask, tasks, toSelect)));
             case Section section -> section.children().forEach(
-                    child -> treeNode.add(treeNode(child, selected, toSelect)));
+                    child -> treeNode.add(treeNode(child, selected, selectedTask, tasks, toSelect)));
             case StaleWorktrees stale -> stale.worktrees().forEach(
-                    worktree -> treeNode.add(treeNode(worktree, selected, toSelect)));
+                    worktree -> treeNode.add(treeNode(worktree, selected, selectedTask, tasks, toSelect)));
             case WorktreeGroup group -> group.tasks().forEach(
-                    task -> treeNode.add(treeNode(task, selected, toSelect)));
+                    task -> treeNode.add(treeNode(task, selected, selectedTask, tasks, toSelect)));
             case JiraGroupRow group -> group.children().forEach(
-                    child -> treeNode.add(treeNode(child, selected, toSelect)));
+                    child -> treeNode.add(treeNode(child, selected, selectedTask, tasks, toSelect)));
             case GitHubNode github -> github.children().forEach(
-                    child -> treeNode.add(treeNode(child, selected, toSelect)));
+                    child -> treeNode.add(treeNode(child, selected, selectedTask, tasks, toSelect)));
             case JiraNode jira -> jira.children().forEach(
-                    child -> treeNode.add(treeNode(child, selected, toSelect)));
+                    child -> treeNode.add(treeNode(child, selected, selectedTask, tasks, toSelect)));
             case TaskRow task -> {
                 if (selected.map(task.session().id()::equals).orElse(false)) {
                     toSelect[0] = treeNode;
+                }
+                // T17a: the task children the layer attaches below this
+                // session row (D10) -- built through the same path, so the
+                // row and its children restore as one.
+                for (app.drydock.tasks.TaskNode.DelayedTaskRow child : tasks.attachedBySession()
+                        .getOrDefault(task.session().id().toString(), List.of())) {
+                    treeNode.add(treeNode(child, selectedTask, toSelect));
                 }
             }
             default -> {
             }
         }
         return treeNode;
+    }
+
+    /** One task-layer section's tree node (T17a): its children, built by the same path. */
+    private static DefaultMutableTreeNode treeNode(app.drydock.tasks.TaskNode.TasksSection section,
+                                                   Optional<TaskId> selectedTask, DefaultMutableTreeNode[] toSelect) {
+        DefaultMutableTreeNode treeNode = new DefaultMutableTreeNode(section);
+        // The layer only ever puts task rows in its sections; other kinds
+        // (a session wrapper) are not produced by this panel.
+        section.children().forEach(child -> {
+            if (child instanceof app.drydock.tasks.TaskNode.DelayedTaskRow task) {
+                treeNode.add(treeNode(task, selectedTask, toSelect));
+            }
+        });
+        return treeNode;
+    }
+
+    /** One delayed task's tree node (T17a): a leaf, kept selected by task id. */
+    private static DefaultMutableTreeNode treeNode(app.drydock.tasks.TaskNode.DelayedTaskRow task,
+                                                   Optional<TaskId> selectedTask, DefaultMutableTreeNode[] toSelect) {
+        DefaultMutableTreeNode treeNode = new DefaultMutableTreeNode(task);
+        if (selectedTask.map(task.id()::equals).orElse(false)) {
+            toSelect[0] = treeNode;
+        }
+        return treeNode;
+    }
+
+    /**
+     * The selected delayed-task row's id (T17a), for the rebuild's
+     * selection keep; a selected session row answers empty (the session
+     * id keeps that selection).
+     */
+    private Optional<TaskId> selectedTask() {
+        TreePath path = tree.getSelectionPath();
+        if (path == null || !(path.getLastPathComponent() instanceof DefaultMutableTreeNode node)) {
+            return Optional.empty();
+        }
+        return node.getUserObject() instanceof app.drydock.tasks.TaskNode.DelayedTaskRow task
+                ? Optional.of(task.id()) : Optional.empty();
+    }
+
+    /** The lead selected row's raw value, whichever layer built it (T20a). */
+    private Object selectedValue() {
+        TreePath path = tree.getSelectionPath();
+        if (path == null || !(path.getLastPathComponent() instanceof DefaultMutableTreeNode node)) {
+            return null;
+        }
+        return node.getUserObject();
+    }
+
+    /** The session rows whose children the user collapsed in the current tree (T17a), keyed by session id. */
+    private Set<String> collapsedSessionRows() {
+        Set<String> collapsed = new HashSet<>();
+        if (tree.getModel().getRoot() instanceof DefaultMutableTreeNode root) {
+            collectCollapsedSessionRows(root, new TreePath(root.getPath()), collapsed);
+        }
+        return collapsed;
+    }
+
+    private void collectCollapsedSessionRows(DefaultMutableTreeNode node, TreePath path, Set<String> out) {
+        // A collapsed session row is the only state a leaf never had: a row
+        // without children reads expanded, so it records nothing and opens
+        // with the children it may gain.
+        if (node.getChildCount() > 0 && tree.isCollapsed(path)
+                && node.getUserObject() instanceof TaskRow task) {
+            out.add(task.session().id().toString());
+        }
+        for (int i = 0; i < node.getChildCount(); i++) {
+            DefaultMutableTreeNode child = (DefaultMutableTreeNode) node.getChildAt(i);
+            collectCollapsedSessionRows(child, path.pathByAddingChild(child), out);
+        }
+    }
+
+    /** Whether the user collapsed the Tasks section in the current tree (T17a). */
+    private boolean tasksSectionCollapsed() {
+        if (tree.getModel().getRoot() instanceof DefaultMutableTreeNode root && root.getChildCount() > 0
+                && root.getChildAt(0) instanceof DefaultMutableTreeNode first
+                && first.getUserObject() instanceof app.drydock.tasks.TaskNode.TasksSection) {
+            return tree.isCollapsed(new TreePath(first.getPath()));
+        }
+        return false;
+    }
+
+    /** Opens every session row that carries task children, except the ones the user collapsed (T17a). */
+    private void expandSessionTaskRows(DefaultMutableTreeNode node, TreePath path, Set<String> collapsedSessions) {
+        if (node.getUserObject() instanceof TaskRow task && node.getChildCount() > 0
+                && !collapsedSessions.contains(task.session().id().toString())) {
+            tree.expandPath(path);
+        }
+        for (int i = 0; i < node.getChildCount(); i++) {
+            DefaultMutableTreeNode child = (DefaultMutableTreeNode) node.getChildAt(i);
+            expandSessionTaskRows(child, path.pathByAddingChild(child), collapsedSessions);
+        }
+    }
+
+    /**
+     * The delayed-task layer of one rebuild (T17a): the section rows for
+     * the tasks no session row claims, and the children each session row
+     * gains. Pure data; empty when the service has published no snapshot
+     * yet (the session-only input).
+     */
+    record TaskLayer(List<app.drydock.tasks.TaskNode.TasksSection> sections,
+                     Map<String, List<app.drydock.tasks.TaskNode.DelayedTaskRow>> attachedBySession) {
+
+        static final TaskLayer EMPTY = new TaskLayer(List.of(), Map.of());
+
+        TaskLayer {
+            sections = List.copyOf(sections);
+            attachedBySession = Map.copyOf(attachedBySession);
+        }
+    }
+
+    /**
+     * The delayed-task layer of one rebuild (T17a): a PURE derivation over
+     * the T15a rows -- the snapshot is the service's cached publication,
+     * the session rows are what the existing model built, the clock is
+     * injected; no file, catalog or clock is read here. Every task whose
+     * stored sessions name a session row this tree shows becomes that
+     * row's child (D10); the others form the Tasks section (D9). The
+     * session rows themselves pass through unchanged.
+     */
+    static TaskLayer taskLayer(List<TaskNode> nodes, Optional<WatchedSnapshot> tasks, Set<String> liveSessionIds,
+                               Map<RepositoryId, String> displayNames, String filter, Instant now) {
+        if (tasks.isEmpty()) {
+            return TaskLayer.EMPTY;
+        }
+        Map<String, TaskRow> shown = sessionRowsOf(nodes);
+        Function<RepositoryId, String> slugs = repository -> slugOf(displayNames.get(repository));
+        TaskTreeModel.ProjectScope scope = TaskTreeModel.parseFilter(filter);
+        String itemFilter = scope.scoped() ? scope.itemFilter() : filter;
+        List<app.drydock.tasks.TaskNode.DelayedTaskRow> rows =
+                DelayedTaskRows.rows(tasks.get(), liveSessionIds, slugs, now);
+        Map<String, List<app.drydock.tasks.TaskNode.DelayedTaskRow>> attached = new LinkedHashMap<>();
+        List<app.drydock.tasks.TaskNode.DelayedTaskRow> unattached = new ArrayList<>();
+        for (app.drydock.tasks.TaskNode.DelayedTaskRow row : DelayedTaskRows.sorted(rows)) {
+            DelayedTaskRows.attachedSession(row, shown.keySet()).ifPresentOrElse(
+                    session -> attached.computeIfAbsent(session, any -> new ArrayList<>()).add(row),
+                    () -> unattached.add(row));
+        }
+        Map<String, List<app.drydock.tasks.TaskNode.DelayedTaskRow>> bySession = new LinkedHashMap<>();
+        for (Map.Entry<String, List<app.drydock.tasks.TaskNode.DelayedTaskRow>> entry : attached.entrySet()) {
+            TaskRow session = shown.get(entry.getKey());
+            // The same rule the session model applies to a matching project
+            // name: a row that itself matches is the answer, its children
+            // stay; otherwise the item filter narrows them.
+            String childFilter = scope.scoped() ? itemFilter
+                    : !filter.isEmpty() && contains(session.session().displayName(), filter) ? "" : filter;
+            List<app.drydock.tasks.TaskNode.DelayedTaskRow> children =
+                    DelayedTaskRows.active(entry.getValue()).stream()
+                            .filter(row -> DelayedTaskRows.matches(childFilter, row))
+                            .toList();
+            if (!children.isEmpty()) {
+                bySession.put(entry.getKey(), children);
+            }
+        }
+        // Terminal tasks stay hidden behind the filter ribbon (D9): the
+        // section holds the active ones, a scope drops other projects'
+        // rows, the search narrows by title or id.
+        List<app.drydock.tasks.TaskNode.DelayedTaskRow> sectionRows =
+                DelayedTaskRows.active(unattached).stream()
+                        .filter(row -> inScope(row, scope, displayNames))
+                        .filter(row -> DelayedTaskRows.matches(itemFilter, row))
+                        .toList();
+        List<app.drydock.tasks.TaskNode.TasksSection> sections = sectionRows.isEmpty() ? List.of()
+                : List.of(new app.drydock.tasks.TaskNode.TasksSection("Tasks",
+                        sectionRows.stream().map(row -> (app.drydock.tasks.TaskNode) row).toList()));
+        return new TaskLayer(sections, bySession);
+    }
+
+    /**
+     * Every session row in the built tree, by session id string (T17a):
+     * the tree's own row identity, which D10's membership uses and the
+     * rebuild's restore keys on. Pure.
+     */
+    static Map<String, TaskRow> sessionRowsOf(List<TaskNode> nodes) {
+        Map<String, TaskRow> rows = new LinkedHashMap<>();
+        sessionRowsOf(nodes, rows);
+        return rows;
+    }
+
+    private static void sessionRowsOf(List<TaskNode> nodes, Map<String, TaskRow> rows) {
+        for (TaskNode node : nodes) {
+            switch (node) {
+                case ProjectRow project -> sessionRowsOf(project.children(), rows);
+                case Section section -> sessionRowsOf(section.children(), rows);
+                case WorktreeGroup group -> group.tasks().forEach(
+                        task -> rows.putIfAbsent(task.session().id().toString(), task));
+                case TaskRow task -> rows.putIfAbsent(task.session().id().toString(), task);
+                default -> {
+                }
+            }
+        }
+    }
+
+    /** Whether the row's project survives the search's project scope (T17a). Pure. */
+    private static boolean inScope(app.drydock.tasks.TaskNode.DelayedTaskRow row,
+                                   TaskTreeModel.ProjectScope scope, Map<RepositoryId, String> displayNames) {
+        if (!scope.scoped()) {
+            return true;
+        }
+        String name = displayNames.get(row.repository());
+        return name != null && scope.matchesProject(name);
+    }
+
+    /**
+     * The live repository catalog as the task layer sees it (T17a): each
+     * repository's display name, from the in-memory state, once per
+     * background pass. No I/O.
+     */
+    static Map<RepositoryId, String> displayNamesByRepository(DrydockPluginService plugin) {
+        Map<RepositoryId, String> names = new LinkedHashMap<>();
+        for (Repository repository : plugin.stateStore().state().repositories()) {
+            names.putIfAbsent(repository.id(), repository.displayName());
+        }
+        return names;
+    }
+
+    /**
+     * The display-name slug (P2, T17a): the same projection the task
+     * service and the goto-declaration handler apply (both private);
+     * lowercase letters, digits and inner hyphens, capped at 60. Pure.
+     */
+    static String slugOf(String name) {
+        if (name == null || name.isBlank()) {
+            return null;
+        }
+        StringBuilder out = new StringBuilder(61);
+        for (int i = 0; i < name.length() && out.length() < 60; i++) {
+            char c = Character.toLowerCase(name.charAt(i));
+            if (c >= 'a' && c <= 'z' || c >= '0' && c <= '9') {
+                out.append(c);
+            } else if (out.length() > 0 && out.charAt(out.length() - 1) != '-') {
+                out.append('-');
+            }
+        }
+        int length = out.length();
+        if (length > 0 && out.charAt(length - 1) == '-') {
+            out.setLength(length - 1);
+        }
+        return out.isEmpty() ? null : out.toString();
+    }
+
+    /** Case-insensitive containment, the tree's existing search rule. */
+    private static boolean contains(String text, String filter) {
+        return text.toLowerCase(Locale.ROOT).contains(filter.toLowerCase(Locale.ROOT));
     }
 
     /**

@@ -5,6 +5,7 @@ import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.CreateContext;
 import app.drydock.agent.api.EvalTokenResolver;
 import app.drydock.agent.api.LaunchPlan;
+import app.drydock.agent.api.LaunchResources;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdStrategy;
 import app.drydock.agent.providers.AgentCommands;
@@ -341,5 +342,189 @@ class ClaudeAgentProviderTest {
         String blank = provider.buildCreateCommand(new CreateContext("S", "uuid", Path.of("/tmp"),
                 Optional.empty(), Optional.empty(), false, false, Optional.of("  "))).command();
         assertEquals(ENV + "claude", blank, "a blank task must not become an empty first message");
+    }
+
+    // ---- extra working directories (LaunchResources) -----------------------
+
+    /** One plain extra directory, the minimal request. */
+    private static final LaunchResources ONE_DIR = new LaunchResources(
+            List.of(Path.of("/wt/prereq")), Optional.empty());
+
+    /** Three extra directories whose paths carry a space, an embedded quote, and a leading dash. */
+    private static final LaunchResources NASTY_DIRS = new LaunchResources(List.of(
+            Path.of("/wt/prereq one"), Path.of("/wt/it's \"quoted\" wt"), Path.of("/-lead-dash/wt")),
+            Optional.empty());
+
+    /** The shell-quoted add-dir arguments NASTY_DIRS must render as. */
+    private static final String NASTY_ADD_DIRS = " --add-dir '/wt/prereq one' --add-dir '/wt/it'\\''s \"quoted\" wt'"
+            + " --add-dir '/-lead-dash/wt'";
+
+    /**
+     * Each requested extra working directory is one safely quoted {@code
+     * --add-dir} option (ClaudeAgentProvider.addDirFlags): a space stays one
+     * argument, an embedded quote is escaped the POSIX way, and a
+     * dash-leading path stays an option value, never prompt text.
+     */
+    @Test
+    void createRendersEachExtraDirectoryAsAQuotedAddDir() {
+        LaunchPlan plan = newProviderNoExecutable().buildCreateCommand(
+                new CreateContext("S", "uuid", Path.of("/tmp"), Optional.empty(), Optional.empty())
+                        .withLaunchResources(NASTY_DIRS));
+        assertEquals(ENV + "claude" + NASTY_ADD_DIRS, plan.command());
+    }
+
+    @Test
+    void resumeRendersEachExtraDirectoryAsAQuotedAddDirAfterTheResumeId() {
+        LaunchPlan plan = newProviderNoExecutable().buildResumeCommand(
+                new ResumeContext(Optional.of("abc-123"), Optional.empty(), Path.of("/tmp"),
+                        Optional.empty(), Optional.empty()).withLaunchResources(NASTY_DIRS));
+        assertEquals(ENV + "claude --resume 'abc-123'" + NASTY_ADD_DIRS, plan.command());
+    }
+
+    /**
+     * Extra directories are options, so they come before the {@code --}
+     * positional prompt: the task is still the last thing on the command, and
+     * a dash-leading task still cannot be read as an option.
+     */
+    @Test
+    void extraDirectoriesStayBeforeThePositionalPromptOnCreateAndResume() {
+        String created = newProviderNoExecutable().buildCreateCommand(new CreateContext("S", "uuid",
+                Path.of("/tmp"), Optional.empty(), Optional.empty(), false, false,
+                Optional.of("--fix the 'parser' crash")).withLaunchResources(ONE_DIR)).command();
+        assertEquals(ENV + "claude --add-dir '/wt/prereq' -- '--fix the '\\''parser'\\'' crash'", created);
+
+        String resumed = newProviderNoExecutable().buildResumeCommand(new ResumeContext(Optional.of("abc-123"),
+                Optional.empty(), Path.of("/tmp"), Optional.empty(), Optional.empty(), false, false, List.of(),
+                Optional.of("pick up")).withLaunchResources(ONE_DIR)).command();
+        assertEquals(ENV + "claude --resume 'abc-123' --add-dir '/wt/prereq' -- 'pick up'", resumed);
+    }
+
+    /** Duplicates collapse to the first occurrence, in first-occurrence order. */
+    @Test
+    void duplicateDirectoriesCollapseKeepingFirstOccurrenceOrder() {
+        LaunchResources dups = new LaunchResources(List.of(Path.of("/wt/a"), Path.of("/wt/b"),
+                Path.of("/wt/a"), Path.of("/wt/c"), Path.of("/wt/b")), Optional.empty());
+        LaunchPlan create = newProviderNoExecutable().buildCreateCommand(
+                new CreateContext("S", "uuid", Path.of("/tmp"), Optional.empty(), Optional.empty())
+                        .withLaunchResources(dups));
+        assertEquals(ENV + "claude --add-dir '/wt/a' --add-dir '/wt/b' --add-dir '/wt/c'", create.command());
+
+        LaunchPlan resume = newProviderNoExecutable().buildResumeCommand(
+                new ResumeContext(Optional.of("abc-123"), Optional.empty(), Path.of("/tmp"),
+                        Optional.empty(), Optional.empty()).withLaunchResources(dups));
+        assertEquals(ENV + "claude --resume 'abc-123' --add-dir '/wt/a' --add-dir '/wt/b' --add-dir '/wt/c'",
+                resume.command());
+    }
+
+    /**
+     * A launch that requests no extra directories keeps exactly today's
+     * command, byte for byte: an absent {@link LaunchResources} and an empty
+     * one are the same launch (ClaudeAgentProvider.addDirFlags returns ""
+     * for both), and so is one carrying only the task-guidance location,
+     * which rendering here does not consume.
+     */
+    @Test
+    void createAndResumeWithoutExtraDirectoriesKeepTodayExactCommand() {
+        ClaudeAgentProvider provider = newProviderNoExecutable();
+
+        String bareCreate = provider.buildCreateCommand(new CreateContext("S", "uuid", Path.of("/tmp"),
+                Optional.empty(), Optional.empty())).command();
+        String emptyCreate = provider.buildCreateCommand(new CreateContext("S", "uuid", Path.of("/tmp"),
+                Optional.empty(), Optional.empty())
+                .withLaunchResources(new LaunchResources(List.of(), Optional.empty()))).command();
+        String guidanceOnlyCreate = provider.buildCreateCommand(new CreateContext("S", "uuid",
+                Path.of("/tmp"), Optional.empty(), Optional.empty())
+                .withLaunchResources(new LaunchResources(List.of(), Optional.of(Path.of("/guidance")))))
+                .command();
+        assertEquals(ENV + "claude", bareCreate);
+        assertEquals(bareCreate, emptyCreate);
+        assertEquals(bareCreate, guidanceOnlyCreate);
+
+        String bareResume = provider.buildResumeCommand(new ResumeContext(Optional.of("abc-123"),
+                Optional.empty(), Path.of("/tmp"), Optional.empty(), Optional.empty())).command();
+        String emptyResume = provider.buildResumeCommand(new ResumeContext(Optional.of("abc-123"),
+                Optional.empty(), Path.of("/tmp"), Optional.empty(), Optional.empty())
+                .withLaunchResources(new LaunchResources(List.of(), Optional.empty()))).command();
+        String guidanceOnlyResume = provider.buildResumeCommand(new ResumeContext(Optional.of("abc-123"),
+                Optional.empty(), Path.of("/tmp"), Optional.empty(), Optional.empty())
+                .withLaunchResources(new LaunchResources(List.of(), Optional.of(Path.of("/guidance")))))
+                .command();
+        assertEquals(ENV + "claude --resume 'abc-123'", bareResume);
+        assertEquals(bareResume, emptyResume);
+        assertEquals(bareResume, guidanceOnlyResume);
+    }
+
+    /**
+     * Resumes render their resources per call: the same resume requested
+     * repeatedly yields the same command each time, and a resume without
+     * resources in between never inherits (or leaves) any flags.
+     */
+    @Test
+    void repeatedResumesRenderTheSameAddDirsEveryTime() {
+        ClaudeAgentProvider provider = newProviderNoExecutable();
+        ResumeContext withDirs = new ResumeContext(Optional.of("abc-123"), Optional.empty(), Path.of("/tmp"),
+                Optional.empty(), Optional.empty()).withLaunchResources(ONE_DIR);
+        String expected = ENV + "claude --resume 'abc-123' --add-dir '/wt/prereq'";
+        assertEquals(expected, provider.buildResumeCommand(withDirs).command());
+        assertEquals(expected, provider.buildResumeCommand(withDirs).command());
+        assertEquals(ENV + "claude --resume 'abc-123'",
+                provider.buildResumeCommand(new ResumeContext(Optional.of("abc-123"), Optional.empty(),
+                        Path.of("/tmp"), Optional.empty(), Optional.empty())).command());
+        assertEquals(expected, provider.buildResumeCommand(withDirs).command());
+    }
+
+    /**
+     * A remote claude runs on another host and cannot see this machine's
+     * directories, so a launch that requests them is refused rather than
+     * silently launching without them. The same remote context with no
+     * requested directories still launches.
+     */
+    @Test
+    void remoteCreateRefusesRequestedExtraDirectories() {
+        LaunchPlan refused = newProviderNoExecutable().buildCreateCommand(new CreateContext("S", "uuid",
+                Path.of("/tmp"), Optional.of(new SshRemote("build-box", "/srv")), Optional.empty())
+                .withLaunchResources(ONE_DIR));
+        assertFalse(refused.supported());
+
+        LaunchPlan plain = newProviderNoExecutable().buildCreateCommand(new CreateContext("S", "uuid",
+                Path.of("/tmp"), Optional.of(new SshRemote("build-box", "/srv")), Optional.empty()));
+        assertTrue(plain.supported());
+    }
+
+    @Test
+    void remoteResumeRefusesRequestedExtraDirectories() {
+        LaunchPlan refused = newProviderNoExecutable().buildResumeCommand(
+                new ResumeContext(Optional.of("abc-123"), Optional.empty(), Path.of("/tmp"),
+                        Optional.of(new SshRemote("build-box", "/srv")), Optional.empty())
+                        .withLaunchResources(ONE_DIR));
+        assertFalse(refused.supported());
+
+        LaunchPlan plain = newProviderNoExecutable().buildResumeCommand(
+                new ResumeContext(Optional.of("abc-123"), Optional.empty(), Path.of("/tmp"),
+                        Optional.of(new SshRemote("build-box", "/srv")), Optional.empty()));
+        assertTrue(plain.supported());
+    }
+
+    /**
+     * The eval container mounts only the session worktree and the hook
+     * dirs, so an eval launch that requests extra directories is refused
+     * before the container is even consulted (no container is installed
+     * here; the no-resources eval path throws instead (see
+     * {@code evalCreateThrowsWhenSetupMissing}).
+     */
+    @Test
+    void evalCreateRefusesRequestedExtraDirectories() {
+        LaunchPlan plan = newProviderNoExecutable().buildCreateCommand(new CreateContext("S", "sess-eval",
+                Path.of("/tmp"), Optional.empty(), Optional.empty(), true).withLaunchResources(ONE_DIR));
+        assertFalse(plan.supported());
+    }
+
+    @Test
+    void evalResumeRefusesRequestedExtraDirectories() {
+        LaunchPlan plan = newProviderNoExecutable().buildResumeCommand(
+                new ResumeContext(Optional.of("sess-eval"), Optional.empty(), Path.of("/tmp"),
+                        Optional.empty(), Optional.empty(), true, false, List.of(), Optional.empty())
+                        .withLaunchResources(ONE_DIR));
+        assertFalse(plan.supported());
     }
 }

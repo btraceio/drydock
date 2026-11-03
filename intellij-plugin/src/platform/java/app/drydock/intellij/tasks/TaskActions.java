@@ -1,5 +1,6 @@
 package app.drydock.intellij.tasks;
 
+import app.drydock.delayedtasks.TaskWorktreeUse;
 import app.drydock.git.WorktreeService;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.DrydockSessionsListener;
@@ -45,6 +46,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Predicate;
+import java.util.stream.Collectors;
 
 /**
  * What the Drydock tool window can do to a task: switch to it, deactivate it,
@@ -502,12 +504,30 @@ final class TaskActions {
             public void run(@NotNull ProgressIndicator indicator) {
                 List<String> failures = new ArrayList<>();
                 List<Path> removed = new ArrayList<>();
+                // T41: the guard's own inputs, read off the EDT once -- the
+                // receipts' store root and the live catalog session ids.
+                Path storeRoot = DrydockPluginService.getInstance().taskService().root();
+                Set<String> liveSessions = DrydockPluginService.getInstance().stateStore().state().sessions()
+                        .stream()
+                        .map(row -> row.id().toString())
+                        .collect(Collectors.toUnmodifiableSet());
                 try (WorktreeService worktrees = new WorktreeService()) {
                     for (int i = 0; i < targets.size(); i++) {
                         IdleWorktree target = targets.get(i);
                         indicator.setText("Removing " + target.branch());
                         indicator.setFraction((double) i / targets.size());
-                        try {
+                        // T41: claim AFTER the confirmation, recheck under the
+                        // claim, delete only when no live dependent session
+                        // uses the path; a refusal keeps the folder and is
+                        // shown with the other failures.
+                        try (TaskWorktreeUse.RemovalClaim claim = TaskWorktreeUse.claimRemoval(
+                                target.worktree(), "standalone worktree removal")) {
+                            Optional<String> refusal = TaskWorktreeUse.guard(storeRoot, target.worktree(),
+                                    liveSessions);
+                            if (refusal.isPresent()) {
+                                failures.add(target.branch() + ": " + refusal.get());
+                                continue;
+                            }
                             // The confirmation explicitly accepts discarded
                             // local changes. Branches intentionally survive.
                             worktrees.removeDiscardingChanges(root, target.worktree(), Optional.empty())
