@@ -3,18 +3,22 @@ package app.drydock.intellij.tasks;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.AgentRegistry;
 import app.drydock.config.UserConfig;
+import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ModelTiers;
 import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryCatalog;
 import app.drydock.domain.RepositoryId;
 import app.drydock.git.BranchListing;
 import app.drydock.git.BranchRef;
-import app.drydock.git.GitStatusService;
 import app.drydock.git.GhCliService.OpenIssue;
+import app.drydock.git.GitStatusService;
 import app.drydock.git.JiraIssue;
 import app.drydock.git.WorktreeService;
+import app.drydock.delayedtasks.DelayedTaskService;
+import app.drydock.delayedtasks.TaskLaunchBinding;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.actions.SessionDialogs;
+import app.drydock.intellij.projects.SharedProjectsService;
 import app.drydock.intellij.settings.DrydockConfigurable;
 import app.drydock.intellij.startup.DrydockStartupActivity;
 import app.drydock.intellij.tasks.NewTaskPlan.Choice;
@@ -22,8 +26,11 @@ import app.drydock.intellij.tasks.NewTaskPlan.FixedWorktree;
 import app.drydock.intellij.tasks.NewTaskPlan.OpenIn;
 import app.drydock.intellij.tasks.NewTaskPlan.WorkIn;
 import app.drydock.intellij.worktree.WorktreeErrors;
+import app.drydock.mcp.TaskToolContext;
 import app.drydock.projects.SharedProject;
 import app.drydock.projects.SharedProjectsSeed;
+import app.drydock.tasks.NewTaskLauncherResult;
+import app.drydock.tasks.TaskDocument;
 
 import com.intellij.ide.impl.ProjectUtil;
 import com.intellij.openapi.application.ApplicationManager;
@@ -48,6 +55,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -192,6 +200,186 @@ public final class TaskLauncher {
         });
     }
 
+    // ---- the observable facade (T22a, D8/P4) ---------------------------------
+
+    /**
+     * Prepares a task for choosing in the background (T22a, D8/P4): the
+     * same dialog-input resolution the launch path uses, off the EDT, with
+     * the same visible progress and the same refusals reported to the
+     * user. The future completes with the prepared task, or empty when
+     * the preparation refused or failed; no path leaves it pending.
+     */
+    public static CompletableFuture<Optional<PreparedTask>> prepareTask(Project from, Optional<Path> mainRoot,
+                                                                       Optional<FixedWorktree> fixed) {
+        CompletableFuture<Optional<PreparedTask>> prepared = new CompletableFuture<>();
+        ProgressManager.getInstance().run(new Task.Backgroundable(from, "Preparing new task…", true) {
+            @Override
+            public void run(@NotNull ProgressIndicator indicator) {
+                try {
+                    prepared.complete(prepare(from, mainRoot, fixed, Optional.empty())
+                            .<PreparedTask>map(PreparedTask::new));
+                } finally {
+                    // Refusal, failure and interruption all end inside
+                    // prepare() with a reported, empty result; this is the
+                    // backstop that no path strands the future.
+                    prepared.complete(Optional.empty());
+                }
+            }
+        });
+        return prepared;
+    }
+
+    /**
+     * Shows the New task dialog for a prepared task WITHOUT launching on
+     * OK (T22a, D8/P4): the future completes with the accepted choice, or
+     * empty when the dialog was canceled, its window was gone, or the user
+     * saved the task for later -- a save is dispatched to the background
+     * exactly as the launch path dispatches it, only the launch itself is
+     * withheld. The choice travels as the opaque {@link ChosenTask}: the
+     * dialog, its preset and its wiring stay this package's own. The
+     * dialog shows on the EDT; the future completes when it closes.
+     */
+    public static CompletableFuture<Optional<ChosenTask>> chooseTask(Project from, PreparedTask preparedTask) {
+        return chooseTask(from, preparedTask, NewTaskPreset.empty());
+    }
+
+    /** As the public {@link #chooseTask(Project, PreparedTask)}, for a preset-carrying entry (the single-project
+      * start's segment preset, T31a; public so the delayed-task layer can open the SAME dialog for its one segment).
+      * This package only otherwise. */
+    public static CompletableFuture<Optional<ChosenTask>> chooseTask(Project from, PreparedTask preparedTask,
+                                                                     NewTaskPreset preset) {
+        CompletableFuture<Optional<ChosenTask>> chosen = new CompletableFuture<>();
+        Runnable show = () -> {
+            Optional<Supplier<Optional<String>>> refChooser;
+            try {
+                refChooser = refChooser(preparedTask.inputs().project().root());
+            } catch (RuntimeException e) {
+                LOG.log(Level.WARNING, "Could not prepare the New task dialog's ref chooser", e);
+                report(from, "Drydock could not prepare a new task: " + WorktreeErrors.visibleMessage(e));
+                chosen.complete(Optional.empty());
+                return;
+            }
+            ApplicationManager.getApplication().invokeLater(() -> chooseChosen(from, preparedTask, refChooser,
+                    preset, chosen), ModalityState.nonModal());
+        };
+        if (ApplicationManager.getApplication().isDispatchThread()) {
+            // The ref chooser blocks on git (worktree list): never on the EDT.
+            ApplicationManager.getApplication().executeOnPooledThread(show);
+        } else {
+            show.run();
+        }
+        return chosen;
+    }
+
+    /** Shows the dialog on the EDT and completes {@code chosen} with what it accepted; never leaves it pending. */
+    private static void chooseChosen(Project from, PreparedTask preparedTask,
+                                     Optional<Supplier<Optional<String>>> refChooser, NewTaskPreset preset,
+                                     CompletableFuture<Optional<ChosenTask>> chosen) {
+        try {
+            if (from.isDisposed()) {
+                chosen.complete(Optional.empty());
+                return;
+            }
+            NewTaskDialog dialog = new NewTaskDialog(from, preparedTask.inputs(), refChooser, preset);
+            if (dialog.showAndGet()) {
+                NewTaskLauncherResult result = dialog.launcherResult();
+                if (result.isLaunch()) {
+                    chosen.complete(Optional.of(new ChosenTask(result.choice())));
+                } else {
+                    saveTask(from, result.saved());
+                    chosen.complete(Optional.empty());
+                }
+            } else {
+                chosen.complete(Optional.empty());
+            }
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, "Could not show the New task dialog", e);
+            report(from, "Could not show the New task dialog: " + WorktreeErrors.visibleMessage(e));
+            chosen.complete(Optional.empty());
+        }
+    }
+
+    /**
+     * Launches a chosen task through the existing start chain (T22a,
+     * D8/P4): register, worktree, window, then
+     * {@link SessionDialogs#launchSession} -- no second process path. The
+     * future completes with the RUNNING session (its id is the observable
+     * outcome), or exceptionally on every refusal, cancel, failure and
+     * disposed path; no wait, timeout or cancel on it cancels or fails the
+     * underlying launch, which can still complete it late and accurately.
+     */
+    public static CompletableFuture<ManagedAgentSession> launchChosen(Project from, PreparedTask preparedTask,
+                                                                      ChosenTask chosen) {
+        return launchChosen(from, preparedTask, chosen, new SessionDialogs.PreparedSessionCallback() {
+        });
+    }
+
+    /**
+     * As {@link #launchChosen(Project, PreparedTask, ChosenTask)}, with the
+     * pre-spawn prepared-session callback (T28's task binding seam).
+     */
+    public static CompletableFuture<ManagedAgentSession> launchChosen(Project from, PreparedTask preparedTask,
+                                                                      ChosenTask chosen,
+                                                                      SessionDialogs.PreparedSessionCallback preparedSession) {
+        return start(from, preparedTask.inputs(), chosen.choice(), preparedSession);
+    }
+
+    /**
+     * As {@link #launchChosen(Project, PreparedTask, ChosenTask, SessionDialogs.PreparedSessionCallback)},
+     * with the whole one-project segment's pre-spawn bindings (T31a,
+     * T28a): every binding runs on the launch chain before the spawn, and
+     * any bind refusal prevents the launch. Still the existing start chain
+     * -- register, worktree, window, {@code SessionDialogs} -- no second
+     * process path.
+     */
+    public static CompletableFuture<ManagedAgentSession> launchChosen(Project from, PreparedTask preparedTask,
+                                                                        ChosenTask chosen,
+                                                                        SessionDialogs.PreparedSessionCallback preparedSession,
+                                                                        List<TaskLaunchBinding> bindings) {
+        return start(from, preparedTask.inputs(), chosen.choice(), preparedSession, bindings);
+    }
+
+    /**
+     * A task prepared for choosing (T22a, D8/P4): the New task dialog's
+     * inputs, resolved off the EDT by {@link #prepareTask}. Opaque outside
+     * this package on purpose: the inputs' shape is the dialog's wiring,
+     * so a coordinator (the staged plan, T28) only passes it back to
+     * {@link #chooseTask} and {@link #launchChosen}.
+     */
+    public static final class PreparedTask {
+
+        private final NewTaskPlan.Inputs inputs;
+
+        PreparedTask(NewTaskPlan.Inputs inputs) {
+            this.inputs = Objects.requireNonNull(inputs, "inputs");
+        }
+
+        /** The dialog's inputs; this package only. */
+        NewTaskPlan.Inputs inputs() {
+            return inputs;
+        }
+    }
+
+    /**
+     * A task chosen without launching (T22a, D8/P4): the launch choice the
+     * New task dialog accepted for a {@link PreparedTask}. Opaque outside
+     * this package: it only travels back to
+     * {@link #launchChosen}, unchanged and uninspected.
+     */
+    public static final class ChosenTask {
+
+        private final Choice choice;
+
+        ChosenTask(Choice choice) {
+            this.choice = Objects.requireNonNull(choice, "choice");
+        }
+
+        /** The accepted launch choice; this package only. */
+        Choice choice() {
+            return choice;
+        }
+    }
+
     /** Off the EDT: resolves the dialog's inputs, then shows it; {@code start} overrides the default start point. */
     private static void prepareAndShow(Project from, Optional<Path> mainRoot, Optional<FixedWorktree> fixed,
                                        Optional<String> start, NewTaskPreset preset) {
@@ -199,13 +387,10 @@ public final class TaskLauncher {
         if (inputs.isEmpty()) {
             return;
         }
-        Optional<Supplier<Optional<String>>> refChooser = refChooser(inputs.get().project().root());
-        ApplicationManager.getApplication().invokeLater(() -> {
-            NewTaskDialog dialog = new NewTaskDialog(from, inputs.get(), refChooser, preset);
-            if (dialog.showAndGet()) {
-                start(from, inputs.get(), dialog.acceptedChoice());
-            }
-        }, ModalityState.nonModal());
+        // The dialog path is unchanged: the same ref chooser, the same
+        // preset, the same save on Save-for-later, the same launch on OK.
+        chooseTask(from, new PreparedTask(inputs.get()), preset)
+                .thenAccept(chosen -> chosen.ifPresent(task -> start(from, inputs.get(), task.choice())));
     }
 
     private static Optional<NewTaskPlan.Inputs> prepare(Project from, Optional<Path> requestedRoot,
@@ -303,10 +488,125 @@ public final class TaskLauncher {
         return Optional.empty();
     }
 
-    /** Runs the chosen task: register, create, open, launch — with progress. */
-    static void start(Project from, NewTaskPlan.Inputs inputs, Choice choice) {
+    /**
+     * Saves the task the dialog accepted instead of starting it (T19a,
+     * D5/P5): the write runs in the background with progress, and every
+     * completion path ends the task -- the Backgroundable owns the
+     * indicator, so a failed save surfaces visibly and never strands the
+     * progress. A save registers the project, creates the task through the
+     * task service and stores the body as its notes. It never registers a
+     * session, creates a worktree or spawns an agent, and never touches the
+     * agent registry, so it works with no agent installed.
+     */
+    static void saveTask(Project from, app.drydock.tasks.NewTaskPlan saved) {
+        DrydockPluginService plugin = DrydockPluginService.getInstance();
+        ProgressManager.getInstance().run(new Task.Backgroundable(from,
+                "Saving task \"" + saved.title() + "\"", true) {
+            @Override
+            public void run(@NotNull ProgressIndicator indicator) {
+                indicator.setText("Saving task \"" + saved.title() + "\"");
+                try {
+                    saveTask(plugin.sharedProjects(), plugin.taskService(), saved);
+                } catch (TaskSaveException e) {
+                    // A refused save: visible, and the background task ends
+                    // here so the progress goes with it.
+                    LOG.log(Level.WARNING, "Could not save the task " + saved.title(), e);
+                    report(from, e.getMessage());
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } catch (ExecutionException | TimeoutException | RuntimeException e) {
+                    LOG.log(Level.WARNING, "Could not save the task " + saved.title(), e);
+                    report(from, "Drydock could not save the task \"" + saved.title() + "\": "
+                            + WorktreeErrors.visibleMessage(e));
+                }
+            }
+        });
+    }
+
+    /**
+     * The save write itself, as the background task runs it and the smoke
+     * exercises it headlessly: the project's STABLE shared-registry id
+     * (registering it first only when needed; registration is idempotent
+     * and keeps the id), one task created through the task service, then
+     * the body's note paragraphs. Domain refusals surface as
+     * {@link TaskSaveException} with the visible message; store and init
+     * failures as the future's checked failures. No session is registered,
+     * no worktree created, nothing spawned.
+     */
+    static TaskDocument saveTask(SharedProjectsService projects, DelayedTaskService tasks,
+                                 app.drydock.tasks.NewTaskPlan saved)
+            throws TaskSaveException, InterruptedException, ExecutionException, TimeoutException {
+        tasks.initialize().get(PREPARE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        Optional<SharedProject> registered = projects.byRoot(saved.projectRoot());
+        RepositoryId stable;
+        if (registered.isPresent()) {
+            stable = registered.get().id();
+        } else {
+            // Registers only when needed; registration keeps the entry and its id either way.
+            stable = projects.register(saved.projectRoot(), saved.projectName())
+                    .get(PREPARE_TIMEOUT_SECONDS, TimeUnit.SECONDS).id();
+        }
+        TaskDocument created = committed(tasks.create(saved.title(), saved.after(), stable)
+                        .get(PREPARE_TIMEOUT_SECONDS, TimeUnit.SECONDS),
+                "Drydock could not save the task \"" + saved.title() + "\"");
+        TaskDocument task = created;
+        for (String note : saved.bodyNotes()) {
+            task = committed(tasks.appendNote(task.id(), note)
+                            .get(PREPARE_TIMEOUT_SECONDS, TimeUnit.SECONDS),
+                    "The task '" + created.id().text() + "' was saved but its body could not be stored");
+        }
+        return task;
+    }
+
+    /** One service outcome: its committed document, or the visible refusal. */
+    private static TaskDocument committed(TaskToolContext.Outcome outcome, String visible)
+            throws TaskSaveException {
+        if (outcome.refused()) {
+            throw new TaskSaveException(visible + ": " + outcome.refusal());
+        }
+        return outcome.document();
+    }
+
+    /** A save the task domain refused or half-completed; the message is what the user sees. */
+    static final class TaskSaveException extends Exception {
+        TaskSaveException(String message) {
+            super(message);
+        }
+    }
+
+    /**
+     * Runs the chosen task: register, create, open, launch — with progress.
+     *
+     * <p>Observable (T22a, D8/P4): the returned future completes with the
+     * RUNNING session -- its id is the observable outcome -- or
+     * exceptionally on every refusal, cancel, failure and disposed path;
+     * never permanently pending. It only ever mirrors the real launch
+     * chain ({@link SessionDialogs#launchSession}), so a timed-out wait on
+     * it cancels and fails nothing, and a late launch still completes it
+     * accurately.</p>
+     */
+    static CompletableFuture<ManagedAgentSession> start(Project from, NewTaskPlan.Inputs inputs, Choice choice) {
+        return start(from, inputs, choice, new SessionDialogs.PreparedSessionCallback() {
+        });
+    }
+
+    /** As {@link #start(Project, NewTaskPlan.Inputs, Choice)}, with the pre-spawn prepared-session callback (T28). */
+    static CompletableFuture<ManagedAgentSession> start(Project from, NewTaskPlan.Inputs inputs, Choice choice,
+                                                        SessionDialogs.PreparedSessionCallback preparedSession) {
+        return start(from, inputs, choice, preparedSession, List.of());
+    }
+
+    /** As {@link #start(Project, NewTaskPlan.Inputs, Choice, SessionDialogs.PreparedSessionCallback)}, with the
+      * one-project segment's pre-spawn bindings (T31a, T28a): an empty list is the byte-identical no-binding
+      * chain; a non-empty one composes the bind step before the tab and the spawn, where a refusal prevents
+      * the launch. */
+    static CompletableFuture<ManagedAgentSession> start(Project from, NewTaskPlan.Inputs inputs, Choice choice,
+                                                        SessionDialogs.PreparedSessionCallback preparedSession,
+                                                        List<TaskLaunchBinding> bindings) {
+        Objects.requireNonNull(bindings, "bindings");
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         Path mainRoot = inputs.project().root();
+        TrackedLaunch tracked = new TrackedLaunch();
         ProgressManager.getInstance().run(new Task.Backgroundable(from, "Starting " + choice.name() + "…", true) {
             @Override
             public void run(@NotNull ProgressIndicator indicator) {
@@ -327,38 +627,113 @@ public final class TaskLauncher {
                     }
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
+                    tracked.cancelled();
                     return;
                 } catch (ExecutionException | TimeoutException | RuntimeException e) {
                     LOG.log(Level.WARNING, "Could not start task " + choice.name(), e);
                     report(from, "Could not start \"" + choice.name() + "\": " + WorktreeErrors.visibleMessage(e));
+                    tracked.failed(e);
                     return;
                 }
                 ApplicationManager.getApplication().invokeLater(() -> {
-                    Project target;
-                    boolean fresh;
-                    if (steps.openIn() == OpenIn.THIS_WINDOW) {
-                        // A tab here; hosted when the folder is another
-                        // project's. No window opens.
-                        target = from;
-                        fresh = false;
-                    } else if (steps.reuseOpenWindow()) {
-                        target = openWindow.get();
-                        fresh = false;
-                        ProjectUtil.focusProjectWindow(target, true);
-                    } else {
-                        target = TaskWindows.openAsProject(steps.workingDirectory());
-                        fresh = true;
+                    try {
+                        Project target;
+                        boolean fresh;
+                        if (steps.openIn() == OpenIn.THIS_WINDOW) {
+                            // A tab here; hosted when the folder is another
+                            // project's. No window opens.
+                            target = from;
+                            fresh = false;
+                        } else if (steps.reuseOpenWindow()) {
+                            target = openWindow.get();
+                            fresh = false;
+                            ProjectUtil.focusProjectWindow(target, true);
+                        } else {
+                            target = TaskWindows.openAsProject(steps.workingDirectory());
+                            fresh = true;
+                        }
+                        if (target == null || target.isDisposed()) {
+                            LOG.log(Level.WARNING, "The window for {0} did not open", steps.workingDirectory());
+                            Messages.showErrorDialog(from, windowDidNotOpen(steps.workingDirectory()), "Drydock");
+                            tracked.windowDidNotOpen(steps.workingDirectory());
+                            return;
+                        }
+                        // The observable result IS the launch chain's own
+                        // future: launch claims, FAILED persistence and the
+                        // RUNNING session id all complete it; this wrapper
+                        // adds no outcome of its own. The bindings compose
+                        // the pre-spawn bind step (T31a); an empty list is
+                        // the byte-identical no-binding chain.
+                        tracked.launched(bindings.isEmpty()
+                                ? SessionDialogs.launchNewSession(target, steps.workingDirectory(), mainRoot,
+                                        choice.agent(), choice.name(), choice.mode(),
+                                        NewTaskPlan.initialPrompt(choice), choice.model(), choice.tiers(), fresh,
+                                        preparedSession)
+                                : SessionDialogs.launchNewSession(target, steps.workingDirectory(), mainRoot,
+                                        choice.agent(), choice.name(), choice.mode(),
+                                        NewTaskPlan.initialPrompt(choice), choice.model(), choice.tiers(), fresh,
+                                        preparedSession, bindings));
+                    } catch (RuntimeException e) {
+                        LOG.log(Level.WARNING, "Could not open the task's window", e);
+                        report(from, "Could not start \"" + choice.name() + "\": " + WorktreeErrors.visibleMessage(e));
+                        tracked.failed(e);
                     }
-                    if (target == null || target.isDisposed()) {
-                        LOG.log(Level.WARNING, "The window for {0} did not open", steps.workingDirectory());
-                        Messages.showErrorDialog(from, windowDidNotOpen(steps.workingDirectory()), "Drydock");
-                        return;
-                    }
-                    SessionDialogs.launchNewSession(target, steps.workingDirectory(), mainRoot, choice.agent(), choice.name(),
-                            choice.mode(), NewTaskPlan.initialPrompt(choice), choice.model(), choice.tiers(), fresh);
                 }, ModalityState.nonModal());
             }
         });
+        return tracked.future();
+    }
+
+    /**
+     * The observable half of one {@link #start} (T22a): a single future
+     * that every refusal, cancel, failure and disposed path completes --
+     * never a permanently pending one -- and whose only source of the real
+     * result is the launch chain itself ({@link #launched}): no wait, no
+     * timeout and no cancel here fails or cancels the underlying launch,
+     * so a slow launch can still complete it, late and accurately. The
+     * one edge that can still leave the observable pending is an
+     * invokeLater that never runs, which only happens at application
+     * shutdown -- the same edge the session service documents for its
+     * launch claims.
+     */
+    static final class TrackedLaunch {
+
+        private final CompletableFuture<ManagedAgentSession> outcome = new CompletableFuture<>();
+
+        /** The observable future callers wait on. */
+        CompletableFuture<ManagedAgentSession> future() {
+            return outcome;
+        }
+
+        /** The background half was interrupted: the launch never started, nothing failed. */
+        void cancelled() {
+            outcome.cancel(false);
+        }
+
+        /** A refusal or failure before the launch chain exists: registration or worktree. */
+        void failed(Throwable failure) {
+            outcome.completeExceptionally(failure);
+        }
+
+        /** The window the launch needs did not open (a canceled import, a disposed host). */
+        void windowDidNotOpen(Path directory) {
+            outcome.completeExceptionally(new IllegalStateException(TaskLauncher.windowDidNotOpen(directory)));
+        }
+
+        /**
+         * The launch chain -- the only source of the real outcome: it
+         * completes the observable exactly when the launch itself
+         * completes, and nothing else does.
+         */
+        void launched(CompletableFuture<ManagedAgentSession> launch) {
+            launch.whenComplete((session, failure) -> {
+                if (failure != null) {
+                    outcome.completeExceptionally(failure);
+                } else {
+                    outcome.complete(session);
+                }
+            });
+        }
     }
 
     /** The open window showing {@code directory}, compared canonically. Blocking: background only. */
