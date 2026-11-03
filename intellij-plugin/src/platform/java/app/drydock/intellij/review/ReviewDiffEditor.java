@@ -110,13 +110,20 @@ public final class ReviewDiffEditor {
      */
     public static ReviewDiffEditor platform(Project project, Disposable parent,
                                             ReviewDiffInlays inlays) {
+        Objects.requireNonNull(inlays, "inlays");
+        return platform(project, parent, inlays::viewerChanged);
+    }
+
+    /** As {@link #platform(Project, Disposable, ReviewDiffInlays)}, with every viewer change dispatched to {@code onViewerChanged}. */
+    public static ReviewDiffEditor platform(Project project, Disposable parent,
+                                            Consumer<FrameDiffTool.DiffViewer> onViewerChanged) {
         Objects.requireNonNull(project, "project");
         Objects.requireNonNull(parent, "parent");
-        Objects.requireNonNull(inlays, "inlays");
+        Objects.requireNonNull(onViewerChanged, "onViewerChanged");
         return new ReviewDiffEditor(
                 () -> FileEditorManager.getInstance(project).openFile(ReviewWorkbenchFile.of(project), true),
                 context -> ReviewDiffRequests.toRequest(project, parent, context),
-                inlays::viewerChanged);
+                onViewerChanged);
     }
 
     /**

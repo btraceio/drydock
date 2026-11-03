@@ -314,7 +314,16 @@ final class ReviewTabProvider {
                 () -> triage, () -> scope, () -> store, this::showCardOutcome);
         inlays = new ReviewDiffInlays(ReviewDiffInlays.platformEdt(), labeledCards(
                 ReviewDiffInlays.triageCards(Clock.systemDefaultZone(), cardActions)));
-        diffEditor = ReviewDiffEditor.platform(project, diffParent, inlays);
+        // The gutter "+" rides the same viewer changes as the finding cards:
+        // a click opens the inbox composer for the line or its selection.
+        ReviewGutterComments gutter = new ReviewGutterComments(
+                target -> resolve(target).isPresent(),
+                target -> compose(project, Optional.of(target), ReviewWorkbenchInbox.Composer.Mode.COMMENT));
+        ReviewDiffInlays layer = inlays;
+        diffEditor = ReviewDiffEditor.platform(project, diffParent, viewer -> {
+            layer.viewerChanged(viewer);
+            gutter.viewerChanged(viewer);
+        });
 
         buildDecisionsBar();
 
