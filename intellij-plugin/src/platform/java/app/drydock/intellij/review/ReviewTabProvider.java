@@ -15,6 +15,7 @@ import app.drydock.intellij.DrydockSessionsListener;
 import app.drydock.intellij.agent.AgentExecutionRegistry;
 import app.drydock.intellij.agent.PromptOutcome;
 import app.drydock.intellij.agent.SessionActivityListener;
+import app.drydock.intellij.review.workbench.model.InboxModel;
 import app.drydock.intellij.review.workbench.model.WorkbenchState;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.AnnotationStore;
@@ -230,6 +231,8 @@ final class ReviewTabProvider {
     private volatile WorkbenchState.Filter workbenchFilter = WorkbenchState.Filter.ALL;
     /** The workbench diff's view, starting from the stored setting; set on the EDT, read when the state is rebuilt. */
     private volatile WorkbenchState.View workbenchView = ReviewDiffEditor.storedView();
+    /** The workbench inbox's tab and scope; set on the EDT, read when the state is rebuilt. */
+    private volatile WorkbenchState.InboxChoice inboxChoice = WorkbenchState.InboxChoice.DEFAULT;
     /** The latest workbench state, for a view that attaches after it was built. */
     private volatile WorkbenchState workbenchState;
 
@@ -633,8 +636,9 @@ final class ReviewTabProvider {
      */
     private void selected(Object row) {
         selectionRow = row;
-        if (workbenchFilter == WorkbenchState.Filter.WITH_FINDINGS) {
-            submitWorkbenchState(); // the filter keeps the selected file listed
+        if (workbenchFilter == WorkbenchState.Filter.WITH_FINDINGS
+                || inboxChoice.scope() == InboxModel.Scope.FILE) {
+            submitWorkbenchState(); // the filter keeps the selected file listed; the inbox follows it
         }
         ReviewDiffEditor editor = this.diffEditor;
         if (editor == null) {
@@ -1689,8 +1693,10 @@ final class ReviewTabProvider {
         if (current == null || scope == null || disposed.get()) {
             return;
         }
+        AnnotationStore annotations = this.store;
+        List<ReviewAnnotation> findings = annotations == null ? List.of() : annotations.forScope(scope.id());
         WorkbenchState state = WorkbenchState.of(subjectOf(scope), WorkbenchState.Mode.LOCAL, current,
-                workbenchFilter, Optional.ofNullable(selectedPath()), workbenchView);
+                workbenchFilter, Optional.ofNullable(selectedPath()), workbenchView, findings, inboxChoice);
         workbenchState = state;
         onEdt(() -> {
             if (disposed.get()) {

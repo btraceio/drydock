@@ -135,7 +135,8 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
     public void testTheHeaderNamesTheSubjectAndTheProgress() {
         WorkbenchState state = WorkbenchState.of("drydock", WorkbenchState.Mode.LOCAL,
                 new ReviewTabModel.Snapshot(List.of(), 4, 1), WorkbenchState.Filter.ALL, Optional.empty(),
-                WorkbenchState.View.CHANGES_ONLY);
+                WorkbenchState.View.CHANGES_ONLY, List.of(),
+                WorkbenchState.InboxChoice.DEFAULT);
         assertEquals("drydock  ·  1 / 4 reviewed", ReviewWorkbenchEditor.headerText(state));
     }
 
@@ -151,7 +152,7 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
 
             navigator.render(WorkbenchState.of("drydock", WorkbenchState.Mode.LOCAL,
                     new ReviewTabModel.Snapshot(List.of(), 0, 0), WorkbenchState.Filter.WITH_FINDINGS,
-                    Optional.empty(), WorkbenchState.View.CHANGES_ONLY));
+                    Optional.empty(), WorkbenchState.View.CHANGES_ONLY, List.of(), WorkbenchState.InboxChoice.DEFAULT));
             assertTrue("the toggle follows the rendered state", navigator.withFindingsAction().isSelected(event));
         } finally {
             Disposer.dispose(navigator);
@@ -241,7 +242,7 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
 
             headers.get(0).accept(WorkbenchState.of("drydock", WorkbenchState.Mode.LOCAL,
                     new ReviewTabModel.Snapshot(List.of(), 0, 0), WorkbenchState.Filter.ALL, Optional.empty(),
-                    WorkbenchState.View.CHANGES_ONLY));
+                    WorkbenchState.View.CHANGES_ONLY, List.of(), WorkbenchState.InboxChoice.DEFAULT));
             assertTrue(changesOnly.isSelected(event));
             assertFalse(fullFile.isSelected(event));
 
@@ -278,7 +279,7 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
             ToggleAction pr = (ToggleAction) editor.modeActions.getChildActionsOrStubs()[1];
             headers.get(0).accept(WorkbenchState.of("drydock", WorkbenchState.Mode.LOCAL,
                     new ReviewTabModel.Snapshot(List.of(), 0, 0), WorkbenchState.Filter.ALL, Optional.empty(),
-                    WorkbenchState.View.CHANGES_ONLY));
+                    WorkbenchState.View.CHANGES_ONLY, List.of(), WorkbenchState.InboxChoice.DEFAULT));
 
             assertEquals("a text-only toggle shows its text", Boolean.TRUE,
                     local.getTemplatePresentation().getClientProperty(ActionUtil.SHOW_TEXT_IN_TOOLBAR));
