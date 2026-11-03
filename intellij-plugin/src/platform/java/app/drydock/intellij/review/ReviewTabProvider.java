@@ -15,6 +15,7 @@ import app.drydock.intellij.DrydockSessionsListener;
 import app.drydock.intellij.agent.AgentExecutionRegistry;
 import app.drydock.intellij.agent.PromptOutcome;
 import app.drydock.intellij.agent.SessionActivityListener;
+import app.drydock.intellij.review.workbench.model.WorkbenchState;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.AnnotationStore;
 import app.drydock.review.ReviewAnnotation;
@@ -69,6 +70,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /**
@@ -207,6 +209,17 @@ final class ReviewTabProvider {
     private String lastText = ReviewTabStatus.LOADING.message();
 
     private final AtomicBoolean disposed = new AtomicBoolean();
+
+    // ---- the review workbench (spec §3) ----
+    /** The workbench navigators and headers showing this review (EDT only). */
+    private final List<WorkbenchView> workbenchViews = new ArrayList<>();
+    /** The workbench navigator's filter; set on the EDT, read when the state is rebuilt. */
+    private volatile WorkbenchState.Filter workbenchFilter = WorkbenchState.Filter.ALL;
+    /** The workbench diff's view; set on the EDT, read when the state is rebuilt. */
+    private volatile WorkbenchState.View workbenchView = WorkbenchState.View.CHANGES_ONLY;
+    /** The latest workbench state, for a view that attaches after it was built. */
+    private volatile WorkbenchState workbenchState;
+
     /** The latest resolved scope; the commands and every reload target it. */
     private volatile ReviewScope scope;
     /** The latest snapshot; the file row of a selected finding is looked up in it. */
@@ -369,6 +382,8 @@ final class ReviewTabProvider {
         snapshot = null;
         selectionRow = null;
         changedSincePending = false;
+        workbenchViews.clear();
+        workbenchState = null;
         mismatchMemo.reset();
         commandRunning.set(false);
         wired.set(false);
@@ -500,6 +515,7 @@ final class ReviewTabProvider {
     private void snapshotArrived(ReviewTabModel.Snapshot snapshot) {
         this.snapshot = snapshot;
         refreshDecorations();
+        rebuildWorkbenchState();
         onEdt(() -> {
             ReviewTabBrowser browser = this.browser;
             JBLabel header = this.header;
@@ -597,6 +613,9 @@ final class ReviewTabProvider {
      */
     private void selected(Object row) {
         selectionRow = row;
+        if (workbenchFilter == WorkbenchState.Filter.WITH_FINDINGS) {
+            submitWorkbenchState(); // the filter keeps the selected file listed
+        }
         ReviewDiffEditor editor = this.diffEditor;
         if (editor == null) {
             return; // the tab is disposed: nothing is selected anywhere
@@ -1598,6 +1617,82 @@ final class ReviewTabProvider {
      * A tab whose first load has not resolved its scope yet has nothing to
      * re-run — that load reads fresh state. EDT.
      */
+    // ---- the review workbench (spec §3) -------------------------------------
+
+    /** A workbench pane fed with every new {@link WorkbenchState}. EDT. */
+    interface WorkbenchView {
+        void render(WorkbenchState state);
+    }
+
+    /**
+     * Rebuilds the workbench state from the latest snapshot and the
+     * workbench's own choices, then pushes it to the attached views on the
+     * EDT. Off the EDT: it runs on the snapshot's thread or the plugin's
+     * executor, never on the EDT itself.
+     */
+    private void rebuildWorkbenchState() {
+        ReviewTabModel.Snapshot current = this.snapshot;
+        ReviewScope scope = this.scope;
+        if (current == null || scope == null || disposed.get()) {
+            return;
+        }
+        WorkbenchState state = WorkbenchState.of(subjectOf(scope), WorkbenchState.Mode.LOCAL, current,
+                workbenchFilter, Optional.ofNullable(selectedPath()), workbenchView);
+        workbenchState = state;
+        onEdt(() -> {
+            if (disposed.get()) {
+                return;
+            }
+            for (WorkbenchView view : List.copyOf(workbenchViews)) {
+                view.render(state);
+            }
+        });
+    }
+
+    private void submitWorkbenchState() {
+        try {
+            plugin.executor().execute(this::rebuildWorkbenchState);
+        } catch (RejectedExecutionException e) {
+            // The plugin is shutting down: nothing is left to render the state.
+        }
+    }
+
+    /** Attaches a workbench view until {@code parent} is disposed, and renders the current state into it. EDT. */
+    private void attachWorkbenchView(WorkbenchView view, Disposable parent) {
+        workbenchViews.add(view);
+        Disposer.register(parent, () -> workbenchViews.remove(view));
+        WorkbenchState current = workbenchState;
+        if (current != null) {
+            view.render(current);
+        }
+    }
+
+    /** The workbench navigator's filter toggle (EDT): remembered, then the state is rebuilt off the EDT. */
+    private void workbenchFilterChanged(WorkbenchState.Filter filter) {
+        workbenchFilter = Objects.requireNonNull(filter, "filter");
+        submitWorkbenchState();
+    }
+
+    /**
+     * A Files navigator over the live review for a new workbench editor,
+     * plus {@code header} fed with every state; both detach and the
+     * navigator's tree is disposed with {@code parent}. Empty when the
+     * project has no live Review content. EDT.
+     */
+    static Optional<JComponent> hostedNavigator(Project project, Disposable parent,
+                                                Consumer<WorkbenchState> header) {
+        ReviewTabProvider provider = project.getUserData(LIVE_PROVIDER);
+        if (provider == null || provider.disposed.get()) {
+            return Optional.empty();
+        }
+        ReviewWorkbenchNavigator navigator = new ReviewWorkbenchNavigator(project, provider::selected,
+                provider::workbenchFilterChanged);
+        Disposer.register(parent, navigator);
+        provider.attachWorkbenchView(navigator::render, parent);
+        provider.attachWorkbenchView(header::accept, parent);
+        return Optional.of(navigator);
+    }
+
     /**
      * The live review's diff for a new workbench editor
      * ({@link ReviewWorkbenchEditor.Host}): empty when the project has no

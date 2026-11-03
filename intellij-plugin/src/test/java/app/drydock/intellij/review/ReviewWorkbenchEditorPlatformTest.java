@@ -1,13 +1,18 @@
 package app.drydock.intellij.review;
 
 import com.intellij.diff.fragments.LineFragment;
+import app.drydock.intellij.review.workbench.model.WorkbenchState;
 import com.intellij.diff.DiffContentFactory;
 import com.intellij.diff.requests.SimpleDiffRequest;
 import com.intellij.diff.util.Side;
 import com.intellij.ide.util.PropertiesComponent;
+import com.intellij.openapi.Disposable;
+import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.fileEditor.FileEditorProvider;
+import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.Disposer;
 import com.intellij.testFramework.LightVirtualFile;
+import com.intellij.testFramework.TestActionEvent;
 import com.intellij.testFramework.fixtures.BasePlatformTestCase;
 import com.intellij.ui.components.JBLabel;
 
@@ -16,6 +21,7 @@ import javax.swing.SwingUtilities;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.Consumer;
 
 /**
  * The review workbench tab in a booted IDE: one reusable file per project,
@@ -45,7 +51,7 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
 
     public void testWithoutALiveReviewTheCentreSaysSo() {
         ReviewWorkbenchEditor editor = new ReviewWorkbenchEditor(getProject(), ReviewWorkbenchFile.of(getProject()),
-                (project, parent) -> Optional.empty());
+                NO_REVIEW);
         try {
             assertEquals(ReviewWorkbenchEditor.NO_REVIEW_TEXT,
                     ((JBLabel) editor.inboxSplitter.getFirstComponent()).getText());
@@ -66,7 +72,7 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
         assertEquals("the first show opens the workbench", 1, opens.size());
 
         ReviewWorkbenchEditor editor = new ReviewWorkbenchEditor(getProject(), ReviewWorkbenchFile.of(getProject()),
-                (project, parent) -> Optional.of(diff.host(project, parent)));
+                diffOnly(diff));
         JComponent focus = editor.getPreferredFocusedComponent();
         assertNotNull(focus);
         assertTrue("the diff is inside the workbench",
@@ -81,7 +87,7 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
 
     public void testTheLayoutIsNavigatorDiffInboxOverTheOutbox() {
         ReviewWorkbenchEditor editor = new ReviewWorkbenchEditor(getProject(), ReviewWorkbenchFile.of(getProject()),
-                (project, parent) -> Optional.empty());
+                NO_REVIEW);
         try {
             assertTrue("the outbox sits below", editor.outboxSplitter.isVertical());
             assertSame(editor.navSplitter, editor.outboxSplitter.getFirstComponent());
@@ -105,13 +111,13 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
         String saved = properties.getValue(ReviewWorkbenchEditor.NAV_KEY);
         try {
             ReviewWorkbenchEditor first = new ReviewWorkbenchEditor(getProject(),
-                    ReviewWorkbenchFile.of(getProject()), (project, parent) -> Optional.empty());
+                    ReviewWorkbenchFile.of(getProject()), NO_REVIEW);
             first.navSplitter.setProportion(0.33f);
             assertEquals("0.33", properties.getValue(ReviewWorkbenchEditor.NAV_KEY));
             Disposer.dispose(first);
 
             ReviewWorkbenchEditor second = new ReviewWorkbenchEditor(getProject(),
-                    ReviewWorkbenchFile.of(getProject()), (project, parent) -> Optional.empty());
+                    ReviewWorkbenchFile.of(getProject()), NO_REVIEW);
             // The splitter loads the stored value when first shown (addNotify);
             // a headless test is never shown, so it asks for the load itself.
             second.navSplitter.setAndLoadSplitterProportionKey(ReviewWorkbenchEditor.NAV_KEY);
@@ -120,6 +126,60 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
         } finally {
             properties.setValue(ReviewWorkbenchEditor.NAV_KEY, saved);
         }
+    }
+
+    public void testTheHeaderNamesTheSubjectAndTheProgress() {
+        WorkbenchState state = WorkbenchState.of("drydock", WorkbenchState.Mode.LOCAL,
+                new ReviewTabModel.Snapshot(List.of(), 4, 1), WorkbenchState.Filter.ALL, Optional.empty(),
+                WorkbenchState.View.CHANGES_ONLY);
+        assertEquals("drydock  ·  1 / 4 reviewed", ReviewWorkbenchEditor.headerText(state));
+    }
+
+    public void testTheNavigatorsToggleAsksForTheOtherFilter() {
+        List<WorkbenchState.Filter> asked = new ArrayList<>();
+        ReviewWorkbenchNavigator navigator = new ReviewWorkbenchNavigator(getProject(), row -> {
+        }, asked::add);
+        try {
+            AnActionEvent event = TestActionEvent.createTestEvent();
+            assertFalse(navigator.withFindingsAction().isSelected(event));
+            navigator.withFindingsAction().setSelected(event, true);
+            assertEquals(List.of(WorkbenchState.Filter.WITH_FINDINGS), asked);
+
+            navigator.render(WorkbenchState.of("drydock", WorkbenchState.Mode.LOCAL,
+                    new ReviewTabModel.Snapshot(List.of(), 0, 0), WorkbenchState.Filter.WITH_FINDINGS,
+                    Optional.empty(), WorkbenchState.View.CHANGES_ONLY));
+            assertTrue("the toggle follows the rendered state", navigator.withFindingsAction().isSelected(event));
+        } finally {
+            Disposer.dispose(navigator);
+        }
+    }
+
+    private static final ReviewWorkbenchEditor.Host NO_REVIEW = new ReviewWorkbenchEditor.Host() {
+        @Override
+        public Optional<ReviewWorkbenchEditor.HostedDiff> hostDiff(Project project, Disposable parent) {
+            return Optional.empty();
+        }
+
+        @Override
+        public Optional<JComponent> hostNavigator(Project project, Disposable parent,
+                                                  Consumer<WorkbenchState> header) {
+            return Optional.empty();
+        }
+    };
+
+    private static ReviewWorkbenchEditor.Host diffOnly(ReviewDiffEditor diff) {
+        return new ReviewWorkbenchEditor.Host() {
+            @Override
+            public Optional<ReviewWorkbenchEditor.HostedDiff> hostDiff(Project project, Disposable parent) {
+                return Optional.of(diff.host(project, parent));
+            }
+
+            @Override
+            public Optional<JComponent> hostNavigator(Project project, Disposable parent,
+                                                      Consumer<WorkbenchState> header) {
+                return Optional.empty();
+            }
+        };
     }
 
     private static ReviewDiffRequests.RequestContext context(String path) {

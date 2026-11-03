@@ -1,5 +1,6 @@
 package app.drydock.intellij.review;
 
+import app.drydock.intellij.review.workbench.model.WorkbenchState;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.fileEditor.FileEditor;
 import com.intellij.openapi.fileEditor.FileEditorState;
@@ -19,6 +20,7 @@ import java.awt.BorderLayout;
 import java.beans.PropertyChangeListener;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /**
@@ -61,6 +63,13 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
     interface Host {
         /** A diff for a new workbench editor, disposed with {@code parent}; empty when no review is live. EDT. */
         Optional<HostedDiff> hostDiff(Project project, Disposable parent);
+
+        /**
+         * A Files navigator for a new workbench editor, with {@code header}
+         * fed every {@link WorkbenchState}; both end with {@code parent}.
+         * Empty when no review is live. EDT.
+         */
+        Optional<JComponent> hostNavigator(Project project, Disposable parent, Consumer<WorkbenchState> header);
     }
 
     private final ReviewWorkbenchFile file;
@@ -77,7 +86,8 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
         Optional<HostedDiff> diff = host.hostDiff(project, this);
         JComponent centre = diff.map(HostedDiff::component).orElseGet(() -> emptyState(NO_REVIEW_TEXT));
 
-        navigator.add(emptyState(NAVIGATOR_EMPTY_TEXT), BorderLayout.CENTER);
+        navigator.add(host.hostNavigator(project, this, this::renderHeader)
+                .orElseGet(() -> emptyState(NAVIGATOR_EMPTY_TEXT)), BorderLayout.CENTER);
         inboxSplitter.setFirstComponent(centre);
         inboxSplitter.setSecondComponent(emptyState(INBOX_EMPTY_TEXT));
         navSplitter.setFirstComponent(navigator);
@@ -93,6 +103,16 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
         preferredFocus = diff.map(HostedDiff::preferredFocus).orElse(() -> centre);
     }
 
+    /** The header for {@code state}: the review's subject and its progress. EDT. */
+    private void renderHeader(WorkbenchState state) {
+        header.setText(headerText(state));
+    }
+
+    /** The header text (pure): "subject · k / n reviewed". */
+    static String headerText(WorkbenchState state) {
+        return state.subject() + "  ·  " + state.progressText();
+    }
+
     private static JComponent emptyState(String text) {
         JBLabel label = new JBLabel(text, SwingConstants.CENTER);
         label.setForeground(UIUtil.getContextHelpForeground());
@@ -101,7 +121,18 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
 
     /** The production host: the project's live Review content ({@code ReviewTabProvider}). */
     static Host liveHost() {
-        return ReviewTabProvider::hostedDiff;
+        return new Host() {
+            @Override
+            public Optional<HostedDiff> hostDiff(Project project, Disposable parent) {
+                return ReviewTabProvider.hostedDiff(project, parent);
+            }
+
+            @Override
+            public Optional<JComponent> hostNavigator(Project project, Disposable parent,
+                                                      Consumer<WorkbenchState> header) {
+                return ReviewTabProvider.hostedNavigator(project, parent, header);
+            }
+        };
     }
 
     @Override
