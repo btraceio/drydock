@@ -136,6 +136,18 @@ class ReviewDiffInlaysTest {
         List<Integer> lines() {
             return inserted.stream().map(i -> i.line).toList();
         }
+
+        /** Every range drawn: "start..end" per call, and whether its handle was released. */
+        final List<String> ranges = new ArrayList<>();
+        final List<FakeGutterMark> rangeHandles = new ArrayList<>();
+
+        @Override
+        public ReviewDiffInlays.Owned addFindingRange(int startLine, int endLine, ReviewAnnotation finding) {
+            ranges.add(startLine + ".." + endLine);
+            FakeGutterMark handle = new FakeGutterMark();
+            rangeHandles.add(handle);
+            return handle;
+        }
     }
 
     private static final class RecordingCards implements ReviewDiffInlays.CardFactory {
@@ -208,6 +220,24 @@ class ReviewDiffInlaysTest {
         @Override
         public void onAfterRediff(Runnable decorate) {
             afterRediff.add(decorate);
+        }
+
+        boolean stale;
+        final List<Runnable> onStale = new ArrayList<>();
+
+        @Override
+        public boolean stale() {
+            return stale;
+        }
+
+        @Override
+        public void onStale(Runnable callback) {
+            onStale.add(callback);
+        }
+
+        void turnStale() {
+            stale = true;
+            onStale.forEach(Runnable::run);
         }
     }
 
@@ -356,6 +386,65 @@ class ReviewDiffInlaysTest {
 
         assertEquals(List.of(1), right.lines());
         assertEquals(List.of(2), left.lines());
+    }
+
+    @Test
+    void aStaleRequestDropsItsDecorationsAndDrawsNoNewOnes() {
+        FakeEditor left = new FakeEditor();
+        FakeEditor right = new FakeEditor();
+        FakeViewer viewer = new FakeViewer("src/A.java", left, right);
+        FakeEdt edt = new FakeEdt();
+        ReviewDiffInlays inlays = new ReviewDiffInlays(edt, new FixedHosts(viewer), new RecordingCards());
+        ReviewAnnotation onNew = finding("f1", "src/A.java", "n2", Triage.PROPOSED, AnnotationStatus.OPEN);
+
+        onEdt(() -> {
+            inlays.setDecorations(decorations("src/A.java", List.of(onNew), "n2"));
+            inlays.viewerChanged(ANY_VIEWER);
+            edt.pump();
+        });
+        int drawnBefore = right.inserted.size();
+        Inserted live = right.inserted.get(drawnBefore - 1);
+        assertFalse(live.inlay.released, "the card is live before the edit");
+
+        // The file is edited while the diff is open: its line keys no longer
+        // address its lines, so the card goes and no rebuild brings it back.
+        onEdt(() -> {
+            viewer.turnStale();
+            edt.pump();
+            edt.pump();
+            inlays.rebuildRequested();
+            edt.pump();
+        });
+        // (FakeEditor hands out the first matching entry's gutter mark for a
+        // redraw, so marks are checked on that entry, inlays on every entry.)
+        assertTrue(right.inserted.stream().allMatch(i -> i.inlay.released), "every drawn card is released");
+        assertTrue(right.inserted.get(0).mark.removed, "the gutter mark is removed");
+        assertEquals(drawnBefore, right.inserted.size(), "nothing new drawn on a stale request");
+    }
+
+    @Test
+    void aFindingsRangeIsDrawnFromItsStartToItsEndKeyAndReleasedWithTheCard() {
+        FakeEditor left = new FakeEditor();
+        FakeEditor right = new FakeEditor();
+        FakeViewer viewer = new FakeViewer("src/A.java", left, right);
+        FakeEdt edt = new FakeEdt();
+        ReviewDiffInlays inlays = new ReviewDiffInlays(edt, new FixedHosts(viewer), new RecordingCards());
+        ReviewAnnotation spanning = new ReviewAnnotation(
+                "s1", "f1", "src/A.java", "n2", "n5",
+                Severity.BLOCKING, Confidence.HIGH, Optional.of("Leak"), "reviewer",
+                NOW, List.of(), Optional.empty(), Optional.empty(), List.of(), List.of(), Optional.empty(),
+                AnnotationStatus.OPEN, Optional.empty(), false, Triage.PROPOSED, Optional.empty());
+
+        onEdt(() -> {
+            inlays.setDecorations(decorations("src/A.java", List.of(spanning), "n2", "n5"));
+            inlays.viewerChanged(ANY_VIEWER);
+            edt.pump();
+        });
+        assertEquals("1..4", right.ranges.get(right.ranges.size() - 1));
+        assertTrue(left.ranges.isEmpty(), "a right-side finding marks only the right editor");
+
+        onEdt(inlays::dispose);
+        assertTrue(right.rangeHandles.stream().allMatch(handle -> handle.removed), "released with the layer");
     }
 
     // ---- unified mapping ----------------------------------------------------

@@ -148,10 +148,10 @@ class ReviewTabBrowserTest {
         List<ReviewTabBrowser.FileRowDisplay> rows = ReviewTabBrowser.nodeRows(snapshot);
         assertEquals(List.of("a.txt", "b.txt", "c.txt", "d.bin"),
                 rows.stream().map(ReviewTabBrowser.FileRowDisplay::path).toList());
-        assertEquals("a.txt  ◆ 1", rows.get(0).text());
+        assertEquals("a.txt  ◆ 1  0/1 hunk", rows.get(0).text());
         assertTrue(rows.get(0).tooltip().isEmpty());
-        assertEquals("b.txt  ✓", rows.get(1).text());
-        assertEquals("c.txt  ○", rows.get(2).text());
+        assertEquals("b.txt  ✓  1/1 hunk", rows.get(1).text());
+        assertEquals("c.txt  ○  0/1 hunk", rows.get(2).text());
         assertEquals(Optional.of(ReviewTabModel.CHANGES_HINT), rows.get(2).tooltip());
         assertEquals("d.bin  no text changes to review", rows.get(3).text());
         assertTrue(rows.get(3).tooltip().isEmpty());
@@ -180,7 +180,7 @@ class ReviewTabBrowserTest {
                 List.of(), Optional.of(BASE));
 
         ReviewTabBrowser.FileRowDisplay row = ReviewTabBrowser.nodeRows(snapshot).get(0);
-        assertEquals("a.txt  ◆ 3", row.text());
+        assertEquals("a.txt  ◆ 3  0/1 hunk", row.text());
         assertEquals(3, row.findings().size()); // resolved and dismissed are hidden
         // severity is the row's icon and tooltip, never a prefix in the text
         assertEquals("leak  :1", row.findings().get(0).text());
@@ -212,7 +212,7 @@ class ReviewTabBrowserTest {
         assertEquals(2, root.getChildCount());
 
         ReviewTabBrowser.FileNode a = (ReviewTabBrowser.FileNode) root.getChildAt(0);
-        assertEquals("a.txt  ◆ 1", a.getTextPresentation());
+        assertEquals("a.txt  ◆ 1  0/1 hunk", a.getTextPresentation());
         assertEquals("a.txt", a.getUserObject().path());
         assertEquals(2, a.getChildCount()); // the finding child, then the footer
         ReviewTabBrowser.FindingNode finding = (ReviewTabBrowser.FindingNode) a.getChildAt(0);
@@ -222,7 +222,7 @@ class ReviewTabBrowserTest {
         assertEquals("1 resolved findings hidden", footer.getUserObject());
 
         ReviewTabBrowser.FileNode b = (ReviewTabBrowser.FileNode) root.getChildAt(1);
-        assertEquals("b.txt  ✓", b.getTextPresentation());
+        assertEquals("b.txt  ✓  1/1 hunk", b.getTextPresentation());
         assertEquals(0, b.getChildCount());
     }
 
@@ -262,7 +262,7 @@ class ReviewTabBrowserTest {
                 List.of(open("a.txt", "n1", "n1", Severity.BLOCKING, "leak")),
                 List.of(), Optional.empty());
         tree.accept(before);
-        assertEquals(List.of("a.txt  ◆ 1"), fileTexts(tree.build()));
+        assertEquals(List.of("a.txt  ◆ 1  0/1 hunk"), fileTexts(tree.build()));
 
         ReviewTabModel.Snapshot after = snapshot(
                 diff(file("a.txt", hunk(A_LINES)), file("b.txt", hunk(B_LINES))),
@@ -271,7 +271,7 @@ class ReviewTabBrowserTest {
                         verdict(digestB(), ReviewVerdict.Decision.APPROVED)),
                 Optional.of(BASE));
         tree.accept(after);
-        assertEquals(List.of("a.txt  ✓", "b.txt  ✓"), fileTexts(tree.build()));
+        assertEquals(List.of("a.txt  ✓  1/1 hunk", "b.txt  ✓  1/1 hunk"), fileTexts(tree.build()));
 
         DefaultTreeModel rebuilt = tree.build();
         ReviewTabBrowser.FileNode a = (ReviewTabBrowser.FileNode)

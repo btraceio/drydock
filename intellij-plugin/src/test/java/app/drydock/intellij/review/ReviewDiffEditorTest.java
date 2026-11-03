@@ -3,6 +3,7 @@ package app.drydock.intellij.review;
 import com.intellij.diff.FrameDiffTool;
 import com.intellij.diff.fragments.LineFragment;
 import com.intellij.diff.requests.DiffRequest;
+import com.intellij.diff.requests.MessageDiffRequest;
 import com.intellij.diff.util.Side;
 
 import org.junit.jupiter.api.Test;
@@ -22,7 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * inlays"): first request seeding, in-place swap, reopen after close with
  * a disposed processor ignored, stale selection completions dropped, and
  * the EDT contract. Everything runs headless through the seams — the
- * platform plumbing ({@code DiffVirtualFile.createProcessor}) is the thin
+ * platform plumbing (the workbench editor's {@code host}) is the thin
  * bridge this state machine sits under, exercised live in the IDE gate.
  */
 class ReviewDiffEditorTest {
@@ -89,6 +90,16 @@ class ReviewDiffEditorTest {
     // ---- first request seeding ---------------------------------------------
 
     @Test
+    void aProcessorCreatedBeforeAnyFileIsPickedAsksForOne() {
+        ReviewDiffEditor editor = editor(new RecordingOpener(), new RecordingRequests());
+
+        DiffRequest seed = onEdtGet(editor::seedRequest);
+
+        assertTrue(seed instanceof MessageDiffRequest, "a public message request, not the internal loading one");
+        assertEquals(ReviewDiffEditor.NO_FILE_TEXT, ((MessageDiffRequest) seed).getMessage());
+    }
+
+    @Test
     void firstShowOpensTheTabAndItsNewProcessorIsSeededWithTheCurrentRequest() {
         RecordingOpener opener = new RecordingOpener();
         RecordingRequests requests = new RecordingRequests();
@@ -104,7 +115,7 @@ class ReviewDiffEditorTest {
         assertEquals("src/A.java", onEdtGet(() -> editor.seedRequest().getTitle()));
         assertEquals(List.of("src/A.java"),
                 requests.contexts.stream().map(ReviewDiffRequests.RequestContext::path).toList());
-        assertEquals("src/A.java", onEdtGet(editor::currentTitle));
+        assertEquals("src/A.java", onEdtGet(() -> editor.seedRequest().getTitle()));
     }
 
     // ---- swap in place ------------------------------------------------------
@@ -122,7 +133,7 @@ class ReviewDiffEditorTest {
 
         assertEquals(1, opener.opens);
         assertEquals(List.of(requests.built.get(0)), processor.applied);
-        assertEquals("src/B.java", onEdtGet(editor::currentTitle));
+        assertEquals("src/B.java", onEdtGet(() -> editor.seedRequest().getTitle()));
     }
 
     // ---- reopen after close -------------------------------------------------

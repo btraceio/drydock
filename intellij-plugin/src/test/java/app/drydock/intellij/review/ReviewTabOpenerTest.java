@@ -75,6 +75,7 @@ class ReviewTabOpenerTest {
                 "resolve: /repo link=" + link.id(),
                 "hasData: scope-1",
                 "activate: Drydock Review",
+                "openWorkbench",
                 "reloadTab"), calls);
     }
 
@@ -90,6 +91,7 @@ class ReviewTabOpenerTest {
                 "resolve: /repo link=" + link.id(),
                 "hasData: scope-1",
                 "activate: Drydock Review",
+                "openWorkbench",
                 "reloadTab"), calls);
     }
 
@@ -103,6 +105,7 @@ class ReviewTabOpenerTest {
                 "resolve: /repo link=<unbound>",
                 "hasData: scope-1",
                 "activate: Drydock Review",
+                "openWorkbench",
                 "reloadTab"), calls);
     }
 
@@ -126,6 +129,7 @@ class ReviewTabOpenerTest {
                 "placeholder: Loading review…",
                 "resolve: /nowhere link=" + link.id(),
                 "activate: Drydock Review",
+                "openWorkbench",
                 "reloadTab"), calls);
     }
 
@@ -139,7 +143,8 @@ class ReviewTabOpenerTest {
         assertTrue(calls.indexOf("saveDocuments") < calls.indexOf("resolve: /repo link=" + link.id()),
                 calls::toString);
         assertEquals("reloadTab", calls.get(calls.size() - 1), calls::toString);
-        assertTrue(calls.indexOf("activate: Drydock Review") < calls.indexOf("reloadTab"), calls::toString);
+        assertTrue(calls.indexOf("activate: Drydock Review") < calls.indexOf("openWorkbench"), calls::toString);
+        assertTrue(calls.indexOf("openWorkbench") < calls.indexOf("reloadTab"), calls::toString);
     }
 
     @Test
@@ -180,6 +185,7 @@ class ReviewTabOpenerTest {
                 "resolve: /repo link=<unbound>",
                 "hasData: scope-1",
                 "activate: Drydock Review",
+                "openWorkbench",
                 "reloadTab"), calls);
         // The seam: still recorded (the content never existed to consume
         // it), peekable, and spent exactly once by the take.
@@ -201,6 +207,7 @@ class ReviewTabOpenerTest {
                 "resolve: /repo link=<unbound>",
                 "hasData: scope-1",
                 "activate: Drydock Review",
+                "openWorkbench",
                 "reloadTab"), calls);
     }
 
@@ -318,6 +325,7 @@ class ReviewTabOpenerTest {
                 "resolve: /repo link=" + link.id(),
                 "hasData: scope-1",
                 "activate: Drydock Review",
+                "openWorkbench",
                 "reloadTab",
                 "offer: /repo scope-1",
                 "launch: /repo scope-1"), calls);
@@ -425,6 +433,11 @@ class ReviewTabOpenerTest {
             @Override
             public void reloadTab(Project project) {
                 calls.add("reloadTab");
+            }
+
+            @Override
+            public void openWorkbench(Project project) {
+                calls.add("openWorkbench");
             }
         };
     }

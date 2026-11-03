@@ -17,7 +17,6 @@ import com.intellij.ui.RoundedLineBorder;
 import com.intellij.ui.components.ActionLink;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBTextField;
-import com.intellij.ui.components.panels.BackgroundRoundedPanel;
 import com.intellij.util.ui.JBFont;
 import com.intellij.util.ui.HTMLEditorKitBuilder;
 import com.intellij.util.ui.JBUI;
@@ -38,7 +37,10 @@ import java.awt.Component;
 import java.awt.Dimension;
 import java.awt.EventQueue;
 import java.awt.FlowLayout;
+import java.awt.Graphics;
+import java.awt.Graphics2D;
 import java.awt.Insets;
+import java.awt.RenderingHints;
 import java.awt.event.ActionListener;
 import java.time.Clock;
 import java.time.Duration;
@@ -479,10 +481,35 @@ public final class FindingInlayCard extends JPanel {
         label.setFont(JBFont.small());
         label.setForeground(CodeReviewColorUtil.Review.INSTANCE.getStateForeground());
         label.setBorder(JBUI.Borders.empty(1, 6));
-        BackgroundRoundedPanel pill = new BackgroundRoundedPanel(TAG_ARC, new SingleComponentCenteringLayout());
+        Pill pill = new Pill();
         pill.setBackground(CodeReviewColorUtil.Review.INSTANCE.getStateBackground());
         pill.add(label);
         return pill;
+    }
+
+    /**
+     * The tag's rounded background. The platform's own rounded panel
+     * ({@code BackgroundRoundedPanel}) is internal API; this paints the same
+     * shape: its background colour filled as a rounded rectangle.
+     */
+    private static final class Pill extends JPanel {
+        Pill() {
+            super(new SingleComponentCenteringLayout());
+            setOpaque(false);
+        }
+
+        @Override
+        protected void paintComponent(Graphics g) {
+            Graphics2D g2 = (Graphics2D) g.create();
+            try {
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                g2.setColor(getBackground());
+                int arc = JBUI.scale(TAG_ARC);
+                g2.fillRoundRect(0, 0, getWidth(), getHeight(), arc, arc);
+            } finally {
+                g2.dispose();
+            }
+        }
     }
 
     private void renderThreadLines() {

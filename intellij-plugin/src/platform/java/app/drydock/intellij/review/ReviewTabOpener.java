@@ -45,10 +45,11 @@ import java.util.concurrent.atomic.AtomicReference;
  * binding flow: the window's own load (T13's provider) resolves the same
  * checkout read-mostly, so by the time it runs the registry already holds
  * the link-bound scope and the provider hands it out unchanged instead of
- * minting unbound (AC19). Once the window is active, an already-loaded
- * content re-runs its diff (spec "Refresh": the Changes link re-runs the
- * diff); a content that was only just created is computing its first
- * diff already.</p>
+ * minting unbound (AC19). Once the window is active, the review workbench
+ * tab opens over its content ({@link ReviewWorkbenchFile#open}), and an
+ * already-loaded content re-runs its diff (spec "Refresh": the Changes
+ * link re-runs the diff); a content that was only just created is
+ * computing its first diff already.</p>
  *
  * <p><strong>The host is the dedicated window</strong> (T7/T8): the
  * Review tree lives in the {@code Drydock Review} tool window —
@@ -83,6 +84,12 @@ public final class ReviewTabOpener {
 
         /** Re-runs the diff of the live content's scope ({@code ReviewTabProvider}); EDT, after the activation. */
         void reloadTab(Project project);
+
+        /**
+         * Opens the review workbench tab ({@link ReviewWorkbenchFile}) over the
+         * live content; EDT, after the activation created that content.
+         */
+        void openWorkbench(Project project);
     }
 
     /**
@@ -245,6 +252,7 @@ public final class ReviewTabOpener {
             return;
         }
         host.activate(project, ReviewToolWindowFactory.TOOL_WINDOW_ID);
+        host.openWorkbench(project);
         host.reloadTab(project);
     }
 
@@ -462,6 +470,11 @@ public final class ReviewTabOpener {
         @Override
         public void reloadTab(Project project) {
             ReviewTabProvider.reloadFromChangesLink(project);
+        }
+
+        @Override
+        public void openWorkbench(Project project) {
+            ReviewWorkbenchFile.open(project);
         }
     }
 

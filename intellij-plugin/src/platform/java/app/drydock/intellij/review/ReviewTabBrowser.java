@@ -381,9 +381,9 @@ public final class ReviewTabBrowser extends AsyncChangesBrowserBase {
         }
     }
 
-    /** The file row's text: the path, then the mark glyph (or the no-text phrase). */
+    /** The file row's text: the path, the mark glyph (or the no-text phrase), then the hunk counter. */
     static String fileText(ReviewTabModel.FileRow row) {
-        return row.path() + "  " + row.mark().text();
+        return row.path() + "  " + row.mark().text() + row.hunkProgress().map(progress -> "  " + progress).orElse("");
     }
 
     /** The file row's tooltip: the model's hint — a {@code CHANGES} decision, the stale hint, or none. */
@@ -428,6 +428,8 @@ public final class ReviewTabBrowser extends AsyncChangesBrowserBase {
             ReviewTabModel.FileRow row = getUserObject();
             renderer.append(row.path(), SimpleTextAttributes.REGULAR_ATTRIBUTES);
             renderer.append("  " + row.mark().text(), markAttributes(row.mark().kind()));
+            row.hunkProgress().ifPresent(progress ->
+                    renderer.append("  " + progress, SimpleTextAttributes.GRAYED_ATTRIBUTES));
             renderer.setIcon(AllIcons.FileTypes.Text);
             renderer.setToolTipText(fileTooltip(row).orElse(null));
         }

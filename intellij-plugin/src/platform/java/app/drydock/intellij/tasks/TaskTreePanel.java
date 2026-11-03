@@ -851,8 +851,10 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             if (e == null) {
                 return AnAction.EMPTY_ARRAY;
             }
+            // The built group's actions as they are: ActionGroup.getChildren
+            // is override-only API, the platform's to call, not ours.
             return TaskMenu.group(selected().orElse(null), selectedNodes(), actions,
-                    selectedProjectRoot().map(JiraTreeActions::jiraEnabled).orElse(false)).getChildren(e);
+                    selectedProjectRoot().map(JiraTreeActions::jiraEnabled).orElse(false)).getChildActionsOrStubs();
         }
     }
 

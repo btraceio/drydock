@@ -122,6 +122,13 @@
              are internal-visibility product modules on 2026.3 and stay
              compile-only in build.gradle.kts, resolved at runtime through
              intellij.platform.vcs.impl. -->
+        <!-- The review workbench (one reusable editor tab per project): the
+             review's diff hosted next to its navigator, inbox and outbox. -->
+        <fileEditorProvider
+                implementation="app.drydock.intellij.review.ReviewWorkbenchEditorProvider"/>
+        <!-- "Drydock: files in this review" in Find Usages / Find in Files. -->
+        <searchScopesProvider implementation="app.drydock.intellij.review.ReviewSearchScopeProvider"/>
+
         <toolWindow id="Drydock Review" anchor="left" secondary="false"
                     icon="/icons/drydock.svg"
                     factoryClass="app.drydock.intellij.review.ReviewToolWindowFactory"/>

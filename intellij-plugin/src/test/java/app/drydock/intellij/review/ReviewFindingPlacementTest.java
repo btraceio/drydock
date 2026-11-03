@@ -283,4 +283,34 @@ class ReviewFindingPlacementTest {
         Placement placement = ReviewFindingPlacement.placement("n5", rowKeys, FALLBACK);
         assertTrue(placement.drifted());
     }
+
+    // ---- the finding's range (workbench: range highlighter + stripe mark) ----
+
+    @Test
+    void aFindingSpansItsStartToItsEndKeyOnOneSide() {
+        assertEquals(Optional.of(new ReviewFindingPlacement.Range(Side.RIGHT, 3, 6)),
+                ReviewFindingPlacement.range("n4", "n7", Set.of("n4", "n7")));
+        assertEquals(Optional.of(new ReviewFindingPlacement.Range(Side.LEFT, 1, 1)),
+                ReviewFindingPlacement.range("o2", "o2", Set.of("o2")));
+    }
+
+    @Test
+    void anUntrustworthyEndKeyShrinksTheRangeToTheStartLine() {
+        Set<String> rows = Set.of("n4", "o9", "n2");
+        assertEquals(Optional.of(new ReviewFindingPlacement.Range(Side.RIGHT, 3, 3)),
+                ReviewFindingPlacement.range("n4", "n8", rows), "end not in the current diff");
+        assertEquals(Optional.of(new ReviewFindingPlacement.Range(Side.RIGHT, 3, 3)),
+                ReviewFindingPlacement.range("n4", "o9", rows), "end on the other side");
+        assertEquals(Optional.of(new ReviewFindingPlacement.Range(Side.RIGHT, 3, 3)),
+                ReviewFindingPlacement.range("n4", "n2", rows), "end before the start");
+        assertEquals(Optional.of(new ReviewFindingPlacement.Range(Side.RIGHT, 3, 3)),
+                ReviewFindingPlacement.range("n4", "garbage", rows), "malformed end");
+    }
+
+    @Test
+    void aDriftedOrMalformedStartHasNoRange() {
+        assertEquals(Optional.empty(), ReviewFindingPlacement.range("n5", "n6", Set.of("n6")));
+        assertEquals(Optional.empty(), ReviewFindingPlacement.range("x5", "n6", Set.of("n6")));
+        assertEquals(Optional.empty(), ReviewFindingPlacement.range(null, "n6", Set.of("n6")));
+    }
 }

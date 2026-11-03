@@ -143,7 +143,34 @@ public final class ReviewTabModel {
                         ? Optional.empty()
                         : Optional.of(hidden + " resolved findings hidden"),
                 List.copyOf(hunkIds),
-                List.copyOf(hunkDigests));
+                List.copyOf(hunkDigests),
+                reviewedHunks(distinctDigests, verdictsByDigest, currentBaseCommit),
+                distinctDigests.size());
+    }
+
+    /**
+     * How many of a file's distinct hunks are reviewed: a hunk whose digest
+     * has a verdict that is fresh against the current base and approved
+     * (by the human or the agent), the same per-hunk rule the file's
+     * {@link Mark.Kind#REVIEWED} mark applies to all of them. A missing base
+     * commit vouches for none (Q4, conservative).
+     */
+    private static int reviewedHunks(Set<String> distinctDigests,
+                                     Map<String, ReviewVerdict> verdictsByDigest,
+                                     Optional<String> currentBaseCommit) {
+        if (currentBaseCommit.isEmpty()) {
+            return 0;
+        }
+        int reviewed = 0;
+        for (String digest : distinctDigests) {
+            ReviewVerdict verdict = verdictsByDigest.get(digest);
+            if (verdict != null && !verdict.staleAgainst(currentBaseCommit.get())
+                    && (verdict.decision() == ReviewVerdict.Decision.APPROVED
+                    || verdict.decision() == ReviewVerdict.Decision.AUTO_APPROVED)) {
+                reviewed++;
+            }
+        }
+        return reviewed;
     }
 
     /**
@@ -237,6 +264,19 @@ public final class ReviewTabModel {
     /** The tree rows in path order, plus the header's counts (AC8). */
     public record Snapshot(List<FileRow> files, int reviewableFiles, int reviewedFiles) {
 
+        /**
+         * The same snapshot showing only files with open findings, plus
+         * {@code keep} (the selected file, so a filter never hides what the
+         * diff shows). The counts are the whole review's, unchanged.
+         */
+        public Snapshot withFindingsOnly(Optional<String> keep) {
+            Objects.requireNonNull(keep, "keep");
+            List<FileRow> shown = files.stream()
+                    .filter(row -> !row.findings().isEmpty() || keep.map(row.path()::equals).orElse(false))
+                    .toList();
+            return new Snapshot(shown, reviewableFiles, reviewedFiles);
+        }
+
         /** The header text: {@code <k> / <n> reviewed}, where n counts only files with at least one hunk. */
         public String headerText() {
             return reviewedFiles + " / " + reviewableFiles + " reviewed";
@@ -248,7 +288,8 @@ public final class ReviewTabModel {
      * needs kind/staged/untracked), its mark, its finding children, its
      * resolved-findings footer, and the hunk ids and digests AC4's comparison
      * reads back (one entry per hunk, in hunk order, ids from {@code
-     * HunkIds.hunkId(path, index)}).
+     * HunkIds.hunkId(path, index)}), and how many of its distinct hunks are
+     * reviewed out of how many.
      */
     public record FileRow(
             String path,
@@ -257,7 +298,9 @@ public final class ReviewTabModel {
             List<FindingRow> findings,
             Optional<String> resolvedFindingsFooter,
             List<String> hunkIds,
-            List<String> hunkDigests
+            List<String> hunkDigests,
+            int reviewedHunks,
+            int totalHunks
     ) {
         public FileRow {
             Objects.requireNonNull(path, "path");
@@ -267,6 +310,16 @@ public final class ReviewTabModel {
             Objects.requireNonNull(resolvedFindingsFooter, "resolvedFindingsFooter");
             hunkIds = List.copyOf(Objects.requireNonNull(hunkIds, "hunkIds"));
             hunkDigests = List.copyOf(Objects.requireNonNull(hunkDigests, "hunkDigests"));
+            if (reviewedHunks < 0 || totalHunks < reviewedHunks) {
+                throw new IllegalArgumentException("reviewed " + reviewedHunks + " of " + totalHunks + " hunks");
+            }
+        }
+
+        /** The reviewed-hunks counter ("2/3 hunks"); empty for a file with no hunks. */
+        public Optional<String> hunkProgress() {
+            return totalHunks == 0
+                    ? Optional.empty()
+                    : Optional.of(reviewedHunks + "/" + totalHunks + (totalHunks == 1 ? " hunk" : " hunks"));
         }
     }
 

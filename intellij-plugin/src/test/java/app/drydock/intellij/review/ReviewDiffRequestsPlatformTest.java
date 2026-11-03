@@ -83,8 +83,8 @@ public class ReviewDiffRequestsPlatformTest extends BasePlatformTestCase {
         try {
             SimpleDiffRequest request = ReviewDiffRequests.toRequest(getProject(), parent, context);
             // The file-path title and the context (a value whose plan is
-            // treated as read-only), plus exactly
-            // the four keys the plan-only creation carries.
+            // treated as read-only), plus the review keys the plan-only
+            // creation carries.
             assertEquals("src/a.txt", request.getTitle());
             assertSame(context, request.getUserData(ReviewDiffRequests.CONTEXT_KEY));
             assertEquals(Boolean.TRUE, request.getUserData(ReviewDiffRequests.REQUEST_KEY));

@@ -12,13 +12,16 @@ import com.intellij.diff.tools.util.side.TwosideTextDiffViewer;
 import com.intellij.diff.util.Side;
 import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.application.ApplicationManager;
+import com.intellij.openapi.editor.Document;
 import com.intellij.openapi.editor.Editor;
 import com.intellij.openapi.editor.Inlay;
 import com.intellij.openapi.editor.colors.EditorFontType;
 import com.intellij.openapi.editor.ex.EditorEx;
 import com.intellij.openapi.editor.markup.GutterIconRenderer;
 import com.intellij.openapi.editor.markup.HighlighterLayer;
+import com.intellij.openapi.editor.markup.HighlighterTargetArea;
 import com.intellij.openapi.editor.markup.RangeHighlighter;
+import com.intellij.openapi.editor.markup.TextAttributes;
 import com.intellij.util.ui.JBUI;
 
 import java.awt.EventQueue;
@@ -97,6 +100,19 @@ public final class ReviewDiffInlays {
 
         /** Registers the viewer-owned after-rediff callback. */
         void onAfterRediff(Runnable decorate);
+
+        /**
+         * The request no longer shows the reviewed text
+         * ({@link ReviewDiffContents.Staleness}): line keys no longer address
+         * its lines, so nothing keyed by them is drawn.
+         */
+        default boolean stale() {
+            return false;
+        }
+
+        /** Registers a callback for the moment the request turns {@link #stale()}; any thread. */
+        default void onStale(Runnable callback) {
+        }
     }
 
     /** Converts the platform's active viewer into a {@link ViewerHost}; null means "not decoratable". */
@@ -113,6 +129,16 @@ public final class ReviewDiffInlays {
 
         /** Adds the severity gutter mark at {@code line}; the handle removes the highlighter. */
         Owned addGutterMark(int line, ReviewAnnotation finding);
+
+        /**
+         * Marks the finding's lines {@code startLine..endLine} (inclusive) with
+         * a range highlighter whose error-stripe mark shows on the scrollbar
+         * ruler in the severity's colour; the handle removes it. An editor
+         * that cannot draw ranges draws none.
+         */
+        default Owned addFindingRange(int startLine, int endLine, ReviewAnnotation finding) {
+            return () -> { };
+        }
     }
 
     /** One decoration the layer owns: release() removes it (inlay dispose / highlighter removal). */
@@ -220,6 +246,9 @@ public final class ReviewDiffInlays {
         if (host == null) {
             return; // no editor lines to address (binary, unknown viewer)
         }
+        // A request turns stale on the viewer's rediff thread; the rebuild
+        // that follows on the EDT then finds it stale and draws nothing.
+        host.onStale(() -> edt.invokeLater(this::rebuildRequested));
         if (host.rediffPending()) {
             host.onAfterRediff(this::decorateNow);
         } else {
@@ -285,6 +314,9 @@ public final class ReviewDiffInlays {
         if (!host.requestPath().map(current.path()::equals).orElse(false)) {
             return; // the viewer shows another file's request: never paint A's findings on B's diff
         }
+        if (host.stale()) {
+            return; // the file was edited after the review: its line keys point at other lines now
+        }
         for (ReviewAnnotation finding : current.findings()) {
             if (finding.resolved() || !finding.file().equals(current.path())) {
                 continue; // every unresolved finding of this file, any triage (Undo stays reachable)
@@ -300,6 +332,14 @@ public final class ReviewDiffInlays {
             inlays.add(editor.insertCardAfter(line, card));
             liveCards.add(card);
             marks.add(editor.addGutterMark(line, finding));
+            ReviewFindingPlacement.range(finding.startKey(), finding.endKey(), current.rowKeys())
+                    .ifPresent(range -> {
+                        int start = host.oneSideLine(range.side(), range.startLine());
+                        int end = host.oneSideLine(range.side(), range.endLine());
+                        if (start >= 0 && end >= start && end < editor.lineCount()) {
+                            marks.add(editor.addFindingRange(start, end, finding));
+                        }
+                    });
         }
     }
 
@@ -400,6 +440,22 @@ public final class ReviewDiffInlays {
         @Override public boolean rediffPending() { return viewer().hasPendingRediff(); }
 
         @Override public void onAfterRediff(Runnable decorate) { viewer().addListener(afterRediff(decorate)); }
+
+        @Override public boolean stale() {
+            ContentDiffRequest request = viewer().getRequest();
+            ReviewDiffContents.Staleness staleness =
+                    request == null ? null : request.getUserData(ReviewDiffContents.STALENESS_KEY);
+            return staleness != null && staleness.isStale();
+        }
+
+        @Override public void onStale(Runnable callback) {
+            ContentDiffRequest request = viewer().getRequest();
+            ReviewDiffContents.Staleness staleness =
+                    request == null ? null : request.getUserData(ReviewDiffContents.STALENESS_KEY);
+            if (staleness != null) {
+                staleness.onStale(callback);
+            }
+        }
     }
 
     /** The unified host: one oneside editor; side lines map through transferLineToOneside. */
@@ -496,6 +552,24 @@ public final class ReviewDiffInlays {
                     editor.getScrollPane().removeComponentListener(resize);
                     if (inlay.isValid()) {
                         inlay.dispose();
+                    }
+                };
+            }
+
+            @Override public Owned addFindingRange(int startLine, int endLine, ReviewAnnotation finding) {
+                Document document = editor.getDocument();
+                TextAttributes attributes = new TextAttributes();
+                attributes.setErrorStripeColor(editor.getColorsScheme()
+                        .getAttributes(SeverityPresentation.stripeKey(finding.effectiveSeverity()))
+                        .getErrorStripeColor());
+                RangeHighlighter highlighter = editor.getMarkupModel().addRangeHighlighter(
+                        document.getLineStartOffset(startLine), document.getLineEndOffset(endLine),
+                        HighlighterLayer.ADDITIONAL_SYNTAX, attributes, HighlighterTargetArea.LINES_IN_RANGE);
+                highlighter.setErrorStripeTooltip(finding.displayTitle());
+                highlighter.setThinErrorStripeMark(false);
+                return () -> {
+                    if (!editor.isDisposed() && highlighter.isValid()) {
+                        editor.getMarkupModel().removeHighlighter(highlighter);
                     }
                 };
             }
