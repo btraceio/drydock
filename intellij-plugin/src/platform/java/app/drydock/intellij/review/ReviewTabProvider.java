@@ -19,6 +19,8 @@ import app.drydock.intellij.review.workbench.model.InboxModel;
 import app.drydock.intellij.review.workbench.model.WorkbenchState;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.DiffSelection;
+import app.drydock.review.PendingQuestions;
+import app.drydock.review.ReviewInstructions;
 import app.drydock.review.AnnotationStore;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewScope;
@@ -192,6 +194,9 @@ final class ReviewTabProvider {
     private ReviewContents contents;
     private ReviewVerdictCommands commands;
     private ReviewTabScopes scopes;
+    /** The backend's pending questions and the selection questions it mints (Ask About Selection). */
+    private volatile PendingQuestions pendingQuestions;
+    private volatile SelectionAsks selectionAsks;
     /** The backend's annotation store; volatile: the store listeners read it from their own threads. */
     private volatile AnnotationStore store;
     /** The finding cards' write side; volatile: the card callbacks read it from the EDT. */
@@ -401,6 +406,8 @@ final class ReviewTabProvider {
         scopes = null;
         refresher = null;
         store = null;
+        pendingQuestions = null;
+        selectionAsks = null;
         triage = null;
         scope = null;
         snapshot = null;
@@ -485,6 +492,8 @@ final class ReviewTabProvider {
         }
         AnnotationStore annotations = backend.annotationStore();
         store = annotations;
+        pendingQuestions = backend.pendingQuestions();
+        selectionAsks = backend.selectionAsks();
         worktrees = new WorktreeService();
         git = new GitStatusService();
         contents = new ReviewContents(new GitExecutableLocator(), git);
@@ -1827,6 +1836,49 @@ final class ReviewTabProvider {
     /** What the inbox says once a comment is stored. */
     static final String COMMENT_ADDED = "Comment added to the Outbox.";
 
+    /** The inbox's text for a selection question's delivery (pure). */
+    static String askMessage(PromptOutcome outcome) {
+        return switch (outcome) {
+            case DELIVERED -> "Asked the agent. Its answer will arrive as a finding to triage.";
+            case REFUSED -> "The agent's session did not take the question: nothing was asked.";
+            case FAILED -> "Sending the question failed: nothing was asked.";
+        };
+    }
+
+    /** What the inbox says when no session can be asked. */
+    static final String ASK_NO_SESSION = "No agent session is bound to this review: nothing was asked.";
+
+    /**
+     * Asks the scope's bound session about a selection: a pending question
+     * is minted, its range remembered ({@link SelectionAsks}), and
+     * {@link ReviewInstructions#forSelectionAsk} submitted. A question that
+     * did not reach the agent is forgotten again. The submission is a
+     * blocking PTY write, so it runs on the plugin's executor.
+     */
+    private CompletableFuture<Optional<String>> askAboutSelection(DiffSelection.Range range, String question) {
+        ReviewScope current = scope;
+        PendingQuestions questions = pendingQuestions;
+        SelectionAsks asks = selectionAsks;
+        if (current == null || questions == null || asks == null) {
+            return CompletableFuture.completedFuture(Optional.of(STILL_LOADING));
+        }
+        Optional<ManagedSessionId> session = current.sessionId();
+        if (session.isEmpty()) {
+            return CompletableFuture.completedFuture(Optional.of(ASK_NO_SESSION));
+        }
+        return CompletableFuture.supplyAsync(() -> {
+            PendingQuestions.PendingAsk ask = questions.mint(current.id(),
+                    range.file() + ":" + range.startKey() + ".." + range.endKey(), session.get());
+            asks.remember(ask.questionId(), new SelectionAsks.Asked(current.id(), range, question, ask.askedAt()));
+            PromptOutcome outcome = promptSubmitter.apply(session.get(), ReviewInstructions.forSelectionAsk(
+                    ask.questionId(), current.id(), range.file(), range.startKey(), range.endKey(), question));
+            if (outcome != PromptOutcome.DELIVERED) {
+                asks.forget(ask.questionId());
+            }
+            return Optional.of(askMessage(outcome));
+        }, plugin.executor());
+    }
+
     /** The inbox's actions on the live review: the triage write side, the navigators, the inbox choice. */
     private final class InboxActions implements ReviewWorkbenchInbox.Actions {
 
@@ -1883,8 +1935,7 @@ final class ReviewTabProvider {
         public CompletableFuture<Optional<String>> submit(ReviewWorkbenchInbox.Composer composer, String text) {
             return switch (composer.mode()) {
                 case COMMENT -> addComment(composer.range(), text);
-                case ASK -> CompletableFuture.failedFuture(
-                        new IllegalStateException("Asking about a selection is not wired yet"));
+                case ASK -> askAboutSelection(composer.range(), text);
             };
         }
 

@@ -226,6 +226,28 @@ public final class ReviewInstructions {
      * reads the answer beside the code, not in this conversation.
      */
     /**
+     * What "Ask Reviewer About Selection…" sends (the IntelliJ workbench):
+     * the reviewer's question about lines of one file in the review, and how
+     * to answer it. One line ({@code sendPrompt} submits at the first
+     * newline): a newline in the question becomes a space. One
+     * {@code review_ask_answer} call closes the question.
+     */
+    public static String forSelectionAsk(String questionId, String scopeId, String file, String startKey,
+                                         String endKey, String question) {
+        Objects.requireNonNull(questionId, "questionId");
+        Objects.requireNonNull(scopeId, "scopeId");
+        Objects.requireNonNull(file, "file");
+        Objects.requireNonNull(startKey, "startKey");
+        Objects.requireNonNull(endKey, "endKey");
+        Objects.requireNonNull(question, "question");
+        String oneLine = question.replaceAll("[\\r\\n]+", " ").strip();
+        return "For review handle " + scopeId + ", the reviewer asks about " + file + " lines " + startKey
+                + ".." + endKey + ": \"" + oneLine + "\" -- read those lines in review_scope and answer with ONE"
+                + " review_ask_answer call (questionId " + questionId + ", answer: plain text, cite file:line when"
+                + " it matters); the reviewer reads it beside those lines";
+    }
+
+    /**
      * What the verdict bar's "Explain" sends: the agent reads the change
      * itself through the tools and replies in its own conversation, so this
      * carries the ask and the read-only shape of it, one line ({@code

@@ -167,6 +167,13 @@
                 description="Add a review comment on the selected lines of the diff">
             <add-to-group group-id="Diff.EditorPopupMenu" anchor="first"/>
         </action>
+        <action id="Drydock.Review.AskAboutSelection"
+                class="app.drydock.intellij.review.ReviewSelectionAction$Ask"
+                text="Ask Reviewer About Selection…"
+                description="Ask the review's agent about the selected lines; the answer arrives as a finding">
+            <add-to-group group-id="Diff.EditorPopupMenu" anchor="after"
+                          relative-to-action="Drydock.Review.CommentOnSelection"/>
+        </action>
         <action id="Drydock.NewTask"
                 class="app.drydock.intellij.tasks.NewTaskAction"
                 text="New Task…"

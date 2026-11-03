@@ -316,4 +316,16 @@ class ReviewInstructionsTest {
         assertTrue(rules.contains("exactly `opus`"), rules);
         assertFalse(rules.contains("\n"));
     }
+
+    @Test
+    void aSelectionAskIsOneLineNamingTheLinesTheQuestionAndTheAnswerTool() {
+        String prompt = ReviewInstructions.forSelectionAsk("ask-3", "rs_a", "src/A.java", "n10", "n12",
+                "Why is this\nsynchronized?\r\nIt is never shared.");
+
+        assertFalse(prompt.contains("\n") || prompt.contains("\r"), "sendPrompt submits at the first newline");
+        assertTrue(prompt.contains("review handle rs_a"));
+        assertTrue(prompt.contains("src/A.java lines n10..n12"));
+        assertTrue(prompt.contains("\"Why is this synchronized? It is never shared.\""));
+        assertTrue(prompt.contains("ONE review_ask_answer call (questionId ask-3"));
+    }
 }

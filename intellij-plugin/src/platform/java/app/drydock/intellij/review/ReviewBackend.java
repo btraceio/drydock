@@ -55,6 +55,8 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
     private static final Logger LOG = System.getLogger(ReviewBackend.class.getName());
 
     private final AnnotationStore annotationStore;
+    private final PendingQuestions pendingQuestions;
+    private final SelectionAsks selectionAsks;
     private final TourStore tourStore;
     private final DiffService diffService;
     private final GitStatusService gitStatusService;
@@ -94,8 +96,10 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
         diffService = new DiffService();
         gitStatusService = new GitStatusService();
         worktreeService = new WorktreeService();
-        // Nothing in the plugin mints asks yet, so the callback has no work.
-        PendingQuestions pendingQuestions = new PendingQuestions(answered -> { });
+        // The workbench's "Ask Reviewer About Selection…" mints asks; an
+        // answer to one becomes a finding at the asked range (SelectionAsks).
+        selectionAsks = new SelectionAsks(annotationStore);
+        pendingQuestions = new PendingQuestions(selectionAsks::answered);
         mcpRegistry = new McpSessionRegistry();
         configWriter = new McpConfigWriter(baseDir);
         // Both deliveries get a file so a credential is never a command-line
@@ -232,6 +236,16 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
     public void release(ManagedSessionId sessionId) {
         mcpRegistry.revoke(sessionId);
         configWriter.delete(sessionId);
+    }
+
+    /** The questions agents are asked to answer through {@code review_ask_answer}. */
+    public PendingQuestions pendingQuestions() {
+        return pendingQuestions;
+    }
+
+    /** The selection questions awaiting an answer, and where an answer goes. */
+    SelectionAsks selectionAsks() {
+        return selectionAsks;
     }
 
     public SessionReviewScopeResolver scopeResolver() {

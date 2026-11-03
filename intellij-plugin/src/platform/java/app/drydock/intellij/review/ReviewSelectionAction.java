@@ -65,4 +65,11 @@ abstract class ReviewSelectionAction extends AnAction implements DumbAware {
             super(ReviewWorkbenchInbox.Composer.Mode.COMMENT);
         }
     }
+
+    /** "Ask Reviewer About Selection…": the composer asks the session's agent about the selected lines. */
+    public static final class Ask extends ReviewSelectionAction {
+        public Ask() {
+            super(ReviewWorkbenchInbox.Composer.Mode.ASK);
+        }
+    }
 }

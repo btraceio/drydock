@@ -29,6 +29,8 @@ public class ReviewSelectionActionPlatformTest extends BasePlatformTestCase {
         List<String> ids = Arrays.stream(((DefaultActionGroup) group).getChildActionsOrStubs())
                 .map(child -> ActionManager.getInstance().getId(child)).toList();
         assertTrue(ids.toString(), ids.contains("Drydock.Review.CommentOnSelection"));
+        assertEquals("Ask follows Comment", ids.indexOf("Drydock.Review.CommentOnSelection") + 1,
+                ids.indexOf("Drydock.Review.AskAboutSelection"));
     }
 
     public void testItShowsOnlyInADrydockReviewDiffWithAnEditor() {
