@@ -247,6 +247,49 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
         }
     }
 
+    public void testTheModeChipSelectsLocalAndKeepsPullRequestDisabled() {
+        List<Consumer<WorkbenchState>> headers = new ArrayList<>();
+        ReviewWorkbenchEditor.Host host = new ReviewWorkbenchEditor.Host() {
+            @Override
+            public Optional<ReviewWorkbenchEditor.HostedDiff> hostDiff(Project project, Disposable parent) {
+                return Optional.empty();
+            }
+
+            @Override
+            public Optional<JComponent> hostNavigator(Project project, Disposable parent,
+                                                      Consumer<WorkbenchState> header) {
+                headers.add(header);
+                return Optional.empty();
+            }
+
+            @Override
+            public void changeView(Project project, WorkbenchState.View view) {
+            }
+        };
+        ReviewWorkbenchEditor editor = new ReviewWorkbenchEditor(getProject(), ReviewWorkbenchFile.of(getProject()),
+                host);
+        try {
+            ToggleAction local = (ToggleAction) editor.modeActions.getChildActionsOrStubs()[0];
+            ToggleAction pr = (ToggleAction) editor.modeActions.getChildActionsOrStubs()[1];
+            headers.get(0).accept(WorkbenchState.of("drydock", WorkbenchState.Mode.LOCAL,
+                    new ReviewTabModel.Snapshot(List.of(), 0, 0), WorkbenchState.Filter.ALL, Optional.empty(),
+                    WorkbenchState.View.CHANGES_ONLY));
+
+            AnActionEvent localEvent = TestActionEvent.createTestEvent(local);
+            local.update(localEvent);
+            assertTrue(local.isSelected(localEvent));
+            assertTrue(localEvent.getPresentation().isEnabled());
+
+            AnActionEvent prEvent = TestActionEvent.createTestEvent(pr);
+            pr.update(prEvent);
+            assertFalse(pr.isSelected(prEvent));
+            assertFalse("the PR mode arrives with W5", prEvent.getPresentation().isEnabled());
+            assertEquals(ReviewWorkbenchEditor.PR_LATER, prEvent.getPresentation().getDescription());
+        } finally {
+            Disposer.dispose(editor);
+        }
+    }
+
     private static final ReviewWorkbenchEditor.Host NO_REVIEW = new ReviewWorkbenchEditor.Host() {
         @Override
         public Optional<ReviewWorkbenchEditor.HostedDiff> hostDiff(Project project, Disposable parent) {

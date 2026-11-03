@@ -52,6 +52,7 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
     static final String CHANGES_ONLY = "Changes Only";
     static final String FULL_FILE = "Full File";
     private static final String TOOLBAR_PLACE = "DrydockReviewWorkbenchHeader";
+    static final String PR_LATER = "Pull request reviews arrive with the PR lane";
 
     /** Navigator | rest. */
     static final String NAV_KEY = "drydock.review.nav";
@@ -92,6 +93,8 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
     private WorkbenchState shown;
     /** The header's Changes only / Full file toggles. */
     final DefaultActionGroup viewActions;
+    /** The header's mode chip: Local changes | Pull request. */
+    final DefaultActionGroup modeActions;
     private final JBPanel<?> navigator = new JBPanel<>(new BorderLayout());
     final OnePixelSplitter navSplitter = new OnePixelSplitter(false, NAV_KEY, 0.2f);
     final OnePixelSplitter inboxSplitter = new OnePixelSplitter(false, INBOX_KEY, 0.75f);
@@ -116,11 +119,16 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
                 new ViewToggle(project, host, WorkbenchState.View.CHANGES_ONLY, CHANGES_ONLY),
                 new ViewToggle(project, host, WorkbenchState.View.FULL_FILE, FULL_FILE));
         ActionToolbar toolbar = ActionManager.getInstance().createActionToolbar(TOOLBAR_PLACE, viewActions, true);
+        modeActions = new DefaultActionGroup(
+                new ModeChip(WorkbenchState.Mode.LOCAL), new ModeChip(WorkbenchState.Mode.PR));
+        ActionToolbar modes = ActionManager.getInstance().createActionToolbar(TOOLBAR_PLACE, modeActions, true);
         JBPanel<?> top = new JBPanel<>(new BorderLayout());
+        top.add(modes.getComponent(), BorderLayout.WEST);
         top.add(header, BorderLayout.CENTER);
         top.add(toolbar.getComponent(), BorderLayout.EAST);
         JBPanel<?> panel = new JBPanel<>(new BorderLayout());
         toolbar.setTargetComponent(panel);
+        modes.setTargetComponent(panel);
         panel.add(top, BorderLayout.NORTH);
         panel.add(outboxSplitter, BorderLayout.CENTER);
         root = panel;
@@ -131,6 +139,46 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
     private void renderHeader(WorkbenchState state) {
         shown = state;
         header.setText(headerText(state));
+    }
+
+    /**
+     * One mode of the header's chip, selected when the rendered state is in
+     * that mode. Only {@link WorkbenchState.Mode#LOCAL} can be chosen until
+     * the PR lane (W5); the PR mode is shown, disabled, so the header does
+     * not shift when it arrives. Choosing the mode the review is in already
+     * changes nothing.
+     */
+    private final class ModeChip extends DumbAwareToggleAction {
+        private final WorkbenchState.Mode mode;
+
+        ModeChip(WorkbenchState.Mode mode) {
+            super(mode.label());
+            this.mode = mode;
+        }
+
+        @Override
+        public boolean isSelected(@NotNull AnActionEvent e) {
+            WorkbenchState state = shown;
+            return state != null && state.mode() == mode;
+        }
+
+        @Override
+        public void setSelected(@NotNull AnActionEvent e, boolean selected) {
+            // LOCAL is the only mode before W5, and it is selected already.
+        }
+
+        @Override
+        public void update(@NotNull AnActionEvent e) {
+            super.update(e);
+            boolean available = mode == WorkbenchState.Mode.LOCAL;
+            e.getPresentation().setEnabled(available);
+            e.getPresentation().setDescription(available ? null : PR_LATER);
+        }
+
+        @Override
+        public @NotNull ActionUpdateThread getActionUpdateThread() {
+            return ActionUpdateThread.EDT;
+        }
     }
 
     /** One of the two view choices; selected when the rendered state shows that view. */
@@ -171,7 +219,7 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
         }
     }
 
-    /** The header text (pure): "subject · k / n reviewed". */
+    /** The header text (pure): "subject · k / n reviewed"; the mode is the chip beside it. */
     static String headerText(WorkbenchState state) {
         return state.subject() + "  ·  " + state.progressText();
     }
