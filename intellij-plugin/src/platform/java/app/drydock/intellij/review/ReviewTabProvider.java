@@ -28,7 +28,6 @@ import com.intellij.openapi.Disposable;
 import com.intellij.openapi.actionSystem.ActionUpdateThread;
 import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.AnActionEvent;
-import com.intellij.openapi.actionSystem.DefaultActionGroup;
 import com.intellij.openapi.application.Application;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.fileEditor.ex.FileEditorManagerEx;
@@ -41,11 +40,13 @@ import com.intellij.openapi.vfs.newvfs.BulkFileListener;
 import com.intellij.openapi.vfs.newvfs.events.VFileEvent;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBPanel;
+import com.intellij.util.ui.UIUtil;
 import org.jetbrains.annotations.NotNull;
 
 import javax.swing.JButton;
 import javax.swing.JComponent;
 import javax.swing.JPanel;
+import javax.swing.SwingConstants;
 import javax.swing.border.EmptyBorder;
 import java.awt.BorderLayout;
 import java.io.IOException;
@@ -73,16 +74,19 @@ import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
+import java.util.stream.Stream;
 
 /**
- * The dedicated Drydock Review window's content (P3): the header
- * ({@code <k> / <n> reviewed}), the tree ({@link ReviewTabBrowser}) and the
- * status placeholder ({@link ReviewTabStatus}) over one review scope —
- * header, tree and status only. The P2 in-panel splitter and diff preview
- * are gone: the operator rejected both, and a file selection now opens the
- * project-owned reusable editor-area diff ({@link ReviewDiffEditor}, T6)
- * whose active viewer the inlay layer ({@link ReviewDiffInlays}, T6)
- * decorates with one finding card per unresolved finding.
+ * The review behind the dedicated Drydock Review window and the review
+ * workbench. The window's content is a launcher: the header
+ * ({@code <k> / <n> reviewed}), the Open Workbench button, the batched
+ * decisions bar and the status placeholder ({@link ReviewTabStatus}). The
+ * review's files are listed in the workbench's navigator
+ * ({@link ReviewWorkbenchNavigator}, a {@link ReviewTabBrowser}); a file
+ * selection there shows the reusable diff ({@link ReviewDiffEditor}) in the
+ * workbench's centre, whose active viewer the inlay layer
+ * ({@link ReviewDiffInlays}) decorates with one finding card per unresolved
+ * finding.
  *
  * <p><strong>Composition.</strong> The tab owns no review logic: the scope
  * comes from {@link ReviewTabScopes}; the snapshot from {@link
@@ -91,13 +95,12 @@ import java.util.function.UnaryOperator;
  * ReviewDiffRequests} with fragments from {@link ReviewFragments}; the
  * finding cards' write side is {@link ReviewTriageActions} (T4), wired
  * through {@link TriageCards} below; the mark/unmark write side is {@link
- * ReviewVerdictCommands} — one command, two entry points (the toolbar and
- * the row context menu; the preview's third entry point left with the
- * preview). The annotation store and the diff service are the backend's own
+ * ReviewVerdictCommands} — one command, two entry points (the navigator's
+ * toolbar and its row context menu). The annotation store and the diff service are the backend's own
  * instances (one writer, and verdict digests measured by the same diff an
  * agent sees).</p>
  *
- * <p><strong>The selection pipeline.</strong> A tree selection runs the
+ * <p><strong>The selection pipeline.</strong> A navigator selection runs the
  * file's git reads (both texts, the row checks, the fragments) on the
  * plugin's background executor; the EDT continuation builds the titled
  * {@link ReviewDiffRequests.RequestContext}, feeds the inlay layer the
@@ -113,10 +116,11 @@ import java.util.function.UnaryOperator;
  *
  * <p><strong>Gutter navigation.</strong> The opener ({@link
  * ReviewTabOpener}, T8) records a finding target on the project before the
- * window's content exists; every snapshot arrival consumes it ({@link
- * ReviewTabOpener#takePendingFinding}) and hands it to {@link
- * ReviewTabBrowser#selectFinding}, whose selection then drives the diff
- * open exactly as a click on the row would.</p>
+ * window's content exists; a snapshot arrival or a navigator attaching
+ * consumes it ({@link ReviewTabOpener#takePendingFinding}) once a
+ * workbench navigator exists, and hands it to every navigator's
+ * {@link ReviewTabBrowser#selectFinding}, whose selection then drives the
+ * diff open exactly as a click on the row would.</p>
  *
  * <p><strong>Threading.</strong> Everything blocking — scope resolution,
  * contents, the diff, digests, store reads, prompt submission — runs on the
@@ -143,6 +147,9 @@ final class ReviewTabProvider {
     /** The window's button into the review workbench. */
     static final String OPEN_WORKBENCH = "Open Workbench";
 
+    /** The launcher window's body: the files are the workbench navigator's. */
+    static final String LAUNCHER_TEXT = "Review the files in the workbench.";
+
     private final Project project;
     private final DrydockPluginService plugin;
 
@@ -158,7 +165,8 @@ final class ReviewTabProvider {
     private JComponent panel;
     private JBLabel header;
     private JBLabel statusLabel;
-    private ReviewTabBrowser browser;
+    /** The workbench navigators showing this review (EDT only); gutter targets land on them. */
+    private final List<ReviewWorkbenchNavigator> navigators = new ArrayList<>();
     /** The disposal parent of the reusable diff editor and its inlay layer. */
     private Disposable diffParent;
     private ReviewDiffEditor diffEditor;
@@ -166,6 +174,7 @@ final class ReviewTabProvider {
     private DebounceScheduler debounce;
     private AnAction markReviewedAction;
     private AnAction unmarkAction;
+    private AnAction refreshAction;
     /** The batched-decisions hand-off: pending counts on the left, the one Send on the right. */
     private JPanel decisionsBar;
     private JBLabel decisionsLabel;
@@ -279,7 +288,6 @@ final class ReviewTabProvider {
         statusLabel = new JBLabel();
         statusLabel.setBorder(new EmptyBorder(4, 8, 4, 8));
         statusLabel.setVisible(false);
-        browser = new ReviewTabBrowser(project, this::selected);
 
         // One reusable editor-area diff per content (T6): its tab is opened
         // by the editor itself on the first selection, its requests are
@@ -298,37 +306,30 @@ final class ReviewTabProvider {
 
         buildDecisionsBar();
 
-        // The workbench is the review surface; this window keeps the progress
-        // header and is the way back into it.
+        // The workbench is the review surface, with the file list in its
+        // navigator; this window is the launcher: the progress header, the
+        // way into the workbench, the batched decisions and the status.
         JButton openWorkbench = new JButton(OPEN_WORKBENCH);
         openWorkbench.addActionListener(event -> ReviewWorkbenchFile.open(project));
         JPanel top = new JPanel(new BorderLayout());
         top.add(header, BorderLayout.CENTER);
         top.add(openWorkbench, BorderLayout.EAST);
+        JBLabel launcher = new JBLabel(LAUNCHER_TEXT, SwingConstants.CENTER);
+        launcher.setForeground(UIUtil.getContextHelpForeground());
         JBPanel<?> content = new JBPanel<>(new BorderLayout());
         content.add(top, BorderLayout.NORTH);
-        content.add(browser, BorderLayout.CENTER);
+        content.add(launcher, BorderLayout.CENTER);
         JPanel south = new JPanel(new BorderLayout());
         south.add(decisionsBar, BorderLayout.NORTH);
         south.add(statusLabel, BorderLayout.SOUTH);
         content.add(south, BorderLayout.SOUTH);
 
-        // Q13: one command, two entry points — the toolbar and the row
-        // context menu. (The preview's third entry point left with the
-        // preview; the diff's own toolbar is the platform's.)
+        // Q13: one command, two entry points — the workbench navigator's
+        // toolbar and its row context menu (hostedNavigator). The diff's
+        // own toolbar is the platform's.
         markReviewedAction = new MarkReviewedAction();
         unmarkAction = new UnmarkAction();
-        AnAction refresh = new RefreshAction();
-        DefaultActionGroup contextMenu = new DefaultActionGroup();
-        contextMenu.add(markReviewedAction);
-        contextMenu.add(unmarkAction);
-        contextMenu.addSeparator();
-        contextMenu.add(refresh);
-        browser.getViewer().installPopupHandler(contextMenu);
-        browser.addToolbarAction(markReviewedAction);
-        browser.addToolbarAction(unmarkAction);
-        browser.addToolbarSeparator();
-        browser.addToolbarAction(refresh);
+        refreshAction = new RefreshAction();
 
         debounce = new DebounceScheduler();
         panel = content;
@@ -368,9 +369,6 @@ final class ReviewTabProvider {
         if (diffParent != null) {
             Disposer.dispose(diffParent);
         }
-        if (browser != null) {
-            browser.dispose(); // stops the async tree's scope: no tree updates a closed tab
-        }
         if (debounce != null) {
             debounce.shutdown();
         }
@@ -380,13 +378,14 @@ final class ReviewTabProvider {
         panel = null;
         header = null;
         statusLabel = null;
-        browser = null;
+        navigators.clear(); // each is disposed with its workbench editor
         diffParent = null;
         diffEditor = null;
         inlays = null;
         debounce = null;
         markReviewedAction = null;
         unmarkAction = null;
+        refreshAction = null;
         worktrees = null;
         git = null;
         contents = null;
@@ -536,12 +535,10 @@ final class ReviewTabProvider {
         refreshDecorations();
         rebuildWorkbenchState();
         onEdt(() -> {
-            ReviewTabBrowser browser = this.browser;
             JBLabel header = this.header;
-            if (browser == null || header == null) {
+            if (header == null) {
                 return;
             }
-            browser.accept(snapshot);
             header.setText(snapshot.headerText());
             refreshDecisionsBar();
             consumePendingFindingTarget();
@@ -550,21 +547,25 @@ final class ReviewTabProvider {
 
     /**
      * The gutter-navigation half of the opener's contract (T8/T9): after a
-     * snapshot lands, the pending target the opener recorded before this
-     * content existed — or while another snapshot was in flight — is taken
-     * from the project and the browser selects that finding; the tree's
-     * own selection listener then drives the diff open, exactly as a click
-     * on the row would. The take is the consumption: found or stale, the
-     * target is spent exactly once, and a stale one leaves the selection
-     * unchanged (the browser's own rule).
+     * snapshot lands, or a workbench navigator attaches, the pending target
+     * the opener recorded is taken from the project and every workbench
+     * navigator selects that finding; the tree's own selection listener then
+     * drives the diff open, exactly as a click on the row would. With no
+     * navigator attached the target stays pending: the opener opens the
+     * workbench, whose navigator takes it. The take is the consumption:
+     * found or stale, the target is spent exactly once, and a stale one
+     * leaves the selection unchanged (the browser's own rule).
      */
     private void consumePendingFindingTarget() {
-        ReviewTabBrowser browser = this.browser;
-        if (browser == null || disposed.get()) {
+        if (navigators.isEmpty() || disposed.get()) {
             return;
         }
-        consumeTarget(ReviewTabOpener.takePendingFinding(project),
-                (file, findingId) -> browser.selectFinding(file, findingId));
+        List<ReviewWorkbenchNavigator> targets = List.copyOf(navigators);
+        consumeTarget(ReviewTabOpener.takePendingFinding(project), (file, findingId) -> {
+            for (ReviewWorkbenchNavigator navigator : targets) {
+                navigator.selectFinding(file, findingId);
+            }
+        });
     }
 
     /**
@@ -621,7 +622,7 @@ final class ReviewTabProvider {
     // ---- selection -> the reusable diff -------------------------------------
 
     /**
-     * The browser's selection consumer (EDT): records the selection for
+     * The navigators' selection consumer (EDT): records the selection for
      * the commands, marks it current with the reusable editor (requests
      * for any earlier selection are stale from here on), then builds the
      * file's request on the background executor — its texts are blocking
@@ -1772,11 +1773,16 @@ final class ReviewTabProvider {
         if (provider == null || provider.disposed.get()) {
             return Optional.empty();
         }
+        List<AnAction> rowCommands = Stream.of(provider.markReviewedAction, provider.unmarkAction,
+                provider.refreshAction).filter(Objects::nonNull).toList();
         ReviewWorkbenchNavigator navigator = new ReviewWorkbenchNavigator(project, provider::selected,
-                provider::workbenchFilterChanged);
+                provider::workbenchFilterChanged, rowCommands);
         Disposer.register(parent, navigator);
         provider.attachWorkbenchView(navigator::render, parent);
         provider.attachWorkbenchView(header::accept, parent);
+        provider.navigators.add(navigator);
+        Disposer.register(parent, () -> provider.navigators.remove(navigator));
+        provider.consumePendingFindingTarget();
         return Optional.of(navigator);
     }
 

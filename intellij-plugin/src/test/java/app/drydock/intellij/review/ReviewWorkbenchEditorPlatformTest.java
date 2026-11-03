@@ -142,7 +142,7 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
     public void testTheNavigatorsToggleAsksForTheOtherFilter() {
         List<WorkbenchState.Filter> asked = new ArrayList<>();
         ReviewWorkbenchNavigator navigator = new ReviewWorkbenchNavigator(getProject(), row -> {
-        }, asked::add);
+        }, asked::add, List.of());
         try {
             AnActionEvent event = TestActionEvent.createTestEvent();
             assertFalse(navigator.withFindingsAction().isSelected(event));
