@@ -139,6 +139,9 @@ final class ReviewTabProvider {
     /** Q15: the pinned window name — the opener (T8) and the descriptor must use this exact string. */
     static final String TAB_NAME = "Drydock Review";
 
+    /** The window's button into the review workbench. */
+    static final String OPEN_WORKBENCH = "Open Workbench";
+
     private final Project project;
     private final DrydockPluginService plugin;
 
@@ -288,8 +291,15 @@ final class ReviewTabProvider {
 
         buildDecisionsBar();
 
+        // The workbench is the review surface; this window keeps the progress
+        // header and is the way back into it.
+        JButton openWorkbench = new JButton(OPEN_WORKBENCH);
+        openWorkbench.addActionListener(event -> ReviewWorkbenchFile.open(project));
+        JPanel top = new JPanel(new BorderLayout());
+        top.add(header, BorderLayout.CENTER);
+        top.add(openWorkbench, BorderLayout.EAST);
         JBPanel<?> content = new JBPanel<>(new BorderLayout());
-        content.add(header, BorderLayout.NORTH);
+        content.add(top, BorderLayout.NORTH);
         content.add(browser, BorderLayout.CENTER);
         JPanel south = new JPanel(new BorderLayout());
         south.add(decisionsBar, BorderLayout.NORTH);

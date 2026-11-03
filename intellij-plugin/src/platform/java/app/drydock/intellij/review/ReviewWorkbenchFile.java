@@ -1,8 +1,11 @@
 package app.drydock.intellij.review;
 
+import com.intellij.openapi.fileEditor.FileEditorManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.Key;
 import com.intellij.openapi.util.UserDataHolderEx;
+import com.intellij.openapi.wm.ToolWindow;
+import com.intellij.openapi.wm.ToolWindowManager;
 import com.intellij.testFramework.LightVirtualFile;
 
 import java.util.Objects;
@@ -34,6 +37,21 @@ public final class ReviewWorkbenchFile extends LightVirtualFile {
             return existing;
         }
         return ((UserDataHolderEx) project).putUserDataIfAbsent(KEY, new ReviewWorkbenchFile());
+    }
+
+    /**
+     * Opens the project's workbench tab (EDT). The workbench editor hosts the
+     * live Review content's diff and navigator, so the Drydock Review window's
+     * content is created first: asking a tool window for its content manager
+     * creates its content.
+     */
+    public static void open(Project project) {
+        ToolWindow review = ToolWindowManager.getInstance(project)
+                .getToolWindow(ReviewToolWindowFactory.TOOL_WINDOW_ID);
+        if (review != null) {
+            review.getContentManager();
+        }
+        FileEditorManager.getInstance(project).openFile(of(project), true);
     }
 
     /** Sets the subject the tab title names; the caller refreshes the tab's presentation. */
