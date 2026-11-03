@@ -17,6 +17,7 @@ import com.intellij.testFramework.PlatformTestUtil;
 import com.intellij.testFramework.fixtures.BasePlatformTestCase;
 import com.intellij.ui.EditorNotificationPanel;
 
+import javax.swing.JComponent;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -108,29 +109,34 @@ public class ReviewDiffContentsPlatformTest extends BasePlatformTestCase {
         SimpleDiffRequest request = ReviewDiffRequests.toRequest(getProject(), parent,
                 new ReviewDiffRequests.RequestContext("e.txt", plan()));
 
-        EditorNotificationPanel notice = notice(request);
-        assertTrue(notice.isVisible());
-        assertEquals(ReviewDiffNotice.SNAPSHOT_TEXT, notice.getText());
+        JComponent holder = holder(request);
+        assertTrue(holder.isVisible());
+        assertEquals(ReviewDiffNotice.SNAPSHOT_TEXT, notice(holder).getText());
     }
 
     public void testAFileBackedNoticeAppearsWhenTheRequestTurnsStale() throws IOException {
         VirtualFile file = worktreeFile("f.txt", RIGHT);
         SimpleDiffRequest request = ReviewDiffRequests.toRequest(getProject(), parent, context(file));
-        EditorNotificationPanel notice = notice(request);
-        assertFalse("silent while the file holds the reviewed text", notice.isVisible());
+        JComponent holder = holder(request);
+        assertTrue("the holder never hides itself: the viewer's wrapper would not follow it", holder.isVisible());
+        assertEquals("silent while the file holds the reviewed text", 0, holder.getComponentCount());
 
         request.getUserData(ReviewDiffContents.STALENESS_KEY).markStale();
         PlatformTestUtil.dispatchAllEventsInIdeEventQueue();
 
-        assertTrue(notice.isVisible());
-        assertEquals(ReviewDiffNotice.STALE_TEXT, notice.getText());
+        assertEquals(ReviewDiffNotice.STALE_TEXT, notice(holder).getText());
     }
 
-    private static EditorNotificationPanel notice(SimpleDiffRequest request) {
+    private static JComponent holder(SimpleDiffRequest request) {
         List<DiffNotificationProvider> providers = request.getUserData(DiffUserDataKeys.NOTIFICATION_PROVIDERS);
         assertNotNull(providers);
         assertEquals(1, providers.size());
-        return (EditorNotificationPanel) providers.get(0).createNotification(null);
+        return providers.get(0).createNotification(null);
+    }
+
+    private static EditorNotificationPanel notice(JComponent holder) {
+        assertEquals(1, holder.getComponentCount());
+        return (EditorNotificationPanel) holder.getComponent(0);
     }
 
     private VirtualFile worktreeFile(String name, String text) throws IOException {

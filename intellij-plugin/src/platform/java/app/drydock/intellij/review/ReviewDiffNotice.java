@@ -5,6 +5,8 @@ import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.ui.EditorNotificationPanel;
 
+import javax.swing.JPanel;
+import java.awt.BorderLayout;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -38,9 +40,15 @@ final class ReviewDiffNotice {
     }
 
     /**
-     * The request's notification provider. A file-backed request gets a
-     * hidden panel that appears when its {@link ReviewDiffContents.Staleness}
-     * fires (on the viewer's rediff thread, so the reveal hops to the EDT).
+     * The request's notification provider. The component it returns is an
+     * always-visible holder, empty (zero height) while there is nothing to
+     * say; the warning panel is added to it when its text applies. A
+     * file-backed request's notice appears when its
+     * {@link ReviewDiffContents.Staleness} fires (on the viewer's rediff
+     * thread, so the reveal hops to the EDT). The holder never hides itself:
+     * the viewer wraps each notification in a wrapper that copies the
+     * notification's visibility once and does not follow it later (seen
+     * live on 263), so a hidden notification could never be revealed.
      */
     static DiffNotificationProvider provider(Project project, ReviewDiffContents.RightSide side,
                                              ReviewDiffContents.Staleness staleness) {
@@ -48,16 +56,23 @@ final class ReviewDiffNotice {
         Objects.requireNonNull(side, "side");
         Objects.requireNonNull(staleness, "staleness");
         return viewer -> {
+            JPanel holder = new JPanel(new BorderLayout());
+            holder.setOpaque(false);
             EditorNotificationPanel panel = new EditorNotificationPanel(EditorNotificationPanel.Status.Warning);
             panel.createActionLabel(REFRESH, () -> ReviewTabProvider.reloadFromChangesLink(project));
             Runnable render = () -> {
                 Optional<String> text = text(side, staleness.isStale());
-                panel.setText(text.orElse(""));
-                panel.setVisible(text.isPresent());
+                holder.removeAll();
+                text.ifPresent(notice -> {
+                    panel.setText(notice);
+                    holder.add(panel, BorderLayout.CENTER);
+                });
+                holder.revalidate();
+                holder.repaint();
             };
             render.run();
             staleness.onStale(() -> ApplicationManager.getApplication().invokeLater(render));
-            return panel;
+            return holder;
         };
     }
 }
