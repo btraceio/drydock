@@ -1,10 +1,13 @@
 package app.drydock.intellij.tasks;
 
+import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.SessionMode;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.JiraIssue;
 import app.drydock.intellij.tasks.NewTaskPlan.OpenIn;
 import app.drydock.intellij.tasks.NewTaskPlan.WorkIn;
+import app.drydock.tasks.StartPlan;
+import app.drydock.tasks.TaskPrompt;
 
 import java.util.Objects;
 import java.util.Optional;
@@ -20,18 +23,40 @@ import java.util.Optional;
  * value goes; the dialog substitutes them from the picked tiers when the
  * harness dispatches subagents (see {@code NewTaskDialog}). Presets without
  * a mapping get no tier rules and no tier pickers.</p>
+ *
+ * <p>{@code composed} carries the single-project start's plan seed (T31a):
+ * when present, the dialog seeds its instructions with the composed segment
+ * prompt for the SELECTED harness and recomposes on a harness switch while
+ * the user has not edited the text (T09's contract -- a user edit survives
+ * every switch). The preset itself stays data: the composition is
+ * {@link #composedInstructions(AgentKind, StartPlan, StartPlan.Segment)}.</p>
  */
-record NewTaskPreset(String name, Optional<String> instructions, Optional<SessionMode> fixedMode,
-                     Optional<WorkIn> fixedWorkIn, boolean instructionsRequired, OpenIn openIn,
-                     Optional<String> tierRoles) {
+public record NewTaskPreset(String name, Optional<String> instructions, Optional<SessionMode> fixedMode,
+                            Optional<WorkIn> fixedWorkIn, boolean instructionsRequired, OpenIn openIn,
+                            Optional<String> tierRoles, Optional<Composed> composed) {
 
-    NewTaskPreset {
+    /** The single-project start's plan seed (T31a): the plan and its one segment the dialog composes from. */
+    public record Composed(StartPlan plan, StartPlan.Segment segment) {
+        public Composed {
+            Objects.requireNonNull(plan, "plan");
+            Objects.requireNonNull(segment, "segment");
+        }
+    }
+
+    public NewTaskPreset {
         Objects.requireNonNull(name, "name");
         Objects.requireNonNull(instructions, "instructions");
         Objects.requireNonNull(fixedMode, "fixedMode");
         Objects.requireNonNull(fixedWorkIn, "fixedWorkIn");
         Objects.requireNonNull(openIn, "openIn");
         Objects.requireNonNull(tierRoles, "tierRoles");
+        Objects.requireNonNull(composed, "composed");
+    }
+
+    NewTaskPreset(String name, Optional<String> instructions, Optional<SessionMode> fixedMode,
+                  Optional<WorkIn> fixedWorkIn, boolean instructionsRequired, OpenIn openIn,
+                  Optional<String> tierRoles) {
+        this(name, instructions, fixedMode, fixedWorkIn, instructionsRequired, openIn, tierRoles, Optional.empty());
     }
 
     NewTaskPreset(String name, Optional<String> instructions, Optional<SessionMode> fixedMode,
@@ -57,6 +82,50 @@ record NewTaskPreset(String name, Optional<String> instructions, Optional<Sessio
         return new NewTaskPreset("", Optional.empty(),
                 mode == SessionMode.READ_ONLY ? Optional.of(SessionMode.READ_ONLY) : Optional.empty(),
                 Optional.empty(), false, openIn);
+    }
+
+    /**
+     * The single-project start's preset (T31a, D7/D15/P6): the target's
+     * title names the session, the composed segment prompt seeds the
+     * instructions for the selected harness (recomposed on a harness switch
+     * while unedited), and every launch field stays the user's to choose.
+     * Instructions are required: the composed plan is the point of the
+     * start, and a deliberate blank should say so before launching.
+     */
+    public static NewTaskPreset segmentStart(String title, StartPlan plan, StartPlan.Segment segment) {
+        Objects.requireNonNull(title, "title");
+        Objects.requireNonNull(plan, "plan");
+        Objects.requireNonNull(segment, "segment");
+        return new NewTaskPreset(title, Optional.empty(), Optional.empty(), Optional.empty(), true,
+                OpenIn.THIS_WINDOW, Optional.empty(), Optional.of(new Composed(plan, segment)));
+    }
+
+    /**
+     * The segment prompt composed for one harness (T09a's three shapes,
+     * pure, no I/O): the exact text the dialog seeds and reseeds per
+     * selected harness.
+     */
+    public static String composedInstructions(AgentKind kind, StartPlan plan, StartPlan.Segment segment) {
+        return TaskPrompt.prompt(harnessOf(kind), plan, segment);
+    }
+
+    /** The prompt harness of an agent kind; a terminal hosts no task segment. */
+    public static TaskPrompt.Kind harnessOf(AgentKind kind) {
+        return switch (kind) {
+            case CLAUDE -> TaskPrompt.Kind.CLAUDE;
+            case CODEX -> TaskPrompt.Kind.CODEX;
+            case PI -> TaskPrompt.Kind.PI;
+            default -> throw new IllegalArgumentException("a terminal is no harness for a task segment");
+        };
+    }
+
+    /**
+     * The instructions after a harness switch (T31a, T09's contract): an
+     * UNEDITED generated text recomposes into the new harness's shape; a
+     * user edit survives every switch unchanged.
+     */
+    public static String switchedInstructions(boolean userEdited, String current, String composed) {
+        return userEdited ? current : composed;
     }
 
     /** Steps 1-5 of the shared issue workflow, common to the GitHub and Jira implement presets. */
