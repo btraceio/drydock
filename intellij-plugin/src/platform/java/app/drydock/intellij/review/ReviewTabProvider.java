@@ -287,6 +287,9 @@ final class ReviewTabProvider {
      * project {@code VirtualFile}s. Set off the EDT with the scope.
      */
     private volatile Path checkoutRoot;
+    /** The finding marks in this project's source editors, for {@link #editorMarksRoot}; EDT. */
+    private ReviewEditorHighlighters editorMarks;
+    private Path editorMarksRoot;
     /** The latest resolved scope; the commands and every reload target it. */
     private volatile ReviewScope scope;
     /** The latest snapshot; the file row of a selected finding is looked up in it. */
@@ -427,6 +430,14 @@ final class ReviewTabProvider {
         if (layer != null) {
             onEdt(layer::dispose);
         }
+        // The source-editor marks also end with diffParent below; this hop clears the field on the EDT that owns it.
+        onEdt(() -> {
+            if (editorMarks != null) {
+                editorMarks.dispose();
+            }
+            editorMarks = null;
+            editorMarksRoot = null;
+        });
         if (diffParent != null) {
             Disposer.dispose(diffParent);
         }
@@ -609,6 +620,40 @@ final class ReviewTabProvider {
         }));
     }
 
+    // ---- the source-editor marks --------------------------------------------
+
+    /**
+     * Repaints the source-editor marks for {@code rows} (spec §2, "Round
+     * trip"): the model is built here, off the EDT, from the snapshot's file
+     * diffs and the scope's findings, and applied on the EDT. The layer is
+     * created for the checkout root the review's paths resolve under, and
+     * recreated when that root changes; it ends with the content.
+     */
+    private void refreshEditorMarks(ReviewTabModel.Snapshot rows) {
+        ReviewScope current = scope;
+        AnnotationStore annotations = store;
+        Path root = checkoutRoot;
+        if (current == null || annotations == null || root == null) {
+            return;
+        }
+        UnifiedDiff diff = new UnifiedDiff(rows.files().stream().map(ReviewTabModel.FileRow::diff).toList());
+        ReviewEditorMarkModel model = ReviewEditorMarkModel.of(diff, annotations.forScope(current.id()));
+        onEdt(() -> {
+            Disposable parent = diffParent;
+            if (disposed.get() || parent == null) {
+                return;
+            }
+            if (editorMarks == null || !root.equals(editorMarksRoot)) {
+                if (editorMarks != null) {
+                    editorMarks.dispose();
+                }
+                editorMarks = ReviewEditorHighlighters.platform(project, root, parent);
+                editorMarksRoot = root;
+            }
+            editorMarks.applyModel(model);
+        });
+    }
+
     // ---- snapshots and status (the EDT half) --------------------------------
 
     /**
@@ -621,6 +666,7 @@ final class ReviewTabProvider {
     private void snapshotArrived(ReviewTabModel.Snapshot snapshot) {
         this.snapshot = snapshot;
         refreshDecorations();
+        refreshEditorMarks(snapshot);
         rebuildWorkbenchState();
         onEdt(() -> {
             JBLabel header = this.header;
