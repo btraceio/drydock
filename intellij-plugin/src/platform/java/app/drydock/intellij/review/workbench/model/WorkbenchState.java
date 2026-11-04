@@ -32,7 +32,7 @@ public record WorkbenchState(String subject, Mode mode, ReviewTabModel.Snapshot 
                              SectionsModel.Snapshot sections, Optional<String> section,
                              OutboxModel.Snapshot outbox) {
 
-    /** What is being reviewed. Only {@link #LOCAL} exists before the PR lane (W5). */
+    /** What is being reviewed: a scope that carries a pull request is reviewed as the pull request. */
     public enum Mode {
         LOCAL("Local changes"),
         PR("Pull request");

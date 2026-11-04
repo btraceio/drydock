@@ -356,7 +356,7 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
                 "Not in the tour", "", List.of(), List.of(), List.of(), 0, 0, 0)));
     }
 
-    public void testTheModeChipSelectsLocalAndKeepsPullRequestDisabled() {
+    public void testTheModeChipShowsTheModeTheScopeIsIn() {
         List<Consumer<WorkbenchState>> headers = new ArrayList<>();
         ReviewWorkbenchEditor.Host host = new ReviewWorkbenchEditor.Host() {
             @Override
@@ -400,8 +400,17 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
             AnActionEvent prEvent = TestActionEvent.createTestEvent(pr);
             pr.update(prEvent);
             assertFalse(pr.isSelected(prEvent));
-            assertFalse("the PR mode arrives with W5", prEvent.getPresentation().isEnabled());
-            assertEquals(ReviewWorkbenchEditor.PR_LATER, prEvent.getPresentation().getDescription());
+            assertFalse("the mode follows the checkout", prEvent.getPresentation().isEnabled());
+            assertEquals(ReviewWorkbenchEditor.MODE_FOLLOWS_CHECKOUT, prEvent.getPresentation().getDescription());
+
+            headers.get(0).accept(WorkbenchState.of("PR #12", WorkbenchState.Mode.PR,
+                    new ReviewTabModel.Snapshot(List.of(), 0, 0), WorkbenchState.Filter.ALL, Optional.empty(),
+                    WorkbenchState.View.CHANGES_ONLY, List.of(), WorkbenchState.InboxChoice.DEFAULT));
+            pr.update(prEvent);
+            local.update(localEvent);
+            assertTrue("a PR checkout is the PR mode", pr.isSelected(prEvent));
+            assertTrue(prEvent.getPresentation().isEnabled());
+            assertFalse(localEvent.getPresentation().isEnabled());
         } finally {
             Disposer.dispose(editor);
         }

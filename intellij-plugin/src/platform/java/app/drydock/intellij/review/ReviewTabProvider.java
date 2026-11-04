@@ -1328,6 +1328,11 @@ final class ReviewTabProvider {
      * The hand-off's subject (pure): the pull request when the scope
      * carries one, else the checkout directory's name.
      */
+    /** The review's mode (pure): a scope that carries a pull request is reviewed as the pull request (spec §8). */
+    static WorkbenchState.Mode modeOf(ReviewScope scope) {
+        return scope.pr().isPresent() ? WorkbenchState.Mode.PR : WorkbenchState.Mode.LOCAL;
+    }
+
     static String subjectOf(ReviewScope scope) {
         return scope.pr()
                 .map(pr -> "PR #" + pr.number())
@@ -1820,7 +1825,7 @@ final class ReviewTabProvider {
         AnnotationStore annotations = this.store;
         List<ReviewAnnotation> findings = annotations == null ? List.of() : annotations.forScope(scope.id());
         List<ReviewVerdict> verdicts = annotations == null ? List.of() : annotations.verdictsFor(scope.id());
-        WorkbenchState state = WorkbenchState.of(subjectOf(scope), WorkbenchState.Mode.LOCAL, current,
+        WorkbenchState state = WorkbenchState.of(subjectOf(scope), modeOf(scope), current,
                 workbenchFilter, Optional.ofNullable(selectedPath()), workbenchView, findings, inboxChoice,
                 sectionsOf(scope, current, verdicts, findings), sectionsChoice)
                 .withOutbox(OutboxModel.snapshot(findings, scope.sessionId().isPresent()));

@@ -3,6 +3,7 @@ package app.drydock.intellij.review;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.intellij.agent.PromptOutcome;
+import app.drydock.intellij.review.workbench.model.WorkbenchState;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.AnnotationStore;
 import app.drydock.review.Confidence;
@@ -728,4 +729,16 @@ class ReviewTabProviderTest {
         return value;
     }
 
+
+    @Test
+    void aScopeCarryingAPullRequestIsReviewedAsThePullRequest() {
+        ReviewScope local = new ReviewScope("rs_1", ReviewScope.Kind.WORKTREE, Path.of("/r"), Optional.of(Path.of("/w")),
+                "main", "task", Optional.empty(), Optional.empty(), Optional.empty());
+        ReviewScope pr = new ReviewScope("rs_2", ReviewScope.Kind.WORKTREE, Path.of("/r"), Optional.of(Path.of("/w")),
+                "main", "pr-12", Optional.of(new ReviewScope.PullRequestRef(12, Optional.empty())), Optional.empty(),
+                Optional.empty());
+        assertEquals(WorkbenchState.Mode.LOCAL, ReviewTabProvider.modeOf(local));
+        assertEquals(WorkbenchState.Mode.PR, ReviewTabProvider.modeOf(pr));
+        assertEquals("PR #12", ReviewTabProvider.subjectOf(pr));
+    }
 }
