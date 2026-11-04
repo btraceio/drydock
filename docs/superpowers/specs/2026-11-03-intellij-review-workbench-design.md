@@ -273,7 +273,8 @@ live run could show.
 | W1 | Workbench editor tab, splitters, header + mode chip, Files navigator, file diff with **real-file contents and navigation**, range highlighting + stripe marks, review search scope | S1, S3, S4 |
 | W2 | Inbox (model, tabs, actions incl. Challenge), selection → comment, ask-about-selection | W1 |
 | W3 | Sections: tour + computed fallback, `dependsOn`, `settledInStep`, section view, reviewed-in-§N collapse, intent | W1, S2 |
-| W4 | Agent takes: model, `review_tour.takes`, prompt, UI | W3 |
+| W4 | Agent takes: model, `review_tour.takes`, prompt, UI on the section view's hunk cards | W3 |
+| W4b | Agent take at each hunk start in the file view (§6): a second decoration kind in `ReviewDiffInlays`, beside the finding cards | W4 |
 | W5 | Outbox: session lane + Fixes land on; PR lane (`SubmitPlan` + `gh`); whole-PR findings | W2 |
 | W6 | Source-editor round trip (changed-range marks, back to review); tool window becomes launcher | W1 |
 
