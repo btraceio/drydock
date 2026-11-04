@@ -1,5 +1,6 @@
 package app.drydock.process;
 
+import app.drydock.app.LoginShellEnvironment;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -90,5 +91,32 @@ class ProcessRunnerTest {
                 List.of("/usr/bin/printf", "%s", "x".repeat(2048)), options, 1024));
 
         assertTrue(failure.getMessage().contains("exceeded 1024 bytes"), failure.getMessage());
+    }
+
+    @Test
+    void aChildRunsWithTheLoginShellsPathUnlessTheCallerSetsOne(@TempDir Path tools) throws Exception {
+        // A superset of the real PATH, so the other tests in this JVM still find their tools.
+        String original = LoginShellEnvironment.currentRealPath();
+        String shell = original + ":" + tools;
+        LoginShellEnvironment.useShellPath(shell);
+        try {
+            ProcessResult inherited = ProcessRunner.run(List.of("/bin/sh", "-c", "printf %s \"$PATH\""),
+                    null, Duration.ofSeconds(15));
+            assertEquals(shell, inherited.stdout(), "the login shell's PATH, not the JVM's");
+
+            ProcessResult own = ProcessRunner.run(List.of("/bin/sh", "-c", "printf %s \"$PATH\""),
+                    new ProcessRunner.Options(null, Duration.ofSeconds(15), false, Map.of("PATH", "/usr/bin:/bin")));
+            assertEquals("/usr/bin:/bin", own.stdout(), "a caller's PATH wins");
+        } finally {
+            LoginShellEnvironment.useShellPath(original);
+        }
+    }
+
+    @Test
+    void aBlankShellPathChangesNothing() {
+        String before = LoginShellEnvironment.currentRealPath();
+        LoginShellEnvironment.useShellPath(" ");
+        LoginShellEnvironment.useShellPath(null);
+        assertEquals(before, LoginShellEnvironment.currentRealPath());
     }
 }

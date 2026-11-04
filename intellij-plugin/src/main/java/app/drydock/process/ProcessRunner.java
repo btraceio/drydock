@@ -1,5 +1,7 @@
 package app.drydock.process;
 
+import app.drydock.app.LoginShellEnvironment;
+
 import java.io.File;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -88,6 +90,12 @@ public final class ProcessRunner {
         }
         if (options.discardInput()) {
             builder.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
+        }
+        // The login shell's PATH, not the JVM's: a Finder-launched IDE inherits launchd's bare PATH, and a
+        // child's own children (git's hooks running git-lfs, say) need the user's tools. A caller's PATH wins.
+        String path = LoginShellEnvironment.currentRealPath();
+        if (path != null) {
+            builder.environment().put("PATH", path);
         }
         builder.environment().putAll(options.environment());
         return runBuilder(builder, command, options.timeout(), maxOutputBytes);

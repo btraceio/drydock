@@ -7,20 +7,21 @@ package app.drydock.app;
  * Finder-launched JVM inherits launchd's bare PATH and Drydock owns its
  * children's environment.
  *
- * <p>None of that machinery belongs to a plugin: the plugin's children
- * (claude, gh, git) inherit the IDE process's environment, and IntelliJ
- * already repairs that PATH itself (it probes the user's shell for PATH
- * additions -- the same {@code -lic} trick -- for terminal and external-tool
- * PATHs). And {@code setenv(3)} is useless here for a second reason: the
- * IDE's JDK has long since snapshotted its environment, and
- * {@code ProcessBuilder} children inherit the snapshot, not {@code getenv(3)}.
+ * <p>None of that machinery belongs to a plugin. IntelliJ probes the user's
+ * shell itself (the same {@code -lic} trick), but it keeps the result in its
+ * own environment map, which its terminal and external tools use: the JVM's
+ * {@code System.getenv("PATH")}, which every {@code ProcessBuilder} child
+ * inherits, stays launchd's bare PATH. So the plugin hands the probed PATH
+ * here ({@link #useShellPath}), and {@code ProcessRunner} gives it to its
+ * children. {@code setenv(3)} would not help: the IDE's JDK has long since
+ * snapshotted its environment, and children inherit the snapshot.
  *
  * <p>FFM is also a hard blocker on the target runtime: FFM is preview on
  * Java 21 (JBR's floor for IntelliJ 2025.x) and only final from Java 22, so
  * the downcall version cannot load in a plugin without {@code --enable-preview}.
  *
  * <p>{@link #currentRealPath()} keeps the original name and contract ("the
- * PATH a session child will actually inherit") for the four call sites that
+ * PATH a session child will actually inherit") for the call sites that
  * locate {@code claude}/{@code gh}/{@code git}. This core source set cannot
  * depend on IntelliJ APIs, so tool-specific callers remain responsible for
  * adding any known fallback locations their wrappers need.
@@ -30,11 +31,23 @@ public final class LoginShellEnvironment {
     private LoginShellEnvironment() {
     }
 
+    /** The login shell's PATH, once the plugin has handed it over; null until then. */
+    private static volatile String shellPath;
+
     /**
-     * The PATH inherited by {@code ProcessBuilder} children of the IDE JVM.
+     * The PATH a child should run with: the login shell's, once known
+     * ({@link #useShellPath}), else the JVM's own.
      */
     public static String currentRealPath() {
-        return System.getenv("PATH");
+        String shell = shellPath;
+        return shell != null ? shell : System.getenv("PATH");
+    }
+
+    /** Hands over the login shell's PATH; a null or blank one changes nothing. Any thread. */
+    public static void useShellPath(String path) {
+        if (path != null && !path.isBlank()) {
+            shellPath = path;
+        }
     }
 
     /**

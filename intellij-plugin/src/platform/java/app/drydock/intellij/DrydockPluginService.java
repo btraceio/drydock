@@ -7,6 +7,7 @@ import app.drydock.agent.api.AgentContext;
 import app.drydock.agent.api.McpAccess;
 import app.drydock.agent.api.McpDelivery;
 import app.drydock.app.ApplicationStateStore;
+import app.drydock.app.LoginShellEnvironment;
 import app.drydock.delayedtasks.DelayedTaskService;
 import app.drydock.intellij.agent.AgentExecution;
 import app.drydock.intellij.agent.AgentExecutionRegistry;
@@ -33,6 +34,7 @@ import app.drydock.state.JsonApplicationStateRepository;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.PathManager;
+import com.intellij.util.EnvironmentUtil;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.Disposer;
 
@@ -464,6 +466,9 @@ public final class DrydockPluginService implements Disposable {
 
     private void initialize() {
         initializationThread = Thread.currentThread();
+        // The login shell's PATH for every child: the JVM's own is launchd's bare PATH when the IDE
+        // starts from Finder or the Dock. EnvironmentUtil may wait for the IDE's shell probe: off the EDT.
+        LoginShellEnvironment.useShellPath(EnvironmentUtil.getValue("PATH"));
         // forRepository loads state.json on first use — blocking file I/O,
         // which is exactly why it lives here and not in the constructor.
         stateStore = ApplicationStateStore.forRepository(repository);
