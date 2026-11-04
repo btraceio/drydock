@@ -42,31 +42,30 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 
 /**
- * Reviews an existing worktree in place — the PR review flow minus the
- * checkout. The worktree already stands; nothing is materialized, nothing is
- * cleaned up, and the gesture can never orphan a directory. What carries
- * over from {@link PullRequestReview} is everything after the materialize
- * step: a RUNNING session on that worktree is joined (its console moves into
- * this window, nothing relaunched), the Drydock review prompt is resolved on
- * the launch chain, and the session's Review tab opens once armed.
+ * Reviews an existing worktree in place: an idle worktree's Review actions,
+ * and a workbench's Review menu, which a pull request opened in its
+ * worktree reaches too. The worktree already stands; nothing is
+ * materialized, nothing is cleaned up, and the gesture can never orphan a
+ * directory. A RUNNING session on that worktree is joined (its console moves
+ * into this window, nothing relaunched), the Drydock review prompt is
+ * resolved on the launch chain, and the session's Review tab opens once
+ * armed.
  *
- * <p>The session runs in WRITES mode for the same reason the PR review does:
- * a reviewer builds, runs tests, and dispatches subagents, which a read-only
- * sandbox or plan mode would block. The prompt spends the repository's
- * remembered subagent tiers; there is no custom-prompt template here — that
- * setting is pull-request-specific ({@code $PR$} substitution), and a
- * worktree review is always Drydock's own flow.</p>
+ * <p>The session runs in WRITES mode: a reviewer builds, runs tests, and
+ * dispatches subagents, which a read-only sandbox or plan mode would block.
+ * The prompt spends the repository's remembered subagent tiers; the
+ * sphinx review sends the harness's command instead.</p>
  *
  * <p>The prompt is resolved BEFORE the agent spawns and travels as the
- * launch's initial prompt — the same channel the PR review uses; a prompt
- * typed into the console after a spawn races the harness's boot and can be
- * swallowed whole.</p>
+ * launch's initial prompt — the same channel a task typed into the New task
+ * dialog uses; a prompt typed into the console after a spawn races the
+ * harness's boot and can be swallowed whole.</p>
  */
 public final class WorktreeReview {
 
     private static final Logger LOG = System.getLogger(WorktreeReview.class.getName());
 
-    /** Bounded waits, mirroring the PR review's generous launch bound. */
+    /** Bounded waits, mirroring the New task flow's generous launch bound. */
     private static final long LAUNCH_TIMEOUT_SECONDS = 60;
 
     /** How often the model dialog's answer re-checks for cancellation/disposal. */
@@ -206,7 +205,7 @@ public final class WorktreeReview {
         // setting is pull-request-specific, so the tiers always apply when
         // the picked harness dispatches subagents.
         Optional<PullRequestReview.ModelChoice> choice = pickModel
-                ? chooseModel(from, plugin, agent.get(), lastUsedModel, lastUsedTiers, false, indicator)
+                ? chooseModel(from, plugin, agent.get(), lastUsedModel, lastUsedTiers, indicator)
                 : Optional.of(new PullRequestReview.ModelChoice(agent.get(),
                         lastUsedModel.apply(agent.get()), Optional.empty()));
         if (choice.isEmpty()) {
@@ -263,7 +262,6 @@ public final class WorktreeReview {
                                                                 AgentKind preselected,
                                                                 Function<AgentKind, Optional<String>> lastUsedModel,
                                                                 Function<AgentKind, ModelTiers> lastUsedTiers,
-                                                                boolean customTemplate,
                                                                 ProgressIndicator indicator) {
         CompletableFuture<PullRequestReview.ModelChoice> picked = new CompletableFuture<>();
         AtomicBoolean claimed = new AtomicBoolean();
@@ -277,7 +275,7 @@ public final class WorktreeReview {
                 }
                 ReviewModelDialog dialog = new ReviewModelDialog(from, plugin.registry().agents(), preselected,
                         lastUsedModel, lastUsedTiers, plugin.registry()::modelSuggestions,
-                        plugin.registry()::supportsSubagents, customTemplate);
+                        plugin.registry()::supportsSubagents);
                 boolean delivered = dialog.showAndGet()
                         ? picked.complete(new PullRequestReview.ModelChoice(dialog.acceptedAgent(),
                                 dialog.acceptedModel(), dialog.acceptedTiers()))
@@ -322,7 +320,7 @@ public final class WorktreeReview {
             return;
         }
         String displayName = displayName(branch);
-        // The sphinx command takes the custom-prompt channel: a fixed prompt
+        // The sphinx command takes the fixed-prompt channel: a fixed prompt
         // needs no review backend and opens no Review tab, which is exactly
         // what a harness-run review loop wants.
         PullRequestReview.ReviewPrompt prompt = sphinxPrompt
@@ -358,7 +356,7 @@ public final class WorktreeReview {
                     // The review is armed: the Drydock instruction rode the
                     // launch and the session holds the review tools. Its
                     // console's window's Review tab is where the human watches
-                    // it — the same sanctioned opener the PR review uses.
+                    // it, through the sanctioned opener the Changes link uses.
                     ApplicationManager.getApplication().invokeLater(
                             () -> ReviewTabOpener.open(from, Optional.of(started)),
                             ModalityState.nonModal(), from.getDisposed());

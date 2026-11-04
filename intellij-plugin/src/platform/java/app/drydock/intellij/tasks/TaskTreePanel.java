@@ -381,18 +381,15 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 }
             }
         };
-        // "Review…" asks for the starting model and re-records the choice:
-        // a pull request is first checked out into its own worktree, an
-        // idle worktree starts the session right there.
+        // "Review…" asks for the starting model and re-records the choice;
+        // an idle worktree starts the session right there. A pull request is
+        // reviewed from its workbench (Open in Review Workbench).
         AnAction review = new DumbAwareAction("Review…",
-                "Pick the starting model and start a review session; "
-                        + "a pull request is first checked out into its own worktree",
-                AllIcons.Actions.Preview) {
+                "Pick the starting model and start a review session", AllIcons.Actions.Preview) {
             @Override
             public void update(@NotNull AnActionEvent e) {
-                TaskNode node = e.getData(SELECTED_NODE);
-                TaskActions.present(e, node instanceof PullRequestRow
-                        || (node instanceof IdleWorktree && e.getData(SELECTED_PROJECT_ROOT) != null));
+                TaskActions.present(e, e.getData(SELECTED_NODE) instanceof IdleWorktree
+                        && e.getData(SELECTED_PROJECT_ROOT) != null);
             }
 
             @Override
@@ -402,10 +399,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
             @Override
             public void actionPerformed(@NotNull AnActionEvent e) {
-                TaskNode node = e.getData(SELECTED_NODE);
-                if (node instanceof PullRequestRow pullRequest) {
-                    reviewPullRequestWithDialog(pullRequest.mainRoot(), pullRequest);
-                } else if (node instanceof IdleWorktree idle) {
+                if (e.getData(SELECTED_NODE) instanceof IdleWorktree idle) {
                     Path root = e.getData(SELECTED_PROJECT_ROOT);
                     if (root != null) {
                         worktreeReview.reviewWithModelDialog(project, root, idle.worktree(), idle.branch());
@@ -415,22 +409,16 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         };
         // One-gesture review with the repository's remembered starting model
         // for the harness the review will launch; "Review…" above asks and
-        // re-records it instead. For a pull request the review checks the
-        // PR out into its own worktree first; an idle worktree starts the
-        // session right there. The label names the model so the quick
+        // re-records it instead. An idle worktree starts the session right
+        // there. The label names the model so the quick
         // action says what it will launch with, and it must track the state
         // store cheaply: it reads the in-memory repositories only, never git.
         AnAction quickReview = new DumbAwareAction("Review (default)",
-                "Start a review session with the remembered starting model; "
-                        + "a pull request is first checked out into its own worktree",
-                AllIcons.Actions.Preview) {
+                "Start a review session with the remembered starting model", AllIcons.Actions.Preview) {
             @Override
             public void update(@NotNull AnActionEvent e) {
-                TaskNode node = e.getData(SELECTED_NODE);
-                Path root = node instanceof PullRequestRow pullRequest ? pullRequest.mainRoot()
-                        : e.getData(SELECTED_PROJECT_ROOT);
-                TaskActions.present(e, node instanceof PullRequestRow
-                        || (node instanceof IdleWorktree && root != null));
+                Path root = e.getData(SELECTED_PROJECT_ROOT);
+                TaskActions.present(e, e.getData(SELECTED_NODE) instanceof IdleWorktree && root != null);
                 e.getPresentation().setText(quickReviewLabel(root));
             }
 
@@ -441,10 +429,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
             @Override
             public void actionPerformed(@NotNull AnActionEvent e) {
-                TaskNode node = e.getData(SELECTED_NODE);
-                if (node instanceof PullRequestRow pullRequest) {
-                    reviewPullRequest(pullRequest.mainRoot(), pullRequest);
-                } else if (node instanceof IdleWorktree idle) {
+                if (e.getData(SELECTED_NODE) instanceof IdleWorktree idle) {
                     Path root = e.getData(SELECTED_PROJECT_ROOT);
                     if (root != null) {
                         worktreeReview.review(project, root, idle.worktree(), idle.branch());
@@ -460,16 +445,13 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         // harness simply lacks the plugin. The launch re-checks whoever the
         // resolved harness actually is.
         AnAction reviewInSphinx = new DumbAwareAction("Review in Sphinx",
-                "Start a review session whose first prompt is the harness's sphinx command; "
-                        + "a pull request is first checked out into its own worktree",
+                "Start a review session whose first prompt is the harness's sphinx command",
                 AllIcons.Actions.Preview) {
             @Override
             public void update(@NotNull AnActionEvent e) {
-                TaskNode node = e.getData(SELECTED_NODE);
-                Path root = node instanceof PullRequestRow pullRequest ? pullRequest.mainRoot()
-                        : e.getData(SELECTED_PROJECT_ROOT);
-                TaskActions.present(e, (node instanceof PullRequestRow
-                        || (node instanceof IdleWorktree && root != null)) && sphinxAvailable(root));
+                Path root = e.getData(SELECTED_PROJECT_ROOT);
+                TaskActions.present(e, e.getData(SELECTED_NODE) instanceof IdleWorktree && root != null
+                        && sphinxAvailable(root));
             }
 
             @Override
@@ -479,10 +461,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
             @Override
             public void actionPerformed(@NotNull AnActionEvent e) {
-                TaskNode node = e.getData(SELECTED_NODE);
-                if (node instanceof PullRequestRow pullRequest) {
-                    reviewPullRequestInSphinx(pullRequest.mainRoot(), pullRequest);
-                } else if (node instanceof IdleWorktree idle) {
+                if (e.getData(SELECTED_NODE) instanceof IdleWorktree idle) {
                     Path root = e.getData(SELECTED_PROJECT_ROOT);
                     if (root != null) {
                         worktreeReview.reviewSphinx(project, root, idle.worktree(), idle.branch());
@@ -1064,38 +1043,6 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 .map(SharedProject::displayName)
                 .orElseGet(() -> String.valueOf(mainRoot.getFileName()));
         pullRequestReview.openInWorkbench(project, mainRoot, repositoryName, pullRequest.pullRequest());
-    }
-
-    private void reviewPullRequest(Path mainRoot, PullRequestRow pullRequest) {
-        if (mainRoot == null) {
-            return;
-        }
-        String repositoryName = DrydockPluginService.getInstance().sharedProjects().byRoot(mainRoot)
-                .map(SharedProject::displayName)
-                .orElseGet(() -> String.valueOf(mainRoot.getFileName()));
-        pullRequestReview.review(project, mainRoot, repositoryName, pullRequest.pullRequest());
-    }
-
-    /** Opens the review's model dialog for the pull request. EDT. */
-    private void reviewPullRequestWithDialog(Path mainRoot, PullRequestRow pullRequest) {
-        if (mainRoot == null) {
-            return;
-        }
-        String repositoryName = DrydockPluginService.getInstance().sharedProjects().byRoot(mainRoot)
-                .map(SharedProject::displayName)
-                .orElseGet(() -> String.valueOf(mainRoot.getFileName()));
-        pullRequestReview.reviewWithModelDialog(project, mainRoot, repositoryName, pullRequest.pullRequest());
-    }
-
-    /** Starts the sphinx review materialization for the clicked pull request. EDT. */
-    private void reviewPullRequestInSphinx(Path mainRoot, PullRequestRow pullRequest) {
-        if (mainRoot == null) {
-            return;
-        }
-        String repositoryName = DrydockPluginService.getInstance().sharedProjects().byRoot(mainRoot)
-                .map(SharedProject::displayName)
-                .orElseGet(() -> String.valueOf(mainRoot.getFileName()));
-        pullRequestReview.reviewSphinx(project, mainRoot, repositoryName, pullRequest.pullRequest());
     }
 
     /**
