@@ -2,7 +2,6 @@ package app.drydock.intellij.review;
 
 import app.drydock.intellij.review.workbench.model.SectionsModel;
 import app.drydock.intellij.review.workbench.model.WorkbenchState;
-import app.drydock.review.tour.HunkTake;
 import com.intellij.diff.DiffManager;
 import com.intellij.diff.DiffRequestPanel;
 import com.intellij.diff.requests.SimpleDiffRequest;
@@ -13,7 +12,6 @@ import com.intellij.openapi.Disposable;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.Disposer;
-import com.intellij.ui.components.ActionLink;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBScrollPane;
 import com.intellij.ui.components.JBTextArea;
@@ -30,7 +28,6 @@ import java.awt.Dimension;
 import java.awt.EventQueue;
 import java.awt.FlowLayout;
 import java.awt.Rectangle;
-import java.awt.event.ActionListener;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -69,7 +66,6 @@ final class ReviewWorkbenchSectionView extends JPanel implements Disposable {
     static final String MARKING = "Marking…";
     static final String FULL_FILE = "Full File";
     static final String SHOW_AGAIN = "Show Again";
-    static final String SHOW_FINDING = "Show finding";
 
     /** What the view asks of the live review. */
     interface Actions {
@@ -268,7 +264,7 @@ final class ReviewWorkbenchSectionView extends JPanel implements Disposable {
             }
         };
         final JBLabel header = new JBLabel();
-        final TakePanel take = new TakePanel();
+        final HunkTakePanel take = new HunkTakePanel(id -> actions.showFinding(id));
         final JButton markButton = new JButton(MARK_HUNK);
         private final JPanel holder = new JPanel(new BorderLayout());
         private final JBLabel placeholder = new JBLabel(LOADING, SwingConstants.CENTER);
@@ -398,88 +394,6 @@ final class ReviewWorkbenchSectionView extends JPanel implements Disposable {
         void dispose() {
             goDormant();
             disposed = true;
-        }
-    }
-
-    /** The take panel's header (pure): "Agent take · Diverges", with the open/closed marker. */
-    static String takeHeader(HunkTake take, boolean expanded) {
-        return (expanded ? "▾ " : "▸ ") + "Agent take · " + take.alignment().label();
-    }
-
-    /**
-     * A card's agent take (spec §6): a header link that folds it, over what
-     * the hunk does, the alignment note and the red flags; a red flag that
-     * names a finding links to it. Hidden while the hunk has no take; open
-     * until the user folds it, for the card's lifetime.
-     */
-    final class TakePanel extends JPanel {
-        final ActionLink toggle;
-        private final JPanel body = new JPanel();
-        private Optional<HunkTake> current = Optional.empty();
-        private boolean expanded = true;
-
-        TakePanel() {
-            super(new BorderLayout());
-            toggle = new ActionLink("", (ActionListener) e -> {
-                expanded = !expanded;
-                render(current);
-            });
-            setBorder(JBUI.Borders.empty(2, 0, 4, 0));
-            body.setLayout(new BoxLayout(body, BoxLayout.Y_AXIS));
-            body.setBorder(JBUI.Borders.emptyLeft(12));
-            add(toggle, BorderLayout.NORTH);
-            add(body, BorderLayout.CENTER);
-            setVisible(false);
-        }
-
-        void render(Optional<HunkTake> next) {
-            current = next;
-            setVisible(next.isPresent());
-            body.removeAll();
-            if (next.isEmpty()) {
-                return;
-            }
-            HunkTake take = next.get();
-            toggle.setText(takeHeader(take, expanded));
-            body.setVisible(expanded);
-            body.add(text(take.does(), false));
-            if (!take.alignmentNote().isEmpty()) {
-                body.add(text(take.alignmentNote(), true));
-            }
-            for (HunkTake.RedFlag flag : take.redFlags()) {
-                JPanel row = new JPanel(new BorderLayout(JBUI.scale(6), 0));
-                row.setAlignmentX(LEFT_ALIGNMENT);
-                row.add(text("⚑ " + flag.text(), false), BorderLayout.CENTER);
-                flag.findingId().ifPresent(id ->
-                        row.add(new ActionLink(SHOW_FINDING, (ActionListener) e -> actions.showFinding(id)), BorderLayout.EAST));
-                body.add(row);
-            }
-            revalidate();
-            repaint();
-        }
-
-        private JBTextArea text(String value, boolean muted) {
-            JBTextArea area = new JBTextArea(value);
-            area.setEditable(false);
-            area.setLineWrap(true);
-            area.setWrapStyleWord(true);
-            area.setOpaque(false);
-            area.setFont(JBUI.Fonts.label()); // a text area defaults to the editor's monospace font
-            area.setAlignmentX(LEFT_ALIGNMENT);
-            if (muted) {
-                area.setForeground(UIUtil.getContextHelpForeground());
-            }
-            return area;
-        }
-
-        /** The texts shown, in order (header first): for the tests. */
-        List<String> shownTexts() {
-            List<String> texts = new ArrayList<>();
-            texts.add(toggle.getText());
-            if (body.isVisible()) {
-                UIUtil.uiTraverser(body).filter(JBTextArea.class).forEach(area -> texts.add(area.getText()));
-            }
-            return texts;
         }
     }
 

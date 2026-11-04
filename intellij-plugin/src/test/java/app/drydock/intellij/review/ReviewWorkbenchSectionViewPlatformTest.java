@@ -76,7 +76,7 @@ public class ReviewWorkbenchSectionViewPlatformTest extends BasePlatformTestCase
         ReviewWorkbenchSectionView view = new ReviewWorkbenchSectionView(getProject(), actions);
         try {
             view.render(state(hunk("A", false, Optional.empty(), Optional.of(TAKE)), hunk("B", false, Optional.empty())));
-            ReviewWorkbenchSectionView.TakePanel take = view.cards.get(0).take;
+            HunkTakePanel take = view.cards.get(0).take;
             assertTrue(take.isVisible());
             assertEquals(List.of("▾ Agent take · Diverges", "Calls bar() and drops its result.",
                     "The intent says callers use the result.", "⚑ The result is ignored.", "⚑ No test covers it."),
