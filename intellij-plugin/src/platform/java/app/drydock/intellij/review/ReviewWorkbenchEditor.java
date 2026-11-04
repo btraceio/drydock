@@ -99,6 +99,11 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
         default Optional<JComponent> hostSectionView(Project project, Disposable parent) {
             return Optional.empty();
         }
+
+        /** The outbox for a new workbench editor, until {@code parent} ends; empty when no review is live. EDT. */
+        default Optional<JComponent> hostOutbox(Project project, Disposable parent) {
+            return Optional.empty();
+        }
     }
 
     private final ReviewWorkbenchFile file;
@@ -136,7 +141,7 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
         navSplitter.setFirstComponent(navigator);
         navSplitter.setSecondComponent(inboxSplitter);
         outboxSplitter.setFirstComponent(navSplitter);
-        outboxSplitter.setSecondComponent(emptyState(OUTBOX_EMPTY_TEXT));
+        outboxSplitter.setSecondComponent(host.hostOutbox(project, this).orElseGet(() -> emptyState(OUTBOX_EMPTY_TEXT)));
 
         header.setBorder(JBUI.Borders.empty(4, 8));
         viewActions = new DefaultActionGroup(
@@ -303,6 +308,11 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
             @Override
             public Optional<JComponent> hostSectionView(Project project, Disposable parent) {
                 return ReviewTabProvider.hostedSectionView(project, parent);
+            }
+
+            @Override
+            public Optional<JComponent> hostOutbox(Project project, Disposable parent) {
+                return ReviewTabProvider.hostedOutbox(project, parent);
             }
         };
     }

@@ -309,7 +309,7 @@ public final class ReviewTriageActions {
      * count through, so the bar can never advertise a batch the send would
      * refuse. Pure read — any thread.
      */
-    static boolean isPendingDecision(ReviewAnnotation finding) {
+    public static boolean isPendingDecision(ReviewAnnotation finding) {
         return !finding.resolved()
                 && finding.triage() != Triage.PROPOSED
                 && finding.status() != AnnotationStatus.SENT;

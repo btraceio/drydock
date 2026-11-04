@@ -24,11 +24,13 @@ import java.util.Optional;
  * @param navigator which navigator tab shows
  * @param sections the Sections tab and the section view
  * @param section  the selected section's key, when it is one of {@code sections}
+ * @param outbox   the outbox's session lane
  */
 public record WorkbenchState(String subject, Mode mode, ReviewTabModel.Snapshot review,
                              ReviewTabModel.Snapshot files, Filter filter, Optional<String> selected,
                              View view, InboxModel.Snapshot inbox, Navigator navigator,
-                             SectionsModel.Snapshot sections, Optional<String> section) {
+                             SectionsModel.Snapshot sections, Optional<String> section,
+                             OutboxModel.Snapshot outbox) {
 
     /** What is being reviewed. Only {@link #LOCAL} exists before the PR lane (W5). */
     public enum Mode {
@@ -67,6 +69,13 @@ public record WorkbenchState(String subject, Mode mode, ReviewTabModel.Snapshot 
         Objects.requireNonNull(navigator, "navigator");
         Objects.requireNonNull(sections, "sections");
         Objects.requireNonNull(section, "section");
+        Objects.requireNonNull(outbox, "outbox");
+    }
+
+    /** This state with {@code next} as the outbox's session lane. */
+    public WorkbenchState withOutbox(OutboxModel.Snapshot next) {
+        return new WorkbenchState(subject, mode, review, files, filter, selected, view, inbox, navigator, sections,
+                section, next);
     }
 
     /** The inbox choices a state is built with: which tab, under which scope. */
@@ -106,7 +115,8 @@ public record WorkbenchState(String subject, Mode mode, ReviewTabModel.Snapshot 
      * {@code findings} under {@code inbox}'s tab and scope, the file scope
      * following the selected file. The navigator shows the user's tab, else
      * Sections when the agent's tour gives them, else Files; a selected
-     * section that {@code sections} no longer has is dropped.
+     * section that {@code sections} no longer has is dropped. The outbox
+     * starts empty; {@link #withOutbox} sets it.
      */
     public static WorkbenchState of(String subject, Mode mode, ReviewTabModel.Snapshot review, Filter filter,
                                     Optional<String> selected, View view, List<ReviewAnnotation> findings,
@@ -121,7 +131,8 @@ public record WorkbenchState(String subject, Mode mode, ReviewTabModel.Snapshot 
                 sections.source() == SectionsModel.Source.TOUR ? Navigator.SECTIONS : Navigator.FILES);
         Optional<String> section = choice.section().filter(key -> sections.section(key).isPresent());
         return new WorkbenchState(subject, mode, review, files, filter, selected, view,
-                InboxModel.snapshot(findings, inbox.tab(), inbox.scope(), selected), navigator, sections, section);
+                InboxModel.snapshot(findings, inbox.tab(), inbox.scope(), selected), navigator, sections, section,
+                OutboxModel.Snapshot.EMPTY);
     }
 
     /** The selected section, when the Sections tab shows and one is selected. */

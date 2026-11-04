@@ -150,12 +150,13 @@ public final class InboxModel {
         return Optional.empty();
     }
 
+    /** Review order: file path, then start line, then id; shared with the outbox. */
+    static final Comparator<ReviewAnnotation> REVIEW_ORDER = Comparator.comparing(ReviewAnnotation::file)
+            .thenComparingInt((ReviewAnnotation finding) -> line(finding.startKey()))
+            .thenComparing(ReviewAnnotation::id);
+
     private static List<ReviewAnnotation> sorted(List<ReviewAnnotation> findings) {
-        return findings.stream()
-                .sorted(Comparator.comparing(ReviewAnnotation::file)
-                        .thenComparingInt(finding -> line(finding.startKey()))
-                        .thenComparing(ReviewAnnotation::id))
-                .toList();
+        return findings.stream().sorted(REVIEW_ORDER).toList();
     }
 
     /** A line key's number for ordering; a malformed key sorts first. */

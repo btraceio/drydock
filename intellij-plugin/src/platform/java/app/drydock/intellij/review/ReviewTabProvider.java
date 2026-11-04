@@ -16,6 +16,7 @@ import app.drydock.intellij.agent.AgentExecutionRegistry;
 import app.drydock.intellij.agent.PromptOutcome;
 import app.drydock.intellij.agent.SessionActivityListener;
 import app.drydock.intellij.review.workbench.model.InboxModel;
+import app.drydock.intellij.review.workbench.model.OutboxModel;
 import app.drydock.intellij.review.workbench.model.SectionsModel;
 import app.drydock.intellij.review.workbench.model.WorkbenchState;
 import app.drydock.review.AnnotationStatus;
@@ -573,6 +574,16 @@ final class ReviewTabProvider {
             onEdt(this::refreshDecisionsBar);
         }));
         refresher.onDispose(backend.scopeRegistry().addChangeListener(scopeId -> {
+            // The registry's copy is the truth: a session that starts reviewing this checkout after
+            // the tab resolved its scope binds it there (the scope's id is the same), and every send
+            // reads the session from this field.
+            ReviewScope current = this.scope;
+            if (current != null && current.id().equals(scopeId)) {
+                backend.scopeRegistry().byId(scopeId).ifPresent(updated -> {
+                    this.scope = updated;
+                    submitWorkbenchState();
+                });
+            }
             refresher.marksChanged();
             submitDecorationRefresh();
         }));
@@ -1214,50 +1225,62 @@ final class ReviewTabProvider {
                 : pendingDecisions(annotations.forScope(current.id()));
         label.setText(pending.describe());
         bar.setVisible(pending.total() > 0);
-        sendDecisionsButton.setEnabled(triage != null && pending.total() > 0);
+        sendDecisionsButton.setEnabled(triage != null && pending.total() > 0 && !sendInFlight);
     }
 
-    /**
-     * The Send: one prompt — the agreed findings (with the reviewer's
-     * comments) plus the dismissed ones — to the scope's bound agent, via
-     * {@link ReviewTriageActions#sendDecisions}. The button is dead for the
-     * duration, and every completion — delivered, refused, failed, or the
-     * scheduling rejected outright — revives it and refreshes the bar; a
-     * delivered send needs no message (the findings turn SENT and the bar
-     * empties), the rest surface distinctly. EDT.
-     */
+    /** The tool window's Send decisions button: the shared send, its outcome in the card notice. EDT. */
     private void sendDecisions() {
+        sendDecisionsButton.setEnabled(false);
+        sendToSession().whenComplete((outcome, error) -> onEdt(() -> {
+            refreshDecisionsBar();
+            if (outcome != null) {
+                outcome.ifPresent(message -> showCardOutcome(message.notice(), message.text()));
+            }
+        }));
+    }
+
+    /** What the outbox says while another send is running. */
+    static final String SEND_RUNNING = "A send to the agent is already running; nothing else was sent.";
+    /** What the outbox says when a send was delivered. */
+    static final String SEND_DELIVERED = "Sent to the agent. The findings move to Done.";
+
+    /**
+     * The one send to the bound session (EDT): the tool window's button and
+     * the workbench outbox both come here, and one in-flight flag keeps a
+     * second send from starting while one runs. Completes, never
+     * exceptionally, with the outcome's message for the caller to show --
+     * empty only when nothing needs saying.
+     */
+    CompletableFuture<Optional<TriageCards.Surfaced>> sendToSession() {
         ReviewTriageActions actions = triage;
         ReviewScope current = scope;
-        if (actions == null || current == null || sendInFlight) {
-            refreshDecisionsBar(); // re-gate the button: the wiring state may have moved
-            return;
+        if (actions == null || current == null) {
+            return CompletableFuture.completedFuture(
+                    Optional.of(new TriageCards.Surfaced(TriageCards.Notice.WARNING, STILL_LOADING)));
+        }
+        if (sendInFlight) {
+            return CompletableFuture.completedFuture(
+                    Optional.of(new TriageCards.Surfaced(TriageCards.Notice.WARNING, SEND_RUNNING)));
         }
         sendInFlight = true;
-        sendDecisionsButton.setEnabled(false);
+        CompletableFuture<Optional<TriageCards.Surfaced>> result = new CompletableFuture<>();
         try {
             actions.sendDecisions(current, subjectOf(current)).whenComplete((outcome, error) -> onEdt(() -> {
                 sendInFlight = false;
-                sendDecisionsButton.setEnabled(true);
-                refreshDecisionsBar();
                 if (error != null) {
-                    showCardOutcome(TriageCards.Notice.ERROR,
-                            "Sending the decisions to the agent failed: " + rootMessage(error));
+                    result.complete(Optional.of(new TriageCards.Surfaced(TriageCards.Notice.ERROR,
+                            "Sending the decisions to the agent failed: " + rootMessage(error))));
                     return;
                 }
-                TriageCards.Surfaced message = TriageCards.fixOutcome(outcome.state());
-                if (message != null) {
-                    showCardOutcome(message.notice(), message.text());
-                }
+                result.complete(Optional.ofNullable(TriageCards.fixOutcome(outcome.state())));
             }));
         } catch (RuntimeException e) {
-            // The scheduling itself was rejected — no future exists; the
-            // button revives here and the failure surfaces.
+            // The scheduling itself was rejected: no future exists, so the flag clears here.
             sendInFlight = false;
-            sendDecisionsButton.setEnabled(true);
-            showCardOutcome(TriageCards.Notice.ERROR,
-                    "Sending the decisions to the agent failed: " + rootMessage(e));
+            result.complete(Optional.of(new TriageCards.Surfaced(TriageCards.Notice.ERROR,
+                    "Sending the decisions to the agent failed: " + rootMessage(e))));
         }
+        return result;
     }
 
     /**
@@ -1799,7 +1822,8 @@ final class ReviewTabProvider {
         List<ReviewVerdict> verdicts = annotations == null ? List.of() : annotations.verdictsFor(scope.id());
         WorkbenchState state = WorkbenchState.of(subjectOf(scope), WorkbenchState.Mode.LOCAL, current,
                 workbenchFilter, Optional.ofNullable(selectedPath()), workbenchView, findings, inboxChoice,
-                sectionsOf(scope, current, verdicts, findings), sectionsChoice);
+                sectionsOf(scope, current, verdicts, findings), sectionsChoice)
+                .withOutbox(OutboxModel.snapshot(findings, scope.sessionId().isPresent()));
         workbenchState = state;
         onEdt(() -> {
             if (disposed.get()) {
@@ -1976,6 +2000,24 @@ final class ReviewTabProvider {
                 }
             }
         }
+    }
+
+    /**
+     * The outbox's session lane over the live review for a new workbench
+     * editor, rendered from every {@link WorkbenchState} until
+     * {@code parent} is disposed. Its Send goes through
+     * {@link #sendToSession}, the tool window's own send. Empty when the
+     * project has no live Review content. EDT.
+     */
+    static Optional<JComponent> hostedOutbox(Project project, Disposable parent) {
+        ReviewTabProvider provider = project.getUserData(LIVE_PROVIDER);
+        if (provider == null || provider.disposed.get()) {
+            return Optional.empty();
+        }
+        ReviewWorkbenchOutbox outbox = new ReviewWorkbenchOutbox(() -> provider.sendToSession().thenApply(
+                message -> Optional.of(message.map(TriageCards.Surfaced::text).orElse(SEND_DELIVERED))));
+        provider.attachWorkbenchView(outbox::render, parent);
+        return Optional.of(outbox);
     }
 
     /**
