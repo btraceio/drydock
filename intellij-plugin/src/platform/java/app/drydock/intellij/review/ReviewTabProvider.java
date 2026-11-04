@@ -689,6 +689,11 @@ final class ReviewTabProvider {
      * workbench, whose navigator takes it. The take is the consumption:
      * found or stale, the target is spent exactly once, and a stale one
      * leaves the selection unchanged (the browser's own rule).
+     *
+     * <p>A pending file target ({@link ReviewTabOpener#openFile}, a source
+     * editor's "Back to review") is taken the same way once a snapshot is
+     * here: the Files tab shows its file, scrolled to its line. A file the
+     * review no longer lists spends the target and changes nothing.</p>
      */
     private void consumePendingFindingTarget() {
         if (navigators.isEmpty() || disposed.get()) {
@@ -700,6 +705,26 @@ final class ReviewTabProvider {
                 navigator.selectFinding(file, findingId);
             }
         });
+        ReviewTabModel.Snapshot rows = snapshot;
+        if (rows == null) {
+            return; // the file target waits for the snapshot that lists its file
+        }
+        ReviewTabOpener.takePendingFile(project).flatMap(target -> fileAt(rows, target)).ifPresent(at -> {
+            sectionsChoice = new WorkbenchState.SectionsChoice(Optional.of(WorkbenchState.Navigator.FILES),
+                    sectionsChoice.section());
+            // The tree's selection shows the file at its first change; the scrolled selection follows and wins.
+            for (ReviewWorkbenchNavigator navigator : targets) {
+                navigator.selectFile(at.file().path());
+            }
+            selected(at);
+            submitWorkbenchState();
+        });
+    }
+
+    /** {@code target}'s file in {@code rows}, at its line (pure); none when the review no longer lists it. */
+    static Optional<FileAt> fileAt(ReviewTabModel.Snapshot rows, ReviewTabOpener.FileTarget target) {
+        return rows.files().stream().filter(row -> row.path().equals(target.filePath())).findFirst()
+                .map(row -> new FileAt(row, target.scrollKey()));
     }
 
     /**
@@ -909,10 +934,12 @@ final class ReviewTabProvider {
                                                                Optional<Path> worktreeFile) {
         Objects.requireNonNull(file, "file");
         ReviewDiffRequests.Plan plan;
-        if (row instanceof ReviewTabModel.FindingRow finding) {
+        String scrollKey = row instanceof ReviewTabModel.FindingRow finding ? finding.startKey()
+                : row instanceof FileAt at ? at.scrollKey()
+                : null;
+        if (scrollKey != null) {
             try {
-                plan = ReviewDiffRequests.plan(left, right, fragments,
-                        ReviewDiffRequests.scrollTarget(finding.startKey()));
+                plan = ReviewDiffRequests.plan(left, right, fragments, ReviewDiffRequests.scrollTarget(scrollKey));
             } catch (IllegalArgumentException e) {
                 // fall through: the file's own scroll target
                 plan = ReviewDiffRequests.plan(file, left, right, fragments);
@@ -1153,6 +1180,9 @@ final class ReviewTabProvider {
         if (row instanceof ReviewTabModel.FileRow file) {
             return file;
         }
+        if (row instanceof FileAt at) {
+            return at.file();
+        }
         if (row instanceof ReviewTabModel.FindingRow finding) {
             ReviewTabModel.Snapshot current = snapshot;
             if (current == null) {
@@ -1183,10 +1213,25 @@ final class ReviewTabProvider {
         if (row instanceof ReviewTabModel.FileRow file) {
             return file.path();
         }
+        if (row instanceof FileAt at) {
+            return at.file().path();
+        }
         if (row instanceof ReviewTabModel.FindingRow finding) {
             return finding.annotation().file();
         }
         return null;
+    }
+
+    /**
+     * A file selected at one of its lines: what a source editor's "Back to
+     * review" asks for (the hunk's first changed row). Shows as its file,
+     * scrolled to {@code scrollKey}.
+     */
+    record FileAt(ReviewTabModel.FileRow file, String scrollKey) {
+        FileAt {
+            Objects.requireNonNull(file, "file");
+            Objects.requireNonNull(scrollKey, "scrollKey");
+        }
     }
 
     /**

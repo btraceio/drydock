@@ -2,26 +2,33 @@ package app.drydock.intellij.review;
 
 import app.drydock.review.Severity;
 
+import com.intellij.icons.AllIcons;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.AnActionEvent;
+import com.intellij.openapi.editor.Document;
 import com.intellij.openapi.editor.Editor;
 import com.intellij.openapi.editor.EditorFactory;
 import com.intellij.openapi.editor.event.EditorFactoryEvent;
 import com.intellij.openapi.editor.event.EditorFactoryListener;
 import com.intellij.openapi.editor.markup.GutterIconRenderer;
 import com.intellij.openapi.editor.markup.HighlighterLayer;
+import com.intellij.openapi.editor.markup.HighlighterTargetArea;
+import com.intellij.openapi.editor.markup.LineMarkerRendererEx;
 import com.intellij.openapi.editor.markup.RangeHighlighter;
 import com.intellij.openapi.fileEditor.FileDocumentManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.Disposer;
 import com.intellij.openapi.vfs.VirtualFile;
+import com.intellij.ui.JBColor;
+import com.intellij.util.ui.JBUI;
 import org.jetbrains.annotations.NotNull;
 
 import java.awt.Color;
 import java.awt.Component;
 import java.awt.Font;
 import java.awt.Graphics;
+import java.awt.Rectangle;
 import java.awt.EventQueue;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
@@ -107,7 +114,27 @@ public final class ReviewEditorHighlighters {
         int lineCount();
 
         ReviewDiffInlays.Owned addGroupMark(int line, GroupMark mark);
+
+        /**
+         * Marks zero-based lines {@code firstLine..lastLine} as changed in
+         * this review, with the way back on the first; null when the editor
+         * paints no such mark.
+         */
+        default ReviewDiffInlays.Owned addChangeMark(int firstLine, int lastLine, ChangeMark mark) {
+            return null;
+        }
     }
+
+    /** A changed-range mark's content: its tooltip and the click that goes back to the review. */
+    public record ChangeMark(String tooltip, Runnable click) {
+        public ChangeMark {
+            Objects.requireNonNull(tooltip, "tooltip");
+            Objects.requireNonNull(click, "click");
+        }
+    }
+
+    /** The changed-range mark's tooltip. */
+    static final String CHANGED_TOOLTIP = "Changed in this review. Click to go back to the review";
 
     /** One gutter mark's UI-agnostic content: severity icon, count, tooltip, and the click. */
     public record GroupMark(Severity severity, int count, String tooltip, Runnable click) {
@@ -121,9 +148,16 @@ public final class ReviewEditorHighlighters {
         }
     }
 
-    /** The navigation a gutter click performs; production is {@link ReviewTabOpener#openFinding}. */
+    /**
+     * The navigation a gutter click performs; production is
+     * {@link ReviewTabOpener#openFinding} and {@link ReviewTabOpener#openFile}.
+     */
     public interface Navigation {
         void openFinding(Project project, String filePath, String findingId);
+
+        /** Back to the review on {@code filePath}, scrolled to {@code scrollKey}. */
+        default void openFile(Project project, String filePath, String scrollKey) {
+        }
     }
 
     private static final Logger LOG = System.getLogger(ReviewEditorHighlighters.class.getName());
@@ -148,7 +182,17 @@ public final class ReviewEditorHighlighters {
      */
     public static ReviewEditorHighlighters platform(Project project, Path checkout, Disposable parent) {
         return new ReviewEditorHighlighters(project, checkout, parent,
-                ReviewDiffInlays.platformEdt(), platformSources(parent), ReviewTabOpener::openFinding);
+                ReviewDiffInlays.platformEdt(), platformSources(parent), new Navigation() {
+                    @Override
+                    public void openFinding(Project target, String filePath, String findingId) {
+                        ReviewTabOpener.openFinding(target, filePath, findingId);
+                    }
+
+                    @Override
+                    public void openFile(Project target, String filePath, String scrollKey) {
+                        ReviewTabOpener.openFile(target, filePath, scrollKey);
+                    }
+                });
     }
 
     ReviewEditorHighlighters(Project project, Path checkout, Disposable parent,
@@ -260,6 +304,22 @@ public final class ReviewEditorHighlighters {
         String relative = relativePathOf(editor);
         if (relative == null) {
             return; // no file, a directory, or outside this checkout
+        }
+        for (ReviewEditorMarkModel.Change change : model.changesFor(relative)) {
+            if (change.firstLine() >= editor.lineCount()) {
+                continue; // the document no longer reaches that hunk; never a guess
+            }
+            int last = Math.min(change.lastLine(), editor.lineCount() - 1);
+            try {
+                ReviewDiffInlays.Owned handle = editor.addChangeMark(change.firstLine(), last,
+                        new ChangeMark(CHANGED_TOOLTIP, () -> navigation.openFile(project, relative,
+                                change.scrollKey())));
+                if (handle != null) {
+                    marksByEditor.computeIfAbsent(editor, ignored -> new ArrayList<>()).add(handle);
+                }
+            } catch (RuntimeException e) {
+                LOG.log(Level.WARNING, "Adding a changed-range mark failed; the hunk is skipped and its siblings continue", e);
+            }
         }
         ReviewEditorMarkModel.FileMarks file = model.forPath(relative).orElse(null);
         if (file == null) {
@@ -408,6 +468,31 @@ public final class ReviewEditorHighlighters {
             };
         }
 
+        @Override public ReviewDiffInlays.Owned addChangeMark(int firstLine, int lastLine, ChangeMark mark) {
+            Document document = editor.getDocument();
+            RangeHighlighter highlighter = editor.getMarkupModel().addRangeHighlighter(
+                    document.getLineStartOffset(firstLine), document.getLineEndOffset(lastLine),
+                    HighlighterLayer.ADDITIONAL_SYNTAX, null, HighlighterTargetArea.LINES_IN_RANGE);
+            try {
+                highlighter.setLineMarkerRenderer(CHANGE_BAR);
+                highlighter.setGutterIconRenderer(new ChangeGutterIcon(mark));
+            } catch (RuntimeException | Error failure) {
+                try {
+                    if (!editor.isDisposed() && highlighter.isValid()) {
+                        editor.getMarkupModel().removeHighlighter(highlighter);
+                    }
+                } catch (RuntimeException cleanupFailure) {
+                    LOG.log(Level.WARNING, "Removing a half-installed changed-range mark failed", cleanupFailure);
+                }
+                throw failure;
+            }
+            return () -> {
+                if (!editor.isDisposed() && highlighter.isValid()) {
+                    editor.getMarkupModel().removeHighlighter(highlighter);
+                }
+            };
+        }
+
         private VirtualFile file() {
             VirtualFile file = FileDocumentManager.getInstance().getFile(editor.getDocument());
             return file != null && file.isValid() ? file : null;
@@ -436,6 +521,56 @@ public final class ReviewEditorHighlighters {
 
         @Override public boolean equals(Object other) {
             return other instanceof GroupedGutterIcon icon && mark.equals(icon.mark);
+        }
+
+        @Override public int hashCode() { return mark.hashCode(); }
+    }
+
+    /** The colour of the changed-range bar: a review's, not the VCS change markers' green or blue. */
+    private static final JBColor CHANGE_COLOR = new JBColor(new Color(0x9C6ADE), new Color(0x8A5CC7));
+
+    /** The changed-range bar: a thin strip at the gutter's right edge over the hunk's lines. */
+    private static final LineMarkerRendererEx CHANGE_BAR = new LineMarkerRendererEx() {
+        @Override public void paint(@NotNull Editor editor, @NotNull Graphics graphics, @NotNull Rectangle range) {
+            Graphics bar = graphics.create();
+            try {
+                bar.setColor(CHANGE_COLOR);
+                int width = JBUI.scale(3);
+                bar.fillRect(range.x + range.width - width, range.y, width, range.height);
+            } finally {
+                bar.dispose();
+            }
+        }
+
+        @Override public @NotNull Position getPosition() {
+            return Position.RIGHT;
+        }
+    };
+
+    /** The changed-range mark's gutter icon on the hunk's first line: the tooltip, and the click back. */
+    private static final class ChangeGutterIcon extends GutterIconRenderer {
+        private final ChangeMark mark;
+
+        ChangeGutterIcon(ChangeMark mark) {
+            this.mark = Objects.requireNonNull(mark, "mark");
+        }
+
+        @Override public @NotNull Icon getIcon() { return AllIcons.Actions.Back; }
+
+        @Override public String getTooltipText() { return mark.tooltip(); }
+
+        @Override public @NotNull Alignment getAlignment() { return Alignment.RIGHT; }
+
+        @Override public AnAction getClickAction() {
+            return new AnAction() {
+                @Override public void actionPerformed(@NotNull AnActionEvent event) {
+                    mark.click().run();
+                }
+            };
+        }
+
+        @Override public boolean equals(Object other) {
+            return other instanceof ChangeGutterIcon icon && mark.equals(icon.mark);
         }
 
         @Override public int hashCode() { return mark.hashCode(); }

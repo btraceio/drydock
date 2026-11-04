@@ -173,6 +173,9 @@ class ReviewEditorHighlightersTest {
     /** One painted group: the line, the mark's content, and the handle that removes it. */
     private record Marked(int line, GroupMark mark, FakeOwned owned) { }
 
+    /** One painted changed range. */
+    private record Changed(int firstLine, int lastLine, ReviewEditorHighlighters.ChangeMark mark, FakeOwned owned) { }
+
     private static class FakeEditor implements SourceEditor {
         final Project project;
         final String filePath;
@@ -202,6 +205,15 @@ class ReviewEditorHighlightersTest {
         @Override public FakeOwned addGroupMark(int line, GroupMark mark) {
             FakeOwned owned = new FakeOwned();
             marks.add(new Marked(line, mark, owned));
+            return owned;
+        }
+
+        /** The changed-range marks painted: first..last, the mark, and its handle. */
+        final List<Changed> changes = new ArrayList<>();
+
+        @Override public FakeOwned addChangeMark(int firstLine, int lastLine, ReviewEditorHighlighters.ChangeMark mark) {
+            FakeOwned owned = new FakeOwned();
+            changes.add(new Changed(firstLine, lastLine, mark, owned));
             return owned;
         }
 
@@ -270,6 +282,10 @@ class ReviewEditorHighlightersTest {
         @Override public void openFinding(Project project, String filePath, String findingId) {
             calls.add(filePath + "|" + findingId);
         }
+
+        @Override public void openFile(Project project, String filePath, String scrollKey) {
+            calls.add("file " + filePath + "|" + scrollKey);
+        }
     }
 
     private static final class Layer {
@@ -318,6 +334,28 @@ class ReviewEditorHighlightersTest {
         assertEquals(model().forPath("src/A.java").orElseThrow().byLine().get(1).tooltip(),
                 first.mark().tooltip());
         assertEquals(3, ours.marks.get(1).line());
+    }
+
+    @Test
+    void everyChangedHunkIsMarkedWithItsWayBackToTheReview() {
+        Layer layer = layer();
+        FakeEditor ours = new FakeEditor(layer.project, "/repo/src/A.java");
+        FakeEditor tooShort = new FakeEditor(layer.project, "/repo/src/B.java", false, 1);
+        layer.sources.editors.addAll(List.of(ours, tooShort));
+
+        layer.apply(model());
+
+        assertEquals(1, ours.changes.size(), "the one hunk");
+        Changed change = ours.changes.getFirst();
+        assertEquals(1, change.firstLine(), "the added row n2, zero-based");
+        assertEquals(1, change.lastLine());
+        assertEquals(ReviewEditorHighlighters.CHANGED_TOOLTIP, change.mark().tooltip());
+        change.mark().click().run();
+        assertEquals(List.of("file src/A.java|n2"), layer.navigation.calls);
+        assertTrue(tooShort.changes.isEmpty(), "a document that no longer reaches the hunk gets no mark");
+
+        layer.apply(emptyModel());
+        assertTrue(change.owned().released, "a new snapshot releases the previous changed ranges");
     }
 
     @Test
