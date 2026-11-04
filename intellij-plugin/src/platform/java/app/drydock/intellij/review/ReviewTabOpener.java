@@ -151,7 +151,16 @@ public final class ReviewTabOpener {
      * the workbench's Review menu asks for an agent review. EDT.
      */
     public static void openWithoutOffer(Project project) {
-        PRODUCTION.openIn(project, Optional.empty(), false);
+        openWithoutOffer(project, Optional.empty());
+    }
+
+    /**
+     * As {@link #open}, without the empty-review preparation offer: for the
+     * Review tab of a review session just started, whose agent is preparing
+     * the review the offer would ask for. EDT.
+     */
+    public static void openWithoutOffer(Project project, Optional<ManagedAgentSession> linkSession) {
+        PRODUCTION.openIn(project, linkSession, false);
     }
 
     /**

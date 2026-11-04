@@ -344,6 +344,22 @@ class ReviewTabOpenerTest {
                 calls::toString);
     }
 
+    /**
+     * A review session's own open (its review is being prepared) keeps the
+     * session link for the mint and never offers a second preparation.
+     */
+    @Test
+    void aStartedReviewsOpenBindsItsSessionAndOffersNothing() {
+        ReviewTabOpener opener = opener(scopeSource(), new RecordingPreparation(false, true));
+
+        opener.openIn(project("/repo"), Optional.of(link), false);
+
+        assertTrue(calls.contains("resolve: /repo link=" + link.id()), calls::toString);
+        assertTrue(calls.contains("reloadTab"), calls::toString);
+        assertTrue(calls.stream().noneMatch(call -> call.startsWith("offer") || call.startsWith("launch")),
+                calls::toString);
+    }
+
     /** A checkout with review data (findings or a tour) opens exactly as before — no offer, no nag. */
     @Test
     void aReviewWithFindingsOffersNothing() {
