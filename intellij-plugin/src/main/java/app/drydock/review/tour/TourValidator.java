@@ -69,6 +69,7 @@ public final class TourValidator {
         Set<String> stepIds = new HashSet<>();
         Set<String> checkIds = new HashSet<>();
         for (TourStep step : tour.steps()) {
+            validateDependencies(step, stepIds, tour, errors);
             if (!stepIds.add(step.id())) {
                 errors.add("step id " + step.id() + " is used twice");
             }
@@ -157,6 +158,29 @@ public final class TourValidator {
                     break;
                 }
                 lineStart = lineEnd + 1;
+            }
+        }
+    }
+
+    /**
+     * A step depends on earlier steps only: the tour's step order is its
+     * dependency order, which also rules out cycles. {@code earlier} holds
+     * the ids of the steps before {@code step}.
+     */
+    private static void validateDependencies(TourStep step, Set<String> earlier, ReviewTour tour,
+                                             List<String> errors) {
+        Set<String> seen = new HashSet<>();
+        for (String dependency : step.dependsOn()) {
+            String where = "step " + step.id() + " dependsOn " + dependency + ": ";
+            if (!seen.add(dependency)) {
+                errors.add(where + "named twice");
+            } else if (dependency.equals(step.id())) {
+                errors.add(where + "a step cannot depend on itself");
+            } else if (tour.step(dependency).isEmpty()) {
+                errors.add(where + "no step has this id");
+            } else if (!earlier.contains(dependency)) {
+                errors.add(where + "that step comes later; order the steps so each comes after the steps it "
+                        + "depends on");
             }
         }
     }

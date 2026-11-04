@@ -39,6 +39,38 @@ class TourValidatorTest {
         assertEquals(List.of(), TourValidator.validate(coveringTour(diff), diff));
     }
 
+    private static TourStep dependent(String id, String file, String startKey, String endKey, String checkId,
+                                      String... dependsOn) {
+        return new TourStep(id, "Step " + id, "Why " + id + " exists.",
+                List.of(new TourAnchor(file, startKey, endKey)), List.of(), List.of(predict(checkId)),
+                Optional.empty(), List.of(dependsOn));
+    }
+
+    @Test
+    void aStepMayDependOnAnEarlierStep() {
+        TourStep first = dependent("s1", "src/A.java", "n1", "n22", "c1");
+        TourStep second = dependent("s2", "src/B.java", "o5", "o6", "c2", "s1");
+        assertEquals(List.of(), TourValidator.validate(tour(diff, first, second), diff));
+    }
+
+    @Test
+    void aDependencyOnALaterStepIsRejected() {
+        TourStep first = dependent("s1", "src/A.java", "n1", "n22", "c1", "s2");
+        TourStep second = dependent("s2", "src/B.java", "o5", "o6", "c2");
+        List<String> errors = TourValidator.validate(tour(diff, first, second), diff);
+        assertTrue(anyContains(errors, "step s1 dependsOn s2: that step comes later"), errors.toString());
+    }
+
+    @Test
+    void aDependencyOnItselfOrOnNoStepOrTwiceIsRejected() {
+        TourStep first = dependent("s1", "src/A.java", "n1", "n22", "c1");
+        TourStep second = dependent("s2", "src/B.java", "o5", "o6", "c2", "s2", "s9", "s1", "s1");
+        List<String> errors = TourValidator.validate(tour(diff, first, second), diff);
+        assertTrue(anyContains(errors, "step s2 dependsOn s2: a step cannot depend on itself"), errors.toString());
+        assertTrue(anyContains(errors, "step s2 dependsOn s9: no step has this id"), errors.toString());
+        assertTrue(anyContains(errors, "step s2 dependsOn s1: named twice"), errors.toString());
+    }
+
     /** A diagram with its limits: readable in the panel, and a drawing that survives the font. */
     @Test
     void aWellFormedDiagramIsValid() {

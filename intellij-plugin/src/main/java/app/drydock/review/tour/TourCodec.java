@@ -108,7 +108,7 @@ public final class TourCodec {
         for (TourStep step : steps) {
             List<TourCheck> checks = step.checks().stream().map(TourCodec::scattered).toList();
             scattered.add(new TourStep(step.id(), step.title(), step.narrative(), step.anchors(),
-                    step.impactNotes(), checks, step.diagram()));
+                    step.impactNotes(), checks, step.diagram(), step.dependsOn()));
         }
         return scattered;
     }
@@ -168,7 +168,27 @@ public final class TourCodec {
         Optional<TourDiagram> diagram = obj.get("diagram") == null
                 ? Optional.empty()
                 : Optional.of(diagramFromJson(obj.get("diagram"), path + ".diagram"));
-        return new TourStep(id, title, narrative, anchors, notes, checks, diagram);
+        return new TourStep(id, title, narrative, anchors, notes, checks, diagram, dependsOn(obj, path));
+    }
+
+    /**
+     * A step's {@code dependsOn}: optional, so every tour written before
+     * dependencies decodes as a step that builds on nothing. Each element is
+     * a step id; whether it names an earlier step is {@link TourValidator}'s
+     * rule.
+     */
+    private static List<String> dependsOn(JsonObject obj, String path) throws InvalidTour {
+        JsonArray array = array(obj, "dependsOn", path, TourValidator.MAX_STEPS, false);
+        List<String> ids = new ArrayList<>();
+        for (int i = 0; i < array.elements().size(); i++) {
+            String at = path + ".dependsOn[" + i + "]";
+            if (!(array.elements().get(i) instanceof JsonString id) || id.value().isBlank()
+                    || id.value().length() > MAX_ID) {
+                throw new InvalidTour(at + ": a step id (a non-blank string of at most " + MAX_ID + " characters)");
+            }
+            ids.add(id.value());
+        }
+        return ids;
     }
 
     /**
@@ -249,6 +269,11 @@ public final class TourCodec {
                 .put("anchors", JsonArray.of(anchors))
                 .put("impactNotes", JsonArray.of(notes))
                 .put("checks", JsonArray.of(checks));
+        // Absent when empty, the wire's shape before dependencies.
+        if (!step.dependsOn().isEmpty()) {
+            json.put("dependsOn", JsonArray.of(step.dependsOn().stream()
+                    .map(id -> (JsonValue) new JsonString(id)).toList()));
+        }
         // Absent when there is no diagram: a tour without one is the wire's
         // older shape, and an empty object here would decode as a diagram
         // with no stages (a validation error) rather than as no diagram.

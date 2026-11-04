@@ -106,6 +106,29 @@ class TourMigrationTest {
                 "and the claim about it moved with it");
     }
 
+    @Test
+    void aMovedOrStaleStepKeepsItsDependencies() {
+        TourStep s1 = step("s1", List.of(new TourAnchor("src/A.java", "n1", "n4")), predict("c1"));
+        TourStep s2 = step("s2", List.of(new TourAnchor("src/A.java", "n21", "n22"),
+                new TourAnchor("src/B.java", "o5", "o6")), risk("c2"));
+        TourStep dependent = new TourStep(s2.id(), s2.title(), s2.narrative(), s2.anchors(), s2.impactNotes(),
+                s2.checks(), Optional.empty(), List.of("s1"));
+        ReviewTour tour = new ReviewTour(TourFixtures.SCOPE, TourFingerprint.of(twoFileDiff()), List.of(s1, dependent));
+        UnifiedDiff.FileDiff shiftedA = file("src/A.java",
+                UNCHANGED_A.hunks().get(0),
+                hunk(ctx(19, 25, "void f() {"), del(20, "  old();"), add(26, "  next();"), ctx(21, 27, "}")));
+
+        UnifiedDiff moved = new UnifiedDiff(List.of(shiftedA, twoFileDiff().files().get(1)));
+        assertEquals(List.of("s1"), TourMigration.migrate(passed(tour), moved).record().tour()
+                .step("s2").orElseThrow().dependsOn(), "a step whose anchors moved");
+
+        UnifiedDiff stale = new UnifiedDiff(List.of(aShiftedUnderNewCode().files().get(0), bChanged().files().get(1)));
+        TourMigration.Result result = TourMigration.migrate(passed(tour), stale);
+        assertEquals(List.of("s2"), result.staleStepIds());
+        assertEquals(List.of("s1"), result.record().tour().step("s2").orElseThrow().dependsOn(),
+                "a step that went stale");
+    }
+
     /**
      * src/A.java's second hunk shifted down five lines, and a different hunk
      * now sits at the line numbers it used to have: n21/n22 are new code.

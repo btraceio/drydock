@@ -328,4 +328,11 @@ class ReviewInstructionsTest {
         assertTrue(prompt.contains("\"Why is this synchronized? It is never shared.\""));
         assertTrue(prompt.contains("ONE review_ask_answer call (questionId ask-3"));
     }
+
+    @Test
+    void theScopePromptAsksForStepsInDependencyOrder() {
+        for (boolean subagents : new boolean[] {true, false}) {
+            assertTrue(ReviewInstructions.forScope("rs_abc123", subagents).contains("dependsOn"));
+        }
+    }
 }

@@ -130,6 +130,33 @@ class TourCodecTest {
     }
 
     @Test
+    void dependsOnDecodesAndRoundTripsThroughThePersistedForm() throws Exception {
+        String withDeps = ONE_STEP.replace("\"narrative\":\"Why.\",",
+                "\"narrative\":\"Why.\",\"dependsOn\":[\"s0\"],");
+        TourStep step = TourCodec.stepsFromAgent(JsonParser.parse(withDeps)).getFirst();
+        assertEquals(List.of("s0"), step.dependsOn());
+
+        TourStep restored = TourCodec.stepFromJson(TourCodec.stepToJson(step), "steps[0]");
+        assertEquals(List.of("s0"), restored.dependsOn(), "the persisted form keeps the dependencies");
+    }
+
+    @Test
+    void aStepWithoutDependenciesDecodesEmptyAndWritesNoDependsOnMember() throws Exception {
+        TourStep step = TourCodec.stepsFromAgent(JsonParser.parse(ONE_STEP)).getFirst();
+        assertEquals(List.of(), step.dependsOn());
+        assertFalse(JsonWriter.write(TourCodec.stepToJson(step)).contains("\"dependsOn\""),
+                "an old-shape step must persist as it did before the field existed");
+    }
+
+    @Test
+    void aDependencyThatIsNotAStepIdIsRejectedNamingItsPath() {
+        TourCodec.InvalidTour error = assertThrows(TourCodec.InvalidTour.class, () -> TourCodec.stepsFromAgent(
+                JsonParser.parse(ONE_STEP.replace("\"narrative\":\"Why.\",",
+                        "\"narrative\":\"Why.\",\"dependsOn\":[3],"))));
+        assertTrue(error.getMessage().contains("steps[0].dependsOn[0]"), error.getMessage());
+    }
+
+    @Test
     void aDiagramWithoutStagesIsRejectedNamingItsPath() {
         TourCodec.InvalidTour error = assertThrows(TourCodec.InvalidTour.class, () -> TourCodec.stepsFromAgent(
                 JsonParser.parse(ONE_STEP.replace("\"narrative\":\"Why.\",",
