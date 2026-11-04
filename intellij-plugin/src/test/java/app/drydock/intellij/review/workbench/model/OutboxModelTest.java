@@ -45,4 +45,19 @@ class OutboxModelTest {
         assertEquals("1 dismissed", OutboxModel.snapshot(List.of(
                 finding("a", "n1", "Claude", "x").withTriage(Triage.DISMISSED)), false).countsText());
     }
+
+    @Test
+    void aPullRequestReviewsLaneCountsTheFindingsMeantForThePrInsteadOfListingThem() {
+        ReviewAnnotation forPr = finding("src/A.java", "n1", "Claude", "Post me.").withTriage(Triage.CONFIRMED);
+        ReviewAnnotation fix = finding("src/A.java", "n2", "Claude", "Fix me.").withTriage(Triage.CONFIRMED)
+                .withPostToPr(false);
+
+        OutboxModel.Snapshot local = OutboxModel.snapshot(List.of(forPr, fix), true, false);
+        OutboxModel.Snapshot pr = OutboxModel.snapshot(List.of(forPr, fix), true, true);
+
+        assertEquals(2, local.toFix().size(), "a local review sends every confirmed finding");
+        assertEquals(List.of(fix), pr.toFix().stream().map(OutboxModel.Item::finding).toList());
+        assertEquals(1, pr.waitingForPr());
+        assertEquals("1 to fix · 1 waits for the PR", pr.countsText());
+    }
 }

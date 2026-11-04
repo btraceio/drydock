@@ -333,6 +333,24 @@ class ReviewTriageActionsTest {
     }
 
     @Test
+    void aPullRequestReviewsSendLeavesTheFindingsMeantForThePrUnsent() {
+        store.upsert(finding("f1", Triage.CONFIRMED, true));   // Post to PR: the PR lane's
+        store.upsert(finding("f2", Triage.CONFIRMED, false));  // Request fix: the session's
+        store.upsert(finding("f3", Triage.DISMISSED, true));   // dismissed: no-action, always sent
+        ReviewScope pr = new ReviewScope("rs_a", ReviewScope.Kind.WORKTREE, Path.of("/repo"),
+                Optional.of(Path.of("/repo/.wt/a")), "base0", "pr-7",
+                Optional.of(new ReviewScope.PullRequestRef(7, Optional.empty())), Optional.of(SESSION), Optional.empty());
+
+        assertEquals(ReviewTriageActions.FixOutcome.State.DELIVERED,
+                await(actions.sendDecisions(pr, "PR #7")).state());
+
+        assertEquals(AnnotationStatus.OPEN, stored("f1").status(), "a PR-bound finding waits for the PR lane");
+        assertEquals(AnnotationStatus.SENT, stored("f2").status());
+        assertEquals(AnnotationStatus.SENT, stored("f3").status());
+        assertFalse(submittedPrompts.get(0).contains("Title f1"), submittedPrompts.get(0));
+    }
+
+    @Test
     void aSendWithoutABoundSessionSendsNothingAndMarksNothing() {
         store.upsert(finding("f1", Triage.CONFIRMED, true));
 

@@ -22,6 +22,7 @@ import app.drydock.intellij.review.workbench.model.WorkbenchState;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.ChangeGraph;
 import app.drydock.review.DiffSelection;
+import app.drydock.review.FixTarget;
 import app.drydock.review.HunkDigest;
 import app.drydock.review.PendingQuestions;
 import app.drydock.review.ReviewInstructions;
@@ -39,6 +40,7 @@ import app.drydock.review.tour.TourStore;
 import com.intellij.diff.FrameDiffTool;
 import com.intellij.diff.fragments.LineFragment;
 import com.intellij.icons.AllIcons;
+import com.intellij.ide.util.PropertiesComponent;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.actionSystem.ActionUpdateThread;
 import com.intellij.openapi.actionSystem.AnAction;
@@ -266,6 +268,10 @@ final class ReviewTabProvider {
     private volatile Optional<String> reviewBase;
     /** The computed sections of one diff, kept while the diff is equal. */
     private volatile ComputedSections computedSections;
+    /** The latest pull request description read, for one scope. */
+    private volatile PrDescription prDescription;
+    /** The scope whose pull request description is being read, if any. */
+    private final AtomicReference<String> prDescriptionInFlight = new AtomicReference<>();
     /** The diff whose computed sections are being built, if any. */
     private final AtomicReference<UnifiedDiff> sectionsInFlight = new AtomicReference<>();
 
@@ -1222,7 +1228,7 @@ final class ReviewTabProvider {
         ReviewScope current = scope;
         PendingDecisions pending = annotations == null || current == null
                 ? new PendingDecisions(0, 0)
-                : pendingDecisions(annotations.forScope(current.id()));
+                : pendingDecisions(annotations.forScope(current.id()), current.pr().isPresent());
         label.setText(pending.describe());
         bar.setVisible(pending.total() > 0);
         sendDecisionsButton.setEnabled(triage != null && pending.total() > 0 && !sendInFlight);
@@ -1237,6 +1243,64 @@ final class ReviewTabProvider {
                 outcome.ifPresent(message -> showCardOutcome(message.notice(), message.text()));
             }
         }));
+    }
+
+    /** One scope's pull request description, as read from gh (empty when it has none or gh failed). */
+    private record PrDescription(String scopeId, Optional<String> text) {
+    }
+
+    /**
+     * The pull request's description for a PR review (off the EDT): read
+     * from gh once per scope on the plugin's executor, the state rebuilt
+     * when it arrives; none while it is being read, and none for a local
+     * review.
+     */
+    private Optional<String> prDescriptionOf(ReviewScope scope) {
+        if (scope.pr().isEmpty()) {
+            return Optional.empty();
+        }
+        PrDescription cached = prDescription;
+        if (cached != null && cached.scopeId().equals(scope.id())) {
+            return cached.text();
+        }
+        ReviewBackend backend = plugin.reviewBackend().orElse(null);
+        if (backend != null && !scope.id().equals(prDescriptionInFlight.getAndSet(scope.id()))) {
+            backend.pullRequests().pullRequestBody(scope.diffRoot(), scope.pr().get().number())
+                    .whenComplete((text, error) -> {
+                        prDescription = new PrDescription(scope.id(), error == null ? text : Optional.empty());
+                        prDescriptionInFlight.compareAndSet(scope.id(), null);
+                        if (!disposed.get()) {
+                            submitWorkbenchState();
+                        }
+                    });
+        }
+        return Optional.empty();
+    }
+
+    /** The IDE property a scope's "Fixes land on" choice is remembered under, keyed by the scope's id. */
+    static final String FIXES_LAND_ON_KEY = "drydock.review.fixesLandOnSubPr.";
+
+    /** Whether a pull request review's fixes land on a stacked sub-PR (remembered per scope). Any thread. */
+    private boolean stackedSubPr(ReviewScope scope) {
+        return scope.pr().isPresent()
+                && PropertiesComponent.getInstance(project).getBoolean(FIXES_LAND_ON_KEY + scope.id(), false);
+    }
+
+    /** Where the scope's fixes land: a stacked sub-PR of its pull request, when chosen; its own branch otherwise. */
+    private FixTarget fixTarget(ReviewScope scope) {
+        return stackedSubPr(scope)
+                ? new FixTarget.StackedSubPr(scope.pr().orElseThrow().number())
+                : FixTarget.SAME_BRANCH;
+    }
+
+    /** The outbox's "Fixes land on" choice (EDT): remembered for the scope, then the state is rebuilt. */
+    private void fixesLandOn(boolean stacked) {
+        ReviewScope current = scope;
+        if (current == null || current.pr().isEmpty()) {
+            return;
+        }
+        PropertiesComponent.getInstance(project).setValue(FIXES_LAND_ON_KEY + current.id(), stacked, false);
+        submitWorkbenchState();
     }
 
     /** What the outbox says while another send is running. */
@@ -1265,7 +1329,7 @@ final class ReviewTabProvider {
         sendInFlight = true;
         CompletableFuture<Optional<TriageCards.Surfaced>> result = new CompletableFuture<>();
         try {
-            actions.sendDecisions(current, subjectOf(current)).whenComplete((outcome, error) -> onEdt(() -> {
+            actions.sendDecisions(current, subjectOf(current), fixTarget(current)).whenComplete((outcome, error) -> onEdt(() -> {
                 sendInFlight = false;
                 if (error != null) {
                     result.complete(Optional.of(new TriageCards.Surfaced(TriageCards.Notice.ERROR,
@@ -1309,10 +1373,15 @@ final class ReviewTabProvider {
     }
 
     static PendingDecisions pendingDecisions(List<ReviewAnnotation> findings) {
+        return pendingDecisions(findings, false);
+    }
+
+    /** As {@link #pendingDecisions(List)}, under the send's {@link ReviewTriageActions#forSession} rule. */
+    static PendingDecisions pendingDecisions(List<ReviewAnnotation> findings, boolean prMode) {
         int toFix = 0;
         int dismissed = 0;
         for (ReviewAnnotation finding : findings) {
-            if (!ReviewTriageActions.isPendingDecision(finding)) {
+            if (!ReviewTriageActions.forSession(finding, prMode)) {
                 continue;
             }
             if (finding.triage() == Triage.CONFIRMED) {
@@ -1328,6 +1397,11 @@ final class ReviewTabProvider {
      * The hand-off's subject (pure): the pull request when the scope
      * carries one, else the checkout directory's name.
      */
+    /** The review's mode (pure): a scope that carries a pull request is reviewed as the pull request (spec §8). */
+    static WorkbenchState.Mode modeOf(ReviewScope scope) {
+        return scope.pr().isPresent() ? WorkbenchState.Mode.PR : WorkbenchState.Mode.LOCAL;
+    }
+
     static String subjectOf(ReviewScope scope) {
         return scope.pr()
                 .map(pr -> "PR #" + pr.number())
@@ -1820,10 +1894,12 @@ final class ReviewTabProvider {
         AnnotationStore annotations = this.store;
         List<ReviewAnnotation> findings = annotations == null ? List.of() : annotations.forScope(scope.id());
         List<ReviewVerdict> verdicts = annotations == null ? List.of() : annotations.verdictsFor(scope.id());
-        WorkbenchState state = WorkbenchState.of(subjectOf(scope), WorkbenchState.Mode.LOCAL, current,
+        WorkbenchState state = WorkbenchState.of(subjectOf(scope), modeOf(scope), current,
                 workbenchFilter, Optional.ofNullable(selectedPath()), workbenchView, findings, inboxChoice,
                 sectionsOf(scope, current, verdicts, findings), sectionsChoice)
-                .withOutbox(OutboxModel.snapshot(findings, scope.sessionId().isPresent()));
+                .withOutbox(OutboxModel.snapshot(findings, scope.sessionId().isPresent(), scope.pr().isPresent())
+                        .withStackedSubPr(stackedSubPr(scope)))
+                .withPrDescription(prDescriptionOf(scope));
         workbenchState = state;
         onEdt(() -> {
             if (disposed.get()) {
@@ -2014,8 +2090,18 @@ final class ReviewTabProvider {
         if (provider == null || provider.disposed.get()) {
             return Optional.empty();
         }
-        ReviewWorkbenchOutbox outbox = new ReviewWorkbenchOutbox(() -> provider.sendToSession().thenApply(
-                message -> Optional.of(message.map(TriageCards.Surfaced::text).orElse(SEND_DELIVERED))));
+        ReviewWorkbenchOutbox outbox = new ReviewWorkbenchOutbox(new ReviewWorkbenchOutbox.Actions() {
+            @Override
+            public CompletableFuture<Optional<String>> send() {
+                return provider.sendToSession().thenApply(
+                        message -> Optional.of(message.map(TriageCards.Surfaced::text).orElse(SEND_DELIVERED)));
+            }
+
+            @Override
+            public void fixesLandOn(boolean stackedSubPr) {
+                provider.fixesLandOn(stackedSubPr);
+            }
+        });
         provider.attachWorkbenchView(outbox::render, parent);
         return Optional.of(outbox);
     }
@@ -2279,6 +2365,12 @@ final class ReviewTabProvider {
 
     /** The inbox's actions on the live review: the triage write side, the navigators, the inbox choice. */
     private final class InboxActions implements ReviewWorkbenchInbox.Actions {
+
+        @Override
+        public CompletableFuture<Optional<String>> postToPr(ReviewAnnotation finding) {
+            ReviewTriageActions actions = triage;
+            return actions == null ? loading() : actions.confirm(finding.key()).thenApply(ReviewTabProvider::goneIfEmpty);
+        }
 
         @Override
         public CompletableFuture<Optional<String>> requestFix(ReviewAnnotation finding) {

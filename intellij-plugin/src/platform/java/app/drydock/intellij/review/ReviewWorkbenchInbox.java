@@ -62,6 +62,9 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
      * error.
      */
     interface Actions {
+        /** Post to PR (a pull request review only): the finding is confirmed for the review's submission. */
+        CompletableFuture<Optional<String>> postToPr(ReviewAnnotation finding);
+
         CompletableFuture<Optional<String>> requestFix(ReviewAnnotation finding);
 
         CompletableFuture<Optional<String>> dismiss(ReviewAnnotation finding);
@@ -137,6 +140,8 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
     private final JButton composerSubmit = new JButton();
     private Composer composer;
     private InboxModel.Snapshot shown = InboxModel.Snapshot.empty(InboxModel.Tab.TO_TRIAGE, InboxModel.Scope.ALL);
+    /** The cards' surface: the inbox of a local review, or of a pull request review. */
+    private FindingInlayCard.Surface surface = FindingInlayCard.Surface.INBOX;
     /** The To Triage order when a decision was taken, and the decided id: where auto-advance starts. */
     private List<String> advanceOrder;
     private String advanceFrom;
@@ -256,6 +261,8 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
 
     /** Shows {@code state}'s inbox. */
     void render(WorkbenchState state) {
+        surface = state.mode() == WorkbenchState.Mode.PR ? FindingInlayCard.Surface.PR_INBOX
+                : FindingInlayCard.Surface.INBOX;
         render(state.inbox());
     }
 
@@ -272,7 +279,7 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
         }
         for (InboxModel.Card card : inbox.cards()) {
             FindingInlayCard view = new FindingInlayCard(card.finding(), Optional.empty(), clock,
-                    new CardCallbacks(card.finding()), FindingInlayCard.Surface.INBOX);
+                    new CardCallbacks(card.finding()), surface);
             view.setAlignmentX(LEFT_ALIGNMENT);
             cards.put(card.finding().id(), view);
             stack.add(view);
@@ -356,8 +363,9 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
             this.finding = finding;
         }
 
+        /** The inbox's Post to PR: offered on a pull request review's inbox only. */
         @Override public void confirm() {
-            throw new IllegalStateException("Confirm is not offered in the inbox");
+            run(finding.id(), true, actions.postToPr(finding));
         }
 
         @Override public void requestFix() {

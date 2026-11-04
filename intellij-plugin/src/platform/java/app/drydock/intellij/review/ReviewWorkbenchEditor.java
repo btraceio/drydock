@@ -56,7 +56,8 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
     static final String CHANGES_ONLY = "Changes Only";
     static final String FULL_FILE = "Full File";
     private static final String TOOLBAR_PLACE = "DrydockReviewWorkbenchHeader";
-    static final String PR_LATER = "Pull request reviews arrive with the PR lane";
+    static final String MODE_FOLLOWS_CHECKOUT =
+            "The mode follows the checkout: a pull request checkout is reviewed as the pull request";
 
     /** Navigator | rest. */
     static final String NAV_KEY = "drydock.review.nav";
@@ -192,10 +193,9 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
 
     /**
      * One mode of the header's chip, selected when the rendered state is in
-     * that mode. Only {@link WorkbenchState.Mode#LOCAL} can be chosen until
-     * the PR lane (W5); the PR mode is shown, disabled, so the header does
-     * not shift when it arrives. Choosing the mode the review is in already
-     * changes nothing.
+     * that mode. The mode follows the review's scope (a scope carrying a
+     * pull request is a PR review, spec §8), so the chip shows it and does
+     * not switch: the other mode is disabled, and its tooltip says why.
      */
     private final class ModeChip extends DumbAwareToggleAction {
         private final WorkbenchState.Mode mode;
@@ -214,15 +214,16 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
 
         @Override
         public void setSelected(@NotNull AnActionEvent e, boolean selected) {
-            // LOCAL is the only mode before W5, and it is selected already.
+            // The mode follows the scope; choosing it changes nothing.
         }
 
         @Override
         public void update(@NotNull AnActionEvent e) {
             super.update(e);
-            boolean available = mode == WorkbenchState.Mode.LOCAL;
-            e.getPresentation().setEnabled(available);
-            e.getPresentation().setDescription(available ? null : PR_LATER);
+            WorkbenchState state = shown;
+            boolean current = state != null && state.mode() == mode;
+            e.getPresentation().setEnabled(current);
+            e.getPresentation().setDescription(current ? null : MODE_FOLLOWS_CHECKOUT);
         }
 
         @Override

@@ -57,6 +57,22 @@ public class ReviewWorkbenchOutboxPlatformTest extends BasePlatformTestCase {
         assertEquals("Sent to the agent.", outbox.notice.getText());
     }
 
+    public void testFixesLandOnShowsInAPullRequestReviewAndPassesTheChoiceOn() {
+        List<Boolean> chosen = new ArrayList<>();
+        ReviewWorkbenchOutbox outbox = new ReviewWorkbenchOutbox(new ReviewWorkbenchOutbox.Actions() {
+            @Override public CompletableFuture<Optional<String>> send() { return next; }
+            @Override public void fixesLandOn(boolean stackedSubPr) { chosen.add(stackedSubPr); }
+        });
+        outbox.render(OutboxModel.snapshot(List.of(), true, false));
+        assertFalse("a local review has no choice", outbox.stackedSubPr.getParent().isVisible());
+
+        outbox.render(OutboxModel.snapshot(List.of(), true, true).withStackedSubPr(true));
+        assertTrue(outbox.stackedSubPr.getParent().isVisible());
+        assertTrue(outbox.stackedSubPr.isSelected());
+        outbox.sameBranch.doClick();
+        assertEquals(List.of(false), chosen);
+    }
+
     public void testARowNamesTheFindingItsLineAndTheReviewersComment() {
         OutboxModel.Item commented = new OutboxModel.Item(comment("n5", "Rename it."), true);
         assertEquals("Rename it. — src/A.java:5 · your comment", ReviewWorkbenchOutbox.rowText(commented));

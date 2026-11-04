@@ -24,7 +24,8 @@ import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 /**
- * The navigator's Sections tab (spec §5): the agent's intent, then one row
+ * The navigator's Sections tab (spec §5): the agent's intent and, in a pull
+ * request review, the first paragraph of the PR's description, then one row
  * per section with its number, title, progress, open findings and the
  * "builds on / needed by" chips. Selecting a row selects the section, which
  * the centre then shows. EDT.
@@ -37,6 +38,7 @@ final class ReviewWorkbenchSections extends JPanel {
 
     private final Consumer<String> select;
     private final JBTextArea intent = new JBTextArea();
+    private final JBTextArea prDescription = new JBTextArea();
     private final JBTextArea note = new JBTextArea();
     private final DefaultListModel<SectionsModel.Section> rows = new DefaultListModel<>();
     final JBList<SectionsModel.Section> list = new JBList<>(rows);
@@ -47,7 +49,7 @@ final class ReviewWorkbenchSections extends JPanel {
     ReviewWorkbenchSections(Consumer<String> select) {
         super(new BorderLayout());
         this.select = Objects.requireNonNull(select, "select");
-        for (JBTextArea text : List.of(intent, note)) {
+        for (JBTextArea text : List.of(intent, prDescription, note)) {
             text.setEditable(false);
             text.setLineWrap(true);
             text.setWrapStyleWord(true);
@@ -65,8 +67,10 @@ final class ReviewWorkbenchSections extends JPanel {
                 select.accept(picked.key());
             }
         });
+        prDescription.setForeground(UIUtil.getContextHelpForeground());
         JPanel north = new JPanel(new BorderLayout());
         north.add(intent, BorderLayout.NORTH);
+        north.add(prDescription, BorderLayout.CENTER);
         north.add(note, BorderLayout.SOUTH);
         add(north, BorderLayout.NORTH);
         add(new JBScrollPane(list), BorderLayout.CENTER);
@@ -80,6 +84,9 @@ final class ReviewWorkbenchSections extends JPanel {
         SectionsModel.Snapshot sections = state.sections();
         intent.setText(sections.intent().map(text -> "Intent: " + text).orElse(""));
         intent.setVisible(sections.intent().isPresent());
+        Optional<String> description = state.prDescription().map(text -> firstParagraph(text, DESCRIPTION_CHARS));
+        prDescription.setText(description.map(text -> "PR description: " + text).orElse(""));
+        prDescription.setVisible(description.isPresent());
         note.setText(COMPUTED_NOTE);
         note.setVisible(sections.source() == SectionsModel.Source.COMPUTED);
         rendering = true;
@@ -107,6 +114,20 @@ final class ReviewWorkbenchSections extends JPanel {
             }
         }
         return -1;
+    }
+
+    /** The most characters of the PR description the tab shows. */
+    static final int DESCRIPTION_CHARS = 400;
+
+    /**
+     * The description's first paragraph (pure): markdown heading lines
+     * dropped, then the text up to its first blank line, whitespace
+     * collapsed, cut at {@code max} characters with an ellipsis.
+     */
+    static String firstParagraph(String text, int max) {
+        String first = text.replaceAll("(?m)^\\s*#+\\s.*$", "").strip().split("\\R\\s*\\R", 2)[0]
+                .replaceAll("\\s+", " ").strip();
+        return first.length() <= max ? first : first.substring(0, max).strip() + "…";
     }
 
     /** The row's chips (pure): "builds on §1 · needed by §3, §4", empty without dependencies. */

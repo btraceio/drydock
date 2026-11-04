@@ -8,8 +8,10 @@ import com.intellij.util.ui.JBUI;
 import com.intellij.util.ui.UIUtil;
 
 import javax.swing.BoxLayout;
+import javax.swing.ButtonGroup;
 import javax.swing.JButton;
 import javax.swing.JPanel;
+import javax.swing.JRadioButton;
 import java.awt.BorderLayout;
 import java.awt.EventQueue;
 import java.awt.FlowLayout;
@@ -20,7 +22,8 @@ import java.util.concurrent.CompletableFuture;
 /**
  * The workbench's bottom pane, the outbox's session lane (spec §8): the
  * findings Send to Session would hand the bound session, the dismissed ones
- * counted, and the button. The button says why it is disabled, shows
+ * counted, the button and, in a pull request review, where the fixes land.
+ * The button says why it is disabled, shows
  * "Sending…" until the send completes, and the outcome goes to the pane's
  * notice line. EDT.
  */
@@ -31,11 +34,18 @@ final class ReviewWorkbenchOutbox extends JPanel {
     static final String SENDING = "Sending…";
     static final String NO_SESSION = "No agent session is bound to this review.";
     static final String COMMENTED = "your comment";
+    static final String FIXES_LAND_ON = "Fixes land on:";
+    static final String SAME_BRANCH = "Same branch";
+    static final String STACKED_SUB_PR = "Stacked sub-PR";
 
     /** What the pane asks of the live review. */
     interface Actions {
         /** Sends the lane to the bound session; completes with the message to show, empty when none. */
         CompletableFuture<Optional<String>> send();
+
+        /** "Fixes land on" was chosen (a pull request review only): a stacked sub-PR, or the PR's own branch. */
+        default void fixesLandOn(boolean stackedSubPr) {
+        }
     }
 
     private final Actions actions;
@@ -44,6 +54,9 @@ final class ReviewWorkbenchOutbox extends JPanel {
     final JBLabel reason = new JBLabel();
     final JBLabel notice = new JBLabel();
     private final JPanel rows = new JPanel();
+    final JRadioButton sameBranch = new JRadioButton(SAME_BRANCH);
+    final JRadioButton stackedSubPr = new JRadioButton(STACKED_SUB_PR);
+    private final JPanel fixesLandOn = new JPanel(new FlowLayout(FlowLayout.LEFT, JBUI.scale(8), 0));
     private OutboxModel.Snapshot shown = OutboxModel.Snapshot.EMPTY;
     private boolean sending;
 
@@ -65,7 +78,21 @@ final class ReviewWorkbenchOutbox extends JPanel {
         bar.setBorder(JBUI.Borders.empty(4, 4));
         rows.setLayout(new BoxLayout(rows, BoxLayout.Y_AXIS));
         rows.setBorder(JBUI.Borders.empty(0, 12, 4, 8));
-        add(bar, BorderLayout.NORTH);
+        ButtonGroup group = new ButtonGroup();
+        group.add(sameBranch);
+        group.add(stackedSubPr);
+        sameBranch.addActionListener(e -> actions.fixesLandOn(false));
+        stackedSubPr.addActionListener(e -> actions.fixesLandOn(true));
+        stackedSubPr.setToolTipText("The agent commits the fixes on a new branch from the PR's head and opens a "
+                + "pull request on top of it; drydock creates no branch itself.");
+        fixesLandOn.add(new JBLabel(FIXES_LAND_ON));
+        fixesLandOn.add(sameBranch);
+        fixesLandOn.add(stackedSubPr);
+        fixesLandOn.setBorder(JBUI.Borders.emptyLeft(8));
+        JPanel north = new JPanel(new BorderLayout());
+        north.add(bar, BorderLayout.NORTH);
+        north.add(fixesLandOn, BorderLayout.SOUTH);
+        add(north, BorderLayout.NORTH);
         add(new JBScrollPane(rows), BorderLayout.CENTER);
         render(OutboxModel.Snapshot.EMPTY);
     }
@@ -81,6 +108,9 @@ final class ReviewWorkbenchOutbox extends JPanel {
         }
         shown = Objects.requireNonNull(lane, "lane");
         counts.setText(lane.countsText());
+        fixesLandOn.setVisible(lane.prMode());
+        sameBranch.setSelected(!lane.stackedSubPr());
+        stackedSubPr.setSelected(lane.stackedSubPr());
         rows.removeAll();
         for (OutboxModel.Item item : lane.toFix()) {
             rows.add(new JBLabel(rowText(item)));

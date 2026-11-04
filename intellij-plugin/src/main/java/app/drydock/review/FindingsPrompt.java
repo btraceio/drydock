@@ -41,6 +41,23 @@ public final class FindingsPrompt {
      */
     public static String forDecisions(String subject, List<ReviewAnnotation> toFix,
                                       List<ReviewAnnotation> dismissed) {
+        return forDecisions(subject, toFix, dismissed, FixTarget.SAME_BRANCH);
+    }
+
+    /**
+     * As {@link #forDecisions(String, List, List)}, ending with where the
+     * fixes land ({@link FixTarget#instruction}); the same branch adds
+     * nothing, so its bytes are the plain hand-off's.
+     */
+    public static String forDecisions(String subject, List<ReviewAnnotation> toFix,
+                                      List<ReviewAnnotation> dismissed, FixTarget target) {
+        String prompt = plainDecisions(subject, toFix, dismissed);
+        String instruction = FixTarget.instruction(target);
+        return instruction.isEmpty() ? prompt : prompt + " " + instruction;
+    }
+
+    private static String plainDecisions(String subject, List<ReviewAnnotation> toFix,
+                                         List<ReviewAnnotation> dismissed) {
         Objects.requireNonNull(subject, "subject");
         Objects.requireNonNull(toFix, "toFix");
         Objects.requireNonNull(dismissed, "dismissed");

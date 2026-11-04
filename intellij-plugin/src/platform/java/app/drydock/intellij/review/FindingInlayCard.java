@@ -124,26 +124,30 @@ public final class FindingInlayCard extends JPanel {
     }
 
     /** Where a card is shown: inside the diff (an inlay) or in the workbench's inbox. */
-    public enum Surface { INLAY, INBOX }
+    /** Where a card is: the diff, the inbox of a local review, or the inbox of a pull request review. */
+    public enum Surface { INLAY, INBOX, PR_INBOX }
 
     /** The links a card offers. */
-    enum Action { CONFIRM, DISMISS, UNDO, REQUEST_FIX, CHALLENGE, SHOW_IN_DIFF }
+    enum Action { CONFIRM, DISMISS, UNDO, POST_TO_PR, REQUEST_FIX, CHALLENGE, SHOW_IN_DIFF }
 
     /**
      * The links a card shows (pure). In the diff a proposed finding offers
-     * Confirm and Dismiss, a decided one Undo. In the inbox (local review) a
-     * proposed finding offers Request fix, Dismiss, Challenge and Show in
-     * diff, a decided one Undo and Show in diff; posting to the PR arrives
-     * with the PR lane.
+     * Confirm and Dismiss, a decided one Undo. In the inbox a proposed
+     * finding offers Request fix, Dismiss, Challenge and Show in diff, and
+     * in a pull request review Post to PR first; a decided one offers Undo
+     * and Show in diff.
      */
     static List<Action> actionsFor(ReviewAnnotation finding, Surface surface) {
         boolean proposed = finding.triage() == Triage.PROPOSED;
         if (surface == Surface.INLAY) {
             return proposed ? List.of(Action.CONFIRM, Action.DISMISS) : List.of(Action.UNDO);
         }
-        return proposed
-                ? List.of(Action.REQUEST_FIX, Action.DISMISS, Action.CHALLENGE, Action.SHOW_IN_DIFF)
-                : List.of(Action.UNDO, Action.SHOW_IN_DIFF);
+        if (!proposed) {
+            return List.of(Action.UNDO, Action.SHOW_IN_DIFF);
+        }
+        return surface == Surface.PR_INBOX
+                ? List.of(Action.POST_TO_PR, Action.REQUEST_FIX, Action.DISMISS, Action.CHALLENGE, Action.SHOW_IN_DIFF)
+                : List.of(Action.REQUEST_FIX, Action.DISMISS, Action.CHALLENGE, Action.SHOW_IN_DIFF);
     }
 
     private static final String PROGRESS_TEXT = "Working…";
@@ -584,6 +588,8 @@ public final class FindingInlayCard extends JPanel {
                 case DISMISS -> link(dismissLabel, callbacks::dismiss, "The finding is dismissed: reported to the"
                         + " agent as a decision with the next hand-off, and left out of the review submission.");
                 case UNDO -> link("Undo", callbacks::undo, "Back to proposed.");
+                case POST_TO_PR -> link("Post to PR", callbacks::confirm, "The finding is valid: it is posted"
+                        + " as a comment when this pull request review is submitted.");
                 case REQUEST_FIX -> link("Request fix", callbacks::requestFix, "The finding is valid: the agent"
                         + " fixes it with the next decisions hand-off. It is not posted to a pull request.");
                 case CHALLENGE -> challengeLink();

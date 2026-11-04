@@ -26,6 +26,7 @@ import com.intellij.ui.components.JBLabel;
 import javax.swing.JComponent;
 import javax.swing.JLabel;
 import javax.swing.SwingUtilities;
+import javax.swing.text.JTextComponent;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -347,6 +348,22 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
         }
     }
 
+    public void testThePrDescriptionsFirstParagraphShowsUnderTheIntent() {
+        assertEquals("Callers use the result of bar().",
+                ReviewWorkbenchSections.firstParagraph("## Summary\nCallers use\n the result of bar().\n\n## Details\nMore.", 400));
+        assertEquals("abcd…", ReviewWorkbenchSections.firstParagraph("abcdefgh", 4));
+
+        ReviewWorkbenchSections sections = new ReviewWorkbenchSections(key -> {
+        });
+        sections.render(WorkbenchState.of("PR #7", WorkbenchState.Mode.PR, new ReviewTabModel.Snapshot(List.of(), 0, 0),
+                WorkbenchState.Filter.ALL, Optional.empty(), WorkbenchState.View.CHANGES_ONLY, List.of(),
+                WorkbenchState.InboxChoice.DEFAULT).withPrDescription(Optional.of("Make widgets.\n\nMore.")));
+        List<String> shown = new ArrayList<>();
+        UIUtil.uiTraverser(sections).filter(JTextComponent.class)
+                .filter(text -> text.isVisible() && !text.getText().isEmpty()).forEach(text -> shown.add(text.getText()));
+        assertTrue(shown.toString(), shown.contains("PR description: Make widgets."));
+    }
+
     public void testASectionRowsChipsAndCounts() {
         SectionsModel.Section section = new SectionsModel.Section("step:s2", 2, Optional.of("s2"), "Two", "",
                 List.of(1), List.of(3, 4), List.of(), 1, 3, 2);
@@ -356,7 +373,7 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
                 "Not in the tour", "", List.of(), List.of(), List.of(), 0, 0, 0)));
     }
 
-    public void testTheModeChipSelectsLocalAndKeepsPullRequestDisabled() {
+    public void testTheModeChipShowsTheModeTheScopeIsIn() {
         List<Consumer<WorkbenchState>> headers = new ArrayList<>();
         ReviewWorkbenchEditor.Host host = new ReviewWorkbenchEditor.Host() {
             @Override
@@ -400,8 +417,17 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
             AnActionEvent prEvent = TestActionEvent.createTestEvent(pr);
             pr.update(prEvent);
             assertFalse(pr.isSelected(prEvent));
-            assertFalse("the PR mode arrives with W5", prEvent.getPresentation().isEnabled());
-            assertEquals(ReviewWorkbenchEditor.PR_LATER, prEvent.getPresentation().getDescription());
+            assertFalse("the mode follows the checkout", prEvent.getPresentation().isEnabled());
+            assertEquals(ReviewWorkbenchEditor.MODE_FOLLOWS_CHECKOUT, prEvent.getPresentation().getDescription());
+
+            headers.get(0).accept(WorkbenchState.of("PR #12", WorkbenchState.Mode.PR,
+                    new ReviewTabModel.Snapshot(List.of(), 0, 0), WorkbenchState.Filter.ALL, Optional.empty(),
+                    WorkbenchState.View.CHANGES_ONLY, List.of(), WorkbenchState.InboxChoice.DEFAULT));
+            pr.update(prEvent);
+            local.update(localEvent);
+            assertTrue("a PR checkout is the PR mode", pr.isSelected(prEvent));
+            assertTrue(prEvent.getPresentation().isEnabled());
+            assertFalse(localEvent.getPresentation().isEnabled());
         } finally {
             Disposer.dispose(editor);
         }

@@ -5,6 +5,7 @@ import app.drydock.intellij.agent.PromptOutcome;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.AnnotationStore;
 import app.drydock.review.FindingsPrompt;
+import app.drydock.review.FixTarget;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewInstructions;
 import app.drydock.review.ReviewScope;
@@ -289,7 +290,8 @@ public final class ReviewTriageActions {
 
     /**
      * Sends the scope's batched decisions to its bound agent in ONE prompt:
-     * every unresolved, decided, not-yet-sent finding -- the CONFIRMED ones
+     * every unresolved, decided, not-yet-sent finding ({@link #forSession}:
+     * in a pull request review, not the ones meant for the PR) -- the CONFIRMED ones
      * as the fix list (each carrying the reviewer's last comment), the
      * DISMISSED ones as an explicit no-action list -- through the shared
      * {@link FindingsPrompt#forDecisions} bytes (never forked text),
@@ -315,9 +317,32 @@ public final class ReviewTriageActions {
                 && finding.status() != AnnotationStatus.SENT;
     }
 
+    /**
+     * Whether a pending decision goes to the session (pure): every one in a
+     * local review; in a pull request review ({@code prMode}) every one but a
+     * confirmed finding meant for the PR ({@code postToPr}), which the PR
+     * lane submits instead. Dismissed findings always go, as the no-action
+     * list. The one rule the outbox's session lane and {@link #sendDecisions}
+     * share.
+     */
+    public static boolean forSession(ReviewAnnotation finding, boolean prMode) {
+        return isPendingDecision(finding)
+                && !(prMode && finding.triage() == Triage.CONFIRMED && finding.postToPr());
+    }
+
     public CompletableFuture<FixOutcome> sendDecisions(ReviewScope scope, String subject) {
+        return sendDecisions(scope, subject, FixTarget.SAME_BRANCH);
+    }
+
+    /**
+     * As {@link #sendDecisions(ReviewScope, String)}, telling the agent
+     * where the fixes land ({@link FindingsPrompt#forDecisions(String, List,
+     * List, FixTarget)}).
+     */
+    public CompletableFuture<FixOutcome> sendDecisions(ReviewScope scope, String subject, FixTarget target) {
         Objects.requireNonNull(scope, "scope");
         Objects.requireNonNull(subject, "subject");
+        Objects.requireNonNull(target, "target");
         Optional<ManagedSessionId> session = scope.sessionId();
         if (session.isEmpty()) {
             return CompletableFuture.completedFuture(FixOutcome.of(FixOutcome.State.NO_SESSION));
@@ -327,8 +352,9 @@ public final class ReviewTriageActions {
             // Membership is read here, off the EDT, at send time: decisions
             // taken after the bar's last refresh are still included, and
             // already-SENT findings are never sent twice.
+            boolean prMode = scope.pr().isPresent();
             List<ReviewAnnotation> decided = store.forScope(scope.id()).stream()
-                    .filter(ReviewTriageActions::isPendingDecision)
+                    .filter(finding -> forSession(finding, prMode))
                     .toList();
             if (decided.isEmpty()) {
                 // The app's rule: an empty hand-off is refused outright,
@@ -340,7 +366,7 @@ public final class ReviewTriageActions {
             List<ReviewAnnotation> dismissed = decided.stream()
                     .filter(finding -> finding.triage() == Triage.DISMISSED).toList();
             PromptOutcome outcome = promptSubmitter.apply(sessionId,
-                    FindingsPrompt.forDecisions(subject, toFix, dismissed));
+                    FindingsPrompt.forDecisions(subject, toFix, dismissed, target));
             return switch (outcome) {
                 case DELIVERED -> {
                     List<ReviewAnnotation> sent = new ArrayList<>(decided.size());
