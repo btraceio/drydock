@@ -238,6 +238,31 @@ public final class ReviewTabBrowser extends AsyncChangesBrowserBase {
      * whose findings do not contain the id is as stale as a missing file:
      * no partial selection, no fallback to the file row.
      */
+    /**
+     * Selects {@code filePath}'s row in the tree as it is displayed, which
+     * shows its diff; nothing happens when the tree has no such row. EDT.
+     */
+    void selectFile(String filePath) {
+        TreePath path = filePath(getViewer().getModel().getRoot(), filePath);
+        if (path != null) {
+            getViewer().setSelectionPath(path);
+            getViewer().scrollPathToVisible(path);
+        }
+    }
+
+    /** The tree path of {@code filePath}'s row under {@code root}, or null when there is none. */
+    static TreePath filePath(Object root, String filePath) {
+        if (!(root instanceof TreeNode node) || filePath == null) {
+            return null;
+        }
+        for (int i = 0; i < node.getChildCount(); i++) {
+            if (node.getChildAt(i) instanceof FileNode file && file.getUserObject().path().equals(filePath)) {
+                return new TreePath(new Object[] {node, file});
+            }
+        }
+        return null;
+    }
+
     static TreePath findingPath(Object root, String filePath, String findingId) {
         if (!(root instanceof TreeNode node)
                 || ReviewTabOpener.FindingTarget.of(filePath, findingId).isEmpty()) {

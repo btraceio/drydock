@@ -16,8 +16,10 @@ import app.drydock.intellij.agent.AgentExecutionRegistry;
 import app.drydock.intellij.agent.PromptOutcome;
 import app.drydock.intellij.agent.SessionActivityListener;
 import app.drydock.intellij.review.workbench.model.InboxModel;
+import app.drydock.intellij.review.workbench.model.SectionsModel;
 import app.drydock.intellij.review.workbench.model.WorkbenchState;
 import app.drydock.review.AnnotationStatus;
+import app.drydock.review.ChangeGraph;
 import app.drydock.review.DiffSelection;
 import app.drydock.review.PendingQuestions;
 import app.drydock.review.ReviewInstructions;
@@ -25,6 +27,11 @@ import app.drydock.review.AnnotationStore;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.Triage;
+import app.drydock.review.ReviewVerdict;
+import app.drydock.review.Sections;
+import app.drydock.review.tour.ReviewTour;
+import app.drydock.review.tour.TourRecord;
+import app.drydock.review.tour.TourStore;
 
 import com.intellij.diff.fragments.LineFragment;
 import com.intellij.icons.AllIcons;
@@ -74,6 +81,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
@@ -199,6 +207,8 @@ final class ReviewTabProvider {
     private volatile SelectionAsks selectionAsks;
     /** The backend's annotation store; volatile: the store listeners read it from their own threads. */
     private volatile AnnotationStore store;
+    /** The backend's tour store: the agent's tours, the Sections navigator's first source. */
+    private volatile TourStore tours;
     /** The finding cards' write side; volatile: the card callbacks read it from the EDT. */
     private volatile ReviewTriageActions triage;
     /** Volatile: the file/activity listeners and the Changes link read it from any thread. */
@@ -244,6 +254,14 @@ final class ReviewTabProvider {
     private volatile WorkbenchState.InboxChoice inboxChoice = WorkbenchState.InboxChoice.DEFAULT;
     /** The latest workbench state, for a view that attaches after it was built. */
     private volatile WorkbenchState workbenchState;
+    /** The workbench navigator's tab and selected section; set on the EDT, read when the state is rebuilt. */
+    private volatile WorkbenchState.SectionsChoice sectionsChoice = WorkbenchState.SectionsChoice.DEFAULT;
+    /** The base commit the latest snapshot was built against, null before the first: the sections judge staleness by it. */
+    private volatile Optional<String> reviewBase;
+    /** The computed sections of one diff, kept while the diff is equal. */
+    private volatile ComputedSections computedSections;
+    /** The diff whose computed sections are being built, if any. */
+    private final AtomicReference<UnifiedDiff> sectionsInFlight = new AtomicReference<>();
 
     /**
      * The scope's diff root as the project's own files name it
@@ -501,6 +519,7 @@ final class ReviewTabProvider {
         }
         AnnotationStore annotations = backend.annotationStore();
         store = annotations;
+        tours = backend.tourStore();
         pendingQuestions = backend.pendingQuestions();
         selectionAsks = backend.selectionAsks();
         worktrees = new WorktreeService();
@@ -523,11 +542,14 @@ final class ReviewTabProvider {
                 // The base commit's git rev-parse runs once per reload; the
                 // marks path reuses the cached value and spawns no git (AC21).
                 contents::baseCommit,
-                (scope, diff, baseCommit) -> new ReviewTabModel.Inputs(
-                        diff,
-                        annotations.forScope(scope.id()),
-                        annotations.verdictsFor(scope.id()),
-                        baseCommit),
+                (scope, diff, baseCommit) -> {
+                    reviewBase = baseCommit;
+                    return new ReviewTabModel.Inputs(
+                            diff,
+                            annotations.forScope(scope.id()),
+                            annotations.verdictsFor(scope.id()),
+                            baseCommit);
+                },
                 ReviewTabModel::snapshot,
                 this::snapshotArrived,
                 (state, text) -> onEdt(() -> refreshStatus(state, text)));
@@ -544,6 +566,13 @@ final class ReviewTabProvider {
         refresher.onDispose(backend.scopeRegistry().addChangeListener(scopeId -> {
             refresher.marksChanged();
             submitDecorationRefresh();
+        }));
+        // A posted or merged tour regroups the Sections navigator.
+        refresher.onDispose(backend.tourStore().addChangeListener(scopeId -> {
+            ReviewScope current = this.scope;
+            if (current != null && current.id().equals(scopeId)) {
+                submitWorkbenchState();
+            }
         }));
     }
 
@@ -1718,8 +1747,10 @@ final class ReviewTabProvider {
         }
         AnnotationStore annotations = this.store;
         List<ReviewAnnotation> findings = annotations == null ? List.of() : annotations.forScope(scope.id());
+        List<ReviewVerdict> verdicts = annotations == null ? List.of() : annotations.verdictsFor(scope.id());
         WorkbenchState state = WorkbenchState.of(subjectOf(scope), WorkbenchState.Mode.LOCAL, current,
-                workbenchFilter, Optional.ofNullable(selectedPath()), workbenchView, findings, inboxChoice);
+                workbenchFilter, Optional.ofNullable(selectedPath()), workbenchView, findings, inboxChoice,
+                sectionsOf(scope, current, verdicts, findings), sectionsChoice);
         workbenchState = state;
         onEdt(() -> {
             if (disposed.get()) {
@@ -1729,6 +1760,72 @@ final class ReviewTabProvider {
                 view.render(state);
             }
         });
+    }
+
+    /** {@link Sections#of} for one diff; empty when the change graph could not be built. */
+    private record ComputedSections(UnifiedDiff diff, List<Sections.Section> sections) {
+    }
+
+    /**
+     * The Sections navigator's snapshot (off the EDT): the scope's stored
+     * tour, else the computed sections, over the files {@code shown} lists
+     * (the Files tab's: its untracked IDE files are left out here too), with
+     * the base commit the latest snapshot used. The change graph parses
+     * every changed file, so it is built once per diff and only while there
+     * is no tour; a parse failure costs the computed sections, never the
+     * state.
+     */
+    private SectionsModel.Snapshot sectionsOf(ReviewScope scope, ReviewTabModel.Snapshot shown,
+                                              List<ReviewVerdict> verdicts, List<ReviewAnnotation> findings) {
+        Optional<String> base = this.reviewBase;
+        if (base == null) {
+            return SectionsModel.Snapshot.EMPTY;
+        }
+        UnifiedDiff diff = new UnifiedDiff(shown.files().stream().map(ReviewTabModel.FileRow::diff).toList());
+        TourStore tourStore = this.tours;
+        Optional<ReviewTour> tour = tourStore == null
+                ? Optional.empty()
+                : tourStore.forScope(scope.id()).map(TourRecord::tour);
+        List<Sections.Section> computed = tour.isPresent() ? List.of() : computedSections(diff);
+        return SectionsModel.of(diff, tour, computed, verdicts, findings, base);
+    }
+
+    /**
+     * The computed sections of {@code diff}, or none while they are being
+     * built: the build runs once per diff on the plugin's executor, so a
+     * large diff's parse never holds up the panes, and its completion
+     * rebuilds the state.
+     */
+    private List<Sections.Section> computedSections(UnifiedDiff diff) {
+        ComputedSections cached = this.computedSections;
+        // Equal, not identical: the diff is rebuilt from the snapshot's rows on every state.
+        if (cached != null && cached.diff().equals(diff)) {
+            return cached.sections();
+        }
+        if (!diff.equals(sectionsInFlight.getAndSet(diff))) {
+            try {
+                plugin.executor().execute(() -> buildComputedSections(diff));
+            } catch (RejectedExecutionException e) {
+                // The plugin is shutting down: nothing is left to show the sections.
+            }
+        }
+        return List.of();
+    }
+
+    private void buildComputedSections(UnifiedDiff diff) {
+        List<Sections.Section> sections;
+        try {
+            sections = Sections.of(diff, ChangeGraph.of(diff));
+        } catch (RuntimeException e) {
+            SYS_LOG.log(Level.WARNING, "The review's change graph could not be built; the workbench shows no "
+                    + "computed sections: " + e.getMessage(), e);
+            sections = List.of();
+        }
+        computedSections = new ComputedSections(diff, sections);
+        sectionsInFlight.compareAndSet(diff, null);
+        if (!disposed.get()) {
+            submitWorkbenchState();
+        }
     }
 
     private void submitWorkbenchState() {
@@ -1747,6 +1844,19 @@ final class ReviewTabProvider {
         if (current != null) {
             view.render(current);
         }
+    }
+
+    /** The workbench navigator's tab toggles (EDT): remembered, then the state is rebuilt off the EDT. */
+    private void workbenchTabChanged(WorkbenchState.Navigator tab) {
+        sectionsChoice = new WorkbenchState.SectionsChoice(Optional.of(tab), sectionsChoice.section());
+        submitWorkbenchState();
+    }
+
+    /** A section picked in the navigator (EDT): the centre shows it once the state is rebuilt. */
+    private void sectionChosen(String key) {
+        sectionsChoice = new WorkbenchState.SectionsChoice(Optional.of(WorkbenchState.Navigator.SECTIONS),
+                Optional.of(key));
+        submitWorkbenchState();
     }
 
     /** The workbench navigator's filter toggle (EDT): remembered, then the state is rebuilt off the EDT. */
@@ -1788,6 +1898,101 @@ final class ReviewTabProvider {
         provider.inboxes.add(inbox);
         Disposer.register(parent, () -> provider.inboxes.remove(inbox));
         return Optional.of(inbox);
+    }
+
+    /**
+     * A section view over the live review for a new workbench editor,
+     * rendered from every {@link WorkbenchState} until {@code parent} is
+     * disposed. Empty when the project has no live Review content. EDT.
+     */
+    static Optional<JComponent> hostedSectionView(Project project, Disposable parent) {
+        ReviewTabProvider provider = project.getUserData(LIVE_PROVIDER);
+        if (provider == null || provider.disposed.get()) {
+            return Optional.empty();
+        }
+        ReviewWorkbenchSectionView view = new ReviewWorkbenchSectionView(project, provider.new SectionActions());
+        Disposer.register(parent, view);
+        provider.attachWorkbenchView(view::render, parent);
+        return Optional.of(view);
+    }
+
+    /** The section view's side of the live review. */
+    private final class SectionActions implements ReviewWorkbenchSectionView.Actions {
+
+        /**
+         * The card's diff, built off the EDT like a file selection's: the
+         * snapshot's row for {@code path}, both sides' texts, and the git
+         * fragments, scrolled to {@code scrollKey}. Empty when the texts no
+         * longer match the diff's rows (the file changed since).
+         */
+        @Override
+        public CompletableFuture<Optional<ReviewDiffRequests.RequestContext>> hunkContext(String path,
+                                                                                        String scrollKey) {
+            ReviewScope current = scope;
+            ReviewContents texts = contents;
+            ReviewTabModel.Snapshot rows = snapshot;
+            if (current == null || texts == null || rows == null || disposed.get()) {
+                return CompletableFuture.completedFuture(Optional.empty());
+            }
+            try {
+                return CompletableFuture.supplyAsync(() -> {
+                    Optional<ReviewTabModel.FileRow> row = rows.files().stream()
+                            .filter(candidate -> candidate.path().equals(path))
+                            .findFirst();
+                    if (row.isEmpty()) {
+                        return Optional.<ReviewDiffRequests.RequestContext>empty();
+                    }
+                    UnifiedDiff.FileDiff file = row.get().diff();
+                    String left = texts.leftText(current, file);
+                    String right = texts.rightText(current, file);
+                    if (!ReviewContents.matchesRows(left, file, false) || !ReviewContents.matchesRows(right, file, true)) {
+                        return Optional.<ReviewDiffRequests.RequestContext>empty();
+                    }
+                    List<LineFragment> fragments = ReviewFragments.fragmentsFor(file, left, right);
+                    Optional<Path> worktreeFile = worktreeFileOf(current, rootFor(current), file);
+                    ReviewDiffContents.warm(worktreeFile);
+                    return Optional.of(new ReviewDiffRequests.RequestContext(path, ReviewDiffRequests.plan(left,
+                            right, fragments, ReviewDiffRequests.scrollTarget(scrollKey)), worktreeFile));
+                }, plugin.executor());
+            } catch (RejectedExecutionException e) {
+                return CompletableFuture.failedFuture(e);
+            }
+        }
+
+        @Override
+        public CompletableFuture<Optional<String>> markReviewed(SectionsModel.Section section, List<String> digests) {
+            ReviewScope current = scope;
+            ReviewVerdictCommands verdicts = commands;
+            if (current == null || verdicts == null) {
+                return CompletableFuture.completedFuture(Optional.of(STILL_LOADING));
+            }
+            return verdicts.markHunks(current, digests, section.stepId())
+                    .thenApply(result -> result instanceof ReviewVerdictCommands.Result.Refused refused
+                            ? Optional.of(refused.reason())
+                            : Optional.<String>empty());
+        }
+
+        /**
+         * The file's row goes straight to the selection pipeline, as a click
+         * on it would: the state rebuild this triggers re-renders the Files
+         * tree, which drops a tree selection, so the tree's highlight is
+         * only best effort.
+         */
+        @Override
+        public void fullFile(String path) {
+            sectionsChoice = new WorkbenchState.SectionsChoice(Optional.of(WorkbenchState.Navigator.FILES),
+                    sectionsChoice.section());
+            ReviewTabModel.Snapshot rows = snapshot;
+            if (rows != null) {
+                rows.files().stream().filter(row -> row.path().equals(path)).findFirst()
+                        .ifPresent(ReviewTabProvider.this::selected);
+            }
+            // After the selection, so the state it rebuilds names the selected file.
+            workbenchViewChanged(WorkbenchState.View.FULL_FILE);
+            for (ReviewWorkbenchNavigator navigator : List.copyOf(navigators)) {
+                navigator.selectFile(path);
+            }
+        }
     }
 
     /** What the inbox says for a selection with no reviewable range. */
@@ -2007,7 +2212,8 @@ final class ReviewTabProvider {
         List<AnAction> rowCommands = Stream.of(provider.markReviewedAction, provider.unmarkAction,
                 provider.refreshAction).filter(Objects::nonNull).toList();
         ReviewWorkbenchNavigator navigator = new ReviewWorkbenchNavigator(project, provider::selected,
-                provider::workbenchFilterChanged, rowCommands);
+                provider::workbenchFilterChanged, rowCommands, provider::workbenchTabChanged,
+                provider::sectionChosen);
         Disposer.register(parent, navigator);
         provider.attachWorkbenchView(navigator::render, parent);
         provider.attachWorkbenchView(header::accept, parent);

@@ -2,6 +2,7 @@ package app.drydock.intellij.review;
 
 import com.intellij.diff.fragments.LineFragment;
 import com.intellij.diff.requests.DiffRequest;
+import app.drydock.intellij.review.workbench.model.SectionsModel;
 import app.drydock.intellij.review.workbench.model.WorkbenchState;
 import com.intellij.diff.DiffContentFactory;
 import com.intellij.diff.tools.util.base.TextDiffSettingsHolder;
@@ -60,8 +61,10 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
         ReviewWorkbenchEditor editor = new ReviewWorkbenchEditor(getProject(), ReviewWorkbenchFile.of(getProject()),
                 NO_REVIEW);
         try {
-            assertEquals(ReviewWorkbenchEditor.NO_REVIEW_TEXT,
-                    ((JBLabel) editor.inboxSplitter.getFirstComponent()).getText());
+            // The centre's file card; there is no section card without a live review.
+            JComponent centre = editor.inboxSplitter.getFirstComponent();
+            assertEquals(1, centre.getComponentCount());
+            assertEquals(ReviewWorkbenchEditor.NO_REVIEW_TEXT, ((JBLabel) centre.getComponent(0)).getText());
         } finally {
             Disposer.dispose(editor);
         }
@@ -146,7 +149,9 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
     public void testTheNavigatorsToggleAsksForTheOtherFilter() {
         List<WorkbenchState.Filter> asked = new ArrayList<>();
         ReviewWorkbenchNavigator navigator = new ReviewWorkbenchNavigator(getProject(), row -> {
-        }, asked::add, List.of());
+        }, asked::add, List.of(), tab -> {
+        }, key -> {
+        });
         try {
             AnActionEvent event = TestActionEvent.createTestEvent();
             assertFalse(navigator.withFindingsAction().isSelected(event));
@@ -157,6 +162,35 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
                     new ReviewTabModel.Snapshot(List.of(), 0, 0), WorkbenchState.Filter.WITH_FINDINGS,
                     Optional.empty(), WorkbenchState.View.CHANGES_ONLY, List.of(), WorkbenchState.InboxChoice.DEFAULT));
             assertTrue("the toggle follows the rendered state", navigator.withFindingsAction().isSelected(event));
+        } finally {
+            Disposer.dispose(navigator);
+        }
+    }
+
+    public void testTheNavigatorShowsTheStatesTabAndPassesOnTheUsersTabAndSection() {
+        List<WorkbenchState.Navigator> tabs = new ArrayList<>();
+        List<String> picked = new ArrayList<>();
+        ReviewWorkbenchNavigator navigator = new ReviewWorkbenchNavigator(getProject(), row -> {
+        }, filter -> {
+        }, List.of(), tabs::add, picked::add);
+        try {
+            SectionsModel.Snapshot sections = new SectionsModel.Snapshot(SectionsModel.Source.TOUR,
+                    Optional.of("Make widgets."), List.of(new SectionsModel.Section("step:s1", 1, Optional.of("s1"),
+                    "Widgets", "Why.", List.of(), List.of(2), List.of(), 0, 1, 0)));
+            navigator.render(WorkbenchState.of("drydock", WorkbenchState.Mode.LOCAL,
+                    new ReviewTabModel.Snapshot(List.of(), 0, 0), WorkbenchState.Filter.ALL, Optional.empty(),
+                    WorkbenchState.View.CHANGES_ONLY, List.of(), WorkbenchState.InboxChoice.DEFAULT, sections,
+                    WorkbenchState.SectionsChoice.DEFAULT));
+            assertEquals("a tour opens the Sections tab", WorkbenchState.Navigator.SECTIONS, navigator.tab());
+            assertEquals(1, navigator.sections.list.getModel().getSize());
+            assertTrue("a render selects nothing for the user", picked.isEmpty());
+
+            navigator.sections.list.setSelectedIndex(0);
+            assertEquals(List.of("step:s1"), picked);
+
+            AnActionEvent event = TestActionEvent.createTestEvent();
+            ((ToggleAction) navigator.tabActions.getChildActionsOrStubs()[1]).setSelected(event, true);
+            assertEquals(List.of(WorkbenchState.Navigator.FILES), tabs);
         } finally {
             Disposer.dispose(navigator);
         }
@@ -259,6 +293,67 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
         } finally {
             Disposer.dispose(editor);
         }
+    }
+
+    public void testTheCentreShowsTheSelectedSectionAndTheFileDiffOtherwise() {
+        List<Consumer<WorkbenchState>> headers = new ArrayList<>();
+        ReviewWorkbenchEditor.Host host = new ReviewWorkbenchEditor.Host() {
+            @Override
+            public Optional<ReviewWorkbenchEditor.HostedDiff> hostDiff(Project project, Disposable parent) {
+                return Optional.empty();
+            }
+
+            @Override
+            public Optional<JComponent> hostNavigator(Project project, Disposable parent,
+                                                      Consumer<WorkbenchState> header) {
+                headers.add(header);
+                return Optional.empty();
+            }
+
+            @Override
+            public void changeView(Project project, WorkbenchState.View view) {
+            }
+
+            @Override
+            public Optional<JComponent> hostInbox(Project project, Disposable parent) {
+                return Optional.empty();
+            }
+
+            @Override
+            public Optional<JComponent> hostSectionView(Project project, Disposable parent) {
+                return Optional.of(new JLabel("section"));
+            }
+        };
+        ReviewWorkbenchEditor editor = new ReviewWorkbenchEditor(getProject(), ReviewWorkbenchFile.of(getProject()),
+                host);
+        try {
+            SectionsModel.Snapshot sections = new SectionsModel.Snapshot(SectionsModel.Source.TOUR, Optional.empty(),
+                    List.of(new SectionsModel.Section("step:s1", 1, Optional.of("s1"), "One", "", List.of(),
+                            List.of(), List.of(), 0, 0, 0)));
+            ReviewTabModel.Snapshot none = new ReviewTabModel.Snapshot(List.of(), 0, 0);
+            headers.get(0).accept(WorkbenchState.of("drydock", WorkbenchState.Mode.LOCAL, none,
+                    WorkbenchState.Filter.ALL, Optional.empty(), WorkbenchState.View.CHANGES_ONLY, List.of(),
+                    WorkbenchState.InboxChoice.DEFAULT, sections, new WorkbenchState.SectionsChoice(
+                            Optional.of(WorkbenchState.Navigator.SECTIONS), Optional.of("step:s1"))));
+            assertEquals(ReviewWorkbenchEditor.CENTRE_SECTION, editor.centreCard());
+
+            headers.get(0).accept(WorkbenchState.of("drydock", WorkbenchState.Mode.LOCAL, none,
+                    WorkbenchState.Filter.ALL, Optional.empty(), WorkbenchState.View.CHANGES_ONLY, List.of(),
+                    WorkbenchState.InboxChoice.DEFAULT, sections, new WorkbenchState.SectionsChoice(
+                            Optional.of(WorkbenchState.Navigator.FILES), Optional.of("step:s1"))));
+            assertEquals("the Files tab shows the file diff", ReviewWorkbenchEditor.CENTRE_FILE, editor.centreCard());
+        } finally {
+            Disposer.dispose(editor);
+        }
+    }
+
+    public void testASectionRowsChipsAndCounts() {
+        SectionsModel.Section section = new SectionsModel.Section("step:s2", 2, Optional.of("s2"), "Two", "",
+                List.of(1), List.of(3, 4), List.of(), 1, 3, 2);
+        assertEquals("builds on §1 · needed by §3, §4", ReviewWorkbenchSections.chips(section));
+        assertEquals("1/3  ·  2 findings", ReviewWorkbenchSections.counts(section));
+        assertEquals("", ReviewWorkbenchSections.chips(new SectionsModel.Section("rest", 5, Optional.empty(),
+                "Not in the tour", "", List.of(), List.of(), List.of(), 0, 0, 0)));
     }
 
     public void testTheModeChipSelectsLocalAndKeepsPullRequestDisabled() {
