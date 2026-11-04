@@ -7,6 +7,7 @@ import app.drydock.review.HunkIds;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Sections;
+import app.drydock.review.tour.HunkTake;
 import app.drydock.review.tour.ReviewTour;
 import app.drydock.review.tour.TourAnchor;
 import app.drydock.review.tour.TourStep;
@@ -198,6 +199,19 @@ class SectionsModelTest {
                 snapshot.sections().getFirst().hunks().stream().map(SectionsModel.Hunk::hunkId).toList());
         assertFalse(snapshot.sections().getFirst().hunks().get(1).collapsed());
         assertEquals("", snapshot.sections().getFirst().narrative());
+    }
+
+    @Test
+    void aHunkCarriesTheToursTakeOnItsDigest() {
+        HunkTake take = new HunkTake(digest("src/A.java", A0), "Adds c and d.", HunkTake.Alignment.ALIGNED, "",
+                List.of(), Instant.EPOCH);
+        ReviewTour withTake = tour(step("s1", List.of(new TourAnchor("src/A.java", "n1", "o20"))))
+                .withTakes(List.of(take));
+
+        List<SectionsModel.Hunk> cards = ofTour(withTake, List.of(), List.of()).sections().getFirst().hunks();
+
+        assertEquals(Optional.of(take), cards.get(0).take());
+        assertEquals(Optional.empty(), cards.get(1).take(), "a hunk the agent gave no take has none");
     }
 
     @Test
