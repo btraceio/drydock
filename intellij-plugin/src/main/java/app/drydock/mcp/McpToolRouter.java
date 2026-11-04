@@ -9,6 +9,8 @@ import app.drydock.mcp.McpSessionContext.RenameOutcome;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.ChangeGraph;
+import app.drydock.review.HunkDigest;
+import app.drydock.review.HunkIds;
 import app.drydock.review.OutOfDiffFanIn;
 import app.drydock.review.ReadingPath;
 import app.drydock.review.PendingQuestions;
@@ -22,6 +24,7 @@ import app.drydock.review.SymbolScan;
 import app.drydock.review.tour.AnchorIndex;
 import app.drydock.review.tour.CheckProgress;
 import app.drydock.review.tour.HunkOverride;
+import app.drydock.review.tour.HunkTake;
 import app.drydock.review.tour.ImpactNote;
 import app.drydock.review.tour.ReviewTour;
 import app.drydock.review.tour.StepGrading;
@@ -48,6 +51,7 @@ import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -399,6 +403,14 @@ public final class McpToolRouter {
                                         + "click -- draw with spaces, never tabs (a tab stops "
                                         + "wherever the panel font says), keep lines under 100 chars}"
                                         + "]}; at most 40 steps, 6 checks each."))
+                                .put("takes", schemaArray("Array of {hunkId (from review_scope), does (<=400 "
+                                        + "chars: what the hunk does, one or two plain sentences), alignment: "
+                                        + "aligned|partial|diverges|context (how it relates to the intent; context "
+                                        + "for a hunk that only supports others), alignmentNote? (<=300 chars: why, "
+                                        + "when not plainly aligned), redFlags?[{text (<=300 chars), findingId? (a "
+                                        + "finding you posted with review_finding)}] (at most 5)}: your take on each "
+                                        + "hunk, at most one per hunk. A take replaces your earlier take on the same "
+                                        + "hunk; takes on other hunks stay."))
                                 .put("intent", schemaString("One sentence: what the change sets out to do, "
                                         + "as the author intends it (<=1000 chars). Shown above the tour's "
                                         + "sections. With onlySteps, the stored intent stays unless this is sent."))
@@ -968,6 +980,7 @@ public final class McpToolRouter {
         Optional<String> intent = intentArgument(args);
         boolean onlySteps = optionalBooleanArg(args, "onlySteps", false);
         List<ReviewAnnotation> findings = context.findingsOf(scope.id());
+        List<HunkTake> takes = takesArgument(args, diff, findings);
         // Read before the store write: it touches the checkout, and the
         // transform runs under the store's lock.
         List<String> noteErrors = impactNoteErrors(caller, steps);
@@ -991,14 +1004,14 @@ public final class McpToolRouter {
                     if (intent.isPresent()) {
                         merged = merged.withTour(merged.tour().withIntent(intent));
                     }
-                    return validated(merged, diff, findings, noteErrors);
+                    return validated(withTakes(merged, current, takes, diff), diff, findings, noteErrors);
                 })
                         .orElseThrow(() -> new McpToolException(missing));
             } else {
                 TourRecord fresh = TourRecord.fresh(
-                        new ReviewTour(scope.id(), TourFingerprint.of(diff), steps, intent), diff);
-                Optional<TourRecord> replaced = context.updateTour(scope.id(),
-                        current -> validated(repost(fresh, current), diff, findings, noteErrors));
+                        new ReviewTour(scope.id(), TourFingerprint.of(diff), steps, intent, takes), diff);
+                Optional<TourRecord> replaced = context.updateTour(scope.id(), current ->
+                        validated(withTakes(repost(fresh, current), current, takes, diff), diff, findings, noteErrors));
                 if (replaced.isPresent()) {
                     stored = replaced.get();
                 } else {
@@ -1112,6 +1125,130 @@ public final class McpToolRouter {
                 .put("scopeId", new JsonString(scope.id()))
                 .put("checkId", new JsonString(checkId))
                 .put("status", new JsonString(next.status().name()));
+    }
+
+    static final int MAX_TAKE_DOES = 400;
+    static final int MAX_TAKE_NOTE = 300;
+    static final int MAX_RED_FLAGS = 5;
+    static final int MAX_RED_FLAG = 300;
+
+    /**
+     * {@code review_tour}'s optional {@code takes}, each resolved from its
+     * hunk id to the hunk's digest in {@code diff}. Every problem at once,
+     * like the steps' decode: an unknown or repeated hunk id, an unknown
+     * alignment, a blank or over-long text, too many red flags, or a red
+     * flag naming a finding the scope does not have.
+     */
+    private static List<HunkTake> takesArgument(JsonObject args, UnifiedDiff diff, List<ReviewAnnotation> findings)
+            throws McpToolException {
+        if (!args.has("takes")) {
+            return List.of();
+        }
+        if (!(arrayArgument(args, "takes") instanceof JsonArray array)) {
+            throw new McpToolException("review_tour rejected, nothing stored:\n- takes must be an array");
+        }
+        Set<String> findingIds = findings.stream().map(ReviewAnnotation::id).collect(Collectors.toSet());
+        Instant now = Instant.now();
+        List<String> problems = new ArrayList<>();
+        List<HunkTake> takes = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (int i = 0; i < array.elements().size(); i++) {
+            String at = "takes[" + i + "]";
+            if (!(array.elements().get(i) instanceof JsonObject take)) {
+                problems.add(at + ": expected an object");
+                continue;
+            }
+            String hunkId = take.get("hunkId") instanceof JsonString id ? id.value() : "";
+            Optional<String> digest = digestOf(diff, hunkId);
+            if (digest.isEmpty()) {
+                problems.add(at + ".hunkId: " + (hunkId.isEmpty() ? "missing" : hunkId + " is not a hunk of the "
+                        + "review diff"));
+            } else if (!seen.add(hunkId)) {
+                problems.add(at + ".hunkId: " + hunkId + " has a take already; send one take per hunk");
+            }
+            String does = take.get("does") instanceof JsonString text ? text.value().strip() : "";
+            if (does.isEmpty() || does.length() > MAX_TAKE_DOES) {
+                problems.add(at + ".does: what the hunk does, 1 to " + MAX_TAKE_DOES + " characters");
+            }
+            Optional<HunkTake.Alignment> alignment = take.get("alignment") instanceof JsonString text
+                    ? HunkTake.Alignment.fromWire(text.value())
+                    : Optional.empty();
+            if (alignment.isEmpty()) {
+                problems.add(at + ".alignment: one of aligned, partial, diverges, context");
+            }
+            String note = take.get("alignmentNote") instanceof JsonString text ? text.value().strip() : "";
+            if (note.length() > MAX_TAKE_NOTE) {
+                problems.add(at + ".alignmentNote: at most " + MAX_TAKE_NOTE + " characters");
+            }
+            List<HunkTake.RedFlag> flags = new ArrayList<>();
+            List<JsonValue> flagValues = take.get("redFlags") instanceof JsonArray flagArray
+                    ? flagArray.elements() : List.of();
+            if (flagValues.size() > MAX_RED_FLAGS) {
+                problems.add(at + ".redFlags: at most " + MAX_RED_FLAGS);
+            }
+            for (int j = 0; j < flagValues.size(); j++) {
+                String flagAt = at + ".redFlags[" + j + "]";
+                JsonObject flag = flagValues.get(j) instanceof JsonObject obj ? obj : JsonObject.empty();
+                String text = flag.get("text") instanceof JsonString value ? value.value().strip() : "";
+                if (text.isEmpty() || text.length() > MAX_RED_FLAG) {
+                    problems.add(flagAt + ".text: 1 to " + MAX_RED_FLAG + " characters");
+                }
+                Optional<String> findingId = flag.get("findingId") instanceof JsonString value
+                        ? Optional.of(value.value().strip()).filter(id -> !id.isEmpty())
+                        : Optional.empty();
+                if (findingId.isPresent() && !findingIds.contains(findingId.get())) {
+                    problems.add(flagAt + ".findingId: " + findingId.get() + " is not a finding of this scope; "
+                            + "post it with review_finding first");
+                }
+                flags.add(new HunkTake.RedFlag(text, findingId));
+            }
+            if (problems.isEmpty()) {
+                takes.add(new HunkTake(digest.get(), does, alignment.get(), note, flags, now));
+            }
+        }
+        if (!problems.isEmpty()) {
+            throw new McpToolException("review_tour rejected, nothing stored:\n- " + String.join("\n- ", problems));
+        }
+        for (HunkTake take : takes) {
+            PromptSafety.checkInboundText(take.does(), "tour.take.does");
+            PromptSafety.checkInboundText(take.alignmentNote(), "tour.take.alignmentNote");
+            for (HunkTake.RedFlag flag : take.redFlags()) {
+                PromptSafety.checkInboundText(flag.text(), "tour.take.redFlag");
+            }
+        }
+        return takes;
+    }
+
+    /** The digest of the hunk {@code hunkId} names in {@code diff}, if it names one. */
+    private static Optional<String> digestOf(UnifiedDiff diff, String hunkId) {
+        return HunkIds.parseHunkId(hunkId).flatMap(anchor -> diff.files().stream()
+                .filter(file -> file.path().equals(anchor.file()))
+                .filter(file -> anchor.hunkIndex() >= 0 && anchor.hunkIndex() < file.hunks().size())
+                .findFirst()
+                .map(file -> HunkDigest.of(file.path(), file.hunks().get(anchor.hunkIndex()))));
+    }
+
+    /**
+     * {@code record} with the takes merged: a sent take replaces the stored
+     * take of the same hunk, and the stored takes of the other hunks still in
+     * {@code diff} stay ({@code previous} is the record before this post, if
+     * any).
+     */
+    private static TourRecord withTakes(TourRecord record, TourRecord previous, List<HunkTake> sent,
+                                        UnifiedDiff diff) {
+        Set<String> live = TourRecord.rowsOf(diff).keySet();
+        Map<String, HunkTake> merged = new LinkedHashMap<>();
+        if (previous != null) {
+            for (HunkTake take : previous.tour().takes()) {
+                if (live.contains(take.hunkDigest())) {
+                    merged.put(take.hunkDigest(), take);
+                }
+            }
+        }
+        for (HunkTake take : sent) {
+            merged.put(take.hunkDigest(), take);
+        }
+        return record.withTour(record.tour().withTakes(List.copyOf(merged.values())));
     }
 
     /** The most characters a tour's intent may have. */

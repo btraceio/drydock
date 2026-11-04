@@ -3,12 +3,14 @@ package app.drydock.mcp;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.Confidence;
+import app.drydock.review.HunkIds;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Severity;
 import app.drydock.review.Triage;
 import app.drydock.review.tour.CheckProgress;
 import app.drydock.review.tour.HunkOverride;
+import app.drydock.review.tour.HunkTake;
 import app.drydock.review.tour.StepGrading;
 import app.drydock.review.tour.StepProgress;
 import app.drydock.review.tour.TourRecord;
@@ -92,6 +94,68 @@ class McpToolRouterTourTest extends McpRouterFixture {
         context.putTour(record.withProgress(record.progress("s2").withStale(true)));
         router.call(callerId(), "review_tour", onlyStepsArgs(step("s2", "src/WidgetUser.java", "n1", "n6", "c9")));
         assertEquals(Optional.of("Widgets get a user."), context.tourOf(scopeId()).orElseThrow().tour().intent());
+    }
+
+    private static String take(String file, String alignment, String flags) {
+        return """
+                {"hunkId":"%s","does":"Adds %s.","alignment":"%s","redFlags":%s}"""
+                .formatted(HunkIds.hunkId(file, 0), file, alignment, flags);
+    }
+
+    private JsonObject withTakes(JsonObject args, String... takes) {
+        return args.put("takes", JsonParser.parse("[" + String.join(",", takes) + "]"));
+    }
+
+    private void storeFinding(String id) {
+        context.upsertFindings(List.of(new ReviewAnnotation(scopeId(), id,
+                "src/WidgetUser.java", "n2", "n2", Severity.QUESTION, Confidence.HIGH, Optional.empty(), "Claude",
+                Instant.EPOCH, List.of(), Optional.empty(), Optional.empty(), List.of(), List.of(),
+                Optional.empty(), AnnotationStatus.OPEN, Optional.empty(), false, Triage.PROPOSED,
+                Optional.empty())));
+    }
+
+    @Test
+    void takesAreStoredByTheirHunksDigestWithTheirRedFlags() throws Exception {
+        storeFinding("f1");
+        router.call(callerId(), "review_tour", withTakes(coveringArgs(),
+                take("src/Widget.java", "aligned", "[]"),
+                take("src/WidgetUser.java", "diverges", "[{\"text\":\"Ignores the result.\",\"findingId\":\"f1\"}]")));
+
+        TourRecord stored = context.tourOf(scopeId()).orElseThrow();
+        assertEquals(2, stored.tour().takes().size());
+        HunkTake user = stored.tour().takes().get(1);
+        assertTrue(stored.hunkRows().containsKey(user.hunkDigest()), "keyed by a digest of the review diff");
+        assertEquals(HunkTake.Alignment.DIVERGES, user.alignment());
+        assertEquals(List.of(new HunkTake.RedFlag("Ignores the result.", Optional.of("f1"))), user.redFlags());
+    }
+
+    @Test
+    void badTakesAreAllNamedAndNothingIsStored() {
+        McpToolException error = assertThrows(McpToolException.class, () -> router.call(callerId(), "review_tour",
+                withTakes(coveringArgs(),
+                        "{\"hunkId\":\"h_src/Nope.java_0\",\"does\":\"x\",\"alignment\":\"aligned\"}",
+                        take("src/Widget.java", "sideways", "[]"),
+                        take("src/WidgetUser.java", "aligned", "[{\"text\":\"t\",\"findingId\":\"f9\"}]"))));
+
+        assertTrue(error.getMessage().contains("takes[0].hunkId"), error.getMessage());
+        assertTrue(error.getMessage().contains("takes[1].alignment"), error.getMessage());
+        assertTrue(error.getMessage().contains("takes[2].redFlags[0].findingId: f9"), error.getMessage());
+        assertTrue(context.tourOf(scopeId()).isEmpty());
+    }
+
+    @Test
+    void aSentTakeReplacesItsHunksAndTheOthersStay() throws Exception {
+        router.call(callerId(), "review_tour", withTakes(coveringArgs(),
+                take("src/Widget.java", "aligned", "[]"), take("src/WidgetUser.java", "aligned", "[]")));
+        TourRecord record = context.tourOf(scopeId()).orElseThrow();
+        context.putTour(record.withProgress(record.progress("s2").withStale(true)));
+
+        router.call(callerId(), "review_tour", withTakes(onlyStepsArgs(step("s2", "src/WidgetUser.java", "n1", "n6", "c9")),
+                take("src/WidgetUser.java", "partial", "[]")));
+
+        List<HunkTake> takes = context.tourOf(scopeId()).orElseThrow().tour().takes();
+        assertEquals(List.of(HunkTake.Alignment.ALIGNED, HunkTake.Alignment.PARTIAL),
+                takes.stream().map(HunkTake::alignment).toList());
     }
 
     @Test
