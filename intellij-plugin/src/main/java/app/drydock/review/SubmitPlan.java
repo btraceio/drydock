@@ -53,9 +53,14 @@ public record SubmitPlan(Event preselected, List<Comment> comments, List<ReviewA
             Objects.requireNonNull(body, "body");
         }
 
-        /** {@code file:line}, the form the review body and the submit sheet both show. */
+        /** {@code file:line}, the form the review body and the submit sheet both show; "Whole PR" without a file. */
         public String location() {
-            return file + ":" + lineLabel;
+            return wholePr() ? "Whole PR" : file + ":" + lineLabel;
+        }
+
+        /** Whether the note is about the change as a whole (no file, no line). */
+        public boolean wholePr() {
+            return file.isEmpty();
         }
     }
 
@@ -167,6 +172,13 @@ public record SubmitPlan(Event preselected, List<Comment> comments, List<ReviewA
             if (!finding.postToPr() || finding.resolved() || !finding.counts()) {
                 continue;
             }
+            if (finding.wholePr()) {
+                // About the change as a whole: no line for GitHub to anchor, and none a newer push can
+                // displace, so it is a body note against any diff, never a refusal.
+                bodyNotes.add(new BodyNote(finding.key(), "", "", "", bodyOf(finding)));
+                posting.add(finding.key());
+                continue;
+            }
             String startCompositeKey = index.key(finding.file(), finding.startKey());
             String endCompositeKey = index.key(finding.file(), finding.endKey());
 
@@ -228,7 +240,9 @@ public record SubmitPlan(Event preselected, List<Comment> comments, List<ReviewA
 
     /**
      * The review body: {@code summary}, then -- when there are notes -- a
-     * blank line, a heading, and one bullet per note.
+     * blank line, a heading, and one bullet per note: the notes about the
+     * change as a whole first ("On the change as a whole:", no location),
+     * then the ones on lines outside the diff.
      *
      * <p>GitHub renders the body as markdown, so each piece is shaped to
      * survive that: the location is an inline code span; every line of a
@@ -243,11 +257,26 @@ public record SubmitPlan(Event preselected, List<Comment> comments, List<ReviewA
             return summary;
         }
         StringBuilder out = new StringBuilder(summary);
-        if (!summary.isBlank()) {
+        List<BodyNote> whole = bodyNotes.stream().filter(BodyNote::wholePr).toList();
+        List<BodyNote> lines = bodyNotes.stream().filter(note -> !note.wholePr()).toList();
+        if (!whole.isEmpty()) {
+            if (!out.toString().isBlank()) {
+                out.append("\n\n");
+            }
+            out.append("On the change as a whole:\n");
+            for (BodyNote note : whole) {
+                out.append("- ").append(indentContinuation(note.body())).append('\n');
+            }
+        }
+        if (lines.isEmpty()) {
+            return out.toString().stripTrailing();
+        }
+        if (!out.toString().isBlank()) {
+            out.setLength(out.toString().stripTrailing().length());
             out.append("\n\n");
         }
         out.append("Comments on lines outside this diff:\n");
-        for (BodyNote note : bodyNotes) {
+        for (BodyNote note : lines) {
             out.append("- ").append(inlineCode(note.location())).append(" — ")
                     .append(indentContinuation(note.body())).append('\n');
             if (!note.excerpt().isEmpty()) {

@@ -77,8 +77,7 @@ public final class FindingsPrompt {
                                         boolean withComments) {
         int n = 1;
         for (ReviewAnnotation finding : findings) {
-            prompt.append('[').append(n++).append("] ").append(finding.file()).append(' ')
-                    .append(finding.startKey()).append(": ")
+            prompt.append('[').append(n++).append("] ").append(location(finding)).append(": ")
                     .append(finding.displayTitle().replaceAll("\\s+", " ")).append(". ");
             if (withComments) {
                 lastCommentOf(finding).ifPresent(comment ->
@@ -115,10 +114,14 @@ public final class FindingsPrompt {
         StringBuilder prompt = new StringBuilder(heading);
         int n = 1;
         for (ReviewAnnotation finding : findings) {
-            prompt.append('[').append(n++).append("] ").append(finding.file()).append(' ')
-                    .append(finding.startKey()).append(": ")
+            prompt.append('[').append(n++).append("] ").append(location(finding)).append(": ")
                     .append(finding.displayTitle().replaceAll("\\s+", " ")).append(". ");
         }
         return prompt.toString().strip();
+    }
+
+    /** Where a finding is, as the prompt names it: "file key", or "the whole change" for a whole-PR finding. */
+    static String location(ReviewAnnotation finding) {
+        return finding.wholePr() ? "the whole change" : finding.file() + " " + finding.startKey();
     }
 }

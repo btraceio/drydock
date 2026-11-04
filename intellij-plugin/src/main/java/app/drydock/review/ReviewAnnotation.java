@@ -153,6 +153,16 @@ public record ReviewAnnotation(
         thread = List.copyOf(Objects.requireNonNull(thread, "thread"));
     }
 
+    /**
+     * Whether the finding is about the change as a whole, not about lines
+     * (spec §7, "Whole-PR findings"): it has no file, and its keys are
+     * empty. Every reader that matches findings to a file's rows leaves it
+     * out on that comparison alone.
+     */
+    public boolean wholePr() {
+        return file.isEmpty();
+    }
+
     /** The composite key everything is stored and looked up under. */
     public Key key() {
         return new Key(scopeId, id);

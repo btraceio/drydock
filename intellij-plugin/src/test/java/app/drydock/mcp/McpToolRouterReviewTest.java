@@ -9,6 +9,7 @@ import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.Severity;
 import app.drydock.state.json.JsonValue;
+import app.drydock.state.json.JsonWriter;
 import app.drydock.state.json.JsonValue.JsonArray;
 import app.drydock.state.json.JsonValue.JsonBoolean;
 import app.drydock.state.json.JsonValue.JsonObject;
@@ -212,6 +213,36 @@ class McpToolRouterReviewTest {
                 "the human's override is theirs, not the agent's to undo");
         assertEquals(AnnotationStatus.RESOLVED, finding.status(),
                 "the human's resolution survives a re-run");
+    }
+
+    @Test
+    void aFindingWithoutAnAnchorIsAboutTheWholeChangeAndReachesReviewComments() throws Exception {
+        JsonObject whole = findingJson("f_whole", "question", "No test covers the new caller.");
+        whole.members().remove("anchor");
+        JsonObject args = JsonObject.empty();
+        args.put("scopeId", new JsonString(SCOPE));
+        args.put("findings", new JsonArray(List.of(whole)));
+
+        router.call(caller, "review_finding", args);
+
+        ReviewAnnotation stored = context.findingsOf(SCOPE).get(0);
+        assertTrue(stored.wholePr());
+        assertEquals("", stored.startKey());
+        JsonValue comments = router.call(caller, "review_comments", JsonObject.empty());
+        assertTrue(JsonWriter.write(comments).matches("(?s).*\"whole_change\":\\s*true.*"), JsonWriter.write(comments));
+    }
+
+    @Test
+    void aWholeChangeFindingIsNeverWithheld() {
+        JsonObject whole = findingJson("f_whole", "question", "x");
+        whole.members().remove("anchor");
+        whole.put("withheldBy", new JsonString("c1"));
+        JsonObject args = JsonObject.empty();
+        args.put("scopeId", new JsonString(SCOPE));
+        args.put("findings", new JsonArray(List.of(whole)));
+
+        McpToolException error = assertThrows(McpToolException.class, () -> router.call(caller, "review_finding", args));
+        assertTrue(error.getMessage().contains("never withheld"), error.getMessage());
     }
 
     /** A batch with one bad entry must write nothing, not half a review. */

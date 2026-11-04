@@ -401,12 +401,22 @@ final class ReviewToolCodec {
                                             Optional<ReviewAnnotation> existing)
             throws McpToolException {
         String id = requireString(obj, "id");
-        if (!(obj.get("anchor") instanceof JsonObject anchor)) {
-            throw new McpToolException("finding '" + id + "' has no anchor");
+        // No anchor: a finding about the change as a whole (spec §7), with no file and no lines.
+        String file = "";
+        String startKey = "";
+        String endKey = "";
+        if (obj.get("anchor") != null) {
+            if (!(obj.get("anchor") instanceof JsonObject anchor)) {
+                throw new McpToolException("finding '" + id + "': anchor must be an object {file, startKey, endKey?}");
+            }
+            file = requireString(anchor, "file");
+            startKey = requireString(anchor, "startKey");
+            endKey = optionalString(anchor, "endKey").orElse(startKey);
+            if (file.isBlank() || startKey.isBlank()) {
+                throw new McpToolException("finding '" + id + "': an anchor names a file and a startKey; "
+                        + "leave anchor out for a finding about the whole change");
+            }
         }
-        String file = requireString(anchor, "file");
-        String startKey = requireString(anchor, "startKey");
-        String endKey = optionalString(anchor, "endKey").orElse(startKey);
 
         List<ReviewAnnotation.Message> thread = existing.map(ReviewAnnotation::thread)
                 .filter(messages -> !messages.isEmpty())
@@ -426,6 +436,10 @@ final class ReviewToolCodec {
         Optional<String> withheldBy = optionalString(obj, "withheldBy");
         if (withheldBy.isPresent() && severity == Severity.BLOCKING) {
             throw new McpToolException("a blocking finding is never withheld: " + id);
+        }
+        if (withheldBy.isPresent() && file.isEmpty()) {
+            throw new McpToolException("a finding about the whole change is never withheld (a check reveals "
+                    + "findings on its step's lines, and it has none): " + id);
         }
 
         return new ReviewAnnotation(scopeId, id,

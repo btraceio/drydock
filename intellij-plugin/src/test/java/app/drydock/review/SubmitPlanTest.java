@@ -316,6 +316,22 @@ class SubmitPlanTest {
     }
 
     @Test
+    void aWholeChangeFindingIsABodyNoteEvenAgainstAMovedHeadAndComesFirst() {
+        ReviewAnnotation whole = finding("f20", "", "", "");
+        ReviewAnnotation outside = finding("f21", "src/Foo.java", "n500", "n500");
+
+        SubmitPlan refusing = SubmitPlan.of(List.of(whole), List.of(), EMPTY_INDEX);
+        assertTrue(refusing.refusals().isEmpty(), "no line to displace: never refused, also against a moved head");
+        assertEquals("Whole PR", refusing.bodyNotes().get(0).location());
+        assertEquals(List.of(whole.key()), refusing.posting());
+
+        String body = SubmitPlan.of(List.of(outside, whole), List.of(), EMPTY_INDEX, lookup()).composeBody("LGTM");
+        assertTrue(body.startsWith("LGTM\n\nOn the change as a whole:\n- Something looks off here.\n\n"
+                + "Comments on lines outside this diff:\n"), body);
+        assertFalse(body.contains("`Whole PR`"), "the whole change has no location to quote");
+    }
+
+    @Test
     void composeBodyIsTheSummaryUnchangedWithoutNotes() {
         assertEquals("LGTM", SubmitPlan.of(List.of(), List.of(), EMPTY_INDEX, lookup()).composeBody("LGTM"));
     }

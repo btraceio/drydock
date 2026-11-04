@@ -335,6 +335,7 @@ class ReviewInstructionsTest {
             assertTrue(ReviewInstructions.forScope("rs_abc123", subagents).contains("dependsOn"));
             assertTrue(ReviewInstructions.forScope("rs_abc123", subagents).contains("review_tour's intent"));
             assertTrue(ReviewInstructions.forScope("rs_abc123", subagents).contains("review_tour's takes"));
+            assertTrue(ReviewInstructions.forScope("rs_abc123", subagents).contains("posted without an anchor"));
         }
     }
 }

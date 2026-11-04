@@ -178,6 +178,10 @@ final class ReviewWorkbenchOutbox extends JPanel {
      * key ({@code o<N>}) names the old line, "file:N (removed)".
      */
     static String rowText(OutboxModel.Item item) {
+        if (item.finding().wholePr()) {
+            return item.finding().displayTitle() + " — the whole change"
+                    + (item.commented() ? " · " + COMMENTED : "");
+        }
         String key = item.finding().startKey();
         String line = key.length() < 2 ? "" : ":" + key.substring(1) + (key.startsWith("o") ? " (removed)" : "");
         return item.finding().displayTitle() + " — " + item.finding().file() + line

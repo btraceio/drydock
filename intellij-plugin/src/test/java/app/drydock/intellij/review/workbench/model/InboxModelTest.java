@@ -108,4 +108,23 @@ class InboxModelTest {
                 List.of(), List.of(new ReviewAnnotation.Message("Claude", Instant.EPOCH, "body")), Optional.empty(),
                 AnnotationStatus.OPEN, Optional.empty(), false, triage, Optional.empty());
     }
+
+    @Test
+    void theWholePrScopeListsOnlyTheFindingsAboutTheWholeChange() {
+        ReviewAnnotation whole = ReviewAnnotation.human("s1", "", "", "",
+                new ReviewAnnotation.Message("Claude", Instant.EPOCH, "No test.")).withTriage(Triage.PROPOSED);
+        ReviewAnnotation onLine = ReviewAnnotation.human("s1", "A.java", "n1", "n1",
+                new ReviewAnnotation.Message("Claude", Instant.EPOCH, "Here.")).withTriage(Triage.PROPOSED);
+
+        InboxModel.Snapshot wholeOnly = InboxModel.snapshot(List.of(onLine, whole), InboxModel.Tab.TO_TRIAGE,
+                InboxModel.Scope.WHOLE_PR, Optional.of("A.java"));
+        InboxModel.Snapshot thisFile = InboxModel.snapshot(List.of(onLine, whole), InboxModel.Tab.TO_TRIAGE,
+                InboxModel.Scope.FILE, Optional.of("A.java"));
+
+        assertEquals(List.of(whole), wholeOnly.cards().stream().map(InboxModel.Card::finding).toList());
+        assertEquals(List.of(onLine), thisFile.cards().stream().map(InboxModel.Card::finding).toList(),
+                "a file's scope leaves the whole change out");
+        assertEquals(2, InboxModel.snapshot(List.of(onLine, whole), InboxModel.Tab.TO_TRIAGE, InboxModel.Scope.ALL,
+                Optional.empty()).cards().size());
+    }
 }
