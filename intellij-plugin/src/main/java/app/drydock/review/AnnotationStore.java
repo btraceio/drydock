@@ -565,6 +565,7 @@ public final class AnnotationStore implements AutoCloseable {
             obj.put("at", new JsonString(verdict.at().toString()));
             obj.put("base", new JsonString(verdict.baseCommit()));
             obj.put("head", new JsonString(verdict.headCommit()));
+            verdict.settledInStep().ifPresent(step -> obj.put("settledInStep", new JsonString(step)));
             verdictEntries.add(obj);
         }
         root.put("verdicts", new JsonArray(verdictEntries));
@@ -845,7 +846,11 @@ public final class AnnotationStore implements AutoCloseable {
                         optionalString(obj, "note"),
                         Instant.parse(requireString(obj, "at")),
                         requireString(obj, "base"),
-                        requireString(obj, "head")));
+                        requireString(obj, "head"),
+                        // Lenient: a missing or non-string step is a verdict given outside a step.
+                        obj.get("settledInStep") instanceof JsonString step
+                                ? Optional.of(step.value())
+                                : Optional.empty()));
             } catch (IllegalArgumentException | DateTimeException e) {
                 LOG.log(Level.WARNING, "Skipping malformed verdict entry: " + e.getMessage());
             }
