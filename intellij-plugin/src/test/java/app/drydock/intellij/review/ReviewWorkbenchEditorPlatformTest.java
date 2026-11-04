@@ -10,6 +10,7 @@ import com.intellij.diff.requests.SimpleDiffRequest;
 import com.intellij.diff.util.Side;
 import com.intellij.ide.util.PropertiesComponent;
 import com.intellij.openapi.Disposable;
+import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.actionSystem.ToggleAction;
 import com.intellij.openapi.actionSystem.ex.ActionUtil;
@@ -371,6 +372,78 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
         assertEquals("1/3  ·  2 findings", ReviewWorkbenchSections.counts(section));
         assertEquals("", ReviewWorkbenchSections.chips(new SectionsModel.Section("rest", 5, Optional.empty(),
                 "Not in the tour", "", List.of(), List.of(), List.of(), 0, 0, 0)));
+    }
+
+    public void testTheReviewMenuAsksForTheTourAndSphinxOnlyWhenTheHarnessHasIt() {
+        List<String> started = new ArrayList<>();
+        boolean[] loaded = {false};
+        boolean[] sphinx = {false};
+        ReviewWorkbenchEditor.Host host = new ReviewWorkbenchEditor.Host() {
+            @Override
+            public Optional<ReviewWorkbenchEditor.HostedDiff> hostDiff(Project project, Disposable parent) {
+                return Optional.empty();
+            }
+
+            @Override
+            public Optional<JComponent> hostNavigator(Project project, Disposable parent,
+                                                      Consumer<WorkbenchState> header) {
+                return Optional.empty();
+            }
+
+            @Override
+            public void changeView(Project project, WorkbenchState.View view) {
+            }
+
+            @Override
+            public Optional<JComponent> hostInbox(Project project, Disposable parent) {
+                return Optional.empty();
+            }
+
+            @Override
+            public boolean canStartReview(Project project) {
+                return loaded[0];
+            }
+
+            @Override
+            public boolean sphinxReviewAvailable(Project project) {
+                return sphinx[0];
+            }
+
+            @Override
+            public void startReview(Project project, boolean viaSphinx) {
+                started.add(viaSphinx ? "sphinx" : "tour");
+            }
+        };
+        ReviewWorkbenchEditor editor = new ReviewWorkbenchEditor(getProject(), ReviewWorkbenchFile.of(getProject()),
+                host);
+        try {
+            assertTrue("a drop-down", editor.reviewActions.isPopup());
+            assertEquals(ReviewWorkbenchEditor.REVIEW_MENU, editor.reviewActions.getTemplatePresentation().getText());
+            AnAction tour = editor.reviewActions.getChildActionsOrStubs()[0];
+            AnAction viaSphinx = editor.reviewActions.getChildActionsOrStubs()[1];
+            assertEquals(ReviewWorkbenchEditor.EDUCATIONAL_TOUR, tour.getTemplatePresentation().getText());
+            assertEquals(ReviewWorkbenchEditor.SPHINX_REVIEW, viaSphinx.getTemplatePresentation().getText());
+
+            AnActionEvent tourEvent = TestActionEvent.createTestEvent(tour);
+            AnActionEvent sphinxEvent = TestActionEvent.createTestEvent(viaSphinx);
+            tour.update(tourEvent);
+            viaSphinx.update(sphinxEvent);
+            assertFalse("off until the review is loaded", tourEvent.getPresentation().isEnabled());
+            assertFalse("hidden without the plugin", sphinxEvent.getPresentation().isVisible());
+
+            loaded[0] = true;
+            sphinx[0] = true;
+            tour.update(tourEvent);
+            viaSphinx.update(sphinxEvent);
+            assertTrue(tourEvent.getPresentation().isEnabled());
+            assertTrue(sphinxEvent.getPresentation().isVisible());
+            assertTrue(sphinxEvent.getPresentation().isEnabled());
+            tour.actionPerformed(tourEvent);
+            viaSphinx.actionPerformed(sphinxEvent);
+            assertEquals(List.of("tour", "sphinx"), started);
+        } finally {
+            Disposer.dispose(editor);
+        }
     }
 
     public void testTheModeChipShowsTheModeTheScopeIsIn() {

@@ -20,6 +20,7 @@ import com.intellij.openapi.wm.ToolWindow;
 import com.intellij.openapi.wm.ToolWindowManager;
 import org.jetbrains.annotations.NotNull;
 
+import java.io.IOException;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
@@ -554,48 +555,65 @@ public final class ReviewTabOpener {
 
         @Override
         public void launch(Project project, Path checkout, ReviewScope scope) {
-            if (project.isDisposed()) {
-                return;
-            }
-            Path target = scope.diffRoot();
-            WorktreeService worktrees = new WorktreeService();
-            worktrees.list(checkout)
-                    .thenApply(listed -> {
-                        WorktreeService.Worktree main = listed.stream()
-                                .filter(WorktreeService.Worktree::mainCheckout).findFirst()
-                                .orElseThrow(() -> new IllegalStateException(
-                                        checkout + " is not in a git repository"));
-                        WorktreeService.Worktree own = listed.stream()
-                                .filter(entry -> samePath(entry.path(), target)).findFirst()
-                                .orElse(main);
-                        // The task window's own branch fallback: a detached
-                        // worktree is labelled by its directory name.
-                        String branch = own.branch().orElse(String.valueOf(own.path().getFileName()));
-                        return new String[] { main.path().toString(), own.path().toString(), branch };
-                    })
-                    .whenComplete((ignored, error) -> closeQuietly(worktrees, "worktree service"))
-                    .thenAccept(rootAndBranch -> ApplicationManager.getApplication().invokeLater(() -> {
-                        if (project.isDisposed()) {
-                            return;
-                        }
-                        new WorktreeReview().reviewWithModelDialog(project,
-                                Path.of(rootAndBranch[0]), Path.of(rootAndBranch[1]), rootAndBranch[2]);
-                    }, ModalityState.nonModal()))
-                    .exceptionally(error -> {
-                        LOG.log(Level.WARNING,
-                                "Could not resolve the checkout for the review preparation of " + target,
-                                rootCause(error));
-                        return null;
-                    });
+            startReview(project, checkout, scope, false);
         }
+    }
 
-        /** Real-path equality: macOS lists temporary directories as {@code /private/var/…}. */
-        private static boolean samePath(Path a, Path b) {
-            try {
-                return a.toRealPath().equals(b.toRealPath());
-            } catch (RuntimeException | java.io.IOException e) {
-                return a.toAbsolutePath().normalize().equals(b.toAbsolutePath().normalize());
-            }
+    /**
+     * Starts a review session on {@code scope}'s checkout through the task
+     * window's Review flow: the educational tour with its model dialog
+     * ({@link WorktreeReview#reviewWithModelDialog}), or the harness's
+     * sphinx review ({@link WorktreeReview#reviewSphinx}) when
+     * {@code sphinx}. That flow owns its background work, pickers and
+     * in-flight guard; this finds the checkout's main root and branch for
+     * it, off the EDT. EDT.
+     */
+    static void startReview(Project project, Path checkout, ReviewScope scope, boolean sphinx) {
+        if (project.isDisposed()) {
+            return;
+        }
+        Path target = scope.diffRoot();
+        WorktreeService worktrees = new WorktreeService();
+        worktrees.list(checkout)
+                .thenApply(listed -> {
+                    WorktreeService.Worktree main = listed.stream()
+                            .filter(WorktreeService.Worktree::mainCheckout).findFirst()
+                            .orElseThrow(() -> new IllegalStateException(
+                                    checkout + " is not in a git repository"));
+                    WorktreeService.Worktree own = listed.stream()
+                            .filter(entry -> samePath(entry.path(), target)).findFirst()
+                            .orElse(main);
+                    // The task window's own branch fallback: a detached
+                    // worktree is labelled by its directory name.
+                    String branch = own.branch().orElse(String.valueOf(own.path().getFileName()));
+                    return new String[] { main.path().toString(), own.path().toString(), branch };
+                })
+                .whenComplete((ignored, error) -> closeQuietly(worktrees, "worktree service"))
+                .thenAccept(rootAndBranch -> ApplicationManager.getApplication().invokeLater(() -> {
+                    if (project.isDisposed()) {
+                        return;
+                    }
+                    Path mainRoot = Path.of(rootAndBranch[0]);
+                    Path worktree = Path.of(rootAndBranch[1]);
+                    if (sphinx) {
+                        new WorktreeReview().reviewSphinx(project, mainRoot, worktree, rootAndBranch[2]);
+                    } else {
+                        new WorktreeReview().reviewWithModelDialog(project, mainRoot, worktree, rootAndBranch[2]);
+                    }
+                }, ModalityState.nonModal()))
+                .exceptionally(error -> {
+                    LOG.log(Level.WARNING, "Could not resolve the checkout for the review of " + target,
+                            rootCause(error));
+                    return null;
+                });
+    }
+
+    /** Real-path equality: macOS lists temporary directories as {@code /private/var/…}. */
+    private static boolean samePath(Path a, Path b) {
+        try {
+            return a.toRealPath().equals(b.toRealPath());
+        } catch (RuntimeException | IOException e) {
+            return a.toAbsolutePath().normalize().equals(b.toAbsolutePath().normalize());
         }
     }
 }

@@ -2167,6 +2167,12 @@ final class ReviewTabProvider {
         };
     }
 
+    /** The scope of {@code project}'s live review, once one is loaded. Any thread. */
+    static Optional<ReviewScope> liveScope(Project project) {
+        ReviewTabProvider provider = project.getUserData(LIVE_PROVIDER);
+        return provider == null || provider.disposed.get() ? Optional.empty() : Optional.ofNullable(provider.scope);
+    }
+
     /**
      * A findings inbox over the live review for a new workbench editor,
      * rendered from every {@link WorkbenchState} until {@code parent} is

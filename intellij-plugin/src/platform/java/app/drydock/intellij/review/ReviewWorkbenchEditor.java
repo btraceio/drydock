@@ -1,6 +1,7 @@
 package app.drydock.intellij.review;
 
 import app.drydock.intellij.review.workbench.model.WorkbenchState;
+import app.drydock.intellij.tasks.WorktreeReview;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.actionSystem.ActionManager;
 import com.intellij.openapi.actionSystem.ActionToolbar;
@@ -11,6 +12,7 @@ import com.intellij.openapi.actionSystem.DefaultActionGroup;
 import com.intellij.openapi.actionSystem.ex.ActionUtil;
 import com.intellij.openapi.fileEditor.FileEditor;
 import com.intellij.openapi.fileEditor.FileEditorState;
+import com.intellij.openapi.project.DumbAwareAction;
 import com.intellij.openapi.project.DumbAwareToggleAction;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.UserDataHolderBase;
@@ -27,6 +29,7 @@ import javax.swing.SwingConstants;
 import java.awt.BorderLayout;
 import java.awt.CardLayout;
 import java.beans.PropertyChangeListener;
+import java.nio.file.Path;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Consumer;
@@ -55,6 +58,9 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
     static final String NAVIGATOR_EMPTY_TEXT = "No files to review.";
     static final String CHANGES_ONLY = "Changes Only";
     static final String FULL_FILE = "Full File";
+    static final String REVIEW_MENU = "Review";
+    static final String EDUCATIONAL_TOUR = "Educational Tour…";
+    static final String SPHINX_REVIEW = "Sphinx Review";
     private static final String TOOLBAR_PLACE = "DrydockReviewWorkbenchHeader";
     static final String MODE_FOLLOWS_CHECKOUT =
             "The mode follows the checkout: a pull request checkout is reviewed as the pull request";
@@ -105,6 +111,20 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
         default Optional<JComponent> hostOutbox(Project project, Disposable parent) {
             return Optional.empty();
         }
+
+        /** Whether a review can be asked for: the live review's scope is loaded. EDT, in memory only. */
+        default boolean canStartReview(Project project) {
+            return false;
+        }
+
+        /** Whether the harness a review would pick has the sphinx plugin. EDT, in memory only. */
+        default boolean sphinxReviewAvailable(Project project) {
+            return false;
+        }
+
+        /** Asks an agent to review the workbench's checkout: the educational tour, or sphinx's review. EDT. */
+        default void startReview(Project project, boolean sphinx) {
+        }
     }
 
     private final ReviewWorkbenchFile file;
@@ -117,6 +137,8 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
     final DefaultActionGroup viewActions;
     /** The header's mode chip: Local changes | Pull request. */
     final DefaultActionGroup modeActions;
+    /** The header's Review ▾: the agent reviews that can be asked for. */
+    final DefaultActionGroup reviewActions;
     private final JBPanel<?> navigator = new JBPanel<>(new BorderLayout());
     static final String CENTRE_FILE = "file";
     static final String CENTRE_SECTION = "section";
@@ -148,6 +170,12 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
         viewActions = new DefaultActionGroup(
                 new ViewToggle(project, host, WorkbenchState.View.CHANGES_ONLY, CHANGES_ONLY),
                 new ViewToggle(project, host, WorkbenchState.View.FULL_FILE, FULL_FILE));
+        reviewActions = new DefaultActionGroup(REVIEW_MENU, true);
+        reviewActions.add(new StartReview(project, host, false));
+        reviewActions.add(new StartReview(project, host, true));
+        showTextInToolbar(reviewActions);
+        ActionToolbar reviews = ActionManager.getInstance().createActionToolbar(TOOLBAR_PLACE,
+                new DefaultActionGroup(reviewActions), true);
         ActionToolbar toolbar = ActionManager.getInstance().createActionToolbar(TOOLBAR_PLACE, viewActions, true);
         modeActions = new DefaultActionGroup(
                 new ModeChip(WorkbenchState.Mode.LOCAL), new ModeChip(WorkbenchState.Mode.PR));
@@ -155,10 +183,14 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
         JBPanel<?> top = new JBPanel<>(new BorderLayout());
         top.add(modes.getComponent(), BorderLayout.WEST);
         top.add(header, BorderLayout.CENTER);
-        top.add(toolbar.getComponent(), BorderLayout.EAST);
+        JBPanel<?> east = new JBPanel<>(new BorderLayout());
+        east.add(reviews.getComponent(), BorderLayout.WEST);
+        east.add(toolbar.getComponent(), BorderLayout.EAST);
+        top.add(east, BorderLayout.EAST);
         JBPanel<?> panel = new JBPanel<>(new BorderLayout());
         toolbar.setTargetComponent(panel);
         modes.setTargetComponent(panel);
+        reviews.setTargetComponent(panel);
         panel.add(top, BorderLayout.NORTH);
         panel.add(outboxSplitter, BorderLayout.CENTER);
         root = panel;
@@ -189,6 +221,43 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
     /** The centre card shown. EDT. */
     String centreCard() {
         return centreCard;
+    }
+
+    /**
+     * One entry of the header's Review ▾: starts an agent review of the
+     * workbench's checkout. The sphinx entry shows only when the harness a
+     * review would pick has the plugin; both are off until the review's
+     * scope is loaded.
+     */
+    private static final class StartReview extends DumbAwareAction {
+        private final Project project;
+        private final Host host;
+        private final boolean sphinx;
+
+        StartReview(Project project, Host host, boolean sphinx) {
+            super(sphinx ? SPHINX_REVIEW : EDUCATIONAL_TOUR, sphinx
+                    ? "Start a review session whose first prompt is the harness's sphinx command"
+                    : "Start a review session that writes the educational tour and its findings", null);
+            this.project = project;
+            this.host = host;
+            this.sphinx = sphinx;
+        }
+
+        @Override
+        public void update(@NotNull AnActionEvent e) {
+            e.getPresentation().setVisible(!sphinx || host.sphinxReviewAvailable(project));
+            e.getPresentation().setEnabled(host.canStartReview(project));
+        }
+
+        @Override
+        public void actionPerformed(@NotNull AnActionEvent e) {
+            host.startReview(project, sphinx);
+        }
+
+        @Override
+        public @NotNull ActionUpdateThread getActionUpdateThread() {
+            return ActionUpdateThread.EDT;
+        }
     }
 
     /**
@@ -285,6 +354,25 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
     /** The production host: the project's live Review content ({@code ReviewTabProvider}). */
     static Host liveHost() {
         return new Host() {
+            @Override
+            public boolean canStartReview(Project project) {
+                return ReviewTabProvider.liveScope(project).isPresent() && project.getBasePath() != null;
+            }
+
+            @Override
+            public boolean sphinxReviewAvailable(Project project) {
+                return ReviewTabProvider.liveScope(project)
+                        .map(scope -> WorktreeReview.sphinxAvailable(scope.repoRoot()))
+                        .orElse(false);
+            }
+
+            @Override
+            public void startReview(Project project, boolean sphinx) {
+                String base = project.getBasePath();
+                ReviewTabProvider.liveScope(project).filter(scope -> base != null).ifPresent(scope ->
+                        ReviewTabOpener.startReview(project, Path.of(base), scope, sphinx));
+            }
+
             @Override
             public Optional<HostedDiff> hostDiff(Project project, Disposable parent) {
                 return ReviewTabProvider.hostedDiff(project, parent);

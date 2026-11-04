@@ -90,6 +90,26 @@ public final class WorktreeReview {
 
     public WorktreeReview() { }
 
+    /**
+     * Whether a sphinx review can be offered for {@code mainRoot}'s
+     * repository: the harness a review would pick -- the repository's
+     * last-used agent, else the default -- reports the sphinx plugin. Reads
+     * the in-memory state only; the repository is matched by its recorded
+     * root as given, and an unmatched root falls back to the default agent.
+     * The launch re-checks the harness it actually picks. Any thread.
+     */
+    public static boolean sphinxAvailable(Path mainRoot) {
+        DrydockPluginService plugin = DrydockPluginService.getInstance();
+        Optional<AgentKind> lastUsed = plugin.stateStore().state().repositories().stream()
+                .filter(repository -> repository.root().equals(mainRoot))
+                .findFirst()
+                .flatMap(repository -> repository.settings().lastUsedAgent());
+        return PullRequestReview.selectReviewAgent(SessionDialogs.defaultAgent(plugin.registry(), lastUsed),
+                        plugin.registry()::isAvailable)
+                .flatMap(kind -> plugin.registry().sphinxReview(kind))
+                .isPresent();
+    }
+
     /** EDT entry: refuses a second materialization of the same worktree. */
     public void review(Project from, Path mainRoot, Path worktree, String branch) {
         review(from, mainRoot, worktree, branch, false, false);
