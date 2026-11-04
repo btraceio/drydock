@@ -99,6 +99,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 import java.util.stream.Stream;
@@ -602,13 +603,10 @@ final class ReviewTabProvider {
             // The registry's copy is the truth: a session that starts reviewing this checkout after
             // the tab resolved its scope binds it there (the scope's id is the same), and every send
             // reads the session from this field.
-            ReviewScope current = this.scope;
-            if (current != null && current.id().equals(scopeId)) {
-                backend.scopeRegistry().byId(scopeId).ifPresent(updated -> {
-                    this.scope = updated;
-                    submitWorkbenchState();
-                });
-            }
+            adopted(this.scope, scopeId, backend.scopeRegistry()::byId).ifPresent(updated -> {
+                this.scope = updated;
+                submitWorkbenchState();
+            });
             refresher.marksChanged();
             submitDecorationRefresh();
         }));
@@ -620,6 +618,18 @@ final class ReviewTabProvider {
                 submitDecorationRefresh();
             }
         }));
+    }
+
+    /**
+     * The registry's copy of {@code current} after a change to scope
+     * {@code changedId} (pure): present only when the change is to the
+     * scope this content shows and the registry still holds it. The copy is
+     * the truth: a session that binds this checkout's scope after the
+     * content resolved it is recorded there, under the same id.
+     */
+    static Optional<ReviewScope> adopted(ReviewScope current, String changedId,
+                                         Function<String, Optional<ReviewScope>> byId) {
+        return current != null && current.id().equals(changedId) ? byId.apply(changedId) : Optional.empty();
     }
 
     // ---- the source-editor marks --------------------------------------------

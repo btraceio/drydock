@@ -37,6 +37,7 @@ import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.function.BiConsumer;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -188,6 +189,25 @@ class ReviewTabProviderTest {
                 new ReviewTabProvider.FileAt(row, "n4"), file, left, right, fragments);
         assertEquals(Side.RIGHT, at.plan().scrollToSide());
         assertEquals(3, at.plan().scrollToLine());
+    }
+
+    @Test
+    void aRegistryChangeToTheShownScopeAdoptsTheRegistrysCopy() {
+        ReviewScope shown = scope(Optional.empty());
+        ReviewScope bound = scope(Optional.of(ManagedSessionId.newId()));
+        List<String> asked = new ArrayList<>();
+        Function<String, Optional<ReviewScope>> byId = id -> {
+            asked.add(id);
+            return id.equals(shown.id()) ? Optional.of(bound) : Optional.empty();
+        };
+
+        assertEquals(Optional.of(bound), ReviewTabProvider.adopted(shown, shown.id(), byId),
+                "a session bound after the content resolved its scope: the registry's copy wins");
+        assertEquals(Optional.empty(), ReviewTabProvider.adopted(shown, "rs_other", byId),
+                "another scope's change adopts nothing");
+        assertEquals(Optional.empty(), ReviewTabProvider.adopted(null, shown.id(), byId),
+                "before a scope is loaded there is nothing to adopt");
+        assertEquals(List.of(shown.id()), asked, "the registry is read only for the shown scope");
     }
 
     @Test
