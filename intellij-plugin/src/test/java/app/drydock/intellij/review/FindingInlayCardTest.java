@@ -125,6 +125,13 @@ class FindingInlayCardTest {
                 FindingInlayCard.actionsFor(proposed, FindingInlayCard.Surface.INBOX));
         assertEquals(List.of(FindingInlayCard.Action.UNDO, FindingInlayCard.Action.SHOW_IN_DIFF),
                 FindingInlayCard.actionsFor(decided, FindingInlayCard.Surface.INBOX));
+        assertEquals(List.of(FindingInlayCard.Action.POST_TO_PR, FindingInlayCard.Action.REQUEST_FIX,
+                        FindingInlayCard.Action.DISMISS, FindingInlayCard.Action.CHALLENGE,
+                        FindingInlayCard.Action.SHOW_IN_DIFF),
+                FindingInlayCard.actionsFor(proposed, FindingInlayCard.Surface.PR_INBOX),
+                "a pull request review's inbox can post a finding to the PR");
+        assertEquals(List.of(FindingInlayCard.Action.UNDO, FindingInlayCard.Action.SHOW_IN_DIFF),
+                FindingInlayCard.actionsFor(decided, FindingInlayCard.Surface.PR_INBOX));
     }
 
     @Test

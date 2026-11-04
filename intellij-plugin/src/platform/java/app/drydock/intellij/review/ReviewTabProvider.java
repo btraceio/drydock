@@ -2286,6 +2286,12 @@ final class ReviewTabProvider {
     private final class InboxActions implements ReviewWorkbenchInbox.Actions {
 
         @Override
+        public CompletableFuture<Optional<String>> postToPr(ReviewAnnotation finding) {
+            ReviewTriageActions actions = triage;
+            return actions == null ? loading() : actions.confirm(finding.key()).thenApply(ReviewTabProvider::goneIfEmpty);
+        }
+
+        @Override
         public CompletableFuture<Optional<String>> requestFix(ReviewAnnotation finding) {
             ReviewTriageActions actions = triage;
             return actions == null ? loading() : actions.requestFix(finding.key()).thenApply(ReviewTabProvider::goneIfEmpty);

@@ -38,6 +38,7 @@ public class ReviewWorkbenchInboxPlatformTest extends BasePlatformTestCase {
     private CompletableFuture<Optional<String>> next = CompletableFuture.completedFuture(Optional.empty());
 
     private final ReviewWorkbenchInbox.Actions actions = new ReviewWorkbenchInbox.Actions() {
+        @Override public CompletableFuture<Optional<String>> postToPr(ReviewAnnotation f) { return record("postToPr " + f.id()); }
         @Override public CompletableFuture<Optional<String>> requestFix(ReviewAnnotation f) { return record("requestFix " + f.id()); }
         @Override public CompletableFuture<Optional<String>> dismiss(ReviewAnnotation f) { return record("dismiss " + f.id()); }
         @Override public CompletableFuture<Optional<String>> undo(ReviewAnnotation f) { return record("undo " + f.id()); }
@@ -180,8 +181,28 @@ public class ReviewWorkbenchInboxPlatformTest extends BasePlatformTestCase {
                 .orElseThrow().endsWith("nothing was sent."));
     }
 
+    public void testAPullRequestReviewsInboxPostsAFindingToThePr() {
+        ReviewWorkbenchInbox inbox = new ReviewWorkbenchInbox(actions, Clock.fixed(Instant.EPOCH, ZoneOffset.UTC));
+        try {
+            ReviewAnnotation a = finding("a", Triage.PROPOSED);
+            inbox.render(state(List.of(a)));
+            assertFalse("a local review has no Post to PR", UIUtil.uiTraverser(cards(inbox).get(0))
+                    .filter(AbstractButton.class).toList().stream().anyMatch(b -> "Post to PR".equals(b.getText())));
+
+            inbox.render(state(List.of(a), WorkbenchState.Mode.PR));
+            click(cards(inbox).get(0), "Post to PR");
+            assertEquals(List.of("postToPr a"), calls);
+        } finally {
+            Disposer.dispose(inbox);
+        }
+    }
+
     private static WorkbenchState state(List<ReviewAnnotation> findings) {
-        return WorkbenchState.of("drydock", WorkbenchState.Mode.LOCAL, new ReviewTabModel.Snapshot(List.of(), 0, 0),
+        return state(findings, WorkbenchState.Mode.LOCAL);
+    }
+
+    private static WorkbenchState state(List<ReviewAnnotation> findings, WorkbenchState.Mode mode) {
+        return WorkbenchState.of("drydock", mode, new ReviewTabModel.Snapshot(List.of(), 0, 0),
                 WorkbenchState.Filter.ALL, Optional.empty(), WorkbenchState.View.CHANGES_ONLY, findings,
                 new WorkbenchState.InboxChoice(InboxModel.Tab.TO_TRIAGE, InboxModel.Scope.ALL));
     }
