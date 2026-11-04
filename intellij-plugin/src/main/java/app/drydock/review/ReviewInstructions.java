@@ -117,6 +117,20 @@ public final class ReviewInstructions {
             + "with that intent (aligned, partial, diverges or context) with a note when it is not plainly "
             + "aligned, and its red flags, each citing the id of the finding you posted for it with review_finding";
 
+    /**
+     * How the section-based review groups the change: what a section is and
+     * what its narrative says. No check asks the reviewer anything, so the
+     * narrative carries the explanation alone.
+     */
+    private static final String SECTIONS = "group the change into the sections a reviewer reads it in: one "
+            + "concern per section, each a step with a title, a narrative of what the section changes and why "
+            + "(lead with its main point; plain active-voice sentences; no history, no asides) and anchors "
+            + "covering its rows; a section-based review asks the reviewer no questions, so post no checks";
+
+    /** The anchor notes of a section-based review: as {@link #ANCHOR_NOTES}, with no check to wait for. */
+    private static final String SECTION_ANCHOR_NOTES = "give every anchor a one-sentence note: the single claim "
+            + "that range supports, as a statement about the code (drydock shows it under those lines)";
+
     /** A finding no line carries (spec §7, "Whole-PR findings"). */
     private static final String WHOLE_CHANGE = "a finding about the change as a whole (its approach, a missing "
             + "test, the description) is posted without an anchor";
@@ -149,6 +163,38 @@ public final class ReviewInstructions {
                 + "every problem if it is rejected, so fix them and post it again; " + ANCHOR_NOTES + "; "
                 + CHECK_KINDS + "; " + IMPACT_NOTES + "; " + CHECK_GROUNDING + "; " + TEACHING
                 + "; " + DIAGRAM + "; " + DEPENDENCY_ORDER + "; " + INTENT + "; " + TAKES + "; " + WHOLE_CHANGE;
+        return dispatched(work, supportsSubagents, tiers, sessionModel);
+    }
+
+    /**
+     * The section-based review's instruction (spec §10, W5g): as
+     * {@link #forScope(String, boolean, ModelTiers, Optional)}, but the tour
+     * it asks for is {@code kind: "sections"} -- the change grouped into
+     * sections a reviewer reads in order, with narratives, anchor notes, the
+     * intent and the per-hunk takes, and no checks. Same single line.
+     */
+    public static String forSections(String scopeId, boolean supportsSubagents, ModelTiers tiers,
+                                     Optional<String> sessionModel) {
+        Objects.requireNonNull(scopeId, "scopeId");
+        Objects.requireNonNull(tiers, "tiers");
+        Objects.requireNonNull(sessionModel, "sessionModel");
+        String work = "read review_scope for handle " + scopeId + " with include=sections,impact"
+                + ", call review_state first so already-settled findings are not re-flagged, "
+                + "then post review_finding and review_tour with kind sections against that handle; review_tour "
+                + "is validated (every changed row in a step, no step carries a check) and lists every problem "
+                + "if it is rejected, so fix them and post it again; " + SECTIONS + "; " + SECTION_ANCHOR_NOTES
+                + "; " + IMPACT_NOTES + "; " + DIAGRAM + "; " + DEPENDENCY_ORDER + "; " + INTENT + "; " + TAKES
+                + "; " + WHOLE_CHANGE;
+        return dispatched(work, supportsSubagents, tiers, sessionModel);
+    }
+
+    /**
+     * {@code work} as the session's instruction: done in the session itself,
+     * or by a code-review subagent under the tiers' model rules when the
+     * harness dispatches subagents.
+     */
+    private static String dispatched(String work, boolean supportsSubagents, ModelTiers tiers,
+                                     Optional<String> sessionModel) {
         if (!supportsSubagents) {
             return "Review the changes in this worktree with the drydock review tools: " + work + ".";
         }

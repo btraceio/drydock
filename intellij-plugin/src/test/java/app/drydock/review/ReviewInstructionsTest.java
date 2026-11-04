@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.Optional;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -337,5 +338,30 @@ class ReviewInstructionsTest {
             assertTrue(ReviewInstructions.forScope("rs_abc123", subagents).contains("review_tour's takes"));
             assertTrue(ReviewInstructions.forScope("rs_abc123", subagents).contains("posted without an anchor"));
         }
+    }
+
+    @Test
+    void theSectionsFormAsksForASectionsTourWithoutChecks() {
+        for (boolean subagents : new boolean[] {true, false}) {
+            String instruction = ReviewInstructions.forSections("rs_abc123", subagents, ModelTiers.EMPTY,
+                    Optional.empty());
+            assertTrue(instruction.contains("rs_abc123"), instruction);
+            assertTrue(instruction.contains("review_state"), instruction);
+            assertTrue(instruction.contains("review_tour with kind sections"), instruction);
+            assertTrue(instruction.contains("no step carries a check"), instruction);
+            assertTrue(instruction.contains("post no checks"), instruction);
+            assertTrue(instruction.contains("takes"), instruction);
+            assertTrue(instruction.contains("dependsOn"), instruction);
+            assertFalse(instruction.contains("predict"), "no check kinds to pick: " + instruction);
+            assertFalse(instruction.contains("\n"));
+            assertEquals(subagents, instruction.contains("subagent"), instruction);
+        }
+    }
+
+    @Test
+    void theSectionsFormSharesTheSubagentModelRules() {
+        ModelTiers tiers = new ModelTiers(Optional.of("strong-1"), Optional.empty(), Optional.of("low-1"));
+        String sections = ReviewInstructions.forSections("rs_abc123", true, tiers, Optional.empty());
+        assertTrue(sections.contains("exactly `strong-1`") && sections.contains("exactly `low-1`"), sections);
     }
 }
