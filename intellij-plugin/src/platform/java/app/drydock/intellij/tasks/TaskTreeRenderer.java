@@ -6,6 +6,7 @@ import app.drydock.delayedtasks.TaskStoreWatcher;
 import app.drydock.domain.SessionStatus;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.JiraIssue;
+import app.drydock.git.PrCheckoutService;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.agent.AgentStripText;
 import app.drydock.intellij.tasks.TaskNode.AddCurrentProject;
@@ -362,6 +363,8 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
         if (task.readOnly()) {
             append("  RO", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
         }
+        pullRequestOf(task).ifPresent(number ->
+                append("  PR #" + number, SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES));
         String agent = AgentLabels.displayName(DrydockPluginService.getInstance().registry(),
                 task.session().agentKind());
         append("   " + secondary(task, agent, Duration.between(task.session().lastOpenedAt(), Instant.now())),
@@ -373,6 +376,16 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
             append(" · ", SimpleTextAttributes.GRAYED_ATTRIBUTES);
             append(text, SimpleTextAttributes.LINK_ATTRIBUTES, LINK);
         });
+    }
+
+    /**
+     * The pull request a session row belongs to (pure): the session's own PR
+     * link when it carries a number, else the {@code pr-<n>} branch a PR
+     * checkout gives its worktree. From the row alone, never a gh call.
+     */
+    static Optional<Integer> pullRequestOf(TaskRow task) {
+        Optional<Integer> linked = task.session().pr().number();
+        return linked.isPresent() ? linked : task.branch().flatMap(PrCheckoutService::pullRequestNumberOf);
     }
 
     /** Review's hint word: bold, so "in review" reads as waiting on YOU, not as just another state (D16). */

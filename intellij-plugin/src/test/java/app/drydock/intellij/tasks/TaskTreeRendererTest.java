@@ -4,6 +4,8 @@ import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.AgentBinding;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.PrLink;
+import app.drydock.domain.PrState;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionStatus;
@@ -281,5 +283,22 @@ class TaskTreeRendererTest {
         renderer.customizeCellRenderer(tree, new DefaultMutableTreeNode(
                 githubNode(new Placeholder(TaskTreeModel.NOT_LOADED))), false, false, false, 0, false);
         assertNull(renderer.getToolTipText(), "the shared renderer must not leak the Jira group's JQL tooltip");
+    }
+
+    private static TaskRow prRow(PrLink pr, String branch) {
+        ManagedAgentSession session = new ManagedAgentSession.Builder(ManagedSessionId.newId(), RepositoryId.newId(),
+                "Review #930", AgentBinding.unlaunched(AgentKind.PI, SessionMode.WRITES),
+                SessionWorkspace.inRepository(DIR), Instant.EPOCH).pr(pr).build();
+        return new TaskRow(session, Optional.empty(), false, Optional.of(branch), new TaskPlacement.Idle(false), false,
+                false, false);
+    }
+
+    @Test
+    void aSessionRowNamesItsPullRequestFromItsLinkElseItsPrBranch() {
+        assertEquals(Optional.of(930), TaskTreeRenderer.pullRequestOf(
+                prRow(PrLink.of(PrState.OPEN, Optional.of(930)), "feature/x")), "the session's own PR link");
+        assertEquals(Optional.of(77), TaskTreeRenderer.pullRequestOf(prRow(PrLink.none(), "pr-77")),
+                "else the pr-<n> branch of a PR checkout");
+        assertEquals(Optional.empty(), TaskTreeRenderer.pullRequestOf(prRow(PrLink.none(), "fix/chunk_memory")));
     }
 }
