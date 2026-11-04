@@ -251,8 +251,12 @@ review" opens a Swing port of the app's `ReviewSubmitSheet`: `SubmitPlan.of(...)
 (inline comments, body notes, refusals), event (`SubmitPlan.preselect`), then
 `GitHubReviewService.submit` via `gh`. Hidden in local mode.
 
-**Mode switch.** `ReviewTabScopes` resolves only `local` today; extend it to
-`SessionReviewScopes.Scopes` with the `Choice` chip in the header (persisted per session).
+**Mode.** The review is in PR mode when its scope carries a pull request (`ReviewScope.pr()`);
+the header's chip shows which mode it is and does not switch. A switch to the separate
+`Kind.PR` scope (`SessionReviewScopes.Scopes.pullRequest`) would show a scope no plugin agent
+writes to: `SessionReviewScopeResolver` and `ReviewTabScopes` both keep only the local scope, and
+the local scope of a `pr-<n>` checkout already carries the PR and diffs from its declared base
+(W5b decision, 2026-11-04).
 
 ## 9. Spikes (before W1; live on 263, public API only)
 
@@ -279,7 +283,8 @@ live run could show.
 | W4 | Agent takes: model, `review_tour.takes`, prompt, UI on the section view's hunk cards | W3 |
 | W4b | Agent take at each hunk start in the file view (§6): a second decoration kind in `ReviewDiffInlays`, beside the finding cards | W4 |
 | W5 | Outbox, session lane: the pending decisions and Send to session in the workbench's bottom pane (local mode) | W2 |
-| W5b | PR mode: the mode switch (`SessionReviewScopes.Scopes` in `ReviewTabScopes`), the PR lane and its submit sheet (`SubmitPlan` + `GitHubReviewService`), Fixes land on (`FixTarget`), the session lane leaving out `postToPr` findings, the intent from the PR description | W5 |
+| W5b | PR mode: the mode from the scope's PR (§8), Post to PR in the inbox, the session lane leaving out `postToPr` findings, Fixes land on (`FixTarget`), the intent from the PR description | W5 |
+| W5e | The PR lane and its submit sheet: `SubmitPlan` preview, event, `GitHubReviewService.submit` via `gh` | W5b |
 | W5c | Whole-PR findings: an anchorless `ReviewAnnotation`, `review_finding`'s optional anchor, `SubmitPlan` body notes, the inbox's Whole PR scope | W5b |
 | W5d | The PR menu opens the workbench (bug below): the PR is checked out into its worktree as today, no agent is launched, and the workbench offers the review to run: section-based (a new prompt and a tour whose steps need no checks), the full educational tour (today's `forScope`), or the harness's sphinx review when it reports the plugin | W5b |
 | W6 | Source-editor round trip (changed-range marks, back to review); tool window becomes launcher | W1 |
@@ -296,6 +301,7 @@ reason and the phase that takes it are recorded here, so nothing lives only in a
 | An end-to-end run with a real agent session posting `review_tour` with `dependsOn`, intent and takes | W3, W4 | The sandbox has no agent session; the router tests cover the tool | Done in W5: a `WorktreeReview` session's agent posted all three, and Send to Session reached it |
 | The MCP review diff includes untracked IDE files (`.idea/workspace.xml`) that the workbench hides, so an agent spends steps, takes and findings on files the reviewer is not shown | W5 | Found in the end-to-end run; which side should change (the MCP diff, or the workbench's IDE-noise rule) is a product decision | W7 |
 | No automated test that the provider adopts the registry's copy of its scope when a session binds it later | W5 | `ReviewTabProvider` has no test harness for registry changes; verified live only | W7 |
+| A branch with an open PR under another name than `pr-<n>` can split into two reviews: the agent's resolver looks the PR up (`ReviewBackend.pullRequestCarriedBy`), the tab's `ReviewTabScopes` does not, and the PR ref is part of the scope's identity (pre-existing) | W5b | Found while reading the scope paths; W5b's PR mode relies on `pr-<n>` checkouts, where both derive the same ref from the branch name | W7 |
 | **Bug:** the task tree's pull-request menu (`TaskTreePanel`: Review…, Review (default), Review in Sphinx) only starts an agent review; it should open the review workbench on the PR, where the reviewer picks a section-based review, the full educational tour or, when available, a sphinx review | Reported 2026-11-04 | Opening the workbench on a PR needs PR mode (W5b), and the section-based review needs its own prompt and a tour whose steps carry no checks (`TourValidator` requires one per step today) | W5d |
 | The Files tree does not highlight the row after Full File or Show finding | W3, W4 | The state rebuild re-renders the tree and drops a tree selection; the diff is selected through the pipeline instead | W7 |
 | `TourMigration` drops every step's diagram when it rebuilds a step (pre-existing) | W3 | Not part of the workbench; found while threading `dependsOn` through migration | W7 |
