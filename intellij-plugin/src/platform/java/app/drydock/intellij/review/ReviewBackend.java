@@ -401,6 +401,11 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
     }
 
     /** For tests: the tour store. */
+    /** The backend's gh service: the pull request lookups the review makes (its description). */
+    GhCliService pullRequests() {
+        return pullRequests;
+    }
+
     TourStore tourStore() {
         return tourStore;
     }

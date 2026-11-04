@@ -26,6 +26,7 @@ import com.intellij.ui.components.JBLabel;
 import javax.swing.JComponent;
 import javax.swing.JLabel;
 import javax.swing.SwingUtilities;
+import javax.swing.text.JTextComponent;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -345,6 +346,22 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
         } finally {
             Disposer.dispose(editor);
         }
+    }
+
+    public void testThePrDescriptionsFirstParagraphShowsUnderTheIntent() {
+        assertEquals("Callers use the result of bar().",
+                ReviewWorkbenchSections.firstParagraph("## Summary\nCallers use\n the result of bar().\n\n## Details\nMore.", 400));
+        assertEquals("abcd…", ReviewWorkbenchSections.firstParagraph("abcdefgh", 4));
+
+        ReviewWorkbenchSections sections = new ReviewWorkbenchSections(key -> {
+        });
+        sections.render(WorkbenchState.of("PR #7", WorkbenchState.Mode.PR, new ReviewTabModel.Snapshot(List.of(), 0, 0),
+                WorkbenchState.Filter.ALL, Optional.empty(), WorkbenchState.View.CHANGES_ONLY, List.of(),
+                WorkbenchState.InboxChoice.DEFAULT).withPrDescription(Optional.of("Make widgets.\n\nMore.")));
+        List<String> shown = new ArrayList<>();
+        UIUtil.uiTraverser(sections).filter(JTextComponent.class)
+                .filter(text -> text.isVisible() && !text.getText().isEmpty()).forEach(text -> shown.add(text.getText()));
+        assertTrue(shown.toString(), shown.contains("PR description: Make widgets."));
     }
 
     public void testASectionRowsChipsAndCounts() {

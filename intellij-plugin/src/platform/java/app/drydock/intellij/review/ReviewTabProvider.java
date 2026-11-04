@@ -268,6 +268,10 @@ final class ReviewTabProvider {
     private volatile Optional<String> reviewBase;
     /** The computed sections of one diff, kept while the diff is equal. */
     private volatile ComputedSections computedSections;
+    /** The latest pull request description read, for one scope. */
+    private volatile PrDescription prDescription;
+    /** The scope whose pull request description is being read, if any. */
+    private final AtomicReference<String> prDescriptionInFlight = new AtomicReference<>();
     /** The diff whose computed sections are being built, if any. */
     private final AtomicReference<UnifiedDiff> sectionsInFlight = new AtomicReference<>();
 
@@ -1241,6 +1245,38 @@ final class ReviewTabProvider {
         }));
     }
 
+    /** One scope's pull request description, as read from gh (empty when it has none or gh failed). */
+    private record PrDescription(String scopeId, Optional<String> text) {
+    }
+
+    /**
+     * The pull request's description for a PR review (off the EDT): read
+     * from gh once per scope on the plugin's executor, the state rebuilt
+     * when it arrives; none while it is being read, and none for a local
+     * review.
+     */
+    private Optional<String> prDescriptionOf(ReviewScope scope) {
+        if (scope.pr().isEmpty()) {
+            return Optional.empty();
+        }
+        PrDescription cached = prDescription;
+        if (cached != null && cached.scopeId().equals(scope.id())) {
+            return cached.text();
+        }
+        ReviewBackend backend = plugin.reviewBackend().orElse(null);
+        if (backend != null && !scope.id().equals(prDescriptionInFlight.getAndSet(scope.id()))) {
+            backend.pullRequests().pullRequestBody(scope.diffRoot(), scope.pr().get().number())
+                    .whenComplete((text, error) -> {
+                        prDescription = new PrDescription(scope.id(), error == null ? text : Optional.empty());
+                        prDescriptionInFlight.compareAndSet(scope.id(), null);
+                        if (!disposed.get()) {
+                            submitWorkbenchState();
+                        }
+                    });
+        }
+        return Optional.empty();
+    }
+
     /** The IDE property a scope's "Fixes land on" choice is remembered under, keyed by the scope's id. */
     static final String FIXES_LAND_ON_KEY = "drydock.review.fixesLandOnSubPr.";
 
@@ -1862,7 +1898,8 @@ final class ReviewTabProvider {
                 workbenchFilter, Optional.ofNullable(selectedPath()), workbenchView, findings, inboxChoice,
                 sectionsOf(scope, current, verdicts, findings), sectionsChoice)
                 .withOutbox(OutboxModel.snapshot(findings, scope.sessionId().isPresent(), scope.pr().isPresent())
-                        .withStackedSubPr(stackedSubPr(scope)));
+                        .withStackedSubPr(stackedSubPr(scope)))
+                .withPrDescription(prDescriptionOf(scope));
         workbenchState = state;
         onEdt(() -> {
             if (disposed.get()) {

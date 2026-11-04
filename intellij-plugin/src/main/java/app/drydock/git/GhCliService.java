@@ -253,6 +253,44 @@ public final class GhCliService implements AutoCloseable {
         }
     }
 
+    /**
+     * The description (body) of pull request {@code number} in {@code root}:
+     * empty when it has none, when gh is not installed, or when gh fails --
+     * a failure is logged, and a review shows no description rather than
+     * failing.
+     */
+    public CompletableFuture<Optional<String>> pullRequestBody(Path root, int number) {
+        return CompletableFuture.supplyAsync(() -> locate().flatMap(gh -> pullRequestBodyWith(gh, root, number)),
+                executor);
+    }
+
+    /** The body lookup with {@code gh} already resolved; static so the argv is testable with a scripted gh. */
+    static Optional<String> pullRequestBodyWith(Path gh, Path root, int number) {
+        if (number <= 0) {
+            return Optional.empty();
+        }
+        ProcessResult result = runIn(root,
+                List.of(gh.toString(), "pr", "view", String.valueOf(number), "--json", "body"));
+        if (result == null) {
+            return Optional.empty();
+        }
+        if (result.exitCode() != 0) {
+            LOG.log(Level.WARNING, "gh pr view " + number + " --json body exited " + result.exitCode()
+                    + (result.stderr().isBlank() ? "" : ": " + ProcessRunner.excerpt(result.stderr())));
+            return Optional.empty();
+        }
+        try {
+            if (JsonParser.parse(result.stdout()) instanceof JsonObject obj
+                    && obj.get("body") instanceof JsonString body && !body.value().isBlank()) {
+                return Optional.of(body.value());
+            }
+            return Optional.empty();
+        } catch (JsonParseException e) {
+            LOG.log(Level.WARNING, "Unparseable gh pr view --json body output", e);
+            return Optional.empty();
+        }
+    }
+
     /** Every open pull request in {@code root}, drafts included (see {@link PullRequestListing}). */
     public CompletableFuture<PullRequestListing> openPullRequests(Path root, Optional<String> repository) {
         return CompletableFuture.supplyAsync(() -> openPullRequestsBlocking(root, repository), executor);

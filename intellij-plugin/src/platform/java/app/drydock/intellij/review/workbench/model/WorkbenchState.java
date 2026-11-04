@@ -25,12 +25,13 @@ import java.util.Optional;
  * @param sections the Sections tab and the section view
  * @param section  the selected section's key, when it is one of {@code sections}
  * @param outbox   the outbox's session lane
+ * @param prDescription the pull request's description, in a pull request review that has one
  */
 public record WorkbenchState(String subject, Mode mode, ReviewTabModel.Snapshot review,
                              ReviewTabModel.Snapshot files, Filter filter, Optional<String> selected,
                              View view, InboxModel.Snapshot inbox, Navigator navigator,
                              SectionsModel.Snapshot sections, Optional<String> section,
-                             OutboxModel.Snapshot outbox) {
+                             OutboxModel.Snapshot outbox, Optional<String> prDescription) {
 
     /** What is being reviewed: a scope that carries a pull request is reviewed as the pull request. */
     public enum Mode {
@@ -70,12 +71,19 @@ public record WorkbenchState(String subject, Mode mode, ReviewTabModel.Snapshot 
         Objects.requireNonNull(sections, "sections");
         Objects.requireNonNull(section, "section");
         Objects.requireNonNull(outbox, "outbox");
+        Objects.requireNonNull(prDescription, "prDescription");
+    }
+
+    /** This state with the pull request's description. */
+    public WorkbenchState withPrDescription(Optional<String> description) {
+        return new WorkbenchState(subject, mode, review, files, filter, selected, view, inbox, navigator, sections,
+                section, outbox, description);
     }
 
     /** This state with {@code next} as the outbox's session lane. */
     public WorkbenchState withOutbox(OutboxModel.Snapshot next) {
         return new WorkbenchState(subject, mode, review, files, filter, selected, view, inbox, navigator, sections,
-                section, next);
+                section, next, prDescription);
     }
 
     /** The inbox choices a state is built with: which tab, under which scope. */
@@ -132,7 +140,7 @@ public record WorkbenchState(String subject, Mode mode, ReviewTabModel.Snapshot 
         Optional<String> section = choice.section().filter(key -> sections.section(key).isPresent());
         return new WorkbenchState(subject, mode, review, files, filter, selected, view,
                 InboxModel.snapshot(findings, inbox.tab(), inbox.scope(), selected), navigator, sections, section,
-                OutboxModel.Snapshot.EMPTY);
+                OutboxModel.Snapshot.EMPTY, Optional.empty());
     }
 
     /** The selected section, when the Sections tab shows and one is selected. */
