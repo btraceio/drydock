@@ -13,6 +13,7 @@ import app.drydock.review.tour.HunkOverride;
 import app.drydock.review.tour.HunkTake;
 import app.drydock.review.tour.StepGrading;
 import app.drydock.review.tour.StepProgress;
+import app.drydock.review.tour.ReviewTour;
 import app.drydock.review.tour.TourRecord;
 import app.drydock.review.tour.TourStep;
 import app.drydock.state.json.JsonParser;
@@ -82,6 +83,59 @@ class McpToolRouterTourTest extends McpRouterFixture {
         TourRecord stored = context.tourOf(scopeId()).orElseThrow();
         assertEquals(2, stored.tour().steps().size());
         assertEquals(1, stored.progress().get("s1").hunkDigests().size());
+    }
+
+    private static String sectionStep(String id, String file, String startKey, String endKey) {
+        return """
+                {"id":"%s","title":"T %s","narrative":"What %s does.",
+                 "anchors":[{"file":"%s","startKey":"%s","endKey":"%s"}]}""".formatted(id, id, id, file, startKey,
+                endKey);
+    }
+
+    private JsonObject sectionsArgs() {
+        return tourArgs(sectionStep("s1", "src/Widget.java", "n1", "n5"),
+                sectionStep("s2", "src/WidgetUser.java", "n1", "n6"))
+                .put("kind", new JsonValue.JsonString("sections"));
+    }
+
+    @Test
+    void aSectionsTourIsStoredWithoutChecks() throws Exception {
+        JsonValue result = router.call(callerId(), "review_tour", sectionsArgs());
+
+        assertEquals("sections", JsonPeek.str(result, "kind"));
+        assertEquals(0, num(result, "checks"));
+        assertEquals(ReviewTour.Kind.SECTIONS, context.tourOf(scopeId()).orElseThrow().tour().kind());
+    }
+
+    @Test
+    void aTourWithoutAKindIsTheEducationalTourAndStillNeedsItsChecks() throws Exception {
+        assertEquals("tour", JsonPeek.str(router.call(callerId(), "review_tour", coveringArgs()), "kind"));
+        McpToolException error = assertThrows(McpToolException.class, () -> router.call(callerId(), "review_tour",
+                tourArgs(sectionStep("s1", "src/Widget.java", "n1", "n5"),
+                        sectionStep("s2", "src/WidgetUser.java", "n1", "n6"))));
+        assertTrue(error.getMessage().contains("needs at least one check"), error.getMessage());
+    }
+
+    @Test
+    void anUnknownKindIsRefused() {
+        McpToolException error = assertThrows(McpToolException.class, () -> router.call(callerId(), "review_tour",
+                sectionsArgs().put("kind", new JsonValue.JsonString("quiz"))));
+        assertTrue(error.getMessage().contains("kind must be \"tour\" or \"sections\""), error.getMessage());
+    }
+
+    @Test
+    void anOnlyStepsUpdateKeepsTheStoredKind() throws Exception {
+        router.call(callerId(), "review_tour", sectionsArgs());
+        TourRecord record = context.tourOf(scopeId()).orElseThrow();
+        context.putTour(record.withProgress(record.progress("s2").withStale(true)));
+
+        McpToolException error = assertThrows(McpToolException.class, () -> router.call(callerId(), "review_tour",
+                onlyStepsArgs(sectionStep("s2", "src/WidgetUser.java", "n1", "n6"))
+                        .put("kind", new JsonValue.JsonString("tour"))));
+        assertTrue(error.getMessage().contains("onlySteps keeps the stored tour's kind"), error.getMessage());
+
+        router.call(callerId(), "review_tour", onlyStepsArgs(sectionStep("s2", "src/WidgetUser.java", "n1", "n6")));
+        assertEquals(ReviewTour.Kind.SECTIONS, context.tourOf(scopeId()).orElseThrow().tour().kind());
     }
 
     @Test

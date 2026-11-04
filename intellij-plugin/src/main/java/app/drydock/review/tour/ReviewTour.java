@@ -10,10 +10,42 @@ import java.util.Optional;
  * statement of what the change sets out to do; empty when it gave none,
  * and for every tour written before the field existed. {@code takes} are
  * the agent's per-hunk takes, at most one per hunk digest; empty for every
- * tour written before them.
+ * tour written before them. {@code kind} is what the agent was asked for:
+ * the educational tour, whose steps carry checks, or the section-based
+ * review, whose steps carry none; every tour written before the field is a
+ * {@link Kind#TOUR}.
  */
 public record ReviewTour(String scopeId, String diffFingerprint, List<TourStep> steps, Optional<String> intent,
-                         List<HunkTake> takes) {
+                         List<HunkTake> takes, Kind kind) {
+
+    /** What kind of review the tour is. */
+    public enum Kind {
+        /** The educational tour: every step carries at least one check. */
+        TOUR("tour"),
+        /** The section-based review: the change grouped into sections, no step carries a check. */
+        SECTIONS("sections");
+
+        private final String wireName;
+
+        Kind(String wireName) {
+            this.wireName = wireName;
+        }
+
+        /** The name on the wire and in the store; a stable contract. */
+        public String wireName() {
+            return wireName;
+        }
+
+        /** The kind named {@code name}, if one is. */
+        public static Optional<Kind> ofWireName(String name) {
+            for (Kind kind : values()) {
+                if (kind.wireName.equals(name)) {
+                    return Optional.of(kind);
+                }
+            }
+            return Optional.empty();
+        }
+    }
 
     public ReviewTour {
         Objects.requireNonNull(scopeId, "scopeId");
@@ -21,6 +53,13 @@ public record ReviewTour(String scopeId, String diffFingerprint, List<TourStep> 
         steps = List.copyOf(steps);
         intent = Objects.requireNonNull(intent, "intent").map(String::strip).filter(text -> !text.isEmpty());
         takes = List.copyOf(takes);
+        Objects.requireNonNull(kind, "kind");
+    }
+
+    /** An educational tour. */
+    public ReviewTour(String scopeId, String diffFingerprint, List<TourStep> steps, Optional<String> intent,
+                      List<HunkTake> takes) {
+        this(scopeId, diffFingerprint, steps, intent, takes, Kind.TOUR);
     }
 
     /** A tour without a stated intent or takes. */
@@ -39,7 +78,7 @@ public record ReviewTour(String scopeId, String diffFingerprint, List<TourStep> 
     }
 
     public ReviewTour withTakes(List<HunkTake> newTakes) {
-        return new ReviewTour(scopeId, diffFingerprint, steps, intent, newTakes);
+        return new ReviewTour(scopeId, diffFingerprint, steps, intent, newTakes, kind);
     }
 
     public Optional<TourStep> step(String id) {
@@ -62,14 +101,14 @@ public record ReviewTour(String scopeId, String diffFingerprint, List<TourStep> 
     }
 
     public ReviewTour withSteps(List<TourStep> newSteps) {
-        return new ReviewTour(scopeId, diffFingerprint, newSteps, intent, takes);
+        return new ReviewTour(scopeId, diffFingerprint, newSteps, intent, takes, kind);
     }
 
     public ReviewTour withFingerprint(String fingerprint) {
-        return new ReviewTour(scopeId, fingerprint, steps, intent, takes);
+        return new ReviewTour(scopeId, fingerprint, steps, intent, takes, kind);
     }
 
     public ReviewTour withIntent(Optional<String> newIntent) {
-        return new ReviewTour(scopeId, diffFingerprint, steps, newIntent, takes);
+        return new ReviewTour(scopeId, diffFingerprint, steps, newIntent, takes, kind);
     }
 }
