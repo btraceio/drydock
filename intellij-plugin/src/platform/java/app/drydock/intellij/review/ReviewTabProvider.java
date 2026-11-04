@@ -574,6 +574,16 @@ final class ReviewTabProvider {
             onEdt(this::refreshDecisionsBar);
         }));
         refresher.onDispose(backend.scopeRegistry().addChangeListener(scopeId -> {
+            // The registry's copy is the truth: a session that starts reviewing this checkout after
+            // the tab resolved its scope binds it there (the scope's id is the same), and every send
+            // reads the session from this field.
+            ReviewScope current = this.scope;
+            if (current != null && current.id().equals(scopeId)) {
+                backend.scopeRegistry().byId(scopeId).ifPresent(updated -> {
+                    this.scope = updated;
+                    submitWorkbenchState();
+                });
+            }
             refresher.marksChanged();
             submitDecorationRefresh();
         }));
