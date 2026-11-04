@@ -81,4 +81,12 @@ class FindingsPromptTest {
         assertTrue(stacked.contains("gh pr create --base"), stacked);
         assertFalse(stacked.contains("\n"), "one line, like every hand-off");
     }
+
+    @Test
+    void aWholeChangeFindingIsNamedAsTheWholeChange() {
+        ReviewAnnotation whole = ReviewAnnotation.human("rs_1", "", "", "",
+                new ReviewAnnotation.Message("Claude", Instant.EPOCH, "No test covers it."));
+        String prompt = FindingsPrompt.forDecisions("PR #7", List.of(whole), List.of());
+        assertTrue(prompt.contains("[1] the whole change: No test covers it."), prompt);
+    }
 }

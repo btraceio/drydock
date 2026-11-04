@@ -117,6 +117,10 @@ public final class ReviewInstructions {
             + "with that intent (aligned, partial, diverges or context) with a note when it is not plainly "
             + "aligned, and its red flags, each citing the id of the finding you posted for it with review_finding";
 
+    /** A finding no line carries (spec §7, "Whole-PR findings"). */
+    private static final String WHOLE_CHANGE = "a finding about the change as a whole (its approach, a missing "
+            + "test, the description) is posted without an anchor";
+
     private ReviewInstructions() {
     }
 
@@ -144,7 +148,7 @@ public final class ReviewInstructions {
                 + "(every changed row in a step, each step at least one check with an alternate) and lists "
                 + "every problem if it is rejected, so fix them and post it again; " + ANCHOR_NOTES + "; "
                 + CHECK_KINDS + "; " + IMPACT_NOTES + "; " + CHECK_GROUNDING + "; " + TEACHING
-                + "; " + DIAGRAM + "; " + DEPENDENCY_ORDER + "; " + INTENT + "; " + TAKES;
+                + "; " + DIAGRAM + "; " + DEPENDENCY_ORDER + "; " + INTENT + "; " + TAKES + "; " + WHOLE_CHANGE;
         if (!supportsSubagents) {
             return "Review the changes in this worktree with the drydock review tools: " + work + ".";
         }

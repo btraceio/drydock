@@ -435,9 +435,12 @@ public final class McpToolRouter {
                                 + "Findings land as proposals; the human confirms or dismisses each.",
                         JsonObject.empty()
                                 .put("scopeId", schemaString("Review scope handle."))
-                                .put("findings", schemaArray("Array of {id, anchor{file, "
+                                .put("findings", schemaArray("Array of {id, anchor?{file, "
                                         + "startKey, endKey?}, severity, confidence, title?, body, "
-                                        + "evidence?, patch?, deviatesFrom?, asks?, withheldBy?}.")),
+                                        + "evidence?, patch?, deviatesFrom?, asks?, withheldBy?}. Leave "
+                                        + "anchor out for a finding about the change as a whole (its "
+                                        + "approach, a missing test, the PR description), which no line "
+                                        + "carries; such a finding is never withheld.")),
                         "scopeId", "findings"),
                 descriptor("review_answer",
                         "Answers a human message in a finding's thread. proposeSeverity and proposeResolve "
@@ -1326,6 +1329,21 @@ public final class McpToolRouter {
     }
 
     private Optional<JsonValue> toComment(ManagedSessionId caller, ReviewAnnotation annotation) {
+        if (annotation.wholePr()) {
+            // About the change as a whole: no line to decode and no excerpt, but the agent's next
+            // round must still see it and its thread.
+            return Optional.of(JsonObject.empty()
+                    .put("id", new JsonString(annotation.id()))
+                    .put("file", new JsonString(""))
+                    .put("line", JsonNull.INSTANCE)
+                    .put("whole_change", new JsonBoolean(true))
+                    .put("status", new JsonString(annotation.status().name()))
+                    .put("scopeId", new JsonString(annotation.scopeId()))
+                    .put("severity", new JsonString(annotation.effectiveSeverity().wireName()))
+                    .put("excerpt", JsonNull.INSTANCE)
+                    .put("hint", JsonNull.INSTANCE)
+                    .put("thread", threadJson(annotation)));
+        }
         LineRef ref;
         try {
             ref = AnnotationLines.decode(annotation.startKey());
@@ -1346,12 +1364,7 @@ public final class McpToolRouter {
             hint = JsonNull.INSTANCE;
         }
 
-        JsonArray thread = new JsonArray(annotation.thread().stream()
-                .map(message -> (JsonValue) JsonObject.empty()
-                        .put("author", new JsonString(message.author()))
-                        .put("at", new JsonString(message.at().toString()))
-                        .put("text", new JsonString(message.text())))
-                .toList());
+        JsonArray thread = threadJson(annotation);
 
         return Optional.of(JsonObject.empty()
                 .put("id", new JsonString(annotation.id()))
@@ -1364,6 +1377,15 @@ public final class McpToolRouter {
                 .put("excerpt", excerpt)
                 .put("hint", hint)
                 .put("thread", thread));
+    }
+
+    private static JsonArray threadJson(ReviewAnnotation annotation) {
+        return new JsonArray(annotation.thread().stream()
+                .map(message -> (JsonValue) JsonObject.empty()
+                        .put("author", new JsonString(message.author()))
+                        .put("at", new JsonString(message.at().toString()))
+                        .put("text", new JsonString(message.text())))
+                .toList());
     }
 
     // ---- review_reply ---------------------------------------------------
