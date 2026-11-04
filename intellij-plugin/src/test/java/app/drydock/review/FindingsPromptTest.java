@@ -1,6 +1,8 @@
 package app.drydock.review;
 
 import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Instant;
 import java.util.List;
@@ -64,5 +66,19 @@ class FindingsPromptTest {
                 FindingsPrompt.forFix("Scope", List.of()));
         assertEquals("Only the heading",
                 FindingsPrompt.render(" Only the heading ", List.of()));
+    }
+
+    @Test
+    void aStackedSubPrTargetTellsTheAgentToBranchFromThePrAndOpenAPrOnIt() {
+        String plain = FindingsPrompt.forDecisions("PR #7", List.of(), List.of());
+        assertEquals(plain, FindingsPrompt.forDecisions("PR #7", List.of(), List.of(), FixTarget.SAME_BRANCH),
+                "the same branch adds nothing to the hand-off");
+
+        String stacked = FindingsPrompt.forDecisions("PR #7", List.of(), List.of(), new FixTarget.StackedSubPr(7));
+        assertTrue(stacked.startsWith(plain + " "), stacked);
+        assertTrue(stacked.contains("create a new branch from the head of pull request #7"), stacked);
+        assertTrue(stacked.contains("gh pr view 7 --json headRefName"), stacked);
+        assertTrue(stacked.contains("gh pr create --base"), stacked);
+        assertFalse(stacked.contains("\n"), "one line, like every hand-off");
     }
 }

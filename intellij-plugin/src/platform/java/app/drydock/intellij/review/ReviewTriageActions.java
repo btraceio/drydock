@@ -5,6 +5,7 @@ import app.drydock.intellij.agent.PromptOutcome;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.AnnotationStore;
 import app.drydock.review.FindingsPrompt;
+import app.drydock.review.FixTarget;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewInstructions;
 import app.drydock.review.ReviewScope;
@@ -330,8 +331,18 @@ public final class ReviewTriageActions {
     }
 
     public CompletableFuture<FixOutcome> sendDecisions(ReviewScope scope, String subject) {
+        return sendDecisions(scope, subject, FixTarget.SAME_BRANCH);
+    }
+
+    /**
+     * As {@link #sendDecisions(ReviewScope, String)}, telling the agent
+     * where the fixes land ({@link FindingsPrompt#forDecisions(String, List,
+     * List, FixTarget)}).
+     */
+    public CompletableFuture<FixOutcome> sendDecisions(ReviewScope scope, String subject, FixTarget target) {
         Objects.requireNonNull(scope, "scope");
         Objects.requireNonNull(subject, "subject");
+        Objects.requireNonNull(target, "target");
         Optional<ManagedSessionId> session = scope.sessionId();
         if (session.isEmpty()) {
             return CompletableFuture.completedFuture(FixOutcome.of(FixOutcome.State.NO_SESSION));
@@ -355,7 +366,7 @@ public final class ReviewTriageActions {
             List<ReviewAnnotation> dismissed = decided.stream()
                     .filter(finding -> finding.triage() == Triage.DISMISSED).toList();
             PromptOutcome outcome = promptSubmitter.apply(sessionId,
-                    FindingsPrompt.forDecisions(subject, toFix, dismissed));
+                    FindingsPrompt.forDecisions(subject, toFix, dismissed, target));
             return switch (outcome) {
                 case DELIVERED -> {
                     List<ReviewAnnotation> sent = new ArrayList<>(decided.size());

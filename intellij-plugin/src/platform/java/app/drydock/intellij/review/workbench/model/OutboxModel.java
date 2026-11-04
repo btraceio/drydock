@@ -35,13 +35,21 @@ public final class OutboxModel {
     /**
      * The lane: the findings to fix in review order, how many dismissed
      * findings go along as no-action, whether a session is bound to receive
-     * them, and how many confirmed findings wait for the PR instead.
+     * them, how many confirmed findings wait for the PR instead, whether
+     * the review is a pull request review, and whether its fixes land on a
+     * stacked sub-PR ("Fixes land on", a pull request review's choice).
      */
-    public record Snapshot(List<Item> toFix, int dismissed, boolean sessionBound, int waitingForPr) {
-        public static final Snapshot EMPTY = new Snapshot(List.of(), 0, false, 0);
+    public record Snapshot(List<Item> toFix, int dismissed, boolean sessionBound, int waitingForPr,
+                           boolean prMode, boolean stackedSubPr) {
+        public static final Snapshot EMPTY = new Snapshot(List.of(), 0, false, 0, false, false);
 
         public Snapshot {
             toFix = List.copyOf(toFix);
+        }
+
+        /** This lane with the fixes landing on a stacked sub-PR when {@code stacked} (a pull request review only). */
+        public Snapshot withStackedSubPr(boolean stacked) {
+            return new Snapshot(toFix, dismissed, sessionBound, waitingForPr, prMode, prMode && stacked);
         }
 
         /** Whether there is anything to send. */
@@ -90,7 +98,7 @@ public final class OutboxModel {
                 .filter(ReviewTriageActions::isPendingDecision)
                 .filter(finding -> !ReviewTriageActions.forSession(finding, prMode))
                 .count();
-        return new Snapshot(toFix, dismissed, sessionBound, waitingForPr);
+        return new Snapshot(toFix, dismissed, sessionBound, waitingForPr, prMode, false);
     }
 
     /** Whether the reviewer wrote to the agent on this finding: a non-blank message of theirs in the thread. */

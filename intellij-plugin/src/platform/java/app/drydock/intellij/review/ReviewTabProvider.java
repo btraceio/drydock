@@ -22,6 +22,7 @@ import app.drydock.intellij.review.workbench.model.WorkbenchState;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.ChangeGraph;
 import app.drydock.review.DiffSelection;
+import app.drydock.review.FixTarget;
 import app.drydock.review.HunkDigest;
 import app.drydock.review.PendingQuestions;
 import app.drydock.review.ReviewInstructions;
@@ -39,6 +40,7 @@ import app.drydock.review.tour.TourStore;
 import com.intellij.diff.FrameDiffTool;
 import com.intellij.diff.fragments.LineFragment;
 import com.intellij.icons.AllIcons;
+import com.intellij.ide.util.PropertiesComponent;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.actionSystem.ActionUpdateThread;
 import com.intellij.openapi.actionSystem.AnAction;
@@ -1239,6 +1241,32 @@ final class ReviewTabProvider {
         }));
     }
 
+    /** The IDE property a scope's "Fixes land on" choice is remembered under, keyed by the scope's id. */
+    static final String FIXES_LAND_ON_KEY = "drydock.review.fixesLandOnSubPr.";
+
+    /** Whether a pull request review's fixes land on a stacked sub-PR (remembered per scope). Any thread. */
+    private boolean stackedSubPr(ReviewScope scope) {
+        return scope.pr().isPresent()
+                && PropertiesComponent.getInstance(project).getBoolean(FIXES_LAND_ON_KEY + scope.id(), false);
+    }
+
+    /** Where the scope's fixes land: a stacked sub-PR of its pull request, when chosen; its own branch otherwise. */
+    private FixTarget fixTarget(ReviewScope scope) {
+        return stackedSubPr(scope)
+                ? new FixTarget.StackedSubPr(scope.pr().orElseThrow().number())
+                : FixTarget.SAME_BRANCH;
+    }
+
+    /** The outbox's "Fixes land on" choice (EDT): remembered for the scope, then the state is rebuilt. */
+    private void fixesLandOn(boolean stacked) {
+        ReviewScope current = scope;
+        if (current == null || current.pr().isEmpty()) {
+            return;
+        }
+        PropertiesComponent.getInstance(project).setValue(FIXES_LAND_ON_KEY + current.id(), stacked, false);
+        submitWorkbenchState();
+    }
+
     /** What the outbox says while another send is running. */
     static final String SEND_RUNNING = "A send to the agent is already running; nothing else was sent.";
     /** What the outbox says when a send was delivered. */
@@ -1265,7 +1293,7 @@ final class ReviewTabProvider {
         sendInFlight = true;
         CompletableFuture<Optional<TriageCards.Surfaced>> result = new CompletableFuture<>();
         try {
-            actions.sendDecisions(current, subjectOf(current)).whenComplete((outcome, error) -> onEdt(() -> {
+            actions.sendDecisions(current, subjectOf(current), fixTarget(current)).whenComplete((outcome, error) -> onEdt(() -> {
                 sendInFlight = false;
                 if (error != null) {
                     result.complete(Optional.of(new TriageCards.Surfaced(TriageCards.Notice.ERROR,
@@ -1833,7 +1861,8 @@ final class ReviewTabProvider {
         WorkbenchState state = WorkbenchState.of(subjectOf(scope), modeOf(scope), current,
                 workbenchFilter, Optional.ofNullable(selectedPath()), workbenchView, findings, inboxChoice,
                 sectionsOf(scope, current, verdicts, findings), sectionsChoice)
-                .withOutbox(OutboxModel.snapshot(findings, scope.sessionId().isPresent(), scope.pr().isPresent()));
+                .withOutbox(OutboxModel.snapshot(findings, scope.sessionId().isPresent(), scope.pr().isPresent())
+                        .withStackedSubPr(stackedSubPr(scope)));
         workbenchState = state;
         onEdt(() -> {
             if (disposed.get()) {
@@ -2024,8 +2053,18 @@ final class ReviewTabProvider {
         if (provider == null || provider.disposed.get()) {
             return Optional.empty();
         }
-        ReviewWorkbenchOutbox outbox = new ReviewWorkbenchOutbox(() -> provider.sendToSession().thenApply(
-                message -> Optional.of(message.map(TriageCards.Surfaced::text).orElse(SEND_DELIVERED))));
+        ReviewWorkbenchOutbox outbox = new ReviewWorkbenchOutbox(new ReviewWorkbenchOutbox.Actions() {
+            @Override
+            public CompletableFuture<Optional<String>> send() {
+                return provider.sendToSession().thenApply(
+                        message -> Optional.of(message.map(TriageCards.Surfaced::text).orElse(SEND_DELIVERED)));
+            }
+
+            @Override
+            public void fixesLandOn(boolean stackedSubPr) {
+                provider.fixesLandOn(stackedSubPr);
+            }
+        });
         provider.attachWorkbenchView(outbox::render, parent);
         return Optional.of(outbox);
     }
