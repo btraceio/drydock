@@ -20,11 +20,13 @@ import javax.swing.ButtonGroup;
 import javax.swing.JComponent;
 import javax.swing.JPanel;
 import javax.swing.JRadioButton;
+import javax.swing.Scrollable;
 import javax.swing.event.DocumentEvent;
 import java.awt.BorderLayout;
 import java.awt.Dimension;
 import java.awt.EventQueue;
 import java.awt.FlowLayout;
+import java.awt.Rectangle;
 import java.util.EnumMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -87,8 +89,9 @@ final class ReviewSubmitDialog extends DialogWrapper {
 
     @Override
     protected @Nullable JComponent createCenterPanel() {
-        JPanel content = new JPanel();
+        JPanel content = new WidthTrackingPanel();
         content.setLayout(new BoxLayout(content, BoxLayout.Y_AXIS));
+        content.setBorder(JBUI.Borders.empty(4, 8));
         unavailable.ifPresent(reason -> content.add(muted("gh cannot post: " + reason)));
         if (!note.isEmpty()) {
             content.add(muted(note));
@@ -120,7 +123,13 @@ final class ReviewSubmitDialog extends DialogWrapper {
                 content.add(muted(refusal.reason()));
             }
         }
-        JPanel eventRow = new JPanel(new FlowLayout(FlowLayout.LEFT, JBUI.scale(8), 0));
+        JPanel eventRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0)) {
+            @Override
+            public Dimension getMaximumSize() {
+                return new Dimension(Integer.MAX_VALUE, getPreferredSize().height);
+            }
+        };
+        eventRow.setAlignmentX(JComponent.LEFT_ALIGNMENT);
         ButtonGroup group = new ButtonGroup();
         for (Event event : Event.values()) {
             JRadioButton button = new JRadioButton(label(event));
@@ -141,8 +150,11 @@ final class ReviewSubmitDialog extends DialogWrapper {
                 updateOk();
             }
         });
-        content.add(new JBScrollPane(summary));
+        JBScrollPane summaryScroll = new JBScrollPane(summary);
+        summaryScroll.setAlignmentX(JComponent.LEFT_ALIGNMENT);
+        content.add(summaryScroll);
         error.setForeground(UIUtil.getErrorForeground());
+        error.setAlignmentX(JComponent.LEFT_ALIGNMENT);
         content.add(error);
         JBScrollPane scroll = new JBScrollPane(content);
         scroll.setPreferredSize(new Dimension(JBUI.scale(640), JBUI.scale(520)));
@@ -225,11 +237,34 @@ final class ReviewSubmitDialog extends DialogWrapper {
         return label;
     }
 
-    private static JBLabel muted(String text) {
-        JBLabel label = new JBLabel(text);
-        label.setForeground(UIUtil.getContextHelpForeground());
-        label.setAlignmentX(JComponent.LEFT_ALIGNMENT);
-        return label;
+    /** A note in the context-help colour, wrapped to the dialog's width. */
+    private static JBTextArea muted(String text) {
+        JBTextArea area = text(text, false);
+        area.setForeground(UIUtil.getContextHelpForeground());
+        return area;
+    }
+
+    /** The dialog's content: as wide as the scroll pane, so its texts wrap instead of scrolling sideways. */
+    private static final class WidthTrackingPanel extends JPanel implements Scrollable {
+        @Override public Dimension getPreferredScrollableViewportSize() {
+            return getPreferredSize();
+        }
+
+        @Override public int getScrollableUnitIncrement(Rectangle visible, int orientation, int direction) {
+            return JBUI.scale(16);
+        }
+
+        @Override public int getScrollableBlockIncrement(Rectangle visible, int orientation, int direction) {
+            return Math.max(visible.height - JBUI.scale(16), JBUI.scale(16));
+        }
+
+        @Override public boolean getScrollableTracksViewportWidth() {
+            return true;
+        }
+
+        @Override public boolean getScrollableTracksViewportHeight() {
+            return false;
+        }
     }
 
     private static JBTextArea text(String value, boolean editable) {
@@ -238,6 +273,7 @@ final class ReviewSubmitDialog extends DialogWrapper {
         area.setLineWrap(true);
         area.setWrapStyleWord(true);
         area.setFont(JBUI.Fonts.label());
+        area.setOpaque(editable);
         area.setAlignmentX(JComponent.LEFT_ALIGNMENT);
         area.setBorder(JBUI.Borders.empty(2, 4));
         return area;
