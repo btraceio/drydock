@@ -131,6 +131,7 @@ final class ReviewWorkbenchSectionView extends JPanel implements Disposable {
         super(new BorderLayout());
         this.project = Objects.requireNonNull(project, "project");
         this.actions = Objects.requireNonNull(actions, "actions");
+        ReviewDiffEditor.preferUnifiedOnce(CARD_PLACE);
         TextDiffSettingsHolder.TextDiffSettings settings = TextDiffSettingsHolder.TextDiffSettings.getSettings(CARD_PLACE);
         settings.setExpandByDefault(false);
         settings.setContextRange(CONTEXT_RANGE);

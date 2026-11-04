@@ -4,6 +4,7 @@ import com.intellij.diff.fragments.LineFragment;
 import com.intellij.diff.requests.DiffRequest;
 import app.drydock.intellij.review.workbench.model.SectionsModel;
 import app.drydock.intellij.review.workbench.model.WorkbenchState;
+import app.drydock.review.tour.ReviewTour;
 import com.intellij.diff.DiffContentFactory;
 import com.intellij.diff.tools.util.base.TextDiffSettingsHolder;
 import com.intellij.diff.requests.SimpleDiffRequest;
@@ -146,6 +147,20 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
                 WorkbenchState.View.CHANGES_ONLY, List.of(),
                 WorkbenchState.InboxChoice.DEFAULT);
         assertEquals("drydock  ·  1 / 4 reviewed", ReviewWorkbenchEditor.headerText(state));
+    }
+
+    public void testTheHeaderNamesTheKindOfAStoredTour() {
+        for (ReviewTour.Kind kind : ReviewTour.Kind.values()) {
+            WorkbenchState state = WorkbenchState.of("drydock", WorkbenchState.Mode.LOCAL,
+                    new ReviewTabModel.Snapshot(List.of(), 4, 1), WorkbenchState.Filter.ALL, Optional.empty(),
+                    WorkbenchState.View.CHANGES_ONLY, List.of(), WorkbenchState.InboxChoice.DEFAULT,
+                    new SectionsModel.Snapshot(SectionsModel.Source.TOUR, Optional.empty(), List.of(),
+                            Optional.of(kind)),
+                    WorkbenchState.SectionsChoice.DEFAULT);
+            assertEquals("drydock  ·  1 / 4 reviewed  ·  " + ReviewWorkbenchEditor.kindLabel(kind),
+                    ReviewWorkbenchEditor.headerText(state));
+        }
+        assertEquals("Section review", ReviewWorkbenchEditor.kindLabel(ReviewTour.Kind.SECTIONS));
     }
 
     public void testTheNavigatorsToggleAsksForTheOtherFilter() {

@@ -2,6 +2,7 @@ package app.drydock.intellij.review;
 
 import app.drydock.intellij.review.workbench.model.WorkbenchState;
 import app.drydock.intellij.tasks.WorktreeReview;
+import app.drydock.review.tour.ReviewTour;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.actionSystem.ActionManager;
 import com.intellij.openapi.actionSystem.ActionToolbar;
@@ -349,9 +350,22 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
         }
     }
 
-    /** The header text (pure): "subject · k / n reviewed"; the mode is the chip beside it. */
+    /**
+     * The header text (pure): "subject · k / n reviewed", and the tour's kind
+     * when a tour is stored ("· Section review"); the mode is the chip beside it.
+     */
     static String headerText(WorkbenchState state) {
-        return state.subject() + "  ·  " + state.progressText();
+        String kind = state.sections().kind().map(ReviewWorkbenchEditor::kindLabel).map(label -> "  ·  " + label)
+                .orElse("");
+        return state.subject() + "  ·  " + state.progressText() + kind;
+    }
+
+    /** What a stored tour is called in the header (pure). */
+    static String kindLabel(ReviewTour.Kind kind) {
+        return switch (kind) {
+            case TOUR -> "Educational tour";
+            case SECTIONS -> "Section review";
+        };
     }
 
     private static JComponent emptyState(String text) {
