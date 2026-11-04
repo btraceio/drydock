@@ -20,11 +20,16 @@ final class SeverityPresentation {
     private SeverityPresentation() {
     }
 
-    /** The platform icon for the severity: error, question, warning, information. */
+    /**
+     * The platform icon for the severity: error, question, warning,
+     * information, all at the editor's 16 px icon size. A question is the
+     * IDE's context-help mark, not its message-dialog icon, which is drawn
+     * at dialog size and dwarfed every tree row and gutter it was in.
+     */
     static Icon icon(Severity severity) {
         return switch (severity) {
             case BLOCKING -> AllIcons.General.Error;
-            case QUESTION -> AllIcons.General.QuestionDialog;
+            case QUESTION -> AllIcons.General.ContextHelp;
             case DEVIATION -> AllIcons.General.Warning;
             case NIT -> AllIcons.General.Information;
         };
