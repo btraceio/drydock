@@ -89,4 +89,36 @@ class AnnotationStoreVerdictKeyTest {
 
         assertEquals(List.of(), store.verdictsFor("scope-1"));
     }
+
+    @Test
+    void theStepAVerdictWasSettledInRoundTripsAndConfirmingKeepsIt() throws IOException {
+        Path file = Files.createTempDirectory("drydock-verdicts").resolve("annotations.json");
+        AnnotationStore store = new AnnotationStore(file);
+        ReviewVerdict inStep = new ReviewVerdict("scope-1", "digest-a", ReviewVerdict.Decision.APPROVED,
+                Optional.empty(), Instant.parse("2026-08-22T00:00:00Z"), "base-1", "head-1", Optional.of("s2"));
+        store.putVerdict(inStep);
+        store.putVerdict(approved("digest-b", "base-1"));
+        store.flushPendingSaves();
+
+        AnnotationStore reloaded = new AnnotationStore(file);
+        assertEquals(Optional.of("s2"), reloaded.verdict("scope-1", "digest-a").orElseThrow().settledInStep());
+        assertEquals(Optional.empty(), reloaded.verdict("scope-1", "digest-b").orElseThrow().settledInStep(),
+                "a file-level mark is settled in no step");
+        assertEquals(Optional.of("s2"), inStep.confirmedAgainst("base-2", "head-2",
+                Instant.parse("2026-08-23T00:00:00Z")).settledInStep());
+    }
+
+    @Test
+    void aVerdictWithAMalformedStepDecodesAsSettledInNoStep() throws IOException {
+        Path file = Files.createTempDirectory("drydock-verdicts").resolve("annotations.json");
+        Files.writeString(file, """
+                {"schemaVersion":6,"annotations":[],"submitted":[],
+                 "verdicts":[{"scopeId":"scope-1","hunkDigest":"digest-a","verdict":"approved",
+                              "at":"2026-08-01T00:00:00Z","base":"b","head":"h","settledInStep":7}]}
+                """);
+
+        AnnotationStore store = new AnnotationStore(file);
+
+        assertEquals(Optional.empty(), store.verdict("scope-1", "digest-a").orElseThrow().settledInStep());
+    }
 }

@@ -25,6 +25,7 @@ import org.jetbrains.annotations.NotNull;
 import javax.swing.JComponent;
 import javax.swing.SwingConstants;
 import java.awt.BorderLayout;
+import java.awt.CardLayout;
 import java.beans.PropertyChangeListener;
 import java.util.Objects;
 import java.util.Optional;
@@ -89,6 +90,15 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
 
         /** A findings inbox for a new workbench editor, disposed with {@code parent}; empty when no review is live. EDT. */
         Optional<JComponent> hostInbox(Project project, Disposable parent);
+
+        /**
+         * The section view for a new workbench editor, disposed with
+         * {@code parent}; empty when no review is live, and then the centre
+         * always shows the file diff. EDT.
+         */
+        default Optional<JComponent> hostSectionView(Project project, Disposable parent) {
+            return Optional.empty();
+        }
     }
 
     private final ReviewWorkbenchFile file;
@@ -102,6 +112,12 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
     /** The header's mode chip: Local changes | Pull request. */
     final DefaultActionGroup modeActions;
     private final JBPanel<?> navigator = new JBPanel<>(new BorderLayout());
+    static final String CENTRE_FILE = "file";
+    static final String CENTRE_SECTION = "section";
+    private final CardLayout centreCards = new CardLayout();
+    /** The centre: the file diff, or the selected section's cards. */
+    private final JBPanel<?> centre = new JBPanel<>(centreCards);
+    private String centreCard = CENTRE_FILE;
     final OnePixelSplitter navSplitter = new OnePixelSplitter(false, NAV_KEY, 0.2f);
     final OnePixelSplitter inboxSplitter = new OnePixelSplitter(false, INBOX_KEY, 0.68f);
     final OnePixelSplitter outboxSplitter = new OnePixelSplitter(true, OUTBOX_KEY, 0.8f);
@@ -109,7 +125,9 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
     ReviewWorkbenchEditor(Project project, ReviewWorkbenchFile file, Host host) {
         this.file = Objects.requireNonNull(file, "file");
         Optional<HostedDiff> diff = host.hostDiff(project, this);
-        JComponent centre = diff.map(HostedDiff::component).orElseGet(() -> emptyState(NO_REVIEW_TEXT));
+        JComponent fileDiff = diff.map(HostedDiff::component).orElseGet(() -> emptyState(NO_REVIEW_TEXT));
+        centre.add(fileDiff, CENTRE_FILE);
+        host.hostSectionView(project, this).ifPresent(view -> centre.add(view, CENTRE_SECTION));
 
         navigator.add(host.hostNavigator(project, this, this::renderHeader)
                 .orElseGet(() -> emptyState(NAVIGATOR_EMPTY_TEXT)), BorderLayout.CENTER);
@@ -138,7 +156,7 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
         panel.add(top, BorderLayout.NORTH);
         panel.add(outboxSplitter, BorderLayout.CENTER);
         root = panel;
-        preferredFocus = diff.map(HostedDiff::preferredFocus).orElse(() -> centre);
+        preferredFocus = diff.map(HostedDiff::preferredFocus).orElse(() -> fileDiff);
     }
 
     /** A text-only toggle renders as a blank button in a toolbar unless its presentation asks for the text. */
@@ -146,10 +164,25 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
         action.getTemplatePresentation().putClientProperty(ActionUtil.SHOW_TEXT_IN_TOOLBAR, true);
     }
 
-    /** The header for {@code state}: the review's subject and its progress. EDT. */
+    /**
+     * The header for {@code state} (the review's subject and its progress),
+     * and the centre: the selected section when the Sections tab has one,
+     * the file diff otherwise. EDT.
+     */
     private void renderHeader(WorkbenchState state) {
         shown = state;
         header.setText(headerText(state));
+        boolean section = state.shownSection().isPresent() && centre.getComponentCount() > 1;
+        String card = section ? CENTRE_SECTION : CENTRE_FILE;
+        if (!card.equals(centreCard)) {
+            centreCard = card;
+            centreCards.show(centre, card);
+        }
+    }
+
+    /** The centre card shown. EDT. */
+    String centreCard() {
+        return centreCard;
     }
 
     /**
@@ -265,6 +298,11 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
             @Override
             public Optional<JComponent> hostInbox(Project project, Disposable parent) {
                 return ReviewTabProvider.hostedInbox(project, parent);
+            }
+
+            @Override
+            public Optional<JComponent> hostSectionView(Project project, Disposable parent) {
+                return ReviewTabProvider.hostedSectionView(project, parent);
             }
         };
     }

@@ -17,10 +17,15 @@ import java.util.Optional;
  * the {@code (baseCommit, headCommit)} this was judged against is recorded
  * alongside it, and {@link #staleAgainst} derives whether the base has since
  * moved.</p>
+ *
+ * <p>{@code settledInStep} is the id of the tour step the hunk was reviewed
+ * in, when it was marked from a section; empty for a file-level mark and for
+ * every verdict written before the field existed. A section shows such a hunk
+ * as "reviewed in §N" when N is another step.</p>
  */
 public record ReviewVerdict(String scopeId, String hunkDigest, Decision decision,
                             Optional<String> note, Instant at,
-                            String baseCommit, String headCommit) {
+                            String baseCommit, String headCommit, Optional<String> settledInStep) {
 
     /** What was decided. {@code AUTO_APPROVED} is the agent's own assertion, not the human's. */
     public enum Decision {
@@ -73,6 +78,13 @@ public record ReviewVerdict(String scopeId, String hunkDigest, Decision decision
             throw new IllegalArgumentException(
                     "a verdict is keyed by (scopeId, hunkDigest); neither may be blank");
         }
+        settledInStep = Objects.requireNonNull(settledInStep, "settledInStep").filter(id -> !id.isBlank());
+    }
+
+    /** A verdict not given in a tour step: a file-level mark, or any verdict outside the workbench's sections. */
+    public ReviewVerdict(String scopeId, String hunkDigest, Decision decision, Optional<String> note, Instant at,
+                         String baseCommit, String headCommit) {
+        this(scopeId, hunkDigest, decision, note, at, baseCommit, headCommit, Optional.empty());
     }
 
     public Key key() {
@@ -104,6 +116,6 @@ public record ReviewVerdict(String scopeId, String hunkDigest, Decision decision
      * to is a silently-approved-stale-code bug.
      */
     public ReviewVerdict confirmedAgainst(String currentBase, String currentHead, Instant when) {
-        return new ReviewVerdict(scopeId, hunkDigest, decision, note, when, currentBase, currentHead);
+        return new ReviewVerdict(scopeId, hunkDigest, decision, note, when, currentBase, currentHead, settledInStep);
     }
 }

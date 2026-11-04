@@ -391,11 +391,17 @@ public final class McpToolRouter {
                                         + "object minus id (a different id), minus alternates: {id, kind, "
                                         + "prompt, explanation, choices?, answer?} -- the alternate needs its "
                                         + "own prompt/explanation/choices/answer, omitting them is rejected}], "
+                                        + "dependsOn?[step id] (the earlier steps this one builds on; "
+                                        + "steps are in dependency order, so each id names a step "
+                                        + "before this one), "
                                         + "diagram?{caption, stages: up to 4 monospace text stages, "
                                         + "each continuing the drawing above it, revealed one per "
                                         + "click -- draw with spaces, never tabs (a tab stops "
                                         + "wherever the panel font says), keep lines under 100 chars}"
                                         + "]}; at most 40 steps, 6 checks each."))
+                                .put("intent", schemaString("One sentence: what the change sets out to do, "
+                                        + "as the author intends it (<=1000 chars). Shown above the tour's "
+                                        + "sections. With onlySteps, the stored intent stays unless this is sent."))
                                 .put("onlySteps", schemaBoolean("Merge these steps into the stored tour instead "
                                         + "of replacing it: re-issue stale steps, add steps for uncovered hunks. "
                                         + "Needs a stored tour.")),
@@ -959,6 +965,7 @@ public final class McpToolRouter {
                     + String.join("\n- ", e.problems()));
         }
         checkTourText(steps);
+        Optional<String> intent = intentArgument(args);
         boolean onlySteps = optionalBooleanArg(args, "onlySteps", false);
         List<ReviewAnnotation> findings = context.findingsOf(scope.id());
         // Read before the store write: it touches the checkout, and the
@@ -979,11 +986,17 @@ public final class McpToolRouter {
                     if (!live.isEmpty()) {
                         throw new TourRejected(live);
                     }
-                    return validated(TourMerge.replaceSteps(current, steps, diff), diff, findings, noteErrors);
+                    TourRecord merged = TourMerge.replaceSteps(current, steps, diff);
+                    // The stored intent stays unless a new one is sent.
+                    if (intent.isPresent()) {
+                        merged = merged.withTour(merged.tour().withIntent(intent));
+                    }
+                    return validated(merged, diff, findings, noteErrors);
                 })
                         .orElseThrow(() -> new McpToolException(missing));
             } else {
-                TourRecord fresh = TourRecord.fresh(new ReviewTour(scope.id(), TourFingerprint.of(diff), steps), diff);
+                TourRecord fresh = TourRecord.fresh(
+                        new ReviewTour(scope.id(), TourFingerprint.of(diff), steps, intent), diff);
                 Optional<TourRecord> replaced = context.updateTour(scope.id(),
                         current -> validated(repost(fresh, current), diff, findings, noteErrors));
                 if (replaced.isPresent()) {
@@ -1099,6 +1112,22 @@ public final class McpToolRouter {
                 .put("scopeId", new JsonString(scope.id()))
                 .put("checkId", new JsonString(checkId))
                 .put("status", new JsonString(next.status().name()));
+    }
+
+    /** The most characters a tour's intent may have. */
+    static final int MAX_TOUR_INTENT = 1000;
+
+    /** {@code review_tour}'s optional {@code intent}: stripped, blank as absent, checked like the tour's text. */
+    private static Optional<String> intentArgument(JsonObject args) throws McpToolException {
+        Optional<String> intent = optionalStringArg(args, "intent").map(String::strip).filter(text -> !text.isEmpty());
+        if (intent.isPresent()) {
+            if (intent.get().length() > MAX_TOUR_INTENT) {
+                throw new McpToolException("review_tour rejected, nothing stored:\n- intent is longer than "
+                        + MAX_TOUR_INTENT + " characters");
+            }
+            PromptSafety.checkInboundText(intent.get(), "tour.intent");
+        }
+        return intent;
     }
 
     private static void checkTourText(List<TourStep> steps) throws McpToolException {

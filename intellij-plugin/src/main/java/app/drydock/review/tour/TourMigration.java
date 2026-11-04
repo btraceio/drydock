@@ -136,7 +136,7 @@ public final class TourMigration {
             return Optional.empty();
         }
         return Optional.of(new TourStep(step.id(), step.title(), step.narrative(), anchors, step.impactNotes(),
-                step.checks()));
+                step.checks(), Optional.empty(), step.dependsOn()));
     }
 
     /**
@@ -159,7 +159,8 @@ public final class TourMigration {
                     ? anchor.movedTo(start.get(), end.get())
                     : anchor);
         }
-        return new TourStep(step.id(), step.title(), step.narrative(), anchors, step.impactNotes(), step.checks());
+        return new TourStep(step.id(), step.title(), step.narrative(), anchors, step.impactNotes(), step.checks(),
+                Optional.empty(), step.dependsOn());
     }
 
     /**

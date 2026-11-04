@@ -83,6 +83,30 @@ class McpToolRouterTourTest extends McpRouterFixture {
     }
 
     @Test
+    void anIntentIsStoredWithTheTourAndKeptByAnOnlyStepsMergeThatSendsNone() throws Exception {
+        router.call(callerId(), "review_tour",
+                coveringArgs().put("intent", new JsonValue.JsonString("  Widgets get a user.  ")));
+        assertEquals(Optional.of("Widgets get a user."), context.tourOf(scopeId()).orElseThrow().tour().intent());
+
+        TourRecord record = context.tourOf(scopeId()).orElseThrow();
+        context.putTour(record.withProgress(record.progress("s2").withStale(true)));
+        router.call(callerId(), "review_tour", onlyStepsArgs(step("s2", "src/WidgetUser.java", "n1", "n6", "c9")));
+        assertEquals(Optional.of("Widgets get a user."), context.tourOf(scopeId()).orElseThrow().tour().intent());
+    }
+
+    @Test
+    void anIntentOverItsCapIsRejectedAndStoresNothing() {
+        JsonObject args = coveringArgs().put("intent",
+                new JsonValue.JsonString("x".repeat(McpToolRouter.MAX_TOUR_INTENT + 1)));
+
+        McpToolException error = assertThrows(McpToolException.class,
+                () -> router.call(callerId(), "review_tour", args));
+
+        assertTrue(error.getMessage().contains("intent is longer than"), error.getMessage());
+        assertTrue(context.tourOf(scopeId()).isEmpty());
+    }
+
+    @Test
     void aPredictOverAnAddedOnlyStepIsRejectedAndStoresNothing() {
         String predict = CHECK.replace("\"kind\":\"trace\"", "\"kind\":\"predict\"");
         String predictStep = """

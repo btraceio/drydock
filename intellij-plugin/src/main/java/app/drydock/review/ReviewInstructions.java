@@ -94,6 +94,21 @@ public final class ReviewInstructions {
             + "holding back the conclusion the way a withheld narrative does; most steps need no diagram, "
             + "one that adds nothing is noise";
 
+    /**
+     * The tour's step order, shared by every tour prompt that posts whole
+     * steps. Step order is dependency order: the validator rejects a
+     * {@code dependsOn} that names a later step.
+     */
+    private static final String DEPENDENCY_ORDER = "order the steps so each comes after the steps it builds on, "
+            + "and name those earlier steps' ids in its dependsOn";
+
+    /**
+     * The tour's intent: the one sentence the reviewer judges every step
+     * against, shown above the sections.
+     */
+    private static final String INTENT = "state in review_tour's intent, in one sentence, what the change sets "
+            + "out to do";
+
     private ReviewInstructions() {
     }
 
@@ -121,7 +136,7 @@ public final class ReviewInstructions {
                 + "(every changed row in a step, each step at least one check with an alternate) and lists "
                 + "every problem if it is rejected, so fix them and post it again; " + ANCHOR_NOTES + "; "
                 + CHECK_KINDS + "; " + IMPACT_NOTES + "; " + CHECK_GROUNDING + "; " + TEACHING
-                + "; " + DIAGRAM;
+                + "; " + DIAGRAM + "; " + DEPENDENCY_ORDER + "; " + INTENT;
         if (!supportsSubagents) {
             return "Review the changes in this worktree with the drydock review tools: " + work + ".";
         }

@@ -92,6 +92,20 @@ class TourCodecTest {
     }
 
     @Test
+    void aTourIntentRoundTripsThroughTheStoredRecordAndIsAbsentWhenNoneWasStated() throws Exception {
+        UnifiedDiff diff = TourFixtures.twoFileDiff();
+        ReviewTour plain = TourFixtures.coveringTour(diff);
+        TourRecord withIntent = TourRecord.fresh(plain.withIntent(Optional.of("Guard the loader.")), diff);
+
+        assertEquals(Optional.of("Guard the loader."),
+                TourCodec.recordFromJson(TourCodec.recordToJson(withIntent)).orElseThrow().tour().intent());
+        TourRecord without = TourRecord.fresh(plain, diff);
+        assertFalse(JsonWriter.write(TourCodec.recordToJson(without)).contains("\"intent\""));
+        assertEquals(Optional.empty(), TourCodec.recordFromJson(TourCodec.recordToJson(without)).orElseThrow()
+                .tour().intent());
+    }
+
+    @Test
     void endKeyDefaultsToStartKey() throws Exception {
         List<TourStep> steps = TourCodec.stepsFromAgent(JsonParser.parse(
                 ONE_STEP.replace("\"startKey\":\"n1\",\"endKey\":\"n22\"", "\"startKey\":\"n3\"")));
@@ -127,6 +141,33 @@ class TourCodecTest {
         assertTrue(step.diagram().isEmpty());
         assertFalse(JsonWriter.write(TourCodec.stepToJson(step)).contains("\"diagram\""),
                 "an old-shape step must persist byte-for-byte as it did before the field existed");
+    }
+
+    @Test
+    void dependsOnDecodesAndRoundTripsThroughThePersistedForm() throws Exception {
+        String withDeps = ONE_STEP.replace("\"narrative\":\"Why.\",",
+                "\"narrative\":\"Why.\",\"dependsOn\":[\"s0\"],");
+        TourStep step = TourCodec.stepsFromAgent(JsonParser.parse(withDeps)).getFirst();
+        assertEquals(List.of("s0"), step.dependsOn());
+
+        TourStep restored = TourCodec.stepFromJson(TourCodec.stepToJson(step), "steps[0]");
+        assertEquals(List.of("s0"), restored.dependsOn(), "the persisted form keeps the dependencies");
+    }
+
+    @Test
+    void aStepWithoutDependenciesDecodesEmptyAndWritesNoDependsOnMember() throws Exception {
+        TourStep step = TourCodec.stepsFromAgent(JsonParser.parse(ONE_STEP)).getFirst();
+        assertEquals(List.of(), step.dependsOn());
+        assertFalse(JsonWriter.write(TourCodec.stepToJson(step)).contains("\"dependsOn\""),
+                "an old-shape step must persist as it did before the field existed");
+    }
+
+    @Test
+    void aDependencyThatIsNotAStepIdIsRejectedNamingItsPath() {
+        TourCodec.InvalidTour error = assertThrows(TourCodec.InvalidTour.class, () -> TourCodec.stepsFromAgent(
+                JsonParser.parse(ONE_STEP.replace("\"narrative\":\"Why.\",",
+                        "\"narrative\":\"Why.\",\"dependsOn\":[3],"))));
+        assertTrue(error.getMessage().contains("steps[0].dependsOn[0]"), error.getMessage());
     }
 
     @Test
