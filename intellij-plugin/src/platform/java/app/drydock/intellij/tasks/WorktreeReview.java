@@ -16,6 +16,7 @@ import app.drydock.intellij.agent.PromptOutcome;
 import app.drydock.intellij.review.ReviewRequest;
 import app.drydock.intellij.review.ReviewTabOpener;
 import app.drydock.intellij.startup.DrydockStartupActivity;
+import app.drydock.review.tour.ReviewTour;
 
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
@@ -53,8 +54,9 @@ import java.util.function.Function;
  *
  * <p>The session runs in WRITES mode: a reviewer builds, runs tests, and
  * dispatches subagents, which a read-only sandbox or plan mode would block.
- * The prompt spends the repository's remembered subagent tiers; the
- * sphinx review sends the harness's command instead.</p>
+ * The prompt spends the repository's remembered subagent tiers, and asks
+ * for the educational tour or the section-based review; the sphinx review
+ * sends the harness's command instead.</p>
  *
  * <p>The prompt is resolved BEFORE the agent spawns and travels as the
  * launch's initial prompt — the same channel a task typed into the New task
@@ -111,7 +113,7 @@ public final class WorktreeReview {
 
     /** EDT entry: refuses a second materialization of the same worktree. */
     public void review(Project from, Path mainRoot, Path worktree, String branch) {
-        review(from, mainRoot, worktree, branch, false, false);
+        review(from, mainRoot, worktree, branch, false, false, ReviewTour.Kind.TOUR);
     }
 
     /**
@@ -121,7 +123,17 @@ public final class WorktreeReview {
      * dialog cancels the whole review.
      */
     public void reviewWithModelDialog(Project from, Path mainRoot, Path worktree, String branch) {
-        review(from, mainRoot, worktree, branch, true, false);
+        reviewWithModelDialog(from, mainRoot, worktree, branch, ReviewTour.Kind.TOUR);
+    }
+
+    /**
+     * As {@link #reviewWithModelDialog(Project, Path, Path, String)}, asking
+     * for {@code tourKind}: the educational tour, or the section-based review
+     * ({@code ReviewInstructions.forSections}).
+     */
+    public void reviewWithModelDialog(Project from, Path mainRoot, Path worktree, String branch,
+                                      ReviewTour.Kind tourKind) {
+        review(from, mainRoot, worktree, branch, true, false, tourKind);
     }
 
     /**
@@ -134,11 +146,11 @@ public final class WorktreeReview {
      * agent does, and the launch re-checks whoever actually got picked.
      */
     public void reviewSphinx(Project from, Path mainRoot, Path worktree, String branch) {
-        review(from, mainRoot, worktree, branch, false, true);
+        review(from, mainRoot, worktree, branch, false, true, ReviewTour.Kind.TOUR);
     }
 
     private void review(Project from, Path mainRoot, Path worktree, String branch, boolean pickModel,
-                        boolean sphinx) {
+                        boolean sphinx, ReviewTour.Kind tourKind) {
         String key;
         try {
             key = worktree.toRealPath().toString();
@@ -154,7 +166,7 @@ public final class WorktreeReview {
             @Override
             public void run(@NotNull ProgressIndicator indicator) {
                 try {
-                    materialize(from, mainRoot, worktree, branch, pickModel, sphinx, indicator);
+                    materialize(from, mainRoot, worktree, branch, pickModel, sphinx, tourKind, indicator);
                 } finally {
                     inFlight.remove(key);
                 }
@@ -163,7 +175,7 @@ public final class WorktreeReview {
     }
 
     private void materialize(Project from, Path mainRoot, Path worktree, String branch, boolean pickModel,
-                             boolean sphinx, ProgressIndicator indicator) {
+                             boolean sphinx, ReviewTour.Kind tourKind, ProgressIndicator indicator) {
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         Optional<AgentKind> agent;
         // The repository's last-used values, read once: they seed the dialog's
@@ -253,7 +265,8 @@ public final class WorktreeReview {
         Path reused = worktree;
         ApplicationManager.getApplication().invokeLater(() ->
                 openAndLaunch(from, mainRoot, reused, branch, picked, model, promptTiers, recordedTiers,
-                        sphinx ? Optional.of(sphinxSupport.get().reviewLocalChangesPrompt()) : Optional.empty()),
+                        sphinx ? Optional.of(sphinxSupport.get().reviewLocalChangesPrompt()) : Optional.empty(),
+                        tourKind),
                 ModalityState.nonModal());
     }
 
@@ -313,7 +326,8 @@ public final class WorktreeReview {
      */
     private void openAndLaunch(Project from, Path mainRoot, Path worktree, String branch,
                                AgentKind agent, Optional<String> model, ModelTiers promptTiers,
-                               Optional<ModelTiers> recordedTiers, Optional<String> sphinxPrompt) {
+                               Optional<ModelTiers> recordedTiers, Optional<String> sphinxPrompt,
+                               ReviewTour.Kind kind) {
         if (from.isDisposed()) {
             LOG.log(Level.INFO, "The window was closed while the review of {0} was starting; {1} is untouched",
                     branch, worktree);
@@ -325,7 +339,8 @@ public final class WorktreeReview {
         // what a harness-run review loop wants.
         PullRequestReview.ReviewPrompt prompt = sphinxPrompt
                 .map(PullRequestReview.ReviewPrompt::fixed)
-                .orElseGet(() -> PullRequestReview.ReviewPrompt.drydockReview(agent, promptTiers, model));
+                .orElseGet(() -> PullRequestReview.ReviewPrompt.drydockReview(agent, promptTiers, model)
+                        .asking(kind));
         var launch = SessionDialogs.launchSession(from, worktree, mainRoot, agent, displayName,
                 SessionMode.WRITES, prompt::resolve, false, model, recordedTiers);
         ProgressManager.getInstance().run(new Task.Backgroundable(from,

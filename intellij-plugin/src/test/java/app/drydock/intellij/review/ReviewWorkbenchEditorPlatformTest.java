@@ -374,7 +374,7 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
                 "Not in the tour", "", List.of(), List.of(), List.of(), 0, 0, 0)));
     }
 
-    public void testTheReviewMenuAsksForTheTourAndSphinxOnlyWhenTheHarnessHasIt() {
+    public void testTheReviewMenuAsksForSectionsTheTourAndSphinxOnlyWhenTheHarnessHasIt() {
         List<String> started = new ArrayList<>();
         boolean[] loaded = {false};
         boolean[] sphinx = {false};
@@ -410,8 +410,8 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
             }
 
             @Override
-            public void startReview(Project project, boolean viaSphinx) {
-                started.add(viaSphinx ? "sphinx" : "tour");
+            public void startReview(Project project, ReviewTabOpener.ReviewStart start) {
+                started.add(start.name());
             }
         };
         ReviewWorkbenchEditor editor = new ReviewWorkbenchEditor(getProject(), ReviewWorkbenchFile.of(getProject()),
@@ -419,8 +419,11 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
         try {
             assertTrue("a drop-down", editor.reviewActions.isPopup());
             assertEquals(ReviewWorkbenchEditor.REVIEW_MENU, editor.reviewActions.getTemplatePresentation().getText());
-            AnAction tour = editor.reviewActions.getChildActionsOrStubs()[0];
-            AnAction viaSphinx = editor.reviewActions.getChildActionsOrStubs()[1];
+            AnAction sections = editor.reviewActions.getChildActionsOrStubs()[0];
+            AnAction tour = editor.reviewActions.getChildActionsOrStubs()[1];
+            AnAction viaSphinx = editor.reviewActions.getChildActionsOrStubs()[2];
+            assertEquals("the section-based review comes first", ReviewWorkbenchEditor.SECTION_REVIEW,
+                    sections.getTemplatePresentation().getText());
             assertEquals(ReviewWorkbenchEditor.EDUCATIONAL_TOUR, tour.getTemplatePresentation().getText());
             assertEquals(ReviewWorkbenchEditor.SPHINX_REVIEW, viaSphinx.getTemplatePresentation().getText());
 
@@ -438,9 +441,13 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
             assertTrue(tourEvent.getPresentation().isEnabled());
             assertTrue(sphinxEvent.getPresentation().isVisible());
             assertTrue(sphinxEvent.getPresentation().isEnabled());
+            AnActionEvent sectionsEvent = TestActionEvent.createTestEvent(sections);
+            sections.update(sectionsEvent);
+            assertTrue(sectionsEvent.getPresentation().isEnabled());
+            sections.actionPerformed(sectionsEvent);
             tour.actionPerformed(tourEvent);
             viaSphinx.actionPerformed(sphinxEvent);
-            assertEquals(List.of("tour", "sphinx"), started);
+            assertEquals(List.of("SECTIONS", "TOUR", "SPHINX"), started);
         } finally {
             Disposer.dispose(editor);
         }

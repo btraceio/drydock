@@ -19,6 +19,7 @@ import app.drydock.intellij.review.ReviewRequest;
 import app.drydock.intellij.review.ReviewTabOpener;
 import app.drydock.review.ReviewInstructions;
 import app.drydock.review.ReviewScope;
+import app.drydock.review.tour.ReviewTour;
 
 import com.intellij.ide.impl.ProjectUtil;
 import com.intellij.openapi.application.ApplicationManager;
@@ -369,6 +370,8 @@ public final class PullRequestReview {
         private Function<ManagedAgentSession, CompletableFuture<Optional<String>>> resolver;
         /** Whether the prompt (when there is one) addresses Drydock's review tools. */
         private boolean needsTools;
+        /** What Drydock's instruction asks for; a fixed prompt ignores it. */
+        private volatile ReviewTour.Kind kind = ReviewTour.Kind.TOUR;
         /** The launch's subagent model tiers, spent by the review instruction's dispatch rules. */
         private final ModelTiers tiers;
         /** The launch's starting model, which an empty tier resolves to in those rules. */
@@ -385,6 +388,20 @@ public final class PullRequestReview {
          * See {@code SessionDialogs.launchSession}'s {@code prompt} parameter. Blocks while resolving.
          * Never throws and never completes exceptionally: a failure is a complaint and an empty prompt.
          */
+        /** This prompt, asking for {@code requested}: the educational tour (the default) or the section-based review. */
+        ReviewPrompt asking(ReviewTour.Kind requested) {
+            kind = Objects.requireNonNull(requested, "requested");
+            return this;
+        }
+
+        /** Drydock's instruction asking for {@code kind} on {@code scopeId} (pure). */
+        static String instructionFor(ReviewTour.Kind kind, String scopeId, boolean subagents, ModelTiers tiers,
+                                     Optional<String> sessionModel) {
+            return kind == ReviewTour.Kind.SECTIONS
+                    ? ReviewInstructions.forSections(scopeId, subagents, tiers, sessionModel)
+                    : ReviewInstructions.forScope(scopeId, subagents, tiers, sessionModel);
+        }
+
         CompletableFuture<Optional<String>> resolve(ManagedAgentSession session) {
             CompletableFuture<Optional<String>> resolving;
             try {
@@ -443,8 +460,8 @@ public final class PullRequestReview {
             try {
                 ReviewScope scope = backend.scopeResolver().resolve(session)
                         .get(ReviewRequest.SCOPE_WAIT_SECONDS, TimeUnit.SECONDS);
-                return Optional.of(ReviewInstructions.forScope(scope.id(), supportsSubagents.test(agent),
-                        tiers, sessionModel));
+                return Optional.of(instructionFor(kind, scope.id(), supportsSubagents.test(agent), tiers,
+                        sessionModel));
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return noPrompt(new ReviewRequest.Failed(PullRequestReview.cause(e)));
