@@ -278,7 +278,9 @@ live run could show.
 | W3 | Sections: tour + computed fallback, `dependsOn`, `settledInStep`, section view, reviewed-in-§N collapse, intent | W1, S2 |
 | W4 | Agent takes: model, `review_tour.takes`, prompt, UI on the section view's hunk cards | W3 |
 | W4b | Agent take at each hunk start in the file view (§6): a second decoration kind in `ReviewDiffInlays`, beside the finding cards | W4 |
-| W5 | Outbox: session lane + Fixes land on; PR lane (`SubmitPlan` + `gh`); whole-PR findings | W2 |
+| W5 | Outbox, session lane: the pending decisions and Send to session in the workbench's bottom pane (local mode) | W2 |
+| W5b | PR mode: the mode switch (`SessionReviewScopes.Scopes` in `ReviewTabScopes`), the PR lane and its submit sheet (`SubmitPlan` + `GitHubReviewService`), Fixes land on (`FixTarget`), the session lane leaving out `postToPr` findings, the intent from the PR description | W5 |
+| W5c | Whole-PR findings: an anchorless `ReviewAnnotation`, `review_finding`'s optional anchor, `SubmitPlan` body notes, the inbox's Whole PR scope | W5b |
 | W6 | Source-editor round trip (changed-range marks, back to review); tool window becomes launcher | W1 |
 | W7 | Polish and fixes deferred from W1–W4 (see below) | W4 |
 
@@ -289,8 +291,8 @@ reason and the phase that takes it are recorded here, so nothing lives only in a
 |---|---|---|---|
 | The agent take at each hunk start in the file view (§6) | W4 | Needs a second decoration kind in `ReviewDiffInlays`; the section cards were the surface W3 built | Done in W4b |
 | Section cards show no finding marks or inlay cards, and no gutter "+" for comments (§4) | W3 | The cards are separate diff panels; `ReviewDiffInlays` and `ReviewGutterComments` are wired to the file view's processor only | Done in W4b (cards are `DiffRequestProcessor`s) |
-| The intent from the PR description (§5) | W3 | `GhCliService.PrInfo` has no body and the workbench has no PR mode | W5, with the PR lane |
-| An end-to-end run with a real agent session posting `review_tour` with `dependsOn`, intent and takes | W3, W4 | The sandbox has no agent session; the router tests cover the tool | W5's exit check, which needs a bound session for the session lane anyway |
+| The intent from the PR description (§5) | W3 | `GhCliService.PrInfo` has no body and the workbench has no PR mode | W5b, with PR mode |
+| An end-to-end run with a real agent session posting `review_tour` with `dependsOn`, intent and takes | W3, W4 | The sandbox has no agent session; the router tests cover the tool | W5's exit check, which needs a bound session for Send to session anyway |
 | The Files tree does not highlight the row after Full File or Show finding | W3, W4 | The state rebuild re-renders the tree and drops a tree selection; the diff is selected through the pipeline instead | W7 |
 | `TourMigration` drops every step's diagram when it rebuilds a step (pre-existing) | W3 | Not part of the workbench; found while threading `dependsOn` through migration | W7 |
 | Finding cards and takes in a diff are unreadable at the workbench's default proportions: each side of the side-by-side centre is about 110 px wide, and the inlays wrap a word per line | W2, W4b | The platform clamps every component inlay to the editor viewport (`CodeReviewComponentInlayRenderer` uses `ComponentInlayAlignment.FIT_VIEWPORT_WIDTH`), and the other alignments are `@ApiStatus.Internal` on 263, so a wider inlay is not reachable through public API. The fix is the centre's width: default proportions, panes that fold, or the unified viewer when the centre is narrow | W7 |
