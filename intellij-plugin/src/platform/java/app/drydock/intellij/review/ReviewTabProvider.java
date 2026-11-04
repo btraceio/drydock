@@ -1222,7 +1222,7 @@ final class ReviewTabProvider {
         ReviewScope current = scope;
         PendingDecisions pending = annotations == null || current == null
                 ? new PendingDecisions(0, 0)
-                : pendingDecisions(annotations.forScope(current.id()));
+                : pendingDecisions(annotations.forScope(current.id()), current.pr().isPresent());
         label.setText(pending.describe());
         bar.setVisible(pending.total() > 0);
         sendDecisionsButton.setEnabled(triage != null && pending.total() > 0 && !sendInFlight);
@@ -1309,10 +1309,15 @@ final class ReviewTabProvider {
     }
 
     static PendingDecisions pendingDecisions(List<ReviewAnnotation> findings) {
+        return pendingDecisions(findings, false);
+    }
+
+    /** As {@link #pendingDecisions(List)}, under the send's {@link ReviewTriageActions#forSession} rule. */
+    static PendingDecisions pendingDecisions(List<ReviewAnnotation> findings, boolean prMode) {
         int toFix = 0;
         int dismissed = 0;
         for (ReviewAnnotation finding : findings) {
-            if (!ReviewTriageActions.isPendingDecision(finding)) {
+            if (!ReviewTriageActions.forSession(finding, prMode)) {
                 continue;
             }
             if (finding.triage() == Triage.CONFIRMED) {
@@ -1828,7 +1833,7 @@ final class ReviewTabProvider {
         WorkbenchState state = WorkbenchState.of(subjectOf(scope), modeOf(scope), current,
                 workbenchFilter, Optional.ofNullable(selectedPath()), workbenchView, findings, inboxChoice,
                 sectionsOf(scope, current, verdicts, findings), sectionsChoice)
-                .withOutbox(OutboxModel.snapshot(findings, scope.sessionId().isPresent()));
+                .withOutbox(OutboxModel.snapshot(findings, scope.sessionId().isPresent(), scope.pr().isPresent()));
         workbenchState = state;
         onEdt(() -> {
             if (disposed.get()) {
