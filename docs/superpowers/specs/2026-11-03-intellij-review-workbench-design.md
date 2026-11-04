@@ -74,9 +74,11 @@ Extra navigation affordances (glue, each small):
 - **Ask the agent about a selection.** Diff-editor context action "Ask reviewer about
   selection…" → `ReviewInstructions.forPeekAsk` + `PendingQuestions` (exists, unused in the
   plugin) → answer lands as a thread on a new human finding at that range.
-- **Round trip.** Navigating away lands in ordinary source editors, which already get finding
-  gutter marks (`ReviewEditorHighlighters`); extend those marks with "changed in this review"
-  ranges and a "Back to review" gutter action (`ReviewTabOpener.openFinding` pattern).
+- **Round trip.** Navigating away lands in ordinary source editors. Their finding gutter marks
+  (`ReviewEditorHighlighters`, `ReviewEditorMarkModel`) existed with their tests but were never
+  wired (found in W6: nothing created the layer or applied a model); W6 wires them and adds
+  "changed in this review" ranges with a "Back to review" gutter action
+  (`ReviewTabOpener.openFile`, the `openFinding` pattern).
 
 ## 3. Surface and layout
 
@@ -324,7 +326,9 @@ reason and the phase that takes it are recorded here, so nothing lives only in a
 | `TaskWindows.windowClosing` clears its list with `PropertiesComponent.unsetValue`, which does not clear a list written by `setValues` (the same call failed `ReviewCheckoutsPlatformTest`), so closing the last remembered task window likely keeps it to be reopened at the next start | W5d | Not part of the workbench, and not reproduced in the task-window flow itself | Its own fix, outside this plan |
 | A real agent posting a section-based review (`review_tour` with `kind: "sections"`) from the `forSections` prompt | W5g | The sandbox has no agent session; the live run posted the tour through the router as the agent would | W7 |
 | A section-based review is told apart from an educational tour only by its stored kind: the workbench shows both the same way, and nothing in the header names the kind | W5g | The workbench reads no checks, so both look alike there; naming the kind is presentation | W7 |
-| The Review tool window's decisions bar text overlaps its Send button | W2 | Tool-window layout; the tool window is being reduced to a launcher | W6 |
+| The source-editor marks appear only once the Review window's content exists in that window (its first show, or the workbench's open): the warm-up `ReviewEditorMarkModel`'s javadoc names (`ReviewEditorMarks`, T12) was never written | W6 | W6 wires the marks to the live review; a warm-up computes a review before any of its UI exists, which is its own design (when, for which checkouts, at what cost) | W7 |
+| The changed-range bar's look beside the IDE's own VCS change markers was checked in one theme on one fixture only | W6 | Presentation | W7 |
+| The Review tool window's decisions bar text overlaps its Send button | W2 | Tool-window layout; the tool window is being reduced to a launcher | W6: the label stands above Send |
 
 **Plugin first; the dual-tree rule is waived for this work** (operator decision,
 2026-11-03: the JavaFX app is heading for obsolescence and may never get these features).
