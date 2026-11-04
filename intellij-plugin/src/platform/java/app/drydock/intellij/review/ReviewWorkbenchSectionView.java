@@ -69,6 +69,7 @@ final class ReviewWorkbenchSectionView extends JPanel implements Disposable {
     static final String MARKING = "Marking…";
     static final String FULL_FILE = "Full File";
     static final String SHOW_AGAIN = "Show Again";
+    static final String ALL_REVIEWED = "Every section is reviewed.";
 
     /** What the view asks of the live review. */
     interface Actions {
@@ -87,6 +88,9 @@ final class ReviewWorkbenchSectionView extends JPanel implements Disposable {
 
         /** Shows the finding with {@code findingId} (a red flag's link) in the Files tab. EDT. */
         void showFinding(String findingId);
+
+        /** Selects the section with {@code key}; the view shows it with the next state. EDT. */
+        void showSection(String key);
 
         /**
          * The hook a card's diff reports its viewers to, decorating them with
@@ -115,6 +119,13 @@ final class ReviewWorkbenchSectionView extends JPanel implements Disposable {
     /** What the cards were built for; a render with the same layout only updates them. */
     private List<String> layout = List.of();
     private boolean marking;
+    /**
+     * A mark from this view that was written, until a state shows its hunks
+     * reviewed: the section it was in, and its digests. That state decides
+     * whether the view moves on.
+     */
+    private String advanceFrom;
+    private Set<String> advanceDigests = Set.of();
 
     ReviewWorkbenchSectionView(Project project, Actions actions) {
         super(new BorderLayout());
@@ -168,6 +179,9 @@ final class ReviewWorkbenchSectionView extends JPanel implements Disposable {
             shownAgain.clear();
             notice.setText("");
         }
+        if (advanceFrom != null && !advanceFrom.equals(next.key())) {
+            advanceFrom = null; // the user went elsewhere before the mark showed
+        }
         shown = next;
         title.setText("§" + next.number() + "  " + next.title());
         narrative.setText(next.narrative());
@@ -182,6 +196,28 @@ final class ReviewWorkbenchSectionView extends JPanel implements Disposable {
         } else {
             rebuild(nextLayout);
         }
+        if (advanceFrom != null && reviewedIn(next, advanceDigests)) {
+            advanceFrom = null;
+            if (next.reviewed() == next.total()) {
+                Optional<SectionsModel.Section> following = SectionsModel.nextUnreviewed(state.sections(), next.key());
+                if (following.isPresent()) {
+                    actions.showSection(following.get().key());
+                } else {
+                    notice.setText(ALL_REVIEWED);
+                }
+            }
+        }
+    }
+
+    /** Whether every one of {@code digests} shows reviewed in {@code section} (pure). */
+    private static boolean reviewedIn(SectionsModel.Section section, Set<String> digests) {
+        Set<String> reviewed = new HashSet<>();
+        for (SectionsModel.Hunk hunk : section.hunks()) {
+            if (hunk.reviewed()) {
+                reviewed.add(hunk.digest());
+            }
+        }
+        return reviewed.containsAll(digests);
     }
 
     /** One entry per hunk: its id and whether it shows as the collapsed row. */
@@ -246,6 +282,10 @@ final class ReviewWorkbenchSectionView extends JPanel implements Disposable {
         actions.markReviewed(section, digests).whenComplete((refusal, error) -> onEdt(() -> {
             marking = false;
             notice.setText(error != null ? "Marking failed: " + ReviewTabProvider.rootMessage(error) : refusal.orElse(""));
+            if (error == null && refusal.isEmpty()) {
+                advanceFrom = section.key();
+                advanceDigests = Set.copyOf(digests);
+            }
             // The written verdicts arrive as the next state; until then the buttons follow the shown one.
             if (shown != null) {
                 markSection.setEnabled(!SectionsModel.unsettledDigests(shown).isEmpty());

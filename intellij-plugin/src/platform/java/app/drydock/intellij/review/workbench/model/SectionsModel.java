@@ -358,6 +358,33 @@ public final class SectionsModel {
                 || verdict.decision() == ReviewVerdict.Decision.AUTO_APPROVED);
     }
 
+    /**
+     * The section to move to once {@code current} is reviewed: the next one in
+     * order with a hunk still to review, wrapping to the first; empty when
+     * every other section is reviewed or {@code current} is not in
+     * {@code snapshot}.
+     */
+    public static Optional<Section> nextUnreviewed(Snapshot snapshot, String current) {
+        List<Section> sections = snapshot.sections();
+        int at = -1;
+        for (int i = 0; i < sections.size(); i++) {
+            if (sections.get(i).key().equals(current)) {
+                at = i;
+                break;
+            }
+        }
+        if (at < 0) {
+            return Optional.empty();
+        }
+        for (int step = 1; step < sections.size(); step++) {
+            Section candidate = sections.get((at + step) % sections.size());
+            if (candidate.reviewed() < candidate.total()) {
+                return Optional.of(candidate);
+            }
+        }
+        return Optional.empty();
+    }
+
     /** The digests of {@code section} that are not reviewed yet, in card order: what "Mark section reviewed" writes. */
     public static List<String> unsettledDigests(Section section) {
         Set<String> digests = new LinkedHashSet<>();

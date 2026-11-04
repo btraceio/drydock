@@ -2332,6 +2332,11 @@ final class ReviewTabProvider {
             ReviewTabProvider.this.showFinding(findingId);
         }
 
+        @Override
+        public void showSection(String key) {
+            sectionChosen(key);
+        }
+
         /**
          * A card's own decoration layer and gutter "+", as the file view's:
          * the file's finding cards, gutter marks and ranges (its take is in
