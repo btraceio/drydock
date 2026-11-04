@@ -53,14 +53,24 @@ public final class SectionsModel {
         NONE
     }
 
-    /** What the sections pane shows. */
-    public record Snapshot(Source source, Optional<String> intent, List<Section> sections) {
+    /**
+     * What the sections pane shows. {@code kind} is the stored tour's kind,
+     * present exactly when the sections come from a tour.
+     */
+    public record Snapshot(Source source, Optional<String> intent, List<Section> sections,
+                           Optional<ReviewTour.Kind> kind) {
         public static final Snapshot EMPTY = new Snapshot(Source.NONE, Optional.empty(), List.of());
 
         public Snapshot {
             Objects.requireNonNull(source, "source");
             Objects.requireNonNull(intent, "intent");
             sections = List.copyOf(sections);
+            Objects.requireNonNull(kind, "kind");
+        }
+
+        /** A snapshot whose tour, if any, is the educational tour. */
+        public Snapshot(Source source, Optional<String> intent, List<Section> sections) {
+            this(source, intent, sections, source == Source.TOUR ? Optional.of(ReviewTour.Kind.TOUR) : Optional.empty());
         }
 
         /** The section with {@code key}, if this snapshot has it. */
@@ -168,7 +178,8 @@ public final class SectionsModel {
             return Snapshot.EMPTY;
         }
         return new Snapshot(source, tour.flatMap(ReviewTour::intent),
-                finish(drafts, tour.map(ReviewTour::takes).orElse(List.of()), verdicts, findings, currentBase));
+                finish(drafts, tour.map(ReviewTour::takes).orElse(List.of()), verdicts, findings, currentBase),
+                tour.map(ReviewTour::kind));
     }
 
     /** One hunk of the diff, before it is placed in a section. */
