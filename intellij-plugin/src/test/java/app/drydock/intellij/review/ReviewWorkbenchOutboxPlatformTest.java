@@ -73,6 +73,31 @@ public class ReviewWorkbenchOutboxPlatformTest extends BasePlatformTestCase {
         assertEquals(List.of(false), chosen);
     }
 
+    public void testThePrLaneShowsInAPullRequestReviewAndIsBusyWhileItChecks() {
+        CompletableFuture<Optional<String>> opened = new CompletableFuture<>();
+        List<String> asked = new ArrayList<>();
+        ReviewWorkbenchOutbox outbox = new ReviewWorkbenchOutbox(new ReviewWorkbenchOutbox.Actions() {
+            @Override public CompletableFuture<Optional<String>> send() { return next; }
+            @Override public CompletableFuture<Optional<String>> submitReview() { asked.add("submit"); return opened; }
+        });
+        outbox.render(OutboxModel.snapshot(List.of(), true, false));
+        assertFalse("a local review has no PR lane", outbox.submitReview.getParent().isVisible());
+
+        ReviewAnnotation forPr = comment("n5", "Rename it.").withTriage(Triage.CONFIRMED).withPostToPr(true);
+        outbox.render(OutboxModel.snapshot(List.of(forPr), true, true));
+        assertTrue(outbox.submitReview.getParent().isVisible());
+        assertEquals("1 comment to post", ReviewWorkbenchOutbox.prCountsText(OutboxModel.snapshot(List.of(forPr), true, true)));
+        outbox.submitReview.doClick();
+        assertEquals(List.of("submit"), asked);
+        assertEquals(ReviewWorkbenchOutbox.CHECKING, outbox.submitReview.getText());
+        assertFalse(outbox.submitReview.isEnabled());
+
+        opened.complete(Optional.of("gh is not installed"));
+        PlatformTestUtil.dispatchAllEventsInIdeEventQueue();
+        assertEquals(ReviewWorkbenchOutbox.SUBMIT_REVIEW, outbox.submitReview.getText());
+        assertEquals("gh is not installed", outbox.prNotice.getText());
+    }
+
     public void testARowNamesTheFindingItsLineAndTheReviewersComment() {
         OutboxModel.Item commented = new OutboxModel.Item(comment("n5", "Rename it."), true);
         assertEquals("Rename it. — src/A.java:5 · your comment", ReviewWorkbenchOutbox.rowText(commented));

@@ -12,6 +12,7 @@ import app.drydock.git.GhCliService;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.PrCheckoutService;
 import app.drydock.git.WorktreeService;
+import app.drydock.github.GitHubReviewService;
 import app.drydock.mcp.McpConfigWriter;
 import app.drydock.mcp.McpServer;
 import app.drydock.mcp.McpSessionContext.RenameOutcome;
@@ -74,6 +75,8 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
     private final McpToolRouter router;
     private final SessionReviewScopeResolver scopeResolver;
     private final GhCliService pullRequests;
+    /** The pull request lane's transport: gh checks and the review POST (W5e). */
+    private final GitHubReviewService reviews;
     private final AtomicBoolean closed = new AtomicBoolean();
     /** Package-private so tests can replace it; production uses {@link McpConfigWriter}. */
     CredentialWriter credentialWriter;
@@ -138,6 +141,7 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
         this.router = router;
         server = new McpServer(mcpRegistry, router);
         pullRequests = new GhCliService();
+        reviews = new GitHubReviewService();
         scopeResolver = new SessionReviewScopeResolver(worktreeService, gitStatusService,
                 scopeRegistry, sessions, this::pullRequestCarriedBy);
     }
@@ -221,6 +225,7 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
         this.router = router;
         server = new McpServer(mcpRegistry, router);
         pullRequests = new GhCliService();
+        reviews = new GitHubReviewService();
         scopeResolver = new SessionReviewScopeResolver(worktreeService, gitStatusService,
                 scopeRegistry, sessions, this::pullRequestCarriedBy);
     }
@@ -372,7 +377,7 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
         }
         ready = false;
         closeEach(List.of(server, annotationStore, tourStore, diffService, gitStatusService,
-                worktreeService, pullRequests));
+                worktreeService, pullRequests, reviews));
     }
 
     static void closeEach(List<AutoCloseable> steps) {
@@ -401,6 +406,11 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
     }
 
     /** For tests: the tour store. */
+    /** The pull request lane's transport: the gh checks and the review POST. */
+    GitHubReviewService reviews() {
+        return reviews;
+    }
+
     /** The backend's gh service: the pull request lookups the review makes (its description). */
     GhCliService pullRequests() {
         return pullRequests;

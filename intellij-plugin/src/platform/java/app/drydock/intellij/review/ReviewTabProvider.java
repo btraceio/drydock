@@ -10,6 +10,8 @@ import app.drydock.git.GitStatusService;
 import app.drydock.git.NotAGitRepositoryException;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.git.WorktreeService;
+import app.drydock.github.GitHubReviewRequest;
+import app.drydock.github.GitHubReviewService;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.DrydockSessionsListener;
 import app.drydock.intellij.agent.AgentExecutionRegistry;
@@ -32,6 +34,7 @@ import app.drydock.review.ReviewScope;
 import app.drydock.review.Triage;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Sections;
+import app.drydock.review.SubmitPlan;
 import app.drydock.review.tour.HunkTake;
 import app.drydock.review.tour.ReviewTour;
 import app.drydock.review.tour.TourRecord;
@@ -41,6 +44,8 @@ import com.intellij.diff.FrameDiffTool;
 import com.intellij.diff.fragments.LineFragment;
 import com.intellij.icons.AllIcons;
 import com.intellij.ide.util.PropertiesComponent;
+import com.intellij.notification.NotificationGroupManager;
+import com.intellij.notification.NotificationType;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.actionSystem.ActionUpdateThread;
 import com.intellij.openapi.actionSystem.AnAction;
@@ -75,6 +80,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -1277,6 +1283,105 @@ final class ReviewTabProvider {
         return Optional.empty();
     }
 
+    /** The notification group a posted review is reported in. */
+    static final String REVIEW_NOTIFICATIONS = "Drydock review";
+
+    /** What the pre-submit checks found: why gh cannot post, the fresh-head note, the PR's diff when its head moved. */
+    private record SubmitChecks(Optional<String> unavailable, String note, UnifiedDiff freshDiff) {
+    }
+
+    /**
+     * The PR lane's Submit Review (EDT): the gh check and the fresh-head
+     * check off the EDT, then the submit dialog over the plan -- built
+     * against the reviewed diff, or against the PR's current diff when its
+     * head moved, so a comment a newer push displaced is refused rather than
+     * posted onto other code. Completes with the message to show when no
+     * dialog opens, empty when it did.
+     */
+    CompletableFuture<Optional<String>> openSubmit() {
+        ReviewScope current = scope;
+        ReviewBackend backend = plugin.reviewBackend().orElse(null);
+        ReviewTabModel.Snapshot rows = snapshot;
+        AnnotationStore annotations = store;
+        GitStatusService gitStatus = git;
+        if (current == null || backend == null || rows == null || annotations == null || gitStatus == null) {
+            return CompletableFuture.completedFuture(Optional.of(STILL_LOADING));
+        }
+        if (current.pr().isEmpty()) {
+            return CompletableFuture.completedFuture(Optional.of("This review is not a pull request review."));
+        }
+        int number = current.pr().get().number();
+        Path root = current.diffRoot();
+        GitHubReviewService reviews = backend.reviews();
+        UnifiedDiff reviewed = new UnifiedDiff(rows.files().stream().map(ReviewTabModel.FileRow::diff).toList());
+        CompletableFuture<SubmitChecks> checks = reviews.unavailableReason(root).thenCompose(reason -> {
+            if (reason.isPresent()) {
+                return CompletableFuture.completedFuture(new SubmitChecks(reason, "", null));
+            }
+            return CompletableFuture.supplyAsync(() -> {
+                Optional<String> remote = reviews.currentHeadSha(root, number).join();
+                Optional<String> local = gitStatus.commitForRefBlocking(current.worktree().orElse(root), "HEAD");
+                PrSubmission.FreshHead head = PrSubmission.classify(remote, local);
+                if (head.state() != PrSubmission.FreshHead.State.MOVED) {
+                    return new SubmitChecks(Optional.empty(), head.note(), null);
+                }
+                Optional<String> diffText = reviews.pullRequestDiff(root, number).join();
+                return diffText.isEmpty()
+                        ? new SubmitChecks(Optional.empty(),
+                                PrSubmission.FreshHead.uncertain("the pull request's current diff could not be read").note(),
+                                null)
+                        : new SubmitChecks(Optional.empty(), head.note(), DiffService.parseUnified(diffText.get()));
+            }, plugin.executor());
+        });
+        return checks.thenApply(found -> {
+            List<ReviewAnnotation> findings = annotations.forScope(current.id());
+            List<ReviewVerdict.Decision> decisions = PrSubmission.decisions(annotations.verdictsFor(current.id()));
+            SubmitPlan plan = found.freshDiff() == null
+                    ? SubmitPlan.of(findings, decisions, PrSubmission.diffIndex(reviewed, "this diff"),
+                            PrSubmission.lineText(reviewed))
+                    : SubmitPlan.of(findings, decisions, PrSubmission.diffIndex(found.freshDiff(),
+                            "the PR's current head"));
+            onEdt(() -> {
+                if (disposed.get() || project.isDisposed()) {
+                    return;
+                }
+                new ReviewSubmitDialog(project, number, plan, found.unavailable(), found.note(),
+                        SubmitPlan.untriagedCount(findings),
+                        (finalPlan, edited, event, summary) -> post(current, number, finalPlan.withBodies(edited),
+                                edited, event, summary)).show();
+            });
+            return Optional.<String>empty();
+        }).exceptionally(error -> Optional.of("Could not check GitHub: " + rootMessage(error)));
+    }
+
+    /**
+     * Posts the review and, only when GitHub took it, records the post
+     * ({@link PrSubmission#recordPosted}) and reports its URL. A rejected or
+     * unavailable post mutates nothing and completes with its message.
+     */
+    private CompletableFuture<Optional<String>> post(ReviewScope current, int number, SubmitPlan plan,
+                                                     Map<ReviewAnnotation.Key, String> edited,
+                                                     GitHubReviewRequest.Event event, String summary) {
+        ReviewBackend backend = plugin.reviewBackend().orElse(null);
+        AnnotationStore annotations = store;
+        if (backend == null || annotations == null) {
+            return CompletableFuture.completedFuture(Optional.of(STILL_LOADING));
+        }
+        return backend.reviews().submit(current.diffRoot(), number, event, plan.composeBody(summary), plan.comments())
+                .thenApply(outcome -> switch (outcome) {
+                    case GitHubReviewService.Posted posted -> {
+                        PrSubmission.recordPosted(annotations, current.id(), plan, edited, Instant.now());
+                        onEdt(() -> NotificationGroupManager.getInstance().getNotificationGroup(REVIEW_NOTIFICATIONS)
+                                .createNotification("Review posted on PR #" + number, posted.reviewUrl(),
+                                        NotificationType.INFORMATION)
+                                .notify(project));
+                        yield Optional.<String>empty();
+                    }
+                    case GitHubReviewService.Rejected rejected -> Optional.of(rejected.message());
+                    case GitHubReviewService.Unavailable unavailable -> Optional.of(unavailable.message());
+                });
+    }
+
     /** The IDE property a scope's "Fixes land on" choice is remembered under, keyed by the scope's id. */
     static final String FIXES_LAND_ON_KEY = "drydock.review.fixesLandOnSubPr.";
 
@@ -2100,6 +2205,11 @@ final class ReviewTabProvider {
             @Override
             public void fixesLandOn(boolean stackedSubPr) {
                 provider.fixesLandOn(stackedSubPr);
+            }
+
+            @Override
+            public CompletableFuture<Optional<String>> submitReview() {
+                return provider.openSubmit();
             }
         });
         provider.attachWorkbenchView(outbox::render, parent);

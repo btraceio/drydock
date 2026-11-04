@@ -200,8 +200,7 @@ public final class GitHubReviewService implements AutoCloseable {
 
     /** The PR's current head sha, or empty when gh cannot answer. */
     public CompletableFuture<Optional<String>> currentHeadSha(Path root, int pr) {
-        return CompletableFuture.supplyAsync(() -> runGh(root,
-                        List.of("view", String.valueOf(pr), "--json", "headRefOid"), "head sha of PR " + pr)
+        return CompletableFuture.supplyAsync(() -> runGh(root, "view", List.of("--json", "headRefOid"), pr)
                 .flatMap(GitHubReviewService::parseHeadRefOid), executor);
     }
 
@@ -220,8 +219,7 @@ public final class GitHubReviewService implements AutoCloseable {
 
     /** The PR's current unified diff, or empty when gh cannot answer. */
     public CompletableFuture<Optional<String>> pullRequestDiff(Path root, int pr) {
-        return CompletableFuture.supplyAsync(() -> runGh(root,
-                List.of("diff", String.valueOf(pr)), "diff of PR " + pr));
+        return CompletableFuture.supplyAsync(() -> runGh(root, "diff", List.of(), pr), executor);
     }
 
     /**
@@ -229,16 +227,30 @@ public final class GitHubReviewService implements AutoCloseable {
      * are probes a submit can proceed without, so a failure is an empty
      * answer the caller words honestly, never an exception into the UI.
      */
-    Optional<String> runGh(Path root, List<String> arguments, String what) {
+    Optional<String> runGh(Path root, String subcommand, List<String> flags, int pr) {
         Path gh = locate().orElse(null);
         if (gh == null) {
             return Optional.empty();
         }
+        return runGhWith(gh, root, subcommand, flags, pr);
+    }
+
+    /**
+     * {@code gh pr <subcommand> <flags…> -- <pr>}, with {@code gh} already
+     * resolved; package-private so the argv is testable with a scripted gh.
+     * The {@code pr} subcommand matters: without it gh has no {@code view}
+     * or {@code diff} command and answers nothing. {@code --} ends the
+     * options before the number (gh rejects {@code --end-of-options}); an
+     * integer cannot start with {@code -}, but the rule every spawn here
+     * follows costs nothing.
+     */
+    static Optional<String> runGhWith(Path gh, Path root, String subcommand, List<String> flags, int pr) {
+        List<String> arguments = new ArrayList<>(List.of("pr", subcommand));
+        arguments.addAll(flags);
+        arguments.add("--");
+        arguments.add(String.valueOf(pr));
         List<String> command = new ArrayList<>(List.of(gh.toString()));
         command.addAll(arguments);
-        // --end-of-options: an integer PR number cannot start with -, but
-        // the rule every other spawn here follows costs nothing.
-        command.add("--end-of-options");
         try {
             ProcessResult result = ProcessRunner.run(command, root, PROCESS_TIMEOUT);
             if (result.exitCode() != 0) {

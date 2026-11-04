@@ -37,6 +37,9 @@ final class ReviewWorkbenchOutbox extends JPanel {
     static final String FIXES_LAND_ON = "Fixes land on:";
     static final String SAME_BRANCH = "Same branch";
     static final String STACKED_SUB_PR = "Stacked sub-PR";
+    static final String PR_LANE = "PR lane";
+    static final String SUBMIT_REVIEW = "Submit Review…";
+    static final String CHECKING = "Checking GitHub…";
 
     /** What the pane asks of the live review. */
     interface Actions {
@@ -45,6 +48,15 @@ final class ReviewWorkbenchOutbox extends JPanel {
 
         /** "Fixes land on" was chosen (a pull request review only): a stacked sub-PR, or the PR's own branch. */
         default void fixesLandOn(boolean stackedSubPr) {
+        }
+
+        /**
+         * Opens the PR lane's submit dialog after its checks (a pull request
+         * review only); completes with the message to show when no dialog
+         * opens, empty when it did.
+         */
+        default CompletableFuture<Optional<String>> submitReview() {
+            return CompletableFuture.completedFuture(Optional.empty());
         }
     }
 
@@ -57,6 +69,11 @@ final class ReviewWorkbenchOutbox extends JPanel {
     final JRadioButton sameBranch = new JRadioButton(SAME_BRANCH);
     final JRadioButton stackedSubPr = new JRadioButton(STACKED_SUB_PR);
     private final JPanel fixesLandOn = new JPanel(new FlowLayout(FlowLayout.LEFT, JBUI.scale(8), 0));
+    private final JPanel prLane = new JPanel(new FlowLayout(FlowLayout.LEFT, JBUI.scale(8), 0));
+    private final JBLabel prCounts = new JBLabel();
+    final JButton submitReview = new JButton(SUBMIT_REVIEW);
+    final JBLabel prNotice = new JBLabel();
+    private boolean checking;
     private OutboxModel.Snapshot shown = OutboxModel.Snapshot.EMPTY;
     private boolean sending;
 
@@ -89,9 +106,20 @@ final class ReviewWorkbenchOutbox extends JPanel {
         fixesLandOn.add(sameBranch);
         fixesLandOn.add(stackedSubPr);
         fixesLandOn.setBorder(JBUI.Borders.emptyLeft(8));
+        JBLabel prTitle = new JBLabel(PR_LANE);
+        prTitle.setFont(JBUI.Fonts.label().asBold());
+        prCounts.setForeground(UIUtil.getContextHelpForeground());
+        prNotice.setForeground(UIUtil.getContextHelpForeground());
+        submitReview.addActionListener(e -> submitReview());
+        prLane.add(prTitle);
+        prLane.add(prCounts);
+        prLane.add(submitReview);
+        prLane.add(prNotice);
+        prLane.setBorder(JBUI.Borders.empty(4, 4));
         JPanel north = new JPanel(new BorderLayout());
         north.add(bar, BorderLayout.NORTH);
-        north.add(fixesLandOn, BorderLayout.SOUTH);
+        north.add(fixesLandOn, BorderLayout.CENTER);
+        north.add(prLane, BorderLayout.SOUTH);
         add(north, BorderLayout.NORTH);
         add(new JBScrollPane(rows), BorderLayout.CENTER);
         render(OutboxModel.Snapshot.EMPTY);
@@ -109,6 +137,8 @@ final class ReviewWorkbenchOutbox extends JPanel {
         shown = Objects.requireNonNull(lane, "lane");
         counts.setText(lane.countsText());
         fixesLandOn.setVisible(lane.prMode());
+        prLane.setVisible(lane.prMode());
+        prCounts.setText(prCountsText(lane));
         sameBranch.setSelected(!lane.stackedSubPr());
         stackedSubPr.setSelected(lane.stackedSubPr());
         rows.removeAll();
@@ -118,6 +148,29 @@ final class ReviewWorkbenchOutbox extends JPanel {
         rows.revalidate();
         rows.repaint();
         updateButton();
+    }
+
+    /** The PR lane's counts (pure): "2 comments to post", or "No comments to post". */
+    static String prCountsText(OutboxModel.Snapshot lane) {
+        int n = lane.waitingForPr();
+        return n == 0 ? "No comments to post" : n + (n == 1 ? " comment to post" : " comments to post");
+    }
+
+    private void submitReview() {
+        if (checking) {
+            return;
+        }
+        checking = true;
+        submitReview.setText(CHECKING);
+        submitReview.setEnabled(false);
+        prNotice.setText("");
+        actions.submitReview().whenComplete((message, error) -> EventQueue.invokeLater(() -> {
+            checking = false;
+            submitReview.setText(SUBMIT_REVIEW);
+            submitReview.setEnabled(true);
+            prNotice.setText(error != null ? "Could not open the review: " + ReviewTabProvider.rootMessage(error)
+                    : message == null ? "" : message.orElse(""));
+        }));
     }
 
     /**
