@@ -7,6 +7,7 @@ import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonWriter;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
@@ -103,6 +104,28 @@ class TourCodecTest {
         assertFalse(JsonWriter.write(TourCodec.recordToJson(without)).contains("\"intent\""));
         assertEquals(Optional.empty(), TourCodec.recordFromJson(TourCodec.recordToJson(without)).orElseThrow()
                 .tour().intent());
+    }
+
+    @Test
+    void takesRoundTripThroughTheStoredRecordAndAMalformedOneIsSkipped() throws Exception {
+        UnifiedDiff diff = TourFixtures.twoFileDiff();
+        HunkTake take = new HunkTake("d1", "Guards the loader.", HunkTake.Alignment.DIVERGES, "Also renames it.",
+                List.of(new HunkTake.RedFlag("Drops the null check.", Optional.of("f1")),
+                        new HunkTake.RedFlag("No test.", Optional.empty())),
+                Instant.parse("2026-11-04T00:00:00Z"));
+        TourRecord record = TourRecord.fresh(TourFixtures.coveringTour(diff).withTakes(List.of(take)), diff);
+
+        assertEquals(List.of(take), TourCodec.recordFromJson(TourCodec.recordToJson(record)).orElseThrow()
+                .tour().takes());
+
+        JsonValue stored = TourCodec.recordToJson(record);
+        JsonValue.JsonObject tourJson = (JsonValue.JsonObject) ((JsonValue.JsonObject) stored).get("tour");
+        tourJson.put("takes", JsonValue.JsonArray.of(List.of(TourCodec.takeToJson(take), JsonParser.parse(
+                "{\"hunkDigest\":\"d2\",\"does\":\"x\",\"alignment\":\"sideways\",\"at\":\"2026-11-04T00:00:00Z\"}"))));
+        assertEquals(List.of(take), TourCodec.recordFromJson(stored).orElseThrow().tour().takes(),
+                "an unknown alignment skips that take, not the tour");
+        assertFalse(JsonWriter.write(TourCodec.recordToJson(TourRecord.fresh(TourFixtures.coveringTour(diff), diff)))
+                .contains("\"takes\""), "a tour without takes is stored as before");
     }
 
     @Test

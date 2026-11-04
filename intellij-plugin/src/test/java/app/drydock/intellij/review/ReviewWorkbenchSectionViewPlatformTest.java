@@ -2,14 +2,18 @@ package app.drydock.intellij.review;
 
 import app.drydock.intellij.review.workbench.model.SectionsModel;
 import app.drydock.intellij.review.workbench.model.WorkbenchState;
+import app.drydock.review.tour.HunkTake;
 import com.intellij.diff.util.Side;
 import com.intellij.openapi.util.Disposer;
 import com.intellij.testFramework.PlatformTestUtil;
 import com.intellij.testFramework.fixtures.BasePlatformTestCase;
+import com.intellij.ui.components.ActionLink;
+import com.intellij.util.ui.UIUtil;
 
 import javax.swing.JButton;
 import java.awt.Component;
 import java.awt.Container;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -45,11 +49,51 @@ public class ReviewWorkbenchSectionViewPlatformTest extends BasePlatformTestCase
         public void fullFile(String path) {
             calls.add("fullFile " + path);
         }
+
+        @Override
+        public void showFinding(String findingId) {
+            calls.add("showFinding " + findingId);
+        }
     };
 
     private static SectionsModel.Hunk hunk(String id, boolean reviewed, Optional<SectionsModel.Settled> elsewhere) {
+        return hunk(id, reviewed, elsewhere, Optional.empty());
+    }
+
+    private static SectionsModel.Hunk hunk(String id, boolean reviewed, Optional<SectionsModel.Settled> elsewhere,
+                                           Optional<HunkTake> take) {
         return new SectionsModel.Hunk("src/" + id + ".java", 0, "src/" + id + ".java#0", "d-" + id, "3–4", "n3",
-                0, 2, List.of(), reviewed, elsewhere);
+                0, 2, List.of(), reviewed, elsewhere, take);
+    }
+
+    private static final HunkTake TAKE = new HunkTake("d-A", "Calls bar() and drops its result.",
+            HunkTake.Alignment.DIVERGES, "The intent says callers use the result.",
+            List.of(new HunkTake.RedFlag("The result is ignored.", Optional.of("f1")),
+                    new HunkTake.RedFlag("No test covers it.", Optional.empty())),
+            Instant.EPOCH);
+
+    public void testACardShowsTheTakeFoldsItAndLinksARedFlagToItsFinding() {
+        ReviewWorkbenchSectionView view = new ReviewWorkbenchSectionView(getProject(), actions);
+        try {
+            view.render(state(hunk("A", false, Optional.empty(), Optional.of(TAKE)), hunk("B", false, Optional.empty())));
+            ReviewWorkbenchSectionView.TakePanel take = view.cards.get(0).take;
+            assertTrue(take.isVisible());
+            assertEquals(List.of("▾ Agent take · Diverges", "Calls bar() and drops its result.",
+                    "The intent says callers use the result.", "⚑ The result is ignored.", "⚑ No test covers it."),
+                    take.shownTexts());
+            assertFalse("a hunk without a take shows none", view.cards.get(1).take.isVisible());
+
+            List<ActionLink> links = new ArrayList<>();
+            UIUtil.uiTraverser(take).filter(ActionLink.class).forEach(links::add);
+            assertEquals("the header and the one red flag with a finding", 2, links.size());
+            links.get(1).doClick();
+            assertEquals(List.of("showFinding f1"), calls);
+
+            take.toggle.doClick();
+            assertEquals(List.of("▸ Agent take · Diverges"), take.shownTexts());
+        } finally {
+            Disposer.dispose(view);
+        }
     }
 
     private static WorkbenchState state(SectionsModel.Hunk... hunks) {

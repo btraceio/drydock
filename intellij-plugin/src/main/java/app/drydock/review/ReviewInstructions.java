@@ -109,6 +109,14 @@ public final class ReviewInstructions {
     private static final String INTENT = "state in review_tour's intent, in one sentence, what the change sets "
             + "out to do";
 
+    /**
+     * The per-hunk takes (spec §6): judged against the intent, and a red
+     * flag cites a finding by id, so the finding must be posted first.
+     */
+    private static final String TAKES = "give review_tour's takes one take per hunk: what it does, its alignment "
+            + "with that intent (aligned, partial, diverges or context) with a note when it is not plainly "
+            + "aligned, and its red flags, each citing the id of the finding you posted for it with review_finding";
+
     private ReviewInstructions() {
     }
 
@@ -136,7 +144,7 @@ public final class ReviewInstructions {
                 + "(every changed row in a step, each step at least one check with an alternate) and lists "
                 + "every problem if it is rejected, so fix them and post it again; " + ANCHOR_NOTES + "; "
                 + CHECK_KINDS + "; " + IMPACT_NOTES + "; " + CHECK_GROUNDING + "; " + TEACHING
-                + "; " + DIAGRAM + "; " + DEPENDENCY_ORDER + "; " + INTENT;
+                + "; " + DIAGRAM + "; " + DEPENDENCY_ORDER + "; " + INTENT + "; " + TAKES;
         if (!supportsSubagents) {
             return "Review the changes in this worktree with the drydock review tools: " + work + ".";
         }

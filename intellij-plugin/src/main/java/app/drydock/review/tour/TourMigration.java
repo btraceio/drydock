@@ -76,7 +76,11 @@ public final class TourMigration {
             }
         }
         List<String> uncovered = uncoveredHunkIds(live, index);
-        ReviewTour tour = record.tour().withSteps(steps).withFingerprint(TourFingerprint.of(newReviewDiff));
+        // A take on a hunk the new diff no longer has is about code that is gone: dropped, never moved.
+        ReviewTour tour = record.tour().withSteps(steps).withFingerprint(TourFingerprint.of(newReviewDiff))
+                .withTakes(record.tour().takes().stream()
+                        .filter(take -> newRows.containsKey(take.hunkDigest()))
+                        .toList());
         // An override on a hunk the new diff no longer has decides nothing,
         // but the submit sheet would still count it.
         Map<String, HunkOverride> overrides = new LinkedHashMap<>(record.hunkOverrides());

@@ -8,6 +8,7 @@ import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Sections;
 import app.drydock.review.Triage;
 import app.drydock.review.tour.AnchorIndex;
+import app.drydock.review.tour.HunkTake;
 import app.drydock.review.tour.ReviewTour;
 import app.drydock.review.tour.TourAnchor;
 import app.drydock.review.tour.TourStep;
@@ -25,7 +26,8 @@ import java.util.Set;
 /**
  * The workbench's Sections navigator and section view (spec §4, §5), pure:
  * the review's hunks grouped into numbered sections, from the agent's tour
- * when one is stored, else from the computed {@link Sections}.
+ * when one is stored, else from the computed {@link Sections}. A hunk
+ * carries the tour's take on its digest, when the agent gave one.
  *
  * <p>A hunk is reviewed when its digest has an approved verdict that is not
  * stale against the current base (the Files navigator's rule; a missing base
@@ -107,10 +109,11 @@ public final class SectionsModel {
      * @param scrollKey        the line key the card's diff scrolls to: the hunk's first changed row
      * @param alsoIn           the numbers of the other sections that show the same digest
      * @param settledElsewhere the section the hunk was reviewed in, when that is another tour step
+     * @param take             the agent's take on the hunk, from the tour
      */
     public record Hunk(String file, int index, String hunkId, String digest, String lines, String scrollKey,
                        int removed, int added, List<Integer> alsoIn, boolean reviewed,
-                       Optional<Settled> settledElsewhere) {
+                       Optional<Settled> settledElsewhere, Optional<HunkTake> take) {
         public Hunk {
             Objects.requireNonNull(file, "file");
             Objects.requireNonNull(hunkId, "hunkId");
@@ -119,6 +122,7 @@ public final class SectionsModel {
             Objects.requireNonNull(scrollKey, "scrollKey");
             alsoIn = List.copyOf(alsoIn);
             Objects.requireNonNull(settledElsewhere, "settledElsewhere");
+            Objects.requireNonNull(take, "take");
         }
 
         /** Whether the card shows as the one-line "reviewed in §N" row. */
@@ -164,7 +168,7 @@ public final class SectionsModel {
             return Snapshot.EMPTY;
         }
         return new Snapshot(source, tour.flatMap(ReviewTour::intent),
-                finish(drafts, verdicts, findings, currentBase));
+                finish(drafts, tour.map(ReviewTour::takes).orElse(List.of()), verdicts, findings, currentBase));
     }
 
     /** One hunk of the diff, before it is placed in a section. */
@@ -270,8 +274,12 @@ public final class SectionsModel {
         return drafts;
     }
 
-    private static List<Section> finish(List<Draft> drafts, List<ReviewVerdict> verdicts,
+    private static List<Section> finish(List<Draft> drafts, List<HunkTake> takes, List<ReviewVerdict> verdicts,
                                         List<ReviewAnnotation> findings, Optional<String> currentBase) {
+        Map<String, HunkTake> takeByDigest = new HashMap<>();
+        for (HunkTake take : takes) {
+            takeByDigest.putIfAbsent(take.hunkDigest(), take);
+        }
         Map<String, ReviewVerdict> byDigest = new LinkedHashMap<>();
         for (ReviewVerdict verdict : verdicts) {
             byDigest.putIfAbsent(verdict.hunkDigest(), verdict);
@@ -330,7 +338,8 @@ public final class SectionsModel {
                         .filter(other -> other != number)
                         .toList();
                 cards.add(new Hunk(hunk.file(), hunk.index(), hunk.hunkId(), hunk.digest(), hunk.lines(),
-                        hunk.scrollKey(), hunk.removed(), hunk.added(), alsoIn, reviewed, elsewhere));
+                        hunk.scrollKey(), hunk.removed(), hunk.added(), alsoIn, reviewed, elsewhere,
+                        Optional.ofNullable(takeByDigest.get(hunk.digest()))));
             }
             int openFindings = (int) open.stream()
                     .filter(finding -> draft.hunks().stream().anyMatch(hunk -> hunk.file().equals(finding.file())

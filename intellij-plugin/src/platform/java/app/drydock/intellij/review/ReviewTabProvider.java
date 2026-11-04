@@ -1973,6 +1973,34 @@ final class ReviewTabProvider {
         }
 
         /**
+         * The finding's row goes straight to the selection pipeline, as for
+         * {@link #fullFile}, and the Files tab shows: the finding is opened
+         * in its file's diff. Nothing happens for a finding the review no
+         * longer lists.
+         */
+        @Override
+        public void showFinding(String findingId) {
+            ReviewTabModel.Snapshot rows = snapshot;
+            if (rows == null) {
+                return;
+            }
+            for (ReviewTabModel.FileRow file : rows.files()) {
+                for (ReviewTabModel.FindingRow finding : file.findings()) {
+                    if (finding.id().equals(findingId)) {
+                        sectionsChoice = new WorkbenchState.SectionsChoice(
+                                Optional.of(WorkbenchState.Navigator.FILES), sectionsChoice.section());
+                        selected(finding);
+                        submitWorkbenchState();
+                        for (ReviewWorkbenchNavigator navigator : List.copyOf(navigators)) {
+                            navigator.selectFinding(file.path(), findingId);
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+
+        /**
          * The file's row goes straight to the selection pipeline, as a click
          * on it would: the state rebuild this triggers re-renders the Files
          * tree, which drops a tree selection, so the tree's highlight is
