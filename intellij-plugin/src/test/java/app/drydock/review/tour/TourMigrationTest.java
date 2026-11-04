@@ -87,6 +87,34 @@ class TourMigrationTest {
         assertTrue(AnchorIndex.of(shifted).resolves(s1.anchors().get(1)));
     }
 
+    private static TourStep withDiagram(TourStep step, TourDiagram diagram) {
+        return new TourStep(step.id(), step.title(), step.narrative(), step.anchors(), step.impactNotes(),
+                step.checks(), Optional.of(diagram), step.dependsOn());
+    }
+
+    @Test
+    void aStepKeepsItsDiagramWhetherItsAnchorsMoveOrItGoesStale() {
+        TourDiagram one = new TourDiagram("Flow", List.of("a -> b"));
+        TourDiagram two = new TourDiagram("Guard", List.of("x", "  y"));
+        ReviewTour tour = new ReviewTour(TourFixtures.SCOPE, TourFingerprint.of(twoFileDiff()), List.of(
+                withDiagram(step("s1", List.of(new TourAnchor("src/A.java", "n1", "o20"),
+                        new TourAnchor("src/A.java", "n21", "n22")), predict("c1")), one),
+                withDiagram(step("s2", List.of(new TourAnchor("src/B.java", "o5", "o6")), risk("c2")), two)));
+        UnifiedDiff.FileDiff shiftedA = file("src/A.java",
+                UNCHANGED_A.hunks().get(0),
+                hunk(ctx(19, 25, "void f() {"), del(20, "  old();"), add(26, "  next();"), ctx(21, 27, "}")));
+        UnifiedDiff shifted = new UnifiedDiff(List.of(shiftedA, twoFileDiff().files().get(1)));
+
+        TourStep moved = TourMigration.migrate(passed(tour), shifted).record().tour().step("s1").orElseThrow();
+        assertEquals("n26", moved.anchors().get(1).startKey(), "the anchor moved");
+        assertEquals(Optional.of(one), moved.diagram(), "and the diagram stayed");
+
+        TourMigration.Result stale = TourMigration.migrate(passed(tour), bChanged());
+        assertEquals(List.of("s2"), stale.staleStepIds());
+        assertEquals(Optional.of(two), stale.record().tour().step("s2").orElseThrow().diagram(),
+                "a stale step keeps its diagram too");
+    }
+
     @Test
     void aMovedAnchorKeepsItsClaim() {
         ReviewTour tour = new ReviewTour(TourFixtures.SCOPE, TourFingerprint.of(twoFileDiff()), List.of(
