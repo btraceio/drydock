@@ -6,6 +6,7 @@ import app.drydock.review.AnnotationStatus;
 import app.drydock.review.AnnotationStore;
 import app.drydock.review.Confidence;
 import app.drydock.review.ReviewAnnotation;
+import app.drydock.review.ReviewInstructions;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.Severity;
 import app.drydock.review.Triage;
@@ -543,5 +544,65 @@ class ReviewTriageActionsTest {
                 assertThrows(ExecutionException.class, () -> future.get(10, TimeUnit.SECONDS));
         assertTrue(failure.getCause() instanceof RejectedExecutionException,
                 "a closed store's save executor must refuse, not report success");
+    }
+
+    // --- request fix and challenge (W2) ------------------------------------------
+
+    @Test
+    void requestFixConfirmsForTheSessionLaneWhateverPostToPrWas() {
+        store.upsert(finding("f1", Triage.PROPOSED, true));
+
+        ReviewAnnotation fixed = await(actions.requestFix(new ReviewAnnotation.Key("rs_a", "f1"))).orElseThrow();
+
+        assertEquals(Triage.CONFIRMED, fixed.triage());
+        assertFalse(fixed.postToPr(), "a fix request goes to the session, never to the pull request");
+        assertEquals(fixed, stored("f1"));
+    }
+
+    @Test
+    void aChallengeAppendsTheMessageThenAsksTheSessionToAnswerIt() {
+        store.upsert(finding("f1", Triage.PROPOSED, false));
+
+        ReviewTriageActions.ChallengeOutcome outcome = await(actions.challenge(
+                new ReviewAnnotation.Key("rs_a", "f1"), "Is this really a leak?", scope(Optional.of(SESSION))));
+
+        assertEquals(ReviewTriageActions.ChallengeOutcome.State.DELIVERED, outcome.state());
+        ReviewAnnotation.Message last = stored("f1").thread().get(stored("f1").thread().size() - 1);
+        assertEquals("You", last.author());
+        assertEquals("Is this really a leak?", last.text());
+        assertEquals(SESSION, submittedSession.get());
+        assertEquals(List.of(ReviewInstructions.forFindingQuestion("rs_a", "f1")), submittedPrompts);
+    }
+
+    @Test
+    void aChallengeThatCannotBeDeliveredKeepsTheMessageAndSaysSo() {
+        store.upsert(finding("f1", Triage.PROPOSED, false));
+        submitAnswer.set(PromptOutcome.REFUSED);
+
+        ReviewTriageActions.ChallengeOutcome outcome = await(actions.challenge(
+                new ReviewAnnotation.Key("rs_a", "f1"), "Why?", scope(Optional.of(SESSION))));
+
+        assertEquals(ReviewTriageActions.ChallengeOutcome.State.REFUSED, outcome.state());
+        assertEquals(2, stored("f1").thread().size(), "the reviewer's message stays in the thread");
+    }
+
+    @Test
+    void aBlankOrUnboundChallengeWritesNothing() {
+        store.upsert(finding("f1", Triage.PROPOSED, false));
+        ReviewAnnotation.Key key = new ReviewAnnotation.Key("rs_a", "f1");
+
+        assertEquals(ReviewTriageActions.ChallengeOutcome.State.BLANK,
+                await(actions.challenge(key, "  ", scope(Optional.of(SESSION)))).state());
+        assertEquals(ReviewTriageActions.ChallengeOutcome.State.NO_SESSION,
+                await(actions.challenge(key, "Why?", scope(Optional.empty()))).state());
+        assertEquals(1, stored("f1").thread().size());
+        assertTrue(submittedPrompts.isEmpty());
+    }
+
+    @Test
+    void aChallengeOfAGoneFindingIsMissingAndSendsNothing() {
+        assertEquals(ReviewTriageActions.ChallengeOutcome.State.MISSING, await(actions.challenge(
+                new ReviewAnnotation.Key("rs_a", "gone"), "Why?", scope(Optional.of(SESSION)))).state());
+        assertTrue(submittedPrompts.isEmpty());
     }
 }

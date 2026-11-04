@@ -17,10 +17,13 @@ import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.Disposer;
 import com.intellij.testFramework.LightVirtualFile;
 import com.intellij.testFramework.TestActionEvent;
+import com.intellij.testFramework.PlatformTestUtil;
+import com.intellij.util.ui.UIUtil;
 import com.intellij.testFramework.fixtures.BasePlatformTestCase;
 import com.intellij.ui.components.JBLabel;
 
 import javax.swing.JComponent;
+import javax.swing.JLabel;
 import javax.swing.SwingUtilities;
 import java.util.ArrayList;
 import java.util.List;
@@ -135,7 +138,8 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
     public void testTheHeaderNamesTheSubjectAndTheProgress() {
         WorkbenchState state = WorkbenchState.of("drydock", WorkbenchState.Mode.LOCAL,
                 new ReviewTabModel.Snapshot(List.of(), 4, 1), WorkbenchState.Filter.ALL, Optional.empty(),
-                WorkbenchState.View.CHANGES_ONLY);
+                WorkbenchState.View.CHANGES_ONLY, List.of(),
+                WorkbenchState.InboxChoice.DEFAULT);
         assertEquals("drydock  ·  1 / 4 reviewed", ReviewWorkbenchEditor.headerText(state));
     }
 
@@ -151,7 +155,7 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
 
             navigator.render(WorkbenchState.of("drydock", WorkbenchState.Mode.LOCAL,
                     new ReviewTabModel.Snapshot(List.of(), 0, 0), WorkbenchState.Filter.WITH_FINDINGS,
-                    Optional.empty(), WorkbenchState.View.CHANGES_ONLY));
+                    Optional.empty(), WorkbenchState.View.CHANGES_ONLY, List.of(), WorkbenchState.InboxChoice.DEFAULT));
             assertTrue("the toggle follows the rendered state", navigator.withFindingsAction().isSelected(event));
         } finally {
             Disposer.dispose(navigator);
@@ -226,6 +230,11 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
             public void changeView(Project project, WorkbenchState.View view) {
                 asked.add(view);
             }
+
+            @Override
+            public Optional<JComponent> hostInbox(Project project, Disposable parent) {
+                return Optional.empty();
+            }
         };
         ReviewWorkbenchEditor editor = new ReviewWorkbenchEditor(getProject(), ReviewWorkbenchFile.of(getProject()),
                 host);
@@ -241,7 +250,7 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
 
             headers.get(0).accept(WorkbenchState.of("drydock", WorkbenchState.Mode.LOCAL,
                     new ReviewTabModel.Snapshot(List.of(), 0, 0), WorkbenchState.Filter.ALL, Optional.empty(),
-                    WorkbenchState.View.CHANGES_ONLY));
+                    WorkbenchState.View.CHANGES_ONLY, List.of(), WorkbenchState.InboxChoice.DEFAULT));
             assertTrue(changesOnly.isSelected(event));
             assertFalse(fullFile.isSelected(event));
 
@@ -270,6 +279,11 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
             @Override
             public void changeView(Project project, WorkbenchState.View view) {
             }
+
+            @Override
+            public Optional<JComponent> hostInbox(Project project, Disposable parent) {
+                return Optional.empty();
+            }
         };
         ReviewWorkbenchEditor editor = new ReviewWorkbenchEditor(getProject(), ReviewWorkbenchFile.of(getProject()),
                 host);
@@ -278,7 +292,7 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
             ToggleAction pr = (ToggleAction) editor.modeActions.getChildActionsOrStubs()[1];
             headers.get(0).accept(WorkbenchState.of("drydock", WorkbenchState.Mode.LOCAL,
                     new ReviewTabModel.Snapshot(List.of(), 0, 0), WorkbenchState.Filter.ALL, Optional.empty(),
-                    WorkbenchState.View.CHANGES_ONLY));
+                    WorkbenchState.View.CHANGES_ONLY, List.of(), WorkbenchState.InboxChoice.DEFAULT));
 
             assertEquals("a text-only toggle shows its text", Boolean.TRUE,
                     local.getTemplatePresentation().getClientProperty(ActionUtil.SHOW_TEXT_IN_TOOLBAR));
@@ -293,6 +307,22 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
             assertFalse(pr.isSelected(prEvent));
             assertFalse("the PR mode arrives with W5", prEvent.getPresentation().isEnabled());
             assertEquals(ReviewWorkbenchEditor.PR_LATER, prEvent.getPresentation().getDescription());
+        } finally {
+            Disposer.dispose(editor);
+        }
+    }
+
+    public void testAWorkbenchOpenedBeforeAnySelectionShowsTheSeededMessageNotTheLoadingState() {
+        ReviewDiffEditor diff = new ReviewDiffEditor(() -> { }, context -> {
+            throw new AssertionError("nothing is selected: no request is built");
+        }, viewer -> { });
+        ReviewWorkbenchEditor editor = new ReviewWorkbenchEditor(getProject(), ReviewWorkbenchFile.of(getProject()),
+                diffOnly(diff));
+        try {
+            PlatformTestUtil.dispatchAllEventsInIdeEventQueue();
+            List<String> texts = UIUtil.uiTraverser(editor.getComponent()).filter(JLabel.class).toList().stream()
+                    .map(JLabel::getText).filter(text -> text != null).toList();
+            assertTrue(texts.toString(), texts.stream().anyMatch(text -> text.contains(ReviewDiffEditor.NO_FILE_TEXT)));
         } finally {
             Disposer.dispose(editor);
         }
@@ -313,6 +343,11 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
         @Override
         public void changeView(Project project, WorkbenchState.View view) {
         }
+
+        @Override
+        public Optional<JComponent> hostInbox(Project project, Disposable parent) {
+            return Optional.empty();
+        }
     };
 
     private static ReviewWorkbenchEditor.Host diffOnly(ReviewDiffEditor diff) {
@@ -330,6 +365,11 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
 
             @Override
             public void changeView(Project project, WorkbenchState.View view) {
+            }
+
+            @Override
+            public Optional<JComponent> hostInbox(Project project, Disposable parent) {
+                return Optional.empty();
             }
         };
     }

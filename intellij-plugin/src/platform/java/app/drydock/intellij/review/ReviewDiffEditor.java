@@ -110,13 +110,20 @@ public final class ReviewDiffEditor {
      */
     public static ReviewDiffEditor platform(Project project, Disposable parent,
                                             ReviewDiffInlays inlays) {
+        Objects.requireNonNull(inlays, "inlays");
+        return platform(project, parent, inlays::viewerChanged);
+    }
+
+    /** As {@link #platform(Project, Disposable, ReviewDiffInlays)}, with every viewer change dispatched to {@code onViewerChanged}. */
+    public static ReviewDiffEditor platform(Project project, Disposable parent,
+                                            Consumer<FrameDiffTool.DiffViewer> onViewerChanged) {
         Objects.requireNonNull(project, "project");
         Objects.requireNonNull(parent, "parent");
-        Objects.requireNonNull(inlays, "inlays");
+        Objects.requireNonNull(onViewerChanged, "onViewerChanged");
         return new ReviewDiffEditor(
                 () -> FileEditorManager.getInstance(project).openFile(ReviewWorkbenchFile.of(project), true),
                 context -> ReviewDiffRequests.toRequest(project, parent, context),
-                inlays::viewerChanged);
+                onViewerChanged);
     }
 
     /**
@@ -128,6 +135,11 @@ public final class ReviewDiffEditor {
         requireEdt();
         DiffRequestProcessor created = newProcessor(project);
         Disposer.register(parent, created);
+        // A DiffVirtualFile tab's editor applies the seeded request on
+        // selection; an embedded processor has no such editor, so it applies
+        // it here, or it would show the platform's loading state until the
+        // next selection.
+        created.updateRequest();
         return new ReviewWorkbenchEditor.HostedDiff(created.getComponent(), created::getPreferredFocusedComponent);
     }
 

@@ -15,8 +15,12 @@ import app.drydock.intellij.DrydockSessionsListener;
 import app.drydock.intellij.agent.AgentExecutionRegistry;
 import app.drydock.intellij.agent.PromptOutcome;
 import app.drydock.intellij.agent.SessionActivityListener;
+import app.drydock.intellij.review.workbench.model.InboxModel;
 import app.drydock.intellij.review.workbench.model.WorkbenchState;
 import app.drydock.review.AnnotationStatus;
+import app.drydock.review.DiffSelection;
+import app.drydock.review.PendingQuestions;
+import app.drydock.review.ReviewInstructions;
 import app.drydock.review.AnnotationStore;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewScope;
@@ -54,6 +58,7 @@ import java.io.UncheckedIOException;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -165,6 +170,8 @@ final class ReviewTabProvider {
     private JComponent panel;
     private JBLabel header;
     private JBLabel statusLabel;
+    /** The workbench inboxes showing this review (EDT only); the selection actions open their composer. */
+    private final List<ReviewWorkbenchInbox> inboxes = new ArrayList<>();
     /** The workbench navigators showing this review (EDT only); gutter targets land on them. */
     private final List<ReviewWorkbenchNavigator> navigators = new ArrayList<>();
     /** The disposal parent of the reusable diff editor and its inlay layer. */
@@ -187,6 +194,9 @@ final class ReviewTabProvider {
     private ReviewContents contents;
     private ReviewVerdictCommands commands;
     private ReviewTabScopes scopes;
+    /** The backend's pending questions and the selection questions it mints (Ask About Selection). */
+    private volatile PendingQuestions pendingQuestions;
+    private volatile SelectionAsks selectionAsks;
     /** The backend's annotation store; volatile: the store listeners read it from their own threads. */
     private volatile AnnotationStore store;
     /** The finding cards' write side; volatile: the card callbacks read it from the EDT. */
@@ -230,6 +240,8 @@ final class ReviewTabProvider {
     private volatile WorkbenchState.Filter workbenchFilter = WorkbenchState.Filter.ALL;
     /** The workbench diff's view, starting from the stored setting; set on the EDT, read when the state is rebuilt. */
     private volatile WorkbenchState.View workbenchView = ReviewDiffEditor.storedView();
+    /** The workbench inbox's tab and scope; set on the EDT, read when the state is rebuilt. */
+    private volatile WorkbenchState.InboxChoice inboxChoice = WorkbenchState.InboxChoice.DEFAULT;
     /** The latest workbench state, for a view that attaches after it was built. */
     private volatile WorkbenchState workbenchState;
 
@@ -302,7 +314,16 @@ final class ReviewTabProvider {
                 () -> triage, () -> scope, () -> store, this::showCardOutcome);
         inlays = new ReviewDiffInlays(ReviewDiffInlays.platformEdt(), labeledCards(
                 ReviewDiffInlays.triageCards(Clock.systemDefaultZone(), cardActions)));
-        diffEditor = ReviewDiffEditor.platform(project, diffParent, inlays);
+        // The gutter "+" rides the same viewer changes as the finding cards:
+        // a click opens the inbox composer for the line or its selection.
+        ReviewGutterComments gutter = new ReviewGutterComments(
+                target -> resolve(target).isPresent(),
+                target -> compose(project, Optional.of(target), ReviewWorkbenchInbox.Composer.Mode.COMMENT));
+        ReviewDiffInlays layer = inlays;
+        diffEditor = ReviewDiffEditor.platform(project, diffParent, viewer -> {
+            layer.viewerChanged(viewer);
+            gutter.viewerChanged(viewer);
+        });
 
         buildDecisionsBar();
 
@@ -379,6 +400,7 @@ final class ReviewTabProvider {
         header = null;
         statusLabel = null;
         navigators.clear(); // each is disposed with its workbench editor
+        inboxes.clear();
         diffParent = null;
         diffEditor = null;
         inlays = null;
@@ -393,6 +415,8 @@ final class ReviewTabProvider {
         scopes = null;
         refresher = null;
         store = null;
+        pendingQuestions = null;
+        selectionAsks = null;
         triage = null;
         scope = null;
         snapshot = null;
@@ -477,6 +501,8 @@ final class ReviewTabProvider {
         }
         AnnotationStore annotations = backend.annotationStore();
         store = annotations;
+        pendingQuestions = backend.pendingQuestions();
+        selectionAsks = backend.selectionAsks();
         worktrees = new WorktreeService();
         git = new GitStatusService();
         contents = new ReviewContents(new GitExecutableLocator(), git);
@@ -633,8 +659,9 @@ final class ReviewTabProvider {
      */
     private void selected(Object row) {
         selectionRow = row;
-        if (workbenchFilter == WorkbenchState.Filter.WITH_FINDINGS) {
-            submitWorkbenchState(); // the filter keeps the selected file listed
+        if (workbenchFilter == WorkbenchState.Filter.WITH_FINDINGS
+                || inboxChoice.scope() == InboxModel.Scope.FILE) {
+            submitWorkbenchState(); // the filter keeps the selected file listed; the inbox follows it
         }
         ReviewDiffEditor editor = this.diffEditor;
         if (editor == null) {
@@ -1494,7 +1521,7 @@ final class ReviewTabProvider {
      * app's {@code UiErrors.message} — which is JavaFX-bound and not part
      * of the plugin, so this is the tab's two-line form of it.
      */
-    private static String rootMessage(Throwable failure) {
+    static String rootMessage(Throwable failure) {
         Throwable t = failure;
         while (t instanceof CompletionException && t.getCause() != null) {
             t = t.getCause();
@@ -1689,8 +1716,10 @@ final class ReviewTabProvider {
         if (current == null || scope == null || disposed.get()) {
             return;
         }
+        AnnotationStore annotations = this.store;
+        List<ReviewAnnotation> findings = annotations == null ? List.of() : annotations.forScope(scope.id());
         WorkbenchState state = WorkbenchState.of(subjectOf(scope), WorkbenchState.Mode.LOCAL, current,
-                workbenchFilter, Optional.ofNullable(selectedPath()), workbenchView);
+                workbenchFilter, Optional.ofNullable(selectedPath()), workbenchView, findings, inboxChoice);
         workbenchState = state;
         onEdt(() -> {
             if (disposed.get()) {
@@ -1724,6 +1753,208 @@ final class ReviewTabProvider {
     private void workbenchFilterChanged(WorkbenchState.Filter filter) {
         workbenchFilter = Objects.requireNonNull(filter, "filter");
         submitWorkbenchState();
+    }
+
+    /** What the inbox says when a finding is no longer in the store. */
+    static final String FINDING_GONE = "The finding is gone: the review changed since it was shown.";
+    /** What the inbox says before the review's backend is wired. */
+    static final String STILL_LOADING = "The review is still loading: nothing was changed.";
+
+    /** The inbox's text for a challenge outcome (pure); empty when there is nothing to report. */
+    static Optional<String> challengeMessage(ReviewTriageActions.ChallengeOutcome.State state) {
+        return switch (state) {
+            case DELIVERED -> Optional.of("Asked the agent. Its answer will appear in the thread.");
+            case BLANK -> Optional.empty();
+            case NO_SESSION -> Optional.of("No agent session is bound to this review: nothing was sent.");
+            case MISSING -> Optional.of(FINDING_GONE);
+            case REFUSED -> Optional.of("The agent's session did not take the question. Your comment is kept.");
+            case FAILED -> Optional.of("Sending the question failed. Your comment is kept.");
+        };
+    }
+
+    /**
+     * A findings inbox over the live review for a new workbench editor,
+     * rendered from every {@link WorkbenchState} until {@code parent} is
+     * disposed. Empty when the project has no live Review content. EDT.
+     */
+    static Optional<JComponent> hostedInbox(Project project, Disposable parent) {
+        ReviewTabProvider provider = project.getUserData(LIVE_PROVIDER);
+        if (provider == null || provider.disposed.get()) {
+            return Optional.empty();
+        }
+        ReviewWorkbenchInbox inbox = new ReviewWorkbenchInbox(provider.new InboxActions(), Clock.systemDefaultZone());
+        Disposer.register(parent, inbox);
+        provider.attachWorkbenchView(inbox::render, parent);
+        provider.inboxes.add(inbox);
+        Disposer.register(parent, () -> provider.inboxes.remove(inbox));
+        return Optional.of(inbox);
+    }
+
+    /** What the inbox says for a selection with no reviewable range. */
+    static final String NO_RANGE =
+            "Select changed lines of the diff: a review comment goes on the lines the change touches.";
+
+    /**
+     * Opens the inbox composer for a diff selection (the selection actions):
+     * the selection is resolved within one hunk of the shown file's diff; a
+     * selection with no range says why instead. EDT.
+     */
+    static void compose(Project project, Optional<ReviewSelection.Target> target,
+                        ReviewWorkbenchInbox.Composer.Mode mode) {
+        ReviewTabProvider provider = project.getUserData(LIVE_PROVIDER);
+        if (provider == null || provider.disposed.get()) {
+            return;
+        }
+        Optional<DiffSelection.Range> range = target.flatMap(provider::resolve);
+        for (ReviewWorkbenchInbox inbox : List.copyOf(provider.inboxes)) {
+            range.ifPresentOrElse(r -> inbox.openComposer(new ReviewWorkbenchInbox.Composer(mode, r)),
+                    () -> inbox.notice(NO_RANGE));
+        }
+    }
+
+    /** A selection target's range in the latest snapshot's file diff; empty when the file or the range is not there. */
+    private Optional<DiffSelection.Range> resolve(ReviewSelection.Target target) {
+        ReviewTabModel.Snapshot current = snapshot;
+        if (current == null) {
+            return Optional.empty();
+        }
+        return current.files().stream()
+                .filter(row -> row.path().equals(target.path()))
+                .findFirst()
+                .flatMap(row -> DiffSelection.resolve(row.diff(), target.side(), target.first(), target.last()));
+    }
+
+    /**
+     * Stores the reviewer's comment as a human finding at the range: confirmed
+     * and, in a local review, not posted to a PR — it is an instruction for
+     * the session. Off the EDT, on the plugin's executor.
+     */
+    private CompletableFuture<Optional<String>> addComment(DiffSelection.Range range, String text) {
+        AnnotationStore annotations = store;
+        ReviewScope current = scope;
+        if (annotations == null || current == null) {
+            return CompletableFuture.completedFuture(Optional.of(STILL_LOADING));
+        }
+        return CompletableFuture.supplyAsync(() -> {
+            annotations.upsert(ReviewAnnotation.human(current.id(), range.file(), range.startKey(), range.endKey(),
+                    new ReviewAnnotation.Message("You", Instant.now(), text)).withPostToPr(false));
+            return Optional.of(COMMENT_ADDED);
+        }, plugin.executor());
+    }
+
+    /** What the inbox says once a comment is stored. */
+    static final String COMMENT_ADDED = "Comment added to the Outbox.";
+
+    /** The inbox's text for a selection question's delivery (pure). */
+    static String askMessage(PromptOutcome outcome) {
+        return switch (outcome) {
+            case DELIVERED -> "Asked the agent. Its answer will arrive as a finding to triage.";
+            case REFUSED -> "The agent's session did not take the question: nothing was asked.";
+            case FAILED -> "Sending the question failed: nothing was asked.";
+        };
+    }
+
+    /** What the inbox says when no session can be asked. */
+    static final String ASK_NO_SESSION = "No agent session is bound to this review: nothing was asked.";
+
+    /**
+     * Asks the scope's bound session about a selection: a pending question
+     * is minted, its range remembered ({@link SelectionAsks}), and
+     * {@link ReviewInstructions#forSelectionAsk} submitted. A question that
+     * did not reach the agent is forgotten again. The submission is a
+     * blocking PTY write, so it runs on the plugin's executor.
+     */
+    private CompletableFuture<Optional<String>> askAboutSelection(DiffSelection.Range range, String question) {
+        ReviewScope current = scope;
+        PendingQuestions questions = pendingQuestions;
+        SelectionAsks asks = selectionAsks;
+        if (current == null || questions == null || asks == null) {
+            return CompletableFuture.completedFuture(Optional.of(STILL_LOADING));
+        }
+        Optional<ManagedSessionId> session = current.sessionId();
+        if (session.isEmpty()) {
+            return CompletableFuture.completedFuture(Optional.of(ASK_NO_SESSION));
+        }
+        return CompletableFuture.supplyAsync(() -> {
+            PendingQuestions.PendingAsk ask = questions.mint(current.id(),
+                    range.file() + ":" + range.startKey() + ".." + range.endKey(), session.get());
+            asks.remember(ask.questionId(), new SelectionAsks.Asked(current.id(), range, question, ask.askedAt()));
+            PromptOutcome outcome = promptSubmitter.apply(session.get(), ReviewInstructions.forSelectionAsk(
+                    ask.questionId(), current.id(), range.file(), range.startKey(), range.endKey(), question));
+            if (outcome != PromptOutcome.DELIVERED) {
+                asks.forget(ask.questionId());
+            }
+            return Optional.of(askMessage(outcome));
+        }, plugin.executor());
+    }
+
+    /** The inbox's actions on the live review: the triage write side, the navigators, the inbox choice. */
+    private final class InboxActions implements ReviewWorkbenchInbox.Actions {
+
+        @Override
+        public CompletableFuture<Optional<String>> requestFix(ReviewAnnotation finding) {
+            ReviewTriageActions actions = triage;
+            return actions == null ? loading() : actions.requestFix(finding.key()).thenApply(ReviewTabProvider::goneIfEmpty);
+        }
+
+        @Override
+        public CompletableFuture<Optional<String>> dismiss(ReviewAnnotation finding) {
+            ReviewTriageActions actions = triage;
+            return actions == null ? loading() : actions.dismiss(finding.key()).thenApply(ReviewTabProvider::goneIfEmpty);
+        }
+
+        @Override
+        public CompletableFuture<Optional<String>> undo(ReviewAnnotation finding) {
+            ReviewTriageActions actions = triage;
+            return actions == null ? loading() : actions.undo(finding.key()).thenApply(ReviewTabProvider::goneIfEmpty);
+        }
+
+        @Override
+        public CompletableFuture<Optional<String>> comment(ReviewAnnotation finding, String text) {
+            ReviewTriageActions actions = triage;
+            return actions == null ? loading() : actions.comment(finding.key(), text).thenApply(outcome ->
+                    outcome.state() == ReviewTriageActions.CommentOutcome.State.MISSING
+                            ? Optional.of(FINDING_GONE)
+                            : Optional.empty());
+        }
+
+        @Override
+        public CompletableFuture<Optional<String>> challenge(ReviewAnnotation finding, String text) {
+            ReviewTriageActions actions = triage;
+            ReviewScope current = scope;
+            return actions == null || current == null
+                    ? loading()
+                    : actions.challenge(finding.key(), text, current).thenApply(outcome -> challengeMessage(outcome.state()));
+        }
+
+        @Override
+        public void showInDiff(ReviewAnnotation finding) {
+            for (ReviewWorkbenchNavigator navigator : List.copyOf(navigators)) {
+                navigator.selectFinding(finding.file(), finding.id());
+            }
+        }
+
+        @Override
+        public void choose(WorkbenchState.InboxChoice choice) {
+            inboxChoice = Objects.requireNonNull(choice, "choice");
+            submitWorkbenchState();
+        }
+
+        @Override
+        public CompletableFuture<Optional<String>> submit(ReviewWorkbenchInbox.Composer composer, String text) {
+            return switch (composer.mode()) {
+                case COMMENT -> addComment(composer.range(), text);
+                case ASK -> askAboutSelection(composer.range(), text);
+            };
+        }
+
+        private CompletableFuture<Optional<String>> loading() {
+            return CompletableFuture.completedFuture(Optional.of(STILL_LOADING));
+        }
+    }
+
+    private static Optional<String> goneIfEmpty(Optional<ReviewAnnotation> updated) {
+        return updated.isEmpty() ? Optional.of(FINDING_GONE) : Optional.empty();
     }
 
     /** The live review's checkout root and latest snapshot, for the review search scope. */

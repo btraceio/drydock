@@ -6,6 +6,7 @@ import app.drydock.review.AnnotationStatus;
 import app.drydock.review.AnnotationStore;
 import app.drydock.review.FindingsPrompt;
 import app.drydock.review.ReviewAnnotation;
+import app.drydock.review.ReviewInstructions;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.Triage;
 
@@ -67,6 +68,17 @@ public final class ReviewTriageActions {
      */
     public CompletableFuture<Optional<ReviewAnnotation>> confirm(ReviewAnnotation.Key key) {
         return setTriage(key, Triage.CONFIRMED);
+    }
+
+    /**
+     * Asks the session to fix a finding (spec §7 "Request fix"): triage
+     * CONFIRMED with {@code postToPr} false, whatever it was, because the
+     * decision goes to the session lane, not to the pull request.
+     */
+    public CompletableFuture<Optional<ReviewAnnotation>> requestFix(ReviewAnnotation.Key key) {
+        Objects.requireNonNull(key, "key");
+        return onExecutor(() -> store.mutate(key, current ->
+                current.withTriage(Triage.CONFIRMED).withPostToPr(false)));
     }
 
     /** Dismisses a finding: triage DISMISSED, every other field untouched. */
@@ -166,6 +178,65 @@ public final class ReviewTriageActions {
                         current.withReply(new ReviewAnnotation.Message("You", clock.instant(), text)))
                 .map(CommentOutcome::appended)
                 .orElseGet(CommentOutcome::missing));
+    }
+
+    // ---- challenge (spec §7) --------------------------------------------------
+
+    /**
+     * The outcome of a challenge. {@code finding} is the finding with the
+     * reviewer's message appended for DELIVERED, REFUSED and FAILED (the
+     * message is kept when the prompt could not be delivered), and
+     * {@code null} for BLANK, NO_SESSION and MISSING, which write nothing.
+     */
+    public record ChallengeOutcome(State state, ReviewAnnotation finding) {
+
+        public enum State { DELIVERED, BLANK, NO_SESSION, MISSING, REFUSED, FAILED }
+
+        public ChallengeOutcome {
+            Objects.requireNonNull(state, "state");
+            boolean written = state == State.DELIVERED || state == State.REFUSED || state == State.FAILED;
+            if (written != (finding != null)) {
+                throw new IllegalArgumentException(state + " with finding " + finding);
+            }
+        }
+
+        static ChallengeOutcome of(State state) {
+            return new ChallengeOutcome(state, null);
+        }
+    }
+
+    /**
+     * Challenges a finding: appends the reviewer's message to its thread,
+     * then asks the scope's bound session to answer it
+     * ({@link ReviewInstructions#forFindingQuestion}); the answer arrives in
+     * the thread through {@code review_answer}. Blank text, or a scope with
+     * no bound session, is refused before anything is written.
+     */
+    public CompletableFuture<ChallengeOutcome> challenge(ReviewAnnotation.Key key, String text, ReviewScope scope) {
+        Objects.requireNonNull(key, "key");
+        Objects.requireNonNull(text, "text");
+        Objects.requireNonNull(scope, "scope");
+        if (text.isBlank()) {
+            return CompletableFuture.completedFuture(ChallengeOutcome.of(ChallengeOutcome.State.BLANK));
+        }
+        Optional<ManagedSessionId> session = scope.sessionId();
+        if (session.isEmpty()) {
+            return CompletableFuture.completedFuture(ChallengeOutcome.of(ChallengeOutcome.State.NO_SESSION));
+        }
+        return onExecutor(() -> {
+            Optional<ReviewAnnotation> replied = store.mutate(key, current ->
+                    current.withReply(new ReviewAnnotation.Message("You", clock.instant(), text)));
+            if (replied.isEmpty()) {
+                return ChallengeOutcome.of(ChallengeOutcome.State.MISSING);
+            }
+            PromptOutcome outcome = promptSubmitter.apply(session.get(),
+                    ReviewInstructions.forFindingQuestion(scope.id(), key.id()));
+            return new ChallengeOutcome(switch (outcome) {
+                case DELIVERED -> ChallengeOutcome.State.DELIVERED;
+                case REFUSED -> ChallengeOutcome.State.REFUSED;
+                case FAILED -> ChallengeOutcome.State.FAILED;
+            }, replied.get());
+        });
     }
 
     // ---- ask-to-fix (AC4) ----------------------------------------------------

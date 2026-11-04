@@ -1,6 +1,7 @@
 package app.drydock.intellij.review;
 
 import com.intellij.icons.AllIcons;
+import com.intellij.openapi.fileTypes.FileTypeRegistry;
 import com.intellij.openapi.application.Application;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.project.Project;
@@ -14,6 +15,7 @@ import com.intellij.ui.JBColor;
 import com.intellij.ui.SimpleTextAttributes;
 import org.jetbrains.annotations.NotNull;
 
+import javax.swing.Icon;
 import javax.swing.JTree;
 import javax.swing.tree.DefaultTreeModel;
 import javax.swing.tree.TreeNode;
@@ -410,6 +412,17 @@ public final class ReviewTabBrowser extends AsyncChangesBrowserBase {
         return Optional.of(row.driftHint().map(hint -> severity + " · " + hint).orElse(severity));
     }
 
+    /**
+     * The icon of the file type the path's name maps to (Java, XML, …), the
+     * one the IDE shows for that file elsewhere; plain text when the type has
+     * none.
+     */
+    static Icon fileIcon(String path) {
+        String name = path.substring(path.lastIndexOf('/') + 1);
+        Icon icon = FileTypeRegistry.getInstance().getFileTypeByFileName(name).getIcon();
+        return icon == null ? AllIcons.FileTypes.Text : icon;
+    }
+
     /** A file row: the path plus its mark, the mark colored by its kind. */
     static final class FileNode extends ChangesBrowserNode<ReviewTabModel.FileRow> {
 
@@ -430,7 +443,7 @@ public final class ReviewTabBrowser extends AsyncChangesBrowserBase {
             renderer.append("  " + row.mark().text(), markAttributes(row.mark().kind()));
             row.hunkProgress().ifPresent(progress ->
                     renderer.append("  " + progress, SimpleTextAttributes.GRAYED_ATTRIBUTES));
-            renderer.setIcon(AllIcons.FileTypes.Text);
+            renderer.setIcon(fileIcon(row.path()));
             renderer.setToolTipText(fileTooltip(row).orElse(null));
         }
     }

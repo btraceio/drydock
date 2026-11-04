@@ -42,8 +42,9 @@ import java.util.function.Supplier;
  * <p>The centre is the live review's own {@link ReviewDiffEditor} processor
  * ({@link Host#hostDiff}), created for this editor and disposed with it, so
  * the selection pipeline and the inlay layer of {@code ReviewTabProvider}
- * work unchanged here. The inbox and the outbox show empty states until
- * their phases (W2, W5) fill them.</p>
+ * work unchanged here. The inbox is the review's findings inbox
+ * ({@link ReviewWorkbenchInbox}); the outbox shows an empty state until W5
+ * fills it.</p>
  */
 final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEditor {
 
@@ -85,6 +86,9 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
 
         /** The user picked Changes only or Full file. EDT. */
         void changeView(Project project, WorkbenchState.View view);
+
+        /** A findings inbox for a new workbench editor, disposed with {@code parent}; empty when no review is live. EDT. */
+        Optional<JComponent> hostInbox(Project project, Disposable parent);
     }
 
     private final ReviewWorkbenchFile file;
@@ -99,7 +103,7 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
     final DefaultActionGroup modeActions;
     private final JBPanel<?> navigator = new JBPanel<>(new BorderLayout());
     final OnePixelSplitter navSplitter = new OnePixelSplitter(false, NAV_KEY, 0.2f);
-    final OnePixelSplitter inboxSplitter = new OnePixelSplitter(false, INBOX_KEY, 0.75f);
+    final OnePixelSplitter inboxSplitter = new OnePixelSplitter(false, INBOX_KEY, 0.68f);
     final OnePixelSplitter outboxSplitter = new OnePixelSplitter(true, OUTBOX_KEY, 0.8f);
 
     ReviewWorkbenchEditor(Project project, ReviewWorkbenchFile file, Host host) {
@@ -110,7 +114,7 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
         navigator.add(host.hostNavigator(project, this, this::renderHeader)
                 .orElseGet(() -> emptyState(NAVIGATOR_EMPTY_TEXT)), BorderLayout.CENTER);
         inboxSplitter.setFirstComponent(centre);
-        inboxSplitter.setSecondComponent(emptyState(INBOX_EMPTY_TEXT));
+        inboxSplitter.setSecondComponent(host.hostInbox(project, this).orElseGet(() -> emptyState(INBOX_EMPTY_TEXT)));
         navSplitter.setFirstComponent(navigator);
         navSplitter.setSecondComponent(inboxSplitter);
         outboxSplitter.setFirstComponent(navSplitter);
@@ -256,6 +260,11 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
             @Override
             public void changeView(Project project, WorkbenchState.View view) {
                 ReviewTabProvider.changeView(project, view);
+            }
+
+            @Override
+            public Optional<JComponent> hostInbox(Project project, Disposable parent) {
+                return ReviewTabProvider.hostedInbox(project, parent);
             }
         };
     }
