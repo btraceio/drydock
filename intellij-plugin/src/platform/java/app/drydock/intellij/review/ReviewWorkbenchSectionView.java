@@ -2,11 +2,12 @@ package app.drydock.intellij.review;
 
 import app.drydock.intellij.review.workbench.model.SectionsModel;
 import app.drydock.intellij.review.workbench.model.WorkbenchState;
-import com.intellij.diff.DiffManager;
-import com.intellij.diff.DiffRequestPanel;
+import com.intellij.diff.FrameDiffTool;
+import com.intellij.diff.impl.DiffRequestProcessor;
+import com.intellij.diff.impl.DiffRequestProcessorListener;
+import com.intellij.diff.requests.DiffRequest;
 import com.intellij.diff.requests.SimpleDiffRequest;
 import com.intellij.diff.tools.util.base.TextDiffSettingsHolder;
-import com.intellij.diff.util.DiffUserDataKeys;
 import com.intellij.diff.util.DiffUserDataKeysEx;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.application.ApplicationManager;
@@ -35,6 +36,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 /**
@@ -45,8 +47,9 @@ import java.util.stream.Collectors;
  * hunk reviewed in another section is one "reviewed in §N" row with Show
  * Again.
  *
- * <p>The S2 technique: each card's diff is its own {@link DiffRequestPanel}
- * on one shared diff place whose settings collapse unchanged code. A card
+ * <p>The S2 technique: each card's diff is its own diff processor on one
+ * shared diff place whose settings collapse unchanged code, its viewers
+ * decorated like the file view's ({@link Actions#decorator}). A card
  * costs two editors, so its panel is created only while the card is within
  * one card height of the viewport and disposed when it leaves; a placeholder
  * of the same height holds the scroll position. Every panel is disposed with
@@ -80,6 +83,16 @@ final class ReviewWorkbenchSectionView extends JPanel implements Disposable {
 
         /** Shows the finding with {@code findingId} (a red flag's link) in the Files tab. EDT. */
         void showFinding(String findingId);
+
+        /**
+         * The hook a card's diff reports its viewers to, decorating them with
+         * {@code path}'s finding cards, marks and gutter "+" until
+         * {@code lifetime} ends. EDT.
+         */
+        default Consumer<FrameDiffTool.DiffViewer> decorator(String path, Disposable lifetime) {
+            return viewer -> {
+            };
+        }
     }
 
     private final Project project;
@@ -365,14 +378,19 @@ final class ReviewWorkbenchSectionView extends JPanel implements Disposable {
                 return; // scrolled away while loading
             }
             lifetime = Disposer.newDisposable(ReviewWorkbenchSectionView.this, "review section card " + hunk.hunkId());
-            DiffRequestPanel panel = DiffManager.getInstance().createRequestPanel(project, lifetime, null);
-            panel.putContextHints(DiffUserDataKeys.PLACE, CARD_PLACE);
             SimpleDiffRequest request = ReviewDiffRequests.toRequest(project, lifetime, loaded.get());
             // The card header names the file; the editors' revision titles would repeat it.
             request.putUserData(DiffUserDataKeysEx.EDITORS_HIDE_TITLE, Boolean.TRUE);
-            panel.setRequest(request);
+            CardProcessor processor = new CardProcessor(project, request);
+            Disposer.register(lifetime, processor);
+            // Registered after the processor, so it is disposed first: the decorations leave
+            // while the editors they sit in still exist.
+            Consumer<FrameDiffTool.DiffViewer> decorate = actions.decorator(hunk.file(), lifetime);
+            processor.addListener((DiffRequestProcessorListener) () -> decorate.accept(processor.getActiveViewer()),
+                    lifetime);
+            processor.updateRequest();
             holder.removeAll();
-            holder.add(panel.getComponent(), BorderLayout.CENTER);
+            holder.add(processor.getComponent(), BorderLayout.CENTER);
             holder.revalidate();
             holder.repaint();
         }
@@ -417,6 +435,25 @@ final class ReviewWorkbenchSectionView extends JPanel implements Disposable {
     private static void requireEdt() {
         if (!EventQueue.isDispatchThread()) {
             throw new IllegalStateException("ReviewWorkbenchSectionView renders on the EDT");
+        }
+    }
+
+    /**
+     * One card's diff: a processor on the card place with a fixed request.
+     * Not a {@code DiffRequestPanel}, because a panel exposes no viewer, and
+     * the card's decorations need the viewer the processor reports.
+     */
+    private static final class CardProcessor extends DiffRequestProcessor {
+        private final DiffRequest request;
+
+        CardProcessor(Project project, DiffRequest request) {
+            super(project, CARD_PLACE);
+            this.request = Objects.requireNonNull(request, "request");
+        }
+
+        @Override
+        public void updateRequest(boolean scrollToChange, DiffUserDataKeysEx.ScrollToPolicy policy) {
+            applyRequest(request, scrollToChange, policy);
         }
     }
 

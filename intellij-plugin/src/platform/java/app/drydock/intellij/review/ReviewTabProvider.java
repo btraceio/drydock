@@ -35,6 +35,7 @@ import app.drydock.review.tour.ReviewTour;
 import app.drydock.review.tour.TourRecord;
 import app.drydock.review.tour.TourStore;
 
+import com.intellij.diff.FrameDiffTool;
 import com.intellij.diff.fragments.LineFragment;
 import com.intellij.icons.AllIcons;
 import com.intellij.openapi.Disposable;
@@ -209,6 +210,8 @@ final class ReviewTabProvider {
     private volatile SelectionAsks selectionAsks;
     /** The backend's annotation store; volatile: the store listeners read it from their own threads. */
     private volatile AnnotationStore store;
+    /** The finding cards' write side, shared by the file view's layer and every section card's. */
+    private TriageCards cardActions;
     /** The backend's tour store: the agent's tours, the Sections navigator's first source. */
     private volatile TourStore tours;
     /** The finding cards' write side; volatile: the card callbacks read it from the EDT. */
@@ -330,7 +333,7 @@ final class ReviewTabProvider {
         // reach the agent as ONE batch (the decisions bar below), so the
         // cards carry no per-finding send at all.
         diffParent = Disposer.newDisposable();
-        TriageCards cardActions = new TriageCards(
+        cardActions = new TriageCards(
                 () -> triage, () -> scope, () -> store, this::showCardOutcome);
         inlays = new ReviewDiffInlays(ReviewDiffInlays.platformEdt(), labeledCards(
                 ReviewDiffInlays.triageCards(Clock.systemDefaultZone(), cardActions)), take -> {
@@ -2056,6 +2059,59 @@ final class ReviewTabProvider {
         @Override
         public void showFinding(String findingId) {
             ReviewTabProvider.this.showFinding(findingId);
+        }
+
+        /**
+         * A card's own decoration layer and gutter "+", as the file view's:
+         * the file's finding cards, gutter marks and ranges (its take is in
+         * the card header, not drawn again), read off the EDT now and on
+         * every store change, until {@code lifetime} ends.
+         */
+        @Override
+        public Consumer<FrameDiffTool.DiffViewer> decorator(String path, Disposable lifetime) {
+            ReviewDiffInlays layer = new ReviewDiffInlays(ReviewDiffInlays.platformEdt(), labeledCards(
+                    ReviewDiffInlays.triageCards(Clock.systemDefaultZone(), cardActions)));
+            ReviewGutterComments gutter = new ReviewGutterComments(
+                    target -> resolve(target).isPresent(),
+                    target -> compose(project, Optional.of(target), ReviewWorkbenchInbox.Composer.Mode.COMMENT));
+            AtomicBoolean ended = new AtomicBoolean();
+            Disposer.register(lifetime, () -> {
+                ended.set(true);
+                layer.dispose();
+            });
+            Runnable refresh = () -> {
+                try {
+                    plugin.executor().execute(() -> {
+                        ReviewScope current = scope;
+                        AnnotationStore annotations = store;
+                        ReviewTabModel.Snapshot rows = snapshot;
+                        if (current == null || annotations == null || rows == null || ended.get()) {
+                            return;
+                        }
+                        rows.files().stream().filter(row -> row.path().equals(path)).findFirst().ifPresent(row -> {
+                            ReviewDiffInlays.Decorations decorations =
+                                    decorationsFor(row, annotations.forScope(current.id()));
+                            onEdt(() -> {
+                                if (!ended.get()) {
+                                    layer.setDecorations(decorations);
+                                }
+                            });
+                        });
+                    });
+                } catch (RejectedExecutionException e) {
+                    // The plugin is shutting down: the card goes with it.
+                }
+            };
+            AnnotationStore annotations = store;
+            if (annotations != null) {
+                Runnable unsubscribe = annotations.addChangeListener(key -> refresh.run());
+                Disposer.register(lifetime, unsubscribe::run);
+            }
+            refresh.run();
+            return viewer -> {
+                layer.viewerChanged(viewer);
+                gutter.viewerChanged(viewer);
+            };
         }
 
         /**
