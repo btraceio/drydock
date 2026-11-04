@@ -16,6 +16,7 @@ import app.drydock.intellij.agent.PromptOutcome;
 import app.drydock.intellij.review.ReviewRequest;
 import app.drydock.intellij.review.ReviewTabOpener;
 import app.drydock.intellij.startup.DrydockStartupActivity;
+import app.drydock.review.tour.ReviewTour;
 
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
@@ -42,31 +43,31 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 
 /**
- * Reviews an existing worktree in place — the PR review flow minus the
- * checkout. The worktree already stands; nothing is materialized, nothing is
- * cleaned up, and the gesture can never orphan a directory. What carries
- * over from {@link PullRequestReview} is everything after the materialize
- * step: a RUNNING session on that worktree is joined (its console moves into
- * this window, nothing relaunched), the Drydock review prompt is resolved on
- * the launch chain, and the session's Review tab opens once armed.
+ * Reviews an existing worktree in place: an idle worktree's Review actions,
+ * and a workbench's Review menu, which a pull request opened in its
+ * worktree reaches too. The worktree already stands; nothing is
+ * materialized, nothing is cleaned up, and the gesture can never orphan a
+ * directory. A RUNNING session on that worktree is joined (its console moves
+ * into this window, nothing relaunched), the Drydock review prompt is
+ * resolved on the launch chain, and the session's Review tab opens once
+ * armed.
  *
- * <p>The session runs in WRITES mode for the same reason the PR review does:
- * a reviewer builds, runs tests, and dispatches subagents, which a read-only
- * sandbox or plan mode would block. The prompt spends the repository's
- * remembered subagent tiers; there is no custom-prompt template here — that
- * setting is pull-request-specific ({@code $PR$} substitution), and a
- * worktree review is always Drydock's own flow.</p>
+ * <p>The session runs in WRITES mode: a reviewer builds, runs tests, and
+ * dispatches subagents, which a read-only sandbox or plan mode would block.
+ * The prompt spends the repository's remembered subagent tiers, and asks
+ * for the educational tour or the section-based review; the sphinx review
+ * sends the harness's command instead.</p>
  *
  * <p>The prompt is resolved BEFORE the agent spawns and travels as the
- * launch's initial prompt — the same channel the PR review uses; a prompt
- * typed into the console after a spawn races the harness's boot and can be
- * swallowed whole.</p>
+ * launch's initial prompt — the same channel a task typed into the New task
+ * dialog uses; a prompt typed into the console after a spawn races the
+ * harness's boot and can be swallowed whole.</p>
  */
 public final class WorktreeReview {
 
     private static final Logger LOG = System.getLogger(WorktreeReview.class.getName());
 
-    /** Bounded waits, mirroring the PR review's generous launch bound. */
+    /** Bounded waits, mirroring the New task flow's generous launch bound. */
     private static final long LAUNCH_TIMEOUT_SECONDS = 60;
 
     /** How often the model dialog's answer re-checks for cancellation/disposal. */
@@ -112,7 +113,7 @@ public final class WorktreeReview {
 
     /** EDT entry: refuses a second materialization of the same worktree. */
     public void review(Project from, Path mainRoot, Path worktree, String branch) {
-        review(from, mainRoot, worktree, branch, false, false);
+        review(from, mainRoot, worktree, branch, false, false, ReviewTour.Kind.TOUR);
     }
 
     /**
@@ -122,7 +123,17 @@ public final class WorktreeReview {
      * dialog cancels the whole review.
      */
     public void reviewWithModelDialog(Project from, Path mainRoot, Path worktree, String branch) {
-        review(from, mainRoot, worktree, branch, true, false);
+        reviewWithModelDialog(from, mainRoot, worktree, branch, ReviewTour.Kind.TOUR);
+    }
+
+    /**
+     * As {@link #reviewWithModelDialog(Project, Path, Path, String)}, asking
+     * for {@code tourKind}: the educational tour, or the section-based review
+     * ({@code ReviewInstructions.forSections}).
+     */
+    public void reviewWithModelDialog(Project from, Path mainRoot, Path worktree, String branch,
+                                      ReviewTour.Kind tourKind) {
+        review(from, mainRoot, worktree, branch, true, false, tourKind);
     }
 
     /**
@@ -135,11 +146,11 @@ public final class WorktreeReview {
      * agent does, and the launch re-checks whoever actually got picked.
      */
     public void reviewSphinx(Project from, Path mainRoot, Path worktree, String branch) {
-        review(from, mainRoot, worktree, branch, false, true);
+        review(from, mainRoot, worktree, branch, false, true, ReviewTour.Kind.TOUR);
     }
 
     private void review(Project from, Path mainRoot, Path worktree, String branch, boolean pickModel,
-                        boolean sphinx) {
+                        boolean sphinx, ReviewTour.Kind tourKind) {
         String key;
         try {
             key = worktree.toRealPath().toString();
@@ -155,7 +166,7 @@ public final class WorktreeReview {
             @Override
             public void run(@NotNull ProgressIndicator indicator) {
                 try {
-                    materialize(from, mainRoot, worktree, branch, pickModel, sphinx, indicator);
+                    materialize(from, mainRoot, worktree, branch, pickModel, sphinx, tourKind, indicator);
                 } finally {
                     inFlight.remove(key);
                 }
@@ -164,7 +175,7 @@ public final class WorktreeReview {
     }
 
     private void materialize(Project from, Path mainRoot, Path worktree, String branch, boolean pickModel,
-                             boolean sphinx, ProgressIndicator indicator) {
+                             boolean sphinx, ReviewTour.Kind tourKind, ProgressIndicator indicator) {
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         Optional<AgentKind> agent;
         // The repository's last-used values, read once: they seed the dialog's
@@ -206,7 +217,7 @@ public final class WorktreeReview {
         // setting is pull-request-specific, so the tiers always apply when
         // the picked harness dispatches subagents.
         Optional<PullRequestReview.ModelChoice> choice = pickModel
-                ? chooseModel(from, plugin, agent.get(), lastUsedModel, lastUsedTiers, false, indicator)
+                ? chooseModel(from, plugin, agent.get(), lastUsedModel, lastUsedTiers, indicator)
                 : Optional.of(new PullRequestReview.ModelChoice(agent.get(),
                         lastUsedModel.apply(agent.get()), Optional.empty()));
         if (choice.isEmpty()) {
@@ -254,7 +265,8 @@ public final class WorktreeReview {
         Path reused = worktree;
         ApplicationManager.getApplication().invokeLater(() ->
                 openAndLaunch(from, mainRoot, reused, branch, picked, model, promptTiers, recordedTiers,
-                        sphinx ? Optional.of(sphinxSupport.get().reviewLocalChangesPrompt()) : Optional.empty()),
+                        sphinx ? Optional.of(sphinxSupport.get().reviewLocalChangesPrompt()) : Optional.empty(),
+                        tourKind),
                 ModalityState.nonModal());
     }
 
@@ -263,7 +275,6 @@ public final class WorktreeReview {
                                                                 AgentKind preselected,
                                                                 Function<AgentKind, Optional<String>> lastUsedModel,
                                                                 Function<AgentKind, ModelTiers> lastUsedTiers,
-                                                                boolean customTemplate,
                                                                 ProgressIndicator indicator) {
         CompletableFuture<PullRequestReview.ModelChoice> picked = new CompletableFuture<>();
         AtomicBoolean claimed = new AtomicBoolean();
@@ -277,7 +288,7 @@ public final class WorktreeReview {
                 }
                 ReviewModelDialog dialog = new ReviewModelDialog(from, plugin.registry().agents(), preselected,
                         lastUsedModel, lastUsedTiers, plugin.registry()::modelSuggestions,
-                        plugin.registry()::supportsSubagents, customTemplate);
+                        plugin.registry()::supportsSubagents);
                 boolean delivered = dialog.showAndGet()
                         ? picked.complete(new PullRequestReview.ModelChoice(dialog.acceptedAgent(),
                                 dialog.acceptedModel(), dialog.acceptedTiers()))
@@ -315,19 +326,21 @@ public final class WorktreeReview {
      */
     private void openAndLaunch(Project from, Path mainRoot, Path worktree, String branch,
                                AgentKind agent, Optional<String> model, ModelTiers promptTiers,
-                               Optional<ModelTiers> recordedTiers, Optional<String> sphinxPrompt) {
+                               Optional<ModelTiers> recordedTiers, Optional<String> sphinxPrompt,
+                               ReviewTour.Kind kind) {
         if (from.isDisposed()) {
             LOG.log(Level.INFO, "The window was closed while the review of {0} was starting; {1} is untouched",
                     branch, worktree);
             return;
         }
         String displayName = displayName(branch);
-        // The sphinx command takes the custom-prompt channel: a fixed prompt
+        // The sphinx command takes the fixed-prompt channel: a fixed prompt
         // needs no review backend and opens no Review tab, which is exactly
         // what a harness-run review loop wants.
         PullRequestReview.ReviewPrompt prompt = sphinxPrompt
                 .map(PullRequestReview.ReviewPrompt::fixed)
-                .orElseGet(() -> PullRequestReview.ReviewPrompt.drydockReview(agent, promptTiers, model));
+                .orElseGet(() -> PullRequestReview.ReviewPrompt.drydockReview(agent, promptTiers, model)
+                        .asking(kind));
         var launch = SessionDialogs.launchSession(from, worktree, mainRoot, agent, displayName,
                 SessionMode.WRITES, prompt::resolve, false, model, recordedTiers);
         ProgressManager.getInstance().run(new Task.Backgroundable(from,
@@ -358,7 +371,7 @@ public final class WorktreeReview {
                     // The review is armed: the Drydock instruction rode the
                     // launch and the session holds the review tools. Its
                     // console's window's Review tab is where the human watches
-                    // it — the same sanctioned opener the PR review uses.
+                    // it, through the sanctioned opener the Changes link uses.
                     ApplicationManager.getApplication().invokeLater(
                             () -> ReviewTabOpener.open(from, Optional.of(started)),
                             ModalityState.nonModal(), from.getDisposed());

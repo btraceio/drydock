@@ -367,8 +367,9 @@ public final class McpToolRouter {
                         "Posts the guided tour of a scope: ordered steps a human walks in full files. Validated "
                                 + "against the review diff and stored only if valid; on rejection nothing is stored "
                                 + "and every problem is listed. Every changed row must lie in some step's anchor; "
-                                + "each step needs a narrative and at least one check, each check at least one "
-                                + "alternate. Anchor keys are line keys from review_scope (n<newLine> or "
+                                + "each step needs a narrative. In an educational tour (kind tour, the default) "
+                                + "each step needs at least one check, each check at least one alternate; in a "
+                                + "section-based review (kind sections) no step carries a check. Anchor keys are line keys from review_scope (n<newLine> or "
                                 + "o<oldLine>); answer is a 0-based index into choices. With onlySteps true, "
                                 + "the steps sent replace the stored stale steps with the same id and the rest "
                                 + "are appended; naming a step that is not stale is rejected. Unsent steps keep "
@@ -402,7 +403,8 @@ public final class McpToolRouter {
                                         + "each continuing the drawing above it, revealed one per "
                                         + "click -- draw with spaces, never tabs (a tab stops "
                                         + "wherever the panel font says), keep lines under 100 chars}"
-                                        + "]}; at most 40 steps, 6 checks each."))
+                                        + "]}; at most 40 steps, 6 checks each. checks may be omitted, and must be "
+                                        + "for kind sections."))
                                 .put("takes", schemaArray("Array of {hunkId (from review_scope), does (<=400 "
                                         + "chars: what the hunk does, one or two plain sentences), alignment: "
                                         + "aligned|partial|diverges|context (how it relates to the intent; context "
@@ -414,6 +416,10 @@ public final class McpToolRouter {
                                 .put("intent", schemaString("One sentence: what the change sets out to do, "
                                         + "as the author intends it (<=1000 chars). Shown above the tour's "
                                         + "sections. With onlySteps, the stored intent stays unless this is sent."))
+                                .put("kind", schemaString("tour (the default: the educational tour, every step "
+                                        + "with checks) or sections (the section-based review: the change grouped "
+                                        + "into sections in reading order, no checks). With onlySteps, it must be "
+                                        + "the stored tour's kind."))
                                 .put("onlySteps", schemaBoolean("Merge these steps into the stored tour instead "
                                         + "of replacing it: re-issue stale steps, add steps for uncovered hunks. "
                                         + "Needs a stored tour.")),
@@ -981,6 +987,7 @@ public final class McpToolRouter {
         }
         checkTourText(steps);
         Optional<String> intent = intentArgument(args);
+        Optional<ReviewTour.Kind> kind = kindArgument(args);
         boolean onlySteps = optionalBooleanArg(args, "onlySteps", false);
         List<ReviewAnnotation> findings = context.findingsOf(scope.id());
         List<HunkTake> takes = takesArgument(args, diff, findings);
@@ -996,6 +1003,12 @@ public final class McpToolRouter {
                     throw new McpToolException(missing);
                 }
                 stored = context.updateTour(scope.id(), current -> {
+                    // Replaced steps join the stored tour, so they take its kind.
+                    ReviewTour.Kind storedKind = current.tour().kind();
+                    if (kind.isPresent() && kind.get() != storedKind) {
+                        throw new TourRejected(List.of("onlySteps keeps the stored tour's kind, \""
+                                + storedKind.wireName() + "\"; post the whole tour to change it"));
+                    }
                     // Judged on the record as it is when written: the
                     // reviewer may have overridden a stale step meanwhile.
                     List<String> live = TourMerge.notStaleReplacements(current, steps, diff);
@@ -1012,7 +1025,8 @@ public final class McpToolRouter {
                         .orElseThrow(() -> new McpToolException(missing));
             } else {
                 TourRecord fresh = TourRecord.fresh(
-                        new ReviewTour(scope.id(), TourFingerprint.of(diff), steps, intent, takes), diff);
+                        new ReviewTour(scope.id(), TourFingerprint.of(diff), steps, intent, takes,
+                                kind.orElse(ReviewTour.Kind.TOUR)), diff);
                 Optional<TourRecord> replaced = context.updateTour(scope.id(), current ->
                         validated(withTakes(repost(fresh, current), current, takes, diff), diff, findings, noteErrors));
                 if (replaced.isPresent()) {
@@ -1029,6 +1043,7 @@ public final class McpToolRouter {
         int checks = storedSteps.stream().mapToInt(step -> step.checks().size()).sum();
         JsonObject result = JsonObject.empty()
                 .put("scopeId", new JsonString(scope.id()))
+                .put("kind", new JsonString(stored.tour().kind().wireName()))
                 .put("steps", JsonNumber.of(storedSteps.size()))
                 .put("checks", JsonNumber.of(checks));
         if (onlySteps) {
@@ -1268,6 +1283,17 @@ public final class McpToolRouter {
             PromptSafety.checkInboundText(intent.get(), "tour.intent");
         }
         return intent;
+    }
+
+    /** review_tour's {@code kind}: empty when absent; an unknown name is refused. */
+    private static Optional<ReviewTour.Kind> kindArgument(JsonObject args) throws McpToolException {
+        Optional<String> name = optionalStringArg(args, "kind");
+        if (name.isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(ReviewTour.Kind.ofWireName(name.get()).orElseThrow(() -> new McpToolException(
+                "review_tour rejected, nothing stored:\n- kind must be \"tour\" or \"sections\"; got "
+                        + name.get())));
     }
 
     private static void checkTourText(List<TourStep> steps) throws McpToolException {

@@ -163,7 +163,8 @@ public final class TourCodec {
                     string(note, "text", at, TourValidator.MAX_PROMPT)));
         }
         List<TourCheck> checks = new ArrayList<>();
-        JsonArray checkArray = array(obj, "checks", path, TourValidator.MAX_CHECKS_PER_STEP, true);
+        // Optional: a section-based review's steps carry none, and its agent may leave the key out.
+        JsonArray checkArray = array(obj, "checks", path, TourValidator.MAX_CHECKS_PER_STEP, false);
         for (int i = 0; i < checkArray.elements().size(); i++) {
             checks.add(checkFromJson(checkArray.elements().get(i), path + ".checks[" + i + "]", true));
         }
@@ -348,6 +349,10 @@ public final class TourCodec {
         if (!record.tour().takes().isEmpty()) {
             tour.put("takes", JsonArray.of(record.tour().takes().stream().map(TourCodec::takeToJson).toList()));
         }
+        // Absent for an educational tour, the stored shape before the field existed.
+        if (record.tour().kind() != ReviewTour.Kind.TOUR) {
+            tour.put("kind", new JsonString(record.tour().kind().wireName()));
+        }
         return JsonObject.empty()
                 .put("tour", tour)
                 .put("progress", progress)
@@ -441,8 +446,12 @@ public final class TourCodec {
         Optional<String> intent = tourObj.get("intent") instanceof JsonString text
                 ? Optional.of(text.value())
                 : Optional.empty();
+        // Missing (written before the field) or unknown: the educational tour.
+        ReviewTour.Kind kind = tourObj.get("kind") instanceof JsonString name
+                ? ReviewTour.Kind.ofWireName(name.value()).orElse(ReviewTour.Kind.TOUR)
+                : ReviewTour.Kind.TOUR;
         ReviewTour tour = new ReviewTour(scopeId.value(), fingerprint.value(), steps, intent,
-                takesFromJson(tourObj.get("takes")));
+                takesFromJson(tourObj.get("takes")), kind);
         Map<String, StepProgress> progress = new LinkedHashMap<>();
         if (root.get("progress") instanceof JsonObject progressObj) {
             for (TourStep step : steps) {

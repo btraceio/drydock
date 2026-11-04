@@ -146,6 +146,24 @@ class TourValidatorTest {
     }
 
     @Test
+    void aSectionsTourWithoutChecksIsValid() {
+        ReviewTour sections = new ReviewTour(SCOPE, TourFingerprint.of(diff), List.of(new TourStep("s1", "t", "n",
+                List.of(new TourAnchor("src/A.java", "n1", "n22"), new TourAnchor("src/B.java", "o5", "o6")),
+                List.of(), List.of())), Optional.empty(), List.of(), ReviewTour.Kind.SECTIONS);
+        assertEquals(List.of(), TourValidator.validate(sections, diff));
+    }
+
+    @Test
+    void aSectionsTourWithACheckIsRejected() {
+        ReviewTour withChecks = coveringTour(diff);
+        ReviewTour sections = new ReviewTour(SCOPE, withChecks.diffFingerprint(), withChecks.steps(),
+                Optional.empty(), List.of(), ReviewTour.Kind.SECTIONS);
+        List<String> errors = TourValidator.validate(sections, diff);
+        assertTrue(anyContains(errors, "a sections tour carries no checks"), errors::toString);
+        assertTrue(errors.stream().noneMatch(error -> error.contains("needs at least one check")), errors::toString);
+    }
+
+    @Test
     void aCheckWithoutAnAlternateIsRejected() {
         TourCheck lonely = new TourCheck("c1", TourCheck.Kind.PREDICT, "p",
                 List.of(choice("a"), choice("b")), OptionalInt.of(0), "e", List.of());

@@ -117,7 +117,6 @@ final class TaskMenu {
             case TaskRow row -> row.running() ? running(row, facts) : idle(row);
             case PullRequestRow ignored -> nonEmpty(List.of(
                     List.of(Item.OPEN_IN_WORKBENCH),
-                    List.of(Item.QUICK_REVIEW, Item.REVIEW, Item.REVIEW_IN_SPHINX),
                     section(urlOf(node).isPresent() ? Item.OPEN_IN_GITHUB : null)));
             case IssueRow ignored -> nonEmpty(List.of(
                     List.of(Item.IMPLEMENT, Item.TRIAGE),

@@ -93,6 +93,34 @@ class TourCodecTest {
     }
 
     @Test
+    void aSectionsKindRoundTripsAndAMissingOrUnknownStoredKindIsTheEducationalTour() throws Exception {
+        UnifiedDiff diff = TourFixtures.twoFileDiff();
+        ReviewTour plain = TourFixtures.coveringTour(diff);
+        ReviewTour sections = new ReviewTour(plain.scopeId(), plain.diffFingerprint(), plain.steps(),
+                Optional.empty(), List.of(), ReviewTour.Kind.SECTIONS);
+
+        assertEquals(ReviewTour.Kind.SECTIONS, TourCodec.recordFromJson(
+                TourCodec.recordToJson(TourRecord.fresh(sections, diff))).orElseThrow().tour().kind());
+        String tourJson = JsonWriter.write(TourCodec.recordToJson(TourRecord.fresh(plain, diff)));
+        assertEquals(null, ((JsonValue.JsonObject) ((JsonValue.JsonObject) JsonParser.parse(tourJson)).get("tour"))
+                .get("kind"), "an educational tour is stored as before the field");
+        assertEquals(ReviewTour.Kind.TOUR, TourCodec.recordFromJson(JsonParser.parse(tourJson)).orElseThrow()
+                .tour().kind());
+        String unknown = tourJson.replaceFirst("\"scopeId\"", "\"kind\":\"quiz\",\"scopeId\"");
+        assertEquals(ReviewTour.Kind.TOUR, TourCodec.recordFromJson(JsonParser.parse(unknown)).orElseThrow()
+                .tour().kind());
+        assertEquals(sections.withTakes(List.of()).kind(), sections.withSteps(plain.steps()).withFingerprint("f")
+                .withIntent(Optional.of("i")).kind(), "every copy keeps the kind");
+    }
+
+    @Test
+    void anAgentsStepMayLeaveOutItsChecks() throws Exception {
+        String noChecks = "[{\"id\":\"s1\",\"title\":\"t\",\"narrative\":\"n\","
+                + "\"anchors\":[{\"file\":\"src/A.java\",\"startKey\":\"n1\",\"endKey\":\"n22\"}]}]";
+        assertEquals(List.of(), TourCodec.stepsFromAgent(JsonParser.parse(noChecks)).getFirst().checks());
+    }
+
+    @Test
     void aTourIntentRoundTripsThroughTheStoredRecordAndIsAbsentWhenNoneWasStated() throws Exception {
         UnifiedDiff diff = TourFixtures.twoFileDiff();
         ReviewTour plain = TourFixtures.coveringTour(diff);

@@ -57,7 +57,6 @@ final class ReviewModelDialog extends DialogWrapper {
     private final Function<AgentKind, Optional<String>> lastUsedModel;
     private final Function<AgentKind, ModelTiers> lastUsedTiers;
     private final Predicate<AgentKind> supportsSubagents;
-    private final boolean customTemplate;
     private final ModelField modelField;
     private final ModelField strongField;
     private final ModelField midField;
@@ -76,21 +75,18 @@ final class ReviewModelDialog extends DialogWrapper {
      *                      last-used agent, else the registry default)
      * @param lastUsedModel the repository's last-used starting model per harness
      * @param lastUsedTiers the repository's last-used subagent tiers per harness
-     * @param customTemplate whether a custom review-prompt template replaces
-     *                       Drydock's instruction: the tiers would bind nobody
      */
     ReviewModelDialog(Project project, List<Agent> agents, AgentKind preselected,
                       Function<AgentKind, Optional<String>> lastUsedModel,
                       Function<AgentKind, ModelTiers> lastUsedTiers,
                       Function<AgentKind, List<String>> suggestions,
-                      Predicate<AgentKind> supportsSubagents, boolean customTemplate) {
+                      Predicate<AgentKind> supportsSubagents) {
         super(project, true);
         this.agents = List.copyOf(agents);
         this.preselected = preselected;
         this.lastUsedModel = lastUsedModel;
         this.lastUsedTiers = lastUsedTiers;
         this.supportsSubagents = supportsSubagents;
-        this.customTemplate = customTemplate;
         setTitle("Review with model");
         modelField = new ModelField(suggestions);
         strongField = new ModelField(suggestions);
@@ -175,9 +171,9 @@ final class ReviewModelDialog extends DialogWrapper {
                 .orElse(preselected);
     }
 
-    /** Whether the tier rows show for {@code kind}: the harness dispatches subagents and no template replaced the instruction. */
+    /** Whether the tier rows show for {@code kind}: the harness dispatches subagents. */
     private boolean tiersShown(AgentKind kind) {
-        return !customTemplate && supportsSubagents.test(kind);
+        return supportsSubagents.test(kind);
     }
 
     @Override

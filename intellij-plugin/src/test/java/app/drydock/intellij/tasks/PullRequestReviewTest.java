@@ -1,5 +1,7 @@
 package app.drydock.intellij.tasks;
 
+import app.drydock.review.tour.ReviewTour;
+import app.drydock.review.ReviewInstructions;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.AgentBinding;
 import app.drydock.domain.ManagedAgentSession;
@@ -61,6 +63,16 @@ class PullRequestReviewTest {
         // armed-but-toolless case is what the launch is allowed to discover.
         assertEquals(Optional.of(noToolsMessage("Review #664")), prompt.userMessage("Review #664", false));
         assertEquals(Optional.empty(), prompt.userMessage("Review #664", true));
+    }
+
+    @Test
+    void theInstructionAsksForTheKindOfReviewRequested() {
+        assertEquals(ReviewInstructions.forSections("rs_1", true, ModelTiers.EMPTY, Optional.empty()),
+                PullRequestReview.ReviewPrompt.instructionFor(ReviewTour.Kind.SECTIONS, "rs_1", true,
+                        ModelTiers.EMPTY, Optional.empty()));
+        assertEquals(ReviewInstructions.forScope("rs_1", false, ModelTiers.EMPTY, Optional.empty()),
+                PullRequestReview.ReviewPrompt.instructionFor(ReviewTour.Kind.TOUR, "rs_1", false,
+                        ModelTiers.EMPTY, Optional.empty()));
     }
 
     private static final String NAME = "Review #664";

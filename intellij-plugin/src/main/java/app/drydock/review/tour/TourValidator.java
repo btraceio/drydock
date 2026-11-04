@@ -73,7 +73,7 @@ public final class TourValidator {
             if (!stepIds.add(step.id())) {
                 errors.add("step id " + step.id() + " is used twice");
             }
-            validateStep(step, index, checkIds, errors);
+            validateStep(step, tour.kind(), index, checkIds, errors);
         }
         validateCoverage(tour, index, errors);
         errors.addAll(withheldFindingErrors(tour, index, findings));
@@ -185,7 +185,8 @@ public final class TourValidator {
         }
     }
 
-    private static void validateStep(TourStep step, AnchorIndex index, Set<String> checkIds, List<String> errors) {
+    private static void validateStep(TourStep step, ReviewTour.Kind kind, AnchorIndex index, Set<String> checkIds,
+                                     List<String> errors) {
         String where = "step " + step.id() + ": ";
         if (step.title().isBlank()) {
             errors.add(where + "needs a title");
@@ -207,8 +208,12 @@ public final class TourValidator {
                         + " is not a range of rows of the diff");
             }
         }
-        if (step.checks().isEmpty()) {
+        // The educational tour asks at least one question per step; the section-based review asks none.
+        if (kind == ReviewTour.Kind.TOUR && step.checks().isEmpty()) {
             errors.add(where + "needs at least one check");
+        }
+        if (kind == ReviewTour.Kind.SECTIONS && !step.checks().isEmpty()) {
+            errors.add(where + "a sections tour carries no checks; remove them, or post kind \"tour\"");
         }
         if (step.checks().size() > MAX_CHECKS_PER_STEP) {
             errors.add(where + "has more than " + MAX_CHECKS_PER_STEP + " checks");

@@ -6,6 +6,7 @@ import app.drydock.git.WorktreeService;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.tasks.WorktreeReview;
 import app.drydock.review.ReviewScope;
+import app.drydock.review.tour.ReviewTour;
 
 import com.intellij.icons.AllIcons;
 import com.intellij.openapi.application.ApplicationManager;
@@ -555,20 +556,29 @@ public final class ReviewTabOpener {
 
         @Override
         public void launch(Project project, Path checkout, ReviewScope scope) {
-            startReview(project, checkout, scope, false);
+            startReview(project, checkout, scope, ReviewStart.TOUR);
         }
+    }
+
+    /** Which agent review the workbench asks for. */
+    enum ReviewStart {
+        /** The section-based review: the change grouped into sections, no checks. */
+        SECTIONS,
+        /** The educational tour, with its checks. */
+        TOUR,
+        /** The harness's sphinx review. */
+        SPHINX
     }
 
     /**
      * Starts a review session on {@code scope}'s checkout through the task
-     * window's Review flow: the educational tour with its model dialog
-     * ({@link WorktreeReview#reviewWithModelDialog}), or the harness's
-     * sphinx review ({@link WorktreeReview#reviewSphinx}) when
-     * {@code sphinx}. That flow owns its background work, pickers and
+     * window's Review flow: the section-based review or the educational tour,
+     * each with its model dialog ({@link WorktreeReview#reviewWithModelDialog}),
+     * or the harness's sphinx review ({@link WorktreeReview#reviewSphinx}). That flow owns its background work, pickers and
      * in-flight guard; this finds the checkout's main root and branch for
      * it, off the EDT. EDT.
      */
-    static void startReview(Project project, Path checkout, ReviewScope scope, boolean sphinx) {
+    static void startReview(Project project, Path checkout, ReviewScope scope, ReviewStart start) {
         if (project.isDisposed()) {
             return;
         }
@@ -595,10 +605,13 @@ public final class ReviewTabOpener {
                     }
                     Path mainRoot = Path.of(rootAndBranch[0]);
                     Path worktree = Path.of(rootAndBranch[1]);
-                    if (sphinx) {
-                        new WorktreeReview().reviewSphinx(project, mainRoot, worktree, rootAndBranch[2]);
-                    } else {
-                        new WorktreeReview().reviewWithModelDialog(project, mainRoot, worktree, rootAndBranch[2]);
+                    WorktreeReview review = new WorktreeReview();
+                    switch (start) {
+                        case SECTIONS -> review.reviewWithModelDialog(project, mainRoot, worktree, rootAndBranch[2],
+                                ReviewTour.Kind.SECTIONS);
+                        case TOUR -> review.reviewWithModelDialog(project, mainRoot, worktree, rootAndBranch[2],
+                                ReviewTour.Kind.TOUR);
+                        case SPHINX -> review.reviewSphinx(project, mainRoot, worktree, rootAndBranch[2]);
                     }
                 }, ModalityState.nonModal()))
                 .exceptionally(error -> {
