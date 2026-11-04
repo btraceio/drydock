@@ -6,6 +6,7 @@ import app.drydock.config.UserConfig;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ModelTiers;
 import app.drydock.domain.Repository;
+import app.drydock.domain.RepositoryCatalog;
 import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionStatusFacet;
 import app.drydock.git.GhCliService.OpenPullRequest;
@@ -27,12 +28,14 @@ import app.drydock.intellij.startup.DrydockStartupActivity;
 import app.drydock.review.ReviewInstructions;
 import app.drydock.review.ReviewScope;
 
+import com.intellij.ide.impl.ProjectUtil;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.progress.ProgressIndicator;
 import com.intellij.openapi.progress.ProgressManager;
 import com.intellij.openapi.progress.Task;
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.project.ProjectManager;
 import com.intellij.openapi.ui.Messages;
 
 import org.jetbrains.annotations.NotNull;
@@ -42,6 +45,7 @@ import java.lang.System.Logger.Level;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -305,34 +309,97 @@ public final class PullRequestReview {
             return;
         }
 
-        Path worktree = base;
-        if (!Files.isDirectory(base)) {
-            try (PrCheckoutService checkout = new PrCheckoutService()) {
-                worktree = checkout.checkout(mainRoot, base, pullRequest.number())
-                        .get(CHECKOUT_AWAIT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return;
-            } catch (ExecutionException | TimeoutException | RuntimeException e) {
-                LOG.log(Level.WARNING, "Could not check out PR #" + pullRequest.number() + " of " + mainRoot, e);
-                // Prefix only when the message does not already carry it. A
-                // PrCheckoutException already reads "Could not check out PR #N:
-                // <cause>", and re-prefixing that is what doubled the sentence;
-                // but a bare TimeoutException, "gh is not installed" or a missing
-                // git executable names no PR, and reporting those bare would
-                // lose which checkout failed.
-                String prefix = "Could not check out PR #" + pullRequest.number() + ": ";
-                String message = cause(e);
-                report(from, message.startsWith(prefix) ? message : prefix + message);
-                return;
-            }
+        Optional<Path> checkedOut = checkedOut(from, mainRoot, base, pullRequest.number());
+        if (checkedOut.isEmpty()) {
+            return;
         }
 
-        Path reused = worktree;
+        Path reused = checkedOut.get();
         // No expiry on the window: openAndLaunch must run even when `from` is gone, to
         // clean up the worktree it would otherwise leave behind.
         ApplicationManager.getApplication().invokeLater(() -> openAndLaunch(from, mainRoot, reused,
                 pullRequest, picked, model, promptTiers, recordedTiers, customPrompt), ModalityState.nonModal());
+    }
+
+    /**
+     * The pull request's worktree at {@code base}: reused as it stands when
+     * the directory exists, else {@code gh pr checkout} into it. Empty when
+     * the checkout failed (reported to the user) or was interrupted.
+     * Background thread.
+     */
+    private static Optional<Path> checkedOut(Project from, Path mainRoot, Path base, int number) {
+        if (Files.isDirectory(base)) {
+            return Optional.of(base);
+        }
+        try (PrCheckoutService checkout = new PrCheckoutService()) {
+            return Optional.of(checkout.checkout(mainRoot, base, number)
+                    .get(CHECKOUT_AWAIT_TIMEOUT_SECONDS, TimeUnit.SECONDS));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return Optional.empty();
+        } catch (ExecutionException | TimeoutException | RuntimeException e) {
+            LOG.log(Level.WARNING, "Could not check out PR #" + number + " of " + mainRoot, e);
+            // Prefix only when the message does not already carry it. A
+            // PrCheckoutException already reads "Could not check out PR #N:
+            // <cause>", and re-prefixing that is what doubled the sentence;
+            // but a bare TimeoutException, "gh is not installed" or a missing
+            // git executable names no PR, and reporting those bare would
+            // lose which checkout failed.
+            String prefix = "Could not check out PR #" + number + ": ";
+            String message = cause(e);
+            report(from, message.startsWith(prefix) ? message : prefix + message);
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * Opens {@code pullRequest} in the review workbench, with no agent: the
+     * PR is checked out into its {@code pr-<n>} worktree as a review does
+     * (an existing one is reused as it stands), then the window that shows
+     * the worktree -- opened as a project when none does -- opens its Review
+     * tab. The worktree's own window, because a workbench reviews its own
+     * project's checkout. Shares the review's in-flight guard: one
+     * materialization per pull request at a time. EDT entry.
+     */
+    public void openInWorkbench(Project from, Path mainRoot, String repositoryName, OpenPullRequest pullRequest) {
+        String key = mainRoot + "#" + pullRequest.number();
+        if (!inFlight.add(key)) {
+            return;
+        }
+        ProgressManager.getInstance().run(new Task.Backgroundable(from,
+                "Checking out PR #" + pullRequest.number() + "…", true) {
+            @Override
+            public void run(@NotNull ProgressIndicator indicator) {
+                try {
+                    Path base = WorktreeNaming.defaultDirectory(Path.of(System.getProperty("user.home")),
+                            UserConfig.load().worktreesDirectory(), repositoryName,
+                            PrCheckoutService.localBranchFor(pullRequest.number()));
+                    Optional<Path> worktree = checkedOut(from, mainRoot, base, pullRequest.number());
+                    if (worktree.isEmpty()) {
+                        return;
+                    }
+                    Path canonical = RepositoryCatalog.canonicalize(worktree.get());
+                    List<Project> open = Arrays.stream(ProjectManager.getInstance().getOpenProjects())
+                            .filter(project -> !project.isDisposed())
+                            .toList();
+                    Optional<Project> window = TaskNavigator.windowFor(open, Optional.empty(),
+                            project -> Optional.ofNullable(project.getBasePath())
+                                    .map(path -> RepositoryCatalog.canonicalize(Path.of(path))),
+                            canonical);
+                    ApplicationManager.getApplication().invokeLater(() -> {
+                        Project target = window.filter(project -> !project.isDisposed())
+                                .orElseGet(() -> TaskWindows.openAsProject(worktree.get()));
+                        if (target == null || target.isDisposed()) {
+                            return;
+                        }
+                        ProjectUtil.focusProjectWindow(target, true);
+                        ReviewTabOpener.open(target, Optional.empty());
+                    }, ModalityState.nonModal());
+                } finally {
+                    inFlight.remove(key);
+                }
+            }
+        });
     }
 
     /**
