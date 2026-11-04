@@ -55,13 +55,20 @@ import java.util.TreeMap;
  * itself lists first. Line iteration is ascending and path iteration is
  * sorted, so no consumer can observe an order the inputs did not
  * determine.</p>
+ *
+ * <p>Besides the findings, every file of the diff carries its changed
+ * hunks ({@link Change}, spec §2 "Round trip"): where each hunk stands on
+ * the working file, the "changed in this review" ranges a source editor
+ * shows with their way back to the review.</p>
  */
 public final class ReviewEditorMarkModel {
 
     private final Map<String, FileMarks> byPath;
+    private final Map<String, List<Change>> changesByPath;
 
-    private ReviewEditorMarkModel(Map<String, FileMarks> byPath) {
+    private ReviewEditorMarkModel(Map<String, FileMarks> byPath, Map<String, List<Change>> changesByPath) {
         this.byPath = byPath;
+        this.changesByPath = changesByPath;
     }
 
     /**
@@ -115,7 +122,71 @@ public final class ReviewEditorMarkModel {
                     groups.put(line, groupAt(line, findingsOnLine)));
             byPath.put(entry.getKey(), new FileMarks(entry.getKey(), groups));
         }
-        return new ReviewEditorMarkModel(Collections.unmodifiableMap(byPath));
+        Map<String, List<Change>> changes = new TreeMap<>();
+        for (UnifiedDiff.FileDiff file : diff.files()) {
+            List<Change> ofFile = new ArrayList<>();
+            for (int i = 0; i < file.hunks().size(); i++) {
+                changeOf(file.hunks().get(i), i).ifPresent(ofFile::add);
+            }
+            if (!ofFile.isEmpty()) {
+                changes.merge(file.path(), List.copyOf(ofFile), (a, b) -> {
+                    List<Change> both = new ArrayList<>(a);
+                    both.addAll(b);
+                    return List.copyOf(both);
+                });
+            }
+        }
+        return new ReviewEditorMarkModel(Collections.unmodifiableMap(byPath), Collections.unmodifiableMap(changes));
+    }
+
+    /**
+     * One hunk's change on the working file (pure): the zero-based new-side
+     * lines its added rows span, or, for a hunk that only removes lines, the
+     * line that now stands where they were (the next row's new line, else
+     * the previous one's). Empty for a hunk with no changed row or no new
+     * line to stand on.
+     */
+    static Optional<Change> changeOf(UnifiedDiff.Hunk hunk, int hunkIndex) {
+        int first = Integer.MAX_VALUE;
+        int last = Integer.MIN_VALUE;
+        String scrollKey = null;
+        int afterRemoved = -1;
+        int beforeRemoved = -1;
+        boolean removed = false;
+        for (UnifiedDiff.Line line : hunk.lines()) {
+            if (line.kind() == UnifiedDiff.Line.Kind.CONTEXT) {
+                int n = line.newLine().orElse(0);
+                if (removed && afterRemoved < 0) {
+                    afterRemoved = n;
+                }
+                if (!removed) {
+                    beforeRemoved = n;
+                }
+                continue;
+            }
+            if (scrollKey == null) {
+                scrollKey = line.lineKey();
+            }
+            if (line.kind() == UnifiedDiff.Line.Kind.ADD) {
+                int n = line.newLine().orElse(0);
+                first = Math.min(first, n);
+                last = Math.max(last, n);
+            } else {
+                removed = true;
+            }
+        }
+        if (scrollKey == null) {
+            return Optional.empty();
+        }
+        if (first == Integer.MAX_VALUE) {
+            int standing = afterRemoved > 0 ? afterRemoved : beforeRemoved;
+            if (standing <= 0) {
+                return Optional.empty();
+            }
+            first = standing;
+            last = standing;
+        }
+        return Optional.of(new Change(first - 1, last - 1, scrollKey, hunkIndex));
     }
 
     private static Group groupAt(int line, List<ReviewAnnotation> findingsOnLine) {
@@ -143,9 +214,14 @@ public final class ReviewEditorMarkModel {
         return text.toString();
     }
 
-    /** Whether any file carries a mark at all. */
+    /** Whether any file carries a finding mark at all. */
     public boolean isEmpty() {
         return byPath.isEmpty();
+    }
+
+    /** The changed hunks of one diff path on the working file, in hunk order; none when it has none. */
+    public List<Change> changesFor(String path) {
+        return changesByPath.getOrDefault(Objects.requireNonNull(path, "path"), List.of());
     }
 
     /** The marks of one diff path, or empty when that file has none. */
@@ -163,6 +239,21 @@ public final class ReviewEditorMarkModel {
     }
 
     // ---- the model's values -------------------------------------------------
+
+    /**
+     * One hunk's change on the working file: the zero-based lines it spans
+     * there, the line key the review scrolls to for it (its first changed
+     * row), and its index in the file's hunks.
+     */
+    public record Change(int firstLine, int lastLine, String scrollKey, int hunkIndex) {
+        public Change {
+            if (firstLine < 0 || lastLine < firstLine) {
+                throw new IllegalArgumentException("a change spans zero-based lines first <= last: "
+                        + firstLine + ".." + lastLine);
+            }
+            Objects.requireNonNull(scrollKey, "scrollKey");
+        }
+    }
 
     /**
      * One marked file: its diff path and the groups by zero-based source

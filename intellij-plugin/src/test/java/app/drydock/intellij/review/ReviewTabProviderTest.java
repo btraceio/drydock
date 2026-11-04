@@ -180,6 +180,28 @@ class ReviewTabProviderTest {
         assertEquals("src/A.java", fileRow.path());
         assertEquals(filePlan.scrollToLine(), fileRow.plan().scrollToLine());
         assertEquals(filePlan.scrollToSide(), fileRow.plan().scrollToSide());
+
+        // A file selected at a line (a source editor's Back to review): scrolled to that key.
+        ReviewTabModel.FileRow row = ReviewTabModel.snapshot(new ReviewTabModel.Inputs(diff(file), List.of(),
+                List.of(), Optional.empty())).files().getFirst();
+        ReviewDiffRequests.RequestContext at = ReviewTabProvider.requestContextFor(
+                new ReviewTabProvider.FileAt(row, "n4"), file, left, right, fragments);
+        assertEquals(Side.RIGHT, at.plan().scrollToSide());
+        assertEquals(3, at.plan().scrollToLine());
+    }
+
+    @Test
+    void aBackToReviewTargetNamesItsFileAtItsLineAndAGoneFileNothing() {
+        UnifiedDiff.FileDiff file = file("src/A.java", hunk(ctx(1, 1, "one"), add(2, "two")));
+        ReviewTabModel.Snapshot rows = ReviewTabModel.snapshot(new ReviewTabModel.Inputs(diff(file), List.of(),
+                List.of(), Optional.empty()));
+
+        ReviewTabProvider.FileAt at = ReviewTabProvider.fileAt(rows,
+                new ReviewTabOpener.FileTarget("src/A.java", "n2")).orElseThrow();
+        assertEquals("src/A.java", at.file().path());
+        assertEquals("n2", at.scrollKey());
+        assertEquals(Optional.empty(), ReviewTabProvider.fileAt(rows,
+                new ReviewTabOpener.FileTarget("src/Gone.java", "n2")));
     }
 
     @Test

@@ -62,6 +62,7 @@ import com.intellij.openapi.vfs.newvfs.BulkFileListener;
 import com.intellij.openapi.vfs.newvfs.events.VFileEvent;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBPanel;
+import com.intellij.util.ui.JBUI;
 import com.intellij.util.ui.UIUtil;
 import org.jetbrains.annotations.NotNull;
 
@@ -71,6 +72,7 @@ import javax.swing.JPanel;
 import javax.swing.SwingConstants;
 import javax.swing.border.EmptyBorder;
 import java.awt.BorderLayout;
+import java.awt.FlowLayout;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.lang.System.Logger.Level;
@@ -287,6 +289,9 @@ final class ReviewTabProvider {
      * project {@code VirtualFile}s. Set off the EDT with the scope.
      */
     private volatile Path checkoutRoot;
+    /** The finding marks in this project's source editors, for {@link #editorMarksRoot}; EDT. */
+    private ReviewEditorHighlighters editorMarks;
+    private Path editorMarksRoot;
     /** The latest resolved scope; the commands and every reload target it. */
     private volatile ReviewScope scope;
     /** The latest snapshot; the file row of a selected finding is looked up in it. */
@@ -427,6 +432,14 @@ final class ReviewTabProvider {
         if (layer != null) {
             onEdt(layer::dispose);
         }
+        // The source-editor marks also end with diffParent below; this hop clears the field on the EDT that owns it.
+        onEdt(() -> {
+            if (editorMarks != null) {
+                editorMarks.dispose();
+            }
+            editorMarks = null;
+            editorMarksRoot = null;
+        });
         if (diffParent != null) {
             Disposer.dispose(diffParent);
         }
@@ -609,6 +622,40 @@ final class ReviewTabProvider {
         }));
     }
 
+    // ---- the source-editor marks --------------------------------------------
+
+    /**
+     * Repaints the source-editor marks for {@code rows} (spec §2, "Round
+     * trip"): the model is built here, off the EDT, from the snapshot's file
+     * diffs and the scope's findings, and applied on the EDT. The layer is
+     * created for the checkout root the review's paths resolve under, and
+     * recreated when that root changes; it ends with the content.
+     */
+    private void refreshEditorMarks(ReviewTabModel.Snapshot rows) {
+        ReviewScope current = scope;
+        AnnotationStore annotations = store;
+        Path root = checkoutRoot;
+        if (current == null || annotations == null || root == null) {
+            return;
+        }
+        UnifiedDiff diff = new UnifiedDiff(rows.files().stream().map(ReviewTabModel.FileRow::diff).toList());
+        ReviewEditorMarkModel model = ReviewEditorMarkModel.of(diff, annotations.forScope(current.id()));
+        onEdt(() -> {
+            Disposable parent = diffParent;
+            if (disposed.get() || parent == null) {
+                return;
+            }
+            if (editorMarks == null || !root.equals(editorMarksRoot)) {
+                if (editorMarks != null) {
+                    editorMarks.dispose();
+                }
+                editorMarks = ReviewEditorHighlighters.platform(project, root, parent);
+                editorMarksRoot = root;
+            }
+            editorMarks.applyModel(model);
+        });
+    }
+
     // ---- snapshots and status (the EDT half) --------------------------------
 
     /**
@@ -621,6 +668,7 @@ final class ReviewTabProvider {
     private void snapshotArrived(ReviewTabModel.Snapshot snapshot) {
         this.snapshot = snapshot;
         refreshDecorations();
+        refreshEditorMarks(snapshot);
         rebuildWorkbenchState();
         onEdt(() -> {
             JBLabel header = this.header;
@@ -643,6 +691,11 @@ final class ReviewTabProvider {
      * workbench, whose navigator takes it. The take is the consumption:
      * found or stale, the target is spent exactly once, and a stale one
      * leaves the selection unchanged (the browser's own rule).
+     *
+     * <p>A pending file target ({@link ReviewTabOpener#openFile}, a source
+     * editor's "Back to review") is taken the same way once a snapshot is
+     * here: the Files tab shows its file, scrolled to its line. A file the
+     * review no longer lists spends the target and changes nothing.</p>
      */
     private void consumePendingFindingTarget() {
         if (navigators.isEmpty() || disposed.get()) {
@@ -654,6 +707,26 @@ final class ReviewTabProvider {
                 navigator.selectFinding(file, findingId);
             }
         });
+        ReviewTabModel.Snapshot rows = snapshot;
+        if (rows == null) {
+            return; // the file target waits for the snapshot that lists its file
+        }
+        ReviewTabOpener.takePendingFile(project).flatMap(target -> fileAt(rows, target)).ifPresent(at -> {
+            sectionsChoice = new WorkbenchState.SectionsChoice(Optional.of(WorkbenchState.Navigator.FILES),
+                    sectionsChoice.section());
+            // The tree's selection shows the file at its first change; the scrolled selection follows and wins.
+            for (ReviewWorkbenchNavigator navigator : targets) {
+                navigator.selectFile(at.file().path());
+            }
+            selected(at);
+            submitWorkbenchState();
+        });
+    }
+
+    /** {@code target}'s file in {@code rows}, at its line (pure); none when the review no longer lists it. */
+    static Optional<FileAt> fileAt(ReviewTabModel.Snapshot rows, ReviewTabOpener.FileTarget target) {
+        return rows.files().stream().filter(row -> row.path().equals(target.filePath())).findFirst()
+                .map(row -> new FileAt(row, target.scrollKey()));
     }
 
     /**
@@ -863,10 +936,12 @@ final class ReviewTabProvider {
                                                                Optional<Path> worktreeFile) {
         Objects.requireNonNull(file, "file");
         ReviewDiffRequests.Plan plan;
-        if (row instanceof ReviewTabModel.FindingRow finding) {
+        String scrollKey = row instanceof ReviewTabModel.FindingRow finding ? finding.startKey()
+                : row instanceof FileAt at ? at.scrollKey()
+                : null;
+        if (scrollKey != null) {
             try {
-                plan = ReviewDiffRequests.plan(left, right, fragments,
-                        ReviewDiffRequests.scrollTarget(finding.startKey()));
+                plan = ReviewDiffRequests.plan(left, right, fragments, ReviewDiffRequests.scrollTarget(scrollKey));
             } catch (IllegalArgumentException e) {
                 // fall through: the file's own scroll target
                 plan = ReviewDiffRequests.plan(file, left, right, fragments);
@@ -1107,6 +1182,9 @@ final class ReviewTabProvider {
         if (row instanceof ReviewTabModel.FileRow file) {
             return file;
         }
+        if (row instanceof FileAt at) {
+            return at.file();
+        }
         if (row instanceof ReviewTabModel.FindingRow finding) {
             ReviewTabModel.Snapshot current = snapshot;
             if (current == null) {
@@ -1137,10 +1215,25 @@ final class ReviewTabProvider {
         if (row instanceof ReviewTabModel.FileRow file) {
             return file.path();
         }
+        if (row instanceof FileAt at) {
+            return at.file().path();
+        }
         if (row instanceof ReviewTabModel.FindingRow finding) {
             return finding.annotation().file();
         }
         return null;
+    }
+
+    /**
+     * A file selected at one of its lines: what a source editor's "Back to
+     * review" asks for (the hunk's first changed row). Shows as its file,
+     * scrolled to {@code scrollKey}.
+     */
+    record FileAt(ReviewTabModel.FileRow file, String scrollKey) {
+        FileAt {
+            Objects.requireNonNull(file, "file");
+            Objects.requireNonNull(scrollKey, "scrollKey");
+        }
     }
 
     /**
@@ -1231,8 +1324,8 @@ final class ReviewTabProvider {
 
     /**
      * Builds the decisions bar: the pending decisions since the last
-     * hand-off on the left, one Send on the right. Hidden until a decision
-     * exists — a bar advertising zero decisions is noise.
+     * hand-off, with one Send below them. Hidden until a decision exists —
+     * a bar advertising zero decisions is noise.
      */
     private void buildDecisionsBar() {
         decisionsBar = new JPanel(new BorderLayout());
@@ -1242,8 +1335,12 @@ final class ReviewTabProvider {
         sendDecisionsButton.setToolTipText("One prompt to the scope's agent: the findings you agreed with"
                 + " (with your comments), and the ones you dismissed as no-action.");
         sendDecisionsButton.addActionListener(event -> sendDecisions());
-        decisionsBar.add(decisionsLabel, BorderLayout.WEST);
-        decisionsBar.add(sendDecisionsButton, BorderLayout.EAST);
+        // The label above Send, not beside it: a narrow launcher clips the label instead of drawing it
+        // under the button.
+        decisionsBar.add(decisionsLabel, BorderLayout.NORTH);
+        JPanel send = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, JBUI.scale(2)));
+        send.add(sendDecisionsButton);
+        decisionsBar.add(send, BorderLayout.SOUTH);
         decisionsBar.setVisible(false);
     }
 

@@ -414,6 +414,49 @@ public final class ReviewTabOpener {
         }
     }
 
+    /** The project user-data key carrying the pending file target. */
+    private static final Key<FileTarget> PENDING_FILE = Key.create("drydock.review.pendingFile");
+
+    /**
+     * Opens Review on {@code file} at {@code scrollKey} (a source editor's
+     * "Back to review"): the target is recorded before the open, as
+     * {@link #openFinding} records its finding, so the content's first
+     * snapshot or the workbench navigator finds it waiting. A malformed
+     * target records nothing; the window still opens. EDT.
+     */
+    public static void openFile(Project project, String file, String scrollKey) {
+        Objects.requireNonNull(project, "project");
+        if (project.isDisposed()) {
+            return;
+        }
+        if (file != null && !file.isBlank() && scrollKey != null && !scrollKey.isBlank()) {
+            synchronized (project) {
+                project.putUserData(PENDING_FILE, new FileTarget(file, scrollKey));
+            }
+        }
+        PRODUCTION.openIn(project, Optional.empty(), false);
+    }
+
+    /** Takes the recorded file target, clearing it: one consumer, once (the finding target's rule). */
+    static Optional<FileTarget> takePendingFile(Project project) {
+        Objects.requireNonNull(project, "project");
+        synchronized (project) {
+            FileTarget target = project.getUserData(PENDING_FILE);
+            if (target != null) {
+                project.putUserData(PENDING_FILE, null);
+            }
+            return Optional.ofNullable(target);
+        }
+    }
+
+    /** A "Back to review" target: the file's diff path and the line key to scroll to. */
+    record FileTarget(String filePath, String scrollKey) {
+        FileTarget {
+            Objects.requireNonNull(filePath, "filePath");
+            Objects.requireNonNull(scrollKey, "scrollKey");
+        }
+    }
+
     /**
      * The production scope source: {@link ReviewTabScopes} over the
      * backend's own registry, through git services this mint owns (the

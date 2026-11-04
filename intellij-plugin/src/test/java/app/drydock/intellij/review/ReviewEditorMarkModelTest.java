@@ -361,4 +361,43 @@ class ReviewEditorMarkModelTest {
         assertTrue(model.byPath().isEmpty());
         assertFalse(model.forPath("src/A.java").isPresent());
     }
+
+    private static UnifiedDiff.Line row(UnifiedDiff.Line.Kind kind, int oldLine, int newLine) {
+        return new UnifiedDiff.Line(kind, oldLine > 0 ? OptionalInt.of(oldLine) : OptionalInt.empty(),
+                newLine > 0 ? OptionalInt.of(newLine) : OptionalInt.empty(), "x");
+    }
+
+    @Test
+    void aHunkStandsOnItsAddedLinesOrWhereItsRemovedLinesWere() {
+        UnifiedDiff.Line.Kind ctx = UnifiedDiff.Line.Kind.CONTEXT;
+        UnifiedDiff.Line.Kind add = UnifiedDiff.Line.Kind.ADD;
+        UnifiedDiff.Line.Kind del = UnifiedDiff.Line.Kind.DEL;
+        UnifiedDiff.Hunk added = new UnifiedDiff.Hunk("@@", List.of(row(ctx, 4, 4), row(del, 5, 0),
+                row(add, 0, 5), row(add, 0, 6), row(ctx, 6, 7)));
+        UnifiedDiff.Hunk removed = new UnifiedDiff.Hunk("@@", List.of(row(ctx, 9, 10), row(del, 10, 0),
+                row(ctx, 11, 11)));
+        UnifiedDiff.Hunk removedAtEnd = new UnifiedDiff.Hunk("@@", List.of(row(ctx, 19, 19), row(del, 20, 0)));
+        UnifiedDiff.Hunk unchanged = new UnifiedDiff.Hunk("@@", List.of(row(ctx, 1, 1)));
+
+        assertEquals(Optional.of(new ReviewEditorMarkModel.Change(4, 5, "o5", 0)),
+                ReviewEditorMarkModel.changeOf(added, 0), "the added rows n5..n6; scrolled to its first changed row");
+        assertEquals(Optional.of(new ReviewEditorMarkModel.Change(10, 10, "o10", 1)),
+                ReviewEditorMarkModel.changeOf(removed, 1), "removed only: the next row's new line");
+        assertEquals(Optional.of(new ReviewEditorMarkModel.Change(18, 18, "o20", 2)),
+                ReviewEditorMarkModel.changeOf(removedAtEnd, 2), "removed at the end: the previous row's line");
+        assertEquals(Optional.empty(), ReviewEditorMarkModel.changeOf(unchanged, 3));
+    }
+
+    @Test
+    void everyFileOfTheDiffCarriesItsChangesWithOrWithoutFindings() {
+        UnifiedDiff.Hunk added = new UnifiedDiff.Hunk("@@", List.of(row(UnifiedDiff.Line.Kind.ADD, 0, 3)));
+        UnifiedDiff diff = new UnifiedDiff(List.of(new UnifiedDiff.FileDiff("src/A.java", "M", 1, 0, false, false,
+                List.of(added, added))));
+        ReviewEditorMarkModel model = ReviewEditorMarkModel.of(diff, List.of());
+
+        assertTrue(model.isEmpty(), "no finding marks");
+        assertEquals(List.of(new ReviewEditorMarkModel.Change(2, 2, "n3", 0),
+                new ReviewEditorMarkModel.Change(2, 2, "n3", 1)), model.changesFor("src/A.java"));
+        assertEquals(List.of(), model.changesFor("src/B.java"));
+    }
 }
