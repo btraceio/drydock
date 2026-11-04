@@ -60,6 +60,45 @@ class WorkbenchStateTest {
         assertEquals(0, state.inbox().count(InboxModel.Tab.TO_TRIAGE), "b.txt is outside the file scope");
     }
 
+    private static SectionsModel.Snapshot sections(SectionsModel.Source source) {
+        return new SectionsModel.Snapshot(source, Optional.empty(), List.of(new SectionsModel.Section("step:s1", 1,
+                Optional.of("s1"), "One", "", List.of(), List.of(), List.of(), 0, 0, 0)));
+    }
+
+    private static WorkbenchState withSections(SectionsModel.Snapshot sections, WorkbenchState.SectionsChoice choice) {
+        return WorkbenchState.of("drydock", WorkbenchState.Mode.LOCAL, REVIEW, WorkbenchState.Filter.ALL,
+                Optional.empty(), WorkbenchState.View.CHANGES_ONLY, List.of(), WorkbenchState.InboxChoice.DEFAULT,
+                sections, choice);
+    }
+
+    @Test
+    void theNavigatorOpensOnSectionsOnlyForATourAndKeepsTheUsersTab() {
+        assertEquals(WorkbenchState.Navigator.SECTIONS,
+                withSections(sections(SectionsModel.Source.TOUR), WorkbenchState.SectionsChoice.DEFAULT).navigator());
+        assertEquals(WorkbenchState.Navigator.FILES,
+                withSections(sections(SectionsModel.Source.COMPUTED), WorkbenchState.SectionsChoice.DEFAULT).navigator());
+        assertEquals(WorkbenchState.Navigator.FILES, withSections(sections(SectionsModel.Source.TOUR),
+                new WorkbenchState.SectionsChoice(Optional.of(WorkbenchState.Navigator.FILES), Optional.empty()))
+                .navigator());
+    }
+
+    @Test
+    void aSelectedSectionIsShownOnlyOnTheSectionsTabAndOnlyWhileItExists() {
+        WorkbenchState.SectionsChoice chosen = new WorkbenchState.SectionsChoice(
+                Optional.of(WorkbenchState.Navigator.SECTIONS), Optional.of("step:s1"));
+        assertEquals("One", withSections(sections(SectionsModel.Source.TOUR), chosen).shownSection()
+                .orElseThrow().title());
+
+        WorkbenchState gone = withSections(sections(SectionsModel.Source.TOUR),
+                new WorkbenchState.SectionsChoice(Optional.of(WorkbenchState.Navigator.SECTIONS),
+                        Optional.of("step:s9")));
+        assertEquals(Optional.empty(), gone.section());
+
+        WorkbenchState onFiles = withSections(sections(SectionsModel.Source.TOUR),
+                new WorkbenchState.SectionsChoice(Optional.of(WorkbenchState.Navigator.FILES), Optional.of("step:s1")));
+        assertEquals(Optional.empty(), onFiles.shownSection());
+    }
+
     @Test
     void theModeChipNamesWhatIsReviewed() {
         assertEquals("Local changes", WorkbenchState.Mode.LOCAL.label());

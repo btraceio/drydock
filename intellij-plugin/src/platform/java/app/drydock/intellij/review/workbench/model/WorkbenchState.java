@@ -21,10 +21,14 @@ import java.util.Optional;
  * @param view     how much of the file the diff shows
  * @param inbox    the findings inbox over the scope's full finding list (dismissed and resolved
  *                 included, which the file rows leave out)
+ * @param navigator which navigator tab shows
+ * @param sections the Sections tab and the section view
+ * @param section  the selected section's key, when it is one of {@code sections}
  */
 public record WorkbenchState(String subject, Mode mode, ReviewTabModel.Snapshot review,
                              ReviewTabModel.Snapshot files, Filter filter, Optional<String> selected,
-                             View view, InboxModel.Snapshot inbox) {
+                             View view, InboxModel.Snapshot inbox, Navigator navigator,
+                             SectionsModel.Snapshot sections, Optional<String> section) {
 
     /** What is being reviewed. Only {@link #LOCAL} exists before the PR lane (W5). */
     public enum Mode {
@@ -48,6 +52,9 @@ public record WorkbenchState(String subject, Mode mode, ReviewTabModel.Snapshot 
     /** How much of a file the diff shows: the changed regions only, or the whole file. */
     public enum View { CHANGES_ONLY, FULL_FILE }
 
+    /** The navigator's tabs. */
+    public enum Navigator { SECTIONS, FILES }
+
     public WorkbenchState {
         Objects.requireNonNull(subject, "subject");
         Objects.requireNonNull(mode, "mode");
@@ -57,6 +64,9 @@ public record WorkbenchState(String subject, Mode mode, ReviewTabModel.Snapshot 
         Objects.requireNonNull(selected, "selected");
         Objects.requireNonNull(view, "view");
         Objects.requireNonNull(inbox, "inbox");
+        Objects.requireNonNull(navigator, "navigator");
+        Objects.requireNonNull(sections, "sections");
+        Objects.requireNonNull(section, "section");
     }
 
     /** The inbox choices a state is built with: which tab, under which scope. */
@@ -70,20 +80,53 @@ public record WorkbenchState(String subject, Mode mode, ReviewTabModel.Snapshot 
     }
 
     /**
-     * Builds the state: the navigator's files are the review's under
-     * {@code filter}, keeping the selected file; the inbox lists
-     * {@code findings} under {@code inbox}'s tab and scope, the file scope
-     * following the selected file.
+     * The navigator choices a state is built with: the tab the user picked, if
+     * any, and the selected section's key, if any.
      */
+    public record SectionsChoice(Optional<Navigator> navigator, Optional<String> section) {
+        public static final SectionsChoice DEFAULT = new SectionsChoice(Optional.empty(), Optional.empty());
+
+        public SectionsChoice {
+            Objects.requireNonNull(navigator, "navigator");
+            Objects.requireNonNull(section, "section");
+        }
+    }
+
+    /** As the full {@link #of}, with no sections and the default navigator choice. */
     public static WorkbenchState of(String subject, Mode mode, ReviewTabModel.Snapshot review, Filter filter,
                                     Optional<String> selected, View view, List<ReviewAnnotation> findings,
                                     InboxChoice inbox) {
+        return of(subject, mode, review, filter, selected, view, findings, inbox, SectionsModel.Snapshot.EMPTY,
+                SectionsChoice.DEFAULT);
+    }
+
+    /**
+     * Builds the state: the navigator's files are the review's under
+     * {@code filter}, keeping the selected file; the inbox lists
+     * {@code findings} under {@code inbox}'s tab and scope, the file scope
+     * following the selected file. The navigator shows the user's tab, else
+     * Sections when the agent's tour gives them, else Files; a selected
+     * section that {@code sections} no longer has is dropped.
+     */
+    public static WorkbenchState of(String subject, Mode mode, ReviewTabModel.Snapshot review, Filter filter,
+                                    Optional<String> selected, View view, List<ReviewAnnotation> findings,
+                                    InboxChoice inbox, SectionsModel.Snapshot sections, SectionsChoice choice) {
         Objects.requireNonNull(review, "review");
         Objects.requireNonNull(filter, "filter");
         Objects.requireNonNull(inbox, "inbox");
+        Objects.requireNonNull(sections, "sections");
+        Objects.requireNonNull(choice, "choice");
         ReviewTabModel.Snapshot files = filter == Filter.WITH_FINDINGS ? review.withFindingsOnly(selected) : review;
+        Navigator navigator = choice.navigator().orElse(
+                sections.source() == SectionsModel.Source.TOUR ? Navigator.SECTIONS : Navigator.FILES);
+        Optional<String> section = choice.section().filter(key -> sections.section(key).isPresent());
         return new WorkbenchState(subject, mode, review, files, filter, selected, view,
-                InboxModel.snapshot(findings, inbox.tab(), inbox.scope(), selected));
+                InboxModel.snapshot(findings, inbox.tab(), inbox.scope(), selected), navigator, sections, section);
+    }
+
+    /** The selected section, when the Sections tab shows and one is selected. */
+    public Optional<SectionsModel.Section> shownSection() {
+        return navigator == Navigator.SECTIONS ? section.flatMap(sections::section) : Optional.empty();
     }
 
     /** The header's progress text: the whole review's {@code k / n reviewed}. */
