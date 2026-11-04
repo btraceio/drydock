@@ -14,6 +14,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.OptionalInt;
 import java.util.concurrent.CompletableFuture;
 
@@ -36,10 +37,36 @@ public class ReviewSubmitDialogPlatformTest extends BasePlatformTestCase {
     }
 
     private ReviewSubmitDialog dialog(Optional<String> unavailable) {
-        return new ReviewSubmitDialog(getProject(), 7, plan(), unavailable, "", 0, (plan, edited, event, summary) -> {
-            posts.add(event + " " + summary + " " + edited.values());
+        return new ReviewSubmitDialog(getProject(), 7, plan(), unavailable, "", 0, (plan, edited, overridden, event, summary) -> {
+            posts.add(event + " " + summary + " " + edited.values() + (overridden.isEmpty() ? "" : " in body " + overridden.size()));
             return answer;
         });
+    }
+
+    public void testARefusedFindingTickedForTheBodyIsSentWithThePost() {
+        ReviewAnnotation offDiff = ReviewAnnotation.human("rs_1", "src/A.java", "n5", "n5",
+                new ReviewAnnotation.Message("You", Instant.EPOCH, "Gone line.")).withTriage(Triage.CONFIRMED)
+                .withPostToPr(true);
+        SubmitPlan refusing = SubmitPlan.of(List.of(offDiff), List.of(), PrSubmission.diffIndex(DIFF,
+                "the PR's current head"));
+        assertEquals("the fixture's finding is refused", 1, refusing.refusals().size());
+        List<Set<ReviewAnnotation.Key>> sent = new ArrayList<>();
+        ReviewSubmitDialog dialog = new ReviewSubmitDialog(getProject(), 7, refusing, Optional.empty(), "", 0,
+                (plan, edited, overridden, event, summary) -> {
+                    sent.add(overridden);
+                    return answer;
+                });
+        try {
+            assertEquals(1, dialog.overrides.size());
+            assertEquals(ReviewSubmitDialog.POST_IN_BODY, dialog.overrides.get(offDiff.key()).getText());
+            assertTrue("unticked by default", dialog.overridden().isEmpty());
+            dialog.overrides.get(offDiff.key()).setSelected(true);
+            dialog.summary.setText("One note.");
+            dialog.doOKAction();
+            assertEquals(List.of(Set.of(offDiff.key())), sent);
+        } finally {
+            Disposer.dispose(dialog.getDisposable());
+        }
     }
 
     public void testACommentReviewNeedsASummaryAndGhMustBeUsable() {

@@ -1485,7 +1485,9 @@ final class ReviewTabProvider {
                 }
                 new ReviewSubmitDialog(project, number, plan, found.unavailable(), found.note(),
                         SubmitPlan.untriagedCount(findings),
-                        (finalPlan, edited, event, summary) -> post(current, number, finalPlan.withBodies(edited),
+                        (finalPlan, edited, overridden, event, summary) -> post(current, number,
+                                finalPlan.withBodies(edited).withBodyFallback(PrSubmission.overriddenNotes(overridden,
+                                        annotations.forScope(current.id()), PrSubmission.lineText(reviewed))),
                                 edited, event, summary)).show();
             });
             return Optional.<String>empty();

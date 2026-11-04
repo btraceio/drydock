@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -36,6 +37,27 @@ class PrSubmissionTest {
         assertEquals("the PR's current head", index.name());
         assertEquals(Optional.of("b"), PrSubmission.lineText(DIFF).apply("src/A.java", "n2"));
         assertEquals(Optional.empty(), PrSubmission.lineText(DIFF).apply("src/A.java", "n9"));
+    }
+
+    @Test
+    void anOverriddenRefusalPostsAsABodyNoteWithTheReviewedLinesText() {
+        ReviewAnnotation finding = ReviewAnnotation.human("rs_1", "src/A.java", "n2", "n2",
+                new ReviewAnnotation.Message("You", Instant.EPOCH, "Rename b.")).withTriage(Triage.CONFIRMED)
+                .withPostToPr(true);
+        ReviewAnnotation other = ReviewAnnotation.human("rs_1", "src/A.java", "n1", "n1",
+                new ReviewAnnotation.Message("You", Instant.EPOCH, "Fine.")).withTriage(Triage.CONFIRMED);
+
+        List<SubmitPlan.BodyNote> notes = PrSubmission.overriddenNotes(Set.of(finding.key()),
+                List.of(other, finding), PrSubmission.lineText(DIFF));
+
+        assertEquals(1, notes.size());
+        SubmitPlan.BodyNote note = notes.getFirst();
+        assertEquals(finding.key(), note.key());
+        assertEquals("src/A.java:" + SubmitPlan.lineLabel("n2", "n2"), note.location());
+        assertEquals("b", note.excerpt(), "the reviewed diff's text of the finding's line");
+        assertEquals(SubmitPlan.bodyOf(finding), note.body());
+        assertEquals(List.of(), PrSubmission.overriddenNotes(Set.of(finding.key()), List.of(other),
+                PrSubmission.lineText(DIFF)), "a key whose finding is gone is skipped");
     }
 
     @Test

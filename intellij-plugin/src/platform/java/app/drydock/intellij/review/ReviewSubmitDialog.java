@@ -7,6 +7,7 @@ import app.drydock.review.SubmitPlan;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.DialogWrapper;
 import com.intellij.ui.DocumentAdapter;
+import com.intellij.ui.components.JBCheckBox;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBScrollPane;
 import com.intellij.ui.components.JBTextArea;
@@ -29,16 +30,19 @@ import java.awt.FlowLayout;
 import java.awt.Rectangle;
 import java.util.EnumMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
 /**
  * The pull request lane's submit dialog (spec §8): what the review will post
  * -- the inline comments, each body editable; the body notes for lines GitHub
- * has no position for; the refusals and why -- with the event (preselected
+ * has no position for; the refusals and why, each with a box to post it in
+ * the review body instead -- with the event (preselected
  * from the reviewer's verdicts) and the summary. Submit is off while gh is
  * unusable, and while the event needs a summary and there is none. Submit
  * shows "Posting…" and keeps the dialog open until the post answers: a
@@ -50,11 +54,17 @@ final class ReviewSubmitDialog extends DialogWrapper {
     static final String POSTING = "Posting…";
     static final String SUMMARY_NEEDED = "A Comment or Request changes review needs a summary.";
 
-    /** Posts the review; completes with the error to show, empty when it was posted. */
+    /**
+     * Posts the review; completes with the error to show, empty when it was
+     * posted. {@code overridden} are the refused findings the reviewer chose
+     * to post in the review body anyway.
+     */
     interface Post {
         CompletableFuture<Optional<String>> post(SubmitPlan plan, Map<ReviewAnnotation.Key, String> editedBodies,
-                                                 Event event, String summary);
+                                                 Set<ReviewAnnotation.Key> overridden, Event event, String summary);
     }
+
+    static final String POST_IN_BODY = "Post it in the review body instead";
 
     private final SubmitPlan plan;
     private final Post post;
@@ -62,6 +72,8 @@ final class ReviewSubmitDialog extends DialogWrapper {
     private final Map<ReviewAnnotation.Key, JBTextArea> bodies = new LinkedHashMap<>();
     private final Map<ReviewAnnotation.Key, String> originals = new LinkedHashMap<>();
     private final Map<Event, JRadioButton> events = new EnumMap<>(Event.class);
+    /** Each refusal's "post it in the body" box, in the plan's refusal order. */
+    final Map<ReviewAnnotation.Key, JBCheckBox> overrides = new LinkedHashMap<>();
     final JBTextArea summary = new JBTextArea(4, 60);
     final JBLabel error = new JBLabel();
     private final String note;
@@ -121,6 +133,11 @@ final class ReviewSubmitDialog extends DialogWrapper {
             content.add(heading(plan.refusals().size() + " not posting"));
             for (SubmitPlan.Refusal refusal : plan.refusals()) {
                 content.add(muted(refusal.reason()));
+                // GitHub cannot anchor it on a line; the reviewer may still want its content in this review.
+                JBCheckBox inBody = new JBCheckBox(POST_IN_BODY);
+                inBody.setAlignmentX(JComponent.LEFT_ALIGNMENT);
+                overrides.put(refusal.key(), inBody);
+                content.add(inBody);
             }
         }
         JPanel eventRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0)) {
@@ -177,6 +194,17 @@ final class ReviewSubmitDialog extends DialogWrapper {
                 .findFirst().orElse(plan.preselected());
     }
 
+    /** The refused findings whose "post it in the body" box is ticked, in refusal order. */
+    Set<ReviewAnnotation.Key> overridden() {
+        Set<ReviewAnnotation.Key> ticked = new LinkedHashSet<>();
+        overrides.forEach((key, box) -> {
+            if (box.isSelected()) {
+                ticked.add(key);
+            }
+        });
+        return ticked;
+    }
+
     /** The comments whose body the reviewer changed, with the new text. */
     Map<ReviewAnnotation.Key, String> editedBodies() {
         Map<ReviewAnnotation.Key, String> edited = new LinkedHashMap<>();
@@ -215,7 +243,8 @@ final class ReviewSubmitDialog extends DialogWrapper {
         setOKButtonText(POSTING);
         updateOk();
         error.setText("");
-        post.post(plan, editedBodies(), selectedEvent(), summary.getText().strip()).whenComplete((failure, thrown) ->
+        post.post(plan, editedBodies(), overridden(), selectedEvent(), summary.getText().strip())
+                .whenComplete((failure, thrown) ->
                 EventQueue.invokeLater(() -> {
                     posting = false;
                     setOKButtonText(SUBMIT);
