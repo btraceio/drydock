@@ -8,12 +8,14 @@ import app.drydock.review.ReviewVerdict;
 import app.drydock.review.SubmitPlan;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.BiFunction;
 
 /**
@@ -62,6 +64,27 @@ final class PrSubmission {
             }
         }
         return (file, key) -> Optional.ofNullable(text.get(file + " " + key));
+    }
+
+    /**
+     * The body notes for the refused findings the reviewer chose to post in
+     * the review body anyway (pure): each from the finding itself and the
+     * <em>reviewed</em> diff's line text -- the anchor and excerpt the review
+     * read, which is the point of an override: the content posts on its own
+     * terms, not on a moved diff's. A key with no finding left is skipped.
+     */
+    static List<SubmitPlan.BodyNote> overriddenNotes(Set<ReviewAnnotation.Key> overridden,
+                                                     List<ReviewAnnotation> findings,
+                                                     BiFunction<String, String, Optional<String>> lineText) {
+        List<SubmitPlan.BodyNote> notes = new ArrayList<>();
+        for (ReviewAnnotation.Key key : overridden) {
+            findings.stream().filter(finding -> finding.key().equals(key)).findFirst().ifPresent(finding ->
+                    notes.add(new SubmitPlan.BodyNote(key, finding.file(),
+                            SubmitPlan.lineLabel(finding.startKey(), finding.endKey()),
+                            lineText.apply(finding.file(), finding.startKey()).orElse(""),
+                            SubmitPlan.bodyOf(finding))));
+        }
+        return List.copyOf(notes);
     }
 
     /** The decisions {@link SubmitPlan#preselect} weighs: one per verdict of the scope (pure). */

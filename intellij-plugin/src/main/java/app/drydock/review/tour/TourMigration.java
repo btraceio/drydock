@@ -140,7 +140,7 @@ public final class TourMigration {
             return Optional.empty();
         }
         return Optional.of(new TourStep(step.id(), step.title(), step.narrative(), anchors, step.impactNotes(),
-                step.checks(), Optional.empty(), step.dependsOn()));
+                step.checks(), step.diagram(), step.dependsOn()));
     }
 
     /**
@@ -163,8 +163,9 @@ public final class TourMigration {
                     ? anchor.movedTo(start.get(), end.get())
                     : anchor);
         }
+        // The diagram is a caption and text stages, with no line key a remap could invalidate.
         return new TourStep(step.id(), step.title(), step.narrative(), anchors, step.impactNotes(), step.checks(),
-                Optional.empty(), step.dependsOn());
+                step.diagram(), step.dependsOn());
     }
 
     /**

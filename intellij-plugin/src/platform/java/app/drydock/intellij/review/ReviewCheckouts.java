@@ -2,11 +2,13 @@ package app.drydock.intellij.review;
 
 import com.intellij.ide.util.PropertiesComponent;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.function.Predicate;
 
 /**
  * The checkouts opened for review with no agent (a pull request's
@@ -18,7 +20,8 @@ import java.util.Set;
  * path the window was opened on is its base path, so no real-path lookup
  * (file I/O) is needed to match it. An IDE quit keeps the entry (the window
  * is restored and its workbench still loads), an ordinary close of the
- * window forgets it. Reads are in memory only.</p>
+ * window forgets it, and a later registration forgets an entry whose
+ * directory is gone. Reads are in memory only.</p>
  */
 public final class ReviewCheckouts {
 
@@ -27,11 +30,15 @@ public final class ReviewCheckouts {
     private ReviewCheckouts() {
     }
 
-    /** Registers {@code checkout}, the path its window is opened on. Any thread. */
+    /**
+     * Registers {@code checkout}, the path its window is opened on, and
+     * forgets the entries whose directory is gone: an entry kept across a
+     * quit whose worktree was removed meanwhile. Checks the disk: off the EDT.
+     */
     public static void register(Path checkout) {
         PropertiesComponent properties = PropertiesComponent.getInstance();
         List<String> current = values(properties);
-        List<String> updated = with(current, normalized(checkout));
+        List<String> updated = with(existing(current, path -> Files.isDirectory(Path.of(path))), normalized(checkout));
         if (!updated.equals(current)) {
             properties.setValues(KEY, updated.toArray(String[]::new));
         }
@@ -62,6 +69,11 @@ public final class ReviewCheckouts {
         Set<String> result = new LinkedHashSet<>(current);
         result.add(path);
         return List.copyOf(result);
+    }
+
+    /** The entries {@code exists} keeps (pure over it). */
+    static List<String> existing(List<String> current, Predicate<String> exists) {
+        return current.stream().filter(exists).toList();
     }
 
     static List<String> without(List<String> current, String path) {
