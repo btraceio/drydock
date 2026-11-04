@@ -30,6 +30,10 @@ public class ReviewCheckoutsPlatformTest extends BasePlatformTestCase {
         assertFalse(ReviewCheckouts.covers(CHECKOUT));
     }
 
+    public void testAnEntryWhoseDirectoryIsGoneIsDropped() {
+        assertEquals(List.of("/kept"), ReviewCheckouts.existing(List.of("/gone", "/kept"), "/kept"::equals));
+    }
+
     public void testRegisteringTwiceKeepsOneEntry() {
         assertEquals(List.of("/a", "/b"), ReviewCheckouts.with(List.of("/a", "/b"), "/a"));
         assertEquals(List.of("/b"), ReviewCheckouts.without(List.of("/a", "/b"), "/a"));
