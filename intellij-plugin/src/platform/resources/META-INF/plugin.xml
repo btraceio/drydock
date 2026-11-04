@@ -102,6 +102,8 @@
         <!-- "<task> is ready/review" and the plan halt/Continue balloons
              (TaskNotifications, T39a). -->
         <notificationGroup id="Drydock tasks" displayType="BALLOON"/>
+        <!-- "Review posted on PR #n": the pull request lane's submit (W5e). -->
+        <notificationGroup id="Drydock review" displayType="BALLOON"/>
 
         <postStartupActivity
                 implementation="app.drydock.intellij.startup.DrydockStartupActivity"/>
