@@ -21,6 +21,7 @@ import app.drydock.intellij.review.workbench.model.WorkbenchState;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.ChangeGraph;
 import app.drydock.review.DiffSelection;
+import app.drydock.review.HunkDigest;
 import app.drydock.review.PendingQuestions;
 import app.drydock.review.ReviewInstructions;
 import app.drydock.review.AnnotationStore;
@@ -29,6 +30,7 @@ import app.drydock.review.ReviewScope;
 import app.drydock.review.Triage;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Sections;
+import app.drydock.review.tour.HunkTake;
 import app.drydock.review.tour.ReviewTour;
 import app.drydock.review.tour.TourRecord;
 import app.drydock.review.tour.TourStore;
@@ -331,7 +333,11 @@ final class ReviewTabProvider {
         TriageCards cardActions = new TriageCards(
                 () -> triage, () -> scope, () -> store, this::showCardOutcome);
         inlays = new ReviewDiffInlays(ReviewDiffInlays.platformEdt(), labeledCards(
-                ReviewDiffInlays.triageCards(Clock.systemDefaultZone(), cardActions)));
+                ReviewDiffInlays.triageCards(Clock.systemDefaultZone(), cardActions)), take -> {
+                    HunkTakePanel panel = new HunkTakePanel(this::showFinding);
+                    panel.render(Optional.of(take));
+                    return panel;
+                });
         // The gutter "+" rides the same viewer changes as the finding cards:
         // a click opens the inbox composer for the line or its selection.
         ReviewGutterComments gutter = new ReviewGutterComments(
@@ -567,11 +573,12 @@ final class ReviewTabProvider {
             refresher.marksChanged();
             submitDecorationRefresh();
         }));
-        // A posted or merged tour regroups the Sections navigator.
+        // A posted or merged tour regroups the Sections navigator and redraws the file view's takes.
         refresher.onDispose(backend.tourStore().addChangeListener(scopeId -> {
             ReviewScope current = this.scope;
             if (current != null && current.id().equals(scopeId)) {
                 submitWorkbenchState();
+                submitDecorationRefresh();
             }
         }));
     }
@@ -775,7 +782,7 @@ final class ReviewTabProvider {
         AnnotationStore annotations = this.store;
         ReviewDiffInlays.Decorations decorations = annotations == null
                 ? null
-                : decorationsFor(row, annotations.forScope(scope.id()));
+                : decorationsFor(row, annotations.forScope(scope.id()), takesOf(scope));
         onEdt(() -> {
             if (disposed.get()) {
                 return;
@@ -906,6 +913,44 @@ final class ReviewTabProvider {
      */
     static ReviewDiffInlays.Decorations decorationsFor(ReviewTabModel.FileRow row,
                                                         List<ReviewAnnotation> scopeFindings) {
+        return decorationsFor(row, scopeFindings, List.of());
+    }
+
+    /**
+     * As {@link #decorationsFor(ReviewTabModel.FileRow, List)}, plus the
+     * agent's takes on the file's hunks: each one placed at its hunk's first
+     * changed row, matched by the hunk's digest.
+     */
+    static ReviewDiffInlays.Decorations decorationsFor(ReviewTabModel.FileRow row,
+                                                        List<ReviewAnnotation> scopeFindings,
+                                                        List<HunkTake> takes) {
+        Objects.requireNonNull(takes, "takes");
+        ReviewDiffInlays.Decorations findings = findingDecorations(row, scopeFindings);
+        List<ReviewDiffInlays.TakeMark> marks = new ArrayList<>();
+        for (UnifiedDiff.Hunk hunk : row.diff().hunks()) {
+            String digest = HunkDigest.of(row.path(), hunk);
+            Optional<HunkTake> take = takes.stream().filter(t -> t.hunkDigest().equals(digest)).findFirst();
+            Optional<UnifiedDiff.Line> firstChanged = hunk.lines().stream()
+                    .filter(line -> line.kind() != UnifiedDiff.Line.Kind.CONTEXT)
+                    .findFirst();
+            if (take.isPresent() && firstChanged.isPresent()) {
+                marks.add(new ReviewDiffInlays.TakeMark(
+                        ReviewDiffRequests.scrollTarget(firstChanged.get().lineKey()), take.get()));
+            }
+        }
+        return new ReviewDiffInlays.Decorations(findings.path(), findings.rowKeys(), findings.firstHunkFallback(),
+                findings.findings(), marks);
+    }
+
+    /** The stored tour's takes for {@code scope}; none without a tour. Any thread. */
+    private List<HunkTake> takesOf(ReviewScope scope) {
+        TourStore tourStore = this.tours;
+        return tourStore == null ? List.of()
+                : tourStore.forScope(scope.id()).map(record -> record.tour().takes()).orElse(List.of());
+    }
+
+    private static ReviewDiffInlays.Decorations findingDecorations(ReviewTabModel.FileRow row,
+                                                                   List<ReviewAnnotation> scopeFindings) {
         Objects.requireNonNull(row, "row");
         Objects.requireNonNull(scopeFindings, "scopeFindings");
         Set<String> rowKeys = new LinkedHashSet<>();
@@ -947,7 +992,8 @@ final class ReviewTabProvider {
             return; // nothing selected or nothing wired yet: the next selection reads fresh state
         }
         DecorationGate.Token token = decorationGate.begin(current.id(), row.path());
-        ReviewDiffInlays.Decorations decorations = decorationsFor(row, annotations.forScope(current.id()));
+        ReviewDiffInlays.Decorations decorations = decorationsFor(row, annotations.forScope(current.id()),
+                takesOf(current));
         onEdt(() -> {
             ReviewDiffInlays layer = inlays;
             if (layer == null || disposed.get()) {
@@ -1901,6 +1947,35 @@ final class ReviewTabProvider {
     }
 
     /**
+     * Shows a finding the review lists (a take's red flag): its row goes
+     * straight to the selection pipeline, as a click on it would, and the
+     * Files tab shows, which opens the finding in its file's diff. The
+     * tree's own selection is only best effort, because the state rebuild
+     * re-renders the tree. Nothing happens for a finding the review no
+     * longer lists. EDT.
+     */
+    private void showFinding(String findingId) {
+        ReviewTabModel.Snapshot rows = snapshot;
+        if (rows == null) {
+            return;
+        }
+        for (ReviewTabModel.FileRow file : rows.files()) {
+            for (ReviewTabModel.FindingRow finding : file.findings()) {
+                if (finding.id().equals(findingId)) {
+                    sectionsChoice = new WorkbenchState.SectionsChoice(
+                            Optional.of(WorkbenchState.Navigator.FILES), sectionsChoice.section());
+                    selected(finding);
+                    submitWorkbenchState();
+                    for (ReviewWorkbenchNavigator navigator : List.copyOf(navigators)) {
+                        navigator.selectFinding(file.path(), findingId);
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
+    /**
      * A section view over the live review for a new workbench editor,
      * rendered from every {@link WorkbenchState} until {@code parent} is
      * disposed. Empty when the project has no live Review content. EDT.
@@ -1980,24 +2055,7 @@ final class ReviewTabProvider {
          */
         @Override
         public void showFinding(String findingId) {
-            ReviewTabModel.Snapshot rows = snapshot;
-            if (rows == null) {
-                return;
-            }
-            for (ReviewTabModel.FileRow file : rows.files()) {
-                for (ReviewTabModel.FindingRow finding : file.findings()) {
-                    if (finding.id().equals(findingId)) {
-                        sectionsChoice = new WorkbenchState.SectionsChoice(
-                                Optional.of(WorkbenchState.Navigator.FILES), sectionsChoice.section());
-                        selected(finding);
-                        submitWorkbenchState();
-                        for (ReviewWorkbenchNavigator navigator : List.copyOf(navigators)) {
-                            navigator.selectFinding(file.path(), findingId);
-                        }
-                        return;
-                    }
-                }
-            }
+            ReviewTabProvider.this.showFinding(findingId);
         }
 
         /**
