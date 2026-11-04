@@ -287,13 +287,14 @@ reason and the phase that takes it are recorded here, so nothing lives only in a
 
 | Item | Found in | Why it was left out | Goes to |
 |---|---|---|---|
-| The agent take at each hunk start in the file view (§6) | W4 | Needs a second decoration kind in `ReviewDiffInlays`; the section cards were the surface W3 built | W4b |
-| Section cards show no finding marks or inlay cards, and no gutter "+" for comments (§4) | W3 | The cards are separate diff panels; `ReviewDiffInlays` and `ReviewGutterComments` are wired to the file view's processor only | W4b, with the same per-viewer decoration work |
+| The agent take at each hunk start in the file view (§6) | W4 | Needs a second decoration kind in `ReviewDiffInlays`; the section cards were the surface W3 built | Done in W4b |
+| Section cards show no finding marks or inlay cards, and no gutter "+" for comments (§4) | W3 | The cards are separate diff panels; `ReviewDiffInlays` and `ReviewGutterComments` are wired to the file view's processor only | Done in W4b (cards are `DiffRequestProcessor`s) |
 | The intent from the PR description (§5) | W3 | `GhCliService.PrInfo` has no body and the workbench has no PR mode | W5, with the PR lane |
 | An end-to-end run with a real agent session posting `review_tour` with `dependsOn`, intent and takes | W3, W4 | The sandbox has no agent session; the router tests cover the tool | W5's exit check, which needs a bound session for the session lane anyway |
 | The Files tree does not highlight the row after Full File or Show finding | W3, W4 | The state rebuild re-renders the tree and drops a tree selection; the diff is selected through the pipeline instead | W7 |
 | `TourMigration` drops every step's diagram when it rebuilds a step (pre-existing) | W3 | Not part of the workbench; found while threading `dependsOn` through migration | W7 |
-| The diff's finding inlay card is squeezed at a narrow centre width | W2 | Layout of `FindingInlayCard` inside the editor's inlay, not the inbox | W7 |
+| Finding cards and takes in a diff are unreadable at the workbench's default proportions: each side of the side-by-side centre is about 110 px wide, and the inlays wrap a word per line | W2, W4b | The platform clamps every component inlay to the editor viewport (`CodeReviewComponentInlayRenderer` uses `ComponentInlayAlignment.FIT_VIEWPORT_WIDTH`), and the other alignments are `@ApiStatus.Internal` on 263, so a wider inlay is not reachable through public API. The fix is the centre's width: default proportions, panes that fold, or the unified viewer when the centre is narrow | W7 |
+| A live check that a section card scrolled out of view releases its finding cards and gutter "+" | W4b | Covered by `ReviewWorkbenchSectionViewPlatformTest` (the decorations end with the card's lifetime); the robot run checked a card in view only | W7 |
 | The Review tool window's decisions bar text overlaps its Send button | W2 | Tool-window layout; the tool window is being reduced to a launcher | W6 |
 
 **Plugin first; the dual-tree rule is waived for this work** (operator decision,
