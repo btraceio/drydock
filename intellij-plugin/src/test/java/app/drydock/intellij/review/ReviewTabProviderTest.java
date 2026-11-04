@@ -242,6 +242,46 @@ class ReviewTabProviderTest {
     }
 
     @Test
+    void aSectionCardsFragmentsAreItsOwnHunksAtTheirAbsoluteLines() {
+        UnifiedDiff.Hunk first = hunk(ctx(1, 1, "one"), add(2, "two"), add(3, "three"), ctx(2, 4, "four"));
+        UnifiedDiff.Hunk second = hunk(ctx(9, 11, "nine"), del(10), ctx(11, 12, "eleven"));
+        UnifiedDiff.FileDiff file = file("src/A.java", first, second);
+
+        UnifiedDiff.FileDiff onlySecond = ReviewTabProvider.onlyHunk(file, 1);
+
+        assertEquals(List.of(second), onlySecond.hunks());
+        assertEquals(List.of(), ReviewTabProvider.onlyHunk(file, 2).hunks(), "an index past the end: no hunk");
+        List<LineFragment> fragments = ReviewFragments.fragmentsFor(onlySecond,
+                "one\nfour\nl3\nl4\nl5\nl6\nl7\nl8\nnine\nten\neleven\n",
+                "one\ntwo\nthree\nfour\nl3\nl4\nl5\nl6\nl7\nl8\nnine\neleven\n");
+        assertEquals(1, fragments.size(), "the first hunk is not a change on the card");
+        assertEquals(9, fragments.getFirst().getStartLine1(), "the deletion at old line 10 (0-based 9)");
+        assertEquals(10, fragments.getFirst().getEndLine1());
+        assertEquals(11, fragments.getFirst().getStartLine2(), "paired after the omitted hunk's two insertions");
+        assertEquals(11, fragments.getFirst().getEndLine2());
+    }
+
+    @Test
+    void aSectionCardsDecorationsAreTheFindingsOnItsHunksRows() {
+        UnifiedDiff.Hunk first = hunk(ctx(1, 1, "one"), add(2, "two"), ctx(2, 3, "three"));
+        UnifiedDiff.Hunk second = hunk(ctx(9, 10, "nine"), del(10), ctx(11, 11, "eleven"));
+        UnifiedDiff.FileDiff file = file("src/A.java", first, second);
+        ReviewAnnotation onFirst = finding("f-first", "src/A.java", "n2", Triage.PROPOSED, AnnotationStatus.OPEN);
+        ReviewAnnotation onSecond = finding("f-second", "src/A.java", "o10", Triage.PROPOSED,
+                AnnotationStatus.OPEN);
+        ReviewTabModel.FileRow row = ReviewTabModel.snapshot(new ReviewTabModel.Inputs(diff(file),
+                List.of(onFirst, onSecond), List.of(), Optional.empty())).files().getFirst();
+
+        ReviewDiffInlays.Decorations decorations = ReviewTabProvider.hunkDecorations(row, 1,
+                List.of(onFirst, onSecond));
+
+        assertEquals(Set.of("n10", "o10", "n11"), decorations.rowKeys(), "only the second hunk's rows");
+        assertEquals(List.of(onSecond), decorations.findings(), "the first hunk's finding stays off the card");
+        assertEquals(ReviewFindingPlacement.firstHunkFallback(ReviewTabProvider.onlyHunk(file, 1)),
+                decorations.firstHunkFallback());
+    }
+
+    @Test
     void aPendingFindingTargetSelectsItsFindingAndNoTargetSelectsNothing() {
         List<String[]> selections = new ArrayList<>();
         BiConsumer<String, String> selectFinding = (file, id) -> selections.add(new String[] {file, id});

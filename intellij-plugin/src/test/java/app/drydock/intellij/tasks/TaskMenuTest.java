@@ -169,13 +169,15 @@ class TaskMenuTest {
     }
 
     @Test
-    void pullRequestRowOffersQuickReviewThenModelReviewThenGitHub() {
+    void pullRequestRowOffersTheWorkbenchThenTheAgentReviewsThenGitHub() {
         assertEquals(List.of(
+                List.of(TaskMenu.Item.OPEN_IN_WORKBENCH),
                 List.of(TaskMenu.Item.QUICK_REVIEW, TaskMenu.Item.REVIEW, TaskMenu.Item.REVIEW_IN_SPHINX),
                 List.of(TaskMenu.Item.OPEN_IN_GITHUB)),
                 sectionsOf(pullRequest(Optional.of("https://github.com/DataDog/profiling-backend/pull/40"))));
-        // No URL, no second section: never an empty one.
-        assertEquals(List.of(List.of(TaskMenu.Item.QUICK_REVIEW, TaskMenu.Item.REVIEW, TaskMenu.Item.REVIEW_IN_SPHINX)),
+        // No URL, no last section: never an empty one.
+        assertEquals(List.of(List.of(TaskMenu.Item.OPEN_IN_WORKBENCH),
+                        List.of(TaskMenu.Item.QUICK_REVIEW, TaskMenu.Item.REVIEW, TaskMenu.Item.REVIEW_IN_SPHINX)),
                 sectionsOf(pullRequest(Optional.empty())));
     }
 

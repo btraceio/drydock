@@ -228,4 +228,27 @@ class SectionsModelTest {
 
         assertFalse(snapshot.sections().getFirst().hunks().getFirst().reviewed());
     }
+
+    private static SectionsModel.Section counted(int number, int reviewed, int total) {
+        return new SectionsModel.Section("computed:" + number, number, Optional.empty(), "T" + number, "",
+                List.of(), List.of(), List.of(), reviewed, total, 0);
+    }
+
+    @Test
+    void theNextUnreviewedSectionFollowsInOrderAndWrapsToTheFirst() {
+        SectionsModel.Snapshot snapshot = new SectionsModel.Snapshot(SectionsModel.Source.COMPUTED, Optional.empty(),
+                List.of(counted(1, 0, 2), counted(2, 1, 1), counted(3, 2, 2), counted(4, 0, 1)));
+
+        assertEquals(Optional.of("computed:4"),
+                SectionsModel.nextUnreviewed(snapshot, "computed:2").map(SectionsModel.Section::key),
+                "§3 is reviewed: §4");
+        assertEquals(Optional.of("computed:1"),
+                SectionsModel.nextUnreviewed(snapshot, "computed:4").map(SectionsModel.Section::key),
+                "after the last: wraps to §1");
+        assertEquals(Optional.empty(), SectionsModel.nextUnreviewed(snapshot, "nope"));
+        SectionsModel.Snapshot done = new SectionsModel.Snapshot(SectionsModel.Source.COMPUTED, Optional.empty(),
+                List.of(counted(1, 1, 1), counted(2, 0, 3)));
+        assertEquals(Optional.empty(), SectionsModel.nextUnreviewed(done, "computed:2"),
+                "every other section is reviewed: none, not the current one");
+    }
 }

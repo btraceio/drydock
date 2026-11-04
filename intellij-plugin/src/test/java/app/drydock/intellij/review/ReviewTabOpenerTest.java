@@ -331,6 +331,19 @@ class ReviewTabOpenerTest {
                 "launch: /repo scope-1"), calls);
     }
 
+    /** An open without the offer (a PR opened in the workbench) opens the window and asks nothing. */
+    @Test
+    void anOpenWithoutTheOfferNeverOffersAnEmptyReview() {
+        ReviewTabOpener opener = opener(scopeSource(), new RecordingPreparation(false, true));
+
+        opener.openIn(project("/repo"), Optional.empty(), false);
+
+        assertTrue(calls.contains("openWorkbench"), calls::toString);
+        assertTrue(calls.contains("reloadTab"), calls::toString);
+        assertTrue(calls.stream().noneMatch(call -> call.startsWith("offer") || call.startsWith("launch")),
+                calls::toString);
+    }
+
     /** A checkout with review data (findings or a tour) opens exactly as before — no offer, no nag. */
     @Test
     void aReviewWithFindingsOffersNothing() {

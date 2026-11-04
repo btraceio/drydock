@@ -968,6 +968,37 @@ final class ReviewTabProvider {
                 findings.findings(), marks);
     }
 
+    /** {@code file} with only its hunk {@code hunkIndex} (pure); none when the index is out of range. */
+    static UnifiedDiff.FileDiff onlyHunk(UnifiedDiff.FileDiff file, int hunkIndex) {
+        List<UnifiedDiff.Hunk> hunks = hunkIndex >= 0 && hunkIndex < file.hunks().size()
+                ? List.of(file.hunks().get(hunkIndex))
+                : List.of();
+        return new UnifiedDiff.FileDiff(file.path(), file.kind(), file.insertions(), file.deletions(), file.staged(),
+                file.untracked(), hunks, file.oldPath());
+    }
+
+    /**
+     * A section card's decorations (pure): the findings on its hunk's rows,
+     * so a card does not draw the file's other findings on code it folds
+     * away. The row keys and the fallback are the hunk's own.
+     */
+    static ReviewDiffInlays.Decorations hunkDecorations(ReviewTabModel.FileRow row, int hunkIndex,
+                                                        List<ReviewAnnotation> scopeFindings) {
+        UnifiedDiff.FileDiff hunkOnly = onlyHunk(row.diff(), hunkIndex);
+        Set<String> rowKeys = new LinkedHashSet<>();
+        for (UnifiedDiff.Hunk hunk : hunkOnly.hunks()) {
+            for (UnifiedDiff.Line line : hunk.lines()) {
+                rowKeys.add(line.lineKey());
+            }
+        }
+        List<ReviewAnnotation> onHunk = scopeFindings.stream()
+                .filter(finding -> finding.file().equals(row.path()) && !finding.resolved())
+                .filter(finding -> rowKeys.contains(finding.startKey()))
+                .toList();
+        return new ReviewDiffInlays.Decorations(row.path(), rowKeys,
+                ReviewFindingPlacement.firstHunkFallback(hunkOnly), onHunk);
+    }
+
     /** The stored tour's takes for {@code scope}; none without a tour. Any thread. */
     private List<HunkTake> takesOf(ReviewScope scope) {
         TourStore tourStore = this.tours;
@@ -2136,6 +2167,12 @@ final class ReviewTabProvider {
         };
     }
 
+    /** The scope of {@code project}'s live review, once one is loaded. Any thread. */
+    static Optional<ReviewScope> liveScope(Project project) {
+        ReviewTabProvider provider = project.getUserData(LIVE_PROVIDER);
+        return provider == null || provider.disposed.get() ? Optional.empty() : Optional.ofNullable(provider.scope);
+    }
+
     /**
      * A findings inbox over the live review for a new workbench editor,
      * rendered from every {@link WorkbenchState} until {@code parent} is
@@ -2242,7 +2279,7 @@ final class ReviewTabProvider {
          * longer match the diff's rows (the file changed since).
          */
         @Override
-        public CompletableFuture<Optional<ReviewDiffRequests.RequestContext>> hunkContext(String path,
+        public CompletableFuture<Optional<ReviewDiffRequests.RequestContext>> hunkContext(String path, int hunkIndex,
                                                                                         String scrollKey) {
             ReviewScope current = scope;
             ReviewContents texts = contents;
@@ -2264,7 +2301,9 @@ final class ReviewTabProvider {
                     if (!ReviewContents.matchesRows(left, file, false) || !ReviewContents.matchesRows(right, file, true)) {
                         return Optional.<ReviewDiffRequests.RequestContext>empty();
                     }
-                    List<LineFragment> fragments = ReviewFragments.fragmentsFor(file, left, right);
+                    // Only this hunk's fragments: the viewer then folds the file's other changes like
+                    // unchanged code, and the card shows the change its section is about.
+                    List<LineFragment> fragments = ReviewFragments.fragmentsFor(onlyHunk(file, hunkIndex), left, right);
                     Optional<Path> worktreeFile = worktreeFileOf(current, rootFor(current), file);
                     ReviewDiffContents.warm(worktreeFile);
                     return Optional.of(new ReviewDiffRequests.RequestContext(path, ReviewDiffRequests.plan(left,
@@ -2299,6 +2338,11 @@ final class ReviewTabProvider {
             ReviewTabProvider.this.showFinding(findingId);
         }
 
+        @Override
+        public void showSection(String key) {
+            sectionChosen(key);
+        }
+
         /**
          * A card's own decoration layer and gutter "+", as the file view's:
          * the file's finding cards, gutter marks and ranges (its take is in
@@ -2306,7 +2350,7 @@ final class ReviewTabProvider {
          * every store change, until {@code lifetime} ends.
          */
         @Override
-        public Consumer<FrameDiffTool.DiffViewer> decorator(String path, Disposable lifetime) {
+        public Consumer<FrameDiffTool.DiffViewer> decorator(String path, int hunkIndex, Disposable lifetime) {
             ReviewDiffInlays layer = new ReviewDiffInlays(ReviewDiffInlays.platformEdt(), labeledCards(
                     ReviewDiffInlays.triageCards(Clock.systemDefaultZone(), cardActions)));
             ReviewGutterComments gutter = new ReviewGutterComments(
@@ -2327,8 +2371,8 @@ final class ReviewTabProvider {
                             return;
                         }
                         rows.files().stream().filter(row -> row.path().equals(path)).findFirst().ifPresent(row -> {
-                            ReviewDiffInlays.Decorations decorations =
-                                    decorationsFor(row, annotations.forScope(current.id()));
+                            ReviewDiffInlays.Decorations decorations = hunkDecorations(row, hunkIndex,
+                                    annotations.forScope(current.id()));
                             onEdt(() -> {
                                 if (!ended.get()) {
                                     layer.setDecorations(decorations);

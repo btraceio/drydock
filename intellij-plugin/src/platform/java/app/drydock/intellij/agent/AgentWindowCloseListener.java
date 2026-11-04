@@ -1,6 +1,7 @@
 package app.drydock.intellij.agent;
 
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.intellij.review.ReviewCheckouts;
 import app.drydock.intellij.startup.DrydockStartupActivity;
 import app.drydock.intellij.tasks.TaskWindows;
 
@@ -10,6 +11,7 @@ import org.jetbrains.annotations.NotNull;
 
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -37,6 +39,9 @@ public final class AgentWindowCloseListener implements ProjectManagerListener {
     @Override
     public void projectClosing(@NotNull Project project) {
         TaskWindows.windowClosing(project, AgentCloseConfirmation.isQuitting());
+        if (!AgentCloseConfirmation.isQuitting() && project.getBasePath() != null) {
+            ReviewCheckouts.forget(Path.of(project.getBasePath()));
+        }
         AgentExecutionRegistry registry = AgentExecutionRegistry.getInstance();
         List<ManagedSessionId> running = registry.runningShownIn(project);
         Optional<CloseWindowPlan.Decision> decision = Optional.ofNullable(

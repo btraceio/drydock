@@ -358,6 +358,29 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 TaskMenu.urlOf(e.getData(SELECTED_NODE)).ifPresent(BrowserUtil::browse);
             }
         };
+        // A pull request's workbench, with no agent: the PR checked out into
+        // its worktree and that worktree's window showing its Review tab,
+        // where the reviewer reads the change and can ask for a review.
+        AnAction openInWorkbench = new DumbAwareAction("Open in Review Workbench",
+                "Check the pull request out into its own worktree and open its review workbench there",
+                AllIcons.Actions.Diff) {
+            @Override
+            public void update(@NotNull AnActionEvent e) {
+                TaskActions.present(e, e.getData(SELECTED_NODE) instanceof PullRequestRow);
+            }
+
+            @Override
+            public @NotNull ActionUpdateThread getActionUpdateThread() {
+                return ActionUpdateThread.EDT;
+            }
+
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                if (e.getData(SELECTED_NODE) instanceof PullRequestRow pullRequest) {
+                    openPullRequestInWorkbench(pullRequest.mainRoot(), pullRequest);
+                }
+            }
+        };
         // "Review…" asks for the starting model and re-records the choice:
         // a pull request is first checked out into its own worktree, an
         // idle worktree starts the session right there.
@@ -532,6 +555,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         menuActions.put(TaskMenu.Item.NEW_TASK, newTask);
         menuActions.put(TaskMenu.Item.NEW_TASK_IN_MAIN, newTaskInMain);
         menuActions.put(TaskMenu.Item.OPEN_IN_GITHUB, openInGitHub);
+        menuActions.put(TaskMenu.Item.OPEN_IN_WORKBENCH, openInWorkbench);
         menuActions.put(TaskMenu.Item.QUICK_REVIEW, quickReview);
         menuActions.put(TaskMenu.Item.REVIEW, review);
         menuActions.put(TaskMenu.Item.REVIEW_IN_SPHINX, reviewInSphinx);
@@ -641,7 +665,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                     pullRequest.pullRequest().url().ifPresent(BrowserUtil::browse);
                 } else if (node instanceof PullRequestRow pullRequest && primaryButton
                         && event.getClickCount() == 1 && onLink(path, event)) {
-                    reviewPullRequest(path, pullRequest);
+                    projectRootOf(path).ifPresent(root -> openPullRequestInWorkbench(root, pullRequest));
                 }
             }
         });
@@ -724,8 +748,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
      */
     static Set<TaskMenu.Item> panelMenuItems() {
         return EnumSet.of(TaskMenu.Item.SWITCH_TO_TASK, TaskMenu.Item.NEW_TASK, TaskMenu.Item.NEW_TASK_IN_MAIN,
-                TaskMenu.Item.OPEN_IN_GITHUB, TaskMenu.Item.OPEN_IN_JIRA, TaskMenu.Item.QUICK_REVIEW,
-                TaskMenu.Item.REVIEW, TaskMenu.Item.REVIEW_IN_SPHINX,
+                TaskMenu.Item.OPEN_IN_GITHUB, TaskMenu.Item.OPEN_IN_JIRA, TaskMenu.Item.OPEN_IN_WORKBENCH,
+                TaskMenu.Item.QUICK_REVIEW, TaskMenu.Item.REVIEW, TaskMenu.Item.REVIEW_IN_SPHINX,
                 TaskMenu.Item.IMPLEMENT, TaskMenu.Item.TRIAGE,
                 TaskMenu.Item.GITHUB_SETTINGS, TaskMenu.Item.JIRA_SETTINGS,
                 TaskMenu.Item.ADD_JIRA_GROUP, TaskMenu.Item.EDIT_JIRA_GROUP, TaskMenu.Item.DELETE_JIRA_GROUP,
@@ -1031,9 +1055,15 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         });
     }
 
-    /** Starts the review materialization for the clicked pull request. EDT. */
-    private void reviewPullRequest(TreePath path, PullRequestRow pullRequest) {
-        reviewPullRequest(projectRootOf(path).orElse(null), pullRequest);
+    /** Opens the pull request's review workbench in its worktree's window. EDT. */
+    private void openPullRequestInWorkbench(Path mainRoot, PullRequestRow pullRequest) {
+        if (mainRoot == null) {
+            return;
+        }
+        String repositoryName = DrydockPluginService.getInstance().sharedProjects().byRoot(mainRoot)
+                .map(SharedProject::displayName)
+                .orElseGet(() -> String.valueOf(mainRoot.getFileName()));
+        pullRequestReview.openInWorkbench(project, mainRoot, repositoryName, pullRequest.pullRequest());
     }
 
     private void reviewPullRequest(Path mainRoot, PullRequestRow pullRequest) {

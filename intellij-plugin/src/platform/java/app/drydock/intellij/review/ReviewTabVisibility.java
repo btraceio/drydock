@@ -13,8 +13,9 @@ import java.util.function.Predicate;
 
 /**
  * The Review tab's visibility predicate (Q8): the tab shows in a window
- * only when a Drydock session covers that window's checkout, so windows
- * with no Drydock session carry no empty fifth tab.
+ * only when a Drydock session covers that window's checkout, or the
+ * checkout was opened for review with no agent ({@link ReviewCheckouts}),
+ * so windows with no Drydock session carry no empty fifth tab.
  *
  * <p>Registered as the {@code changesViewContent} entry's
  * {@code predicateClassName}. {@code ChangesViewContentEP.newPredicateInstance}
@@ -71,11 +72,15 @@ final class ReviewTabVisibility implements Predicate<Project> {
 
     /**
      * Whether any in-memory session's working directory is {@code base} by
-     * real path. Package-private: the tab's provider (T13) shows the same
-     * rule's negative as the {@link ReviewTabStatus#NO_SESSION} state, so
-     * the predicate and the empty state can never disagree.
+     * real path, or {@code base} was opened for review with no agent
+     * ({@link ReviewCheckouts}). Package-private: the tab's provider (T13)
+     * shows the same rule's negative as the {@link ReviewTabStatus#NO_SESSION}
+     * state, so the predicate and the empty state can never disagree.
      */
     static boolean covers(DrydockPluginService plugin, Path base) {
+        if (ReviewCheckouts.covers(base)) {
+            return true;
+        }
         Path realBase = realPath(base);
         if (realBase == null) {
             return false; // the base path itself is gone: nothing can cover it

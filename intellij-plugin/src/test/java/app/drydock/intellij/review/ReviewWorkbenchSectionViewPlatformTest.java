@@ -34,9 +34,9 @@ public class ReviewWorkbenchSectionViewPlatformTest extends BasePlatformTestCase
 
     private final ReviewWorkbenchSectionView.Actions actions = new ReviewWorkbenchSectionView.Actions() {
         @Override
-        public CompletableFuture<Optional<ReviewDiffRequests.RequestContext>> hunkContext(String path,
+        public CompletableFuture<Optional<ReviewDiffRequests.RequestContext>> hunkContext(String path, int hunkIndex,
                                                                                         String scrollKey) {
-            calls.add("context " + path + " " + scrollKey);
+            calls.add("context " + path + " " + hunkIndex + " " + scrollKey);
             return CompletableFuture.completedFuture(Optional.of(new ReviewDiffRequests.RequestContext(path,
                     ReviewDiffRequests.plan("a\nb\n", "a\nc\n", List.of(),
                             new ReviewDiffRequests.ScrollTarget(Side.RIGHT, 1)))));
@@ -59,7 +59,12 @@ public class ReviewWorkbenchSectionViewPlatformTest extends BasePlatformTestCase
         }
 
         @Override
-        public Consumer<FrameDiffTool.DiffViewer> decorator(String path, Disposable lifetime) {
+        public void showSection(String key) {
+            calls.add("showSection " + key);
+        }
+
+        @Override
+        public Consumer<FrameDiffTool.DiffViewer> decorator(String path, int hunkIndex, Disposable lifetime) {
             calls.add("decorator " + path);
             Disposer.register(lifetime, () -> calls.add("decorations released " + path));
             return viewer -> calls.add("viewer " + (viewer == null ? "none" : viewer.getClass().getSimpleName()));
@@ -116,6 +121,81 @@ public class ReviewWorkbenchSectionViewPlatformTest extends BasePlatformTestCase
                 new SectionsModel.Snapshot(SectionsModel.Source.TOUR, Optional.empty(), List.of(section)),
                 new WorkbenchState.SectionsChoice(Optional.of(WorkbenchState.Navigator.SECTIONS),
                         Optional.of("step:s2")));
+    }
+
+    private static SectionsModel.Section section(int number, SectionsModel.Hunk... hunks) {
+        int reviewed = (int) List.of(hunks).stream().filter(SectionsModel.Hunk::reviewed).count();
+        return new SectionsModel.Section("step:s" + number, number, Optional.of("s" + number), "Step " + number, "",
+                List.of(), List.of(), List.of(hunks), reviewed, hunks.length, 0);
+    }
+
+    /** The Sections tab showing {@code shown} of {@code sections}. */
+    private static WorkbenchState state(int shown, SectionsModel.Section... sections) {
+        return WorkbenchState.of("drydock", WorkbenchState.Mode.LOCAL, new ReviewTabModel.Snapshot(List.of(), 0, 0),
+                WorkbenchState.Filter.ALL, Optional.empty(), WorkbenchState.View.CHANGES_ONLY, List.of(),
+                WorkbenchState.InboxChoice.DEFAULT,
+                new SectionsModel.Snapshot(SectionsModel.Source.TOUR, Optional.empty(), List.of(sections)),
+                new WorkbenchState.SectionsChoice(Optional.of(WorkbenchState.Navigator.SECTIONS),
+                        Optional.of("step:s" + shown)));
+    }
+
+    public void testASectionsLastMarkMovesToTheNextSectionWithWorkLeftWrappingAround() {
+        ReviewWorkbenchSectionView view = new ReviewWorkbenchSectionView(getProject(), actions);
+        try {
+            SectionsModel.Section first = section(1, hunk("A", false, Optional.empty()));
+            SectionsModel.Section third = section(3, hunk("C", true, Optional.empty()));
+            view.render(state(2, first, section(2, hunk("B", false, Optional.empty())), third));
+            view.markSection.doClick();
+            PlatformTestUtil.dispatchAllEventsInIdeEventQueue();
+            view.render(state(2, first, section(2, hunk("B", false, Optional.empty())), third));
+            assertEquals("a state from before the write does not move on yet", List.of("mark step:s2 [d-B]"), calls);
+
+            view.render(state(2, first, section(2, hunk("B", true, Optional.empty())), third));
+            assertEquals("§3 is reviewed: the next with work left is §1",
+                    List.of("mark step:s2 [d-B]", "showSection step:s1"), calls);
+            view.render(state(2, first, section(2, hunk("B", true, Optional.empty())), third));
+            assertEquals("once only", 2, calls.size());
+        } finally {
+            Disposer.dispose(view);
+        }
+    }
+
+    public void testAMarkThatLeavesTheSectionOpenOrEndsTheReviewDoesNotMove() {
+        ReviewWorkbenchSectionView view = new ReviewWorkbenchSectionView(getProject(), actions);
+        try {
+            SectionsModel.Section other = section(1, hunk("Z", true, Optional.empty()));
+            view.render(state(2, other, section(2, hunk("A", false, Optional.empty()),
+                    hunk("B", false, Optional.empty()))));
+            view.cards.get(0).markButton.doClick();
+            PlatformTestUtil.dispatchAllEventsInIdeEventQueue();
+            view.render(state(2, other, section(2, hunk("A", true, Optional.empty()),
+                    hunk("B", false, Optional.empty()))));
+            assertEquals("one hunk of two: the section stays", List.of("mark step:s2 [d-A]"), calls);
+
+            view.cards.get(1).markButton.doClick();
+            PlatformTestUtil.dispatchAllEventsInIdeEventQueue();
+            view.render(state(2, other, section(2, hunk("A", true, Optional.empty()),
+                    hunk("B", true, Optional.empty()))));
+            assertEquals(List.of("mark step:s2 [d-A]", "mark step:s2 [d-B]"), calls);
+            assertEquals(ReviewWorkbenchSectionView.ALL_REVIEWED, view.notice.getText());
+        } finally {
+            Disposer.dispose(view);
+        }
+    }
+
+    public void testARefusedMarkDoesNotMove() {
+        marked = CompletableFuture.completedFuture(Optional.of("refused"));
+        ReviewWorkbenchSectionView view = new ReviewWorkbenchSectionView(getProject(), actions);
+        try {
+            SectionsModel.Section first = section(1, hunk("A", false, Optional.empty()));
+            view.render(state(2, first, section(2, hunk("B", false, Optional.empty()))));
+            view.markSection.doClick();
+            PlatformTestUtil.dispatchAllEventsInIdeEventQueue();
+            view.render(state(2, first, section(2, hunk("B", true, Optional.empty()))));
+            assertEquals(List.of("mark step:s2 [d-B]"), calls);
+        } finally {
+            Disposer.dispose(view);
+        }
     }
 
     private static final SectionsModel.Settled IN_FIRST = new SectionsModel.Settled(1, "Widgets");
@@ -178,7 +258,7 @@ public class ReviewWorkbenchSectionViewPlatformTest extends BasePlatformTestCase
             layOut(view);
             view.updateLiveCards();
             PlatformTestUtil.dispatchAllEventsInIdeEventQueue();
-            assertEquals("context src/A.java n3", calls.getFirst());
+            assertEquals("context src/A.java 0 n3", calls.getFirst());
             assertTrue("the card in view has its diff", view.cards.get(0).live());
 
             ReviewWorkbenchSectionView.Card card = view.cards.get(0);

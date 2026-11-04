@@ -60,6 +60,8 @@ final class TaskMenu {
         /** Resume, or Start when there is no conversation to resume into. */
         RESUME,
         RESUME_IN_OWN_WINDOW,
+        /** Check a pull request out into its worktree and open its review workbench, with no agent. */
+        OPEN_IN_WORKBENCH,
         /** Review with the repository's remembered starting model. */
         QUICK_REVIEW,
         REVIEW,
@@ -114,6 +116,7 @@ final class TaskMenu {
             case null -> List.of();
             case TaskRow row -> row.running() ? running(row, facts) : idle(row);
             case PullRequestRow ignored -> nonEmpty(List.of(
+                    List.of(Item.OPEN_IN_WORKBENCH),
                     List.of(Item.QUICK_REVIEW, Item.REVIEW, Item.REVIEW_IN_SPHINX),
                     section(urlOf(node).isPresent() ? Item.OPEN_IN_GITHUB : null)));
             case IssueRow ignored -> nonEmpty(List.of(
