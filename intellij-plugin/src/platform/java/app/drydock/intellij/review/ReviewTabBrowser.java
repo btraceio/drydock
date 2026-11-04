@@ -136,7 +136,50 @@ public final class ReviewTabBrowser extends AsyncChangesBrowserBase {
      */
     public void accept(ReviewTabModel.Snapshot snapshot) {
         tree.accept(snapshot);
-        rebuild(this::applyPendingSelection);
+        rebuild(() -> {
+            restoreSelection();
+            applyPendingSelection();
+        });
+    }
+
+    /**
+     * The selected row, by its stable keys: its file path, and the finding
+     * id for a finding row (none for a file row). Kept so a rebuild, which
+     * drops the tree's selection, can select the same row again. EDT.
+     */
+    private record Selected(String filePath, Optional<String> findingId) {
+    }
+
+    private Selected selected;
+    /** Set while the browser reselects a row itself: the consumer already shows it, so it is not told again. */
+    private boolean restoring;
+
+    /**
+     * Selects the remembered row again after a rebuild dropped it, without
+     * telling the consumer, whose diff already shows that row (and may be
+     * scrolled to a line of it). A row the new snapshot no longer has is
+     * forgotten. EDT.
+     */
+    private void restoreSelection() {
+        Selected remembered = selected;
+        if (remembered == null || getViewer().getSelectionPath() != null) {
+            return;
+        }
+        Object root = getViewer().getModel().getRoot();
+        TreePath path = remembered.findingId()
+                .map(id -> findingPath(root, remembered.filePath(), id))
+                .orElseGet(() -> filePath(root, remembered.filePath()));
+        if (path == null) {
+            selected = null;
+            return;
+        }
+        restoring = true;
+        try {
+            getViewer().expandPath(path.getParentPath());
+            getViewer().setSelectionPath(path);
+        } finally {
+            restoring = false;
+        }
     }
 
     /**
@@ -213,7 +256,12 @@ public final class ReviewTabBrowser extends AsyncChangesBrowserBase {
         }
         if (path.getLastPathComponent() instanceof ChangesBrowserNode<?> node) {
             Object row = selectableRow(node);
-            if (row != null) {
+            if (row instanceof ReviewTabModel.FileRow file) {
+                selected = new Selected(file.path(), Optional.empty());
+            } else if (row instanceof ReviewTabModel.FindingRow finding) {
+                selected = new Selected(finding.annotation().file(), Optional.of(finding.id()));
+            }
+            if (row != null && !restoring) {
                 selection.accept(row);
             }
         }
