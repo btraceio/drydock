@@ -31,6 +31,7 @@ import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.agent.api.AgentRegistry;
 import app.drydock.ui.AgentLabels;
+import app.drydock.review.ReviewDiffs;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.review.ReviewScopeRegistry;
@@ -330,8 +331,9 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
         }
         DiffScope diffScope = scope.diffScope();
         try {
-            return diffService.diff(scope.diffRoot(), diffScope, scope.base(),
-                    DiffService.REVIEW_CONTEXT_LINES).get(JOIN_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            // The workbench hides untracked IDE files; the agent reads the same diff without them.
+            return ReviewDiffs.withoutIdeNoise(diffService.diff(scope.diffRoot(), diffScope, scope.base(),
+                    DiffService.REVIEW_CONTEXT_LINES).get(JOIN_TIMEOUT_SECONDS, TimeUnit.SECONDS));
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new McpToolException("Interrupted while diffing " + scope.diffRoot());

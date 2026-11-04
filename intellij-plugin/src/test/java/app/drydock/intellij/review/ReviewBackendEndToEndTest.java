@@ -187,6 +187,23 @@ class ReviewBackendEndToEndTest {
     }
 
     @Test
+    void theAgentsReviewDiffLeavesOutUntrackedIdeFilesAsTheWorkbenchDoes() throws Exception {
+        Path wt = base.resolve("fixture").resolve("wt");
+        Files.createDirectories(wt.resolve(".idea"));
+        Files.writeString(wt.resolve(".idea/workspace.xml"), "<project/>\n");
+        Files.writeString(wt.resolve("src/B.java"), "class B {}\n");
+
+        JsonValue scopeResult = callTool("review_scope", JsonObject.empty().put("scopeId", new JsonString(scope.id())));
+
+        List<String> files = array(field(scopeResult, "hunks")).stream()
+                .map(hunk -> str(hunk, "id").replaceFirst("^h_", "").replaceFirst("_\\d+$", ""))
+                .distinct().toList();
+        assertTrue(files.contains("src/B.java"), "an untracked source file is review material: " + files);
+        assertFalse(files.stream().anyMatch(file -> file.startsWith(".idea/")),
+                "an untracked IDE file is not: " + files);
+    }
+
+    @Test
     void closeFlushesAPostedTourToDisk() throws Exception {
         JsonObject anchor = JsonObject.empty()
                 .put("file", new JsonString("src/A.java"))

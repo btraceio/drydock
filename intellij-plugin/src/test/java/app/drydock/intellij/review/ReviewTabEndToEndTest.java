@@ -81,11 +81,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * call {@code review_scope} itself makes -- so a human and an agent can
  * never be shown different code under the same scope id.
  *
- * <p>The fixture carries the rows AC4's comparison has to subtract: an
- * untracked {@code .idea/workspace.xml} and an untracked {@code *.iml}
- * (both in the tool's file list, both hidden by the snapshot) next to a
- * tracked, modified {@code .idea/codeStyles/Project.xml} (in both lists),
- * so the equality proves the filter drops exactly the untracked IDE noise
+ * <p>The fixture carries the rows both sides leave out: an untracked
+ * {@code .idea/workspace.xml} and an untracked {@code *.iml} (in the raw
+ * diff, in neither list) next to a tracked, modified
+ * {@code .idea/codeStyles/Project.xml} (in both lists), so the equality
+ * proves the one filter both apply drops exactly the untracked IDE noise
  * and nothing else. No {@code sections}/{@code impact} includes are
  * requested: those parse every changed file and would load tree-sitter
  * natives into this JVM, which this page does not need.</p>
@@ -94,7 +94,7 @@ class ReviewTabEndToEndTest {
 
     private static final String TOKEN_HEADER = "X-Drydock-Session-Token";
 
-    /** The fixture's untracked IDE noise rows: what the snapshot must drop. */
+    /** The fixture's untracked IDE noise rows: what both sides leave out. */
     private static final Set<String> UNTRACKED_NOISE = Set.of(".idea/workspace.xml", "drydock-scratch.iml");
 
     @TempDir
@@ -204,18 +204,18 @@ class ReviewTabEndToEndTest {
             toolFiles.add(str(file, "path"));
         }
         // The fixture exercises both sides of the filter before the
-        // equality is worth anything: the noise rows are in the tool's list,
+        // equality is worth anything: the noise rows are in the raw diff,
         // and the tracked .idea edit is review material.
-        assertTrue(toolFiles.contains(".idea/workspace.xml"), toolFiles.toString());
-        assertTrue(toolFiles.contains("drydock-scratch.iml"), toolFiles.toString());
+        List<String> rawFiles = diff.files().stream().map(UnifiedDiff.FileDiff::path).toList();
+        assertTrue(rawFiles.containsAll(UNTRACKED_NOISE), rawFiles.toString());
+        assertTrue(toolFiles.stream().noneMatch(UNTRACKED_NOISE::contains),
+                "the agent is not shown the untracked IDE noise: " + toolFiles);
         assertTrue(toolFiles.contains(".idea/codeStyles/Project.xml"), toolFiles.toString());
 
         List<String> snapshotFiles = snapshot.files().stream()
                 .map(ReviewTabModel.FileRow::path).toList();
-        assertEquals(toolFiles.stream().filter(path -> !UNTRACKED_NOISE.contains(path))
-                        .sorted().toList(),
-                snapshotFiles,
-                "the snapshot's files are the tool's files minus the untracked IDE noise");
+        assertEquals(toolFiles.stream().sorted().toList(), snapshotFiles,
+                "the agent and the reviewer are shown the same files");
 
         // Per-file hunk ids: the wire's flatten order is file by file, hunk
         // by hunk, which is exactly the snapshot's per-row list order.
@@ -224,10 +224,8 @@ class ReviewTabEndToEndTest {
             toolHunkIds.computeIfAbsent(str(hunk, "file"), file -> new ArrayList<>())
                     .add(str(hunk, "id"));
         }
-        // The noise rows carry hunks the tool happily reports; the snapshot
-        // dropped the whole files, so their ids must not leak in anywhere.
-        assertTrue(toolHunkIds.containsKey(".idea/workspace.xml"), toolHunkIds.toString());
-        assertTrue(toolHunkIds.containsKey("drydock-scratch.iml"), toolHunkIds.toString());
+        // Neither side reports the noise rows' hunks.
+        assertTrue(UNTRACKED_NOISE.stream().noneMatch(toolHunkIds::containsKey), toolHunkIds.toString());
 
         for (ReviewTabModel.FileRow row : snapshot.files()) {
             List<String> toolIds = toolHunkIds.get(row.path());

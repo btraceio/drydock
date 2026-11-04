@@ -4,6 +4,7 @@ import app.drydock.git.UnifiedDiff;
 import app.drydock.review.HunkDigest;
 import app.drydock.review.HunkIds;
 import app.drydock.review.ReviewAnnotation;
+import app.drydock.review.ReviewDiffs;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Severity;
 import app.drydock.review.Triage;
@@ -67,7 +68,7 @@ public final class ReviewTabModel {
         }
 
         List<UnifiedDiff.FileDiff> displayed = inputs.diff().files().stream()
-                .filter(file -> !ideNoise(file))
+                .filter(file -> !ReviewDiffs.ideNoise(file))
                 .sorted(Comparator.comparing(UnifiedDiff.FileDiff::path))
                 .toList();
 
@@ -79,16 +80,6 @@ public final class ReviewTabModel {
         int reviewable = (int) rows.stream().filter(row -> !row.diff().hunks().isEmpty()).count();
         int reviewed = (int) rows.stream().filter(row -> row.mark().kind() == Mark.Kind.REVIEWED).count();
         return new Snapshot(List.copyOf(rows), reviewable, reviewed);
-    }
-
-    /**
-     * The rows to hide (AC5): untracked IDE project files, and only those --
-     * a tracked, modified {@code .idea/…} file is review material and stays.
-     * Hiding is display-only; no hunk id or digest of any other file changes.
-     */
-    private static boolean ideNoise(UnifiedDiff.FileDiff file) {
-        return file.untracked()
-                && (file.path().startsWith(".idea/") || file.path().endsWith(".iml"));
     }
 
     private static FileRow rowFor(UnifiedDiff.FileDiff file,
