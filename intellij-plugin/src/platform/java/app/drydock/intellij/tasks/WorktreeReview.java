@@ -371,9 +371,11 @@ public final class WorktreeReview {
                     // The review is armed: the Drydock instruction rode the
                     // launch and the session holds the review tools. Its
                     // console's window's Review tab is where the human watches
-                    // it, through the sanctioned opener the Changes link uses.
+                    // it, through the sanctioned opener the Changes link uses,
+                    // without its empty-review offer: this session is preparing
+                    // that review, and accepting the offer would start a second.
                     ApplicationManager.getApplication().invokeLater(
-                            () -> ReviewTabOpener.open(from, Optional.of(started)),
+                            () -> ReviewTabOpener.openWithoutOffer(from, Optional.of(started)),
                             ModalityState.nonModal(), from.getDisposed());
                 }
             }
