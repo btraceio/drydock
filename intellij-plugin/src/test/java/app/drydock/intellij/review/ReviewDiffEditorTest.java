@@ -4,6 +4,7 @@ import com.intellij.diff.FrameDiffTool;
 import com.intellij.diff.fragments.LineFragment;
 import com.intellij.diff.requests.DiffRequest;
 import com.intellij.diff.requests.MessageDiffRequest;
+import com.intellij.diff.tools.fragmented.UnifiedDiffTool;
 import com.intellij.diff.util.Side;
 
 import org.junit.jupiter.api.Test;
@@ -333,5 +334,13 @@ class ReviewDiffEditorTest {
             throw error;
         }
         throw new AssertionError("the off-EDT probe threw a checked exception", failure);
+    }
+
+    @Test
+    void theUnifiedViewerGoesFirstAndNothingElseMoves() {
+        String unified = UnifiedDiffTool.class.getCanonicalName();
+        assertEquals(List.of(unified), ReviewDiffEditor.unifiedFirst(List.of()));
+        assertEquals(List.of(unified, "a.Simple", "b.Other"),
+                ReviewDiffEditor.unifiedFirst(List.of("a.Simple", unified, "b.Other")));
     }
 }

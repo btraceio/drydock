@@ -5,16 +5,21 @@ import app.drydock.intellij.review.workbench.model.WorkbenchState;
 import com.intellij.diff.FrameDiffTool;
 import com.intellij.diff.impl.DiffRequestProcessor;
 import com.intellij.diff.impl.DiffRequestProcessorListener;
+import com.intellij.diff.impl.DiffSettingsHolder;
 import com.intellij.diff.requests.DiffRequest;
 import com.intellij.diff.requests.MessageDiffRequest;
+import com.intellij.diff.tools.fragmented.UnifiedDiffTool;
 import com.intellij.diff.tools.util.base.TextDiffSettingsHolder;
 import com.intellij.diff.util.DiffUserDataKeysEx;
+import com.intellij.ide.util.PropertiesComponent;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.fileEditor.FileEditorManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.Disposer;
 
 import java.awt.EventQueue;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.function.Consumer;
 
@@ -133,6 +138,7 @@ public final class ReviewDiffEditor {
      */
     ReviewWorkbenchEditor.HostedDiff host(Project project, Disposable parent) {
         requireEdt();
+        preferUnifiedOnce(PLACE);
         DiffRequestProcessor created = newProcessor(project);
         Disposer.register(parent, created);
         // A DiffVirtualFile tab's editor applies the seeded request on
@@ -204,6 +210,33 @@ public final class ReviewDiffEditor {
         if (current != null && live != null && !live.isDisposed()) {
             live.apply(requests.build(current));
         }
+    }
+
+    /**
+     * Makes the unified viewer {@code place}'s first choice, once per place:
+     * side by side, each half of the workbench's centre is too narrow for a
+     * finding card or a take, which the platform clamps to the editor's
+     * viewport. Once only, so the viewer's own Side-by-side toggle, which
+     * stores the same order, keeps the reviewer's choice afterwards. EDT.
+     */
+    static void preferUnifiedOnce(String place) {
+        PropertiesComponent properties = PropertiesComponent.getInstance();
+        String applied = "drydock.review.unifiedDefault." + place;
+        if (properties.getBoolean(applied)) {
+            return;
+        }
+        DiffSettingsHolder.DiffSettings settings = DiffSettingsHolder.DiffSettings.getSettings(place);
+        settings.setDiffToolsOrder(unifiedFirst(settings.getDiffToolsOrder()));
+        properties.setValue(applied, true);
+    }
+
+    /** {@code order} with the unified viewer first and nothing else moved (pure). */
+    static List<String> unifiedFirst(List<String> order) {
+        String unified = UnifiedDiffTool.class.getCanonicalName();
+        List<String> result = new ArrayList<>();
+        result.add(unified);
+        order.stream().filter(tool -> !tool.equals(unified)).forEach(result::add);
+        return List.copyOf(result);
     }
 
     /** The view's setting (pure over the settings object): the whole file expands, changes only collapses. */
