@@ -3,6 +3,7 @@ package app.drydock.intellij.review;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.Confidence;
 import app.drydock.review.ReviewAnnotation;
+import app.drydock.review.tour.HunkTake;
 import app.drydock.review.Severity;
 import app.drydock.review.Triage;
 
@@ -118,9 +119,15 @@ class ReviewDiffInlaysTest {
             return lineCount;
         }
 
+        /** Components that are not finding cards (takes): "line:component". */
+        final List<String> others = new ArrayList<>();
+
         @Override
         public ReviewDiffInlays.Owned insertCardAfter(int line, javax.swing.JComponent card) {
-            RecordingCards.Card content = (RecordingCards.Card) card;
+            if (!(card instanceof RecordingCards.Card content)) {
+                others.add(line + ":" + card.getName());
+                return new FakeInlay();
+            }
             Inserted entry = new Inserted(line, content.finding, content.driftHint);
             inserted.add(entry);
             return entry.inlay;
@@ -366,6 +373,51 @@ class ReviewDiffInlaysTest {
 
     private static ReviewDiffInlays layer(ReviewDiffInlays.ViewerHost host) {
         return new ReviewDiffInlays(new FakeEdt(), new FixedHosts(host), new RecordingCards());
+    }
+
+    // ---- takes --------------------------------------------------------------
+
+    private static ReviewDiffInlays.TakeMark takeAt(Side side, int line, String does) {
+        return new ReviewDiffInlays.TakeMark(new ReviewDiffRequests.ScrollTarget(side, line),
+                new HunkTake("d-" + does, does, HunkTake.Alignment.ALIGNED, "", List.of(), NOW));
+    }
+
+    @Test
+    void aTakeIsPlacedAboveItsHunksFirstChangedRowOnItsSide() {
+        FakeEditor left = new FakeEditor();
+        FakeEditor right = new FakeEditor();
+        FakeViewer viewer = new FakeViewer("src/A.java", left, right);
+        ReviewDiffInlays inlays = new ReviewDiffInlays(new FakeEdt(), new FixedHosts(viewer), new RecordingCards(),
+                take -> {
+                    JPanel panel = new JPanel();
+                    panel.setName(take.does());
+                    return panel;
+                });
+
+        onEdt(() -> {
+            inlays.setDecorations(new ReviewDiffInlays.Decorations("src/A.java", Set.of(),
+                    new ReviewDiffRequests.ScrollTarget(Side.RIGHT, 0), List.of(),
+                    List.of(takeAt(Side.RIGHT, 4, "adds"), takeAt(Side.LEFT, 0, "first"), takeAt(Side.RIGHT, 500, "gone"))));
+            inlays.viewerChanged(ANY_VIEWER);
+        });
+
+        assertEquals(List.of("3:adds"), right.others, "after the line before the row; an off-editor line draws nothing");
+        assertEquals(List.of("0:first"), left.others, "a hunk at the first line gets its take below it");
+    }
+
+    @Test
+    void aLayerWithoutATakeFactoryDrawsNoTakes() {
+        FakeEditor right = new FakeEditor();
+        FakeViewer viewer = new FakeViewer("src/A.java", new FakeEditor(), right);
+        ReviewDiffInlays inlays = layer(viewer);
+
+        onEdt(() -> {
+            inlays.setDecorations(new ReviewDiffInlays.Decorations("src/A.java", Set.of(),
+                    new ReviewDiffRequests.ScrollTarget(Side.RIGHT, 0), List.of(), List.of(takeAt(Side.RIGHT, 4, "adds"))));
+            inlays.viewerChanged(ANY_VIEWER);
+        });
+
+        assertEquals(List.of(), right.others);
     }
 
     // ---- two-side choice and mapping ----------------------------------------

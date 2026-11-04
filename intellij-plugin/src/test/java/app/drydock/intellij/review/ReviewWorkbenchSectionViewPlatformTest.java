@@ -3,7 +3,9 @@ package app.drydock.intellij.review;
 import app.drydock.intellij.review.workbench.model.SectionsModel;
 import app.drydock.intellij.review.workbench.model.WorkbenchState;
 import app.drydock.review.tour.HunkTake;
+import com.intellij.diff.FrameDiffTool;
 import com.intellij.diff.util.Side;
+import com.intellij.openapi.Disposable;
 import com.intellij.openapi.util.Disposer;
 import com.intellij.testFramework.PlatformTestUtil;
 import com.intellij.testFramework.fixtures.BasePlatformTestCase;
@@ -18,6 +20,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Consumer;
 
 /**
  * The workbench's section view over a fake review: one card per hunk, the
@@ -54,6 +57,13 @@ public class ReviewWorkbenchSectionViewPlatformTest extends BasePlatformTestCase
         public void showFinding(String findingId) {
             calls.add("showFinding " + findingId);
         }
+
+        @Override
+        public Consumer<FrameDiffTool.DiffViewer> decorator(String path, Disposable lifetime) {
+            calls.add("decorator " + path);
+            Disposer.register(lifetime, () -> calls.add("decorations released " + path));
+            return viewer -> calls.add("viewer " + (viewer == null ? "none" : viewer.getClass().getSimpleName()));
+        }
     };
 
     private static SectionsModel.Hunk hunk(String id, boolean reviewed, Optional<SectionsModel.Settled> elsewhere) {
@@ -76,7 +86,7 @@ public class ReviewWorkbenchSectionViewPlatformTest extends BasePlatformTestCase
         ReviewWorkbenchSectionView view = new ReviewWorkbenchSectionView(getProject(), actions);
         try {
             view.render(state(hunk("A", false, Optional.empty(), Optional.of(TAKE)), hunk("B", false, Optional.empty())));
-            ReviewWorkbenchSectionView.TakePanel take = view.cards.get(0).take;
+            HunkTakePanel take = view.cards.get(0).take;
             assertTrue(take.isVisible());
             assertEquals(List.of("▾ Agent take · Diverges", "Calls bar() and drops its result.",
                     "The intent says callers use the result.", "⚑ The result is ignored.", "⚑ No test covers it."),
@@ -168,7 +178,7 @@ public class ReviewWorkbenchSectionViewPlatformTest extends BasePlatformTestCase
             layOut(view);
             view.updateLiveCards();
             PlatformTestUtil.dispatchAllEventsInIdeEventQueue();
-            assertEquals(List.of("context src/A.java n3"), calls);
+            assertEquals("context src/A.java n3", calls.getFirst());
             assertTrue("the card in view has its diff", view.cards.get(0).live());
 
             ReviewWorkbenchSectionView.Card card = view.cards.get(0);
@@ -177,6 +187,27 @@ public class ReviewWorkbenchSectionViewPlatformTest extends BasePlatformTestCase
                     WorkbenchState.View.CHANGES_ONLY, List.of(), WorkbenchState.InboxChoice.DEFAULT));
             assertFalse("a section that is no longer shown releases its editors", card.live());
             assertTrue(view.cards.isEmpty());
+        } finally {
+            Disposer.dispose(view);
+        }
+    }
+
+    public void testALiveCardsViewerIsDecoratedUntilTheCardGoes() {
+        ReviewWorkbenchSectionView view = new ReviewWorkbenchSectionView(getProject(), actions);
+        try {
+            view.setSize(800, 900);
+            view.render(state(hunk("A", false, Optional.empty())));
+            layOut(view);
+            view.updateLiveCards();
+            PlatformTestUtil.dispatchAllEventsInIdeEventQueue();
+            assertTrue(calls.toString(), calls.contains("decorator src/A.java"));
+            assertTrue("the card's viewer reaches the decorator: " + calls,
+                    calls.stream().anyMatch(call -> call.startsWith("viewer ") && !call.equals("viewer none")));
+
+            view.render(WorkbenchState.of("drydock", WorkbenchState.Mode.LOCAL,
+                    new ReviewTabModel.Snapshot(List.of(), 0, 0), WorkbenchState.Filter.ALL, Optional.empty(),
+                    WorkbenchState.View.CHANGES_ONLY, List.of(), WorkbenchState.InboxChoice.DEFAULT));
+            assertTrue(calls.toString(), calls.contains("decorations released src/A.java"));
         } finally {
             Disposer.dispose(view);
         }

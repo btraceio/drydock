@@ -6,10 +6,12 @@ import app.drydock.intellij.agent.PromptOutcome;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.AnnotationStore;
 import app.drydock.review.Confidence;
+import app.drydock.review.HunkDigest;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.Severity;
 import app.drydock.review.Triage;
+import app.drydock.review.tour.HunkTake;
 import com.intellij.diff.fragments.LineFragment;
 import com.intellij.diff.util.Side;
 import org.junit.jupiter.api.AfterEach;
@@ -177,6 +179,29 @@ class ReviewTabProviderTest {
         assertEquals("src/A.java", fileRow.path());
         assertEquals(filePlan.scrollToLine(), fileRow.plan().scrollToLine());
         assertEquals(filePlan.scrollToSide(), fileRow.plan().scrollToSide());
+    }
+
+    @Test
+    void theDecorationsPlaceEachTakeAtItsHunksFirstChangedRow() {
+        UnifiedDiff.Hunk added = hunk(ctx(1, 1, "one"), add(2, "two"), ctx(2, 3, "three"));
+        UnifiedDiff.Hunk removed = hunk(ctx(9, 10, "nine"), del(10), ctx(11, 11, "eleven"));
+        UnifiedDiff.FileDiff file = file("src/A.java", added, removed);
+        HunkTake onAdded = new HunkTake(HunkDigest.of("src/A.java", added), "Adds two.",
+                HunkTake.Alignment.ALIGNED, "", List.of(), Instant.EPOCH);
+        HunkTake onRemoved = new HunkTake(HunkDigest.of("src/A.java", removed), "Removes ten.",
+                HunkTake.Alignment.CONTEXT, "", List.of(), Instant.EPOCH);
+        HunkTake elsewhere = new HunkTake("other-digest", "Elsewhere.", HunkTake.Alignment.ALIGNED, "", List.of(),
+                Instant.EPOCH);
+        ReviewTabModel.FileRow row = ReviewTabModel.snapshot(new ReviewTabModel.Inputs(diff(file), List.of(),
+                List.of(), Optional.empty())).files().getFirst();
+
+        ReviewDiffInlays.Decorations decorations = ReviewTabProvider.decorationsFor(row, List.of(),
+                List.of(elsewhere, onRemoved, onAdded));
+
+        assertEquals(List.of(
+                new ReviewDiffInlays.TakeMark(new ReviewDiffRequests.ScrollTarget(Side.RIGHT, 1), onAdded),
+                new ReviewDiffInlays.TakeMark(new ReviewDiffRequests.ScrollTarget(Side.LEFT, 9), onRemoved)),
+                decorations.takes(), "in hunk order, on the side of the first changed row; other hunks' takes stay out");
     }
 
     @Test
