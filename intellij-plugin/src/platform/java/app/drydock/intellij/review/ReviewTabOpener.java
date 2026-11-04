@@ -144,6 +144,15 @@ public final class ReviewTabOpener {
     }
 
     /**
+     * As {@link #open} with no link session, without the empty-review
+     * preparation offer: for a checkout opened to be reviewed by hand, where
+     * the workbench's Review menu asks for an agent review. EDT.
+     */
+    public static void openWithoutOffer(Project project) {
+        PRODUCTION.openIn(project, Optional.empty(), false);
+    }
+
+    /**
      * Opens Review focused on one finding (AC5's gutter navigation): the
      * target is recorded <em>before</em> anything the open path does, so
      * it works even when the dedicated window's content has never been
@@ -162,6 +171,11 @@ public final class ReviewTabOpener {
 
     /** The open path over the seams; see {@link #open}. */
     void openIn(Project project, Optional<ManagedAgentSession> linkSession) {
+        openIn(project, linkSession, true);
+    }
+
+    /** As {@link #openIn(Project, Optional)}; {@code offer} false skips the preparation offer. */
+    void openIn(Project project, Optional<ManagedAgentSession> linkSession, boolean offer) {
         Objects.requireNonNull(project, "project");
         Objects.requireNonNull(linkSession, "linkSession");
         if (project.isDisposed()) {
@@ -180,7 +194,7 @@ public final class ReviewTabOpener {
         AtomicReference<Outcome> minted = new AtomicReference<>();
         loading.run(project, ReviewTabStatus.LOADING.message(),
                 () -> mint(project, linkSession, minted),
-                () -> finish(project, minted.get()));
+                () -> finish(project, minted.get(), offer));
     }
 
     /** The gutter path over the seams; see {@link #openFinding}. */
@@ -229,13 +243,13 @@ public final class ReviewTabOpener {
      * data lives with the checkout a review ran against, and a session that
      * never had one must be told so, with the launch one confirmation away.
      */
-    private void finish(Project project, Outcome outcome) {
+    private void finish(Project project, Outcome outcome, boolean offer) {
         if (project.isDisposed()) {
             return;
         }
         selectTab(project);
-        if (outcome == null || outcome.hasData()) {
-            return; // mint failed (already warned), or a review exists for this checkout
+        if (!offer || outcome == null || outcome.hasData()) {
+            return; // not offered here, mint failed (already warned), or a review exists for this checkout
         }
         Path checkout = checkoutOf(project);
         if (preparations.offer(project, checkout, outcome.scope())) {

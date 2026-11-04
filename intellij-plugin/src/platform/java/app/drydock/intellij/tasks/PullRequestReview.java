@@ -21,6 +21,7 @@ import app.drydock.intellij.agent.AgentConsoles;
 import app.drydock.intellij.agent.AgentExecutionRegistry;
 import app.drydock.intellij.agent.PromptOutcome;
 import app.drydock.intellij.review.ReviewBackend;
+import app.drydock.intellij.review.ReviewCheckouts;
 import app.drydock.intellij.review.ReviewRequest;
 import app.drydock.intellij.review.ReviewTabOpener;
 import app.drydock.intellij.settings.PullRequestReviewPrompt;
@@ -358,7 +359,9 @@ public final class PullRequestReview {
      * (an existing one is reused as it stands), then the window that shows
      * the worktree -- opened as a project when none does -- opens its Review
      * tab. The worktree's own window, because a workbench reviews its own
-     * project's checkout. Shares the review's in-flight guard: one
+     * project's checkout. The checkout is registered as opened for review
+     * ({@link ReviewCheckouts}), which lets its Review tab load with no
+     * session, and the open skips the empty-review preparation offer. Shares the review's in-flight guard: one
      * materialization per pull request at a time. EDT entry.
      */
     public void openInWorkbench(Project from, Path mainRoot, String repositoryName, OpenPullRequest pullRequest) {
@@ -386,6 +389,10 @@ public final class PullRequestReview {
                             project -> Optional.ofNullable(project.getBasePath())
                                     .map(path -> RepositoryCatalog.canonicalize(Path.of(path))),
                             canonical);
+                    // Before the window opens: its Review tab is shown only for a
+                    // covered checkout, and no session covers this one.
+                    ReviewCheckouts.register(window.map(project -> Path.of(project.getBasePath()))
+                            .orElse(worktree.get()));
                     ApplicationManager.getApplication().invokeLater(() -> {
                         Project target = window.filter(project -> !project.isDisposed())
                                 .orElseGet(() -> TaskWindows.openAsProject(worktree.get()));
@@ -393,7 +400,8 @@ public final class PullRequestReview {
                             return;
                         }
                         ProjectUtil.focusProjectWindow(target, true);
-                        ReviewTabOpener.open(target, Optional.empty());
+                        // The review is asked for from the workbench's Review menu, not offered on open.
+                        ReviewTabOpener.openWithoutOffer(target);
                     }, ModalityState.nonModal());
                 } finally {
                     inFlight.remove(key);
