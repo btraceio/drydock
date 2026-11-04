@@ -62,6 +62,7 @@ import com.intellij.openapi.vfs.newvfs.BulkFileListener;
 import com.intellij.openapi.vfs.newvfs.events.VFileEvent;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBPanel;
+import com.intellij.util.ui.JBUI;
 import com.intellij.util.ui.UIUtil;
 import org.jetbrains.annotations.NotNull;
 
@@ -71,6 +72,7 @@ import javax.swing.JPanel;
 import javax.swing.SwingConstants;
 import javax.swing.border.EmptyBorder;
 import java.awt.BorderLayout;
+import java.awt.FlowLayout;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.lang.System.Logger.Level;
@@ -1322,8 +1324,8 @@ final class ReviewTabProvider {
 
     /**
      * Builds the decisions bar: the pending decisions since the last
-     * hand-off on the left, one Send on the right. Hidden until a decision
-     * exists — a bar advertising zero decisions is noise.
+     * hand-off, with one Send below them. Hidden until a decision exists —
+     * a bar advertising zero decisions is noise.
      */
     private void buildDecisionsBar() {
         decisionsBar = new JPanel(new BorderLayout());
@@ -1333,8 +1335,12 @@ final class ReviewTabProvider {
         sendDecisionsButton.setToolTipText("One prompt to the scope's agent: the findings you agreed with"
                 + " (with your comments), and the ones you dismissed as no-action.");
         sendDecisionsButton.addActionListener(event -> sendDecisions());
-        decisionsBar.add(decisionsLabel, BorderLayout.WEST);
-        decisionsBar.add(sendDecisionsButton, BorderLayout.EAST);
+        // The label above Send, not beside it: a narrow launcher clips the label instead of drawing it
+        // under the button.
+        decisionsBar.add(decisionsLabel, BorderLayout.NORTH);
+        JPanel send = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, JBUI.scale(2)));
+        send.add(sendDecisionsButton);
+        decisionsBar.add(send, BorderLayout.SOUTH);
         decisionsBar.setVisible(false);
     }
 
