@@ -92,6 +92,20 @@ class TourCodecTest {
     }
 
     @Test
+    void aTourIntentRoundTripsThroughTheStoredRecordAndIsAbsentWhenNoneWasStated() throws Exception {
+        UnifiedDiff diff = TourFixtures.twoFileDiff();
+        ReviewTour plain = TourFixtures.coveringTour(diff);
+        TourRecord withIntent = TourRecord.fresh(plain.withIntent(Optional.of("Guard the loader.")), diff);
+
+        assertEquals(Optional.of("Guard the loader."),
+                TourCodec.recordFromJson(TourCodec.recordToJson(withIntent)).orElseThrow().tour().intent());
+        TourRecord without = TourRecord.fresh(plain, diff);
+        assertFalse(JsonWriter.write(TourCodec.recordToJson(without)).contains("\"intent\""));
+        assertEquals(Optional.empty(), TourCodec.recordFromJson(TourCodec.recordToJson(without)).orElseThrow()
+                .tour().intent());
+    }
+
+    @Test
     void endKeyDefaultsToStartKey() throws Exception {
         List<TourStep> steps = TourCodec.stepsFromAgent(JsonParser.parse(
                 ONE_STEP.replace("\"startKey\":\"n1\",\"endKey\":\"n22\"", "\"startKey\":\"n3\"")));

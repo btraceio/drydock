@@ -337,11 +337,14 @@ public final class TourCodec {
         JsonObject rows = JsonObject.empty();
         record.hunkRows().forEach((digest, keys) ->
                 rows.put(digest, JsonArray.of(keys.stream().<JsonValue>map(JsonString::new).toList())));
+        JsonObject tour = JsonObject.empty()
+                .put("scopeId", new JsonString(record.tour().scopeId()))
+                .put("fingerprint", new JsonString(record.tour().diffFingerprint()))
+                .put("steps", JsonArray.of(steps));
+        // Absent when the agent stated none, the stored shape before the field existed.
+        record.tour().intent().ifPresent(intent -> tour.put("intent", new JsonString(intent)));
         return JsonObject.empty()
-                .put("tour", JsonObject.empty()
-                        .put("scopeId", new JsonString(record.tour().scopeId()))
-                        .put("fingerprint", new JsonString(record.tour().diffFingerprint()))
-                        .put("steps", JsonArray.of(steps)))
+                .put("tour", tour)
                 .put("progress", progress)
                 .put("hunkOverrides", overrides)
                 .put("hunkRows", rows)
@@ -368,7 +371,10 @@ public final class TourCodec {
                 }
             }
         }
-        ReviewTour tour = new ReviewTour(scopeId.value(), fingerprint.value(), steps);
+        Optional<String> intent = tourObj.get("intent") instanceof JsonString text
+                ? Optional.of(text.value())
+                : Optional.empty();
+        ReviewTour tour = new ReviewTour(scopeId.value(), fingerprint.value(), steps, intent);
         Map<String, StepProgress> progress = new LinkedHashMap<>();
         if (root.get("progress") instanceof JsonObject progressObj) {
             for (TourStep step : steps) {

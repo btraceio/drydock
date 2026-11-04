@@ -180,8 +180,11 @@ Model changes (plugin core only — see §10):
   marks). A hunk card collapses as "reviewed in §N" when its digest has a non-stale verdict
   settled in a different step. Per-section progress = settled digests / section digests;
   "Mark section reviewed" puts one verdict per unsettled digest.
-- **Intent** shown at the top of the list: `ReviewIntent(scopeId, Source{PR_DESCRIPTION,
-  SESSION_GOAL}, text)` — PR body via `GhCliService.viewPr`, or the session's initial prompt.
+- **Intent** shown at the top of the list. W3: the agent states it in an optional `intent`
+  on `review_tour`, stored with the tour. The other two sources are not available in the
+  plugin: `GhCliService.PrInfo` carries no PR body, and `ManagedAgentSession` does not keep
+  the session's initial prompt. The PR description becomes a second source with the PR lane
+  (W5).
 
 ## 6. Agent take per hunk
 
