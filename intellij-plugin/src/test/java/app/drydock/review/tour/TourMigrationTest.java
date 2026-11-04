@@ -5,6 +5,7 @@ import app.drydock.review.HunkDigest;
 import app.drydock.review.ReviewVerdict;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -104,6 +105,22 @@ class TourMigrationTest {
         assertEquals("n26", s1.anchors().get(1).startKey(), "the range moved");
         assertEquals("The second range is the guard.", s1.anchors().get(1).note(),
                 "and the claim about it moved with it");
+    }
+
+    @Test
+    void aTakeOnAHunkTheNewDiffNoLongerHasIsDropped() {
+        UnifiedDiff before = twoFileDiff();
+        String keptDigest = HunkDigest.of("src/A.java", before.files().get(0).hunks().get(0));
+        String changedDigest = HunkDigest.of("src/B.java", before.files().get(1).hunks().get(0));
+        HunkTake kept = new HunkTake(keptDigest, "Kept.", HunkTake.Alignment.ALIGNED, "", List.of(),
+                Instant.EPOCH);
+        HunkTake gone = new HunkTake(changedDigest, "Gone.", HunkTake.Alignment.ALIGNED, "", List.of(),
+                Instant.EPOCH);
+        ReviewTour tour = TourFixtures.coveringTour(before).withTakes(List.of(kept, gone));
+
+        TourRecord migrated = TourMigration.migrate(passed(tour), bChanged()).record();
+
+        assertEquals(List.of(kept), migrated.tour().takes());
     }
 
     @Test

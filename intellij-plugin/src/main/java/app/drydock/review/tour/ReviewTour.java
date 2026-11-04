@@ -8,20 +8,38 @@ import java.util.Optional;
  * An agent-written tour of one review scope, valid for the diff whose
  * fingerprint it carries. {@code intent} is the agent's one-sentence
  * statement of what the change sets out to do; empty when it gave none,
- * and for every tour written before the field existed.
+ * and for every tour written before the field existed. {@code takes} are
+ * the agent's per-hunk takes, at most one per hunk digest; empty for every
+ * tour written before them.
  */
-public record ReviewTour(String scopeId, String diffFingerprint, List<TourStep> steps, Optional<String> intent) {
+public record ReviewTour(String scopeId, String diffFingerprint, List<TourStep> steps, Optional<String> intent,
+                         List<HunkTake> takes) {
 
     public ReviewTour {
         Objects.requireNonNull(scopeId, "scopeId");
         Objects.requireNonNull(diffFingerprint, "diffFingerprint");
         steps = List.copyOf(steps);
         intent = Objects.requireNonNull(intent, "intent").map(String::strip).filter(text -> !text.isEmpty());
+        takes = List.copyOf(takes);
     }
 
-    /** A tour without a stated intent. */
+    /** A tour without a stated intent or takes. */
     public ReviewTour(String scopeId, String diffFingerprint, List<TourStep> steps) {
-        this(scopeId, diffFingerprint, steps, Optional.empty());
+        this(scopeId, diffFingerprint, steps, Optional.empty(), List.of());
+    }
+
+    /** A tour without takes. */
+    public ReviewTour(String scopeId, String diffFingerprint, List<TourStep> steps, Optional<String> intent) {
+        this(scopeId, diffFingerprint, steps, intent, List.of());
+    }
+
+    /** The take on the hunk with {@code digest}, if the agent gave one. */
+    public Optional<HunkTake> take(String digest) {
+        return takes.stream().filter(take -> take.hunkDigest().equals(digest)).findFirst();
+    }
+
+    public ReviewTour withTakes(List<HunkTake> newTakes) {
+        return new ReviewTour(scopeId, diffFingerprint, steps, intent, newTakes);
     }
 
     public Optional<TourStep> step(String id) {
@@ -44,14 +62,14 @@ public record ReviewTour(String scopeId, String diffFingerprint, List<TourStep> 
     }
 
     public ReviewTour withSteps(List<TourStep> newSteps) {
-        return new ReviewTour(scopeId, diffFingerprint, newSteps, intent);
+        return new ReviewTour(scopeId, diffFingerprint, newSteps, intent, takes);
     }
 
     public ReviewTour withFingerprint(String fingerprint) {
-        return new ReviewTour(scopeId, fingerprint, steps, intent);
+        return new ReviewTour(scopeId, fingerprint, steps, intent, takes);
     }
 
     public ReviewTour withIntent(Optional<String> newIntent) {
-        return new ReviewTour(scopeId, diffFingerprint, steps, newIntent);
+        return new ReviewTour(scopeId, diffFingerprint, steps, newIntent, takes);
     }
 }

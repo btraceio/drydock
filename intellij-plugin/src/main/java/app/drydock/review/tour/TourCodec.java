@@ -8,6 +8,8 @@ import app.drydock.state.json.JsonValue.JsonNumber;
 import app.drydock.state.json.JsonValue.JsonObject;
 import app.drydock.state.json.JsonValue.JsonString;
 
+import java.time.DateTimeException;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -343,6 +345,9 @@ public final class TourCodec {
                 .put("steps", JsonArray.of(steps));
         // Absent when the agent stated none, the stored shape before the field existed.
         record.tour().intent().ifPresent(intent -> tour.put("intent", new JsonString(intent)));
+        if (!record.tour().takes().isEmpty()) {
+            tour.put("takes", JsonArray.of(record.tour().takes().stream().map(TourCodec::takeToJson).toList()));
+        }
         return JsonObject.empty()
                 .put("tour", tour)
                 .put("progress", progress)
@@ -351,6 +356,68 @@ public final class TourCodec {
                 .put("reviewAnyway", new JsonBoolean(record.reviewAnyway()))
                 .put("shelved", new JsonBoolean(record.shelved()))
                 .put("seeded", new JsonBoolean(record.seeded()));
+    }
+
+    /** A take's stored shape; {@code alignmentNote} and a red flag's {@code findingId} only when present. */
+    public static JsonValue takeToJson(HunkTake take) {
+        List<JsonValue> flags = new ArrayList<>();
+        for (HunkTake.RedFlag flag : take.redFlags()) {
+            JsonObject obj = JsonObject.empty().put("text", new JsonString(flag.text()));
+            flag.findingId().ifPresent(id -> obj.put("findingId", new JsonString(id)));
+            flags.add(obj);
+        }
+        JsonObject json = JsonObject.empty().put("hunkDigest", new JsonString(take.hunkDigest()))
+                .put("does", new JsonString(take.does()))
+                .put("alignment", new JsonString(take.alignment().wireName()))
+                .put("redFlags", JsonArray.of(flags))
+                .put("at", new JsonString(take.at().toString()));
+        if (!take.alignmentNote().isEmpty()) {
+            json.put("alignmentNote", new JsonString(take.alignmentNote()));
+        }
+        return json;
+    }
+
+    /**
+     * The stored takes, decoded leniently: a malformed take is skipped, never
+     * the tour -- a take is commentary, and losing one costs nothing the
+     * reviewer cannot read in the code itself.
+     */
+    static List<HunkTake> takesFromJson(JsonValue value) {
+        if (!(value instanceof JsonArray array)) {
+            return List.of();
+        }
+        List<HunkTake> takes = new ArrayList<>();
+        for (JsonValue element : array.elements()) {
+            if (!(element instanceof JsonObject obj)
+                    || !(obj.get("hunkDigest") instanceof JsonString digest)
+                    || !(obj.get("does") instanceof JsonString does)
+                    || !(obj.get("alignment") instanceof JsonString alignment)
+                    || !(obj.get("at") instanceof JsonString at)) {
+                continue;
+            }
+            Optional<HunkTake.Alignment> parsed = HunkTake.Alignment.fromWire(alignment.value());
+            if (parsed.isEmpty() || digest.value().isBlank()) {
+                continue;
+            }
+            List<HunkTake.RedFlag> flags = new ArrayList<>();
+            if (obj.get("redFlags") instanceof JsonArray flagArray) {
+                for (JsonValue flag : flagArray.elements()) {
+                    if (flag instanceof JsonObject flagObj && flagObj.get("text") instanceof JsonString text) {
+                        flags.add(new HunkTake.RedFlag(text.value(), flagObj.get("findingId") instanceof JsonString id
+                                ? Optional.of(id.value())
+                                : Optional.empty()));
+                    }
+                }
+            }
+            try {
+                takes.add(new HunkTake(digest.value(), does.value(), parsed.get(),
+                        obj.get("alignmentNote") instanceof JsonString note ? note.value() : "", flags,
+                        Instant.parse(at.value())));
+            } catch (DateTimeException e) {
+                // Skipped like any other malformed take.
+            }
+        }
+        return takes;
     }
 
     // ---- JSON → record (lenient) ----
@@ -374,7 +441,8 @@ public final class TourCodec {
         Optional<String> intent = tourObj.get("intent") instanceof JsonString text
                 ? Optional.of(text.value())
                 : Optional.empty();
-        ReviewTour tour = new ReviewTour(scopeId.value(), fingerprint.value(), steps, intent);
+        ReviewTour tour = new ReviewTour(scopeId.value(), fingerprint.value(), steps, intent,
+                takesFromJson(tourObj.get("takes")));
         Map<String, StepProgress> progress = new LinkedHashMap<>();
         if (root.get("progress") instanceof JsonObject progressObj) {
             for (TourStep step : steps) {
