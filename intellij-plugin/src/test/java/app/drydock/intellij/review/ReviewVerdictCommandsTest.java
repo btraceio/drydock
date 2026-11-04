@@ -206,6 +206,45 @@ class ReviewVerdictCommandsTest {
                 "the written digests are the fresh diff's, not the passed file's");
     }
 
+    // ---- sections (workbench W3) ---------------------------------------------
+
+    @Test
+    void markHunksApprovesTheGivenDigestsSettledInTheStep() throws Exception {
+        List<String> digests = List.copyOf(digestsOf(scope, "src/Distinct.java"));
+
+        assertEquals(new ReviewVerdictCommands.Result.Ok(), commands.markHunks(scope, List.of(digests.get(0)),
+                Optional.of("s2")).get(SECONDS, TimeUnit.SECONDS));
+
+        ReviewVerdict verdict = store.verdict(scope.id(), digests.get(0)).orElseThrow();
+        assertEquals(ReviewVerdict.Decision.APPROVED, verdict.decision());
+        assertEquals(Optional.of("s2"), verdict.settledInStep());
+        assertEquals(revParse(wt, "main"), verdict.baseCommit());
+        assertTrue(store.verdict(scope.id(), digests.get(1)).isEmpty(), "only the given digest");
+    }
+
+    @Test
+    void markHunksIsRefusedOnlyByABlockingFindingOnTheHunksOwnRows() throws Exception {
+        List<String> digests = List.copyOf(digestsOf(scope, "src/Distinct.java"));
+        store.upsert(blockingFinding("f_far", "src/Distinct.java", "n1"));
+
+        assertEquals(new ReviewVerdictCommands.Result.Ok(), commands.markHunks(scope, List.of(digests.get(0)),
+                Optional.empty()).get(SECONDS, TimeUnit.SECONDS), "a blocker outside the hunk does not refuse it");
+
+        store.upsert(blockingFinding("f_on", "src/Distinct.java", "n70"));
+        ReviewVerdictCommands.Result.Refused refused = assertInstanceOf(ReviewVerdictCommands.Result.Refused.class,
+                commands.markHunks(scope, List.of(digests.get(1)), Optional.empty()).get(SECONDS, TimeUnit.SECONDS));
+        assertTrue(refused.reason().contains("f_on"), refused.reason());
+        assertTrue(store.verdict(scope.id(), digests.get(1)).isEmpty(), "a refusal writes nothing");
+    }
+
+    @Test
+    void markHunksIsRefusedWhenNoDigestIsInTheFreshDiff() throws Exception {
+        ReviewVerdictCommands.Result.Refused refused = assertInstanceOf(ReviewVerdictCommands.Result.Refused.class,
+                commands.markHunks(scope, List.of("gone"), Optional.empty()).get(SECONDS, TimeUnit.SECONDS));
+        assertTrue(refused.reason().contains("no longer in the diff"), refused.reason());
+        assertTrue(store.verdictsFor(scope.id()).isEmpty());
+    }
+
     // ---- AC11 --------------------------------------------------------------
 
     @Test
@@ -365,7 +404,11 @@ class ReviewVerdictCommandsTest {
     }
 
     private static ReviewAnnotation blockingFinding(String id, String file) {
-        return new ReviewAnnotation("scope-1", id, file, "n1", "n1", Severity.BLOCKING, Confidence.HIGH,
+        return blockingFinding(id, file, "n1");
+    }
+
+    private static ReviewAnnotation blockingFinding(String id, String file, String key) {
+        return new ReviewAnnotation("scope-1", id, file, key, key, Severity.BLOCKING, Confidence.HIGH,
                 Optional.of("A blocking problem"), "Reviewer", Instant.now(), List.of(),
                 Optional.empty(), Optional.empty(), List.of(), List.of(), Optional.empty(),
                 AnnotationStatus.OPEN, Optional.empty(), false);

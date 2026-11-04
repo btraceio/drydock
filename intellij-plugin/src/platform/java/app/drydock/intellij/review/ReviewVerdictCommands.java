@@ -15,7 +15,12 @@ import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -113,6 +118,22 @@ public final class ReviewVerdictCommands {
     }
 
     /**
+     * Approves the hunks with {@code digests} (a workbench section's or one
+     * hunk card's), each verdict settled in {@code stepId} when the section
+     * is a tour step. Dated and refused like {@link #markReviewed}, except
+     * that the blocking finding that refuses it is one on these hunks' own
+     * rows. A digest the fresh diff no longer has is skipped: its code
+     * changed since the section was shown. Refused, writing nothing, when no
+     * digest is left.
+     */
+    public CompletableFuture<Result> markHunks(ReviewScope scope, List<String> digests, Optional<String> stepId) {
+        Objects.requireNonNull(scope, "scope");
+        Objects.requireNonNull(digests, "digests");
+        Objects.requireNonNull(stepId, "stepId");
+        return diff(scope).thenApplyAsync(fresh -> markHunks(scope, digests, stepId, fresh), executor);
+    }
+
+    /**
      * {@code thenApplyAsync}, not {@code thenApply}: with {@code thenApply} a
      * diff that completed before this call attaches would run every step
      * below -- blocking git spawns included -- on the caller's thread, which
@@ -164,6 +185,57 @@ public final class ReviewVerdictCommands {
         for (String digest : digests) {
             store.putVerdict(new ReviewVerdict(scope.id(), digest, ReviewVerdict.Decision.APPROVED,
                     Optional.empty(), at, base.get(), head.get()));
+        }
+        return new Result.Ok();
+    }
+
+    private Result markHunks(ReviewScope scope, List<String> digests, Optional<String> stepId, UnifiedDiff fresh) {
+        Map<String, Set<String>> rowsByDigest = new LinkedHashMap<>();
+        Map<String, String> fileByDigest = new HashMap<>();
+        Set<String> wanted = new LinkedHashSet<>(digests);
+        for (UnifiedDiff.FileDiff file : fresh.files()) {
+            for (UnifiedDiff.Hunk hunk : file.hunks()) {
+                String digest = HunkDigest.of(file.path(), hunk);
+                if (wanted.contains(digest)) {
+                    rowsByDigest.computeIfAbsent(digest, d -> new HashSet<>())
+                            .addAll(hunk.lines().stream().map(UnifiedDiff.Line::lineKey).toList());
+                    fileByDigest.put(digest, file.path());
+                }
+            }
+        }
+        if (rowsByDigest.isEmpty()) {
+            return new Result.Refused("these changes are no longer in the diff: refresh the review; "
+                    + "nothing was written");
+        }
+        Optional<String> base = resolveRef(scope, scope.base());
+        if (base.isEmpty()) {
+            return new Result.Refused("the base of this review ('" + scope.base()
+                    + "') does not resolve to a commit right now, so an approval could not be dated; "
+                    + "nothing was written");
+        }
+        String headRef = SessionReviewScopes.headRevision(scope.head());
+        Optional<String> head = resolveRef(scope, headRef);
+        if (head.isEmpty()) {
+            return new Result.Refused("the head of this review ('" + headRef
+                    + "') does not resolve to a commit right now, so an approval could not be dated; "
+                    + "nothing was written");
+        }
+        ReviewAnnotation blocker = store.forScope(scope.id()).stream()
+                .filter(ReviewAnnotation::blocksApproval)
+                .filter(finding -> rowsByDigest.entrySet().stream().anyMatch(entry ->
+                        fileByDigest.get(entry.getKey()).equals(finding.file())
+                                && entry.getValue().contains(finding.startKey())))
+                .findFirst()
+                .orElse(null);
+        if (blocker != null) {
+            return new Result.Refused("cannot approve while the open blocking finding "
+                    + blocker.id() + " (" + blocker.displayTitle() + ") is unresolved; "
+                    + "nothing was written");
+        }
+        Instant at = Instant.now();
+        for (String digest : rowsByDigest.keySet()) {
+            store.putVerdict(new ReviewVerdict(scope.id(), digest, ReviewVerdict.Decision.APPROVED,
+                    Optional.empty(), at, base.get(), head.get(), stepId));
         }
         return new Result.Ok();
     }
