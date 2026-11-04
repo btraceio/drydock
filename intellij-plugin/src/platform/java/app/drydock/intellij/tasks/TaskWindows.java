@@ -22,7 +22,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /** Opening a worktree as its own IDE window. */
 public final class TaskWindows {
 
-    private static final String OPEN_WINDOWS_KEY = "drydock.openTaskWindows";
+    static final String OPEN_WINDOWS_KEY = "drydock.openTaskWindows";
     private static final AtomicBoolean RESTORE_STARTED = new AtomicBoolean();
 
     private TaskWindows() {
@@ -68,11 +68,10 @@ public final class TaskWindows {
         List<String> current = values(properties);
         List<String> updated = withoutRemembered(current, path);
         if (!updated.equals(current)) {
-            if (updated.isEmpty()) {
-                properties.unsetValue(OPEN_WINDOWS_KEY);
-            } else {
-                properties.setValues(OPEN_WINDOWS_KEY, updated.toArray(String[]::new));
-            }
+            // setValues even for the last one: unsetValue does not clear a
+            // list stored by setValues, so the closed window came back at the
+            // next IDE start.
+            properties.setValues(OPEN_WINDOWS_KEY, updated.toArray(String[]::new));
         }
     }
 
@@ -100,7 +99,7 @@ public final class TaskWindows {
         });
     }
 
-    private static void remember(Path path) {
+    static void remember(Path path) {
         PropertiesComponent properties = PropertiesComponent.getInstance();
         List<String> current = values(properties);
         List<String> updated = withRemembered(current, normalized(path));
