@@ -188,14 +188,17 @@ Model changes (plugin core only — see §10):
 
 ## 6. Agent take per hunk
 
-New core record, stored in `TourStore` beside the tour (same writer, same lifecycle,
-migrated by `TourMigration` on diff moves):
+New core record, stored on the `ReviewTour` (`ReviewTour.takes`, one per digest), so it has
+the tour's writer and lifecycle and `TourMigration` drops a take whose hunk left the diff:
 
 ```
-HunkTake(scopeId, hunkDigest, String does, Alignment alignment, String alignmentNote,
-         List<RedFlag(String text, Optional<String> findingId)> redFlags, String author, Instant at)
+HunkTake(hunkDigest, String does, Alignment alignment, String alignmentNote,
+         List<RedFlag(String text, Optional<String> findingId)> redFlags, Instant at)
 Alignment = ALIGNED | PARTIAL | DIVERGES | CONTEXT
 ```
+
+The scope is the tour's own. No author is recorded: the router knows the calling session's
+id, not an agent name.
 
 - MCP: extend `review_tour` with an optional `takes[]` (keyed by hunk id, resolved to digest on
   write) — one call for the whole structure, as the agent already writes tours that way.
@@ -277,11 +280,26 @@ live run could show.
 | W4b | Agent take at each hunk start in the file view (§6): a second decoration kind in `ReviewDiffInlays`, beside the finding cards | W4 |
 | W5 | Outbox: session lane + Fixes land on; PR lane (`SubmitPlan` + `gh`); whole-PR findings | W2 |
 | W6 | Source-editor round trip (changed-range marks, back to review); tool window becomes launcher | W1 |
+| W7 | Polish and fixes deferred from W1–W4 (see below) | W4 |
+
+**Deferred from earlier phases.** Each item was left out of the phase that found it; the
+reason and the phase that takes it are recorded here, so nothing lives only in a PR.
+
+| Item | Found in | Why it was left out | Goes to |
+|---|---|---|---|
+| The agent take at each hunk start in the file view (§6) | W4 | Needs a second decoration kind in `ReviewDiffInlays`; the section cards were the surface W3 built | W4b |
+| Section cards show no finding marks or inlay cards, and no gutter "+" for comments (§4) | W3 | The cards are separate diff panels; `ReviewDiffInlays` and `ReviewGutterComments` are wired to the file view's processor only | W4b, with the same per-viewer decoration work |
+| The intent from the PR description (§5) | W3 | `GhCliService.PrInfo` has no body and the workbench has no PR mode | W5, with the PR lane |
+| An end-to-end run with a real agent session posting `review_tour` with `dependsOn`, intent and takes | W3, W4 | The sandbox has no agent session; the router tests cover the tool | W5's exit check, which needs a bound session for the session lane anyway |
+| The Files tree does not highlight the row after Full File or Show finding | W3, W4 | The state rebuild re-renders the tree and drops a tree selection; the diff is selected through the pipeline instead | W7 |
+| `TourMigration` drops every step's diagram when it rebuilds a step (pre-existing) | W3 | Not part of the workbench; found while threading `dependsOn` through migration | W7 |
+| The diff's finding inlay card is squeezed at a narrow centre width | W2 | Layout of `FindingInlayCard` inside the editor's inlay, not the inbox | W7 |
+| The Review tool window's decisions bar text overlaps its Send button | W2 | Tool-window layout; the tool window is being reduced to a launcher | W6 |
 
 **Plugin first; the dual-tree rule is waived for this work** (operator decision,
 2026-11-03: the JavaFX app is heading for obsolescence and may never get these features).
 Core changes (`TourStep.dependsOn`, `ReviewVerdict.settledInStep`, `HunkTake`,
-`ReviewIntent`, anchorless `ReviewAnnotation`, `FixTarget`, prompt text) land in
+`ReviewTour.intent`, anchorless `ReviewAnnotation`, `FixTarget`, prompt text) land in
 `intellij-plugin/src/main/java` only. Consequences to respect:
 
 - The plugin core copy now **intentionally diverges** from `app/` for these files; list them in
