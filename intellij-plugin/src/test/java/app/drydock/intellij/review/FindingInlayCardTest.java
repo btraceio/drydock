@@ -135,6 +135,17 @@ class FindingInlayCardTest {
     }
 
     @Test
+    void aWholeChangeFindingOffersNoShowInDiff() {
+        ReviewAnnotation whole = ReviewAnnotation.human("s1", "", "", "",
+                new ReviewAnnotation.Message("Claude", Instant.EPOCH, "No test.")).withTriage(Triage.PROPOSED);
+        assertEquals(List.of(FindingInlayCard.Action.POST_TO_PR, FindingInlayCard.Action.REQUEST_FIX,
+                        FindingInlayCard.Action.DISMISS, FindingInlayCard.Action.CHALLENGE),
+                FindingInlayCard.actionsFor(whole, FindingInlayCard.Surface.PR_INBOX));
+        assertEquals(List.of(FindingInlayCard.Action.UNDO),
+                FindingInlayCard.actionsFor(whole.withTriage(Triage.CONFIRMED), FindingInlayCard.Surface.INBOX));
+    }
+
+    @Test
     void anInboxCardOffersRequestFixDismissChallengeAndShowInDiff() {
         Recording owner = new Recording();
         FindingInlayCard card = inboxCard(finding(Triage.PROPOSED, AnnotationStatus.OPEN), owner);

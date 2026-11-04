@@ -103,5 +103,8 @@ public class ReviewWorkbenchOutboxPlatformTest extends BasePlatformTestCase {
         assertEquals("Rename it. — src/A.java:5 · your comment", ReviewWorkbenchOutbox.rowText(commented));
         OutboxModel.Item removed = new OutboxModel.Item(comment("o9", "Gone.").withTriage(Triage.CONFIRMED), false);
         assertEquals("Gone. — src/A.java:9 (removed)", ReviewWorkbenchOutbox.rowText(removed));
+        OutboxModel.Item whole = new OutboxModel.Item(ReviewAnnotation.human("rs_1", "", "", "",
+                new ReviewAnnotation.Message("You", Instant.EPOCH, "Split this PR.")), true);
+        assertEquals("Split this PR. — the whole change · your comment", ReviewWorkbenchOutbox.rowText(whole));
     }
 }

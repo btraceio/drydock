@@ -155,6 +155,7 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
         }
         scopeActions.add(new ScopeToggle(InboxModel.Scope.ALL, "All"));
         scopeActions.add(new ScopeToggle(InboxModel.Scope.FILE, "This File"));
+        scopeActions.add(new ScopeToggle(InboxModel.Scope.WHOLE_PR, "Whole PR"));
         ActionToolbar tabs = ActionManager.getInstance().createActionToolbar(TOOLBAR_PLACE, tabActions, true);
         ActionToolbar scopes = ActionManager.getInstance().createActionToolbar(TOOLBAR_PLACE, scopeActions, true);
         tabs.setTargetComponent(this);

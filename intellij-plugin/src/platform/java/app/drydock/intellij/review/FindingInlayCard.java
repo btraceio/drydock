@@ -135,19 +135,22 @@ public final class FindingInlayCard extends JPanel {
      * Confirm and Dismiss, a decided one Undo. In the inbox a proposed
      * finding offers Request fix, Dismiss, Challenge and Show in diff, and
      * in a pull request review Post to PR first; a decided one offers Undo
-     * and Show in diff.
+     * and Show in diff. A finding about the whole change offers no Show in
+     * diff.
      */
     static List<Action> actionsFor(ReviewAnnotation finding, Surface surface) {
         boolean proposed = finding.triage() == Triage.PROPOSED;
         if (surface == Surface.INLAY) {
             return proposed ? List.of(Action.CONFIRM, Action.DISMISS) : List.of(Action.UNDO);
         }
-        if (!proposed) {
-            return List.of(Action.UNDO, Action.SHOW_IN_DIFF);
-        }
-        return surface == Surface.PR_INBOX
+        List<Action> actions = !proposed ? List.of(Action.UNDO, Action.SHOW_IN_DIFF)
+                : surface == Surface.PR_INBOX
                 ? List.of(Action.POST_TO_PR, Action.REQUEST_FIX, Action.DISMISS, Action.CHALLENGE, Action.SHOW_IN_DIFF)
                 : List.of(Action.REQUEST_FIX, Action.DISMISS, Action.CHALLENGE, Action.SHOW_IN_DIFF);
+        // A finding about the whole change has no lines to show.
+        return finding.wholePr()
+                ? actions.stream().filter(action -> action != Action.SHOW_IN_DIFF).toList()
+                : actions;
     }
 
     private static final String PROGRESS_TEXT = "Working…";
@@ -517,9 +520,15 @@ public final class FindingInlayCard extends JPanel {
         return row;
     }
 
+    /** The tag a finding about the whole change carries: it has no line to name. */
+    static final String WHOLE_PR_TAG = "Whole PR";
+
     /** The state tags: what the human decided, and whether the finding already went to the agent. */
     private void renderTags() {
         stateTags.clear();
+        if (finding.wholePr()) {
+            stateTags.add(WHOLE_PR_TAG);
+        }
         if (finding.triage() == Triage.CONFIRMED) {
             stateTags.add(pastTense(confirmLabel));
         } else if (finding.triage() == Triage.DISMISSED) {

@@ -43,8 +43,8 @@ public final class InboxModel {
         }
     }
 
-    /** Which findings a tab lists: the whole review, or one file's. */
-    public enum Scope { ALL, FILE }
+    /** Which findings a tab lists: the whole review, one file's, or the ones about the whole change. */
+    public enum Scope { ALL, FILE, WHOLE_PR }
 
     /**
      * One card. {@code challenged} marks a finding awaiting triage whose last
@@ -102,20 +102,22 @@ public final class InboxModel {
 
     /**
      * The inbox under {@code scope}: {@link Scope#FILE} lists the findings of
-     * {@code file} only, and is the whole review while no file is selected.
+     * {@code file} only, and is the whole review while no file is selected;
+     * {@link Scope#WHOLE_PR} lists the findings about the whole change.
      * Cards are in review order (file path, then start line, then id).
      */
     public static Snapshot snapshot(List<ReviewAnnotation> findings, Tab tab, Scope scope, Optional<String> file) {
         Objects.requireNonNull(findings, "findings");
         Objects.requireNonNull(file, "file");
         boolean byFile = scope == Scope.FILE && file.isPresent();
+        boolean wholeOnly = scope == Scope.WHOLE_PR;
         Map<Tab, Integer> counts = new EnumMap<>(Tab.class);
         for (Tab each : Tab.values()) {
             counts.put(each, 0);
         }
         List<Card> cards = new ArrayList<>();
         for (ReviewAnnotation finding : sorted(findings)) {
-            if (byFile && !finding.file().equals(file.get())) {
+            if (byFile && !finding.file().equals(file.get()) || wholeOnly && !finding.wholePr()) {
                 continue;
             }
             Tab of = tabOf(finding);
