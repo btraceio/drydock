@@ -72,8 +72,12 @@ final class ReviewWorkbenchSectionView extends JPanel implements Disposable {
 
     /** What the view asks of the live review. */
     interface Actions {
-        /** The diff of {@code path} scrolled to {@code scrollKey}; empty when the file changed since the diff. Any thread. */
-        CompletableFuture<Optional<ReviewDiffRequests.RequestContext>> hunkContext(String path, String scrollKey);
+        /**
+         * The diff of {@code path} that shows only its hunk {@code hunkIndex} as a change, scrolled to
+         * {@code scrollKey}; empty when the file changed since the diff. Any thread.
+         */
+        CompletableFuture<Optional<ReviewDiffRequests.RequestContext>> hunkContext(String path, int hunkIndex,
+                                                                                 String scrollKey);
 
         /** Approves {@code digests} in {@code section}; completes with the refusal to show, empty when written. */
         CompletableFuture<Optional<String>> markReviewed(SectionsModel.Section section, List<String> digests);
@@ -86,10 +90,10 @@ final class ReviewWorkbenchSectionView extends JPanel implements Disposable {
 
         /**
          * The hook a card's diff reports its viewers to, decorating them with
-         * {@code path}'s finding cards, marks and gutter "+" until
-         * {@code lifetime} ends. EDT.
+         * the finding cards and marks on {@code path}'s hunk {@code hunkIndex}
+         * and the gutter "+" until {@code lifetime} ends. EDT.
          */
-        default Consumer<FrameDiffTool.DiffViewer> decorator(String path, Disposable lifetime) {
+        default Consumer<FrameDiffTool.DiffViewer> decorator(String path, int hunkIndex, Disposable lifetime) {
             return viewer -> {
             };
         }
@@ -355,7 +359,7 @@ final class ReviewWorkbenchSectionView extends JPanel implements Disposable {
             // Asked once per card: a scroll event must not read the file's texts again. A card
             // that loaded, scrolled away and came back builds its panel from the same result.
             if (context == null) {
-                context = actions.hunkContext(hunk.file(), hunk.scrollKey());
+                context = actions.hunkContext(hunk.file(), hunk.index(), hunk.scrollKey());
                 context.whenComplete((loaded, error) -> onEdt(() -> create(loaded, error)));
             } else if (context.isDone() && !context.isCompletedExceptionally()) {
                 create(context.join(), null);
@@ -385,7 +389,7 @@ final class ReviewWorkbenchSectionView extends JPanel implements Disposable {
             Disposer.register(lifetime, processor);
             // Registered after the processor, so it is disposed first: the decorations leave
             // while the editors they sit in still exist.
-            Consumer<FrameDiffTool.DiffViewer> decorate = actions.decorator(hunk.file(), lifetime);
+            Consumer<FrameDiffTool.DiffViewer> decorate = actions.decorator(hunk.file(), hunk.index(), lifetime);
             processor.addListener((DiffRequestProcessorListener) () -> decorate.accept(processor.getActiveViewer()),
                     lifetime);
             processor.updateRequest();

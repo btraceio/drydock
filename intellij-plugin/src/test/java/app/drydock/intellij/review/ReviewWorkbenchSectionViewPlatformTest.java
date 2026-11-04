@@ -34,9 +34,9 @@ public class ReviewWorkbenchSectionViewPlatformTest extends BasePlatformTestCase
 
     private final ReviewWorkbenchSectionView.Actions actions = new ReviewWorkbenchSectionView.Actions() {
         @Override
-        public CompletableFuture<Optional<ReviewDiffRequests.RequestContext>> hunkContext(String path,
+        public CompletableFuture<Optional<ReviewDiffRequests.RequestContext>> hunkContext(String path, int hunkIndex,
                                                                                         String scrollKey) {
-            calls.add("context " + path + " " + scrollKey);
+            calls.add("context " + path + " " + hunkIndex + " " + scrollKey);
             return CompletableFuture.completedFuture(Optional.of(new ReviewDiffRequests.RequestContext(path,
                     ReviewDiffRequests.plan("a\nb\n", "a\nc\n", List.of(),
                             new ReviewDiffRequests.ScrollTarget(Side.RIGHT, 1)))));
@@ -59,7 +59,7 @@ public class ReviewWorkbenchSectionViewPlatformTest extends BasePlatformTestCase
         }
 
         @Override
-        public Consumer<FrameDiffTool.DiffViewer> decorator(String path, Disposable lifetime) {
+        public Consumer<FrameDiffTool.DiffViewer> decorator(String path, int hunkIndex, Disposable lifetime) {
             calls.add("decorator " + path);
             Disposer.register(lifetime, () -> calls.add("decorations released " + path));
             return viewer -> calls.add("viewer " + (viewer == null ? "none" : viewer.getClass().getSimpleName()));
@@ -178,7 +178,7 @@ public class ReviewWorkbenchSectionViewPlatformTest extends BasePlatformTestCase
             layOut(view);
             view.updateLiveCards();
             PlatformTestUtil.dispatchAllEventsInIdeEventQueue();
-            assertEquals("context src/A.java n3", calls.getFirst());
+            assertEquals("context src/A.java 0 n3", calls.getFirst());
             assertTrue("the card in view has its diff", view.cards.get(0).live());
 
             ReviewWorkbenchSectionView.Card card = view.cards.get(0);
