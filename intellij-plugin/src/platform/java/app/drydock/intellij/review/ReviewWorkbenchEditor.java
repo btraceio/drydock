@@ -59,7 +59,7 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
     static final String NAVIGATOR_EMPTY_TEXT = "No files to review.";
     static final String CHANGES_ONLY = "Changes Only";
     static final String FULL_FILE = "Full File";
-    static final String REVIEW_MENU = "Review";
+    static final String REVIEW_MENU = "Agent Review";
     static final String SECTION_REVIEW = "Section Review…";
     static final String EDUCATIONAL_TOUR = "Educational Tour…";
     static final String SPHINX_REVIEW = "Sphinx Review";
@@ -238,15 +238,7 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
         private final ReviewTabOpener.ReviewStart start;
 
         StartReview(Project project, Host host, ReviewTabOpener.ReviewStart start) {
-            super(switch (start) {
-                case SECTIONS -> SECTION_REVIEW;
-                case TOUR -> EDUCATIONAL_TOUR;
-                case SPHINX -> SPHINX_REVIEW;
-            }, switch (start) {
-                case SECTIONS -> "Start a review session that groups the change into sections, with its findings";
-                case TOUR -> "Start a review session that writes the educational tour and its findings";
-                case SPHINX -> "Start a review session whose first prompt is the harness's sphinx command";
-            }, null);
+            super(startLabel(start), startDescription(start), null);
             this.project = project;
             this.host = host;
             this.start = start;
@@ -268,6 +260,24 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
         public @NotNull ActionUpdateThread getActionUpdateThread() {
             return ActionUpdateThread.EDT;
         }
+    }
+
+    /** An agent review's name, in the header's menu and the inbox's buttons (pure). */
+    static String startLabel(ReviewTabOpener.ReviewStart start) {
+        return switch (start) {
+            case SECTIONS -> SECTION_REVIEW;
+            case TOUR -> EDUCATIONAL_TOUR;
+            case SPHINX -> SPHINX_REVIEW;
+        };
+    }
+
+    /** What an agent review does, as its tooltip (pure). */
+    static String startDescription(ReviewTabOpener.ReviewStart start) {
+        return switch (start) {
+            case SECTIONS -> "Start a review session that groups the change into sections, with its findings";
+            case TOUR -> "Start a review session that writes the educational tour and its findings";
+            case SPHINX -> "Start a review session whose first prompt is the harness's sphinx command";
+        };
     }
 
     /**

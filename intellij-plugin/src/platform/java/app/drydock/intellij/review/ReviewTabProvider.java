@@ -21,6 +21,7 @@ import app.drydock.intellij.review.workbench.model.InboxModel;
 import app.drydock.intellij.review.workbench.model.OutboxModel;
 import app.drydock.intellij.review.workbench.model.SectionsModel;
 import app.drydock.intellij.review.workbench.model.WorkbenchState;
+import app.drydock.intellij.tasks.WorktreeReview;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.ChangeGraph;
 import app.drydock.review.DiffSelection;
@@ -2697,6 +2698,26 @@ final class ReviewTabProvider {
         public void choose(WorkbenchState.InboxChoice choice) {
             inboxChoice = Objects.requireNonNull(choice, "choice");
             submitWorkbenchState();
+        }
+
+        @Override
+        public boolean canStartReview() {
+            return scope != null && project.getBasePath() != null;
+        }
+
+        @Override
+        public boolean sphinxReviewAvailable() {
+            ReviewScope current = scope;
+            return current != null && WorktreeReview.sphinxAvailable(current.repoRoot());
+        }
+
+        @Override
+        public void startReview(ReviewTabOpener.ReviewStart start) {
+            ReviewScope current = scope;
+            String base = project.getBasePath();
+            if (current != null && base != null) {
+                ReviewTabOpener.startReview(project, Path.of(base), current, start);
+            }
         }
 
         @Override

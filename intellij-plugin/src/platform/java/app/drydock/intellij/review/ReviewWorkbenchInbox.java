@@ -1,6 +1,7 @@
 package app.drydock.intellij.review;
 
 import app.drydock.intellij.review.workbench.model.InboxModel;
+import app.drydock.intellij.review.workbench.model.SectionsModel;
 import app.drydock.intellij.review.workbench.model.WorkbenchState;
 import app.drydock.review.DiffSelection;
 import app.drydock.review.ReviewAnnotation;
@@ -20,6 +21,7 @@ import com.intellij.util.ui.JBUI;
 import com.intellij.util.ui.UIUtil;
 import org.jetbrains.annotations.NotNull;
 
+import javax.swing.Box;
 import javax.swing.BoxLayout;
 import javax.swing.ButtonGroup;
 import javax.swing.JButton;
@@ -59,6 +61,7 @@ import java.util.concurrent.CompletableFuture;
 final class ReviewWorkbenchInbox extends JPanel implements Disposable {
 
     static final String EMPTY_TEXT = "No findings here.";
+    static final String NO_REVIEW_TEXT = "No agent has reviewed this change yet.";
     private static final String TOOLBAR_PLACE = "DrydockReviewWorkbenchInbox";
 
     /**
@@ -92,6 +95,20 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
          * ignores it.
          */
         CompletableFuture<Optional<String>> submit(Composer composer, String text, Severity severity);
+
+        /** Whether an agent review can be asked for: the live review's scope is loaded. EDT, in memory. */
+        default boolean canStartReview() {
+            return false;
+        }
+
+        /** Whether the harness a review would pick has the sphinx plugin. EDT, in memory. */
+        default boolean sphinxReviewAvailable() {
+            return false;
+        }
+
+        /** Asks an agent to review the checkout: sections, the educational tour, or sphinx's. EDT. */
+        default void startReview(ReviewTabOpener.ReviewStart start) {
+        }
     }
 
     /**
@@ -164,6 +181,8 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
     private final JPanel severityRow = new JPanel(new FlowLayout(FlowLayout.LEFT, JBUI.scale(4), 0));
     private Composer composer;
     private InboxModel.Snapshot shown = InboxModel.Snapshot.empty(InboxModel.Tab.TO_TRIAGE, InboxModel.Scope.ALL);
+    /** Whether no agent has reviewed the change yet; the inbox then offers the reviews. */
+    private boolean unreviewed;
     /** The cards' surface: the inbox of a local review, or of a pull request review. */
     private FindingInlayCard.Surface surface = FindingInlayCard.Surface.INBOX;
     /** The To Triage order when a decision was taken, and the decided id: where auto-advance starts. */
@@ -352,7 +371,46 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
     void render(WorkbenchState state) {
         surface = state.mode() == WorkbenchState.Mode.PR ? FindingInlayCard.Surface.PR_INBOX
                 : FindingInlayCard.Surface.INBOX;
+        unreviewed = unreviewed(state);
         render(state.inbox());
+    }
+
+    /**
+     * Whether no agent has reviewed the change yet (pure): no finding in any
+     * tab and no stored tour. The inbox then offers the reviews to ask for.
+     */
+    static boolean unreviewed(WorkbenchState state) {
+        InboxModel.Snapshot inbox = state.inbox();
+        boolean anyFinding = false;
+        for (InboxModel.Tab tab : InboxModel.Tab.values()) {
+            anyFinding |= inbox.count(tab) > 0;
+        }
+        return !anyFinding && state.sections().source() != SectionsModel.Source.TOUR;
+    }
+
+    /** "No agent has reviewed this change yet." and a button per review to ask for. */
+    private JPanel askForReview() {
+        JPanel panel = new JPanel();
+        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+        panel.setAlignmentX(LEFT_ALIGNMENT);
+        panel.setBorder(JBUI.Borders.empty(8));
+        JBLabel text = new JBLabel(NO_REVIEW_TEXT);
+        text.setAlignmentX(LEFT_ALIGNMENT);
+        panel.add(text);
+        boolean enabled = actions.canStartReview();
+        for (ReviewTabOpener.ReviewStart start : ReviewTabOpener.ReviewStart.values()) {
+            if (start == ReviewTabOpener.ReviewStart.SPHINX && !actions.sphinxReviewAvailable()) {
+                continue;
+            }
+            JButton button = new JButton(ReviewWorkbenchEditor.startLabel(start));
+            button.setToolTipText(ReviewWorkbenchEditor.startDescription(start));
+            button.setEnabled(enabled);
+            button.addActionListener(e -> actions.startReview(start));
+            button.setAlignmentX(LEFT_ALIGNMENT);
+            panel.add(Box.createVerticalStrut(JBUI.scale(6)));
+            panel.add(button);
+        }
+        return panel;
     }
 
     private void render(InboxModel.Snapshot inbox) {
@@ -360,7 +418,9 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
         shown = inbox;
         disposeCards();
         stack.removeAll();
-        if (inbox.cards().isEmpty()) {
+        if (unreviewed) {
+            stack.add(askForReview());
+        } else if (inbox.cards().isEmpty()) {
             JBLabel empty = new JBLabel(EMPTY_TEXT, SwingConstants.CENTER);
             empty.setForeground(UIUtil.getContextHelpForeground());
             empty.setAlignmentX(LEFT_ALIGNMENT);

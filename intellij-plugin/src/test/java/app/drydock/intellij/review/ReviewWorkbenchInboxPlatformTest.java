@@ -46,6 +46,8 @@ public class ReviewWorkbenchInboxPlatformTest extends BasePlatformTestCase {
         @Override public CompletableFuture<Optional<String>> challenge(ReviewAnnotation f, String t) { return record("challenge " + f.id()); }
         @Override public void showInDiff(ReviewAnnotation f) { calls.add("showInDiff " + f.id()); }
         @Override public void choose(WorkbenchState.InboxChoice c) { calls.add("choose " + c.tab() + " " + c.scope()); }
+        @Override public boolean canStartReview() { return true; }
+        @Override public void startReview(ReviewTabOpener.ReviewStart start) { calls.add("start " + start); }
         @Override public CompletableFuture<Optional<String>> submit(ReviewWorkbenchInbox.Composer c, String text,
                                                                     Severity severity) {
             return record("submit " + c.mode() + " " + c.range().startKey() + " " + text
@@ -112,10 +114,29 @@ public class ReviewWorkbenchInboxPlatformTest extends BasePlatformTestCase {
         }
     }
 
-    public void testAnEmptyTabSaysSo() {
+    public void testAnUnreviewedChangeOffersTheAgentReviews() {
         ReviewWorkbenchInbox inbox = new ReviewWorkbenchInbox(actions, Clock.fixed(Instant.EPOCH, ZoneOffset.UTC));
         try {
             inbox.render(state(List.of()));
+            assertTrue(UIUtil.uiTraverser(inbox).filter(JBLabel.class).toList().stream()
+                    .anyMatch(label -> ReviewWorkbenchInbox.NO_REVIEW_TEXT.equals(label.getText())));
+            assertNull("no sphinx plugin: no button", submitButtonOrNull(inbox, ReviewWorkbenchEditor.SPHINX_REVIEW));
+            submitButton(inbox, ReviewWorkbenchEditor.SECTION_REVIEW).doClick();
+            submitButton(inbox, ReviewWorkbenchEditor.EDUCATIONAL_TOUR).doClick();
+            assertEquals(List.of("start SECTIONS", "start TOUR"), calls);
+
+            inbox.render(state(List.of(finding("a", Triage.PROPOSED))));
+            assertNull("a reviewed change offers no review", submitButtonOrNull(inbox, ReviewWorkbenchEditor.SECTION_REVIEW));
+        } finally {
+            Disposer.dispose(inbox);
+        }
+    }
+
+    public void testAnEmptyTabSaysSo() {
+        ReviewWorkbenchInbox inbox = new ReviewWorkbenchInbox(actions, Clock.fixed(Instant.EPOCH, ZoneOffset.UTC));
+        try {
+            // Reviewed (a finding sits in the Outbox tab), but nothing is left to triage.
+            inbox.render(state(List.of(finding("a", Triage.CONFIRMED))));
             assertTrue(cards(inbox).isEmpty());
             assertTrue(UIUtil.uiTraverser(inbox).filter(JBLabel.class).toList().stream()
                     .anyMatch(label -> ReviewWorkbenchInbox.EMPTY_TEXT.equals(label.getText())));
@@ -192,6 +213,11 @@ public class ReviewWorkbenchInboxPlatformTest extends BasePlatformTestCase {
         } finally {
             Disposer.dispose(inbox);
         }
+    }
+
+    private static AbstractButton submitButtonOrNull(ReviewWorkbenchInbox inbox, String text) {
+        return UIUtil.uiTraverser(inbox).filter(AbstractButton.class).toList().stream()
+                .filter(button -> text.equals(button.getText())).findFirst().orElse(null);
     }
 
     private static AbstractButton submitButton(ReviewWorkbenchInbox inbox, String text) {
