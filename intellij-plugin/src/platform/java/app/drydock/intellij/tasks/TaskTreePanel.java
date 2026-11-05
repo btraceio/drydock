@@ -38,6 +38,7 @@ import app.drydock.intellij.tasks.TaskTreeModel.ViewFilter;
 import app.drydock.tasks.DelayedTaskRows;
 import app.drydock.tasks.TaskId;
 import app.drydock.tasks.TaskNode.DelayedTaskRow;
+import app.drydock.tasks.TaskNode.TasksSection;
 import app.drydock.tasks.TaskSnapshot;
 
 import com.intellij.icons.AllIcons;
@@ -81,12 +82,16 @@ import org.jetbrains.annotations.Nullable;
 import javax.swing.JPanel;
 import javax.swing.SwingUtilities;
 import javax.swing.event.DocumentEvent;
+import javax.swing.event.TreeExpansionEvent;
+import javax.swing.event.TreeWillExpandListener;
+import javax.swing.tree.ExpandVetoException;
 import javax.swing.tree.DefaultMutableTreeNode;
 import javax.swing.tree.DefaultTreeModel;
 import javax.swing.tree.TreePath;
 
 import java.awt.BorderLayout;
 import java.awt.Component;
+import java.awt.EventQueue;
 import java.awt.Rectangle;
 import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
@@ -197,7 +202,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         @Override
         public void update(@NotNull AnActionEvent e) {
             TaskActions.present(e, selectedValue()
-                    instanceof app.drydock.tasks.TaskNode.TasksSection);
+                    instanceof TasksSection);
         }
 
         @Override
@@ -660,6 +665,19 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         // restoration alike — reach the tracker, which records only the
         // user's; restoration runs inside its programmatic guard.
         tree.addTreeWillExpandListener(expansions);
+        // Added after the tracker, so it runs first (Swing fires the newest
+        // listener first) and a vetoed toggle is never recorded as the user's.
+        tree.addTreeWillExpandListener(new TreeWillExpandListener() {
+            @Override
+            public void treeWillExpand(TreeExpansionEvent event) throws ExpandVetoException {
+                vetoRowClickToggle(event);
+            }
+
+            @Override
+            public void treeWillCollapse(TreeExpansionEvent event) throws ExpandVetoException {
+                vetoRowClickToggle(event);
+            }
+        });
 
         search.addDocumentListener(new DocumentAdapter() {
             @Override
@@ -926,7 +944,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             if (value instanceof DelayedTaskRow) {
                 return delayedTaskActions;
             }
-            if (value instanceof app.drydock.tasks.TaskNode.TasksSection) {
+            if (value instanceof TasksSection) {
                 return new AnAction[] { newDelayedTask };
             }
             return TaskMenu.group(selected().orElse(null), selectedNodes(), actions,
@@ -1376,7 +1394,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         boolean tasksSectionCollapsed = tasksSectionCollapsed();
         DefaultMutableTreeNode root = new DefaultMutableTreeNode();
         DefaultMutableTreeNode[] toSelect = new DefaultMutableTreeNode[1];
-        for (app.drydock.tasks.TaskNode.TasksSection section : tasks.sections()) {
+        for (TasksSection section : tasks.sections()) {
             root.add(treeNode(section, selectedTask, toSelect));
         }
         for (TaskNode node : nodes) {
@@ -1398,7 +1416,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             if (!tasksSectionCollapsed) {
                 for (int i = 0; i < root.getChildCount(); i++) {
                     if (root.getChildAt(i) instanceof DefaultMutableTreeNode child
-                            && child.getUserObject() instanceof app.drydock.tasks.TaskNode.TasksSection) {
+                            && child.getUserObject() instanceof TasksSection) {
                         tree.expandPath(new TreePath(child.getPath()));
                     }
                 }
@@ -1541,7 +1559,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     }
 
     /** One task-layer section's tree node (T17a): its children, built by the same path. */
-    private static DefaultMutableTreeNode treeNode(app.drydock.tasks.TaskNode.TasksSection section,
+    private static DefaultMutableTreeNode treeNode(TasksSection section,
                                                    Optional<TaskId> selectedTask, DefaultMutableTreeNode[] toSelect) {
         DefaultMutableTreeNode treeNode = new DefaultMutableTreeNode(section);
         // The layer only ever puts task rows in its sections; other kinds
@@ -1610,11 +1628,33 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         }
     }
 
+    /**
+     * Task-related parents (the Tasks section, a session row, a task row)
+     * toggle only from the expand handle: a click on the row itself selects,
+     * activates or edits it, and never folds its children.
+     */
+    private void vetoRowClickToggle(TreeExpansionEvent event) throws ExpandVetoException {
+        if (!(EventQueue.getCurrentEvent() instanceof MouseEvent mouse) || mouse.getComponent() != tree) {
+            return;
+        }
+        TreePath path = event.getPath();
+        Object node = ((DefaultMutableTreeNode) path.getLastPathComponent()).getUserObject();
+        if (!(node instanceof TasksSection || node instanceof TaskRow || node instanceof DelayedTaskRow)) {
+            return;
+        }
+        Rectangle bounds = tree.getPathBounds(path);
+        // The handle sits left of the row's bounds; a press there is the handle's toggle.
+        if (bounds != null && mouse.getX() >= bounds.x
+                && path.equals(tree.getPathForLocation(mouse.getX(), mouse.getY()))) {
+            throw new ExpandVetoException(event, "a row click does not toggle a task row");
+        }
+    }
+
     /** Whether the user collapsed the Tasks section in the current tree (T17a). */
     private boolean tasksSectionCollapsed() {
         if (tree.getModel().getRoot() instanceof DefaultMutableTreeNode root && root.getChildCount() > 0
                 && root.getChildAt(0) instanceof DefaultMutableTreeNode first
-                && first.getUserObject() instanceof app.drydock.tasks.TaskNode.TasksSection) {
+                && first.getUserObject() instanceof TasksSection) {
             return tree.isCollapsed(new TreePath(first.getPath()));
         }
         return false;
@@ -1638,7 +1678,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
      * gains. Pure data; empty when the service has published no snapshot
      * yet (the session-only input).
      */
-    record TaskLayer(List<app.drydock.tasks.TaskNode.TasksSection> sections,
+    record TaskLayer(List<TasksSection> sections,
                      Map<String, List<app.drydock.tasks.TaskNode.DelayedTaskRow>> attachedBySession) {
 
         static final TaskLayer EMPTY = new TaskLayer(List.of(), Map.of());
@@ -1700,8 +1740,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                         .filter(row -> inScope(row, scope, displayNames))
                         .filter(row -> DelayedTaskRows.matches(itemFilter, row))
                         .toList();
-        List<app.drydock.tasks.TaskNode.TasksSection> sections = sectionRows.isEmpty() ? List.of()
-                : List.of(new app.drydock.tasks.TaskNode.TasksSection("Tasks",
+        List<TasksSection> sections = sectionRows.isEmpty() ? List.of()
+                : List.of(new TasksSection("Tasks",
                         sectionRows.stream().map(row -> (app.drydock.tasks.TaskNode) row).toList()));
         return new TaskLayer(sections, bySession);
     }
