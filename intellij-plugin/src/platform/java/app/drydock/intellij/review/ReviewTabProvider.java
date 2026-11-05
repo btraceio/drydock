@@ -21,6 +21,7 @@ import app.drydock.intellij.review.workbench.model.InboxModel;
 import app.drydock.intellij.review.workbench.model.OutboxModel;
 import app.drydock.intellij.review.workbench.model.SectionsModel;
 import app.drydock.intellij.review.workbench.model.WorkbenchState;
+import app.drydock.intellij.tasks.WorktreeReview;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.ChangeGraph;
 import app.drydock.review.DiffSelection;
@@ -34,6 +35,7 @@ import app.drydock.review.ReviewScope;
 import app.drydock.review.Triage;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Sections;
+import app.drydock.review.Severity;
 import app.drydock.review.SubmitPlan;
 import app.drydock.review.tour.HunkTake;
 import app.drydock.review.tour.ReviewTour;
@@ -1904,7 +1906,10 @@ final class ReviewTabProvider {
         // Progress at once (repository rule): both actions disable (their
         // update() reads commandRunning) and the status says what runs;
         // every completion path below clears it.
-        renderStatusText((mark ? "Marking " : "Unmarking ") + path + " reviewed…");
+        String progress = (mark ? "Marking " : "Unmarking ") + path + " reviewed…";
+        renderStatusText(progress);
+        // The workbench too: the Review window that shows the status line is usually hidden.
+        noticeInWorkbench(progress);
         CompletableFuture<ReviewVerdictCommands.Result> future;
         try {
             future = mark
@@ -1926,12 +1931,23 @@ final class ReviewTabProvider {
             return;
         }
         if (error != null) {
+            noticeInWorkbench("");
             Messages.showErrorDialog(project, "Could not " + (mark ? "mark " : "unmark ") + path
                     + (mark ? " reviewed: " : ": ") + rootMessage(error), "Drydock Review");
             return;
         }
         if (result instanceof ReviewVerdictCommands.Result.Refused refused) {
+            noticeInWorkbench("");
             Messages.showWarningDialog(project, refused.reason(), "Drydock Review");
+            return;
+        }
+        noticeInWorkbench(mark ? path + " is marked reviewed." : path + " is no longer marked reviewed.");
+    }
+
+    /** Shows {@code text} in every workbench inbox's notice line; a blank text clears it. EDT. */
+    private void noticeInWorkbench(String text) {
+        for (ReviewWorkbenchInbox inbox : List.copyOf(inboxes)) {
+            inbox.notice(text);
         }
     }
 
@@ -2567,7 +2583,7 @@ final class ReviewTabProvider {
      * and, in a local review, not posted to a PR — it is an instruction for
      * the session. Off the EDT, on the plugin's executor.
      */
-    private CompletableFuture<Optional<String>> addComment(DiffSelection.Range range, String text) {
+    private CompletableFuture<Optional<String>> addComment(DiffSelection.Range range, String text, Severity severity) {
         AnnotationStore annotations = store;
         ReviewScope current = scope;
         if (annotations == null || current == null) {
@@ -2575,7 +2591,7 @@ final class ReviewTabProvider {
         }
         return CompletableFuture.supplyAsync(() -> {
             annotations.upsert(ReviewAnnotation.human(current.id(), range.file(), range.startKey(), range.endKey(),
-                    new ReviewAnnotation.Message("You", Instant.now(), text)).withPostToPr(false));
+                    new ReviewAnnotation.Message("You", Instant.now(), text), severity).withPostToPr(false));
             return Optional.of(COMMENT_ADDED);
         }, plugin.executor());
     }
@@ -2685,9 +2701,30 @@ final class ReviewTabProvider {
         }
 
         @Override
-        public CompletableFuture<Optional<String>> submit(ReviewWorkbenchInbox.Composer composer, String text) {
+        public boolean canStartReview() {
+            return scope != null && project.getBasePath() != null;
+        }
+
+        @Override
+        public boolean sphinxReviewAvailable() {
+            ReviewScope current = scope;
+            return current != null && WorktreeReview.sphinxAvailable(current.repoRoot());
+        }
+
+        @Override
+        public void startReview(ReviewTabOpener.ReviewStart start) {
+            ReviewScope current = scope;
+            String base = project.getBasePath();
+            if (current != null && base != null) {
+                ReviewTabOpener.startReview(project, Path.of(base), current, start);
+            }
+        }
+
+        @Override
+        public CompletableFuture<Optional<String>> submit(ReviewWorkbenchInbox.Composer composer, String text,
+                                                          Severity severity) {
             return switch (composer.mode()) {
-                case COMMENT -> addComment(composer.range(), text);
+                case COMMENT -> addComment(composer.range(), text, severity);
                 case ASK -> askAboutSelection(composer.range(), text);
             };
         }

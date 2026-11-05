@@ -35,8 +35,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * The open paths of {@link ReviewTabOpener} over fakes: the placeholder
- * before any platform call (AC18), the dedicated Review window activated
- * by its pinned id (T8), and the link session carried into the mint (Q7).
+ * before any platform call (AC18), the dedicated Review window's content
+ * created by its pinned id (T8), and the link session carried into the mint (Q7).
  * The gutter path ({@code openFinding}) adds the pending-target seam: the
  * target is recorded on the project before activation, so it works with
  * no content in sight, and an ordinary open records nothing.
@@ -58,7 +58,7 @@ class ReviewTabOpenerTest {
         // background work lands on a platform call (AC18).
         assertTrue(calls.indexOf("placeholder: Loading review…") >= 0, calls::toString);
         assertTrue(calls.indexOf("placeholder: Loading review…")
-                        < calls.indexOf("activate: Drydock Review"),
+                        < calls.indexOf("content: Drydock Review"),
                 calls::toString);
     }
 
@@ -74,7 +74,7 @@ class ReviewTabOpenerTest {
                 "placeholder: Loading review…",
                 "resolve: /repo link=" + link.id(),
                 "hasData: scope-1",
-                "activate: Drydock Review",
+                "content: Drydock Review",
                 "openWorkbench",
                 "reloadTab"), calls);
     }
@@ -90,7 +90,7 @@ class ReviewTabOpenerTest {
                 "placeholder: Loading review…",
                 "resolve: /repo link=" + link.id(),
                 "hasData: scope-1",
-                "activate: Drydock Review",
+                "content: Drydock Review",
                 "openWorkbench",
                 "reloadTab"), calls);
     }
@@ -104,7 +104,7 @@ class ReviewTabOpenerTest {
                 "placeholder: Loading review…",
                 "resolve: /repo link=<unbound>",
                 "hasData: scope-1",
-                "activate: Drydock Review",
+                "content: Drydock Review",
                 "openWorkbench",
                 "reloadTab"), calls);
     }
@@ -128,7 +128,7 @@ class ReviewTabOpenerTest {
                 "saveDocuments",
                 "placeholder: Loading review…",
                 "resolve: /nowhere link=" + link.id(),
-                "activate: Drydock Review",
+                "content: Drydock Review",
                 "openWorkbench",
                 "reloadTab"), calls);
     }
@@ -143,7 +143,7 @@ class ReviewTabOpenerTest {
         assertTrue(calls.indexOf("saveDocuments") < calls.indexOf("resolve: /repo link=" + link.id()),
                 calls::toString);
         assertEquals("reloadTab", calls.get(calls.size() - 1), calls::toString);
-        assertTrue(calls.indexOf("activate: Drydock Review") < calls.indexOf("openWorkbench"), calls::toString);
+        assertTrue(calls.indexOf("content: Drydock Review") < calls.indexOf("openWorkbench"), calls::toString);
         assertTrue(calls.indexOf("openWorkbench") < calls.indexOf("reloadTab"), calls::toString);
     }
 
@@ -158,8 +158,8 @@ class ReviewTabOpenerTest {
 
     /**
      * The gutter click records its target on the project <em>before</em> the
-     * window is activated — with no Review content in existence, because
-     * activation is what lazily creates it (T7's factory). The recorded
+     * window's content is created — with no Review content in existence,
+     * because that step is what lazily creates it (T7's factory). The recorded
      * target survives for the consumer and is spent exactly once.
      */
     @Test
@@ -172,7 +172,7 @@ class ReviewTabOpenerTest {
         // window's lazy content could observe.
         assertTrue(calls.indexOf("record: " + target) >= 0, calls::toString);
         assertTrue(calls.indexOf("record: " + target)
-                        < calls.indexOf("activate: Drydock Review"),
+                        < calls.indexOf("content: Drydock Review"),
                 calls::toString);
         // The open path itself is the unbound one — the gutter click has no
         // link session — and keeps the Changes-link ordering (Q9, AC18):
@@ -184,7 +184,7 @@ class ReviewTabOpenerTest {
                 "placeholder: Loading review…",
                 "resolve: /repo link=<unbound>",
                 "hasData: scope-1",
-                "activate: Drydock Review",
+                "content: Drydock Review",
                 "openWorkbench",
                 "reloadTab"), calls);
         // The seam: still recorded (the content never existed to consume
@@ -206,7 +206,7 @@ class ReviewTabOpenerTest {
                 "placeholder: Loading review…",
                 "resolve: /repo link=<unbound>",
                 "hasData: scope-1",
-                "activate: Drydock Review",
+                "content: Drydock Review",
                 "openWorkbench",
                 "reloadTab"), calls);
     }
@@ -297,7 +297,7 @@ class ReviewTabOpenerTest {
 
     /**
      * A checkout no review was ever prepared for (no findings, no tour):
-     * the open still activates and reloads the window — the click is not
+     * the open still creates the content and reloads it — the click is not
      * lost — and ends in the offer. Declining stops there.
      */
     @Test
@@ -307,7 +307,7 @@ class ReviewTabOpenerTest {
         opener.openIn(project("/repo"), Optional.of(link));
 
         assertTrue(calls.contains("offer: /repo scope-1"), calls::toString);
-        assertTrue(calls.indexOf("activate: Drydock Review") < calls.indexOf("offer: /repo scope-1"),
+        assertTrue(calls.indexOf("content: Drydock Review") < calls.indexOf("offer: /repo scope-1"),
                 "the window opens before the offer: " + calls);
         assertTrue(calls.stream().noneMatch(call -> call.startsWith("launch")), calls::toString);
     }
@@ -324,7 +324,7 @@ class ReviewTabOpenerTest {
                 "placeholder: Loading review…",
                 "resolve: /repo link=" + link.id(),
                 "hasData: scope-1",
-                "activate: Drydock Review",
+                "content: Drydock Review",
                 "openWorkbench",
                 "reloadTab",
                 "offer: /repo scope-1",
@@ -382,7 +382,7 @@ class ReviewTabOpenerTest {
 
         opener.openIn(project("/nowhere"), Optional.of(link));
 
-        assertTrue(calls.contains("activate: Drydock Review"), calls::toString);
+        assertTrue(calls.contains("content: Drydock Review"), calls::toString);
         assertTrue(calls.stream().noneMatch(call -> call.startsWith("offer")), calls::toString);
     }
 
@@ -394,7 +394,7 @@ class ReviewTabOpenerTest {
         opener.openIn(project("/repo"), Optional.of(link));
 
         assertTrue(calls.indexOf("hasData: scope-1") >= 0, calls::toString);
-        assertTrue(calls.indexOf("hasData: scope-1") < calls.indexOf("activate: Drydock Review"),
+        assertTrue(calls.indexOf("hasData: scope-1") < calls.indexOf("content: Drydock Review"),
                 calls::toString);
     }
 
@@ -450,8 +450,8 @@ class ReviewTabOpenerTest {
     private ReviewTabOpener.Host host() {
         return new ReviewTabOpener.Host() {
             @Override
-            public void activate(Project project, String toolWindowId) {
-                calls.add("activate: " + toolWindowId);
+            public void prepareContent(Project project, String toolWindowId) {
+                calls.add("content: " + toolWindowId);
             }
 
             @Override
