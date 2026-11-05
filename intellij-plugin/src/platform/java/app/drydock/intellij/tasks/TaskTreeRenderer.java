@@ -35,8 +35,10 @@ import app.drydock.ui.AgentLabels;
 import com.intellij.icons.AllIcons;
 import com.intellij.openapi.util.IconLoader;
 import com.intellij.ui.ColoredTreeCellRenderer;
+import com.intellij.ui.IconManager;
 import com.intellij.ui.JBColor;
 import com.intellij.ui.SimpleTextAttributes;
+import com.intellij.util.ui.EmptyIcon;
 import com.intellij.util.ui.JBUI;
 import org.jetbrains.annotations.NotNull;
 
@@ -48,7 +50,9 @@ import java.awt.Color;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Paints one {@link TaskNode}: dot, name, and the grey where/what/age text.
@@ -62,6 +66,16 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
 
     /** The tag on a row's link text ("Add", "Start ▸"): what a single click may act on. */
     static final Object LINK = new Object();
+
+    /** The tag on a session row's {@code Done…} link, shown while its pull request is merged or closed. */
+    static final Object DONE_LINK = new Object();
+
+    static final String DONE_LINK_TEXT = "Done\u2026";
+
+    /** The tag on a conflicting pull request row's {@code Resolve Conflicts…} link. */
+    static final Object RESOLVE_CONFLICTS_LINK = new Object();
+
+    static final String RESOLVE_CONFLICTS_LINK_TEXT = "Resolve Conflicts\u2026";
 
     /**
      * The neutral bundled Jira source mark (a ticket glyph, deliberately not
@@ -186,12 +200,20 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
                 paintMirroredTask(jira.issue().url());
             }
             case PullRequestRow pullRequest -> {
-                setIcon(AllIcons.Vcs.Vendors.Github);
+                setIcon(pullRequestRowIcon(pullRequest.pullRequest().conflicting()));
                 append("#" + pullRequest.pullRequest().number() + " " + pullRequest.pullRequest().title());
                 pullRequest.pullRequest().author().ifPresent(author ->
                         append("  @" + author, SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES));
+                if (pullRequest.pullRequest().conflicting()) {
+                    setToolTipText("#" + pullRequest.pullRequest().number()
+                            + " cannot merge into " + pullRequest.pullRequest().baseRefName() + ": it has conflicts");
+                }
                 append(" · ", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
                 append("Review ▸", SimpleTextAttributes.LINK_ATTRIBUTES, LINK);
+                if (pullRequest.pullRequest().conflicting()) {
+                    append(" · ", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
+                    append(RESOLVE_CONFLICTS_LINK_TEXT, SimpleTextAttributes.LINK_ATTRIBUTES, RESOLVE_CONFLICTS_LINK);
+                }
             }
             case TaskRow task -> paintTask(task);
             // Fully-qualified on purpose: the delayed-task layer reuses the
@@ -363,7 +385,7 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
 
     private void paintTask(TaskRow task) {
         SessionStatus status = task.running() ? SessionStatus.RUNNING : task.session().status();
-        setIcon(SessionDots.dotIcon(status, task.activity()));
+        setIcon(sessionIcon(SessionDots.dotIcon(status, task.activity()), task.branchPullRequest()));
         append(task.session().displayName());
         if (task.session().flagged()) {
             append("  " + FLAG_TAG, FLAG_ATTRIBUTES);
@@ -371,12 +393,11 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
         if (task.readOnly()) {
             append("  RO", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
         }
-        if (task.branchPullRequest().isPresent()) {
-            BranchPullRequest pullRequest = task.branchPullRequest().get();
-            append("  " + pullRequestBadge(pullRequest), badgeAttributes(pullRequest));
-            setToolTipText(pullRequestTooltip(pullRequest));
-        } else {
-            pullRequestOf(task).ifPresent(number ->
+        // The state is the leading icon; the tooltip names the PR. Without a
+        // known state the number stays as grey text.
+        task.branchPullRequest().ifPresent(pullRequest -> setToolTipText(pullRequestTooltip(pullRequest)));
+        if (task.branchPullRequest().flatMap(TaskTreeRenderer::pullRequestIcon).isEmpty()) {
+            task.branchPullRequest().map(BranchPullRequest::number).or(() -> pullRequestOf(task)).ifPresent(number ->
                     append("  PR #" + number, SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES));
         }
         String agent = AgentLabels.displayName(DrydockPluginService.getInstance().registry(),
@@ -390,6 +411,10 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
             append(" · ", SimpleTextAttributes.GRAYED_ATTRIBUTES);
             append(text, SimpleTextAttributes.LINK_ATTRIBUTES, LINK);
         });
+        if (PullRequestDoneOffers.offerOf(task).isPresent()) {
+            append(" · ", SimpleTextAttributes.GRAYED_ATTRIBUTES);
+            append(DONE_LINK_TEXT, SimpleTextAttributes.LINK_ATTRIBUTES, DONE_LINK);
+        }
     }
 
     /**
@@ -415,17 +440,6 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
         };
     }
 
-    /** Pure. The badge text: {@code PR #12}, with the state word for anything but a plain open PR. */
-    static String pullRequestBadge(BranchPullRequest pullRequest) {
-        String base = "PR #" + pullRequest.number();
-        return switch (badgeKind(pullRequest)) {
-            case OPEN, UNKNOWN -> base;
-            case DRAFT -> base + " draft";
-            case MERGED -> base + " merged";
-            case CLOSED -> base + " closed";
-        };
-    }
-
     /** Pure. The session row's hover text when its branch has a pull request. */
     static String pullRequestTooltip(BranchPullRequest pullRequest) {
         String state = switch (badgeKind(pullRequest)) {
@@ -439,22 +453,55 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
                 + pullRequest.headRefName() + (pullRequest.title().isBlank() ? "" : ": " + pullRequest.title());
     }
 
-    /** The badge colours: GitHub's own green, grey, purple and red for open, draft, merged and closed. */
-    private static SimpleTextAttributes badgeAttributes(BranchPullRequest pullRequest) {
+    /**
+     * Pure. The state icon of a branch's pull request: GitHub's green, grey,
+     * purple and red glyphs for open, draft, merged and closed (each with a
+     * dark-theme variant); none when gh reported no state.
+     */
+    static Optional<Icon> pullRequestIcon(BranchPullRequest pullRequest) {
         return switch (badgeKind(pullRequest)) {
-            case OPEN -> OPEN_BADGE;
-            case DRAFT, UNKNOWN -> SimpleTextAttributes.GRAYED_BOLD_ATTRIBUTES;
-            case MERGED -> MERGED_BADGE;
-            case CLOSED -> CLOSED_BADGE;
+            case OPEN -> Optional.of(PR_OPEN_ICON);
+            case DRAFT -> Optional.of(PR_DRAFT_ICON);
+            case MERGED -> Optional.of(PR_MERGED_ICON);
+            case CLOSED -> Optional.of(PR_CLOSED_ICON);
+            case UNKNOWN -> Optional.empty();
         };
     }
 
-    private static final SimpleTextAttributes OPEN_BADGE = new SimpleTextAttributes(
-            SimpleTextAttributes.STYLE_BOLD, new JBColor(new Color(0x1A, 0x7F, 0x37), new Color(0x3F, 0xB9, 0x50)));
-    private static final SimpleTextAttributes MERGED_BADGE = new SimpleTextAttributes(
-            SimpleTextAttributes.STYLE_BOLD, new JBColor(new Color(0x82, 0x50, 0xDF), new Color(0xA3, 0x71, 0xF7)));
-    private static final SimpleTextAttributes CLOSED_BADGE = new SimpleTextAttributes(
-            SimpleTextAttributes.STYLE_BOLD, new JBColor(new Color(0xCF, 0x22, 0x2E), new Color(0xF8, 0x51, 0x49)));
+    /**
+     * A session row's leading icon: its status dot, then its pull request's
+     * state icon -- on the left, so it stays visible while the long row is
+     * scrolled -- or an empty slot of the same width, so every session's
+     * name starts in the same column. Cached per pair: both halves are
+     * shared instances, so the cache stays as small as their product.
+     */
+    static Icon sessionIcon(Icon dot, Optional<BranchPullRequest> pullRequest) {
+        Icon state = pullRequest.flatMap(TaskTreeRenderer::pullRequestIcon).orElse(PR_ICON_SLOT);
+        return ROW_ICONS.computeIfAbsent(new IconPair(dot, state),
+                pair -> IconManager.getInstance().createRowIcon(pair.first(), pair.second()));
+    }
+
+    /** A pull request row's leading icon: GitHub's mark, followed by the conflict icon while it conflicts. */
+    static Icon pullRequestRowIcon(boolean conflicting) {
+        if (!conflicting) {
+            return AllIcons.Vcs.Vendors.Github;
+        }
+        return ROW_ICONS.computeIfAbsent(new IconPair(AllIcons.Vcs.Vendors.Github, PR_CONFLICT_ICON),
+                pair -> IconManager.getInstance().createRowIcon(pair.first(), pair.second()));
+    }
+
+    private record IconPair(Icon first, Icon second) { }
+
+    private static final Map<IconPair, Icon> ROW_ICONS = new ConcurrentHashMap<>();
+
+    static final Icon PR_OPEN_ICON = IconLoader.getIcon("/icons/prOpen.svg", TaskTreeRenderer.class);
+    static final Icon PR_DRAFT_ICON = IconLoader.getIcon("/icons/prDraft.svg", TaskTreeRenderer.class);
+    static final Icon PR_MERGED_ICON = IconLoader.getIcon("/icons/prMerged.svg", TaskTreeRenderer.class);
+    static final Icon PR_CLOSED_ICON = IconLoader.getIcon("/icons/prClosed.svg", TaskTreeRenderer.class);
+    static final Icon PR_CONFLICT_ICON = IconLoader.getIcon("/icons/prConflict.svg", TaskTreeRenderer.class);
+
+    /** The empty slot a session without a pull request keeps, as wide as a state icon. */
+    private static final Icon PR_ICON_SLOT = EmptyIcon.create(PR_OPEN_ICON);
 
     /** Marks either end of a task mirror: the task's row and the mirrored issue's row. */
     static final String MIRROR_MARK = "\u21c4";

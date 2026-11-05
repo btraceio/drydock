@@ -3,6 +3,7 @@ package app.drydock.intellij.tasks;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.SessionMode;
 import app.drydock.git.GhCliService.OpenIssue;
+import app.drydock.git.GhCliService.OpenPullRequest;
 import app.drydock.git.JiraIssue;
 import app.drydock.intellij.tasks.NewTaskPlan.OpenIn;
 import app.drydock.intellij.tasks.NewTaskPlan.WorkIn;
@@ -224,6 +225,38 @@ public record NewTaskPreset(String name, Optional<String> instructions, Optional
         return new NewTaskPreset(name, Optional.of(prompt.toString()), Optional.of(SessionMode.WRITES),
                 Optional.empty(), true, OpenIn.THIS_WINDOW, Optional.of(IMPLEMENT_TIER_ROLES));
     }
+
+    /**
+     * A writable task, fixed by its caller to the pull request's checkout,
+     * prefilled to merge the PR's base into it, resolve the conflicts and
+     * push the result to the PR's head branch. A {@code pr-<n>} checkout's
+     * local branch is not named like the head branch, so the push names the
+     * upstream explicitly rather than relying on {@code git push}'s default.
+     */
+    static NewTaskPreset resolveConflicts(OpenPullRequest pullRequest) {
+        String reference = "#" + pullRequest.number();
+        StringBuilder prompt = new StringBuilder("Resolve the merge conflicts of GitHub pull request ")
+                .append(reference).append(": ").append(pullRequest.title());
+        pullRequest.url().ifPresent(url -> prompt.append("\n\n").append(url));
+        prompt.append(RESOLVE_CONFLICTS_STEPS.formatted(pullRequest.baseRefName(), pullRequest.headRefName()));
+        return new NewTaskPreset("Resolve conflicts " + reference + " " + pullRequest.title(),
+                Optional.of(prompt.toString()), Optional.of(SessionMode.WRITES), Optional.empty(), true,
+                OpenIn.THIS_WINDOW);
+    }
+
+    private static final String RESOLVE_CONFLICTS_STEPS = """
+
+
+            This worktree is the pull request's checkout. Steps:
+            1. Fetch, bring this checkout up to the PR's head (`git merge --ff-only @{upstream}`), then merge the
+               PR's base branch into it: `git merge origin/%1$s`. Do not rebase: the branch is already published.
+            2. Resolve every conflict so both sides' intent survives. When a conflict is ambiguous, stop and ask
+               instead of picking a side.
+            3. Build and run the tests the change touches; fix what the merge broke.
+            4. Commit the merge, then push it to the PR's head branch `%2$s` on the remote this branch tracks
+               (`git rev-parse --abbrev-ref @{upstream}` names it), e.g. `git push <remote> HEAD:%2$s`.
+            5. Report what conflicted, how each conflict was resolved, and the verification run.
+            """;
 
     static NewTaskPreset triage(OpenIssue issue) {
         String reference = "#" + issue.number();

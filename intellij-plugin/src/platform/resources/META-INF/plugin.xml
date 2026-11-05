@@ -104,6 +104,9 @@
         <notificationGroup id="Drydock tasks" displayType="BALLOON"/>
         <!-- "Review posted on PR #n": the pull request lane's submit (W5e). -->
         <notificationGroup id="Drydock review" displayType="BALLOON"/>
+        <!-- "PR #n merged/closed - done with <session>?": the session Done
+             offer (PullRequestDoneOffers). -->
+        <notificationGroup id="Drydock pull requests" displayType="BALLOON"/>
 
         <postStartupActivity
                 implementation="app.drydock.intellij.startup.DrydockStartupActivity"/>

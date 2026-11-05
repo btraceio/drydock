@@ -83,4 +83,20 @@ class GhCliPullRequestListingTest {
                 GhCliService.pathWithFallbacks(String.join(separator, "/opt/homebrew/bin", "/usr/local/bin")),
                 "known locations already on PATH must not be duplicated");
     }
+
+    @Test
+    void onlyAnExplicitConflictingMergeableMarksAConflict() {
+        String stdout = """
+                [{"number":1,"title":"a","headRefName":"a","baseRefName":"main","mergeable":"CONFLICTING"},
+                 {"number":2,"title":"b","headRefName":"b","baseRefName":"main","mergeable":"MERGEABLE"},
+                 {"number":3,"title":"c","headRefName":"c","baseRefName":"main","mergeable":"UNKNOWN"},
+                 {"number":4,"title":"d","headRefName":"d","baseRefName":"main"}]
+                """;
+
+        List<GhCliService.OpenPullRequest> prs = assertInstanceOf(GhCliService.PullRequestListing.Listed.class,
+                GhCliService.parsePullRequestListing(stdout)).pullRequests();
+
+        assertEquals(List.of(true, false, false, false),
+                prs.stream().map(GhCliService.OpenPullRequest::conflicting).toList());
+    }
 }

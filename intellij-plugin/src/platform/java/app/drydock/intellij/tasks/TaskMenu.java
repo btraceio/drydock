@@ -63,6 +63,8 @@ final class TaskMenu {
         RESUME_IN_OWN_WINDOW,
         /** Check a pull request out into its worktree and open its review workbench, with no agent. */
         OPEN_IN_WORKBENCH,
+        /** Check a conflicting pull request out and start a task that merges its base and resolves the conflicts. */
+        RESOLVE_CONFLICTS,
         /** Review with the repository's remembered starting model. */
         QUICK_REVIEW,
         REVIEW,
@@ -125,8 +127,9 @@ final class TaskMenu {
         return switch (node) {
             case null -> List.of();
             case TaskRow row -> row.running() ? running(row, facts) : idle(row);
-            case PullRequestRow ignored -> nonEmpty(List.of(
-                    List.of(Item.OPEN_IN_WORKBENCH),
+            case PullRequestRow pullRequest -> nonEmpty(List.of(
+                    section(Item.OPEN_IN_WORKBENCH,
+                            pullRequest.pullRequest().conflicting() ? Item.RESOLVE_CONFLICTS : null),
                     section(urlOf(node).isPresent() ? Item.OPEN_IN_GITHUB : null)));
             case IssueRow ignored -> nonEmpty(List.of(
                     section(facts.mirroredTask() ? Item.OPEN_MIRRORED_TASK : null),

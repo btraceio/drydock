@@ -16,6 +16,7 @@ import app.drydock.git.GhCliService.PullRequestListing;
 import app.drydock.git.GitExecutableLocator;
 import app.drydock.git.JiraIssueListing;
 import app.drydock.git.JiraService;
+import app.drydock.git.PrCheckoutService;
 import app.drydock.git.WorktreeService;
 import app.drydock.git.WorktreeService.Worktree;
 import app.drydock.intellij.DrydockPluginService;
@@ -507,12 +508,29 @@ final class TaskTreeInputs implements AutoCloseable {
             }
             Map<String, BranchPullRequest> pullRequests = byProject.computeIfAbsent(session.repositoryId(),
                     ignored -> branchPullRequestsNow(source.root(), source.repository()));
-            BranchPullRequest pullRequest = pullRequests.get(branch.get());
-            if (pullRequest != null) {
-                matched.put(session.id(), pullRequest);
-            }
+            sessionPullRequest(pullRequests, branch.get(), session.pr().number())
+                    .ifPresent(pullRequest -> matched.put(session.id(), pullRequest));
         }
         return matched;
+    }
+
+    /**
+     * Pure. A session's pull request among its project's: the one whose head
+     * is the session's branch, else the one with the session's own PR number
+     * -- the number its stored PR link carries, or the one a {@code pr-<n>}
+     * PR checkout's branch encodes, since a checkout's local branch is not
+     * the PR's head branch.
+     */
+    static Optional<BranchPullRequest> sessionPullRequest(Map<String, BranchPullRequest> byHeadBranch,
+                                                          String branch, Optional<Integer> linkedNumber) {
+        BranchPullRequest byBranch = byHeadBranch.get(branch);
+        if (byBranch != null) {
+            return Optional.of(byBranch);
+        }
+        Optional<Integer> number = linkedNumber.or(() -> PrCheckoutService.pullRequestNumberOf(branch));
+        return number.flatMap(wanted -> byHeadBranch.values().stream()
+                .filter(pullRequest -> pullRequest.number() == wanted)
+                .findFirst());
     }
 
     /**

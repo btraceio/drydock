@@ -191,6 +191,43 @@ public final class PullRequestReview {
     }
 
     /**
+     * "Resolve Conflicts…" on a conflicting pull request: checks the PR out
+     * into its {@code pr-<n>} worktree as {@link #openInWorkbench} does (an
+     * existing one is reused as it stands), then opens the New task dialog
+     * fixed to that worktree with the conflict-resolution prompt, where the
+     * user picks the agent and can edit the prompt. The session then works
+     * on the {@code pr-<n>} branch, which is how its row finds the PR again
+     * and offers Done once it merges. Shares the in-flight guard. EDT entry.
+     */
+    public void resolveConflicts(Project from, Path mainRoot, String repositoryName, OpenPullRequest pullRequest) {
+        String key = mainRoot + "#" + pullRequest.number();
+        if (!inFlight.add(key)) {
+            return;
+        }
+        ProgressManager.getInstance().run(new Task.Backgroundable(from,
+                "Checking out PR #" + pullRequest.number() + "…", true) {
+            @Override
+            public void run(@NotNull ProgressIndicator indicator) {
+                try {
+                    String branch = PrCheckoutService.localBranchFor(pullRequest.number());
+                    Path base = WorktreeNaming.defaultDirectory(Path.of(System.getProperty("user.home")),
+                            UserConfig.load().worktreesDirectory(), repositoryName, branch);
+                    checkedOut(from, mainRoot, base, pullRequest.number()).ifPresent(worktree ->
+                            ApplicationManager.getApplication().invokeLater(() -> {
+                                if (!from.isDisposed()) {
+                                    TaskLauncher.open(from, Optional.of(mainRoot),
+                                            Optional.of(new NewTaskPlan.FixedWorktree(worktree, branch)),
+                                            NewTaskPreset.resolveConflicts(pullRequest));
+                                }
+                            }, ModalityState.nonModal()));
+                } finally {
+                    inFlight.remove(key);
+                }
+            }
+        });
+    }
+
+    /**
      * What the model dialog's answer contributes to the launch: {@code tiers}
      * is empty when no tier pickers were shown.
      */

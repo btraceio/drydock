@@ -39,6 +39,7 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -305,11 +306,17 @@ class TaskTreeRendererTest {
     }
 
     @Test
-    void aBranchPullRequestBadgeNamesItsStateUnlessPlainOpen() {
-        assertEquals("PR #12", TaskTreeRenderer.pullRequestBadge(branchPr(PrLifecycle.OPEN, false)));
-        assertEquals("PR #12 draft", TaskTreeRenderer.pullRequestBadge(branchPr(PrLifecycle.OPEN, true)));
-        assertEquals("PR #12 merged", TaskTreeRenderer.pullRequestBadge(branchPr(PrLifecycle.MERGED, false)));
-        assertEquals("PR #12 closed", TaskTreeRenderer.pullRequestBadge(branchPr(PrLifecycle.CLOSED, false)));
+    void aBranchPullRequestsStatePicksItsIcon() {
+        assertEquals(Optional.of(TaskTreeRenderer.PR_OPEN_ICON),
+                TaskTreeRenderer.pullRequestIcon(branchPr(PrLifecycle.OPEN, false)));
+        assertEquals(Optional.of(TaskTreeRenderer.PR_DRAFT_ICON),
+                TaskTreeRenderer.pullRequestIcon(branchPr(PrLifecycle.OPEN, true)));
+        assertEquals(Optional.of(TaskTreeRenderer.PR_MERGED_ICON),
+                TaskTreeRenderer.pullRequestIcon(branchPr(PrLifecycle.MERGED, false)));
+        assertEquals(Optional.of(TaskTreeRenderer.PR_CLOSED_ICON),
+                TaskTreeRenderer.pullRequestIcon(branchPr(PrLifecycle.CLOSED, false)));
+        assertEquals(Optional.empty(), TaskTreeRenderer.pullRequestIcon(branchPr(PrLifecycle.UNKNOWN, false)),
+                "no state from gh: no state icon");
         assertEquals(TaskTreeRenderer.PullRequestBadgeKind.MERGED,
                 TaskTreeRenderer.badgeKind(branchPr(PrLifecycle.MERGED, true)), "a merged draft is merged");
         assertEquals("Pull request #12 (draft) from feature/x: Fix it",
@@ -318,5 +325,15 @@ class TaskTreeRendererTest {
 
     private static BranchPullRequest branchPr(PrLifecycle state, boolean draft) {
         return new BranchPullRequest(12, state, draft, "feature/x", "Fix it", Optional.empty());
+    }
+
+    @Test
+    void aSessionIconKeepsTheStateSlotSoNamesAlign() {
+        Icon dot = TaskTreeRenderer.PR_OPEN_ICON;
+        Icon withPr = TaskTreeRenderer.sessionIcon(dot, Optional.of(branchPr(PrLifecycle.MERGED, false)));
+        Icon withoutPr = TaskTreeRenderer.sessionIcon(dot, Optional.empty());
+        assertEquals(withPr.getIconWidth(), withoutPr.getIconWidth(), "a row without a PR keeps an empty slot");
+        assertSame(withPr, TaskTreeRenderer.sessionIcon(dot, Optional.of(branchPr(PrLifecycle.MERGED, false))),
+                "the composite is cached, not rebuilt per paint");
     }
 }
