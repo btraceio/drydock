@@ -141,7 +141,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     public static final DataKey<Path> SELECTED_PROJECT_ROOT = DataKey.create("drydock.task.projectRoot");
 
     /** The selected Tasks section (T20a), for its New Task action and the context menu. */
-    static final DataKey<app.drydock.tasks.TaskNode.TasksSection> SELECTED_TASKS_SECTION =
+    static final DataKey<TasksSection> SELECTED_TASKS_SECTION =
             DataKey.create("drydock.task.tasksSection");
 
     /** Updates the visible tree as successful worktree removals complete. */
@@ -976,7 +976,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         Object value = selectedValue();
         if (value instanceof DelayedTaskRow task) {
             sink.set(DelayedTaskActions.SELECTED_TASK, task);
-        } else if (value instanceof app.drydock.tasks.TaskNode.TasksSection section) {
+        } else if (value instanceof TasksSection section) {
             sink.set(SELECTED_TASKS_SECTION, section);
         }
         List<TaskNode> selected = selectedNodes();
