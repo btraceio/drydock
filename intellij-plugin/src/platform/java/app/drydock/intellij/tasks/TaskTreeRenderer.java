@@ -28,6 +28,7 @@ import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
 import app.drydock.intellij.ui.SessionDots;
 import app.drydock.tasks.DelayedTaskRows;
 import app.drydock.tasks.TaskId;
+import app.drydock.tasks.TaskMirror;
 import app.drydock.tasks.TaskState;
 import app.drydock.ui.AgentLabels;
 
@@ -36,6 +37,7 @@ import com.intellij.openapi.util.IconLoader;
 import com.intellij.ui.ColoredTreeCellRenderer;
 import com.intellij.ui.JBColor;
 import com.intellij.ui.SimpleTextAttributes;
+import com.intellij.util.ui.JBUI;
 import org.jetbrains.annotations.NotNull;
 
 import javax.swing.Icon;
@@ -171,6 +173,7 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
                     append("  " + String.join(", ", issue.issue().labels()),
                             SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
                 }
+                issue.issue().url().ifPresent(this::paintMirroredTask);
             }
             case TaskNode.JiraIssueRow jira -> {
                 setIcon(JIRA_ICON);
@@ -180,6 +183,7 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
                             SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
                 }
                 setToolTipText("Jira issue " + jira.issue().key());
+                paintMirroredTask(jira.issue().url());
             }
             case PullRequestRow pullRequest -> {
                 setIcon(AllIcons.Vcs.Vendors.Github);
@@ -452,6 +456,35 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
     private static final SimpleTextAttributes CLOSED_BADGE = new SimpleTextAttributes(
             SimpleTextAttributes.STYLE_BOLD, new JBColor(new Color(0xCF, 0x22, 0x2E), new Color(0xF8, 0x51, 0x49)));
 
+    /** Marks either end of a task mirror: the task's row and the mirrored issue's row. */
+    static final String MIRROR_MARK = "\u21c4";
+
+    /** Pure. A task row's mirror badge: the mark and each mirror's short name, e.g. {@code #12, PROJ-7}. */
+    static String mirrorsBadge(List<String> mirrors) {
+        return MIRROR_MARK + " " + String.join(", ", mirrors.stream().map(TaskMirror::label).toList());
+    }
+
+    /** Pure. An issue row's mirror badge: the mark and the title of the task it mirrors. */
+    static String mirroredTaskBadge(String taskTitle) {
+        return MIRROR_MARK + " task: " + taskTitle;
+    }
+
+    /**
+     * The badge of an issue row some task mirrors, looked up in the task
+     * service's cached snapshot (memory only, like the plan annotation).
+     */
+    private void paintMirroredTask(String url) {
+        TaskMirroring.mirroredTask(url).ifPresent(document -> {
+            append("  " + mirroredTaskBadge(document.title()), MIRROR_ATTRIBUTES);
+            setToolTipText((getToolTipText() == null ? "" : getToolTipText() + " · ")
+                    + "Mirror of the Drydock task '" + document.title() + "' (" + document.id() + ")");
+        });
+    }
+
+    /** The mirror badges: small and in the link colour, so both ends of a mirror read as a link. */
+    private static final SimpleTextAttributes MIRROR_ATTRIBUTES = new SimpleTextAttributes(
+            SimpleTextAttributes.STYLE_SMALLER, JBUI.CurrentTheme.Link.Foreground.ENABLED);
+
     /** The follow-up flag's tag on a session row. */
     static final String FLAG_TAG = "\u2691 follow up";
 
@@ -490,6 +523,9 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
         Optional<DelayedTaskRows.PlanProgress> progress = planProgressOf(task.id());
         progress.ifPresent(annotation -> append("  " + annotation.text(),
                 SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES));
+        if (!task.mirrors().isEmpty()) {
+            append("  " + mirrorsBadge(task.mirrors()), MIRROR_ATTRIBUTES);
+        }
         String age = delayedAge(task, now);
         if (!age.isEmpty()) {
             append(" · " + age, SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
@@ -501,7 +537,8 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
             append(" · " + blocker, SimpleTextAttributes.GRAYED_ATTRIBUTES);
         }
         setToolTipText(delayedTooltip(task, now) + progress.map(annotation ->
-                " · plan " + annotation.text()).orElse(""));
+                " · plan " + annotation.text()).orElse("")
+                + (task.mirrors().isEmpty() ? "" : " · mirrored to " + String.join(", ", task.mirrors())));
     }
 
     /**

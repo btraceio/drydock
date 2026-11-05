@@ -34,10 +34,12 @@ public sealed interface TaskNode {
      * removed session stays linkable (D10) with no session object at hand;
      * {@code stale} is the proposed 14-day age flag (D9), computed against
      * an INJECTED clock by {@link DelayedTaskRows}, never
-     * {@code System.now} deep in row code.
+     * {@code System.now} deep in row code. {@code mirrors} is the
+     * document's stored mirror addresses (GitHub issues, Jira tickets).
      */
     record DelayedTaskRow(TaskState.TaskView view, String title, RepositoryId repository,
-            Optional<Instant> created, boolean stale, List<String> storedSessions) implements TaskNode {
+            Optional<Instant> created, boolean stale, List<String> storedSessions, List<String> mirrors)
+            implements TaskNode {
 
         public DelayedTaskRow {
             Objects.requireNonNull(view, "view");
@@ -45,6 +47,13 @@ public sealed interface TaskNode {
             Objects.requireNonNull(repository, "repository");
             Objects.requireNonNull(created, "created");
             storedSessions = List.copyOf(storedSessions);
+            mirrors = List.copyOf(mirrors);
+        }
+
+        /** The shape before tasks could be mirrored: no mirror. */
+        public DelayedTaskRow(TaskState.TaskView view, String title, RepositoryId repository,
+                Optional<Instant> created, boolean stale, List<String> storedSessions) {
+            this(view, title, repository, created, stale, storedSessions, List.of());
         }
 
         /**

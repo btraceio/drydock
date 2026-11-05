@@ -859,6 +859,23 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
         });
     }
 
+    /**
+     * Records that {@code task} was mirrored to {@code url} (a GitHub issue
+     * or Jira ticket page), appended under the store's single writer. Not
+     * part of the MCP tool context: only the tree's mirror actions record
+     * mirrors. A blank address is a refusal; a task the store cannot find
+     * or write fails the future, like every other store failure here.
+     */
+    public CompletableFuture<Outcome> recordMirror(TaskId task, String url) {
+        return supply(store -> {
+            try {
+                return Outcome.committed(store.addMirror(task, url));
+            } catch (IllegalArgumentException e) {
+                return Outcome.refused(e.getMessage());
+            }
+        });
+    }
+
     @Override
     public CompletableFuture<Outcome> appendNote(TaskId task, String note) {
         return supply(store -> {

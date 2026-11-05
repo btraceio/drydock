@@ -382,6 +382,27 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 TaskMenu.urlOf(e.getData(SELECTED_NODE)).ifPresent(BrowserUtil::browse);
             }
         };
+        // The issue-to-task half of a mirror: the task file whose mirrors
+        // list names this issue row's page.
+        AnAction openMirroredTask = new DumbAwareAction("Open Mirrored Task",
+                "Open the Drydock task this issue is a mirror of", AllIcons.Actions.Edit) {
+            @Override
+            public void update(@NotNull AnActionEvent e) {
+                TaskActions.present(e, TaskMenu.issueUrlOf(e.getData(SELECTED_NODE))
+                        .flatMap(TaskMirroring::mirroredTask).isPresent());
+            }
+
+            @Override
+            public @NotNull ActionUpdateThread getActionUpdateThread() {
+                return ActionUpdateThread.BGT;
+            }
+
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                TaskMenu.issueUrlOf(e.getData(SELECTED_NODE))
+                        .ifPresent(url -> TaskMirroring.openMirroredTask(project, url));
+            }
+        };
         // A pull request's workbench, with no agent: the PR checked out into
         // its worktree and that worktree's window showing its Review tab,
         // where the reviewer reads the change and can ask for a review.
@@ -590,6 +611,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         menuActions.put(TaskMenu.Item.TRIAGE, triage);
         menuActions.put(TaskMenu.Item.GITHUB_SETTINGS, githubSettings);
         menuActions.put(TaskMenu.Item.OPEN_IN_JIRA, JiraTreeActions.openInJira());
+        menuActions.put(TaskMenu.Item.OPEN_MIRRORED_TASK, openMirroredTask);
         menuActions.put(TaskMenu.Item.JIRA_SETTINGS, JiraTreeActions.settings(project, root -> {
             inputs.invalidateJira();
             requestRebuild(false);
@@ -797,7 +819,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
      */
     static Set<TaskMenu.Item> panelMenuItems() {
         return EnumSet.of(TaskMenu.Item.SWITCH_TO_TASK, TaskMenu.Item.NEW_TASK, TaskMenu.Item.NEW_TASK_IN_MAIN,
-                TaskMenu.Item.OPEN_IN_GITHUB, TaskMenu.Item.OPEN_IN_JIRA, TaskMenu.Item.OPEN_IN_WORKBENCH,
+                TaskMenu.Item.OPEN_IN_GITHUB, TaskMenu.Item.OPEN_IN_JIRA, TaskMenu.Item.OPEN_MIRRORED_TASK,
+                TaskMenu.Item.OPEN_IN_WORKBENCH,
                 TaskMenu.Item.QUICK_REVIEW, TaskMenu.Item.REVIEW, TaskMenu.Item.REVIEW_IN_SPHINX,
                 TaskMenu.Item.IMPLEMENT, TaskMenu.Item.TRIAGE,
                 TaskMenu.Item.GITHUB_SETTINGS, TaskMenu.Item.JIRA_SETTINGS,

@@ -15,6 +15,7 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.security.SecureRandom;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -196,6 +197,35 @@ public final class TaskStore implements AutoCloseable {
         }
         Committed committed = write(
                 () -> mutate(id, (parsed, source) -> TaskFilePatch.appendNote(source, note)));
+        if (committed.snapshot() != null) {
+            publish(committed.snapshot());
+        }
+        return committed.document();
+    }
+
+    /**
+     * Records one more mirror of a task: {@code url} is appended to the
+     * task's {@code mirrors} list unless it is already there. The list is
+     * read from the file inside the writer lock, not from a caller's
+     * snapshot, so two mirrors recorded back to back both survive. Same
+     * single-writer path, guard and publish as {@link #update}; when the
+     * address is already recorded the file's text stays exactly as it was.
+     */
+    public TaskDocument addMirror(TaskId id, String url) throws TaskStoreException {
+        Objects.requireNonNull(id, "id");
+        if (url == null || url.isBlank()) {
+            throw new IllegalArgumentException("A mirror address must not be blank");
+        }
+        Committed committed = write(() -> mutate(id, (parsed, source) -> {
+            List<String> mirrors = parsed.document().mirrors();
+            if (mirrors.contains(url)) {
+                return source;
+            }
+            List<String> extended = new ArrayList<>(mirrors);
+            extended.add(url);
+            return TaskFilePatch.patch(parsed, source,
+                    new TaskFilePatch.Updates(null, null, null, null, null, null, extended));
+        }));
         if (committed.snapshot() != null) {
             publish(committed.snapshot());
         }

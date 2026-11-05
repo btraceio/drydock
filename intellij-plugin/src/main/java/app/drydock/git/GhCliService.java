@@ -37,9 +37,10 @@ import java.util.regex.Pattern;
  * READ-ONLY queries against the GitHub CLI ({@code gh}): the PR chip a
  * worktree session reconciles after a hand-off, the open pull requests
  * and issues that repository views list, and the pull requests of every
- * state that badge a session by its branch. The app never runs
- * {@code gh pr create} or any other mutation -- Claude in the terminal does;
- * this service only observes. Checking a PR out is a working-tree change and
+ * state that badge a session by its branch. This service never runs
+ * {@code gh pr create} or any other mutation -- Claude in the terminal opens
+ * PRs; the app's own two writes, a posted review and a task's mirror issue,
+ * live in {@code GitHubReviewService} and {@code GitHubIssueMirrorService}. Checking a PR out is a working-tree change and
  * lives in {@code PrCheckoutService}, not here.
  *
  * <p>{@code gh} is optional: when it is not installed, {@link #viewPr}

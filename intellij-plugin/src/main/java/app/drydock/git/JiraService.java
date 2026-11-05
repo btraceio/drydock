@@ -25,8 +25,10 @@ import java.util.function.Supplier;
  * READ-ONLY queries against a Jira site's search API: the unresolved issues
  * that a registered project's Issues section lists, and nothing else. This
  * service never transitions, comments on, assigns or creates anything -- it
- * only observes, exactly as {@link GhCliService} observes GitHub. Writes are
- * a hand-off's job, in the agent, not the tree's.
+ * only observes, exactly as {@link GhCliService} observes GitHub. The one
+ * write the tree makes, a task mirrored into a new ticket, is
+ * {@link JiraIssueWriter}'s; every other write is a hand-off's job, in the
+ * agent.
  *
  * <p>Same three-outcome shape as {@code GhCliService.IssueListing} through
  * {@link JiraIssueListing}: a project with no Jira configured is

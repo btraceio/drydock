@@ -215,8 +215,9 @@ class TaskActionsTest {
 
     /** Every {@link TaskMenu.Item} a menu can offer, over one row of each kind. */
     private static Set<TaskMenu.Item> usedByTaskMenu() {
-        // Jira enabled, so the group items a menu can offer are all reachable.
-        TaskMenu.MenuFacts transfer = new TaskMenu.MenuFacts(true, true);
+        // Jira enabled and the issue rows mirrored, so the group items and
+        // Open Mirrored Task a menu can offer are all reachable.
+        TaskMenu.MenuFacts transfer = new TaskMenu.MenuFacts(true, true, true);
         IdleWorktree worktree = new IdleWorktree(Path.of("/wt/fix"), "fix", Optional.empty(), false, false);
         List<TaskNode> shapes = List.of(
                 row(true, new TaskPlacement.OwnWindow()),

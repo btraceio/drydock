@@ -29,6 +29,7 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -353,5 +354,29 @@ class TaskMenuTest {
         assertEquals(Optional.empty(), TaskMenu.urlOf(worktree(false, false)));
         assertEquals(Optional.empty(), TaskMenu.urlOf(task(true, new TaskPlacement.ThisWindow())));
         assertEquals(Optional.empty(), TaskMenu.urlOf(null));
+    }
+
+    @Test
+    void aMirroredIssueOffersItsTaskFirstAndAPlainOneDoesNot() {
+        TaskMenu.MenuFacts mirrored = new TaskMenu.MenuFacts(false, false, true);
+        assertEquals(List.of(
+                List.of(TaskMenu.Item.OPEN_MIRRORED_TASK),
+                List.of(TaskMenu.Item.IMPLEMENT, TaskMenu.Item.TRIAGE),
+                List.of(TaskMenu.Item.OPEN_IN_JIRA, TaskMenu.Item.JIRA_SETTINGS)),
+                TaskMenu.sections(jiraIssue(), List.of(jiraIssue()), mirrored));
+        IssueRow github = issue(Optional.of("https://github.com/DataDog/profiling-backend/issues/42"));
+        assertEquals(TaskMenu.Item.OPEN_MIRRORED_TASK,
+                TaskMenu.sections(github, List.of(github), mirrored).get(0).get(0));
+        assertFalse(TaskMenu.sections(github, List.of(github), NO_TRANSFER).stream()
+                .anyMatch(section -> section.contains(TaskMenu.Item.OPEN_MIRRORED_TASK)));
+    }
+
+    @Test
+    void issueUrlOfNamesTheGitHubAndJiraPages() {
+        assertEquals(Optional.of("https://acme.atlassian.net/browse/PROJ-123"), TaskMenu.issueUrlOf(jiraIssue()));
+        assertEquals(Optional.of("https://github.com/DataDog/profiling-backend/issues/42"),
+                TaskMenu.issueUrlOf(issue(Optional.of("https://github.com/DataDog/profiling-backend/issues/42"))));
+        assertEquals(Optional.empty(), TaskMenu.issueUrlOf(pullRequest(Optional.of("https://github.com/o/r/pull/40"))));
+        assertEquals(Optional.empty(), TaskMenu.issueUrlOf(null));
     }
 }

@@ -37,7 +37,7 @@ import java.util.Optional;
  * multi-document front matter, duplicate keys, aliases, unbounded
  * nesting/collections, and invalid values for known fields ({@code title},
  * {@code status}, {@code done_by}, {@code created}, {@code after},
- * {@code sessions}). Unknown keys, comments and the body are never
+ * {@code sessions}, {@code mirrors}). Unknown keys, comments and the body are never
  * interpreted — they survive byte for byte in
  * {@link TaskDocument#rawFrontMatter()} and {@link TaskDocument#rawBody()}.
  *
@@ -113,7 +113,7 @@ public final class TaskFileReader {
         Optional<Instant> created = fields.created != null ? Optional.of(fields.created)
                 : Optional.ofNullable(createdFallback);
         TaskDocument document = new TaskDocument(id, repository, fields.title, fields.status, fields.doneBy,
-                created, fields.after, fields.sessions, envelope.frontMatter(), envelope.body());
+                created, fields.after, fields.sessions, fields.mirrors, envelope.frontMatter(), envelope.body());
         return new Parsed(document, fields.spans,
                 new Span(envelope.frontStart(), envelope.frontStart() + envelope.frontMatter().length()));
     }
@@ -169,6 +169,7 @@ public final class TaskFileReader {
         Instant created;
         List<String> after;
         List<String> sessions;
+        List<String> mirrors;
         final Map<String, Span> spans = new LinkedHashMap<>();
     }
 
@@ -209,6 +210,10 @@ public final class TaskFileReader {
                 case "sessions" -> {
                     fields.sessions = stringList(value, "sessions");
                     fields.spans.put("sessions", entrySpan(source, envelope, key, value));
+                }
+                case "mirrors" -> {
+                    fields.mirrors = stringList(value, "mirrors");
+                    fields.spans.put("mirrors", entrySpan(source, envelope, key, value));
                 }
                 default -> {
                     // Unknown key: preserved only as raw text, never interpreted.

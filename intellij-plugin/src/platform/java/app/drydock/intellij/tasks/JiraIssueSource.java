@@ -157,7 +157,7 @@ final class JiraIssueSource implements AutoCloseable {
      * {@code JiraService} builds its client inside its first request; never
      * on the EDT, and no thread assertion is needed for these reads.
      */
-    private static HttpClient.Builder ideClientBuilder() {
+    static HttpClient.Builder ideClientBuilder() {
         return HttpClient.newBuilder()
                 .proxy(JdkProxyProvider.getInstance().getProxySelector())
                 .sslContext(CertificateManager.getInstance().getSslContext())
