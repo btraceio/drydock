@@ -1,5 +1,7 @@
 package app.drydock.intellij.tasks;
 
+import app.drydock.git.GhCliService.BranchPullRequest;
+import app.drydock.git.GhCliService.PrInfo.PrLifecycle;
 import app.drydock.git.JiraIssueListing;
 import app.drydock.intellij.tasks.TaskTreeModel.ViewFilter;
 import app.drydock.process.ProcessResult;
@@ -353,5 +355,22 @@ class TaskTreeInputsTest {
         assertFalse(TaskTreeInputs.jiraGroupWanted(
                 Set.of(new ListingExpansionTracker.GroupKey(ROOT, "g-bugs")), key,
                 TaskTreeModel.parseFilter("allocation"), "profiling-backend"));
+    }
+
+    @Test
+    void aSessionsPullRequestIsItsBranchsElseTheOneItsNumberNames() {
+        BranchPullRequest feature = new BranchPullRequest(12, PrLifecycle.OPEN, false, "feature/x", "", Optional.empty());
+        BranchPullRequest someonesBranch = new BranchPullRequest(77, PrLifecycle.MERGED, false, "alice/fix", "",
+                Optional.empty());
+        Map<String, BranchPullRequest> byHead = Map.of("feature/x", feature, "alice/fix", someonesBranch);
+        assertEquals(Optional.of(feature), TaskTreeInputs.sessionPullRequest(byHead, "feature/x", Optional.of(77)),
+                "the branch's own PR wins");
+        assertEquals(Optional.of(someonesBranch), TaskTreeInputs.sessionPullRequest(byHead, "pr-77", Optional.empty()),
+                "a pr-<n> checkout is its PR by number");
+        assertEquals(Optional.of(someonesBranch),
+                TaskTreeInputs.sessionPullRequest(byHead, "review/local", Optional.of(77)), "the stored PR link");
+        assertEquals(Optional.empty(), TaskTreeInputs.sessionPullRequest(byHead, "pr-5", Optional.empty()),
+                "a number not listed");
+        assertEquals(Optional.empty(), TaskTreeInputs.sessionPullRequest(byHead, "main", Optional.empty()));
     }
 }

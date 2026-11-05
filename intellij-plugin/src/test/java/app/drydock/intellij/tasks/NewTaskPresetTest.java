@@ -1,5 +1,6 @@
 package app.drydock.intellij.tasks;
 
+import app.drydock.git.GhCliService.OpenPullRequest;
 import app.drydock.domain.SessionMode;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.JiraIssue;
@@ -252,5 +253,22 @@ class NewTaskPresetTest {
         assertEquals(Optional.empty(), NewTaskPreset.mainCheckout().tierRoles());
         assertEquals(Optional.empty(),
                 NewTaskPreset.start(NewTaskPlan.OpenIn.THIS_WINDOW, SessionMode.WRITES).tierRoles());
+    }
+
+    @Test
+    void resolveConflictsMergesTheBaseAndPushesToTheHeadBranch() {
+        NewTaskPreset preset = NewTaskPreset.resolveConflicts(new OpenPullRequest(40, "Speed up the suite",
+                "alice/speed", "release-1.x", false, Optional.empty(),
+                Optional.of("https://github.com/o/r/pull/40"), true));
+
+        assertEquals("Resolve conflicts #40 Speed up the suite", preset.name());
+        assertEquals(Optional.of(SessionMode.WRITES), preset.fixedMode());
+        assertTrue(preset.instructionsRequired());
+        String prompt = preset.instructions().orElseThrow();
+        assertTrue(prompt.startsWith("Resolve the merge conflicts of GitHub pull request #40: Speed up the suite"));
+        assertTrue(prompt.contains("https://github.com/o/r/pull/40"));
+        assertTrue(prompt.contains("`git merge origin/release-1.x`"), "merges the PR's own base");
+        assertTrue(prompt.contains("HEAD:alice/speed"), "pushes to the PR's head, not the pr-<n> name");
+        assertFalse(prompt.contains("%"), "every format placeholder was filled");
     }
 }

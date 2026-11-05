@@ -223,6 +223,8 @@ class TaskActionsTest {
                 row(true, new TaskPlacement.OwnWindow()),
                 row(false, new TaskPlacement.Idle(false)),
                 pullRequest(Optional.of("https://github.com/DataDog/repo/pull/7")),
+                new PullRequestRow(Path.of("/repo"), new OpenPullRequest(8, "Conflicts", "pr-8", "main",
+                        false, Optional.empty(), Optional.empty(), true)),
                 issue(Optional.of("https://github.com/DataDog/repo/issues/9")),
                 new JiraIssueRow(Path.of("/repo"), new JiraIssue("PROJ-9", "Fix the thing",
                         "https://acme.atlassian.net/browse/PROJ-9", List.of(), Optional.of(Instant.EPOCH))),

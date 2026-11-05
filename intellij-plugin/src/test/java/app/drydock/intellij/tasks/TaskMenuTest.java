@@ -379,4 +379,12 @@ class TaskMenuTest {
         assertEquals(Optional.empty(), TaskMenu.issueUrlOf(pullRequest(Optional.of("https://github.com/o/r/pull/40"))));
         assertEquals(Optional.empty(), TaskMenu.issueUrlOf(null));
     }
+
+    @Test
+    void aConflictingPullRequestRowOffersResolveConflictsBesideTheWorkbench() {
+        PullRequestRow conflicting = new PullRequestRow(ROOT, new OpenPullRequest(40, "Speed up the flaky suite",
+                "pr-40", "main", false, Optional.of("reviewer"), Optional.empty(), true));
+        assertEquals(List.of(List.of(TaskMenu.Item.OPEN_IN_WORKBENCH, TaskMenu.Item.RESOLVE_CONFLICTS)),
+                sectionsOf(conflicting));
+    }
 }

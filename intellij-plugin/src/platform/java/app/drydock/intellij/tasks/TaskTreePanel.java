@@ -426,6 +426,29 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 }
             }
         };
+        // A conflicting pull request: its checkout and a task that merges the
+        // base in and resolves the conflicts, started from the New task dialog.
+        AnAction resolveConflicts = new DumbAwareAction("Resolve Conflicts…",
+                "Check the pull request out and start a task that merges its base and resolves the conflicts",
+                AllIcons.Vcs.Merge) {
+            @Override
+            public void update(@NotNull AnActionEvent e) {
+                TaskActions.present(e, e.getData(SELECTED_NODE) instanceof PullRequestRow pullRequest
+                        && pullRequest.pullRequest().conflicting());
+            }
+
+            @Override
+            public @NotNull ActionUpdateThread getActionUpdateThread() {
+                return ActionUpdateThread.BGT;
+            }
+
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                if (e.getData(SELECTED_NODE) instanceof PullRequestRow pullRequest) {
+                    resolvePullRequestConflicts(pullRequest);
+                }
+            }
+        };
         // "Review…" asks for the starting model and re-records the choice;
         // an idle worktree starts the session right there. A pull request is
         // reviewed from its workbench (Open in Review Workbench).
@@ -604,6 +627,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         menuActions.put(TaskMenu.Item.NEW_TASK_IN_MAIN, newTaskInMain);
         menuActions.put(TaskMenu.Item.OPEN_IN_GITHUB, openInGitHub);
         menuActions.put(TaskMenu.Item.OPEN_IN_WORKBENCH, openInWorkbench);
+        menuActions.put(TaskMenu.Item.RESOLVE_CONFLICTS, resolveConflicts);
         menuActions.put(TaskMenu.Item.QUICK_REVIEW, quickReview);
         menuActions.put(TaskMenu.Item.REVIEW, review);
         menuActions.put(TaskMenu.Item.REVIEW_IN_SPHINX, reviewInSphinx);
@@ -694,6 +718,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                         }
                     });
                 } else if (node instanceof TaskRow task && primaryButton && event.getClickCount() == 1
+                        && onLink(path, event, TaskTreeRenderer.DONE_LINK)) {
+                    PullRequestDoneOffers.offerOf(task).ifPresent(offer -> PullRequestDoneOffers.done(project, offer));
+                } else if (node instanceof TaskRow task && primaryButton && event.getClickCount() == 1
                         && onLink(path, event)) {
                     hereLink(task);
                 } else if (node instanceof DelayedTaskRow delayed && primaryButton
@@ -710,6 +737,10 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 } else if (node instanceof PullRequestRow pullRequest && primaryButton
                         && event.getClickCount() == 2) {
                     pullRequest.pullRequest().url().ifPresent(BrowserUtil::browse);
+                } else if (node instanceof PullRequestRow pullRequest && primaryButton
+                        && event.getClickCount() == 1
+                        && onLink(path, event, TaskTreeRenderer.RESOLVE_CONFLICTS_LINK)) {
+                    resolvePullRequestConflicts(pullRequest);
                 } else if (node instanceof PullRequestRow pullRequest && primaryButton
                         && event.getClickCount() == 1 && onLink(path, event)) {
                     projectRootOf(path).ifPresent(root -> openPullRequestInWorkbench(root, pullRequest));
@@ -820,7 +851,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     static Set<TaskMenu.Item> panelMenuItems() {
         return EnumSet.of(TaskMenu.Item.SWITCH_TO_TASK, TaskMenu.Item.NEW_TASK, TaskMenu.Item.NEW_TASK_IN_MAIN,
                 TaskMenu.Item.OPEN_IN_GITHUB, TaskMenu.Item.OPEN_IN_JIRA, TaskMenu.Item.OPEN_MIRRORED_TASK,
-                TaskMenu.Item.OPEN_IN_WORKBENCH,
+                TaskMenu.Item.OPEN_IN_WORKBENCH, TaskMenu.Item.RESOLVE_CONFLICTS,
                 TaskMenu.Item.QUICK_REVIEW, TaskMenu.Item.REVIEW, TaskMenu.Item.REVIEW_IN_SPHINX,
                 TaskMenu.Item.IMPLEMENT, TaskMenu.Item.TRIAGE,
                 TaskMenu.Item.GITHUB_SETTINGS, TaskMenu.Item.JIRA_SETTINGS,
@@ -1058,6 +1089,11 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
     /** Whether {@code event} landed on the link text of the row at {@code path}. EDT. */
     private boolean onLink(TreePath path, MouseEvent event) {
+        return onLink(path, event, TaskTreeRenderer.LINK);
+    }
+
+    /** Whether {@code event} landed on the fragment tagged {@code tag} in the row at {@code path}. EDT. */
+    private boolean onLink(TreePath path, MouseEvent event, Object tag) {
         Rectangle bounds = tree.getPathBounds(path);
         if (bounds == null) {
             return false;
@@ -1067,7 +1103,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 path.getLastPathComponent(), tree.isRowSelected(row), tree.isExpanded(row),
                 tree.getModel().isLeaf(path.getLastPathComponent()), row, false);
         return rendered instanceof SimpleColoredComponent colored
-                && colored.getFragmentTagAt(event.getX() - bounds.x) == TaskTreeRenderer.LINK;
+                && colored.getFragmentTagAt(event.getX() - bounds.x) == tag;
     }
 
     /** The main checkout of the project row at or above {@code path}. */
@@ -1145,10 +1181,20 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         if (mainRoot == null) {
             return;
         }
-        String repositoryName = DrydockPluginService.getInstance().sharedProjects().byRoot(mainRoot)
+        pullRequestReview.openInWorkbench(project, mainRoot, repositoryName(mainRoot), pullRequest.pullRequest());
+    }
+
+    /** Checks the pull request out and opens the conflict-resolution task's dialog on it. EDT. */
+    private void resolvePullRequestConflicts(PullRequestRow pullRequest) {
+        pullRequestReview.resolveConflicts(project, pullRequest.mainRoot(), repositoryName(pullRequest.mainRoot()),
+                pullRequest.pullRequest());
+    }
+
+    /** The registered project's display name for {@code mainRoot}, else the folder's name. */
+    private static String repositoryName(Path mainRoot) {
+        return DrydockPluginService.getInstance().sharedProjects().byRoot(mainRoot)
                 .map(SharedProject::displayName)
                 .orElseGet(() -> String.valueOf(mainRoot.getFileName()));
-        pullRequestReview.openInWorkbench(project, mainRoot, repositoryName, pullRequest.pullRequest());
     }
 
     /** {@link #quickReviewLabel(Map, List, AgentRegistry, Path)} over this panel's map and the live plugin state. */
@@ -1462,9 +1508,16 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             }
             List<TaskNode> applied = shown;
             TaskLayer appliedTasks = shownTasks;
+            // A session whose pull request merged or closed is offered its
+            // Done flow once, by whichever window's pass sees it first.
+            List<PullRequestDoneOffers.Offer> doneOffers =
+                    PullRequestDoneOffers.claim(gathered.sessions(), gathered.pullRequestsBySession());
             ApplicationManager.getApplication().invokeLater(
-                    () -> finishRebuild(requestedVersion, requestedFilter, requestedViewFilter, applied, nodes,
-                            appliedTasks, null),
+                    () -> {
+                        finishRebuild(requestedVersion, requestedFilter, requestedViewFilter, applied, nodes,
+                                appliedTasks, null);
+                        doneOffers.forEach(offer -> PullRequestDoneOffers.notify(project, offer));
+                    },
                     ModalityState.any(), project.getDisposed());
         }, plugin.executor()).exceptionally(failure -> {
             ApplicationManager.getApplication().invokeLater(

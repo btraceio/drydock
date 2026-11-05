@@ -70,13 +70,20 @@ public final class GhCliService implements AutoCloseable {
      * request, and a row reading {@code pr-40} tells nobody which.</p>
      */
     public record OpenPullRequest(int number, String title, String headRefName, String baseRefName,
-                                  boolean draft, Optional<String> author, Optional<String> url) {
+                                  boolean draft, Optional<String> author, Optional<String> url,
+                                  boolean conflicting) {
         public OpenPullRequest {
             Objects.requireNonNull(title, "title");
             Objects.requireNonNull(headRefName, "headRefName");
             Objects.requireNonNull(baseRefName, "baseRefName");
             Objects.requireNonNull(author, "author");
             Objects.requireNonNull(url, "url");
+        }
+
+        /** The shape before the listing carried mergeability: not known to conflict. */
+        public OpenPullRequest(int number, String title, String headRefName, String baseRefName,
+                               boolean draft, Optional<String> author, Optional<String> url) {
+            this(number, title, headRefName, baseRefName, draft, author, url, false);
         }
     }
 
@@ -326,7 +333,7 @@ public final class GhCliService implements AutoCloseable {
         List<String> command = new ArrayList<>(List.of(gh.toString(), "pr", "list",
                 "--state", "open",
                 "--limit", String.valueOf(PR_LIST_LIMIT),
-                "--json", "number,title,headRefName,baseRefName,isDraft,author,url"));
+                "--json", "number,title,headRefName,baseRefName,isDraft,author,url,mergeable"));
         repository.ifPresent(value -> {
             command.add("--repo");
             command.add(value);
@@ -365,8 +372,12 @@ public final class GhCliService implements AutoCloseable {
                             ? Optional.of(login.value()) : Optional.empty();
                     Optional<String> url = obj.get("url") instanceof JsonString u
                             ? Optional.of(u.value()) : Optional.empty();
+                    // GitHub computes mergeability lazily: UNKNOWN until it
+                    // has, so only an explicit CONFLICTING counts.
+                    boolean conflicting = obj.get("mergeable") instanceof JsonString m
+                            && "CONFLICTING".equals(m.value());
                     pullRequests.add(new OpenPullRequest(number.asInt(), title.value(),
-                            head.value(), base.value(), draft, author, url));
+                            head.value(), base.value(), draft, author, url, conflicting));
                 }
             }
             return new PullRequestListing.Listed(pullRequests);
