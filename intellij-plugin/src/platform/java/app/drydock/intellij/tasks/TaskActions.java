@@ -327,7 +327,7 @@ final class TaskActions {
 
             @Override
             public @NotNull ActionUpdateThread getActionUpdateThread() {
-                return ActionUpdateThread.EDT;
+                return ActionUpdateThread.BGT;
             }
 
             @Override
@@ -355,7 +355,7 @@ final class TaskActions {
 
             @Override
             public @NotNull ActionUpdateThread getActionUpdateThread() {
-                return ActionUpdateThread.EDT;
+                return ActionUpdateThread.BGT;
             }
 
             @Override
@@ -404,7 +404,7 @@ final class TaskActions {
 
             @Override
             public @NotNull ActionUpdateThread getActionUpdateThread() {
-                return ActionUpdateThread.EDT;
+                return ActionUpdateThread.BGT;
             }
 
             @Override

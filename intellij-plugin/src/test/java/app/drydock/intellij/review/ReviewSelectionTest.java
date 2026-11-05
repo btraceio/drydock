@@ -57,7 +57,7 @@ class ReviewSelectionTest {
         ReviewWorkbenchInbox.Composer ask = new ReviewWorkbenchInbox.Composer(
                 ReviewWorkbenchInbox.Composer.Mode.ASK, new DiffSelection.Range("A.java", "o7", "o7", true));
         assertEquals("Ask about A.java, line old 7", ask.title());
-        assertEquals("Ask", ask.submitText());
+        assertEquals("Ask Agent", ask.submitText());
         assertEquals(true, ask.note().isPresent(), "clamped at its hunk");
     }
 }

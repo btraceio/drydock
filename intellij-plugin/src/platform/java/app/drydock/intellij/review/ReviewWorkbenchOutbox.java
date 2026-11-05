@@ -2,10 +2,17 @@ package app.drydock.intellij.review;
 
 import app.drydock.intellij.review.workbench.model.OutboxModel;
 import app.drydock.intellij.review.workbench.model.WorkbenchState;
+import com.intellij.openapi.actionSystem.ActionManager;
+import com.intellij.openapi.actionSystem.ActionToolbar;
+import com.intellij.openapi.actionSystem.ActionUpdateThread;
+import com.intellij.openapi.actionSystem.AnActionEvent;
+import com.intellij.openapi.actionSystem.DefaultActionGroup;
+import com.intellij.openapi.project.DumbAwareToggleAction;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBScrollPane;
 import com.intellij.util.ui.JBUI;
 import com.intellij.util.ui.UIUtil;
+import org.jetbrains.annotations.NotNull;
 
 import javax.swing.BoxLayout;
 import javax.swing.ButtonGroup;
@@ -13,6 +20,7 @@ import javax.swing.JButton;
 import javax.swing.JPanel;
 import javax.swing.JRadioButton;
 import java.awt.BorderLayout;
+import java.awt.CardLayout;
 import java.awt.EventQueue;
 import java.awt.FlowLayout;
 import java.util.Objects;
@@ -20,16 +28,17 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
 /**
- * The workbench's bottom pane, the outbox's session lane (spec §8): the
- * findings Send to Session would hand the bound session, the dismissed ones
- * counted, the button and, in a pull request review, where the fixes land.
- * The button says why it is disabled, shows
- * "Sending…" until the send completes, and the outcome goes to the pane's
- * notice line. EDT.
+ * The workbench's bottom pane, the outbox (spec §8), in two tabs as the
+ * inbox's are. <b>Session</b>: the findings Send to Session would hand the
+ * bound session, the dismissed ones counted, the button and, in a pull
+ * request review, where the fixes land; the button says why it is disabled,
+ * shows "Sending…" until the send completes, and the outcome goes to the
+ * tab's notice line. <b>Pull request</b>, in a pull request review only: the
+ * comments to post and Submit Review…. EDT.
  */
 final class ReviewWorkbenchOutbox extends JPanel {
 
-    static final String TITLE = "Session lane";
+    static final String TITLE = "Session";
     static final String SEND = "Send to Session";
     static final String SENDING = "Sending…";
     static final String NO_SESSION = "No agent session is bound to this review.";
@@ -37,7 +46,10 @@ final class ReviewWorkbenchOutbox extends JPanel {
     static final String FIXES_LAND_ON = "Fixes land on:";
     static final String SAME_BRANCH = "Same branch";
     static final String STACKED_SUB_PR = "Stacked sub-PR";
-    static final String PR_LANE = "PR lane";
+    static final String PR_LANE = "Pull request";
+    private static final String TOOLBAR_PLACE = "DrydockReviewWorkbenchOutbox";
+    private static final String SESSION_CARD = "session";
+    private static final String PR_CARD = "pr";
     static final String SUBMIT_REVIEW = "Submit Review…";
     static final String CHECKING = "Checking GitHub…";
 
@@ -76,18 +88,21 @@ final class ReviewWorkbenchOutbox extends JPanel {
     private boolean checking;
     private OutboxModel.Snapshot shown = OutboxModel.Snapshot.EMPTY;
     private boolean sending;
+    /** The tabs: Session, and Pull request in a pull request review. */
+    final DefaultActionGroup tabActions = new DefaultActionGroup();
+    private final CardLayout cards = new CardLayout();
+    private final JPanel body = new JPanel(cards);
+    /** Whether the Pull request tab shows; only in a pull request review. EDT. */
+    private boolean prTab;
 
     ReviewWorkbenchOutbox(Actions actions) {
         super(new BorderLayout());
         this.actions = Objects.requireNonNull(actions, "actions");
-        JBLabel title = new JBLabel(TITLE);
-        title.setFont(JBUI.Fonts.label().asBold());
         counts.setForeground(UIUtil.getContextHelpForeground());
         reason.setForeground(UIUtil.getContextHelpForeground());
         notice.setForeground(UIUtil.getContextHelpForeground());
         send.addActionListener(e -> send());
         JPanel bar = new JPanel(new FlowLayout(FlowLayout.LEFT, JBUI.scale(8), 0));
-        bar.add(title);
         bar.add(counts);
         bar.add(send);
         bar.add(reason);
@@ -106,22 +121,29 @@ final class ReviewWorkbenchOutbox extends JPanel {
         fixesLandOn.add(sameBranch);
         fixesLandOn.add(stackedSubPr);
         fixesLandOn.setBorder(JBUI.Borders.emptyLeft(8));
-        JBLabel prTitle = new JBLabel(PR_LANE);
-        prTitle.setFont(JBUI.Fonts.label().asBold());
         prCounts.setForeground(UIUtil.getContextHelpForeground());
         prNotice.setForeground(UIUtil.getContextHelpForeground());
         submitReview.addActionListener(e -> submitReview());
-        prLane.add(prTitle);
         prLane.add(prCounts);
         prLane.add(submitReview);
         prLane.add(prNotice);
         prLane.setBorder(JBUI.Borders.empty(4, 4));
-        JPanel north = new JPanel(new BorderLayout());
-        north.add(bar, BorderLayout.NORTH);
-        north.add(fixesLandOn, BorderLayout.CENTER);
-        north.add(prLane, BorderLayout.SOUTH);
-        add(north, BorderLayout.NORTH);
-        add(new JBScrollPane(rows), BorderLayout.CENTER);
+        JPanel sessionNorth = new JPanel(new BorderLayout());
+        sessionNorth.add(bar, BorderLayout.NORTH);
+        sessionNorth.add(fixesLandOn, BorderLayout.CENTER);
+        JPanel session = new JPanel(new BorderLayout());
+        session.add(sessionNorth, BorderLayout.NORTH);
+        session.add(new JBScrollPane(rows), BorderLayout.CENTER);
+        JPanel pullRequest = new JPanel(new BorderLayout());
+        pullRequest.add(prLane, BorderLayout.NORTH);
+        body.add(session, SESSION_CARD);
+        body.add(pullRequest, PR_CARD);
+        tabActions.add(new Tab(false));
+        tabActions.add(new Tab(true));
+        ActionToolbar tabs = ActionManager.getInstance().createActionToolbar(TOOLBAR_PLACE, tabActions, true);
+        tabs.setTargetComponent(this);
+        add(tabs.getComponent(), BorderLayout.NORTH);
+        add(body, BorderLayout.CENTER);
         render(OutboxModel.Snapshot.EMPTY);
     }
 
@@ -137,7 +159,9 @@ final class ReviewWorkbenchOutbox extends JPanel {
         shown = Objects.requireNonNull(lane, "lane");
         counts.setText(lane.countsText());
         fixesLandOn.setVisible(lane.prMode());
-        prLane.setVisible(lane.prMode());
+        if (!lane.prMode()) {
+            showPrTab(false); // a local review has no Pull request tab
+        }
         prCounts.setText(prCountsText(lane));
         sameBranch.setSelected(!lane.stackedSubPr());
         stackedSubPr.setSelected(lane.stackedSubPr());
@@ -148,6 +172,48 @@ final class ReviewWorkbenchOutbox extends JPanel {
         rows.revalidate();
         rows.repaint();
         updateButton();
+    }
+
+    /** Shows the Pull request tab, or the Session tab; a local review only ever shows Session. EDT. */
+    void showPrTab(boolean pr) {
+        prTab = pr && shown.prMode();
+        cards.show(body, prTab ? PR_CARD : SESSION_CARD);
+    }
+
+    /** One tab's label (pure): "Session (2)", "Pull request (1)". */
+    static String tabLabel(boolean pr, OutboxModel.Snapshot lane) {
+        return pr ? PR_LANE + " (" + lane.waitingForPr() + ")" : TITLE + " (" + lane.toFix().size() + ")";
+    }
+
+    /** One of the two tabs, selected while the outbox shows it; Pull request is shown in a PR review only. */
+    private final class Tab extends DumbAwareToggleAction {
+        private final boolean pr;
+
+        Tab(boolean pr) {
+            super(pr ? PR_LANE : TITLE);
+            this.pr = pr;
+            ReviewWorkbenchEditor.showTextInToolbar(this);
+        }
+
+        @Override public boolean isSelected(@NotNull AnActionEvent e) {
+            return prTab == pr;
+        }
+
+        @Override public void setSelected(@NotNull AnActionEvent e, boolean selected) {
+            if (selected) {
+                showPrTab(pr);
+            }
+        }
+
+        @Override public void update(@NotNull AnActionEvent e) {
+            super.update(e);
+            e.getPresentation().setVisible(!pr || shown.prMode());
+            e.getPresentation().setText(tabLabel(pr, shown));
+        }
+
+        @Override public @NotNull ActionUpdateThread getActionUpdateThread() {
+            return ActionUpdateThread.EDT;
+        }
     }
 
     /** The PR lane's counts (pure): "2 comments to post", or "No comments to post". */
