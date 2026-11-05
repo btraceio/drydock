@@ -592,16 +592,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         query.add(new ViewFilterRibbon(viewFilter, candidate -> {
             // The ribbon owns only the chips; the chosen view stays here,
             // and every real change (not a re-click of the selected chip)
-            // narrows the tree the same way the old chip row did. Issues is
-            // strictly lazy — a filter, never a load — so only the PRs view
-            // fetches on the next pass and needs the busy wait.
+            // narrows the tree the same way the old chip row did. No view
+            // fetches anything, so none needs a busy wait.
             viewFilter = candidate;
-            if (candidate == ViewFilter.PULL_REQUESTS) {
-                ((DefaultTreeModel) tree.getModel()).setRoot(new DefaultMutableTreeNode());
-                displayedNodes = List.of();
-                tree.getEmptyText().setText("Loading pull requests…");
-                tree.setPaintBusy(true);
-            }
             requestRebuild(false);
         }), BorderLayout.SOUTH);
         top.add(query, BorderLayout.SOUTH);
@@ -1447,8 +1440,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         // Restoration, not intent: every expansion in this span (and any a
         // selection could cause) records no user request.
         expansions.runProgrammatic(() -> {
-            restoreExpansions(root, new TreePath(root.getPath()), null, appliedViewFilter, expansions,
-                    tree::expandPath);
+            restoreExpansions(root, new TreePath(root.getPath()), null, expansions, tree::expandPath);
             // T17a: the Tasks section and the session rows that gained task
             // children (D10) open with their content; the user's collapse of
             // them, snapshotted above, is restored instead.
@@ -1467,18 +1459,6 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         });
     }
 
-    /** Whether a lazy listing section expands: the PRs view opens every Pull Requests
-     * section; every other section follows the request alone. Issues sections are
-     * strictly lazy — the view is a filter, never a load — so they follow the
-     * request in every view. Pure.
-     */
-    static boolean expandsListing(SectionKind kind, ViewFilter view, boolean requested) {
-        if (kind == SectionKind.PULL_REQUESTS) {
-            return view == ViewFilter.PULL_REQUESTS || requested;
-        }
-        return requested;
-    }
-
     /**
      * Whether an issues container node (the GitHub node, the Jira node, a
      * Jira group) expands: only after the user opened it here — a rebuild
@@ -1491,8 +1471,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
     /**
      * The panel's restoration walk: expands, through {@code expand}, every
-     * eager node and every lazy section or Jira group this view or the
-     * user's requests open — each node before its children, children in
+     * eager node and every lazy section or Jira group the user's requests
+     * open — each node before its children, children in
      * order. The project root of a node is its nearest project row's main
      * root, carried down the walk; a section or group with none never
      * expands, in any view. Static and panel-free (the side effect is the
@@ -1500,8 +1480,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
      * live project.
      */
     static void restoreExpansions(DefaultMutableTreeNode node, TreePath path, Path projectRoot,
-                                  ViewFilter view, ListingExpansionTracker expansions,
-                                  Consumer<TreePath> expand) {
+                                  ListingExpansionTracker expansions, Consumer<TreePath> expand) {
         Object value = node.getUserObject();
         Path root = value instanceof ProjectRow row ? row.project().root() : projectRoot;
         boolean expanded = switch (value) {
@@ -1511,12 +1490,12 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             case StaleWorktrees ignored -> true;
             case Section section -> switch (section.kind()) {
                 case SESSIONS, ACTIVE, INACTIVE -> true;
-                case WORKTREES -> root != null && expandsListing(SectionKind.WORKTREES, view,
-                        expansions.requested(SectionKind.WORKTREES).contains(root));
+                case WORKTREES -> root != null
+                        && expansions.requested(SectionKind.WORKTREES).contains(root);
                 case ISSUES -> root != null
                         && expansions.requestedIssueSections().contains(root);
-                case PULL_REQUESTS -> root != null && expandsListing(SectionKind.PULL_REQUESTS, view,
-                        expansions.requested(SectionKind.PULL_REQUESTS).contains(root));
+                case PULL_REQUESTS -> root != null
+                        && expansions.requested(SectionKind.PULL_REQUESTS).contains(root);
             };
             case GitHubNode ignored -> root != null
                     && expandsIssuesNode(expansions.requestedGitHubIssues().contains(root));
@@ -1532,7 +1511,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         }
         for (int i = 0; i < node.getChildCount(); i++) {
             DefaultMutableTreeNode child = (DefaultMutableTreeNode) node.getChildAt(i);
-            restoreExpansions(child, path.pathByAddingChild(child), root, view, expansions, expand);
+            restoreExpansions(child, path.pathByAddingChild(child), root, expansions, expand);
         }
     }
 
