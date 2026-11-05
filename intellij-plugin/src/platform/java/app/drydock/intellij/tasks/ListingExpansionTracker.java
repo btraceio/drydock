@@ -1,9 +1,8 @@
 package app.drydock.intellij.tasks;
 
 import javax.swing.event.TreeExpansionEvent;
-import javax.swing.event.TreeWillExpandListener;
+import javax.swing.event.TreeExpansionListener;
 import javax.swing.tree.DefaultMutableTreeNode;
-import javax.swing.tree.ExpandVetoException;
 import javax.swing.tree.TreePath;
 
 import java.nio.file.Path;
@@ -23,9 +22,20 @@ import java.util.function.Function;
  * sections) and pure UI state for the ones whose children always travel
  * (the Issues and Jira container nodes).
  *
+ * <p>The tracker listens to {@code treeExpanded}/{@code treeCollapsed},
+ * not to the will-expand/will-collapse pair: IntelliJ's {@code Tree}
+ * collapses recursively by default ({@code ide.tree.collapse.recursively})
+ * through a bulk {@code collapsePaths} that fires only
+ * {@code treeCollapsed} — for the clicked node and each expanded
+ * descendant — and its bulk {@code expandPaths} fires only
+ * {@code treeExpanded}. A will-collapse listener therefore never saw the
+ * user's collapse, kept every record, and the next rebuild re-opened (and
+ * re-fetched) every node the user had closed. A vetoed toggle fires no
+ * {@code treeExpanded}/{@code treeCollapsed}, so it records nothing.</p>
+ *
  * <p>The tree is rebuilt from scratch on every pass, and the panel then
  * re-expands the eager and requested nodes with {@code Tree.expandPath} —
- * which fires the very {@code treeWillExpand} a user's click fires.
+ * which fires the very {@code treeExpanded} a user's click fires.
  * Unguarded, a pass through a view that auto-expands recorded every
  * project as user-requested, so returning to Active/All kept fetching and
  * expanding every listing. {@link #runProgrammatic(Runnable)} suppresses
@@ -53,7 +63,7 @@ import java.util.function.Function;
  * disabling its Jira connection forgets it, and a failed pass forgets
  * nothing.</p>
  */
-final class ListingExpansionTracker implements TreeWillExpandListener {
+final class ListingExpansionTracker implements TreeExpansionListener {
 
     /** The panel's rebuild scheduler. */
     @FunctionalInterface
@@ -162,7 +172,7 @@ final class ListingExpansionTracker implements TreeWillExpandListener {
      * expanding gesture).
      */
     @Override
-    public void treeWillExpand(TreeExpansionEvent event) throws ExpandVetoException {
+    public void treeExpanded(TreeExpansionEvent event) {
         Object component = event.getPath().getLastPathComponent();
         if (!(component instanceof DefaultMutableTreeNode node)) {
             return;
@@ -203,8 +213,12 @@ final class ListingExpansionTracker implements TreeWillExpandListener {
         }
     }
 
+    /**
+     * A real collapse, single or bulk: forgets the closed node's record,
+     * except while the panel restores its own state. EDT.
+     */
     @Override
-    public void treeWillCollapse(TreeExpansionEvent event) throws ExpandVetoException {
+    public void treeCollapsed(TreeExpansionEvent event) {
         Object component = event.getPath().getLastPathComponent();
         if (programmatic || !(component instanceof DefaultMutableTreeNode node)) {
             return;
