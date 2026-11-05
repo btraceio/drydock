@@ -754,7 +754,7 @@ class TaskTreeModelTest {
 
     @Test
     void viewFilterOrderMatchesTheRibbon() {
-        assertEquals(List.of("All", "Active", "Inactive", "Needs you"),
+        assertEquals(List.of("All", "Active", "Inactive", "Needs you", "Flagged"),
                 Arrays.stream(ViewFilter.values()).map(ViewFilter::label).toList());
     }
 
@@ -780,6 +780,24 @@ class TaskTreeModelTest {
         // BTRACE has no needs-you session, so it is hidden entirely.
         assertEquals(List.of(ALPHA), projectRoots(nodes));
         assertEquals(List.of("Waiting for you"), sessionNames(nodes, ALPHA));
+        assertTrue(section(projectRow(nodes, ALPHA), SectionKind.WORKTREES).isEmpty());
+    }
+
+    @Test
+    void flaggedViewContainsOnlyFlaggedSessionsRunningOrNot() {
+        In in = new In().project(ALPHA).project(BTRACE);
+        ManagedAgentSession flaggedRunning = session("Flagged running", ALPHA.resolve("a")).withFlagged(true);
+        ManagedAgentSession flaggedStopped = session("Flagged stopped", ALPHA.resolve("b")).withFlagged(true);
+        ManagedAgentSession plain = session("Not flagged", ALPHA.resolve("c"));
+        in.sessions.addAll(List.of(flaggedRunning, flaggedStopped, plain, session("Elsewhere", BTRACE)));
+        in.running.add(flaggedRunning.id());
+        in.viewFilter = ViewFilter.FLAGGED;
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build());
+
+        // BTRACE has no flagged session, so it is hidden entirely.
+        assertEquals(List.of(ALPHA), projectRoots(nodes));
+        assertEquals(Set.of("Flagged running", "Flagged stopped"), Set.copyOf(sessionNames(nodes, ALPHA)));
         assertTrue(section(projectRow(nodes, ALPHA), SectionKind.WORKTREES).isEmpty());
     }
 

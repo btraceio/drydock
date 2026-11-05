@@ -91,7 +91,7 @@ class TaskMenuTest {
         assertEquals(List.of(
                 List.of(TaskMenu.Item.SWITCH_TO_TASK, TaskMenu.Item.SHOW_HERE),
                 List.of(TaskMenu.Item.DEACTIVATE, TaskMenu.Item.REVIEW_CHANGES, TaskMenu.Item.TRANSFER_TO),
-                List.of(TaskMenu.Item.RENAME, TaskMenu.Item.NEW_TASK),
+                List.of(TaskMenu.Item.RENAME, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
                 List.of(TaskMenu.Item.DEACTIVATE_AND_CLOSE, TaskMenu.Item.DONE_WITH_TASK)),
                 TaskMenu.sections(task(true, new TaskPlacement.OwnWindow()), List.of(), TRANSFER));
     }
@@ -101,7 +101,7 @@ class TaskMenuTest {
         assertEquals(List.of(
                 List.of(TaskMenu.Item.SWITCH_TO_TASK, TaskMenu.Item.SHOW_HERE),
                 List.of(TaskMenu.Item.DEACTIVATE, TaskMenu.Item.REVIEW_CHANGES),
-                List.of(TaskMenu.Item.RENAME, TaskMenu.Item.NEW_TASK),
+                List.of(TaskMenu.Item.RENAME, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
                 List.of(TaskMenu.Item.DONE_WITH_TASK)),
                 sectionsOf(task(true, new TaskPlacement.OtherWindow("profiling-rt"))));
     }
@@ -113,7 +113,7 @@ class TaskMenuTest {
         assertEquals(List.of(
                 List.of(TaskMenu.Item.SWITCH_TO_TASK),
                 List.of(TaskMenu.Item.DEACTIVATE, TaskMenu.Item.REVIEW_CHANGES),
-                List.of(TaskMenu.Item.RENAME, TaskMenu.Item.NEW_TASK),
+                List.of(TaskMenu.Item.RENAME, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
                 List.of(TaskMenu.Item.DONE_WITH_TASK)),
                 sectionsOf(task(true, new TaskPlacement.Here())));
     }
@@ -123,7 +123,7 @@ class TaskMenuTest {
         assertEquals(List.of(
                 List.of(TaskMenu.Item.SWITCH_TO_TASK),
                 List.of(TaskMenu.Item.DEACTIVATE, TaskMenu.Item.REVIEW_CHANGES),
-                List.of(TaskMenu.Item.RENAME, TaskMenu.Item.NEW_TASK),
+                List.of(TaskMenu.Item.RENAME, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
                 List.of(TaskMenu.Item.DEACTIVATE_AND_CLOSE, TaskMenu.Item.DONE_WITH_TASK)),
                 sectionsOf(task(true, new TaskPlacement.ThisWindow())));
     }
@@ -133,7 +133,7 @@ class TaskMenuTest {
         assertEquals(List.of(
                 List.of(TaskMenu.Item.SWITCH_TO_TASK),
                 List.of(TaskMenu.Item.DEACTIVATE, TaskMenu.Item.REVIEW_CHANGES),
-                List.of(TaskMenu.Item.RENAME, TaskMenu.Item.NEW_TASK),
+                List.of(TaskMenu.Item.RENAME, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
                 List.of(TaskMenu.Item.DONE_WITH_TASK)),
                 sectionsOf(task(true, new TaskPlacement.NotShown())));
     }
@@ -152,7 +152,7 @@ class TaskMenuTest {
         assertEquals(List.of(
                 List.of(TaskMenu.Item.SWITCH_TO_TASK),
                 List.of(TaskMenu.Item.RESUME, TaskMenu.Item.RESUME_IN_OWN_WINDOW),
-                List.of(TaskMenu.Item.RENAME, TaskMenu.Item.NEW_TASK),
+                List.of(TaskMenu.Item.RENAME, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
                 List.of(TaskMenu.Item.DONE_WITH_TASK)),
                 sectionsOf(task(false, new TaskPlacement.Idle(false))));
     }
@@ -163,7 +163,7 @@ class TaskMenuTest {
         assertEquals(List.of(
                 List.of(TaskMenu.Item.SWITCH_TO_TASK),
                 List.of(TaskMenu.Item.RESUME),
-                List.of(TaskMenu.Item.RENAME, TaskMenu.Item.NEW_TASK),
+                List.of(TaskMenu.Item.RENAME, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
                 List.of(TaskMenu.Item.DONE_WITH_TASK)),
                 sectionsOf(task(false, new TaskPlacement.Idle(true))));
     }

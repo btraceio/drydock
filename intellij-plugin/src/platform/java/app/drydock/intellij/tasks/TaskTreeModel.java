@@ -141,7 +141,8 @@ public final class TaskTreeModel {
         INACTIVE("Inactive", "Show only sessions whose agent is not running",
                 "No inactive sessions."),
         NEEDS_YOU("Needs you", "Show only running sessions waiting for your answer",
-                "No sessions need you.");
+                "No sessions need you."),
+        FLAGGED("Flagged", "Show only sessions you flagged for follow-up", "No flagged sessions.");
 
         private final String label;
         private final String tooltip;
@@ -470,6 +471,7 @@ public final class TaskTreeModel {
             // stopped session's leftover activity never counts.
             case NEEDS_YOU -> task.running()
                     && task.activity().equals(Optional.of(SessionActivity.NEEDS_ATTENTION));
+            case FLAGGED -> task.session().flagged();
         };
     }
 

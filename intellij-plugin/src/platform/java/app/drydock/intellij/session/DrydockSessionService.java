@@ -1226,6 +1226,30 @@ public final class DrydockSessionService implements AgentExecutionListener {
     }
 
     /**
+     * The human's follow-up flag: sets or clears it as one state transform on
+     * the plugin's background executor, then republishes so the task tree
+     * redraws. Completes exceptionally when the session no longer exists.
+     */
+    public CompletableFuture<ManagedAgentSession> setFlagged(ManagedSessionId sessionId, boolean flagged) {
+        Objects.requireNonNull(sessionId, "sessionId");
+        return initialization.thenApplyAsync(unused -> {
+            ManagedAgentSession[] updated = new ManagedAgentSession[1];
+            stateStore.get().update(state -> {
+                updated[0] = state.sessions().stream()
+                        .filter(existing -> existing.id().equals(sessionId))
+                        .findFirst()
+                        .orElseThrow(() -> new IllegalStateException("The session no longer exists"))
+                        .withFlagged(flagged);
+                return state.withSessions(state.sessions().stream()
+                        .map(existing -> existing.id().equals(sessionId) ? updated[0] : existing)
+                        .toList());
+            });
+            DrydockSessionsListener.publishChanged();
+            return updated[0];
+        }, executor);
+    }
+
+    /**
      * The agent's {@code session_rename}: refuses a human-pinned name,
      * refuses an unchanged title and a sibling collision as outcomes (the
      * router turns each into its own message), applies anything else, and

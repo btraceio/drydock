@@ -53,6 +53,8 @@ final class TaskMenu {
         REVIEW_CHANGES,
         TRANSFER_TO,
         RENAME,
+        /** Set or clear the human's follow-up flag; the label follows the session's current flag. */
+        FLAG,
         NEW_TASK,
         DEACTIVATE_AND_CLOSE,
         DONE_WITH_TASK,
@@ -158,7 +160,7 @@ final class TaskMenu {
                 section(Item.DEACTIVATE,
                         TaskActions.reviewsChanges(row) ? Item.REVIEW_CHANGES : null,
                         facts.transferAvailable() ? Item.TRANSFER_TO : null),
-                List.of(Item.RENAME, Item.NEW_TASK),
+                List.of(Item.RENAME, Item.FLAG, Item.NEW_TASK),
                 section(TaskActions.closesOwnWindow(row) ? Item.DEACTIVATE_AND_CLOSE : null,
                         Item.DONE_WITH_TASK)));
     }
@@ -168,7 +170,7 @@ final class TaskMenu {
         return nonEmpty(List.of(
                 List.of(Item.SWITCH_TO_TASK),
                 section(Item.RESUME, TaskActions.resumesElsewhere(row) ? Item.RESUME_IN_OWN_WINDOW : null),
-                List.of(Item.RENAME, Item.NEW_TASK),
+                List.of(Item.RENAME, Item.FLAG, Item.NEW_TASK),
                 List.of(Item.DONE_WITH_TASK)));
     }
 
