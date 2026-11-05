@@ -22,6 +22,11 @@ import java.util.Optional;
  * {@link TaskId}s. The repository is the shared registry identity the task
  * is stored under (D2), carried explicitly so a document never travels
  * without it.</p>
+ *
+ * <p>{@code mirrors} are the web addresses of the GitHub issues and Jira
+ * tickets this task was mirrored into, in the order they were created; a
+ * missing key is no mirror. The remote side names the task back (see
+ * {@link TaskMirror}), so the link runs both ways.</p>
  */
 public record TaskDocument(
         TaskId id,
@@ -32,6 +37,7 @@ public record TaskDocument(
         Optional<Instant> created,
         List<String> after,
         List<String> sessions,
+        List<String> mirrors,
         String rawFrontMatter,
         String rawBody
 ) {
@@ -50,6 +56,14 @@ public record TaskDocument(
         created = created != null ? created : Optional.empty();
         after = after != null ? List.copyOf(after) : List.of();
         sessions = sessions != null ? List.copyOf(sessions) : List.of();
+        mirrors = mirrors != null ? List.copyOf(mirrors) : List.of();
+    }
+
+    /** The shape before tasks could be mirrored: no mirror. */
+    public TaskDocument(TaskId id, RepositoryId repository, String title, TaskStatus status, DoneBy doneBy,
+                        Optional<Instant> created, List<String> after, List<String> sessions,
+                        String rawFrontMatter, String rawBody) {
+        this(id, repository, title, status, doneBy, created, after, sessions, List.of(), rawFrontMatter, rawBody);
     }
 
     /**
@@ -58,7 +72,7 @@ public record TaskDocument(
      * every other field, including the raw envelope, is carried unchanged.
      */
     public TaskDocument withTitle(String newTitle) {
-        return new TaskDocument(id, repository, newTitle, status, doneBy, created, after, sessions,
+        return new TaskDocument(id, repository, newTitle, status, doneBy, created, after, sessions, mirrors,
                 rawFrontMatter, rawBody);
     }
 }

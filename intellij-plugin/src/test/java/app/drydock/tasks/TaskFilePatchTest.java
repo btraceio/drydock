@@ -338,4 +338,27 @@ class TaskFilePatchTest {
         assertRefused("embedded line break refused",
                 () -> TaskFilePatch.appendNote("---\ntitle: T\n---\n", "line one\nline two"));
     }
+
+    @Test
+    void mirrorsAreReadInsertedReplacedAndWrittenByNewFileOnlyWhenPresent() throws Exception {
+        String source = "---\ntitle: T\nowner: jb   # kept\n---\nBody.\n";
+        String github = "https://github.com/o/r/issues/12";
+        String jira = "https://acme.atlassian.net/browse/PROJ-7";
+
+        String inserted = TaskFilePatch.patch(parse(source), source,
+                new TaskFilePatch.Updates(null, null, null, null, null, null, List.of(github)));
+        assertEquals("---\ntitle: T\nowner: jb   # kept\nmirrors: [\"" + github + "\"]\n---\nBody.\n", inserted);
+        String replaced = TaskFilePatch.patch(parse(inserted), inserted,
+                new TaskFilePatch.Updates(null, null, null, null, null, null, List.of(github, jira)));
+        assertEquals(List.of(github, jira), parse(replaced).document().mirrors());
+        assertEquals(replaced, TaskFilePatch.patch(parse(replaced), replaced, up(null, TaskStatus.OPEN, null,
+                null, null, null)), "the six-field updates leave mirrors alone");
+
+        assertFalse(TaskFilePatch.newFile(document("T", null, List.of(), "")).contains("mirrors"),
+                "a task with no mirror gets no mirrors key");
+        TaskDocument mirrored = new TaskDocument(ID, REPO, "T", TaskStatus.OPEN, DoneBy.HUMAN, Optional.empty(),
+                List.of(), List.of(), List.of(jira), "", "");
+        assertEquals(List.of(jira), parse(TaskFilePatch.newFile(mirrored)).document().mirrors());
+        assertRefused("a non-list mirrors value", () -> parse("---\ntitle: T\nmirrors: one\n---\n"));
+    }
 }

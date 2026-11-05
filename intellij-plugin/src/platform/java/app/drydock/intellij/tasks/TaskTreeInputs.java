@@ -10,6 +10,7 @@ import app.drydock.domain.RepositoryCatalog;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionActivity;
 import app.drydock.git.GhCliService;
+import app.drydock.git.GhCliService.BranchPullRequest;
 import app.drydock.git.GhCliService.IssueListing;
 import app.drydock.git.GhCliService.PullRequestListing;
 import app.drydock.git.GitExecutableLocator;
@@ -96,6 +97,10 @@ final class TaskTreeInputs implements AutoCloseable {
     private final Map<Path, Boolean> remoteCache = new ConcurrentHashMap<>();
     private final Map<IssueKey, CachedIssues> issueCache = new ConcurrentHashMap<>();
     private final Map<PullRequestKey, CachedPullRequests> pullRequestCache = new ConcurrentHashMap<>();
+    private final Map<PullRequestKey, CachedBranchPullRequests> branchPullRequestCache = new ConcurrentHashMap<>();
+    private final Map<Path, CachedBranch> branchCache = new ConcurrentHashMap<>();
+    /** Runs when a badge lookup this gather did not wait for completes; the panel rebuilds. */
+    private volatile Runnable lateData = () -> { };
     private final ResumabilityCache resumability = new ResumabilityCache();
     /** Task-change notifications (T17a); production observes the VFS, fakes inject. */
     private final TaskChanges taskChanges;
@@ -142,6 +147,17 @@ final class TaskTreeInputs implements AutoCloseable {
 
     private record CachedPullRequests(long expiresAt, CompletableFuture<PullRequestListing> listing) { }
 
+    /**
+     * One project's head-branch PR map: the current lookup and the last
+     * answer, which is served while a refresh after the TTL is in flight so
+     * the badges do not blink off once a minute.
+     */
+    private record CachedBranchPullRequests(long expiresAt, CompletableFuture<Map<String, BranchPullRequest>> lookup,
+                                            Map<String, BranchPullRequest> previous) { }
+
+    /** One working directory's checked-out branch, empty when detached or unknown to git. */
+    private record CachedBranch(long expiresAt, Optional<String> branch) { }
+
     /** One {@code git remote get-url origin} run in {@code root}; throws when git gave no answer. */
     @FunctionalInterface
     interface OriginProbe {
@@ -152,12 +168,22 @@ final class TaskTreeInputs implements AutoCloseable {
         worktreeCache.clear();
         activityCache.clear();
         resumability.clear();
+        branchCache.clear();
     }
 
     void invalidateGitHub() {
         issueCache.clear();
         pullRequestCache.clear();
+        branchPullRequestCache.clear();
         remoteCache.clear();
+    }
+
+    /**
+     * Sets what runs when a session's pull-request lookup, which a gather
+     * never waits for, completes later: the panel's rebuild request.
+     */
+    void onLateData(Runnable callback) {
+        lateData = Objects.requireNonNull(callback, "callback");
     }
 
     /** Forgets every cached Jira listing, so the next gather re-queries each project. */
@@ -173,6 +199,7 @@ final class TaskTreeInputs implements AutoCloseable {
     /** Forgets {@code root}'s cached pull-request listing, so the next gather re-queries it. */
     void invalidatePullRequests(Path root) {
         pullRequestCache.keySet().removeIf(key -> key.root().equals(root));
+        branchPullRequestCache.keySet().removeIf(key -> key.root().equals(root));
     }
 
     /**
@@ -259,6 +286,7 @@ final class TaskTreeInputs implements AutoCloseable {
         Set<Path> jiraRoots = new HashSet<>();
         Set<Path> jiraGhostRoots = new HashSet<>();
         Map<Path, List<Worktree>> pullRequestDedupWorktrees = new HashMap<>();
+        Map<RepositoryId, BadgeSource> badgeSources = new HashMap<>();
         Set<Path> missing = new HashSet<>();
         TaskTreeModel.ProjectScope scope = TaskTreeModel.parseFilter(filter);
         // Resolved once per pass, not once per project: remote detection reuses it.
@@ -322,6 +350,7 @@ final class TaskTreeInputs implements AutoCloseable {
             }
             if (githubSettings.pullRequestsEnabled()) {
                 pullRequestContainers.add(root);
+                badgeSources.put(project.id(), new BadgeSource(root, githubSettings.repository()));
                 // A scoped-out project's row is not shown at all, so fetching
                 // its listing — or the worktree list the dedup needs — would
                 // be pure waste. Ordinary unscoped text is not a scope: a
@@ -381,6 +410,8 @@ final class TaskTreeInputs implements AutoCloseable {
         // catalog) by ResumabilityCache so a gather does not re-ask for it.
         Map<ManagedSessionId, Boolean> resumable =
                 resumability.refresh(sessions, running, AgentConsoles::hasConversation);
+        Map<ManagedSessionId, BranchPullRequest> sessionPullRequests =
+                sessionPullRequests(sessions, badgeSources, git);
         Map<RepositoryId, Path> recordedRoots = new HashMap<>();
         for (Repository repository : plugin.stateStore().state().repositories()) {
             if (!repository.isRemote()) {
@@ -444,7 +475,104 @@ final class TaskTreeInputs implements AutoCloseable {
                 pullRequestContainers, githubIssueRoots, githubGhostRoots, jiraRoots, jiraGhostRoots,
                 openFolders, Map.copyOf(activityCache), Instant.now(),
                 issues, jiraGroupListings, pullRequests, pullRequestDedupWorktrees, plugin.sharedProjects().problem(),
-                filter, viewFilter, resumable);
+                filter, viewFilter, resumable, sessionPullRequests);
+    }
+
+    /** Where a project's pull-request badges come from: its main checkout and its configured repository. */
+    private record BadgeSource(Path root, Optional<String> repository) { }
+
+    /**
+     * Each session's pull request, matched by its current branch against
+     * the head branches of its project's PRs. Only projects that list pull
+     * requests take part, and only sessions whose folder still exists.
+     * Never waits on {@code gh}: a lookup still running yields the last
+     * answer (none on the very first pass), and its completion requests
+     * one more rebuild through {@link #onLateData}.
+     */
+    private Map<ManagedSessionId, BranchPullRequest> sessionPullRequests(
+            List<ManagedAgentSession> sessions, Map<RepositoryId, BadgeSource> sources, Optional<Path> git) {
+        if (git.isEmpty() || sources.isEmpty()) {
+            return Map.of();
+        }
+        Map<RepositoryId, Map<String, BranchPullRequest>> byProject = new HashMap<>();
+        Map<ManagedSessionId, BranchPullRequest> matched = new HashMap<>();
+        for (ManagedAgentSession session : sessions) {
+            BadgeSource source = sources.get(session.repositoryId());
+            if (source == null || !Files.isDirectory(session.workingDirectory())) {
+                continue;
+            }
+            Optional<String> branch = branchOf(session.workingDirectory(), git.get());
+            if (branch.isEmpty()) {
+                continue;
+            }
+            Map<String, BranchPullRequest> pullRequests = byProject.computeIfAbsent(session.repositoryId(),
+                    ignored -> branchPullRequestsNow(source.root(), source.repository()));
+            BranchPullRequest pullRequest = pullRequests.get(branch.get());
+            if (pullRequest != null) {
+                matched.put(session.id(), pullRequest);
+            }
+        }
+        return matched;
+    }
+
+    /**
+     * The head-branch PR map for {@code root} as far as it is known now.
+     * A missing or expired entry starts a lookup whose completion calls
+     * {@link #lateData}; until it completes the previous answer is served.
+     */
+    private Map<String, BranchPullRequest> branchPullRequestsNow(Path root, Optional<String> repository) {
+        PullRequestKey key = new PullRequestKey(root, repository);
+        long now = System.nanoTime();
+        CachedBranchPullRequests cached = branchPullRequestCache.get(key);
+        if (cached == null || cached.expiresAt() <= now) {
+            Map<String, BranchPullRequest> previous = cached == null ? Map.of() : current(cached);
+            CompletableFuture<Map<String, BranchPullRequest>> lookup = github.branchPullRequests(root, repository);
+            cached = new CachedBranchPullRequests(now + ISSUE_CACHE_NANOS, lookup, previous);
+            branchPullRequestCache.put(key, cached);
+            if (!lookup.isDone()) {
+                lookup.whenComplete((answer, failure) -> lateData.run());
+            }
+        }
+        return current(cached);
+    }
+
+    /** The finished lookup's answer, or the previous one while it runs (or if it failed). */
+    private static Map<String, BranchPullRequest> current(CachedBranchPullRequests cached) {
+        CompletableFuture<Map<String, BranchPullRequest>> lookup = cached.lookup();
+        if (lookup.isDone() && !lookup.isCompletedExceptionally()) {
+            return lookup.join();
+        }
+        return cached.previous();
+    }
+
+    /**
+     * The branch checked out in {@code directory}, cached for the issue TTL
+     * (a session can switch branches, so the answer is not kept for good).
+     * A detached HEAD or a non-zero exit is a definitive "no branch" and is
+     * cached; a timeout, launch failure or interrupt is not, so the next
+     * gather asks again.
+     */
+    private Optional<String> branchOf(Path directory, Path git) {
+        long now = System.nanoTime();
+        CachedBranch cached = branchCache.get(directory);
+        if (cached != null && cached.expiresAt() > now) {
+            return cached.branch();
+        }
+        try {
+            ProcessResult result = ProcessRunner.run(List.of(git.toString(), "-C", directory.toString(),
+                    "symbolic-ref", "--quiet", "--short", "HEAD"), null, Duration.ofSeconds(GIT_TIMEOUT_SECONDS));
+            Optional<String> branch = result.exitCode() == 0 && !result.stdout().isBlank()
+                    ? Optional.of(result.stdout().strip()) : Optional.empty();
+            branchCache.put(directory, new CachedBranch(now + ISSUE_CACHE_NANOS, branch));
+            return branch;
+        } catch (ProcessTimeoutException e) {
+            LOG.log(Level.DEBUG, () -> "Branch of " + directory + " undetermined: timed out; not cached");
+        } catch (IOException e) {
+            LOG.log(Level.WARNING, "Could not run git to read the branch of " + directory + ": " + e.getMessage());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        return Optional.empty();
     }
 
     /**

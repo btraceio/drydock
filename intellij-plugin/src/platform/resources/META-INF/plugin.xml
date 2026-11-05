@@ -248,6 +248,21 @@
                 class="app.drydock.intellij.delayedtasks.DelayedTaskActions$GotoBlockerSession"
                 text="Go to Blocker Session"
                 description="Switch to the session that runs this task's blocker"/>
+        <!-- Mirroring a task into a GitHub issue or a Jira ticket: the task
+             stays, records the mirror's address, and the mirror names the
+             task and carries its metadata in hidden form. -->
+        <action id="Drydock.DelayedTask.MirrorToGitHub"
+                class="app.drydock.intellij.delayedtasks.DelayedTaskActions$MirrorToGitHub"
+                text="Mirror to GitHub Issue…"
+                description="Create a GitHub issue from this task and link the two; the task stays"/>
+        <action id="Drydock.DelayedTask.MirrorToJira"
+                class="app.drydock.intellij.delayedtasks.DelayedTaskActions$MirrorToJira"
+                text="Mirror to Jira…"
+                description="Create a Jira ticket from this task and link the two; the task stays"/>
+        <action id="Drydock.DelayedTask.OpenMirrors"
+                class="app.drydock.intellij.delayedtasks.DelayedTaskActions$OpenMirrors"
+                text="Open Mirrored Issue"
+                description="Open the GitHub issue or Jira ticket this task is mirrored into"/>
         <!-- The agent console tab's own commands (A7): the header shortcuts
              ride EditorTabActionGroup, the platform's per-tab label-action
              seam, so every agent console tab carries them and a click

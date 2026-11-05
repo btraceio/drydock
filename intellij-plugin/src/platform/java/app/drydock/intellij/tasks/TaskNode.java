@@ -2,6 +2,7 @@ package app.drydock.intellij.tasks;
 
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.SessionActivity;
+import app.drydock.git.GhCliService.BranchPullRequest;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.GhCliService.OpenPullRequest;
 import app.drydock.git.JiraIssue;
@@ -185,17 +186,28 @@ public sealed interface TaskNode {
      * {@code folderMissing}: it runs, and its worktree folder is gone.
      * {@code resumable}: it is stopped and has a conversation to resume into
      * (the model's answer, warmed by {@link ResumabilityCache}); always
-     * {@code false} while it runs.
+     * {@code false} while it runs. {@code branchPullRequest}: the GitHub
+     * pull request whose head is the session's current branch, when the
+     * project lists pull requests and {@code gh} has answered.
      */
     record TaskRow(ManagedAgentSession session, Optional<SessionActivity> activity, boolean running,
                    Optional<String> branch, TaskPlacement placement, boolean readOnly, boolean folderMissing,
-                   boolean resumable)
+                   boolean resumable, Optional<BranchPullRequest> branchPullRequest)
             implements TaskNode {
         public TaskRow {
             Objects.requireNonNull(session, "session");
             Objects.requireNonNull(activity, "activity");
             Objects.requireNonNull(branch, "branch");
             Objects.requireNonNull(placement, "placement");
+            Objects.requireNonNull(branchPullRequest, "branchPullRequest");
+        }
+
+        /** The shape before the model carried a branch's pull request: none known. */
+        public TaskRow(ManagedAgentSession session, Optional<SessionActivity> activity, boolean running,
+                       Optional<String> branch, TaskPlacement placement, boolean readOnly, boolean folderMissing,
+                       boolean resumable) {
+            this(session, activity, running, branch, placement, readOnly, folderMissing, resumable,
+                    Optional.empty());
         }
 
         /**

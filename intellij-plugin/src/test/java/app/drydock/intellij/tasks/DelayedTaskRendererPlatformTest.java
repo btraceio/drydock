@@ -3,6 +3,7 @@ package app.drydock.intellij.tasks;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.delayedtasks.TaskStoreWatcher.WatchedSnapshot;
 import app.drydock.domain.*;
+import app.drydock.git.GhCliService;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.IsolatedCatalog;
 import app.drydock.tasks.*;
@@ -200,6 +201,25 @@ public class DelayedTaskRendererPlatformTest extends BasePlatformTestCase {
                 ((SessionTasks) through.nodes().get(0)).session());
         assertEquals("the model's pass-through paints the same fragments", expected,
                 fragments(paint(through.nodes().get(0))));
+    }
+
+    // ---- a session whose branch has a pull request carries the badge ----
+
+    public void testASessionRowOnAPullRequestBranchShowsTheColouredBadgeAndTooltip() {
+        TaskNode.TaskRow plain = SESSION_ROWS.get(1);
+        TaskNode.TaskRow badged = new TaskNode.TaskRow(plain.session(), plain.activity(), plain.running(),
+                plain.branch(), plain.placement(), plain.readOnly(), plain.folderMissing(), plain.resumable(),
+                Optional.of(new GhCliService.BranchPullRequest(12, GhCliService.PrInfo.PrLifecycle.MERGED, false,
+                        "feature/x", "Fix it", Optional.empty())));
+        TaskTreeRenderer painted = paint(badged);
+        assertTrue(text(painted), text(painted).contains("  PR #12 merged"));
+        SimpleTextAttributes style = attributes(painted, "  PR #12 merged");
+        assertTrue("the badge is bold", (style.getStyle() & SimpleTextAttributes.STYLE_BOLD) != 0);
+        int rgb = style.getFgColor().getRGB() & 0xFFFFFF;
+        assertTrue("merged paints purple in both themes: " + Integer.toHexString(rgb),
+                rgb == 0x8250DF || rgb == 0xA371F7);
+        assertEquals("Pull request #12 (merged) from feature/x: Fix it", painted.getToolTipText());
+        assertFalse("a row without a branch PR carries no badge", text(paint(plain)).contains("PR #"));
     }
 
     // ---- fixtures: documents, rows and the model inputs ----

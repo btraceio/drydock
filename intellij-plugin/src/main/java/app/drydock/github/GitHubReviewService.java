@@ -30,9 +30,11 @@ import java.util.concurrent.Executors;
 /**
  * The only class that runs {@code gh} to post a PR review. Same
  * executor/{@code locate()}/{@code runIn} shape as {@link
- * app.drydock.git.GhCliService}, which is read-only; this is the one place
- * that mutates a repository on GitHub's side, so its failure modes are kept
- * as distinct from each other as {@code GhCliService}'s successes are.
+ * app.drydock.git.GhCliService}, which is read-only. It and
+ * {@link GitHubIssueMirrorService} (a task's mirror issue) are the only
+ * places that mutate a repository on GitHub's side, so their failure modes
+ * are kept as distinct from each other as {@code GhCliService}'s successes
+ * are.
  */
 public final class GitHubReviewService implements AutoCloseable {
 

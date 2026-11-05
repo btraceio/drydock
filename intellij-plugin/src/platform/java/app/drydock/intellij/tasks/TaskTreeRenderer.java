@@ -4,6 +4,7 @@ import app.drydock.agent.api.AgentRegistry;
 import app.drydock.delayedtasks.DelayedTaskService;
 import app.drydock.delayedtasks.TaskStoreWatcher;
 import app.drydock.domain.SessionStatus;
+import app.drydock.git.GhCliService.BranchPullRequest;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.JiraIssue;
 import app.drydock.git.PrCheckoutService;
@@ -27,6 +28,7 @@ import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
 import app.drydock.intellij.ui.SessionDots;
 import app.drydock.tasks.DelayedTaskRows;
 import app.drydock.tasks.TaskId;
+import app.drydock.tasks.TaskMirror;
 import app.drydock.tasks.TaskState;
 import app.drydock.ui.AgentLabels;
 
@@ -35,6 +37,7 @@ import com.intellij.openapi.util.IconLoader;
 import com.intellij.ui.ColoredTreeCellRenderer;
 import com.intellij.ui.JBColor;
 import com.intellij.ui.SimpleTextAttributes;
+import com.intellij.util.ui.JBUI;
 import org.jetbrains.annotations.NotNull;
 
 import javax.swing.Icon;
@@ -170,6 +173,7 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
                     append("  " + String.join(", ", issue.issue().labels()),
                             SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
                 }
+                issue.issue().url().ifPresent(this::paintMirroredTask);
             }
             case TaskNode.JiraIssueRow jira -> {
                 setIcon(JIRA_ICON);
@@ -179,6 +183,7 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
                             SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
                 }
                 setToolTipText("Jira issue " + jira.issue().key());
+                paintMirroredTask(jira.issue().url());
             }
             case PullRequestRow pullRequest -> {
                 setIcon(AllIcons.Vcs.Vendors.Github);
@@ -366,8 +371,14 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
         if (task.readOnly()) {
             append("  RO", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
         }
-        pullRequestOf(task).ifPresent(number ->
-                append("  PR #" + number, SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES));
+        if (task.branchPullRequest().isPresent()) {
+            BranchPullRequest pullRequest = task.branchPullRequest().get();
+            append("  " + pullRequestBadge(pullRequest), badgeAttributes(pullRequest));
+            setToolTipText(pullRequestTooltip(pullRequest));
+        } else {
+            pullRequestOf(task).ifPresent(number ->
+                    append("  PR #" + number, SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES));
+        }
         String agent = AgentLabels.displayName(DrydockPluginService.getInstance().registry(),
                 task.session().agentKind());
         append("   " + secondary(task, agent, Duration.between(task.session().lastOpenedAt(), Instant.now())),
@@ -390,6 +401,89 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
         Optional<Integer> linked = task.session().pr().number();
         return linked.isPresent() ? linked : task.branch().flatMap(PrCheckoutService::pullRequestNumberOf);
     }
+
+    /** What a branch's pull request badge reads as, which also picks its colour. */
+    enum PullRequestBadgeKind { OPEN, DRAFT, MERGED, CLOSED, UNKNOWN }
+
+    /** Pure. The badge kind of a branch's pull request: a draft is only a draft while it is open. */
+    static PullRequestBadgeKind badgeKind(BranchPullRequest pullRequest) {
+        return switch (pullRequest.state()) {
+            case OPEN -> pullRequest.draft() ? PullRequestBadgeKind.DRAFT : PullRequestBadgeKind.OPEN;
+            case MERGED -> PullRequestBadgeKind.MERGED;
+            case CLOSED -> PullRequestBadgeKind.CLOSED;
+            case UNKNOWN -> PullRequestBadgeKind.UNKNOWN;
+        };
+    }
+
+    /** Pure. The badge text: {@code PR #12}, with the state word for anything but a plain open PR. */
+    static String pullRequestBadge(BranchPullRequest pullRequest) {
+        String base = "PR #" + pullRequest.number();
+        return switch (badgeKind(pullRequest)) {
+            case OPEN, UNKNOWN -> base;
+            case DRAFT -> base + " draft";
+            case MERGED -> base + " merged";
+            case CLOSED -> base + " closed";
+        };
+    }
+
+    /** Pure. The session row's hover text when its branch has a pull request. */
+    static String pullRequestTooltip(BranchPullRequest pullRequest) {
+        String state = switch (badgeKind(pullRequest)) {
+            case OPEN -> "open";
+            case DRAFT -> "draft";
+            case MERGED -> "merged";
+            case CLOSED -> "closed";
+            case UNKNOWN -> "state unknown";
+        };
+        return "Pull request #" + pullRequest.number() + " (" + state + ") from "
+                + pullRequest.headRefName() + (pullRequest.title().isBlank() ? "" : ": " + pullRequest.title());
+    }
+
+    /** The badge colours: GitHub's own green, grey, purple and red for open, draft, merged and closed. */
+    private static SimpleTextAttributes badgeAttributes(BranchPullRequest pullRequest) {
+        return switch (badgeKind(pullRequest)) {
+            case OPEN -> OPEN_BADGE;
+            case DRAFT, UNKNOWN -> SimpleTextAttributes.GRAYED_BOLD_ATTRIBUTES;
+            case MERGED -> MERGED_BADGE;
+            case CLOSED -> CLOSED_BADGE;
+        };
+    }
+
+    private static final SimpleTextAttributes OPEN_BADGE = new SimpleTextAttributes(
+            SimpleTextAttributes.STYLE_BOLD, new JBColor(new Color(0x1A, 0x7F, 0x37), new Color(0x3F, 0xB9, 0x50)));
+    private static final SimpleTextAttributes MERGED_BADGE = new SimpleTextAttributes(
+            SimpleTextAttributes.STYLE_BOLD, new JBColor(new Color(0x82, 0x50, 0xDF), new Color(0xA3, 0x71, 0xF7)));
+    private static final SimpleTextAttributes CLOSED_BADGE = new SimpleTextAttributes(
+            SimpleTextAttributes.STYLE_BOLD, new JBColor(new Color(0xCF, 0x22, 0x2E), new Color(0xF8, 0x51, 0x49)));
+
+    /** Marks either end of a task mirror: the task's row and the mirrored issue's row. */
+    static final String MIRROR_MARK = "\u21c4";
+
+    /** Pure. A task row's mirror badge: the mark and each mirror's short name, e.g. {@code #12, PROJ-7}. */
+    static String mirrorsBadge(List<String> mirrors) {
+        return MIRROR_MARK + " " + String.join(", ", mirrors.stream().map(TaskMirror::label).toList());
+    }
+
+    /** Pure. An issue row's mirror badge: the mark and the title of the task it mirrors. */
+    static String mirroredTaskBadge(String taskTitle) {
+        return MIRROR_MARK + " task: " + taskTitle;
+    }
+
+    /**
+     * The badge of an issue row some task mirrors, looked up in the task
+     * service's cached snapshot (memory only, like the plan annotation).
+     */
+    private void paintMirroredTask(String url) {
+        TaskMirroring.mirroredTask(url).ifPresent(document -> {
+            append("  " + mirroredTaskBadge(document.title()), MIRROR_ATTRIBUTES);
+            setToolTipText((getToolTipText() == null ? "" : getToolTipText() + " · ")
+                    + "Mirror of the Drydock task '" + document.title() + "' (" + document.id() + ")");
+        });
+    }
+
+    /** The mirror badges: small and in the link colour, so both ends of a mirror read as a link. */
+    private static final SimpleTextAttributes MIRROR_ATTRIBUTES = new SimpleTextAttributes(
+            SimpleTextAttributes.STYLE_SMALLER, JBUI.CurrentTheme.Link.Foreground.ENABLED);
 
     /** The follow-up flag's tag on a session row. */
     static final String FLAG_TAG = "\u2691 follow up";
@@ -429,6 +523,9 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
         Optional<DelayedTaskRows.PlanProgress> progress = planProgressOf(task.id());
         progress.ifPresent(annotation -> append("  " + annotation.text(),
                 SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES));
+        if (!task.mirrors().isEmpty()) {
+            append("  " + mirrorsBadge(task.mirrors()), MIRROR_ATTRIBUTES);
+        }
         String age = delayedAge(task, now);
         if (!age.isEmpty()) {
             append(" · " + age, SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
@@ -440,7 +537,8 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
             append(" · " + blocker, SimpleTextAttributes.GRAYED_ATTRIBUTES);
         }
         setToolTipText(delayedTooltip(task, now) + progress.map(annotation ->
-                " · plan " + annotation.text()).orElse(""));
+                " · plan " + annotation.text()).orElse("")
+                + (task.mirrors().isEmpty() ? "" : " · mirrored to " + String.join(", ", task.mirrors())));
     }
 
     /**

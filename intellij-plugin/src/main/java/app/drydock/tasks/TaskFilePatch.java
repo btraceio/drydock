@@ -59,11 +59,18 @@ public final class TaskFilePatch {
      * caller mutations cannot change what a patch writes.
      */
     public record Updates(String title, TaskStatus status, DoneBy doneBy, Instant created,
-            List<String> after, List<String> sessions) {
+            List<String> after, List<String> sessions, List<String> mirrors) {
 
         public Updates {
             after = snapshotEntries(after, "after");
             sessions = snapshotEntries(sessions, "sessions");
+            mirrors = snapshotEntries(mirrors, "mirrors");
+        }
+
+        /** The updates before tasks could be mirrored: {@code mirrors} left unchanged. */
+        public Updates(String title, TaskStatus status, DoneBy doneBy, Instant created,
+                List<String> after, List<String> sessions) {
+            this(title, status, doneBy, created, after, sessions, null);
         }
     }
 
@@ -109,6 +116,9 @@ public final class TaskFilePatch {
         if (updates.sessions() != null && !updates.sessions().equals(doc.sessions())) {
             spanEdit(spans.get("sessions"), edits, inserted, "sessions: " + list(updates.sessions()));
         }
+        if (updates.mirrors() != null && !updates.mirrors().equals(doc.mirrors())) {
+            spanEdit(spans.get("mirrors"), edits, inserted, "mirrors: " + list(updates.mirrors()));
+        }
         if (!inserted.isEmpty()) {
             edits.add(insertion(parsed, inserted));
         }
@@ -129,10 +139,10 @@ public final class TaskFilePatch {
 
     /**
      * Renders a new task file: canonical known front matter (P1 order:
-     * title, status, done_by, created only when present, after, sessions;
-     * lists always flow style, scalars through the shared {@link #quoted})
-     * followed by the document's raw body verbatim. Only the six known
-     * fields are written -- unknown keys have nowhere to come from in a new
+     * title, status, done_by, created only when present, after, sessions,
+     * mirrors only when there is one; lists always flow style, scalars
+     * through the shared {@link #quoted}) followed by the document's raw
+     * body verbatim. Only the known fields are written -- unknown keys have nowhere to come from in a new
      * file -- so this is not a general YAML serializer, and it reuses
      * {@link #patch}'s rendering instead of inventing a second one. The
      * result is re-parsed through the bounded reader before it is
@@ -149,6 +159,9 @@ public final class TaskFilePatch {
         document.created().ifPresent(created -> out.append("created: ").append(created).append('\n'));
         out.append("after: ").append(list(document.after())).append('\n');
         out.append("sessions: ").append(list(document.sessions())).append('\n');
+        if (!document.mirrors().isEmpty()) {
+            out.append("mirrors: ").append(list(document.mirrors())).append('\n');
+        }
         out.append("---\n").append(document.rawBody());
         String result = out.toString();
         checkNewFile(document, result);
@@ -165,7 +178,8 @@ public final class TaskFilePatch {
                 || reparsed.doneBy() != document.doneBy()
                 || !document.created().equals(reparsed.created())
                 || !reparsed.after().equals(document.after())
-                || !reparsed.sessions().equals(document.sessions())) {
+                || !reparsed.sessions().equals(document.sessions())
+                || !reparsed.mirrors().equals(document.mirrors())) {
             throw new TaskFormatException("New-file front matter does not round-trip");
         }
     }
@@ -484,7 +498,8 @@ public final class TaskFilePatch {
                 || updates.doneBy() != null && updates.doneBy() != reparsed.doneBy()
                 || updates.created() != null && !Optional.of(updates.created()).equals(reparsed.created())
                 || updates.after() != null && !updates.after().equals(reparsed.after())
-                || updates.sessions() != null && !updates.sessions().equals(reparsed.sessions())) {
+                || updates.sessions() != null && !updates.sessions().equals(reparsed.sessions())
+                || updates.mirrors() != null && !updates.mirrors().equals(reparsed.mirrors())) {
             throw new TaskFormatException("Patched front matter does not round-trip");
         }
     }

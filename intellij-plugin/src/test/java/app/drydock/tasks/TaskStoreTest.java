@@ -208,4 +208,21 @@ class TaskStoreTest {
         assertTrue(last.rawBody().contains("one committed note"));
         store.close();
     }
+
+    @Test
+    void addMirrorAppendsOnceAndKeepsEveryOtherByte() throws Exception {
+        String source = "---\ntitle: Mirror me\nstatus: open   # note\nextra: keep\n---\nBody stays.\n";
+        writeTask(REPO_A, "mirror-me-a1b2", source);
+        TaskId id = TaskId.of("mirror-me-a1b2");
+        String github = "https://github.com/o/r/issues/12";
+        String jira = "https://acme.atlassian.net/browse/PROJ-7";
+        try (TaskStore store = store()) {
+            assertEquals(List.of(github), store.addMirror(id, github).mirrors());
+            assertEquals(List.of(github, jira), store.addMirror(id, jira).mirrors());
+            assertEquals(List.of(github, jira), store.addMirror(id, github).mirrors(), "a known address is not added twice");
+            assertThrows(IllegalArgumentException.class, () -> store.addMirror(id, " "));
+        }
+        assertEquals(source.replace("extra: keep\n", "extra: keep\nmirrors: [\"" + github + "\", \"" + jira + "\"]\n"),
+                readTask(REPO_A, "mirror-me-a1b2"));
+    }
 }

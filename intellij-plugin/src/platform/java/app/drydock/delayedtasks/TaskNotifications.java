@@ -246,7 +246,7 @@ public final class TaskNotifications implements AutoCloseable {
             }
             TaskDocument document = latest.byId().get(task);
             DelayedTaskStart.start(project, new DelayedTaskRow(view, document.title(),
-                    document.repository(), document.created(), false, document.sessions()));
+                    document.repository(), document.created(), false, document.sessions(), document.mirrors()));
         }
         /** Show Session: the task's newest catalog session in the LATEST snapshot, raised
           * the way Go to Blocker Session raises one. */

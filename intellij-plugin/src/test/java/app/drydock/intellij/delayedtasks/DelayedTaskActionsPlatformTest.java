@@ -5,6 +5,7 @@ import app.drydock.delayedtasks.DelayedTaskService;
 import app.drydock.domain.*;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.IsolatedCatalog;
+import app.drydock.intellij.tasks.TaskMirroring;
 import app.drydock.tasks.TaskNode.DelayedTaskRow;
 import app.drydock.tasks.TaskState.Presentation;
 import app.drydock.tasks.*;
@@ -91,8 +92,13 @@ public class DelayedTaskActionsPlatformTest extends BasePlatformTestCase {
 
     /** The real update() on this selection, for the tree's menu and everywhere else. */
     private void check(AnAction action, DelayedTaskActions.Item item, Object selection) {
-        boolean applies = selection instanceof DelayedTaskRow row
-                && DelayedTaskActions.applicable(row.presentation()).contains(item);
+        boolean applies = selection instanceof DelayedTaskRow row && switch (item) {
+            // The mirror actions key on the row's mirrors, not its presentation.
+            case MIRROR_TO_GITHUB -> TaskMirroring.offersGitHub(row);
+            case MIRROR_TO_JIRA -> TaskMirroring.offersJira(row);
+            case OPEN_MIRRORS -> !row.mirrors().isEmpty();
+            default -> DelayedTaskActions.applicable(row.presentation()).contains(item);
+        };
         var menu = new com.intellij.openapi.actionSystem.Presentation();
         action.update(event(selection, menu, true));
         assertTrue(selection + " menu shows what applies",

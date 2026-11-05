@@ -71,6 +71,8 @@ final class TaskMenu {
         OPEN_IN_GITHUB,
         /** Open the Jira issue's page; only a Jira row offers it. */
         OPEN_IN_JIRA,
+        /** Open the Drydock task an issue row is a mirror of; only a mirrored issue offers it. */
+        OPEN_MIRRORED_TASK,
         IMPLEMENT,
         TRIAGE,
         GITHUB_SETTINGS,
@@ -94,7 +96,12 @@ final class TaskMenu {
     }
 
     /** The non-pure answers of one menu build, computed once by {@link #factsFor}. */
-    record MenuFacts(boolean transferAvailable, boolean jiraEnabled) {
+    record MenuFacts(boolean transferAvailable, boolean jiraEnabled, boolean mirroredTask) {
+
+        /** The facts before issue rows could mirror a task: no mirrored task. */
+        MenuFacts(boolean transferAvailable, boolean jiraEnabled) {
+            this(transferAvailable, jiraEnabled, false);
+        }
     }
 
     private TaskMenu() {
@@ -122,9 +129,11 @@ final class TaskMenu {
                     List.of(Item.OPEN_IN_WORKBENCH),
                     section(urlOf(node).isPresent() ? Item.OPEN_IN_GITHUB : null)));
             case IssueRow ignored -> nonEmpty(List.of(
+                    section(facts.mirroredTask() ? Item.OPEN_MIRRORED_TASK : null),
                     List.of(Item.IMPLEMENT, Item.TRIAGE),
                     section(urlOf(node).isPresent() ? Item.OPEN_IN_GITHUB : null, Item.GITHUB_SETTINGS)));
             case JiraIssueRow ignored -> nonEmpty(List.of(
+                    section(facts.mirroredTask() ? Item.OPEN_MIRRORED_TASK : null),
                     List.of(Item.IMPLEMENT, Item.TRIAGE),
                     List.of(Item.OPEN_IN_JIRA, Item.JIRA_SETTINGS)));
             case JiraGroupRow ignored -> nonEmpty(List.of(
@@ -233,10 +242,22 @@ final class TaskMenu {
      * {@link MenuFacts} instead. {@code jiraEnabled} is the selected
      * project's connection flag as the caller read it; whether to offer
      * adding a group hinges on it (the Jira settings entry is always offered).
+     * {@code mirroredTask} asks the task service's cached snapshot whether a
+     * task mirrors the selected issue row, memory only.
      */
     static MenuFacts factsFor(TaskNode lead, boolean jiraEnabled) {
         return new MenuFacts(lead instanceof TaskRow row
-                && SessionTransfer.available(row.session(), row.activity()), jiraEnabled);
+                && SessionTransfer.available(row.session(), row.activity()), jiraEnabled,
+                issueUrlOf(lead).flatMap(TaskMirroring::mirroredTask).isPresent());
+    }
+
+    /** The page of a GitHub or Jira issue row, the address a task mirror records. Pure. */
+    static Optional<String> issueUrlOf(TaskNode node) {
+        return switch (node) {
+            case IssueRow issue -> issue.issue().url();
+            case JiraIssueRow jira -> Optional.of(jira.issue().url());
+            case null, default -> Optional.empty();
+        };
     }
 
     /**

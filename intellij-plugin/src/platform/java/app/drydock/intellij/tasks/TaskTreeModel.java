@@ -7,6 +7,7 @@ import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionActivity;
 import app.drydock.git.GhCliService.IssueListing;
 import app.drydock.git.GhCliService.OpenIssue;
+import app.drydock.git.GhCliService.BranchPullRequest;
 import app.drydock.git.GhCliService.OpenPullRequest;
 import app.drydock.git.GhCliService.PullRequestListing;
 import app.drydock.git.JiraIssue;
@@ -205,7 +206,8 @@ public final class TaskTreeModel {
                          Map<Path, PullRequestListing> pullRequestsByMainRoot,
                          Map<Path, List<Worktree>> pullRequestDedupWorktrees,
                          Optional<String> listProblem, String filter,
-                         ViewFilter viewFilter, Map<ManagedSessionId, Boolean> resumable) {
+                         ViewFilter viewFilter, Map<ManagedSessionId, Boolean> resumable,
+                         Map<ManagedSessionId, BranchPullRequest> pullRequestsBySession) {
         public Inputs {
             projects = List.copyOf(projects);
             sessions = List.copyOf(sessions);
@@ -236,6 +238,32 @@ public final class TaskTreeModel {
             filter = filter == null ? "" : filter.strip();
             Objects.requireNonNull(viewFilter, "viewFilter");
             resumable = Map.copyOf(resumable);
+            pullRequestsBySession = Map.copyOf(pullRequestsBySession);
+        }
+
+        /** The shape before sessions carried their branch's pull request: none known. */
+        public Inputs(List<SharedProject> projects, List<ManagedAgentSession> sessions,
+                      Map<Path, List<Worktree>> worktreesByMainRoot, Map<Path, Path> mainRootOf,
+                      Optional<Path> currentMainRoot, Optional<Path> currentWorkingRoot,
+                      Map<ManagedSessionId, Optional<SessionActivity>> activity, Set<ManagedSessionId> running,
+                      Map<ManagedSessionId, Host> hosts, Set<Path> missingFolders,
+                      Map<RepositoryId, Path> recordedRoots,
+                      Set<Path> worktreeContainers, Set<Path> pullRequestContainers,
+                      Set<Path> githubIssueRoots, Set<Path> githubGhostRoots,
+                      Set<Path> jiraRoots, Set<Path> jiraGhostRoots,
+                      Set<Path> openFolders, Map<Path, Instant> lastActivity, Instant now,
+                      Map<Path, IssueListing> issuesByMainRoot,
+                      Map<Path, List<JiraGroups.Listing>> jiraGroupsByMainRoot,
+                      Map<Path, PullRequestListing> pullRequestsByMainRoot,
+                      Map<Path, List<Worktree>> pullRequestDedupWorktrees,
+                      Optional<String> listProblem, String filter,
+                      ViewFilter viewFilter, Map<ManagedSessionId, Boolean> resumable) {
+            this(projects, sessions, worktreesByMainRoot, mainRootOf, currentMainRoot, currentWorkingRoot,
+                    activity, running, hosts, missingFolders, recordedRoots, worktreeContainers,
+                    pullRequestContainers, githubIssueRoots, githubGhostRoots, jiraRoots, jiraGhostRoots,
+                    openFolders, lastActivity, now, issuesByMainRoot, jiraGroupsByMainRoot,
+                    pullRequestsByMainRoot, pullRequestDedupWorktrees, listProblem, filter, viewFilter,
+                    resumable, Map.of());
         }
     }
 
@@ -387,7 +415,8 @@ public final class TaskTreeModel {
                 in.currentWorkingRoot());
         return new TaskRow(session, in.activity().getOrDefault(session.id(), Optional.empty()),
                 running, branch, placement, session.readOnly(),
-                running && in.missingFolders().contains(directory), resumable);
+                running && in.missingFolders().contains(directory), resumable,
+                Optional.ofNullable(in.pullRequestsBySession().get(session.id())));
     }
 
     private record Children(List<TaskNode> visible, List<IdleWorktree> inactive) {

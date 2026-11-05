@@ -219,7 +219,7 @@ public final class DelayedTaskRows {
     /**
      * One row per document, in snapshot order: the view the snapshot's
      * {@link TaskState} derives (presentation, blockers, live sessions),
-     * the document's own title/repository/stored sessions, and the age
+     * the document's own title/repository/stored sessions/mirrors, and the age
      * flag against the injected clock. No session object, no catalog and
      * no file are consulted -- a row exists for every document, whoever
      * its sessions were.
@@ -237,7 +237,7 @@ public final class DelayedTaskRows {
             boolean stale = document.created().map(created -> created.isBefore(now.minus(STALE_AFTER)))
                     .orElse(false);
             out.add(new TaskNode.DelayedTaskRow(view, document.title(), document.repository(),
-                    document.created(), stale, document.sessions()));
+                    document.created(), stale, document.sessions(), document.mirrors()));
         }
         return out;
     }

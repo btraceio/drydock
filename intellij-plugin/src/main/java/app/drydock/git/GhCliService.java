@@ -21,6 +21,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -34,10 +35,12 @@ import java.util.regex.Pattern;
 
 /**
  * READ-ONLY queries against the GitHub CLI ({@code gh}): the PR chip a
- * worktree session reconciles after a hand-off, and the open pull requests
- * and issues that repository views list. The app never runs
- * {@code gh pr create} or any other mutation -- Claude in the terminal does;
- * this service only observes. Checking a PR out is a working-tree change and
+ * worktree session reconciles after a hand-off, the open pull requests
+ * and issues that repository views list, and the pull requests of every
+ * state that badge a session by its branch. This service never runs
+ * {@code gh pr create} or any other mutation -- Claude in the terminal opens
+ * PRs; the app's own two writes, a posted review and a task's mirror issue,
+ * live in {@code GitHubReviewService} and {@code GitHubIssueMirrorService}. Checking a PR out is a working-tree change and
  * lives in {@code PrCheckoutService}, not here.
  *
  * <p>{@code gh} is optional: when it is not installed, {@link #viewPr}
@@ -100,6 +103,22 @@ public final class GhCliService implements AutoCloseable {
             public Failed {
                 Objects.requireNonNull(message, "message");
             }
+        }
+    }
+
+    /**
+     * A pull request of any state, as {@code gh pr list --state all}
+     * reports it: enough to badge a session whose branch is the PR's head
+     * branch. Only same-repository PRs are kept; a fork's {@code main}
+     * must not badge a local {@code main}.
+     */
+    public record BranchPullRequest(int number, PrInfo.PrLifecycle state, boolean draft, String headRefName,
+                                    String title, Optional<String> url) {
+        public BranchPullRequest {
+            Objects.requireNonNull(state, "state");
+            Objects.requireNonNull(headRefName, "headRefName");
+            Objects.requireNonNull(title, "title");
+            Objects.requireNonNull(url, "url");
         }
     }
 
@@ -355,6 +374,105 @@ public final class GhCliService implements AutoCloseable {
             LOG.log(Level.DEBUG, "Unparseable gh pr list output", e);
             return new PullRequestListing.Failed("gh pr list returned output that could not be parsed");
         }
+    }
+
+    /**
+     * The repository's recent pull requests of every state, keyed by head
+     * branch (see {@link #byHeadBranch}). Empty when {@code gh} is not
+     * installed (logged at DEBUG) or when the query fails (logged at
+     * WARNING with the stderr excerpt): a missing badge is the only
+     * fallback a session row has, so no failure row is produced.
+     */
+    public CompletableFuture<Map<String, BranchPullRequest>> branchPullRequests(Path root,
+                                                                             Optional<String> repository) {
+        return CompletableFuture.supplyAsync(() -> branchPullRequestsBlocking(root, repository), executor);
+    }
+
+    Map<String, BranchPullRequest> branchPullRequestsBlocking(Path root, Optional<String> repository) {
+        Path gh = locate().orElse(null);
+        if (gh == null) {
+            LOG.log(Level.DEBUG, "gh is not installed; no pull-request badges for " + root);
+            return Map.of();
+        }
+        if (repository.filter(value -> !validRepository(value)).isPresent()) {
+            LOG.log(Level.WARNING, "The configured GitHub repository for " + root
+                    + " is not OWNER/REPO or HOST/OWNER/REPO; no pull-request badges");
+            return Map.of();
+        }
+        List<String> command = new ArrayList<>(List.of(gh.toString(), "pr", "list",
+                "--state", "all",
+                "--limit", String.valueOf(PR_LIST_LIMIT),
+                "--json", "number,state,isDraft,headRefName,title,url,isCrossRepository"));
+        repository.ifPresent(value -> {
+            command.add("--repo");
+            command.add(value);
+        });
+        ProcessResult result = runIn(root, command);
+        if (result == null) {
+            LOG.log(Level.WARNING, "gh pr list --state all in " + root + " did not run to completion");
+            return Map.of();
+        }
+        if (result.exitCode() != 0) {
+            String excerpt = ProcessRunner.excerpt(result.stderr());
+            LOG.log(Level.WARNING, "gh pr list --state all in " + root + " exited " + result.exitCode()
+                    + (excerpt.isBlank() ? "" : ": " + excerpt));
+            return Map.of();
+        }
+        return byHeadBranch(parseBranchPullRequests(result.stdout()));
+    }
+
+    /**
+     * The pure half of {@code gh pr list --state all --json}: malformed rows
+     * and cross-repository (fork) PRs are skipped; output that is not a JSON
+     * array is logged and reads as no PRs.
+     */
+    static List<BranchPullRequest> parseBranchPullRequests(String stdout) {
+        try {
+            if (!(JsonParser.parse(stdout) instanceof JsonArray array)) {
+                LOG.log(Level.WARNING, "gh pr list --state all did not return a JSON array");
+                return List.of();
+            }
+            List<BranchPullRequest> pullRequests = new ArrayList<>();
+            for (JsonValue element : array.elements()) {
+                if (element instanceof JsonObject obj
+                        && obj.get("number") instanceof JsonNumber number
+                        && obj.get("headRefName") instanceof JsonString head
+                        && !head.value().isBlank()
+                        && !(obj.get("isCrossRepository") instanceof JsonBoolean cross && cross.value())) {
+                    PrInfo.PrLifecycle state = obj.get("state") instanceof JsonString s
+                            ? lifecycleOf(s.value()) : PrInfo.PrLifecycle.UNKNOWN;
+                    boolean draft = obj.get("isDraft") instanceof JsonBoolean d && d.value();
+                    String title = obj.get("title") instanceof JsonString t ? t.value() : "";
+                    Optional<String> url = obj.get("url") instanceof JsonString u
+                            ? Optional.of(u.value()) : Optional.empty();
+                    pullRequests.add(new BranchPullRequest(number.asInt(), state, draft, head.value(), title, url));
+                }
+            }
+            return pullRequests;
+        } catch (JsonParseException | NumberFormatException e) {
+            LOG.log(Level.WARNING, "gh pr list --state all returned output that could not be parsed", e);
+            return List.of();
+        }
+    }
+
+    /**
+     * Pure. One PR per head branch: an open PR beats a merged or closed one
+     * (a branch reused after its first PR merged belongs to the new PR), and
+     * between two of the same kind the higher number, the newer PR, wins.
+     */
+    static Map<String, BranchPullRequest> byHeadBranch(List<BranchPullRequest> pullRequests) {
+        Map<String, BranchPullRequest> byBranch = new HashMap<>();
+        for (BranchPullRequest candidate : pullRequests) {
+            byBranch.merge(candidate.headRefName(), candidate, (kept, next) -> {
+                boolean keptOpen = kept.state() == PrInfo.PrLifecycle.OPEN;
+                boolean nextOpen = next.state() == PrInfo.PrLifecycle.OPEN;
+                if (keptOpen != nextOpen) {
+                    return nextOpen ? next : kept;
+                }
+                return next.number() > kept.number() ? next : kept;
+            });
+        }
+        return Map.copyOf(byBranch);
     }
 
     /** All open issues for the repository, using the globally active {@code gh} account. */

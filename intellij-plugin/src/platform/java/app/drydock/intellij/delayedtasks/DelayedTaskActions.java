@@ -7,6 +7,7 @@ import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
 import app.drydock.intellij.DrydockPluginService;
+import app.drydock.intellij.tasks.TaskMirroring;
 import app.drydock.intellij.tasks.TaskNavigator;
 import app.drydock.intellij.worktree.WorktreeErrors;
 import app.drydock.mcp.TaskToolContext;
@@ -67,7 +68,9 @@ import java.util.function.Function;
  * blocker session resolves over the CACHED watched snapshot (T21a's
  * discipline) through the same {@link TaskGraph} resolution the store and
  * the editor navigation compose. Writes show immediate progress, run off
- * the EDT, end it on every path, and surface refusals in dialogs.
+ * the EDT, end it on every path, and surface refusals in dialogs. Mirror
+ * to GitHub Issue, Mirror to Jira and Open Mirrored Issue hand over to
+ * {@link TaskMirroring}.
  */
 public final class DelayedTaskActions {
 
@@ -75,7 +78,8 @@ public final class DelayedTaskActions {
      * T40): one entry per action. CANCEL keys on the task's PLAN, not its
      * presentation, so it never appears in {@link #applicable} -- the Cancel
      * action resolves the CURRENT published plan record (P4.12). */
-    public enum Item { START, CANCEL, EDIT, DROP, CONFIRM, REOPEN, GOTO_BLOCKER_SESSION }
+    public enum Item { START, CANCEL, EDIT, DROP, CONFIRM, REOPEN, GOTO_BLOCKER_SESSION, MIRROR_TO_GITHUB,
+        MIRROR_TO_JIRA, OPEN_MIRRORS }
 
     /** The selected delayed-task row, for the task-node actions (T20a). */
     public static final DataKey<DelayedTaskRow> SELECTED_TASK = DataKey.create("drydock.delayedTask.node");
@@ -98,7 +102,9 @@ public final class DelayedTaskActions {
         return new Entry[] { new Entry(Start.ID, new Start()), new Entry(Cancel.ID, new Cancel()),
                 new Entry(Edit.ID, new Edit()), new Entry(Drop.ID, new Drop()),
                 new Entry(Confirm.ID, new Confirm()), new Entry(Reopen.ID, new Reopen()),
-                new Entry(GotoBlockerSession.ID, new GotoBlockerSession()) };
+                new Entry(GotoBlockerSession.ID, new GotoBlockerSession()),
+                new Entry(MirrorToGitHub.ID, new MirrorToGitHub()), new Entry(MirrorToJira.ID, new MirrorToJira()),
+                new Entry(OpenMirrors.ID, new OpenMirrors()) };
     }
 
     /** Pure: which menu items apply, read off the presentation {@link TaskState}
@@ -232,10 +238,15 @@ public final class DelayedTaskActions {
      * store's {@code <root>/<repository>/<id>.md} layout, looked up off the EDT
      * behind visible progress; an unfindable file is a visible refusal. */
     public static void edit(Project from, DelayedTaskRow row) {
+        edit(from, row.repository(), row.id(), row.title());
+    }
+
+    /** Edit by identity, for callers that hold a task document rather than a tree row (a mirror's issue row). */
+    public static void edit(Project from, RepositoryId repository, TaskId id, String title) {
         Path file = DrydockPluginService.getInstance().taskService().root()
-                .resolve(row.repository().toString()).resolve(row.id().text() + ".md");
+                .resolve(repository.toString()).resolve(id.text() + ".md");
         ProgressManager.getInstance().run(new Task.Backgroundable(from,
-                "Opening task '" + row.title() + "'…", true) {
+                "Opening task '" + title + "'…", true) {
             @Override
             public void run(@NotNull ProgressIndicator indicator) {
                 indicator.setText("Opening " + file.getFileName());
@@ -244,7 +255,7 @@ public final class DelayedTaskActions {
                         .orElseGet(() -> files.refreshAndFindFileByNioPath(file));
                 ApplicationManager.getApplication().invokeLater(() -> {
                     if (target == null) {
-                        refuse(from, "Drydock could not open '" + row.title() + "': its file "
+                        refuse(from, "Drydock could not open '" + title + "': its file "
                                 + file + " is not in the store.");
                         return;
                     }
@@ -421,6 +432,53 @@ public final class DelayedTaskActions {
         public static final String ID = "Drydock.DelayedTask.Reopen";
         public Reopen() { super(Item.REOPEN, "Reopen", "Set the task back to open", AllIcons.Actions.Undo); }
         @Override void dispatch(Project project, DelayedTaskRow row) { commit(project, row, TaskStatus.OPEN); }
+    }
+
+    /** Shared base of the mirror actions: offered on every task node, whatever its presentation, while
+      * {@code offered} holds for the row. */
+    private abstract static class MirrorAction extends TaskNodeAction {
+
+        MirrorAction(Item item, String text, String description, Icon icon) {
+            super(item, text, description, icon);
+        }
+
+        abstract boolean offered(DelayedTaskRow row);
+
+        @Override
+        public void update(@NotNull AnActionEvent e) {
+            DelayedTaskRow row = e.getData(SELECTED_TASK);
+            boolean applies = row != null && offered(row);
+            e.getPresentation().setVisible(applies || !e.isFromContextMenu());
+            e.getPresentation().setEnabled(applies);
+        }
+    }
+
+    /** Mirror to GitHub Issue: a GitHub copy of the task, linked both ways; the task stays. */
+    public static final class MirrorToGitHub extends MirrorAction {
+        public static final String ID = "Drydock.DelayedTask.MirrorToGitHub";
+        public MirrorToGitHub() { super(Item.MIRROR_TO_GITHUB, "Mirror to GitHub Issue…",
+                "Create a GitHub issue from this task and link the two; the task stays",
+                AllIcons.Vcs.Vendors.Github); }
+        @Override boolean offered(DelayedTaskRow row) { return TaskMirroring.offersGitHub(row); }
+        @Override void dispatch(Project project, DelayedTaskRow row) { TaskMirroring.mirrorToGitHub(project, row); }
+    }
+
+    /** Mirror to Jira: a Jira copy of the task, linked both ways; the task stays. */
+    public static final class MirrorToJira extends MirrorAction {
+        public static final String ID = "Drydock.DelayedTask.MirrorToJira";
+        public MirrorToJira() { super(Item.MIRROR_TO_JIRA, "Mirror to Jira…",
+                "Create a Jira ticket from this task and link the two; the task stays", AllIcons.Nodes.Tag); }
+        @Override boolean offered(DelayedTaskRow row) { return TaskMirroring.offersJira(row); }
+        @Override void dispatch(Project project, DelayedTaskRow row) { TaskMirroring.mirrorToJira(project, row); }
+    }
+
+    /** Open Mirrors: the task's GitHub issues and Jira tickets in the browser. */
+    public static final class OpenMirrors extends MirrorAction {
+        public static final String ID = "Drydock.DelayedTask.OpenMirrors";
+        public OpenMirrors() { super(Item.OPEN_MIRRORS, "Open Mirrored Issue",
+                "Open the GitHub issue or Jira ticket this task is mirrored into", AllIcons.Ide.External_link_arrow); }
+        @Override boolean offered(DelayedTaskRow row) { return !row.mirrors().isEmpty(); }
+        @Override void dispatch(Project project, DelayedTaskRow row) { TaskMirroring.openMirrors(row); }
     }
 
     /** Go to blocker session: the session that runs this task's blocker (D11). */
