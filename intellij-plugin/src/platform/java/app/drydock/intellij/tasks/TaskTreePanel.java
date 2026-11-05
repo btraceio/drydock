@@ -1,6 +1,7 @@
 package app.drydock.intellij.tasks;
 
 import app.drydock.agent.api.AgentKind;
+import app.drydock.agent.api.AgentRegistry;
 import app.drydock.delayedtasks.DelayedTaskService;
 import app.drydock.delayedtasks.NewDelayedTaskDialog;
 import app.drydock.delayedtasks.TaskPrerequisitePicker;
@@ -134,6 +135,10 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     /** The main checkout of the project the selected row belongs to. */
     public static final DataKey<Path> SELECTED_PROJECT_ROOT = DataKey.create("drydock.task.projectRoot");
 
+    /** The selected Tasks section (T20a), for its New Task action and the context menu. */
+    static final DataKey<app.drydock.tasks.TaskNode.TasksSection> SELECTED_TASKS_SECTION =
+            DataKey.create("drydock.task.tasksSection");
+
     /** Updates the visible tree as successful worktree removals complete. */
     static final DataKey<WorktreeRemovalUi> WORKTREE_REMOVAL_UI = DataKey.create("drydock.task.worktreeRemovalUi");
 
@@ -196,13 +201,12 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             "Save a delayed task definition for later; it starts nothing", AllIcons.General.Add) {
         @Override
         public void update(@NotNull AnActionEvent e) {
-            TaskActions.present(e, selectedValue()
-                    instanceof app.drydock.tasks.TaskNode.TasksSection);
+            TaskActions.present(e, e.getData(SELECTED_TASKS_SECTION) != null);
         }
 
         @Override
         public @NotNull ActionUpdateThread getActionUpdateThread() {
-            return ActionUpdateThread.EDT;
+            return ActionUpdateThread.BGT;
         }
 
         @Override
@@ -262,8 +266,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         }
     };
     /**
-     * Canonical repository root -> its id, refreshed by every background rebuild so the EDT
-     * {@code update()} of the quick review action never canonicalizes (filesystem IO). First
+     * Canonical repository root -> its id, refreshed by every background rebuild so the
+     * {@code update()} of the review actions never canonicalizes (filesystem IO). First
      * repository per root wins, as the previous stream's findFirst() did.
      */
     private volatile Map<Path, RepositoryId> repositoryIdsByRoot = Map.of();
@@ -289,7 +293,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
             @Override
             public @NotNull ActionUpdateThread getActionUpdateThread() {
-                return ActionUpdateThread.EDT;
+                return ActionUpdateThread.BGT;
             }
 
             @Override
@@ -309,7 +313,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
             @Override
             public @NotNull ActionUpdateThread getActionUpdateThread() {
-                return ActionUpdateThread.EDT;
+                return ActionUpdateThread.BGT;
             }
 
             @Override
@@ -330,7 +334,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
             @Override
             public @NotNull ActionUpdateThread getActionUpdateThread() {
-                return ActionUpdateThread.EDT;
+                return ActionUpdateThread.BGT;
             }
 
             @Override
@@ -350,7 +354,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
             @Override
             public @NotNull ActionUpdateThread getActionUpdateThread() {
-                return ActionUpdateThread.EDT;
+                return ActionUpdateThread.BGT;
             }
 
             @Override
@@ -371,7 +375,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
             @Override
             public @NotNull ActionUpdateThread getActionUpdateThread() {
-                return ActionUpdateThread.EDT;
+                return ActionUpdateThread.BGT;
             }
 
             @Override
@@ -394,7 +398,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
             @Override
             public @NotNull ActionUpdateThread getActionUpdateThread() {
-                return ActionUpdateThread.EDT;
+                return ActionUpdateThread.BGT;
             }
 
             @Override
@@ -424,7 +428,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
             @Override
             public @NotNull ActionUpdateThread getActionUpdateThread() {
-                return ActionUpdateThread.EDT;
+                return ActionUpdateThread.BGT;
             }
 
             @Override
@@ -456,7 +460,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
             @Override
             public @NotNull ActionUpdateThread getActionUpdateThread() {
-                return ActionUpdateThread.EDT;
+                return ActionUpdateThread.BGT;
             }
 
             @Override
@@ -479,7 +483,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
             @Override
             public @NotNull ActionUpdateThread getActionUpdateThread() {
-                return ActionUpdateThread.EDT;
+                return ActionUpdateThread.BGT;
             }
 
             @Override
@@ -501,7 +505,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
             @Override
             public @NotNull ActionUpdateThread getActionUpdateThread() {
-                return ActionUpdateThread.EDT;
+                return ActionUpdateThread.BGT;
             }
 
             @Override
@@ -556,7 +560,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         menuActions.put(TaskMenu.Item.EDIT_JIRA_GROUP, JiraTreeActions.editGroup(project, afterJiraGroupChange));
         menuActions.put(TaskMenu.Item.DELETE_JIRA_GROUP, JiraTreeActions.deleteGroup(project, afterJiraGroupChange));
         menuActions.put(TaskMenu.Item.REFRESH, refresh);
-        PopupHandler.installPopupMenu(tree, new TreeMenu(menuActions), "Drydock.TaskTree.Popup");
+        PopupHandler.installPopupMenu(tree,
+                new TreeMenu(menuActions, delayedTaskActions, newDelayedTask, JiraTreeActions::jiraEnabled),
+                "Drydock.TaskTree.Popup");
 
         // The tool window's own buttons: start a task, then what can be done
         // to the selected task or project. They stay in place, greyed when
@@ -892,21 +898,29 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
      * The tree's context menu: {@link TaskMenu#group} over the selection at
      * popup time, so each popup holds exactly the actions that apply to
      * the selected rows, in TaskMenu's order — navigation first,
-     * destructive cleanup last (A10). EDT: the tree's selection is Swing
-     * state, and the actions' own updates read the same data the popup
-     * sinks.
+     * destructive cleanup last (A10). BGT: it reads the selection from the
+     * event's data, which {@link #uiDataSnapshot} captured on the EDT, never
+     * from the Swing tree, so the popup never waits for a busy EDT.
      */
-    private final class TreeMenu extends ActionGroup implements DumbAware {
+    static final class TreeMenu extends ActionGroup implements DumbAware {
 
         private final Map<TaskMenu.Item, AnAction> actions;
+        private final AnAction[] delayedTaskActions;
+        private final AnAction newDelayedTask;
+        /** Whether a project root's Jira connection is enabled; it canonicalizes the root (filesystem IO). */
+        private final Predicate<Path> jiraEnabled;
 
-        TreeMenu(Map<TaskMenu.Item, AnAction> actions) {
+        TreeMenu(Map<TaskMenu.Item, AnAction> actions, AnAction[] delayedTaskActions, AnAction newDelayedTask,
+                 Predicate<Path> jiraEnabled) {
             this.actions = actions;
+            this.delayedTaskActions = delayedTaskActions;
+            this.newDelayedTask = newDelayedTask;
+            this.jiraEnabled = jiraEnabled;
         }
 
         @Override
         public @NotNull ActionUpdateThread getActionUpdateThread() {
-            return ActionUpdateThread.EDT;
+            return ActionUpdateThread.BGT;
         }
 
         @Override
@@ -922,15 +936,16 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             // T20a: a task node carries the delayed-task layer's own
             // actions, and the Tasks node offers New Task over the T18a
             // form -- everything else keeps the session-layer menu it had.
-            Object value = selectedValue();
-            if (value instanceof DelayedTaskRow) {
+            if (e.getData(DelayedTaskActions.SELECTED_TASK) != null) {
                 return delayedTaskActions;
             }
-            if (value instanceof app.drydock.tasks.TaskNode.TasksSection) {
+            if (e.getData(SELECTED_TASKS_SECTION) != null) {
                 return new AnAction[] { newDelayedTask };
             }
-            return TaskMenu.group(selected().orElse(null), selectedNodes(), actions,
-                    selectedProjectRoot().map(JiraTreeActions::jiraEnabled).orElse(false)).getChildActionsOrStubs();
+            List<TaskNode> selection = e.getData(SELECTED_NODES);
+            Path root = e.getData(SELECTED_PROJECT_ROOT);
+            return TaskMenu.group(e.getData(SELECTED_NODE), selection == null ? List.of() : selection, actions,
+                    root != null && jiraEnabled.test(root)).getChildActionsOrStubs();
         }
     }
 
@@ -940,8 +955,11 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         selected().ifPresent(node -> sink.set(SELECTED_NODE, node));
         // T20a: a task node is its own selection data -- the task-node
         // actions key on it; selected() answers only session-layer rows.
-        if (selectedValue() instanceof DelayedTaskRow task) {
+        Object value = selectedValue();
+        if (value instanceof DelayedTaskRow task) {
             sink.set(DelayedTaskActions.SELECTED_TASK, task);
+        } else if (value instanceof app.drydock.tasks.TaskNode.TasksSection section) {
+            sink.set(SELECTED_TASKS_SECTION, section);
         }
         List<TaskNode> selected = selectedNodes();
         if (!selected.isEmpty()) {
@@ -1045,58 +1063,80 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         pullRequestReview.openInWorkbench(project, mainRoot, repositoryName, pullRequest.pullRequest());
     }
 
+    /** {@link #quickReviewLabel(Map, List, AgentRegistry, Path)} over this panel's map and the live plugin state. */
+    private String quickReviewLabel(Path mainRoot) {
+        if (mainRoot == null) {
+            return quickReviewLabel(Map.of(), List.of(), null, null);
+        }
+        DrydockPluginService plugin = DrydockPluginService.getInstance();
+        return quickReviewLabel(repositoryIdsByRoot, plugin.stateStore().state().repositories(),
+                plugin.registry(), mainRoot);
+    }
+
     /**
      * The quick review action's label: the remembered starting model of the
      * harness the review will launch, or "default" when none was picked yet.
-     * Reads in-memory state only (a precomputed canonical-root map plus the
-     * state store) — never git, never the disk — because {@code update} runs
-     * on the EDT; a root not yet mapped reads "default" until the next rebuild.
+     * Reads in-memory state only (a precomputed canonical-root map, the state
+     * store's repositories, the registry's init-time answers) — never git,
+     * never the disk — because {@code update} runs on every selection change;
+     * a root not yet mapped reads "default" until the next rebuild. Pure; any
+     * thread. {@code registry} may be {@code null} only when {@code mainRoot} is.
      */
-    private String quickReviewLabel(Path mainRoot) {
+    static String quickReviewLabel(Map<Path, RepositoryId> idsByRoot, List<Repository> repositories,
+                                   AgentRegistry registry, Path mainRoot) {
         if (mainRoot == null) {
             return "Review (default)";
         }
-        DrydockPluginService plugin = DrydockPluginService.getInstance();
-        // mainRoot is already canonical (TaskTreeInputs.gather), and the root -> id map is
-        // precomputed off the EDT; the settings themselves are read fresh from the in-memory store.
-        RepositoryId id = repositoryIdsByRoot.get(mainRoot);
-        Optional<Repository> repository = id == null ? Optional.empty()
-                : plugin.stateStore().state().repositories().stream()
-                        .filter(r -> r.id().equals(id))
-                        .findFirst();
-        Optional<AgentKind> agent = PullRequestReview.selectReviewAgent(
-                SessionDialogs.defaultAgent(plugin.registry(),
-                        repository.flatMap(r -> r.settings().lastUsedAgent())),
-                plugin.registry()::isAvailable);
-        String model = agent.flatMap(kind -> repository.flatMap(r -> r.settings().lastUsedModel(kind)))
+        Optional<Repository> repository = repositoryAt(idsByRoot, repositories, mainRoot);
+        String model = reviewAgent(registry, repository)
+                .flatMap(kind -> repository.flatMap(r -> r.settings().lastUsedModel(kind)))
                 .orElse("default");
         return "Review (" + model + ")";
     }
 
-    /**
-     * Whether the repository's default harness reaches the sphinx plugin —
-     * the same cheap EDT answer {@code quickReviewLabel} builds on: the
-     * precomputed root→id map plus the in-memory state store, never git and
-     * never a fresh probe ({@code AgentRegistry#sphinxReview} reads its
-     * init-time snapshot). {@code null} root or an unknown repository reads
-     * as unavailable — absent must not look like offered.
-     */
+    /** {@link #sphinxAvailable(Map, List, AgentRegistry, Path)} over this panel's map and the live plugin state. */
     private boolean sphinxAvailable(Path mainRoot) {
         if (mainRoot == null) {
             return false;
         }
         DrydockPluginService plugin = DrydockPluginService.getInstance();
-        RepositoryId id = repositoryIdsByRoot.get(mainRoot);
-        Optional<Repository> repository = id == null ? Optional.empty()
-                : plugin.stateStore().state().repositories().stream()
-                        .filter(r -> r.id().equals(id))
-                        .findFirst();
+        return sphinxAvailable(repositoryIdsByRoot, plugin.stateStore().state().repositories(),
+                plugin.registry(), mainRoot);
+    }
+
+    /**
+     * Whether the repository's default harness reaches the sphinx plugin —
+     * the same in-memory reads {@code quickReviewLabel} builds on, never git
+     * and never a fresh probe ({@code AgentRegistry#sphinxReview} reads its
+     * init-time snapshot). {@code null} root or an unknown repository reads
+     * as unavailable — absent must not look like offered. Pure; any thread.
+     */
+    static boolean sphinxAvailable(Map<Path, RepositoryId> idsByRoot, List<Repository> repositories,
+                                   AgentRegistry registry, Path mainRoot) {
+        if (mainRoot == null) {
+            return false;
+        }
+        Optional<Repository> repository = repositoryAt(idsByRoot, repositories, mainRoot);
+        return reviewAgent(registry, repository).flatMap(registry::sphinxReview).isPresent();
+    }
+
+    /**
+     * The repository recorded for canonical {@code mainRoot}: its id from the
+     * precomputed map ({@code mainRoot} is already canonical, see
+     * TaskTreeInputs.gather), its settings from {@code repositories}.
+     */
+    private static Optional<Repository> repositoryAt(Map<Path, RepositoryId> idsByRoot,
+                                                     List<Repository> repositories, Path mainRoot) {
+        RepositoryId id = idsByRoot.get(mainRoot);
+        return id == null ? Optional.empty()
+                : repositories.stream().filter(r -> r.id().equals(id)).findFirst();
+    }
+
+    /** The harness a review of {@code repository} launches: its default agent, never the terminal. */
+    private static Optional<AgentKind> reviewAgent(AgentRegistry registry, Optional<Repository> repository) {
         return PullRequestReview.selectReviewAgent(
-                        SessionDialogs.defaultAgent(plugin.registry(),
-                                repository.flatMap(r -> r.settings().lastUsedAgent())),
-                        plugin.registry()::isAvailable)
-                .flatMap(kind -> plugin.registry().sphinxReview(kind))
-                .isPresent();
+                SessionDialogs.defaultAgent(registry, repository.flatMap(r -> r.settings().lastUsedAgent())),
+                registry::isAvailable);
     }
 
     /**
@@ -1208,7 +1248,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
             @Override
             public @NotNull ActionUpdateThread getActionUpdateThread() {
-                return ActionUpdateThread.EDT;
+                return ActionUpdateThread.BGT;
             }
 
             @Override

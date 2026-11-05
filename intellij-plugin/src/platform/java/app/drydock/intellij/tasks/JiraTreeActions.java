@@ -57,7 +57,8 @@ final class JiraTreeActions {
     /**
      * Whether the selected project's Jira connection is enabled — the gate
      * for offering {@code Add Jira Group…}. Reads the shared-projects list
-     * and the in-memory properties: EDT-safe, no password-safe touch.
+     * and the in-memory properties, no password-safe touch; the list lookup
+     * canonicalizes {@code root} (filesystem IO), so call it off the EDT.
      */
     static boolean jiraEnabled(Path root) {
         return DrydockPluginService.getInstance().sharedProjects().byRoot(root)
@@ -76,7 +77,7 @@ final class JiraTreeActions {
 
             @Override
             public @NotNull ActionUpdateThread getActionUpdateThread() {
-                return ActionUpdateThread.EDT;
+                return ActionUpdateThread.BGT;
             }
 
             @Override
@@ -104,7 +105,7 @@ final class JiraTreeActions {
 
             @Override
             public @NotNull ActionUpdateThread getActionUpdateThread() {
-                return ActionUpdateThread.EDT;
+                return ActionUpdateThread.BGT;
             }
 
             @Override
@@ -158,7 +159,7 @@ final class JiraTreeActions {
 
             @Override
             public @NotNull ActionUpdateThread getActionUpdateThread() {
-                return ActionUpdateThread.EDT;
+                return ActionUpdateThread.BGT;
             }
 
             @Override
@@ -200,7 +201,7 @@ final class JiraTreeActions {
 
             @Override
             public @NotNull ActionUpdateThread getActionUpdateThread() {
-                return ActionUpdateThread.EDT;
+                return ActionUpdateThread.BGT;
             }
 
             @Override
@@ -251,7 +252,7 @@ final class JiraTreeActions {
 
             @Override
             public @NotNull ActionUpdateThread getActionUpdateThread() {
-                return ActionUpdateThread.EDT;
+                return ActionUpdateThread.BGT;
             }
 
             @Override

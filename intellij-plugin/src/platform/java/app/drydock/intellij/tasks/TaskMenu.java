@@ -19,7 +19,6 @@ import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
 
 import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.DefaultActionGroup;
-import com.intellij.openapi.application.ApplicationManager;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -222,7 +221,7 @@ final class TaskMenu {
     }
 
     /**
-     * EDT: the non-pure answers a menu build needs, computed once here
+     * Any thread: the non-pure answers a menu build needs, computed once here
      * instead of per action. Transfer eligibility reads the registry's O(1)
      * probes, the transfer table, and the provider registry — memory-only,
      * but not pure, so {@link #sections} takes the answer as
@@ -231,13 +230,12 @@ final class TaskMenu {
      * adding a group hinges on it (the Jira settings entry is always offered).
      */
     static MenuFacts factsFor(TaskNode lead, boolean jiraEnabled) {
-        ApplicationManager.getApplication().assertIsDispatchThread();
         return new MenuFacts(lead instanceof TaskRow row
                 && SessionTransfer.available(row.session(), row.activity()), jiraEnabled);
     }
 
     /**
-     * EDT: the popup for a selection — {@link #sections} with a separator
+     * Any thread: the popup for a selection — {@link #sections} with a separator
      * only between the sections that have actions, so a conditional absence
      * never leaves a leading, trailing, or doubled separator. The map holds
      * the panel's action instances; an {@link Item} without one is skipped
@@ -245,7 +243,6 @@ final class TaskMenu {
      */
     static DefaultActionGroup group(TaskNode lead, List<TaskNode> selection, Map<Item, AnAction> actions,
                                     boolean jiraEnabled) {
-        ApplicationManager.getApplication().assertIsDispatchThread();
         DefaultActionGroup menu = new DefaultActionGroup();
         boolean separated = false;
         for (List<Item> section : sections(lead, selection, factsFor(lead, jiraEnabled))) {
