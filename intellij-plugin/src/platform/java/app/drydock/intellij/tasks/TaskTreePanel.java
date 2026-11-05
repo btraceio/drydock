@@ -15,6 +15,7 @@ import app.drydock.domain.SessionMode;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.DrydockSessionsListener;
 import app.drydock.intellij.actions.SessionDialogs;
+import app.drydock.intellij.agent.AgentConsoleFile;
 import app.drydock.intellij.agent.AgentConsoles;
 import app.drydock.intellij.agent.AgentExecutionListener;
 import app.drydock.intellij.agent.SessionActivityListener;
@@ -57,6 +58,8 @@ import com.intellij.openapi.actionSystem.UiDataProvider;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.project.DumbAware;
+import com.intellij.openapi.fileEditor.FileEditorManagerEvent;
+import com.intellij.openapi.fileEditor.FileEditorManagerListener;
 import com.intellij.openapi.project.DumbAwareAction;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.progress.ProgressIndicator;
@@ -678,6 +681,17 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 }, SEARCH_DEBOUNCE_MILLIS);
             }
         });
+
+        // The agent tab the user selects in the editor area selects its row.
+        project.getMessageBus().connect(this).subscribe(FileEditorManagerListener.FILE_EDITOR_MANAGER,
+                new FileEditorManagerListener() {
+                    @Override
+                    public void selectionChanged(@NotNull FileEditorManagerEvent event) {
+                        if (event.getNewFile() instanceof AgentConsoleFile console) {
+                            selectSessionRow(console.sessionId());
+                        }
+                    }
+                });
 
         MessageBusConnection bus = ApplicationManager.getApplication().getMessageBus().connect(this);
         bus.subscribe(DrydockSessionsListener.TOPIC, (DrydockSessionsListener) () -> requestRebuild(true));
@@ -1870,6 +1884,40 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 AgentConsoles.resumeOrStart(project, task.session());
             }
         });
+    }
+
+    /**
+     * Selects and scrolls to the row of {@code sessionId}, if the tree shows
+     * one. Runs inside the tracker's programmatic guard: selecting a row
+     * expands its collapsed ancestors, which is not the user's request to
+     * open them. EDT.
+     */
+    private void selectSessionRow(ManagedSessionId sessionId) {
+        if (disposed) {
+            return;
+        }
+        sessionPath((DefaultMutableTreeNode) tree.getModel().getRoot(), sessionId).ifPresent(path -> {
+            if (!path.equals(tree.getSelectionPath())) {
+                expansions.runProgrammatic(() -> {
+                    tree.setSelectionPath(path);
+                    tree.scrollPathToVisible(path);
+                });
+            }
+        });
+    }
+
+    /** The path of the first session row of {@code sessionId} under {@code node}, depth first. Pure. */
+    static Optional<TreePath> sessionPath(DefaultMutableTreeNode node, ManagedSessionId sessionId) {
+        if (node.getUserObject() instanceof TaskRow task && task.session().id().equals(sessionId)) {
+            return Optional.of(new TreePath(node.getPath()));
+        }
+        for (int i = 0; i < node.getChildCount(); i++) {
+            Optional<TreePath> found = sessionPath((DefaultMutableTreeNode) node.getChildAt(i), sessionId);
+            if (found.isPresent()) {
+                return found;
+            }
+        }
+        return Optional.empty();
     }
 
     /** The row's default gesture mirrors its primary toolbar action. EDT. */

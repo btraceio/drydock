@@ -100,6 +100,36 @@ class TaskTreePanelTargetTest {
     }
 
     @Test
+    void sessionPathFindsTheRowOfTheSelectedAgentTabsSession() {
+        TaskRow wanted = sessionRow("Wanted");
+        TaskRow other = sessionRow("Other");
+        DefaultMutableTreeNode root = new DefaultMutableTreeNode();
+        DefaultMutableTreeNode project = new DefaultMutableTreeNode(projectRow(REGISTERED_ROOT, List.of()));
+        DefaultMutableTreeNode sessions = new DefaultMutableTreeNode(new Section(SectionKind.SESSIONS,
+                List.of(other, wanted)));
+        DefaultMutableTreeNode otherNode = new DefaultMutableTreeNode(other);
+        DefaultMutableTreeNode wantedNode = new DefaultMutableTreeNode(wanted);
+        sessions.add(otherNode);
+        sessions.add(wantedNode);
+        project.add(sessions);
+        root.add(project);
+
+        assertEquals(Optional.of(new TreePath(wantedNode.getPath())),
+                TaskTreePanel.sessionPath(root, wanted.session().id()));
+        assertEquals(Optional.empty(), TaskTreePanel.sessionPath(root, ManagedSessionId.newId()));
+    }
+
+    private static TaskRow sessionRow(String name) {
+        ManagedAgentSession session = new ManagedAgentSession.Builder(
+                ManagedSessionId.newId(), RepositoryId.newId(), name,
+                AgentBinding.unlaunched(AgentKind.CLAUDE, SessionMode.WRITES),
+                SessionWorkspace.inRepository(REGISTERED_ROOT), NOW)
+                .build();
+        return new TaskRow(session, Optional.empty(), false, Optional.empty(),
+                new TaskPlacement.Idle(false), false, false);
+    }
+
+    @Test
     void taskInTheMainCheckoutKeepsTheNormalMainProjectChoices() {
         ManagedAgentSession session = new ManagedAgentSession.Builder(
                 ManagedSessionId.newId(), RepositoryId.newId(), "Main checkout task",
