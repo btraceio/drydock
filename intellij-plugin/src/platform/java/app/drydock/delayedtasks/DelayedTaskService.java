@@ -785,6 +785,11 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
         return liveSessions;
     }
 
+    /** Drydock's session catalog as the service reads it: in memory, no I/O. */
+    public List<ManagedAgentSession> catalogSessions() {
+        return sessions.get();
+    }
+
     @Override
     public CompletableFuture<TaskSnapshot> snapshot() {
         return supply(store -> scanFresh());

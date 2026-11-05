@@ -96,7 +96,7 @@ public class TaskNotificationsPlatformTest extends BasePlatformTestCase {
     }
     public void testConfirmActionResolvesTheLatestState() throws Exception {
         Notification review = reviewBalloon("t39-beta", "Beta");
-        assertEquals("the review balloon carries both answers", 2, review.getActions().size());
+        assertEquals("the review balloon carries both answers and Show Session", 3, review.getActions().size());
         update(TaskId.of("t39-beta"), TaskState.Actor.HUMAN, TaskStatus.DONE); publish(); // moved on
         dispatch(review, "Confirm Done");
         await(() -> !dialogs.isEmpty(), "the stale balloon's refusal");
@@ -104,6 +104,13 @@ public class TaskNotificationsPlatformTest extends BasePlatformTestCase {
         assertEquals("the stale object was never acted on", TaskStatus.DONE, status(TaskId.of("t39-beta")));
         assertTrue("exactly the one refusal, no re-notify from it", dialogs.size() == 1
                 && balloons("Task review: 'Beta'").size() == 1);
+    }
+    public void testShowSessionWithNoCatalogSessionRefusesVisibly() throws Exception {
+        Notification review = reviewBalloon("t39-eta", "Eta"); // no session was ever bound
+        dispatch(review, "Show Session");
+        await(() -> !dialogs.isEmpty(), "the Show Session refusal");
+        assertTrue("the refusal names the task by title", dialogs.get(0).contains("'Eta' has no session left"));
+        assertEquals("Show Session answers nothing about the review", TaskStatus.REVIEW, status(TaskId.of("t39-eta")));
     }
     public void testReopenOnADrivenPlanHaltsItAndSurfacesTheReason() throws Exception {
         TaskId gate = write("t39-gate", "Gate work", List.of());
