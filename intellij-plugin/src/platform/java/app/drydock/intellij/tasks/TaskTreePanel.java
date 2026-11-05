@@ -663,9 +663,10 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             }
         });
         // Real expansion events — the user's click and the panel's own
-        // restoration alike — reach the tracker, which records only the
-        // user's; restoration runs inside its programmatic guard.
-        tree.addTreeWillExpandListener(expansions);
+        // restoration alike, single or bulk — reach the tracker, which
+        // records only the user's; restoration runs inside its programmatic
+        // guard.
+        tree.addTreeExpansionListener(expansions);
 
         search.addDocumentListener(new DocumentAdapter() {
             @Override
@@ -1422,7 +1423,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         for (TaskNode node : nodes) {
             root.add(treeNode(node, selectedSession, selectedTask, tasks, toSelect));
         }
-        ((DefaultTreeModel) tree.getModel()).setRoot(root);
+        // Replacing the root is not intent either: whatever expansion
+        // events the model swap fires must not touch the records.
+        expansions.runProgrammatic(() -> ((DefaultTreeModel) tree.getModel()).setRoot(root));
         tree.getEmptyText().setText(emptyText(appliedFilter, appliedViewFilter));
         // This pass replaced the rows; the load it announced is over, even
         // when the rows are empty (the empty text says that instead).

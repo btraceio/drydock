@@ -33,7 +33,6 @@ import org.junit.jupiter.api.Test;
 import javax.swing.JTree;
 import javax.swing.event.TreeExpansionEvent;
 import javax.swing.tree.DefaultMutableTreeNode;
-import javax.swing.tree.ExpandVetoException;
 import javax.swing.tree.DefaultTreeModel;
 import javax.swing.tree.TreePath;
 
@@ -228,7 +227,7 @@ class TaskTreePanelTargetTest {
         }
         JTree tree = new JTree(new DefaultTreeModel(root));
         tree.setRootVisible(true);
-        tree.addTreeWillExpandListener(tracker);
+        tree.addTreeExpansionListener(tracker);
         // Full paths, now that every node has its parent: without them the root
         // component is missing and no path matches the model's nodes.
         for (int i = 0; i < root.getChildCount(); i++) {
@@ -289,6 +288,43 @@ class TaskTreePanelTargetTest {
     }
 
     @Test
+    void aBulkCollapseWithNoWillCollapseEventStillForgetsTheRecord() {
+        Map<String, TreePath> sections = new HashMap<>();
+        ListingExpansionTracker tracker = new ListingExpansionTracker(changed -> { },
+                TaskTreePanel::projectRootOf);
+        JTree tree = listingTree(tracker, sections);
+        TreePath pullRequests = sections.get("profiling-backend:PULL_REQUESTS");
+        TreePath issues = sections.get("profiling-backend:ISSUES");
+        tree.expandPath(pullRequests);
+        tree.expandPath(issues);
+        assertEquals(Set.of(REGISTERED_ROOT), tracker.requested(SectionKind.PULL_REQUESTS));
+
+        // IntelliJ's recursive collapse (ide.tree.collapse.recursively, on by
+        // default) goes through a bulk collapsePaths that fires treeCollapsed
+        // only, never treeWillCollapse.
+        tree.fireTreeCollapsed(pullRequests);
+
+        assertTrue(tracker.requested(SectionKind.PULL_REQUESTS).isEmpty());
+        assertEquals(Set.of(REGISTERED_ROOT), tracker.requestedIssueSections(),
+                "collapsing one section leaves its sibling's record");
+    }
+
+    @Test
+    void aBulkExpandWithNoWillExpandEventStillRecordsTheRequest() {
+        Map<String, TreePath> sections = new HashMap<>();
+        List<Boolean> rebuilds = new ArrayList<>();
+        ListingExpansionTracker tracker = new ListingExpansionTracker(rebuilds::add,
+                TaskTreePanel::projectRootOf);
+        JTree tree = listingTree(tracker, sections);
+
+        // IntelliJ's bulk expandPaths fires treeExpanded only.
+        tree.fireTreeExpanded(sections.get("drydock:PULL_REQUESTS"));
+
+        assertEquals(Set.of(OTHER_ROOT), tracker.requested(SectionKind.PULL_REQUESTS));
+        assertEquals(List.of(false), rebuilds);
+    }
+
+    @Test
     void requestedRejectsSectionKindsItDoesNotTrack() {
         ListingExpansionTracker tracker = new ListingExpansionTracker(changed -> { },
                 TaskTreePanel::projectRootOf);
@@ -324,7 +360,7 @@ class TaskTreePanelTargetTest {
         root.add(project);
         JTree tree = new JTree(new DefaultTreeModel(root));
         tree.setRootVisible(true);
-        tree.addTreeWillExpandListener(tracker);
+        tree.addTreeExpansionListener(tracker);
         tree.expandPath(new TreePath(project.getPath()));
 
         for (int i = 0; i < project.getChildCount(); i++) {
@@ -352,7 +388,7 @@ class TaskTreePanelTargetTest {
         root.add(project);
         JTree tree = new JTree(new DefaultTreeModel(root));
         tree.setRootVisible(true);
-        tree.addTreeWillExpandListener(tracker);
+        tree.addTreeExpansionListener(tracker);
         // The panel's own restoration opens the way to the group: neither the
         // project row nor a guarded section expansion is user intent.
         tracker.runProgrammatic(() -> {
@@ -454,7 +490,7 @@ class TaskTreePanelTargetTest {
         root.add(section);
         JTree tree = new JTree(new DefaultTreeModel(root));
         tree.setRootVisible(true);
-        tree.addTreeWillExpandListener(tracker);
+        tree.addTreeExpansionListener(tracker);
 
         tree.expandPath(new TreePath(section.getPath()));
 
@@ -735,7 +771,7 @@ class TaskTreePanelTargetTest {
     @Test
     void theGroupKeyRootIsTheProjectRowsNotTheGroupRowsOwn() {
         // A group whose own main root differs from its project row's: the key
-        // is what treeWillExpand records, the nearest project row's root.
+        // is what treeExpanded records, the nearest project row's root.
         DefaultMutableTreeNode root = modelTree(issuesProject(REGISTERED_ROOT, OTHER_ROOT, "g-sprint"));
 
         ListingExpansionTracker underProject = tracker();
@@ -792,18 +828,18 @@ class TaskTreePanelTargetTest {
     }
 
     /** Simulates the user's collapsing gesture at {@code path}. */
-    private static void collapse(ListingExpansionTracker tracker, TreePath path) throws ExpandVetoException {
-        tracker.treeWillCollapse(new TreeExpansionEvent(new JTree(), path));
+    private static void collapse(ListingExpansionTracker tracker, TreePath path) {
+        tracker.treeCollapsed(new TreeExpansionEvent(new JTree(), path));
     }
 
-    /** {@link #collapse} for a lambda: the tracker never vetoes, so the checked exception is a failure. */
+    /** {@link #collapse}, kept for the call sites that pass it as a lambda. */
     private static void collapseQuietly(ListingExpansionTracker tracker, TreePath path) {
-        assertDoesNotThrow(() -> collapse(tracker, path));
+        collapse(tracker, path);
     }
 
     /** Simulates an expansion event at {@code path} (a user's gesture or the panel's restoration). */
     private static void expand(ListingExpansionTracker tracker, TreePath path) {
-        assertDoesNotThrow(() -> tracker.treeWillExpand(new TreeExpansionEvent(new JTree(), path)));
+        tracker.treeExpanded(new TreeExpansionEvent(new JTree(), path));
     }
 
     /** Copies of all six record sets, in a fixed order, so before/after can be compared. */
@@ -844,7 +880,7 @@ class TaskTreePanelTargetTest {
     }
 
     @Test
-    void aClosedLazyNodeStaysClosedAcrossRebuilds() throws ExpandVetoException {
+    void aClosedLazyNodeStaysClosedAcrossRebuilds() {
         DefaultMutableTreeNode root = modelTree(issuesSourcesProject(REGISTERED_ROOT));
         ListingExpansionTracker tracker = tracker();
         tracker.requestedGitHubIssues().add(REGISTERED_ROOT);
@@ -858,7 +894,7 @@ class TaskTreePanelTargetTest {
     }
 
     @Test
-    void closingTheJiraNodeForgetsItsGroups() throws ExpandVetoException {
+    void closingTheJiraNodeForgetsItsGroups() {
         DefaultMutableTreeNode root = modelTree(issuesSourcesProject(REGISTERED_ROOT));
         ListingExpansionTracker tracker = tracker();
         tracker.requestedJiraNodes().add(REGISTERED_ROOT);
@@ -875,7 +911,7 @@ class TaskTreePanelTargetTest {
     }
 
     @Test
-    void closingTheIssuesSectionForgetsEveryLazyDescendant() throws ExpandVetoException {
+    void closingTheIssuesSectionForgetsEveryLazyDescendant() {
         DefaultMutableTreeNode root = modelTree(issuesSourcesProject(REGISTERED_ROOT));
         ListingExpansionTracker tracker = tracker();
         tracker.requestedIssueSections().add(REGISTERED_ROOT);
@@ -895,7 +931,7 @@ class TaskTreePanelTargetTest {
     }
 
     @Test
-    void closingOneProjectsNodeLeavesAnotherProjectsRecord() throws ExpandVetoException {
+    void closingOneProjectsNodeLeavesAnotherProjectsRecord() {
         DefaultMutableTreeNode root = modelTree(
                 issuesSourcesProject(REGISTERED_ROOT), issuesSourcesProject(OTHER_ROOT));
         ListingExpansionTracker tracker = tracker();
@@ -910,7 +946,7 @@ class TaskTreePanelTargetTest {
     }
 
     @Test
-    void closingTheWorktreesSectionForgetsItsRootOnly() throws ExpandVetoException {
+    void closingTheWorktreesSectionForgetsItsRootOnly() {
         DefaultMutableTreeNode root = modelTree(projectRow(REGISTERED_ROOT, List.of(
                 new Section(SectionKind.WORKTREES, List.of(new Deferred("Reading…"))),
                 new Section(SectionKind.PULL_REQUESTS, List.of(new Deferred("Reading…"))))));
@@ -928,7 +964,7 @@ class TaskTreePanelTargetTest {
     }
 
     @Test
-    void aProgrammaticCollapseForgetsNothing() throws ExpandVetoException {
+    void aProgrammaticCollapseForgetsNothing() {
         DefaultMutableTreeNode root = modelTree(everyCollapsibleKind(REGISTERED_ROOT));
         ListingExpansionTracker tracker = tracker();
         recordEverything(tracker, REGISTERED_ROOT);
@@ -974,7 +1010,7 @@ class TaskTreePanelTargetTest {
     }
 
     @Test
-    void closingAJiraGroupForgetsOnlyThatGroup() throws ExpandVetoException {
+    void closingAJiraGroupForgetsOnlyThatGroup() {
         // The group rows' own main root (OTHER_ROOT) deliberately differs from
         // their project row's (REGISTERED_ROOT): the key is the project row's.
         DefaultMutableTreeNode root = modelTree(
@@ -1008,7 +1044,7 @@ class TaskTreePanelTargetTest {
     }
 
     @Test
-    void closingThePullRequestsSectionForgetsItsRootOnly() throws ExpandVetoException {
+    void closingThePullRequestsSectionForgetsItsRootOnly() {
         DefaultMutableTreeNode root = modelTree(projectRow(REGISTERED_ROOT, List.of(
                 new Section(SectionKind.WORKTREES, List.of(new Deferred("Reading…"))),
                 new Section(SectionKind.PULL_REQUESTS, List.of(new Deferred("Reading…"))))));
@@ -1025,13 +1061,13 @@ class TaskTreePanelTargetTest {
     }
 
     @Test
-    void collapsingAProjectRowOrAnUnlistedSectionForgetsNothing() throws ExpandVetoException {
+    void collapsingAProjectRowOrAnUnlistedSectionForgetsNothing() {
         DefaultMutableTreeNode root = modelTree(everyCollapsibleKind(REGISTERED_ROOT));
         ListingExpansionTracker tracker = tracker();
         recordEverything(tracker, REGISTERED_ROOT);
         List<Set<?>> before = records(tracker);
 
-        collapse(tracker, pathAt(root, 0));     // the ProjectRow: treeWillCollapse's default
+        collapse(tracker, pathAt(root, 0));     // the ProjectRow: treeCollapsed's default
         collapse(tracker, pathAt(root, 0, 3));  // Section(SESSIONS): closeSection's default
 
         assertEquals(before, records(tracker));
