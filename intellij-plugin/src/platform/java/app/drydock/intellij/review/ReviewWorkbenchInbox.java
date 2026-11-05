@@ -225,10 +225,10 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
         return Optional.ofNullable(composer);
     }
 
-    /** Shows {@code text} in the notice line. EDT. */
+    /** Shows {@code text} in the notice line; a blank text hides it. EDT. */
     void notice(String text) {
         requireEdt();
-        report(Optional.of(text));
+        report(text.isBlank() ? Optional.empty() : Optional.of(text));
     }
 
     private void submitComposer() {
