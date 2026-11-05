@@ -289,10 +289,10 @@ class TaskStateTest {
                 + " 'missing-id' in project 'alpha'"), broken.blockers());
         TaskView cycle = view(state, "cyc-x");
         assertEquals(Presentation.BLOCKED, cycle.presentation());
-        assertEquals(List.of("in a dependency cycle: cyc-x -> cyc-y -> cyc-x"), cycle.blockers());
+        assertEquals(List.of("in a dependency cycle: 'Task cyc-x' -> 'Task cyc-y' -> 'Task cyc-x'"), cycle.blockers());
         TaskView selfCycle = view(state, "self-cyc");
         assertEquals(Presentation.BLOCKED, selfCycle.presentation());
-        assertEquals(List.of("in a dependency cycle: self-cyc -> self-cyc",
+        assertEquals(List.of("in a dependency cycle: 'Task self-cyc' -> 'Task self-cyc'",
                 "blocked by 'Task self-cyc' (open)"), selfCycle.blockers());
         assertEquals(Presentation.TERMINAL, view(state, "cyc-y").presentation());
     }

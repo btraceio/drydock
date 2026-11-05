@@ -56,8 +56,8 @@ public final class StartPlanner {
                     + target.text() + "' in the snapshot (never stored, or excluded after an id collision)")));
         }
         if (targetDocument.status() == TaskStatus.DONE || targetDocument.status() == TaskStatus.DROPPED) {
-            return StartPlan.refused(target, List.of(new StartPlan.Refusal(TARGET_FINISHED, "target task '"
-                    + target.text() + "' is already " + targetDocument.status().storedName()
+            return StartPlan.refused(target, List.of(new StartPlan.Refusal(TARGET_FINISHED, "target task "
+                    + graph.titleOf(target) + " is already " + targetDocument.status().storedName()
                     + ": it starts nothing")));
         }
         Walk walk = closure(target, snapshot, graph, live);
@@ -121,16 +121,16 @@ public final class StartPlanner {
                     () -> new IllegalArgumentException("the graph holds no diagnostics for task '" + id.text()
                             + "'; build it from this snapshot"));
             for (TaskGraph.BrokenReference broken : diagnostics.broken()) {
-                walk.refusals.add(new StartPlan.Refusal(BROKEN_REFERENCE, "task '" + id.text() + "': broken"
-                        + " prerequisite reference '" + broken.reference() + "': " + broken.reason()));
+                walk.refusals.add(new StartPlan.Refusal(BROKEN_REFERENCE, "task " + graph.titleOf(id)
+                        + ": broken prerequisite reference '" + broken.reference() + "': " + broken.reason()));
             }
             for (TaskGraph.CycleDiagnostic cycle : diagnostics.cycles()) {
-                walk.refusals.add(new StartPlan.Refusal(TASK_CYCLE, "task '" + id.text() + "' is in a"
-                        + " dependency cycle: " + cycle.text()));
+                walk.refusals.add(new StartPlan.Refusal(TASK_CYCLE, "task " + graph.titleOf(id) + " is in a"
+                        + " dependency cycle: " + graph.titledPath(cycle)));
             }
             document.sessions().stream().filter(live::contains).findFirst().ifPresent(session ->
-                    walk.refusals.add(new StartPlan.Refusal(OWNED_TASK, "task '" + id.text() + "' ("
-                            + document.title() + ") is already owned by live session '" + session + "'")));
+                    walk.refusals.add(new StartPlan.Refusal(OWNED_TASK, "task " + graph.titleOf(id)
+                            + " is already owned by live session '" + session + "'")));
             List<TaskId> unfinished = new ArrayList<>();
             for (TaskGraph.ResolvedReference reference : diagnostics.resolved()) {
                 TaskDocument prerequisite = reference.target();
@@ -195,8 +195,9 @@ public final class StartPlanner {
                 if (segment.equals(other)) continue;
                 waits.computeIfAbsent(segment, any -> new LinkedHashSet<>()).add(other);
                 edges.computeIfAbsent(segment, any -> new LinkedHashMap<>()).putIfAbsent(other,
-                        "task '" + id.text() + "' in '" + nameOf(projectSlugs, segment) + "' waits for '"
-                                + prerequisite.text() + "' in '" + nameOf(projectSlugs, other) + "'");
+                        "task '" + snapshot.byId().get(id).title() + "' in '" + nameOf(projectSlugs, segment)
+                                + "' waits for '" + snapshot.byId().get(prerequisite).title() + "' in '"
+                                + nameOf(projectSlugs, other) + "'");
             }
         }
         return new SegmentWaits(waits, edges);

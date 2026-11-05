@@ -167,6 +167,18 @@ public final class TaskGraph {
         return Optional.ofNullable(diagnostics.get(task));
     }
 
+    /** The cycle's path by task title, e.g. {@code 'Fix login' -> 'Ship it' -> 'Fix login'};
+      * an id this snapshot holds no document for keeps its id text. */
+    public String titledPath(CycleDiagnostic cycle) {
+        return cycle.path().stream().map(this::titleOf).collect(Collectors.joining(" -> "));
+    }
+
+    /** The task's title in quotes, or its quoted id text when the snapshot holds no such document. */
+    public String titleOf(TaskId task) {
+        TaskDocument document = snapshot.byId().get(task);
+        return "'" + (document != null ? document.title() : task.text()) + "'";
+    }
+
     /** Why {@code reference} names no task in this snapshot (the same reason a stored one would
       * show as broken), or empty when it resolves. */
     public Optional<String> brokenReason(String reference) {
