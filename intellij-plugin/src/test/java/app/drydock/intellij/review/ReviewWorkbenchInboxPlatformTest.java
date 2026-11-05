@@ -46,8 +46,10 @@ public class ReviewWorkbenchInboxPlatformTest extends BasePlatformTestCase {
         @Override public CompletableFuture<Optional<String>> challenge(ReviewAnnotation f, String t) { return record("challenge " + f.id()); }
         @Override public void showInDiff(ReviewAnnotation f) { calls.add("showInDiff " + f.id()); }
         @Override public void choose(WorkbenchState.InboxChoice c) { calls.add("choose " + c.tab() + " " + c.scope()); }
-        @Override public CompletableFuture<Optional<String>> submit(ReviewWorkbenchInbox.Composer c, String text) {
-            return record("submit " + c.mode() + " " + c.range().startKey() + " " + text);
+        @Override public CompletableFuture<Optional<String>> submit(ReviewWorkbenchInbox.Composer c, String text,
+                                                                    Severity severity) {
+            return record("submit " + c.mode() + " " + c.range().startKey() + " " + text
+                    + (c.mode() == ReviewWorkbenchInbox.Composer.Mode.COMMENT ? " " + severity : ""));
         }
     };
 
@@ -131,13 +133,43 @@ public class ReviewWorkbenchInboxPlatformTest extends BasePlatformTestCase {
             inbox.openComposer(composer);
             assertEquals(Optional.of(composer), inbox.composer());
 
-            JBTextArea text = UIUtil.uiTraverser(inbox).filter(JBTextArea.class).first();
+            JBTextArea text = inbox.composerText;
             text.setText("  Use a try-with-resources here.  ");
             submitButton(inbox, "Add Comment").doClick();
             PlatformTestUtil.dispatchAllEventsInIdeEventQueue();
 
-            assertEquals(List.of("submit COMMENT n10 Use a try-with-resources here."), calls);
+            assertEquals(List.of("submit COMMENT n10 Use a try-with-resources here. QUESTION"), calls);
             assertEquals(Optional.empty(), inbox.composer());
+        } finally {
+            Disposer.dispose(inbox);
+        }
+    }
+
+    public void testTheComposerSwitchesToAQuestionAndACommentCarriesItsSeverity() {
+        next = CompletableFuture.completedFuture(Optional.empty());
+        ReviewWorkbenchInbox inbox = new ReviewWorkbenchInbox(actions, Clock.fixed(Instant.EPOCH, ZoneOffset.UTC));
+        try {
+            DiffSelection.Range range = new DiffSelection.Range("A.java", "n10", "n12", false);
+            inbox.openComposer(new ReviewWorkbenchInbox.Composer(ReviewWorkbenchInbox.Composer.Mode.COMMENT, range));
+            assertTrue(inbox.commentMode.isSelected());
+            assertTrue("Question until another is picked", inbox.severities.get(Severity.QUESTION).isSelected());
+            inbox.severities.get(Severity.BLOCKING).doClick();
+            inbox.composerText.setText("This leaks the stream.");
+            submitButton(inbox, "Add Comment").doClick();
+            PlatformTestUtil.dispatchAllEventsInIdeEventQueue();
+            assertEquals(List.of("submit COMMENT n10 This leaks the stream. BLOCKING"), calls);
+
+            calls.clear();
+            inbox.openComposer(new ReviewWorkbenchInbox.Composer(ReviewWorkbenchInbox.Composer.Mode.COMMENT, range));
+            inbox.composerText.setText("Why is this cached?");
+            inbox.askMode.doClick();
+            assertEquals(Optional.of(new ReviewWorkbenchInbox.Composer(ReviewWorkbenchInbox.Composer.Mode.ASK, range)),
+                    inbox.composer());
+            assertFalse("a question has no severity", inbox.severities.get(Severity.NIT).getParent().isVisible());
+            assertEquals("the text is kept", "Why is this cached?", inbox.composerText.getText());
+            submitButton(inbox, "Ask Agent").doClick();
+            PlatformTestUtil.dispatchAllEventsInIdeEventQueue();
+            assertEquals(List.of("submit ASK n10 Why is this cached?"), calls);
         } finally {
             Disposer.dispose(inbox);
         }
@@ -149,7 +181,7 @@ public class ReviewWorkbenchInboxPlatformTest extends BasePlatformTestCase {
         try {
             inbox.openComposer(new ReviewWorkbenchInbox.Composer(
                     ReviewWorkbenchInbox.Composer.Mode.COMMENT, new DiffSelection.Range("A.java", "n10", "n10", false)));
-            JBTextArea text = UIUtil.uiTraverser(inbox).filter(JBTextArea.class).first();
+            JBTextArea text = inbox.composerText;
             text.setText("Rename this.");
             submitButton(inbox, "Add Comment").doClick();
             PlatformTestUtil.dispatchAllEventsInIdeEventQueue();

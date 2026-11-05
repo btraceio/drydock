@@ -4,6 +4,7 @@ import app.drydock.intellij.review.workbench.model.InboxModel;
 import app.drydock.intellij.review.workbench.model.WorkbenchState;
 import app.drydock.review.DiffSelection;
 import app.drydock.review.ReviewAnnotation;
+import app.drydock.review.Severity;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.actionSystem.ActionManager;
 import com.intellij.openapi.actionSystem.ActionToolbar;
@@ -11,6 +12,7 @@ import com.intellij.openapi.actionSystem.ActionUpdateThread;
 import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.actionSystem.DefaultActionGroup;
 import com.intellij.openapi.project.DumbAwareToggleAction;
+import com.intellij.ui.JBColor;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBScrollPane;
 import com.intellij.ui.components.JBTextArea;
@@ -19,9 +21,11 @@ import com.intellij.util.ui.UIUtil;
 import org.jetbrains.annotations.NotNull;
 
 import javax.swing.BoxLayout;
+import javax.swing.ButtonGroup;
 import javax.swing.JButton;
 import javax.swing.JComponent;
 import javax.swing.JPanel;
+import javax.swing.JRadioButton;
 import javax.swing.JViewport;
 import javax.swing.Scrollable;
 import javax.swing.SwingConstants;
@@ -34,6 +38,7 @@ import java.awt.Insets;
 import java.awt.Rectangle;
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -81,8 +86,12 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
         /** The inbox's tab or scope changed. */
         void choose(WorkbenchState.InboxChoice choice);
 
-        /** The composer was submitted with {@code text} (never blank). */
-        CompletableFuture<Optional<String>> submit(Composer composer, String text);
+        /**
+         * The composer was submitted with {@code text} (never blank); a
+         * comment carries the {@code severity} chosen for it, a question
+         * ignores it.
+         */
+        CompletableFuture<Optional<String>> submit(Composer composer, String text, Severity severity);
     }
 
     /**
@@ -111,7 +120,12 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
         }
 
         String submitText() {
-            return mode == Mode.COMMENT ? "Add Comment" : "Ask";
+            return mode == Mode.COMMENT ? "Add Comment" : "Ask Agent";
+        }
+
+        /** The same range in {@code other} mode. */
+        Composer as(Mode other) {
+            return new Composer(other, range);
         }
 
         private static String lines(String startKey, String endKey) {
@@ -126,6 +140,10 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
         }
     }
 
+    static final String COMMENT_MODE = "Comment";
+    static final String ASK_MODE = "Ask the agent";
+    static final String SEVERITY = "Severity:";
+
     private final Actions actions;
     private final Clock clock;
     private final JPanel stack = new TrackingPanel();
@@ -134,10 +152,16 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
     final DefaultActionGroup scopeActions = new DefaultActionGroup();
     private final Map<String, FindingInlayCard> cards = new LinkedHashMap<>();
     private final JPanel composerPanel = new JPanel(new BorderLayout());
-    private final JBLabel composerTitle = new JBLabel();
-    private final JBLabel composerNote = new JBLabel();
-    private final JBTextArea composerText = new JBTextArea(3, 20);
+    private final JBTextArea composerTitle = wrapped(true);
+    private final JBTextArea composerNote = wrapped(false);
+    final JBTextArea composerText = new JBTextArea(5, 20);
     private final JButton composerSubmit = new JButton();
+    /** The composer's two ways to use a selection: a comment, or a question to the review's agent. */
+    final JRadioButton commentMode = new JRadioButton(COMMENT_MODE);
+    final JRadioButton askMode = new JRadioButton(ASK_MODE);
+    /** A comment's severity, one chip each; Question until the reviewer picks another. */
+    final Map<Severity, JRadioButton> severities = new EnumMap<>(Severity.class);
+    private final JPanel severityRow = new JPanel(new FlowLayout(FlowLayout.LEFT, JBUI.scale(4), 0));
     private Composer composer;
     private InboxModel.Snapshot shown = InboxModel.Snapshot.empty(InboxModel.Tab.TO_TRIAGE, InboxModel.Scope.ALL);
     /** The cards' surface: the inbox of a local review, or of a pull request review. */
@@ -181,12 +205,50 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
         render(shown);
     }
 
+    /** A read-only text that wraps to the pane's width, in the UI font; bold for the title. */
+    private static JBTextArea wrapped(boolean bold) {
+        JBTextArea area = new JBTextArea();
+        area.setEditable(false);
+        area.setLineWrap(true);
+        area.setWrapStyleWord(true);
+        area.setOpaque(false);
+        area.setFont(bold ? JBUI.Fonts.label().asBold() : JBUI.Fonts.label());
+        return area;
+    }
+
     private void buildComposer() {
-        composerTitle.setBorder(JBUI.Borders.empty(4, 8, 0, 8));
+        composerTitle.setBorder(JBUI.Borders.empty(6, 8, 2, 8));
         composerNote.setForeground(UIUtil.getContextHelpForeground());
-        composerNote.setBorder(JBUI.Borders.empty(0, 8));
+        composerNote.setBorder(JBUI.Borders.empty(0, 8, 2, 8));
         composerText.setLineWrap(true);
         composerText.setWrapStyleWord(true);
+        // A text area defaults to the editor's monospace font; a comment is prose.
+        composerText.setFont(JBUI.Fonts.label());
+        composerText.setMargin(JBUI.insets(4, 6));
+        ButtonGroup modes = new ButtonGroup();
+        modes.add(commentMode);
+        modes.add(askMode);
+        commentMode.addActionListener(e -> switchMode(Composer.Mode.COMMENT));
+        askMode.addActionListener(e -> switchMode(Composer.Mode.ASK));
+        askMode.setToolTipText("Ask the review's agent about these lines; its answer arrives as a thread on them.");
+        JPanel modeRow = new JPanel(new FlowLayout(FlowLayout.LEFT, JBUI.scale(8), 0));
+        modeRow.add(commentMode);
+        modeRow.add(askMode);
+        ButtonGroup chips = new ButtonGroup();
+        severityRow.add(new JBLabel(SEVERITY));
+        for (Severity severity : Severity.values()) {
+            JRadioButton chip = new JRadioButton(SeverityPresentation.label(severity), SeverityPresentation.icon(severity));
+            chips.add(chip);
+            severities.put(severity, chip);
+            severityRow.add(chip);
+        }
+        JPanel choices = new JPanel();
+        choices.setLayout(new BoxLayout(choices, BoxLayout.Y_AXIS));
+        modeRow.setAlignmentX(LEFT_ALIGNMENT);
+        severityRow.setAlignmentX(LEFT_ALIGNMENT);
+        choices.add(modeRow);
+        choices.add(severityRow);
+        choices.setBorder(JBUI.Borders.empty(0, 4));
         JButton cancel = new JButton("Cancel");
         cancel.addActionListener(e -> closeComposer());
         composerSubmit.addActionListener(e -> submitComposer());
@@ -195,9 +257,11 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
         buttons.add(composerSubmit);
         JPanel labels = new JPanel(new BorderLayout());
         labels.add(composerTitle, BorderLayout.NORTH);
-        labels.add(composerNote, BorderLayout.SOUTH);
+        labels.add(composerNote, BorderLayout.CENTER);
+        labels.add(choices, BorderLayout.SOUTH);
         JBScrollPane text = new JBScrollPane(composerText);
-        text.setBorder(JBUI.Borders.compound(JBUI.Borders.empty(4, 8), text.getBorder()));
+        // An outlined field: the scroll pane's own border is invisible in the dark themes.
+        text.setBorder(JBUI.Borders.compound(JBUI.Borders.empty(4, 8), JBUI.Borders.customLine(JBColor.border(), 1)));
         composerPanel.add(labels, BorderLayout.NORTH);
         composerPanel.add(text, BorderLayout.CENTER);
         composerPanel.add(buttons, BorderLayout.SOUTH);
@@ -208,16 +272,40 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
     void openComposer(Composer next) {
         requireEdt();
         composer = Objects.requireNonNull(next, "next");
-        composerTitle.setText(next.title());
+        commentMode.setSelected(next.mode() == Composer.Mode.COMMENT);
+        askMode.setSelected(next.mode() == Composer.Mode.ASK);
+        severities.get(Severity.QUESTION).setSelected(true);
+        showMode(next);
         composerNote.setText(next.note().orElse(""));
         composerNote.setVisible(next.note().isPresent());
-        composerSubmit.setText(next.submitText());
         composerSubmit.setEnabled(true);
         composerText.setText("");
         composerText.setEnabled(true);
         composerPanel.setVisible(true);
         revalidate();
         composerText.requestFocusInWindow();
+    }
+
+    /** The open composer, switched to {@code mode}: the same lines, the text kept. EDT. */
+    private void switchMode(Composer.Mode mode) {
+        if (composer != null && composer.mode() != mode) {
+            composer = composer.as(mode);
+            showMode(composer);
+        }
+    }
+
+    /** The title, the submit button and, for a comment, the severity chips of {@code current}. */
+    private void showMode(Composer current) {
+        composerTitle.setText(current.title());
+        composerSubmit.setText(current.submitText());
+        severityRow.setVisible(current.mode() == Composer.Mode.COMMENT);
+        revalidate();
+    }
+
+    /** The severity chip selected; Question when none is. */
+    Severity chosenSeverity() {
+        return severities.entrySet().stream().filter(entry -> entry.getValue().isSelected())
+                .map(Map.Entry::getKey).findFirst().orElse(Severity.QUESTION);
     }
 
     /** The composer currently open, if any. */
@@ -239,7 +327,7 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
         }
         composerSubmit.setEnabled(false);
         composerText.setEnabled(false);
-        actions.submit(current, text).whenComplete((outcome, error) -> EventQueue.invokeLater(() -> {
+        actions.submit(current, text, chosenSeverity()).whenComplete((outcome, error) -> EventQueue.invokeLater(() -> {
             if (composer != current) {
                 return; // a newer composer replaced this one meanwhile
             }

@@ -34,6 +34,7 @@ import app.drydock.review.ReviewScope;
 import app.drydock.review.Triage;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Sections;
+import app.drydock.review.Severity;
 import app.drydock.review.SubmitPlan;
 import app.drydock.review.tour.HunkTake;
 import app.drydock.review.tour.ReviewTour;
@@ -2581,7 +2582,7 @@ final class ReviewTabProvider {
      * and, in a local review, not posted to a PR — it is an instruction for
      * the session. Off the EDT, on the plugin's executor.
      */
-    private CompletableFuture<Optional<String>> addComment(DiffSelection.Range range, String text) {
+    private CompletableFuture<Optional<String>> addComment(DiffSelection.Range range, String text, Severity severity) {
         AnnotationStore annotations = store;
         ReviewScope current = scope;
         if (annotations == null || current == null) {
@@ -2589,7 +2590,7 @@ final class ReviewTabProvider {
         }
         return CompletableFuture.supplyAsync(() -> {
             annotations.upsert(ReviewAnnotation.human(current.id(), range.file(), range.startKey(), range.endKey(),
-                    new ReviewAnnotation.Message("You", Instant.now(), text)).withPostToPr(false));
+                    new ReviewAnnotation.Message("You", Instant.now(), text), severity).withPostToPr(false));
             return Optional.of(COMMENT_ADDED);
         }, plugin.executor());
     }
@@ -2699,9 +2700,10 @@ final class ReviewTabProvider {
         }
 
         @Override
-        public CompletableFuture<Optional<String>> submit(ReviewWorkbenchInbox.Composer composer, String text) {
+        public CompletableFuture<Optional<String>> submit(ReviewWorkbenchInbox.Composer composer, String text,
+                                                          Severity severity) {
             return switch (composer.mode()) {
-                case COMMENT -> addComment(composer.range(), text);
+                case COMMENT -> addComment(composer.range(), text, severity);
                 case ASK -> askAboutSelection(composer.range(), text);
             };
         }
