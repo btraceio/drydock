@@ -53,6 +53,8 @@ final class TaskMenu {
         REVIEW_CHANGES,
         TRANSFER_TO,
         RENAME,
+        /** Set or clear the human's follow-up flag; the label follows the session's current flag. */
+        FLAG,
         NEW_TASK,
         DEACTIVATE_AND_CLOSE,
         DONE_WITH_TASK,
@@ -81,6 +83,8 @@ final class TaskMenu {
         /** Delete a Jira group, after confirmation; only a group node offers it. */
         DELETE_JIRA_GROUP,
         REFRESH,
+        /** Show only this project in the tree, or every project again when it is focused already. */
+        FOCUS_PROJECT,
         NEW_TASK_IN_MAIN,
         REMOVE_WORKTREE,
         REMOVE_STALE_WORKTREES,
@@ -158,7 +162,7 @@ final class TaskMenu {
                 section(Item.DEACTIVATE,
                         TaskActions.reviewsChanges(row) ? Item.REVIEW_CHANGES : null,
                         facts.transferAvailable() ? Item.TRANSFER_TO : null),
-                List.of(Item.RENAME, Item.NEW_TASK),
+                List.of(Item.RENAME, Item.FLAG, Item.NEW_TASK),
                 section(TaskActions.closesOwnWindow(row) ? Item.DEACTIVATE_AND_CLOSE : null,
                         Item.DONE_WITH_TASK)));
     }
@@ -168,7 +172,7 @@ final class TaskMenu {
         return nonEmpty(List.of(
                 List.of(Item.SWITCH_TO_TASK),
                 section(Item.RESUME, TaskActions.resumesElsewhere(row) ? Item.RESUME_IN_OWN_WINDOW : null),
-                List.of(Item.RENAME, Item.NEW_TASK),
+                List.of(Item.RENAME, Item.FLAG, Item.NEW_TASK),
                 List.of(Item.DONE_WITH_TASK)));
     }
 
@@ -176,6 +180,7 @@ final class TaskMenu {
     private static List<List<Item>> project(ProjectRow row, MenuFacts facts) {
         return nonEmpty(List.of(
                 List.of(Item.NEW_TASK, Item.NEW_TASK_IN_MAIN),
+                List.of(Item.FOCUS_PROJECT),
                 section(Item.REFRESH, Item.GITHUB_SETTINGS, Item.JIRA_SETTINGS,
                         facts.jiraEnabled() ? Item.ADD_JIRA_GROUP : null),
                 section(TaskActions.removable(row).isEmpty() ? null : Item.REMOVE_INACTIVE_WORKTREES,

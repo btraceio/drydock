@@ -78,6 +78,11 @@ import java.util.Optional;
  * why no non-invasive path exists) and for Codex it is unsupported (built-in
  * provider cannot carry extra headers), so an eval session of those kinds is
  * marked and badged but its requests are not rerouted.</p>
+ *
+ * <p>{@link #flagged()} records that the human flagged this session for
+ * follow-up: it needs their attention later, whatever its agent is doing. Only
+ * the human sets or clears it (the task tree's Flag for Follow-up toggle);
+ * nothing clears it on its own.</p>
  */
 public record ManagedAgentSession(
         ManagedSessionId id,
@@ -94,7 +99,8 @@ public record ManagedAgentSession(
         Optional<ManagedSessionId> forkedFrom,
         boolean evalMode,
         Optional<WorkflowId> workflowId,
-        boolean startedWithTask
+        boolean startedWithTask,
+        boolean flagged
 ) {
 
     public ManagedAgentSession {
@@ -114,6 +120,19 @@ public record ManagedAgentSession(
         if (displayName.isBlank()) {
             throw new IllegalArgumentException("ManagedAgentSession displayName must not be blank");
         }
+    }
+
+    /**
+     * As the canonical constructor with {@code flagged = false}; for callers
+     * (and tests) that do not participate in follow-up flagging.
+     */
+    public ManagedAgentSession(ManagedSessionId id, RepositoryId repositoryId, String displayName,
+                               AgentBinding binding, SessionWorkspace workspace, SessionStatus status,
+                               Instant createdAt, Instant lastOpenedAt, Optional<Integer> lastExitCode,
+                               PrLink pr, boolean namePinned, Optional<ManagedSessionId> forkedFrom,
+                               boolean evalMode, Optional<WorkflowId> workflowId, boolean startedWithTask) {
+        this(id, repositoryId, displayName, binding, workspace, status, createdAt, lastOpenedAt, lastExitCode,
+                pr, namePinned, forkedFrom, evalMode, workflowId, startedWithTask, false);
     }
 
     /**
@@ -270,6 +289,11 @@ public record ManagedAgentSession(
         return toBuilder().startedWithTask(newStartedWithTask).build();
     }
 
+    /** Sets or clears the human's follow-up flag. */
+    public ManagedAgentSession withFlagged(boolean newFlagged) {
+        return toBuilder().flagged(newFlagged).build();
+    }
+
     /**
      * The single construction path. Adding a component touches this class in
      * one place instead of once per {@code with*} method, which is the whole
@@ -292,6 +316,7 @@ public record ManagedAgentSession(
         private boolean evalMode;
         private Optional<WorkflowId> workflowId;
         private boolean startedWithTask;
+        private boolean flagged;
 
         private Builder(ManagedAgentSession from) {
             this.id = from.id;
@@ -309,6 +334,7 @@ public record ManagedAgentSession(
             this.evalMode = from.evalMode;
             this.workflowId = from.workflowId;
             this.startedWithTask = from.startedWithTask;
+            this.flagged = from.flagged;
         }
 
         /**
@@ -334,6 +360,7 @@ public record ManagedAgentSession(
             this.evalMode = false;
             this.workflowId = Optional.empty();
             this.startedWithTask = false;
+            this.flagged = false;
         }
 
         public Builder id(ManagedSessionId value) {
@@ -411,10 +438,15 @@ public record ManagedAgentSession(
             return this;
         }
 
+        public Builder flagged(boolean value) {
+            this.flagged = value;
+            return this;
+        }
+
         public ManagedAgentSession build() {
             return new ManagedAgentSession(id, repositoryId, displayName, binding, workspace, status,
                     createdAt, lastOpenedAt, lastExitCode, pr, namePinned, forkedFrom, evalMode, workflowId,
-                    startedWithTask);
+                    startedWithTask, flagged);
         }
     }
 }

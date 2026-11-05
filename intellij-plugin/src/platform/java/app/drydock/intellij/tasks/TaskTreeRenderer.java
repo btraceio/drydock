@@ -360,6 +360,9 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
         SessionStatus status = task.running() ? SessionStatus.RUNNING : task.session().status();
         setIcon(SessionDots.dotIcon(status, task.activity()));
         append(task.session().displayName());
+        if (task.session().flagged()) {
+            append("  " + FLAG_TAG, FLAG_ATTRIBUTES);
+        }
         if (task.readOnly()) {
             append("  RO", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
         }
@@ -387,6 +390,13 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
         Optional<Integer> linked = task.session().pr().number();
         return linked.isPresent() ? linked : task.branch().flatMap(PrCheckoutService::pullRequestNumberOf);
     }
+
+    /** The follow-up flag's tag on a session row. */
+    static final String FLAG_TAG = "\u2691 follow up";
+
+    /** The follow-up tag: bold in the stale flag's orange, so it reads as the human's own mark. */
+    private static final SimpleTextAttributes FLAG_ATTRIBUTES = new SimpleTextAttributes(
+            SimpleTextAttributes.STYLE_BOLD, new JBColor(new Color(0xB5, 0x4A, 0x0E), new Color(0xD9, 0x8A, 0x5A)));
 
     /** Review's hint word: bold, so "in review" reads as waiting on YOU, not as just another state (D16). */
     private static final SimpleTextAttributes REVIEW_HINT_ATTRIBUTES =

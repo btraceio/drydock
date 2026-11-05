@@ -1118,6 +1118,36 @@ class ApplicationStateCodecTest {
     }
 
     @Test
+    void aFlaggedSessionRoundTripsAndAnOldOneDecodesUnflagged() {
+        ManagedAgentSession session = new ManagedAgentSession(ManagedSessionId.newId(),
+                RepositoryId.newId(), "test-session",
+                new AgentBinding(AgentKind.CLAUDE, java.util.Optional.empty(), java.util.Optional.empty()),
+                SessionWorkspace.inRepository(Path.of("/tmp/repo")),
+                SessionStatus.INACTIVE, Instant.parse("2026-08-28T10:00:00Z"),
+                Instant.parse("2026-08-28T10:00:00Z"), java.util.Optional.empty(),
+                PrLink.none(), false, java.util.Optional.empty()).withFlagged(true);
+
+        ApplicationState state = new ApplicationState(List.of(), List.of(session), List.of(),
+                WorkspaceUiState.empty(), List.of());
+        ApplicationState decoded = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state));
+        assertTrue(decoded.sessions().get(0).flagged());
+
+        // State written before the member existed: the session decodes, unflagged.
+        JsonValue old = JsonParser.parse("""
+                {"schemaVersion":2,"repositories":[],
+                 "sessions":[{"id":"%s","repositoryId":"%s","displayName":"old-session",
+                  "agentKind":"claude","agentSessionId":null,"agentSessionName":null,
+                  "workingDirectory":"/tmp/repo","worktreeRoot":null,"status":"INACTIVE",
+                  "createdAt":"2026-01-01T00:00:00Z","lastOpenedAt":"2026-01-01T00:00:00Z",
+                  "lastExitCode":null,"prState":"NONE","prNumber":null,
+                  "branchCreatedHere":false,"namePinned":false,"forkedFrom":null,"evalMode":false}],
+                 "ui":{"selectedRepositoryId":null,"sidebarWidth":288.0,
+                        "expandedRepositoryIds":[],"theme":"DARK"}}
+                """.formatted(SESSION_ID, REPO_ID));
+        assertFalse(ApplicationStateCodec.fromJson(old).sessions().get(0).flagged());
+    }
+
+    @Test
     void aStateWithoutWorkflowsDecodesToAnEmptyList() {
         // Old state written before workflows existed has no "workflows" member;
         // it must decode to an empty list, not fail.

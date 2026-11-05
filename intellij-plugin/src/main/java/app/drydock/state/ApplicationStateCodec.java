@@ -82,7 +82,8 @@ import java.util.Set;
  *       "forkedFrom": "<uuid>" | null,
  *       "evalMode": <boolean>,
  *       "workflowId": "<uuid>" | null,
- *       "startedWithTask": <boolean>
+ *       "startedWithTask": <boolean>,
+ *       "flagged": <boolean>
  *     }
  *   ],
  *   "handoffBriefs": [
@@ -313,6 +314,7 @@ public final class ApplicationStateCodec {
                 .<JsonValue>map(w -> new JsonString(w.value().toString()))
                 .orElse(JsonValue.JsonNull.INSTANCE));
         obj.put("startedWithTask", new JsonBoolean(session.startedWithTask()));
+        obj.put("flagged", new JsonBoolean(session.flagged()));
         return obj;
     }
 
@@ -651,6 +653,9 @@ public final class ApplicationStateCodec {
             // existed was started without an injected prompt, and a malformed
             // value must not silently earn it the resume prompt. No schema bump.
             boolean startedWithTask = obj.get("startedWithTask") instanceof JsonBoolean st && st.value();
+            // Lenient like evalMode: a session persisted before this member
+            // existed was never flagged. No schema bump.
+            boolean flagged = obj.get("flagged") instanceof JsonBoolean fl && fl.value();
             // The persisted shape stays FLAT: grouping is a Java-side change,
             // and schemaVersion must not move for it.
             return new ManagedAgentSession(id, repositoryId, displayName,
@@ -658,7 +663,7 @@ public final class ApplicationStateCodec {
                     new SessionWorkspace(workingDirectory, worktreeRoot, branchCreatedHere),
                     status, createdAt, lastOpenedAt, lastExitCode,
                     PrLink.fromPersisted(prState, prNumber), namePinned, forkedFrom, evalMode, workflowId,
-                    startedWithTask);
+                    startedWithTask, flagged);
         } catch (IllegalArgumentException | DateTimeException e) {
             throw new StateDecodeException("Malformed session entry: " + e.getMessage());
         }

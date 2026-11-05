@@ -11,6 +11,7 @@ import app.drydock.intellij.agent.SessionCommandHandlers;
 import app.drydock.intellij.agent.SessionRename;
 import app.drydock.intellij.agent.SessionTransfer;
 import app.drydock.intellij.review.ReviewRequest;
+import app.drydock.intellij.startup.DrydockStartupActivity;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.intellij.tasks.TaskNode.StaleWorktrees;
@@ -64,6 +65,7 @@ final class TaskActions {
     enum DefaultActivation { SWITCH_TO_RUNNING, RESUME_HERE }
 
     private static final long REMOVE_TIMEOUT_SECONDS = 120;
+    private static final long FLAG_TIMEOUT_SECONDS = 30;
 
     private TaskActions() {
     }
@@ -174,6 +176,10 @@ final class TaskActions {
                 (project, row) -> SessionTransfer.show(project, row.session()));
         AnAction rename = task("Rename…", "Rename this session", AllIcons.Actions.Edit, row -> true,
                 (project, row) -> SessionRename.show(project, row.session()));
+        AnAction flag = task("Flag for Follow-up", "Mark this session as needing your attention later",
+                AllIcons.Nodes.Bookmark, row -> true, row -> true,
+                (presentation, row) -> presentation.setText(flagText(row.session().flagged())),
+                TaskActions::toggleFlag);
         AnAction done = task("Done with This Task…", "Forget the task, and optionally remove its worktree",
                 AllIcons.Actions.Checked, row -> true, TaskActions::notBusy,
                 (project, row) -> SessionCommandHandlers.done(project, row.session()));
@@ -188,6 +194,7 @@ final class TaskActions {
         actions.put(TaskMenu.Item.RESUME_IN_OWN_WINDOW, resumeInOwnWindow);
         actions.put(TaskMenu.Item.TRANSFER_TO, transfer);
         actions.put(TaskMenu.Item.RENAME, rename);
+        actions.put(TaskMenu.Item.FLAG, flag);
         actions.put(TaskMenu.Item.DONE_WITH_TASK, done);
         actions.put(TaskMenu.Item.REMOVE_WORKTREE, removeWorktrees);
         actions.put(TaskMenu.Item.REMOVE_STALE_WORKTREES, removeWorktrees);
@@ -212,6 +219,38 @@ final class TaskActions {
             }
         }
         return List.copyOf(toolbar);
+    }
+
+    /** Pure: the follow-up toggle's label for a session that is, or is not, flagged now. */
+    static String flagText(boolean flagged) {
+        return flagged ? "Clear Follow-up Flag" : "Flag for Follow-up";
+    }
+
+    /**
+     * Flips {@code row}'s follow-up flag. EDT. The write runs under a
+     * background progress that ends when it returns; a failure is shown in
+     * an error dialog on the EDT.
+     */
+    static void toggleFlag(Project from, TaskRow row) {
+        boolean flagged = !row.session().flagged();
+        ProgressManager.getInstance().run(new Task.Backgroundable(from,
+                flagged ? "Flagging session…" : "Clearing session flag…", false) {
+            @Override
+            public void run(@NotNull ProgressIndicator indicator) {
+                try {
+                    DrydockStartupActivity.sessions(from).setFlagged(row.session().id(), flagged)
+                            .get(FLAG_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } catch (ExecutionException | TimeoutException | RuntimeException e) {
+                    ApplicationManager.getApplication().invokeLater(
+                            () -> Messages.showErrorDialog(from,
+                                    "Could not change this session's flag: " + WorktreeErrors.visibleMessage(e),
+                                    "Drydock"),
+                            ModalityState.nonModal(), from.getDisposed());
+                }
+            }
+        });
     }
 
     /** Whether Ask Agent to Review Changes applies: the agent runs, whatever its mode. Pure. */
