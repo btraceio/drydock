@@ -814,6 +814,19 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
         List<String> prerequisites = after == null ? List.of() : List.copyOf(after);
         return supply(store -> {
             try {
+                // Checked before anything is written: MCP cannot edit relations later, so an
+                // unresolved reference stored here would block the task until a human edits it.
+                if (!prerequisites.isEmpty()) {
+                    TaskGraph graph = TaskGraph.of(scanFresh(), this::slugOf);
+                    for (String reference : prerequisites) {
+                        Optional<String> broken = graph.brokenReason(reference);
+                        if (broken.isPresent()) {
+                            return Outcome.refused("Prerequisite '" + reference + "' does not resolve: "
+                                    + broken.get() + ". Nothing was created; pass existing task ids"
+                                    + " (task_list shows them) or omit the prerequisite.");
+                        }
+                    }
+                }
                 TaskDocument created = store.create(repository, title, List.of());
                 // The core's create carries no prerequisites; the after refs land via one committed update.
                 return Outcome.committed(prerequisites.isEmpty() ? created

@@ -108,7 +108,8 @@ public final class TaskTools {
                                         + " first session note."))
                                 .put("after", schemaStringArray("Prerequisite references: bare task"
                                         + " ids or '<project>:<id>', at most " + MAX_AFTER_REFS
-                                        + " entries."))
+                                        + " entries. Each must name an existing task; an"
+                                        + " unresolved one refuses the create."))
                                 .put("project", schemaString("Registered project to create in, by"
                                         + " display slug; omit for this session's own repository.")),
                         "title"));

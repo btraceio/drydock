@@ -146,6 +146,9 @@ Done dialog of a prerequisite session warns before it removes such a worktree.
 - Reads span projects; status writes affect only tasks assigned to the calling
   session. Creation may target another registered project and defaults to human
   validation. A policy suggestion in prose does not change `done_by`.
+- `task_create` refuses an `after` reference that does not resolve (P2), and
+  writes nothing. MCP cannot edit relations later, so a stored broken
+  reference would block the task until a human edits the file.
 - `task_update` changes only `status` (`done` becomes `review` when
   `done_by: human`, D16) and appends a note to the body under a
   `## Session notes` heading. Dropping is human-only: MCP cannot set `dropped`

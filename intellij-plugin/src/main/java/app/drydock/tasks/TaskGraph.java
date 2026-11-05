@@ -82,15 +82,21 @@ public final class TaskGraph {
     }
 
     private final TaskSnapshot snapshot;
+    private final Function<RepositoryId, String> projectSlugs;
+    private final Map<String, List<RepositoryId>> bySlug;
+    private final Map<TaskId, TaskSnapshot.IdCollision> collisions;
     private final Map<TaskId, List<TaskDocument>> dependents;
     private final Map<TaskId, TaskDiagnostics> diagnostics;
 
     /** Builds the graph for one snapshot; call via {@link #of}. */
     private TaskGraph(TaskSnapshot snapshot, Function<RepositoryId, String> projectSlugs) {
         this.snapshot = snapshot;
+        this.projectSlugs = projectSlugs;
         Map<TaskId, TaskSnapshot.IdCollision> collisions = new HashMap<>();
         snapshot.idCollisions().forEach(collision -> collisions.put(collision.id(), collision));
+        this.collisions = collisions;
         Map<String, List<RepositoryId>> bySlug = new LinkedHashMap<>();
+        this.bySlug = bySlug;
         for (RepositoryId repository : snapshot.repositories()) {
             String slug = slugOf(projectSlugs, repository);
             if (slug != null) bySlug.computeIfAbsent(slug, any -> new ArrayList<>()).add(repository);
@@ -159,6 +165,13 @@ public final class TaskGraph {
     /** The diagnostics of one task, or empty when the snapshot holds no such document. */
     public Optional<TaskDiagnostics> diagnosticsOf(TaskId task) {
         return Optional.ofNullable(diagnostics.get(task));
+    }
+
+    /** Why {@code reference} names no task in this snapshot (the same reason a stored one would
+      * show as broken), or empty when it resolves. */
+    public Optional<String> brokenReason(String reference) {
+        return Optional.ofNullable(resolve(Objects.requireNonNull(reference, "reference"),
+                projectSlugs, bySlug, collisions).reason());
     }
 
     /** One stored reference text against P2: bare ids globally, qualified ids per slug. */
