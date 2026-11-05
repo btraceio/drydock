@@ -40,6 +40,7 @@ import app.drydock.intellij.tasks.TaskTreeModel.ViewFilter;
 import app.drydock.tasks.DelayedTaskRows;
 import app.drydock.tasks.TaskId;
 import app.drydock.tasks.TaskNode.DelayedTaskRow;
+import app.drydock.tasks.TaskNode.TasksSection;
 import app.drydock.tasks.TaskSnapshot;
 
 import com.intellij.icons.AllIcons;
@@ -85,12 +86,16 @@ import org.jetbrains.annotations.Nullable;
 import javax.swing.JPanel;
 import javax.swing.SwingUtilities;
 import javax.swing.event.DocumentEvent;
+import javax.swing.event.TreeExpansionEvent;
+import javax.swing.event.TreeWillExpandListener;
+import javax.swing.tree.ExpandVetoException;
 import javax.swing.tree.DefaultMutableTreeNode;
 import javax.swing.tree.DefaultTreeModel;
 import javax.swing.tree.TreePath;
 
 import java.awt.BorderLayout;
 import java.awt.Component;
+import java.awt.EventQueue;
 import java.awt.Rectangle;
 import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
@@ -143,6 +148,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             DataKey.create("drydock.task.tasksSection");
 
     /** Updates the visible tree as successful worktree removals complete. */
+    /** The registered project Focus on Project would show alone, snapshotted on the EDT for the BGT update. */
+    private static final DataKey<Focus> FOCUS_TARGET = DataKey.create("drydock.task.focusTarget");
+
     static final DataKey<WorktreeRemovalUi> WORKTREE_REMOVAL_UI = DataKey.create("drydock.task.worktreeRemovalUi");
 
     @FunctionalInterface
@@ -173,6 +181,13 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     private volatile String filter = "";
     private volatile ViewFilter viewFilter = ViewFilter.ALL;
     private List<TaskNode> displayedNodes = List.of();
+    /** The last applied rows before the focus narrowed them: where a hidden session's project is looked up. */
+    private List<TaskNode> displayedUnfocusedNodes = List.of();
+    /** The registered project the tree shows alone, or null for every project. Written on the EDT. */
+    private volatile Focus focus;
+    /** The session whose agent tab the user selected while the focus hides its row; null otherwise. EDT. */
+    private ManagedSessionId outsideFocus;
+    private final ProjectFocusBar focusBar = new ProjectFocusBar(this::focusOnOutside, () -> setFocus(null));
     private String displayedFilter = "";
     private ViewFilter displayedViewFilter = ViewFilter.ALL;
     /** Which lazy listing sections the user opened here, with the guard that keeps the
@@ -531,6 +546,30 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         // toolbar and the project row, one listing only from a section's
         // own menu (see the static refresh(…) dispatch below).
         AnAction refresh = refreshAction(refreshTarget);
+        // Shows one project alone, or every project again: the selected
+        // row's project, from any row under it. Focused, the same button
+        // drops the focus, whatever is selected.
+        AnAction focusProject = new DumbAwareAction("Focus on Project",
+                "Show only the selected row's project", AllIcons.General.Locate) {
+            @Override
+            public void update(@NotNull AnActionEvent e) {
+                boolean focused = focus != null;
+                e.getPresentation().setText(focused ? "Show All Projects" : "Focus on Project");
+                e.getPresentation().setDescription(focused ? "Show every project again"
+                        : "Show only the selected row's project");
+                e.getPresentation().setEnabled(focused || e.getData(FOCUS_TARGET) != null);
+            }
+
+            @Override
+            public @NotNull ActionUpdateThread getActionUpdateThread() {
+                return ActionUpdateThread.BGT;
+            }
+
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                setFocus(focus != null ? null : e.getData(FOCUS_TARGET));
+            }
+        };
         // The tree's context menu, one action instance per entry: TaskMenu
         // lays out which of them apply to the selection, and in what order
         // (A10), so a popup holds exactly the applicable actions.
@@ -563,6 +602,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         menuActions.put(TaskMenu.Item.EDIT_JIRA_GROUP, JiraTreeActions.editGroup(project, afterJiraGroupChange));
         menuActions.put(TaskMenu.Item.DELETE_JIRA_GROUP, JiraTreeActions.deleteGroup(project, afterJiraGroupChange));
         menuActions.put(TaskMenu.Item.REFRESH, refresh);
+        menuActions.put(TaskMenu.Item.FOCUS_PROJECT, focusProject);
         PopupHandler.installPopupMenu(tree,
                 new TreeMenu(menuActions, delayedTaskActions, newDelayedTask, JiraTreeActions::jiraEnabled),
                 "Drydock.TaskTree.Popup");
@@ -582,6 +622,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         // button (TaskActions.toolbarActions).
         toolbarActions.addAll(TaskActions.toolbarActions(taskActions));
         toolbarActions.addSeparator();
+        toolbarActions.add(focusProject);
         toolbarActions.add(refresh);
         ActionToolbar toolbar = ActionManager.getInstance().createActionToolbar("Drydock.TaskTree", toolbarActions, true);
         toolbar.setTargetComponent(this);
@@ -596,7 +637,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             // fetches anything, so none needs a busy wait.
             viewFilter = candidate;
             requestRebuild(false);
-        }), BorderLayout.SOUTH);
+        }), BorderLayout.CENTER);
+        query.add(focusBar, BorderLayout.SOUTH);
         top.add(query, BorderLayout.SOUTH);
         setToolbar(top);
 
@@ -681,7 +723,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                     @Override
                     public void selectionChanged(@NotNull FileEditorManagerEvent event) {
                         if (event.getNewFile() instanceof AgentConsoleFile console) {
-                            selectSessionRow(console.sessionId());
+                            consoleSelected(console.sessionId());
                         }
                     }
                 });
@@ -746,7 +788,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 TaskMenu.Item.IMPLEMENT, TaskMenu.Item.TRIAGE,
                 TaskMenu.Item.GITHUB_SETTINGS, TaskMenu.Item.JIRA_SETTINGS,
                 TaskMenu.Item.ADD_JIRA_GROUP, TaskMenu.Item.EDIT_JIRA_GROUP, TaskMenu.Item.DELETE_JIRA_GROUP,
-                TaskMenu.Item.REFRESH);
+                TaskMenu.Item.REFRESH, TaskMenu.Item.FOCUS_PROJECT);
     }
 
     /**
@@ -974,6 +1016,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             sink.set(SELECTED_NODES, selected);
         }
         selectedProjectRoot().ifPresent(root -> sink.set(SELECTED_PROJECT_ROOT, root));
+        focusTarget().ifPresent(target -> sink.set(FOCUS_TARGET, target));
     }
 
     /** Whether {@code event} landed on the link text of the row at {@code path}. EDT. */
@@ -1340,6 +1383,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         long requestedVersion = requested.get().version();
         String requestedFilter = filter;
         ViewFilter requestedViewFilter = viewFilter;
+        Focus requestedFocus = focus;
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         plugin.initialization().thenRunAsync(() -> {
             if (disposed || project.isDisposed()) {
@@ -1369,13 +1413,26 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             TaskLayer tasks = taskLayer(nodes, inputs.watchedTasks(),
                     plugin.taskService().liveSessionIds(), displayNamesByRepository(plugin),
                     requestedFilter, Instant.now());
+            // The focus narrows what this pass built; the unfocused rows ride
+            // along so a session the focus hides can still be placed.
+            List<TaskNode> shown = nodes;
+            TaskLayer shownTasks = tasks;
+            if (requestedFocus != null) {
+                shown = ProjectFocus.focused(nodes, requestedFocus.root());
+                Map<RepositoryId, Path> roots = repositoryRoots(plugin);
+                shownTasks = ProjectFocus.focused(tasks, repository -> ProjectFocus.inFocus(repository,
+                        requestedFocus.root(), roots, gathered.mainRootOf()));
+            }
+            List<TaskNode> applied = shown;
+            TaskLayer appliedTasks = shownTasks;
             ApplicationManager.getApplication().invokeLater(
-                    () -> finishRebuild(requestedVersion, requestedFilter, requestedViewFilter, nodes, tasks, null),
+                    () -> finishRebuild(requestedVersion, requestedFilter, requestedViewFilter, applied, nodes,
+                            appliedTasks, null),
                     ModalityState.any(), project.getDisposed());
         }, plugin.executor()).exceptionally(failure -> {
             ApplicationManager.getApplication().invokeLater(
                     () -> finishRebuild(requestedVersion, requestedFilter, requestedViewFilter, List.of(),
-                            TaskLayer.EMPTY, failure),
+                            List.of(), TaskLayer.EMPTY, failure),
                     ModalityState.any(), project.getDisposed());
             return null;
         });
@@ -1383,7 +1440,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
     /** EDT: applies only the newest requested view, then schedules any request coalesced behind it. */
     private void finishRebuild(long requestedVersion, String requestedFilter, ViewFilter requestedViewFilter,
-                               List<TaskNode> nodes, TaskLayer tasks, Throwable failure) {
+                               List<TaskNode> nodes, List<TaskNode> unfocused, TaskLayer tasks,
+                               Throwable failure) {
         boolean newerPassPending = requestedVersion != refreshRequests.version();
         if (failure != null) {
             // Never silent: an empty tree with no reason given is the worst
@@ -1399,7 +1457,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 }
             }
         } else if (requestedVersion == refreshRequests.version() && !disposed && !project.isDisposed()) {
-            apply(nodes, tasks, requestedFilter, requestedViewFilter);
+            apply(nodes, unfocused, tasks, requestedFilter, requestedViewFilter);
         }
         refreshRequests.finishPass();
         if (!disposed && !project.isDisposed() && newerPassPending) {
@@ -1408,8 +1466,10 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     }
 
     /** EDT: swaps in the new rows, keeping the selected task selected. */
-    private void apply(List<TaskNode> nodes, TaskLayer tasks, String appliedFilter, ViewFilter appliedViewFilter) {
+    private void apply(List<TaskNode> nodes, List<TaskNode> unfocused, TaskLayer tasks, String appliedFilter,
+                       ViewFilter appliedViewFilter) {
         displayedNodes = List.copyOf(nodes);
+        displayedUnfocusedNodes = List.copyOf(unfocused);
         displayedTasks = tasks;
         displayedFilter = appliedFilter;
         displayedViewFilter = appliedViewFilter;
@@ -1424,7 +1484,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         boolean tasksSectionCollapsed = tasksSectionCollapsed();
         DefaultMutableTreeNode root = new DefaultMutableTreeNode();
         DefaultMutableTreeNode[] toSelect = new DefaultMutableTreeNode[1];
-        for (app.drydock.tasks.TaskNode.TasksSection section : tasks.sections()) {
+        for (TasksSection section : tasks.sections()) {
             root.add(treeNode(section, selectedTask, toSelect));
         }
         for (TaskNode node : nodes) {
@@ -1447,7 +1507,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             if (!tasksSectionCollapsed) {
                 for (int i = 0; i < root.getChildCount(); i++) {
                     if (root.getChildAt(i) instanceof DefaultMutableTreeNode child
-                            && child.getUserObject() instanceof app.drydock.tasks.TaskNode.TasksSection) {
+                            && child.getUserObject() instanceof TasksSection) {
                         tree.expandPath(new TreePath(child.getPath()));
                     }
                 }
@@ -1457,6 +1517,17 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 tree.setSelectionPath(new TreePath(toSelect[0].getPath()));
             }
         });
+        // A session the focus hid is selected once a focus change shows it;
+        // one that left the tree altogether is no longer outside anything.
+        if (outsideFocus != null) {
+            if (sessionPath(root, outsideFocus).isPresent()) {
+                selectSessionRow(outsideFocus);
+                outsideFocus = null;
+            } else if (hiddenProject(outsideFocus).isEmpty()) {
+                outsideFocus = null;
+            }
+        }
+        updateFocusBar();
     }
 
     /**
@@ -1521,7 +1592,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         if (disposed || project.isDisposed() || removed.isEmpty()) {
             return;
         }
-        apply(TaskTreeModel.withoutWorktrees(displayedNodes, removed), displayedTasks,
+        apply(TaskTreeModel.withoutWorktrees(displayedNodes, removed),
+                TaskTreeModel.withoutWorktrees(displayedUnfocusedNodes, removed), displayedTasks,
                 displayedFilter, displayedViewFilter);
     }
 
@@ -1577,7 +1649,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     }
 
     /** One task-layer section's tree node (T17a): its children, built by the same path. */
-    private static DefaultMutableTreeNode treeNode(app.drydock.tasks.TaskNode.TasksSection section,
+    private static DefaultMutableTreeNode treeNode(TasksSection section,
                                                    Optional<TaskId> selectedTask, DefaultMutableTreeNode[] toSelect) {
         DefaultMutableTreeNode treeNode = new DefaultMutableTreeNode(section);
         // The layer only ever puts task rows in its sections; other kinds
@@ -1646,11 +1718,33 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         }
     }
 
+    /**
+     * Task-related parents (the Tasks section, a session row, a task row)
+     * toggle only from the expand handle: a click on the row itself selects,
+     * activates or edits it, and never folds its children.
+     */
+    private void vetoRowClickToggle(TreeExpansionEvent event) throws ExpandVetoException {
+        if (!(EventQueue.getCurrentEvent() instanceof MouseEvent mouse) || mouse.getComponent() != tree) {
+            return;
+        }
+        TreePath path = event.getPath();
+        Object node = ((DefaultMutableTreeNode) path.getLastPathComponent()).getUserObject();
+        if (!(node instanceof TasksSection || node instanceof TaskRow || node instanceof DelayedTaskRow)) {
+            return;
+        }
+        Rectangle bounds = tree.getPathBounds(path);
+        // The handle sits left of the row's bounds; a press there is the handle's toggle.
+        if (bounds != null && mouse.getX() >= bounds.x
+                && path.equals(tree.getPathForLocation(mouse.getX(), mouse.getY()))) {
+            throw new ExpandVetoException(event, "a row click does not toggle a task row");
+        }
+    }
+
     /** Whether the user collapsed the Tasks section in the current tree (T17a). */
     private boolean tasksSectionCollapsed() {
         if (tree.getModel().getRoot() instanceof DefaultMutableTreeNode root && root.getChildCount() > 0
                 && root.getChildAt(0) instanceof DefaultMutableTreeNode first
-                && first.getUserObject() instanceof app.drydock.tasks.TaskNode.TasksSection) {
+                && first.getUserObject() instanceof TasksSection) {
             return tree.isCollapsed(new TreePath(first.getPath()));
         }
         return false;
@@ -1674,7 +1768,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
      * gains. Pure data; empty when the service has published no snapshot
      * yet (the session-only input).
      */
-    record TaskLayer(List<app.drydock.tasks.TaskNode.TasksSection> sections,
+    record TaskLayer(List<TasksSection> sections,
                      Map<String, List<app.drydock.tasks.TaskNode.DelayedTaskRow>> attachedBySession) {
 
         static final TaskLayer EMPTY = new TaskLayer(List.of(), Map.of());
@@ -1736,8 +1830,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                         .filter(row -> inScope(row, scope, displayNames))
                         .filter(row -> DelayedTaskRows.matches(itemFilter, row))
                         .toList();
-        List<app.drydock.tasks.TaskNode.TasksSection> sections = sectionRows.isEmpty() ? List.of()
-                : List.of(new app.drydock.tasks.TaskNode.TasksSection("Tasks",
+        List<TasksSection> sections = sectionRows.isEmpty() ? List.of()
+                : List.of(new TasksSection("Tasks",
                         sectionRows.stream().map(row -> (app.drydock.tasks.TaskNode) row).toList()));
         return new TaskLayer(sections, bySession);
     }
@@ -1883,6 +1977,81 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 });
             }
         });
+    }
+
+    /** A registered project the tree can show alone: its main root and the name the focus bar shows. */
+    private record Focus(Path root, String name) {
+    }
+
+    /** EDT: the project the selected rows belong to, when it is a registered project's row the tree shows. */
+    private Optional<Focus> focusTarget() {
+        return selectedProjectRoot().flatMap(root -> displayedNodes.stream()
+                .filter(ProjectRow.class::isInstance)
+                .map(ProjectRow.class::cast)
+                .filter(row -> row.project().root().equals(root))
+                .findFirst()
+                .map(row -> new Focus(root, row.project().displayName())));
+    }
+
+    /** EDT: shows {@code next} alone, or every project for null, and rebuilds. */
+    private void setFocus(Focus next) {
+        focus = next;
+        updateFocusBar();
+        // The rebuild that applies the focus clears this, on every path.
+        tree.setPaintBusy(true);
+        requestRebuild(false);
+    }
+
+    /** EDT: moves the focus to the project of the selected session the focus hides. */
+    private void focusOnOutside() {
+        if (outsideFocus != null) {
+            hiddenProject(outsideFocus).ifPresent(row ->
+                    setFocus(new Focus(row.project().root(), row.project().displayName())));
+        }
+    }
+
+    /**
+     * EDT: the agent tab of {@code sessionId} was selected in the editor
+     * area. Its row is selected when the tree shows it; when the focus hides
+     * it, the focus bar names its project instead.
+     */
+    private void consoleSelected(ManagedSessionId sessionId) {
+        outsideFocus = hiddenProject(sessionId).isPresent() ? sessionId : null;
+        updateFocusBar();
+        selectSessionRow(sessionId);
+    }
+
+    /** EDT: the project row of {@code sessionId} when the focus is what hides it. */
+    private Optional<ProjectRow> hiddenProject(ManagedSessionId sessionId) {
+        Focus current = focus;
+        if (current == null) {
+            return Optional.empty();
+        }
+        return ProjectFocus.projectOf(displayedUnfocusedNodes, sessionId)
+                .filter(row -> !row.project().root().equals(current.root()));
+    }
+
+    /** EDT: brings the focus bar in line with the focus and the hidden selected session. */
+    private void updateFocusBar() {
+        Focus current = focus;
+        if (current == null) {
+            focusBar.display(Optional.empty());
+            return;
+        }
+        Optional<ProjectFocusBar.Outside> outside = outsideFocus == null ? Optional.empty()
+                : hiddenProject(outsideFocus).map(row -> new ProjectFocusBar.Outside(
+                        sessionRowsOf(List.of(row)).get(outsideFocus.toString()).session().displayName(),
+                        row.project().displayName()));
+        focusBar.display(Optional.of(new ProjectFocusBar.State(current.name(), outside)));
+    }
+
+    /** Background only: each recorded repository's canonical root (filesystem IO). */
+    private static Map<RepositoryId, Path> repositoryRoots(DrydockPluginService plugin) {
+        Map<RepositoryId, Path> roots = new LinkedHashMap<>();
+        for (Repository repository : plugin.stateStore().state().repositories()) {
+            roots.putIfAbsent(repository.id(), RepositoryCatalog.canonicalize(repository.root()));
+        }
+        return roots;
     }
 
     /** The path of the first session row of {@code sessionId} under {@code node}, depth first. Pure. */

@@ -221,6 +221,7 @@ class TaskMenuTest {
                 sectionsOf(issues));
         assertEquals(List.of(
                 List.of(TaskMenu.Item.NEW_TASK, TaskMenu.Item.NEW_TASK_IN_MAIN),
+                List.of(TaskMenu.Item.FOCUS_PROJECT),
                 List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.GITHUB_SETTINGS, TaskMenu.Item.JIRA_SETTINGS,
                         TaskMenu.Item.ADD_JIRA_GROUP),
                 List.of(TaskMenu.Item.REMOVE_FROM_DRYDOCK)),
@@ -268,16 +269,19 @@ class TaskMenuTest {
     void projectRowOffersInactiveRemovalOnlyWhenOneApplies() {
         assertEquals(List.of(
                 List.of(TaskMenu.Item.NEW_TASK, TaskMenu.Item.NEW_TASK_IN_MAIN),
+                List.of(TaskMenu.Item.FOCUS_PROJECT),
                 List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.GITHUB_SETTINGS, TaskMenu.Item.JIRA_SETTINGS),
                 List.of(TaskMenu.Item.REMOVE_INACTIVE_WORKTREES, TaskMenu.Item.REMOVE_FROM_DRYDOCK)),
                 sectionsOf(project(worktree(false, false))));
         assertEquals(List.of(
                 List.of(TaskMenu.Item.NEW_TASK, TaskMenu.Item.NEW_TASK_IN_MAIN),
+                List.of(TaskMenu.Item.FOCUS_PROJECT),
                 List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.GITHUB_SETTINGS, TaskMenu.Item.JIRA_SETTINGS),
                 List.of(TaskMenu.Item.REMOVE_FROM_DRYDOCK)),
                 sectionsOf(project(worktree(true, false))));
         assertEquals(List.of(
                 List.of(TaskMenu.Item.NEW_TASK, TaskMenu.Item.NEW_TASK_IN_MAIN),
+                List.of(TaskMenu.Item.FOCUS_PROJECT),
                 List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.GITHUB_SETTINGS, TaskMenu.Item.JIRA_SETTINGS),
                 List.of(TaskMenu.Item.REMOVE_FROM_DRYDOCK)),
                 sectionsOf(project()));

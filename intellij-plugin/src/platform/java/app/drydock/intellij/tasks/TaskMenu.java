@@ -83,6 +83,8 @@ final class TaskMenu {
         /** Delete a Jira group, after confirmation; only a group node offers it. */
         DELETE_JIRA_GROUP,
         REFRESH,
+        /** Show only this project in the tree, or every project again when it is focused already. */
+        FOCUS_PROJECT,
         NEW_TASK_IN_MAIN,
         REMOVE_WORKTREE,
         REMOVE_STALE_WORKTREES,
@@ -178,6 +180,7 @@ final class TaskMenu {
     private static List<List<Item>> project(ProjectRow row, MenuFacts facts) {
         return nonEmpty(List.of(
                 List.of(Item.NEW_TASK, Item.NEW_TASK_IN_MAIN),
+                List.of(Item.FOCUS_PROJECT),
                 section(Item.REFRESH, Item.GITHUB_SETTINGS, Item.JIRA_SETTINGS,
                         facts.jiraEnabled() ? Item.ADD_JIRA_GROUP : null),
                 section(TaskActions.removable(row).isEmpty() ? null : Item.REMOVE_INACTIVE_WORKTREES,
