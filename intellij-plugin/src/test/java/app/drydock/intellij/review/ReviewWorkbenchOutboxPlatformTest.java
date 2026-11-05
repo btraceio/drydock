@@ -81,11 +81,14 @@ public class ReviewWorkbenchOutboxPlatformTest extends BasePlatformTestCase {
             @Override public CompletableFuture<Optional<String>> submitReview() { asked.add("submit"); return opened; }
         });
         outbox.render(OutboxModel.snapshot(List.of(), true, false));
-        assertFalse("a local review has no PR lane", outbox.submitReview.getParent().isVisible());
+        outbox.showPrTab(true);
+        assertFalse("a local review has no Pull request tab", outbox.submitReview.getParent().isShowing()
+                || outbox.submitReview.getParent().getParent().isVisible());
 
         ReviewAnnotation forPr = comment("n5", "Rename it.").withTriage(Triage.CONFIRMED).withPostToPr(true);
         outbox.render(OutboxModel.snapshot(List.of(forPr), true, true));
-        assertTrue(outbox.submitReview.getParent().isVisible());
+        outbox.showPrTab(true);
+        assertTrue(outbox.submitReview.getParent().getParent().isVisible());
         assertEquals("1 comment to post", ReviewWorkbenchOutbox.prCountsText(OutboxModel.snapshot(List.of(forPr), true, true)));
         outbox.submitReview.doClick();
         assertEquals(List.of("submit"), asked);
@@ -96,6 +99,26 @@ public class ReviewWorkbenchOutboxPlatformTest extends BasePlatformTestCase {
         PlatformTestUtil.dispatchAllEventsInIdeEventQueue();
         assertEquals(ReviewWorkbenchOutbox.SUBMIT_REVIEW, outbox.submitReview.getText());
         assertEquals("gh is not installed", outbox.prNotice.getText());
+    }
+
+    public void testTheTabsCountTheirLanesAndAPullRequestTabShowsOnlyInAPrReview() {
+        ReviewAnnotation forPr = comment("n5", "Rename it.").withTriage(Triage.CONFIRMED).withPostToPr(true);
+        ReviewAnnotation toFix = comment("n7", "Fix it.").withTriage(Triage.CONFIRMED);
+        OutboxModel.Snapshot pr = OutboxModel.snapshot(List.of(forPr), true, true);
+        assertEquals("Pull request (1)", ReviewWorkbenchOutbox.tabLabel(true, pr));
+        assertEquals("Session (1)", ReviewWorkbenchOutbox.tabLabel(false,
+                OutboxModel.snapshot(List.of(comment("n5", "Rename it.")), true)));
+
+        ReviewWorkbenchOutbox outbox = outbox();
+        assertEquals("Session and Pull request", 2, outbox.tabActions.getChildActionsOrStubs().length);
+        outbox.render(pr);
+        outbox.showPrTab(true);
+        assertTrue("the Pull request tab shows its lane", outbox.submitReview.getParent().getParent().isVisible());
+        assertFalse(outbox.send.getParent().getParent().getParent().isVisible());
+
+        outbox.render(OutboxModel.snapshot(List.of(toFix), true, false));
+        assertTrue("a local review falls back to the Session tab",
+                outbox.send.getParent().getParent().getParent().isVisible());
     }
 
     public void testARowNamesTheFindingItsLineAndTheReviewersComment() {
