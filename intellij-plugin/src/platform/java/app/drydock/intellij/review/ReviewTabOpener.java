@@ -42,12 +42,12 @@ import java.util.concurrent.atomic.AtomicReference;
  * background work: a visible "Loading review…" progress whose
  * body is the mint of the checkout's review scope, bound to {@code
  * linkSession} — the session whose Changes link opened the tab (Q7, T8).
- * Only when that mint settles does the open path activate the dedicated
- * Review tool window. That ordering is what makes the
+ * Only when that mint settles does the open path create the dedicated
+ * Review tool window's content (without showing the window). That ordering is what makes the
  * binding flow: the window's own load (T13's provider) resolves the same
  * checkout read-mostly, so by the time it runs the registry already holds
  * the link-bound scope and the provider hands it out unchanged instead of
- * minting unbound (AC19). Once the window is active, the review workbench
+ * minting unbound (AC19). Once the content exists, the review workbench
  * tab opens over its content ({@link ReviewWorkbenchFile#open}), and an
  * already-loaded content re-runs its diff (spec "Refresh": the Changes
  * link re-runs the diff); a content that was only just created is
@@ -72,19 +72,24 @@ public final class ReviewTabOpener {
     private static final Logger LOG = System.getLogger(ReviewTabOpener.class.getName());
 
     /**
-     * The open path's platform calls: the dedicated Review window is
-     * activated by its pinned id — one content, so activation is the
-     * whole selection, and no {@code ChangesViewContentManager} call
-     * remains. Faked in tests.
+     * The open path's platform calls: the dedicated Review window's content
+     * is created by its pinned id, the workbench opens, and its diff re-runs.
+     * Faked in tests.
      */
     interface Host {
-        /** Activates the dedicated Review tool window ({@link ReviewToolWindowFactory#TOOL_WINDOW_ID}). */
-        void activate(Project project, String toolWindowId);
+        /**
+         * Creates the dedicated Review tool window's content
+         * ({@link ReviewToolWindowFactory#TOOL_WINDOW_ID}), which holds the
+         * live review the workbench shows, without showing the window: the
+         * workbench is where the review is read, and the window beside it
+         * only took space.
+         */
+        void prepareContent(Project project, String toolWindowId);
 
         /** Q9: saves the open documents ({@link ReviewDocumentSaves#saveOpenDocuments}); EDT, write intent. */
         void saveDocuments(Project project);
 
-        /** Re-runs the diff of the live content's scope ({@code ReviewTabProvider}); EDT, after the activation. */
+        /** Re-runs the diff of the live content's scope ({@code ReviewTabProvider}); EDT, after the content exists. */
         void reloadTab(Project project);
 
         /**
@@ -197,8 +202,8 @@ public final class ReviewTabOpener {
         // (The save itself takes the write-intent lock: ReviewDocumentSaves.)
         host.saveDocuments(project);
         // The placeholder next (AC18): the click visibly does something
-        // before any background work starts, and before the window is
-        // activated. The mint hands its outcome to the EDT half through the
+        // before any background work starts, and before the window's
+        // content is created. The mint hands its outcome to the EDT half through the
         // reference — one open, one hand-off; two opens racing is the same
         // accepted race the mint documents, and each finish reads only its
         // own outcome.
@@ -246,9 +251,8 @@ public final class ReviewTabOpener {
     }
 
     /**
-     * The EDT half after the mint: activate the dedicated Review window —
-     * its single content needs no separate selection (T7) — then re-run its
-     * diff. When the minted scope carries no review data (no findings, no
+     * The EDT half after the mint: the dedicated Review window's content and
+     * the workbench, then its diff re-run. When the minted scope carries no review data (no findings, no
      * tour — a checkout no review was ever prepared for), the open ends in
      * the preparation offer instead of a silently empty window: the review
      * data lives with the checkout a review ran against, and a session that
@@ -269,14 +273,14 @@ public final class ReviewTabOpener {
     }
 
     /**
-     * The EDT half: activate the dedicated Review window — its single
-     * content needs no separate selection (T7) — then re-run its diff.
+     * The EDT half: the dedicated Review window's content (created, not
+     * shown), the workbench, then the diff re-run.
      */
     private void selectTab(Project project) {
         if (project.isDisposed()) {
             return;
         }
-        host.activate(project, ReviewToolWindowFactory.TOOL_WINDOW_ID);
+        host.prepareContent(project, ReviewToolWindowFactory.TOOL_WINDOW_ID);
         host.openWorkbench(project);
         host.reloadTab(project);
     }
@@ -513,21 +517,25 @@ public final class ReviewTabOpener {
     }
 
     /**
-     * The production host calls: activate the dedicated Review window by its
-     * pinned id — one content, so no content-manager selection exists — then
-     * re-run its diff.
+     * The production host calls: the dedicated Review window's content by
+     * its pinned id, created and the window hidden, then the diff re-run.
      */
     private static final class ProductionHost implements Host {
 
         @Override
-        public void activate(Project project, String toolWindowId) {
+        public void prepareContent(Project project, String toolWindowId) {
             ToolWindow toolWindow = ToolWindowManager.getInstance(project).getToolWindow(toolWindowId);
             if (toolWindow == null) {
                 LOG.log(Level.WARNING, () -> "The '" + toolWindowId + "' tool window is not registered in "
                         + project.getName());
                 return;
             }
-            toolWindow.activate(null);
+            // Asking for the content manager creates a lazy tool window's content (the factory's
+            // createToolWindowContent) without showing the window.
+            toolWindow.getContentManager();
+            if (toolWindow.isVisible()) {
+                toolWindow.hide();
+            }
         }
 
         @Override
