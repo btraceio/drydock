@@ -10,6 +10,7 @@ import app.drydock.tasks.TaskNode.DelayedTaskRow;
 import app.drydock.tasks.*;
 
 import com.intellij.openapi.ui.TestDialogManager;
+import com.intellij.openapi.util.text.StringUtil;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -115,10 +116,12 @@ public class DelayedTaskStartBindingTest extends DelayedTaskStartFixture {
         DelayedTaskStart.start(getProject(), row(mine, "Ship here", here));
         await(() -> shown.size() == 2, "both route refusals");
         String cycle = route(planOf(a)).orElseThrow();
-        assertEquals("the cycle refusal is the planner's text, verbatim", cycle, shown.get(0));
+        // The dialog renders HTML, so the planner's text reaches it entity-escaped.
+        assertEquals("the cycle refusal is the planner's text, verbatim",
+                StringUtil.escapeXmlEntities(cycle), shown.get(0));
         assertTrue("it names the cycle", cycle.contains("cycle"));
         assertEquals("the cross-project refusal is the T38 one, verbatim",
-                crossProjectRefusal(), shown.get(1));
+                StringUtil.escapeXmlEntities(crossProjectRefusal()), shown.get(1));
         assertEquals("nothing was written: no partial launch", before, settledTree());
         try (TaskRuns runs = new TaskRuns(storeRoot)) {
             assertTrue("no reservation receipt exists",
