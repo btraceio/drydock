@@ -4,6 +4,7 @@ import app.drydock.agent.api.AgentRegistry;
 import app.drydock.delayedtasks.DelayedTaskService;
 import app.drydock.delayedtasks.TaskStoreWatcher;
 import app.drydock.domain.SessionStatus;
+import app.drydock.git.GhCliService.BranchPullRequest;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.JiraIssue;
 import app.drydock.git.PrCheckoutService;
@@ -366,8 +367,14 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
         if (task.readOnly()) {
             append("  RO", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
         }
-        pullRequestOf(task).ifPresent(number ->
-                append("  PR #" + number, SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES));
+        if (task.branchPullRequest().isPresent()) {
+            BranchPullRequest pullRequest = task.branchPullRequest().get();
+            append("  " + pullRequestBadge(pullRequest), badgeAttributes(pullRequest));
+            setToolTipText(pullRequestTooltip(pullRequest));
+        } else {
+            pullRequestOf(task).ifPresent(number ->
+                    append("  PR #" + number, SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES));
+        }
         String agent = AgentLabels.displayName(DrydockPluginService.getInstance().registry(),
                 task.session().agentKind());
         append("   " + secondary(task, agent, Duration.between(task.session().lastOpenedAt(), Instant.now())),
@@ -390,6 +397,60 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
         Optional<Integer> linked = task.session().pr().number();
         return linked.isPresent() ? linked : task.branch().flatMap(PrCheckoutService::pullRequestNumberOf);
     }
+
+    /** What a branch's pull request badge reads as, which also picks its colour. */
+    enum PullRequestBadgeKind { OPEN, DRAFT, MERGED, CLOSED, UNKNOWN }
+
+    /** Pure. The badge kind of a branch's pull request: a draft is only a draft while it is open. */
+    static PullRequestBadgeKind badgeKind(BranchPullRequest pullRequest) {
+        return switch (pullRequest.state()) {
+            case OPEN -> pullRequest.draft() ? PullRequestBadgeKind.DRAFT : PullRequestBadgeKind.OPEN;
+            case MERGED -> PullRequestBadgeKind.MERGED;
+            case CLOSED -> PullRequestBadgeKind.CLOSED;
+            case UNKNOWN -> PullRequestBadgeKind.UNKNOWN;
+        };
+    }
+
+    /** Pure. The badge text: {@code PR #12}, with the state word for anything but a plain open PR. */
+    static String pullRequestBadge(BranchPullRequest pullRequest) {
+        String base = "PR #" + pullRequest.number();
+        return switch (badgeKind(pullRequest)) {
+            case OPEN, UNKNOWN -> base;
+            case DRAFT -> base + " draft";
+            case MERGED -> base + " merged";
+            case CLOSED -> base + " closed";
+        };
+    }
+
+    /** Pure. The session row's hover text when its branch has a pull request. */
+    static String pullRequestTooltip(BranchPullRequest pullRequest) {
+        String state = switch (badgeKind(pullRequest)) {
+            case OPEN -> "open";
+            case DRAFT -> "draft";
+            case MERGED -> "merged";
+            case CLOSED -> "closed";
+            case UNKNOWN -> "state unknown";
+        };
+        return "Pull request #" + pullRequest.number() + " (" + state + ") from "
+                + pullRequest.headRefName() + (pullRequest.title().isBlank() ? "" : ": " + pullRequest.title());
+    }
+
+    /** The badge colours: GitHub's own green, grey, purple and red for open, draft, merged and closed. */
+    private static SimpleTextAttributes badgeAttributes(BranchPullRequest pullRequest) {
+        return switch (badgeKind(pullRequest)) {
+            case OPEN -> OPEN_BADGE;
+            case DRAFT, UNKNOWN -> SimpleTextAttributes.GRAYED_BOLD_ATTRIBUTES;
+            case MERGED -> MERGED_BADGE;
+            case CLOSED -> CLOSED_BADGE;
+        };
+    }
+
+    private static final SimpleTextAttributes OPEN_BADGE = new SimpleTextAttributes(
+            SimpleTextAttributes.STYLE_BOLD, new JBColor(new Color(0x1A, 0x7F, 0x37), new Color(0x3F, 0xB9, 0x50)));
+    private static final SimpleTextAttributes MERGED_BADGE = new SimpleTextAttributes(
+            SimpleTextAttributes.STYLE_BOLD, new JBColor(new Color(0x82, 0x50, 0xDF), new Color(0xA3, 0x71, 0xF7)));
+    private static final SimpleTextAttributes CLOSED_BADGE = new SimpleTextAttributes(
+            SimpleTextAttributes.STYLE_BOLD, new JBColor(new Color(0xCF, 0x22, 0x2E), new Color(0xF8, 0x51, 0x49)));
 
     /** The follow-up flag's tag on a session row. */
     static final String FLAG_TAG = "\u2691 follow up";

@@ -10,7 +10,9 @@ import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
+import app.drydock.git.GhCliService.BranchPullRequest;
 import app.drydock.git.GhCliService.OpenIssue;
+import app.drydock.git.GhCliService.PrInfo.PrLifecycle;
 import app.drydock.git.JiraIssue;
 import app.drydock.intellij.tasks.TaskNode.Deferred;
 import app.drydock.intellij.tasks.TaskNode.GitHubNode;
@@ -300,5 +302,21 @@ class TaskTreeRendererTest {
         assertEquals(Optional.of(77), TaskTreeRenderer.pullRequestOf(prRow(PrLink.none(), "pr-77")),
                 "else the pr-<n> branch of a PR checkout");
         assertEquals(Optional.empty(), TaskTreeRenderer.pullRequestOf(prRow(PrLink.none(), "fix/chunk_memory")));
+    }
+
+    @Test
+    void aBranchPullRequestBadgeNamesItsStateUnlessPlainOpen() {
+        assertEquals("PR #12", TaskTreeRenderer.pullRequestBadge(branchPr(PrLifecycle.OPEN, false)));
+        assertEquals("PR #12 draft", TaskTreeRenderer.pullRequestBadge(branchPr(PrLifecycle.OPEN, true)));
+        assertEquals("PR #12 merged", TaskTreeRenderer.pullRequestBadge(branchPr(PrLifecycle.MERGED, false)));
+        assertEquals("PR #12 closed", TaskTreeRenderer.pullRequestBadge(branchPr(PrLifecycle.CLOSED, false)));
+        assertEquals(TaskTreeRenderer.PullRequestBadgeKind.MERGED,
+                TaskTreeRenderer.badgeKind(branchPr(PrLifecycle.MERGED, true)), "a merged draft is merged");
+        assertEquals("Pull request #12 (draft) from feature/x: Fix it",
+                TaskTreeRenderer.pullRequestTooltip(branchPr(PrLifecycle.OPEN, true)));
+    }
+
+    private static BranchPullRequest branchPr(PrLifecycle state, boolean draft) {
+        return new BranchPullRequest(12, state, draft, "feature/x", "Fix it", Optional.empty());
     }
 }

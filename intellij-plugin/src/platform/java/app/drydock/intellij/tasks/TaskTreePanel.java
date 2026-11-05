@@ -297,6 +297,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         tree.setRootVisible(false);
         tree.setShowsRootHandles(true);
         tree.setCellRenderer(new TaskTreeRenderer());
+        // A session's PR badge arrives after the gather that asked for it.
+        inputs.onLateData(() -> requestRebuild(false));
         // The first read runs git once per project; a blank "Nothing to show"
         // meanwhile looked like a broken window.
         tree.getEmptyText().setText("Loading Drydock projects…");
