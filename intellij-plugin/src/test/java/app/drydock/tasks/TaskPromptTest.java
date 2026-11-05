@@ -95,6 +95,16 @@ class TaskPromptTest {
     // blockedBy fields naming the unfinished prerequisite ids.
 
     @Test
+    void statusIsTheLaunchBindingsAndNamesAnEarlierStart() {
+        TaskDocument resumed = new TaskDocument(TaskId.of("resumed-a"), REPO, "Task resumed-a", TaskStatus.STARTED,
+                DoneBy.HUMAN, Optional.empty(), List.of(), List.of("sess-old"), "", "");
+        String p = render(PI, plan(List.of(resumed), List.of(), List.of()));
+        assertTrue(p.contains("status: started (bound to this session at launch; started before this launch);"),
+                "an earlier start is named, so the agent can look for its work");
+        assertFalse(p.contains("status: open"), "the prompt never claims the pre-launch status");
+    }
+
+    @Test
     void claudeManyTasksMirrorUnfinishedEdgesIntoBlockedBy() {
         String p = render(CLAUDE, plan(many(), List.of(), List.of()));
         assertTrue(p.contains("## WORK - this segment's tasks, in dependency order"));
@@ -104,8 +114,8 @@ class TaskPromptTest {
         assertTrue(p.contains("blockedBy (unfinished prerequisite ids): none\n"));
         assertTrue(p.contains("blockedBy (unfinished prerequisite ids): many-a\n"));
         assertTrue(p.contains("blockedBy (unfinished prerequisite ids): many-b, many-c\n"));
-        assertTrue(p.contains("status: open; done_by: human (your done stores review until a human confirms)\n"));
-        assertTrue(p.contains("status: open; done_by: agent (you may store done directly)\n"));
+        assertTrue(p.contains("status: started (bound to this session at launch); done_by: human (your done stores review until a human confirms)\n"));
+        assertTrue(p.contains("status: started (bound to this session at launch); done_by: agent (you may store done directly)\n"));
         assertTrue(p.contains("TITLE (user data):\n" + BOUNDARY + "\nTask many-d\n" + BOUNDARY + "\n"));
         assertTrue(inOrder(p, "TASK many-a", "TASK many-b", "TASK many-c", "TASK many-d"),
                 "the tasks appear in dependency order");

@@ -53,8 +53,10 @@ class DelayedTaskServiceTest {
             await(service.initialize());
             assertTrue(Files.isDirectory(root) && await(service.snapshot()).documents().isEmpty(),
                     "initialization creates the store root and it scans empty");
+            TaskId prerequisite = await(service.create("Refresh the token", List.of(), repository))
+                    .document().id();
             TaskToolContext.Outcome created = await(service.create("Fix the login redirect",
-                    List.of("auth-lib:token-refresh"), repository));
+                    List.of(prerequisite.text()), repository));
             assertFalse(created.refused(), created.refusal());
             TaskId id = created.document().id();
             assertTrue(id.text().startsWith("fix-the-login-redirect-"), id.text());
@@ -62,9 +64,23 @@ class DelayedTaskServiceTest {
                     "the layout is <root>/<repository-id>/<id>.md");
             TaskDocument stored = await(service.snapshot()).byId().get(id);
             assertNotNull(stored, "the committed write is what the next scan sees");
-            assertEquals(List.of("auth-lib:token-refresh"), stored.after());
+            assertEquals(List.of(prerequisite.text()), stored.after());
             assertTrue(stored.sessions().isEmpty() && stored.doneBy() == DoneBy.HUMAN,
                     "a created task carries no sessions and defaults to human validation");
+        }
+    }
+
+    // 1a. A prerequisite that names no task refuses the create, and nothing is written.
+    @Test
+    void unresolvedPrerequisiteRefusesTheCreate(@TempDir Path root) throws Exception {
+        RepositoryId repository = RepositoryId.newId();
+        try (DelayedTaskService service = new DelayedTaskService(root, executor, List::of, List::of)) {
+            await(service.initialize());
+            TaskToolContext.Outcome refused = await(service.create("Follow up",
+                    List.of("<this-pr-110-task-id>"), repository));
+            assertTrue(refused.refused(), "an unresolved reference is refused");
+            assertTrue(refused.refusal().contains("'<this-pr-110-task-id>'"), refused.refusal());
+            assertTrue(await(service.snapshot()).documents().isEmpty(), "nothing was created");
         }
     }
 

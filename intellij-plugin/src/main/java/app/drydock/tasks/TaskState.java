@@ -231,7 +231,7 @@ public final class TaskState {
             blockers.add("broken prerequisite reference '" + broken.reference() + "': " + broken.reason());
         }
         for (TaskGraph.CycleDiagnostic cycle : diagnostics.cycles()) {
-            blockers.add("in a dependency cycle: " + cycle.text());
+            blockers.add("in a dependency cycle: " + graph.titledPath(cycle));
         }
         for (TaskGraph.ResolvedReference reference : diagnostics.resolved()) {
             TaskDocument target = reference.target();

@@ -278,9 +278,15 @@ public final class TaskPrompt {
 
     /** The status and done-by markers of one task (D16): what the agent's
       * done does - stored directly for agent tasks, review until a human
-      * confirms for human tasks. */
+      * confirms for human tasks. The status is the one the agent will read:
+      * the launch binds every segment task to this session as started before
+      * the harness spawns, after the plan's snapshot was taken. */
     private static void markers(StringBuilder out, TaskDocument task) {
-        out.append("status: ").append(task.status().storedName());
+        out.append("status: started (bound to this session at launch");
+        if (task.status() != TaskStatus.OPEN) {
+            out.append("; ").append(task.status().storedName()).append(" before this launch");
+        }
+        out.append(")");
         out.append("; done_by: ").append(task.doneBy().storedName());
         if (task.doneBy() == DoneBy.AGENT) out.append(" (you may store done directly)\n");
         else out.append(" (your done stores review until a human confirms)\n");

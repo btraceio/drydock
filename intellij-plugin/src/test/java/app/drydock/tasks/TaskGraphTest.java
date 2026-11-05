@@ -111,6 +111,18 @@ class TaskGraphTest {
                 reasonFor(graph, id("coll-a"), "alpha:clash-x"));
     }
 
+    @Test
+    void brokenReasonChecksAnUnstoredReferenceByTheSameRules() {
+        Store store = new Store();
+        store.add("alpha", "bare-a");
+        store.add("beta", "cross-b");
+        TaskGraph graph = TaskGraph.of(store.snapshot(), store.slugs("alpha", "alpha", "beta", "beta"));
+        assertEquals(Optional.empty(), graph.brokenReason("cross-b"), "a bare id resolves");
+        assertEquals(Optional.empty(), graph.brokenReason("beta:cross-b"), "a qualified id resolves");
+        assertEquals(Optional.of("no task with id '<pr-task>'"), graph.brokenReason("<pr-task>"));
+        assertEquals(Optional.of("no repository with project slug 'ghost'"), graph.brokenReason("ghost:bare-a"));
+    }
+
     // Matrix 2: qualified refs scope per slug, never a global fallback.
 
     @Test

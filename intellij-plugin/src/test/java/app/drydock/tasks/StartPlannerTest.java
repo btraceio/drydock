@@ -172,8 +172,9 @@ class StartPlannerTest {
         StartPlan plan = plan(store, store.slugs("alpha", "alpha", "beta", "beta"), "col-t");
         assertFalse(plan.startable());
         assertEquals(List.of(new StartPlan.Refusal(SEGMENT_CYCLE, "project segments form a cycle although"
-                + " the task graph is acyclic: 'alpha' -> 'beta' -> 'alpha' (the closing edges: task 'col-t'"
-                + " in 'alpha' waits for 'col-b1' in 'beta'; task 'col-b1' in 'beta' waits for 'col-c1'"
+                + " the task graph is acyclic: 'alpha' -> 'beta' -> 'alpha' (the closing edges: task 'Task col-t'"
+                + " in 'alpha' waits for 'Task col-b1' in 'beta'; task 'Task col-b1' in 'beta' waits for"
+                + " 'Task col-c1'"
                 + " in 'alpha')")), plan.refusals());
         assertTrue(plan.segments().isEmpty() && plan.stages().isEmpty() && plan.context().isEmpty()
                 && plan.followUps().isEmpty(), "a refused plan starts nothing");
@@ -223,11 +224,11 @@ class StartPlannerTest {
         StartPlan done = plan(store, store.slugs("alpha", "alpha"), "fin-x");
         assertFalse(done.startable());
         assertEquals(List.of(new StartPlan.Refusal(TARGET_FINISHED,
-                "target task 'fin-x' is already done: it starts nothing")), done.refusals());
+                "target task 'Task fin-x' is already done: it starts nothing")), done.refusals());
         StartPlan dropped = plan(store, store.slugs("alpha", "alpha"), "gone-x");
         assertFalse(dropped.startable());
         assertEquals(List.of(new StartPlan.Refusal(TARGET_FINISHED,
-                "target task 'gone-x' is already dropped: it starts nothing")), dropped.refusals());
+                "target task 'Task gone-x' is already dropped: it starts nothing")), dropped.refusals());
         assertTrue(dropped.segments().isEmpty() && dropped.stages().isEmpty()
                 && dropped.context().isEmpty() && dropped.followUps().isEmpty());
     }
@@ -242,7 +243,7 @@ class StartPlannerTest {
         store.open("alpha", "own-t", "own-x");
         StartPlan plan = plan(store, store.slugs("alpha", "alpha"), "own-t", "sess-live-1");
         assertFalse(plan.startable());
-        assertEquals(List.of(new StartPlan.Refusal(OWNED_TASK, "task 'own-x' (Task own-x) is already owned"
+        assertEquals(List.of(new StartPlan.Refusal(OWNED_TASK, "task 'Task own-x' is already owned"
                 + " by live session 'sess-live-1'")), plan.refusals());
         assertTrue(plan.segments().isEmpty() && plan.stages().isEmpty());
     }
@@ -278,7 +279,7 @@ class StartPlannerTest {
         broken.open("alpha", "brk-t", "no-such-id");
         StartPlan refused = plan(broken, broken.slugs("alpha", "alpha"), "brk-t");
         assertFalse(refused.startable());
-        assertEquals(List.of(new StartPlan.Refusal(BROKEN_REFERENCE, "task 'brk-t': broken prerequisite"
+        assertEquals(List.of(new StartPlan.Refusal(BROKEN_REFERENCE, "task 'Task brk-t': broken prerequisite"
                 + " reference 'no-such-id': no task with id 'no-such-id'")), refused.refusals());
         Store cycled = new Store();
         cycled.open("alpha", "cyc-a", "cyc-b");
@@ -287,8 +288,10 @@ class StartPlannerTest {
         StartPlan cycle = plan(cycled, cycled.slugs("alpha", "alpha"), "cyc-t");
         assertFalse(cycle.startable());
         assertEquals(List.of(
-                new StartPlan.Refusal(TASK_CYCLE, "task 'cyc-a' is in a dependency cycle: cyc-a -> cyc-b -> cyc-a"),
-                new StartPlan.Refusal(TASK_CYCLE, "task 'cyc-b' is in a dependency cycle: cyc-b -> cyc-a -> cyc-b")),
+                new StartPlan.Refusal(TASK_CYCLE, "task 'Task cyc-a' is in a dependency cycle:"
+                        + " 'Task cyc-a' -> 'Task cyc-b' -> 'Task cyc-a'"),
+                new StartPlan.Refusal(TASK_CYCLE, "task 'Task cyc-b' is in a dependency cycle:"
+                        + " 'Task cyc-b' -> 'Task cyc-a' -> 'Task cyc-b'")),
                 cycle.refusals());
         assertTrue(cycle.segments().isEmpty() && cycle.stages().isEmpty());
     }

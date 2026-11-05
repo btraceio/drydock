@@ -1,6 +1,8 @@
 package app.drydock.delayedtasks;
 
+import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.RepositoryId;
+import app.drydock.intellij.tasks.TaskNavigator;
 import app.drydock.intellij.worktree.WorktreeErrors;
 import app.drydock.tasks.TaskDocument;
 import app.drydock.tasks.TaskGraph;
@@ -26,6 +28,7 @@ import com.intellij.openapi.wm.IdeFocusManager;
 
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
@@ -147,6 +150,19 @@ public final class TaskNotifications implements AutoCloseable {
                 .viewOf(task).orElse(null);
         return view != null && view.presentation() == Presentation.READY ? view : null;
     }
+    /** Pure: the newest of the task's sessions in LATEST that the catalog still holds, or null. */
+    static ManagedAgentSession sessionOf(TaskId task, TaskSnapshot latest, List<ManagedAgentSession> catalog) {
+        TaskDocument document = latest == null ? null : latest.byId().get(task);
+        if (document == null) { return null; }
+        List<String> ids = document.sessions();
+        for (int i = ids.size() - 1; i >= 0; i--) { // sessions are appended: the last is the newest
+            for (ManagedAgentSession session : catalog) {
+                if (session.id().toString().equals(ids.get(i))) { return session; }
+            }
+        }
+        return null;
+    }
+
     /** The task's title in {@code snapshot}, or its id when it is gone. */
     private static String title(TaskSnapshot snapshot, TaskId task) {
         TaskDocument document = snapshot == null ? null : snapshot.byId().get(task);
@@ -185,6 +201,9 @@ public final class TaskNotifications implements AutoCloseable {
                                 () -> settle(notice.task(), TaskStatus.DONE, "confirm done for")));
                         balloon.addAction(NotificationAction.createSimpleExpiring("Reopen",
                                 () -> settle(notice.task(), TaskStatus.OPEN, "reopen")));
+                        // Not expiring: looking at the work comes before confirming or reopening it.
+                        balloon.addAction(NotificationAction.createSimple("Show Session",
+                                () -> showSession(notice.task())));
                     }
                     case READY -> balloon.addAction(NotificationAction.createSimpleExpiring("Start",
                             () -> start(notice.task())));
@@ -229,6 +248,18 @@ public final class TaskNotifications implements AutoCloseable {
             DelayedTaskStart.start(project, new DelayedTaskRow(view, document.title(),
                     document.repository(), document.created(), false, document.sessions()));
         }
+        /** Show Session: the task's newest catalog session in the LATEST snapshot, raised
+          * the way Go to Blocker Session raises one. */
+        private void showSession(TaskId task) {
+            TaskSnapshot latest = latest();
+            ManagedAgentSession session = sessionOf(task, latest, service.catalogSessions());
+            if (session == null) {
+                refuse("'" + title(latest, task) + "' has no session left in Drydock's session catalog.");
+                return;
+            }
+            TaskNavigator.switchTo(session);
+        }
+
         /** The latest CACHED watched snapshot (T21a's discipline), or null before the first. */
         private TaskSnapshot latest() {
             TaskStoreWatcher.WatchedSnapshot watched = service.watchedSnapshot();

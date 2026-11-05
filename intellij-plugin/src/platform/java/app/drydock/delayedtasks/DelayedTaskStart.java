@@ -42,6 +42,7 @@ import com.intellij.openapi.progress.Task;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.project.ProjectManager;
 import com.intellij.openapi.ui.Messages;
+import com.intellij.openapi.util.text.StringUtil;
 import org.jetbrains.annotations.NotNull;
 
 import java.lang.System.Logger;
@@ -324,7 +325,8 @@ public final class DelayedTaskStart {
             LOG.log(Level.WARNING, "Drydock start refused (headless): {0}", message);
             return;
         }
-        application.invokeLater(() -> Messages.showErrorDialog(from, message, "Drydock"),
+        // The dialog renders HTML: a stored reference such as '<some-id>' would vanish as a tag.
+        application.invokeLater(() -> Messages.showErrorDialog(from, StringUtil.escapeXmlEntities(message), "Drydock"),
                 ModalityState.nonModal(), from == null ? null : from.getDisposed());
     }
 
