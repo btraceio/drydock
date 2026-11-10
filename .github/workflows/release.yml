@@ -133,7 +133,9 @@ jobs:
     name: Build jbang jar
     needs: [setup, prepare, native]
     if: ${{ always() && needs.setup.result == 'success' && needs.native.result == 'success' && (needs.prepare.result == 'success' || needs.prepare.result == 'skipped') }}
-    runs-on: macos-14
+    # macos-15, not macos-14: GitHub retired the macos-14 runner label
+    # (see the comment in tests.yml's app:test job).
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

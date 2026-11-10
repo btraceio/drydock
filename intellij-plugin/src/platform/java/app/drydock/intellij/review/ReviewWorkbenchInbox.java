@@ -15,10 +15,13 @@ import com.intellij.openapi.actionSystem.DefaultActionGroup;
 import com.intellij.openapi.project.DumbAwareToggleAction;
 import com.intellij.ui.JBColor;
 import com.intellij.ui.components.JBLabel;
+import com.intellij.ui.components.JBPanel;
 import com.intellij.ui.components.JBScrollPane;
+import com.intellij.ui.components.panels.VerticalLayout;
 import com.intellij.ui.components.JBTextArea;
 import com.intellij.util.ui.JBUI;
 import com.intellij.util.ui.UIUtil;
+import com.intellij.util.ui.WrapLayout;
 import org.jetbrains.annotations.NotNull;
 
 import javax.swing.Box;
@@ -26,8 +29,10 @@ import javax.swing.BoxLayout;
 import javax.swing.ButtonGroup;
 import javax.swing.JButton;
 import javax.swing.JComponent;
+import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JRadioButton;
+import javax.swing.JTextArea;
 import javax.swing.JViewport;
 import javax.swing.Scrollable;
 import javax.swing.SwingConstants;
@@ -169,8 +174,8 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
     final DefaultActionGroup scopeActions = new DefaultActionGroup();
     private final Map<String, FindingInlayCard> cards = new LinkedHashMap<>();
     private final JPanel composerPanel = new JPanel(new BorderLayout());
-    private final JBTextArea composerTitle = wrapped(true);
-    private final JBTextArea composerNote = wrapped(false);
+    private final JTextArea composerTitle = ReviewTypography.prose(ReviewTypography.Role.CARD_TITLE);
+    private final JTextArea composerNote = ReviewTypography.prose(ReviewTypography.Role.META);
     final JBTextArea composerText = new JBTextArea(5, 20);
     private final JButton composerSubmit = new JButton();
     /** The composer's two ways to use a selection: a comment, or a question to the review's agent. */
@@ -178,7 +183,8 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
     final JRadioButton askMode = new JRadioButton(ASK_MODE);
     /** A comment's severity, one chip each; Question until the reviewer picks another. */
     final Map<Severity, JRadioButton> severities = new EnumMap<>(Severity.class);
-    private final JPanel severityRow = new JPanel(new FlowLayout(FlowLayout.LEFT, JBUI.scale(4), 0));
+    private final JPanel severityRow = new JPanel(
+            new WrapLayout(WrapLayout.LEFT, JBUI.scale(ReviewTypography.S), JBUI.scale(ReviewTypography.XS)));
     private Composer composer;
     private InboxModel.Snapshot shown = InboxModel.Snapshot.empty(InboxModel.Tab.TO_TRIAGE, InboxModel.Scope.ALL);
     /** Whether no agent has reviewed the change yet; the inbox then offers the reviews. */
@@ -208,10 +214,11 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
         top.add(tabs.getComponent(), BorderLayout.NORTH);
         top.add(scopes.getComponent(), BorderLayout.SOUTH);
 
-        stack.setLayout(new BoxLayout(stack, BoxLayout.Y_AXIS));
-        stack.setBorder(JBUI.Borders.empty(4));
-        notice.setBorder(JBUI.Borders.empty(2, 8));
-        notice.setForeground(UIUtil.getContextHelpForeground());
+        stack.setLayout(new VerticalLayout(ReviewTypography.M));
+        stack.setBorder(JBUI.Borders.empty(ReviewTypography.M, ReviewTypography.L));
+        notice.setBorder(JBUI.Borders.compound(JBUI.Borders.customLineTop(JBUI.CurrentTheme.ToolWindow.borderColor()),
+                JBUI.Borders.empty(ReviewTypography.S, ReviewTypography.L)));
+        ReviewTypography.apply(notice, ReviewTypography.Role.META);
         notice.setVisible(false);
 
         buildComposer();
@@ -221,28 +228,23 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
         add(north, BorderLayout.NORTH);
         add(new JBScrollPane(stack), BorderLayout.CENTER);
         add(notice, BorderLayout.SOUTH);
+        built = true;
         render(shown);
     }
 
-    /** A read-only text that wraps to the pane's width, in the UI font; bold for the title. */
-    private static JBTextArea wrapped(boolean bold) {
-        JBTextArea area = new JBTextArea();
-        area.setEditable(false);
-        area.setLineWrap(true);
-        area.setWrapStyleWord(true);
-        area.setOpaque(false);
-        area.setFont(bold ? JBUI.Fonts.label().asBold() : JBUI.Fonts.label());
-        return area;
+    /** Set at the end of the constructor: updateUI runs before that, with nothing to restyle yet. */
+    private boolean built;
+
+    @Override
+    public void updateUI() {
+        super.updateUI();
+        if (built) {
+            ReviewTypography.restyle(this);
+        }
     }
 
     private void buildComposer() {
-        composerTitle.setBorder(JBUI.Borders.empty(6, 8, 2, 8));
-        composerNote.setForeground(UIUtil.getContextHelpForeground());
-        composerNote.setBorder(JBUI.Borders.empty(0, 8, 2, 8));
-        composerText.setLineWrap(true);
-        composerText.setWrapStyleWord(true);
-        // A text area defaults to the editor's monospace font; a comment is prose.
-        composerText.setFont(JBUI.Fonts.label());
+        ReviewTypography.applyFont(composerText, ReviewTypography.Role.BODY);
         composerText.setMargin(JBUI.insets(4, 6));
         ButtonGroup modes = new ButtonGroup();
         modes.add(commentMode);
@@ -254,36 +256,39 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
         modeRow.add(commentMode);
         modeRow.add(askMode);
         ButtonGroup chips = new ButtonGroup();
-        severityRow.add(new JBLabel(SEVERITY));
+        severityRow.add(ReviewTypography.label(SEVERITY, ReviewTypography.Role.META));
         for (Severity severity : Severity.values()) {
             JRadioButton chip = new JRadioButton(SeverityPresentation.label(severity), SeverityPresentation.icon(severity));
             chips.add(chip);
             severities.put(severity, chip);
             severityRow.add(chip);
         }
-        JPanel choices = new JPanel();
-        choices.setLayout(new BoxLayout(choices, BoxLayout.Y_AXIS));
-        modeRow.setAlignmentX(LEFT_ALIGNMENT);
-        severityRow.setAlignmentX(LEFT_ALIGNMENT);
+        JPanel choices = new JPanel(new VerticalLayout(ReviewTypography.XS));
+        choices.setOpaque(false);
         choices.add(modeRow);
         choices.add(severityRow);
-        choices.setBorder(JBUI.Borders.empty(0, 4));
         JButton cancel = new JButton("Cancel");
         cancel.addActionListener(e -> closeComposer());
         composerSubmit.addActionListener(e -> submitComposer());
-        JPanel buttons = new JPanel(new FlowLayout(FlowLayout.RIGHT, JBUI.scale(4), 0));
+        JPanel buttons = new JPanel(new FlowLayout(FlowLayout.RIGHT, JBUI.scale(ReviewTypography.M), 0));
         buttons.add(cancel);
         buttons.add(composerSubmit);
-        JPanel labels = new JPanel(new BorderLayout());
-        labels.add(composerTitle, BorderLayout.NORTH);
-        labels.add(composerNote, BorderLayout.CENTER);
-        labels.add(choices, BorderLayout.SOUTH);
+        JPanel labels = new JPanel(new VerticalLayout(ReviewTypography.S));
+        labels.setOpaque(false);
+        labels.add(composerTitle);
+        labels.add(composerNote);
+        labels.add(choices);
         JBScrollPane text = new JBScrollPane(composerText);
         // An outlined field: the scroll pane's own border is invisible in the dark themes.
-        text.setBorder(JBUI.Borders.compound(JBUI.Borders.empty(4, 8), JBUI.Borders.customLine(JBColor.border(), 1)));
+        text.setBorder(JBUI.Borders.compound(JBUI.Borders.empty(ReviewTypography.M, 0),
+                JBUI.Borders.customLine(JBColor.border(), 1)));
         composerPanel.add(labels, BorderLayout.NORTH);
         composerPanel.add(text, BorderLayout.CENTER);
         composerPanel.add(buttons, BorderLayout.SOUTH);
+        // One hairline between the fixed composer and the scrolling stack.
+        composerPanel.setBorder(JBUI.Borders.compound(
+                JBUI.Borders.customLineBottom(JBUI.CurrentTheme.ToolWindow.borderColor()),
+                JBUI.Borders.empty(ReviewTypography.M, ReviewTypography.L)));
         composerPanel.setVisible(false);
     }
 
@@ -369,9 +374,18 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
 
     /** Shows {@code state}'s inbox. */
     void render(WorkbenchState state) {
-        surface = state.mode() == WorkbenchState.Mode.PR ? FindingInlayCard.Surface.PR_INBOX
-                : FindingInlayCard.Surface.INBOX;
-        unreviewed = unreviewed(state);
+        FindingInlayCard.Surface nextSurface = state.mode() == WorkbenchState.Mode.PR
+                ? FindingInlayCard.Surface.PR_INBOX : FindingInlayCard.Surface.INBOX;
+        boolean nextUnreviewed = unreviewed(state);
+        if (nextSurface == surface && nextUnreviewed == unreviewed && state.inbox().equals(shown)) {
+            // The inbox, its surface and its unreviewed-ness are unchanged:
+            // rebuilding the cards would only destroy any comment the user is
+            // typing into one. A decision still rebuilds — it changes the
+            // snapshot.
+            return;
+        }
+        surface = nextSurface;
+        unreviewed = nextUnreviewed;
         render(state.inbox());
     }
 
@@ -390,12 +404,10 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
 
     /** "No agent has reviewed this change yet." and a button per review to ask for. */
     private JPanel askForReview() {
-        JPanel panel = new JPanel();
-        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
-        panel.setAlignmentX(LEFT_ALIGNMENT);
-        panel.setBorder(JBUI.Borders.empty(8));
-        JBLabel text = new JBLabel(NO_REVIEW_TEXT);
-        text.setAlignmentX(LEFT_ALIGNMENT);
+        JPanel panel = new JPanel(new VerticalLayout(ReviewTypography.M));
+        panel.setOpaque(false);
+        panel.setBorder(JBUI.Borders.empty(ReviewTypography.M, 0));
+        JLabel text = ReviewTypography.label(NO_REVIEW_TEXT, ReviewTypography.Role.BODY);
         panel.add(text);
         boolean enabled = actions.canStartReview();
         for (ReviewTabOpener.ReviewStart start : ReviewTabOpener.ReviewStart.values()) {
@@ -406,9 +418,8 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
             button.setToolTipText(ReviewWorkbenchEditor.startDescription(start));
             button.setEnabled(enabled);
             button.addActionListener(e -> actions.startReview(start));
-            button.setAlignmentX(LEFT_ALIGNMENT);
-            panel.add(Box.createVerticalStrut(JBUI.scale(6)));
-            panel.add(button);
+            // VerticalLayout fills the width; a button keeps its own size.
+            panel.add(JBUI.Panels.simplePanel().addToLeft(button));
         }
         return panel;
     }
@@ -421,15 +432,14 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
         if (unreviewed) {
             stack.add(askForReview());
         } else if (inbox.cards().isEmpty()) {
-            JBLabel empty = new JBLabel(EMPTY_TEXT, SwingConstants.CENTER);
-            empty.setForeground(UIUtil.getContextHelpForeground());
-            empty.setAlignmentX(LEFT_ALIGNMENT);
+            JLabel empty = ReviewTypography.label(EMPTY_TEXT, ReviewTypography.Role.META);
+            empty.setHorizontalAlignment(SwingConstants.CENTER);
+            empty.setBorder(JBUI.Borders.empty(ReviewTypography.XXL, 0));
             stack.add(empty);
         }
         for (InboxModel.Card card : inbox.cards()) {
             FindingInlayCard view = new FindingInlayCard(card.finding(), Optional.empty(), clock,
                     new CardCallbacks(card.finding()), surface);
-            view.setAlignmentX(LEFT_ALIGNMENT);
             cards.put(card.finding().id(), view);
             stack.add(view);
         }
@@ -475,6 +485,7 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
 
     private void report(Optional<String> text) {
         notice.setText(text.orElse(""));
+        notice.setToolTipText(text.orElse(null)); // the notice line clips; the tooltip keeps the words
         notice.setVisible(text.isPresent());
     }
 

@@ -26,10 +26,12 @@ import com.intellij.util.ui.WrapLayout;
 import kotlin.Unit;
 
 import javax.swing.BorderFactory;
+import javax.swing.Box;
 import javax.swing.BoxLayout;
 import javax.swing.Icon;
 import javax.swing.JComponent;
 import javax.swing.JEditorPane;
+import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.SwingConstants;
 import java.awt.BorderLayout;
@@ -221,6 +223,10 @@ public final class FindingInlayCard extends JPanel {
         this.clock = Objects.requireNonNull(clock, "clock");
         this.callbacks = Objects.requireNonNull(callbacks, "callbacks");
         checkEdt();
+        // The card restyles itself: updateUI re-renders the whole subtree, and
+        // renderActions re-applies the one persistent typed component (progress),
+        // so a surface's restyle walk must not descend into it.
+        ReviewTypography.selfRestyling(this);
         setLayout(new BorderLayout());
         setOpaque(false);
 
@@ -230,7 +236,7 @@ public final class FindingInlayCard extends JPanel {
         comment.getEmptyText().setText(COMMENT_HINT);
         comment.addActionListener(e -> submitComment());
         actions.setOpaque(false);
-        progress.setForeground(UIUtil.getContextHelpForeground());
+        ReviewTypography.apply(progress, ReviewTypography.Role.META);
         progress.setVisible(false);
 
         // The footer sits in the items' content column: indented past the
@@ -243,6 +249,7 @@ public final class FindingInlayCard extends JPanel {
         footer.setBorder(JBUI.Borders.empty(2, ITEM.getContentLeftShift(), padding.bottom, padding.right));
         comment.setAlignmentX(LEFT_ALIGNMENT);
         actions.setAlignmentX(LEFT_ALIGNMENT);
+        actions.setBorder(JBUI.Borders.emptyTop(ReviewTypography.S));
         footer.add(comment);
         footer.add(actions);
 
@@ -323,6 +330,16 @@ public final class FindingInlayCard extends JPanel {
         wrapWidth = content;
         applyWrapWidth();
         revalidate();
+    }
+
+    @Override
+    public void updateUI() {
+        super.updateUI();
+        // render() rebuilds every block with fresh fonts and colours; the
+        // guard is JPanel's constructor call, before the fields exist.
+        if (finding != null) {
+            render();
+        }
     }
 
     /** The card's own layout: a changed assigned width re-wraps the blocks at it. */
@@ -459,6 +476,7 @@ public final class FindingInlayCard extends JPanel {
         if (finding.title().filter(text -> !text.isBlank()).isPresent()) {
             body.add(block(HtmlChunk.text(titleText).bold().toString()));
             if (!opening.isBlank()) {
+                body.add(Box.createVerticalStrut(JBUI.scale(ReviewTypography.S)));
                 body.add(block(paragraphs(opening)));
             }
         } else if (!opening.isBlank()) {
@@ -467,8 +485,9 @@ public final class FindingInlayCard extends JPanel {
             body.add(block(HtmlChunk.text(titleText).bold().toString()));
         }
         driftHint.ifPresent(hint -> {
+            body.add(Box.createVerticalStrut(JBUI.scale(ReviewTypography.S)));
             driftBlock = block(HtmlChunk.text(hint).italic().toString());
-            driftBlock.pane.setForeground(UIUtil.getContextHelpForeground());
+            ReviewTypography.apply(driftBlock.pane, ReviewTypography.Role.BODY_MUTED);
             body.add(driftBlock);
         });
 
@@ -476,6 +495,12 @@ public final class FindingInlayCard extends JPanel {
         // header-actions slot is hover-only (edit/delete in a review thread),
         // and a finding's state must be readable without hovering.
         JComponent header = header(finding.author(), finding.at());
+        // The severity word sits between the author and the age, coloured only
+        // for the two severities a reviewer must act on (SeverityPresentation).
+        JLabel severity = ReviewTypography.label(SeverityPresentation.label(finding.effectiveSeverity()),
+                ReviewTypography.Role.META);
+        severity.setForeground(SeverityPresentation.foreground(finding.effectiveSeverity()));
+        header.add(severity, 1);
         for (String tag : stateTags) {
             header.add(tag(tag));
         }
@@ -511,10 +536,9 @@ public final class FindingInlayCard extends JPanel {
         JPanel row = new JPanel(new FlowLayout(FlowLayout.LEADING, JBUI.scale(6), 0));
         row.setOpaque(false);
         JBLabel name = new JBLabel(author);
-        name.setFont(JBFont.label());
+        ReviewTypography.apply(name, ReviewTypography.Role.BODY);
         JBLabel age = new JBLabel(age(at));
-        age.setFont(JBFont.label());
-        age.setForeground(UIUtil.getContextHelpForeground());
+        ReviewTypography.apply(age, ReviewTypography.Role.META);
         row.add(name);
         row.add(age);
         return row;
@@ -605,6 +629,7 @@ public final class FindingInlayCard extends JPanel {
                 case SHOW_IN_DIFF -> showInDiffLink();
             });
         }
+        ReviewTypography.apply(progress, ReviewTypography.Role.META);
         actions.add(progress);
         setControlsEnabled(!busy && !disposed);
         actions.revalidate();

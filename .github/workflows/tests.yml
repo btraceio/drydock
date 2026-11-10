@@ -31,8 +31,11 @@ jobs:
     # macOS because the product is macOS-only, and because the git-backed
     # tests exercise the same `git` this app spawns at runtime. The suite
     # itself needs no native libraries: libghostty is only wired into the
-    # `run` and packaging tasks, never into `test`.
-    runs-on: macos-14
+    # `run` and packaging tasks, never into `test`. macos-15, not macos-14:
+    # GitHub retired the macos-14 runner label on 2026-11-09 — every job
+    # requesting it dies at configuration ("The configuration
+    # 'macos-14-arm64-us-default' is not supported"), on every branch.
+    runs-on: macos-15
     # The suite outgrew 30 minutes: 21-24 min through Oct 1, 29 min 11 s on the
     # last run that finished, and cancelled at the limit on every run since.
     timeout-minutes: 60
@@ -169,7 +172,7 @@ jobs:
           cache: gradle
 
       # Gradle's own daemon runs on JDK 17 (gradle/gradle-daemon-jvm.properties
-      # toolchainVersion=17). macos-14 has a preinstalled 17 that toolchain
+      # toolchainVersion=17). macos-15 has a preinstalled 17 that toolchain
       # detection finds; windows-latest does not, and no toolchain download
       # URL is configured, so without this the build dies before the spike
       # even runs with "No defined toolchain download url for WINDOWS". The
