@@ -314,6 +314,35 @@ class TaskTreeModelTest {
     }
 
     @Test
+    void aSessionInASubdirectoryOfAWorktreeShowsThatWorktreesBranch() {
+        // The linked worktree sits UNDER the main checkout root so
+        // placement()'s deepest-prefix fallback resolves the session's main
+        // checkout; the row's branch is then the deepest listed worktree
+        // containing the session's directory.
+        Path wt = DRYDOCK.resolve(".wt/fix");
+        In in = new In().project(DRYDOCK).worktree(DRYDOCK, wt, "task-centric");
+        in.sessions.add(session("Nested session", wt.resolve("nested/dir")));
+
+        ProjectRow row = projectRow(TaskTreeModel.build(in.build()), DRYDOCK);
+
+        TaskRow task = assertInstanceOf(TaskRow.class, sessionNodes(row).get(0));
+        assertEquals(Optional.of("task-centric"), task.branch(),
+                "the linked worktree is the deepest prefix ancestor: its branch wins");
+    }
+
+    @Test
+    void aSessionInASubdirectoryOfTheMainCheckoutShowsTheMainBranch() {
+        In in = new In().project(DRYDOCK);
+        in.sessions.add(session("Nested session", DRYDOCK.resolve("src/x")));
+
+        ProjectRow row = projectRow(TaskTreeModel.build(in.build()), DRYDOCK);
+
+        TaskRow task = assertInstanceOf(TaskRow.class, sessionNodes(row).get(0));
+        assertEquals(Optional.of("main"), task.branch(),
+                "a session in a subdirectory of the main checkout still badges its branch");
+    }
+
+    @Test
     void twoTasksInOneWorktreeBecomeGroup() {
         Path wt = Path.of("/wt/btrace-jfr");
         In in = new In().project(BTRACE).worktree(BTRACE, wt, "add-jfr-events");
@@ -1043,7 +1072,10 @@ class TaskTreeModelTest {
         ProjectRow row = projectRow(TaskTreeModel.build(in.build()), BTRACE);
 
         assertEquals(1, sessionNodes(row).size());
-        assertEquals(Optional.empty(), ((TaskRow) sessionNodes(row).get(0)).branch());
+        // The removed worktree's directory sits under the main checkout, so
+        // prefix-based branch resolution badges the session with the main
+        // worktree's branch (same rule as any main-checkout subdirectory).
+        assertEquals(Optional.of("main"), ((TaskRow) sessionNodes(row).get(0)).branch());
     }
 
     @Test

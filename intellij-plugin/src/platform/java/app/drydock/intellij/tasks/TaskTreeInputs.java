@@ -50,6 +50,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -71,9 +72,15 @@ import java.util.function.Function;
  * every path made canonical. Blocking (git, the disk): call on the
  * plugin's executor, never the EDT.
  *
- * <p>Worktree lists are cached per main checkout until {@link
- * #invalidateWorktrees()}: activity changes arrive every second or so and
- * must not each cost one {@code git worktree list} per project.</p>
+ * <p>Worktree lists are cached per main checkout for one minute and cleared
+ * by {@link #invalidateWorktrees()}: activity changes arrive every second or
+ * so and must not each cost one {@code git worktree list} per project, while
+ * a branch switch in a session worktree must surface on the badge within a
+ * bounded time. A listing git cannot produce is never cached: the pass
+ * answers empty and the next gather re-lists. The Worktrees-section listing
+ * ({@code byMain} / {@code requestedWorktrees}) is served from the same
+ * cache, so an opened section may show up to one minute of staleness — the
+ * bound the TTL accepts.</p>
  */
 final class TaskTreeInputs implements AutoCloseable {
 
@@ -88,12 +95,15 @@ final class TaskTreeInputs implements AutoCloseable {
     private static final long JIRA_TIMEOUT_SECONDS =
             JiraService.CONNECT_TIMEOUT.plus(JiraService.REQUEST_TIMEOUT).plusSeconds(5).toSeconds();
     private static final long ISSUE_CACHE_NANOS = TimeUnit.MINUTES.toNanos(1);
+    // Deliberately mirrors but does NOT share ISSUE_CACHE_NANOS: the two
+    // caches must stay free to diverge.
+    private static final long WORKTREE_CACHE_NANOS = TimeUnit.MINUTES.toNanos(1);
 
     private final WorktreeService worktrees = new WorktreeService();
     private final GhCliService github = new GhCliService();
     private final JiraIssueSource jira = new JiraIssueSource();
     private final GitExecutableLocator gitLocator = new GitExecutableLocator();
-    private final Map<Path, List<Worktree>> worktreeCache = new ConcurrentHashMap<>();
+    private final Map<Path, CachedWorktrees> worktreeCache = new ConcurrentHashMap<>();
     private final Map<Path, Instant> activityCache = new ConcurrentHashMap<>();
     private final Map<Path, Boolean> remoteCache = new ConcurrentHashMap<>();
     private final Map<IssueKey, CachedIssues> issueCache = new ConcurrentHashMap<>();
@@ -155,10 +165,31 @@ final class TaskTreeInputs implements AutoCloseable {
     private record CachedBranchPullRequests(long expiresAt, CompletableFuture<Map<String, BranchPullRequest>> lookup,
                                             Map<String, BranchPullRequest> previous) { }
 
+    /**
+     * One root's worktree listing with its expiry stamp: re-listed after the
+     * TTL so a branch switch surfaces without {@link #invalidateWorktrees()}. 
+     * Seam surface (package-private): the static cache seam's parameter and
+     * the same-package tests construct it.
+     */
+    record CachedWorktrees(long expiresAt, List<Worktree> listed) { }
+
     /** One {@code git remote get-url origin} run in {@code root}; throws when git gave no answer. */
     @FunctionalInterface
     interface OriginProbe {
         ProcessResult getUrl(Path git, Path root) throws IOException, InterruptedException;
+    }
+
+    /**
+     * Lists {@code root}'s worktrees, canonical paths; throws when git
+     * cannot answer (never returns a placeholder). The throws list below
+     * IS the contract the static's catch clauses mirror one-for-one:
+     * adding a throws-clause member without a matching catch in the
+     * compute lambda fails to compile and fails review.
+     */
+    @FunctionalInterface
+    interface WorktreeLister {
+        List<Worktree> list(Path root) throws ExecutionException,
+                TimeoutException, InterruptedException;
     }
 
     void invalidateWorktrees() {
@@ -479,7 +510,7 @@ final class TaskTreeInputs implements AutoCloseable {
     }
 
     /** Where a project's pull-request badges come from: its main checkout and its configured repository. */
-    private record BadgeSource(Path root, Optional<String> repository) { }
+    record BadgeSource(Path root, Optional<String> repository) { }
 
     /**
      * Each session's pull request, matched by its current branch against
@@ -496,6 +527,26 @@ final class TaskTreeInputs implements AutoCloseable {
      */
     private Map<ManagedSessionId, BranchPullRequest> sessionPullRequests(
             List<ManagedAgentSession> sessions, Map<Path, BadgeSource> sources) {
+        return sessionPullRequests(sessions, sources, this::worktreesOf,
+                source -> branchPullRequestsNow(source.root(), source.repository()));
+    }
+
+    /**
+     * The session-to-badge join as a pure seam: the same join the instance
+     * method runs, with the two blocking edges injected — the per-session
+     * live worktree listing ({@code listingsOf}) and the project's head-branch
+     * PR map ({@code prsOf}). Pure apart from the directory-existence check
+     * (a disk read, kept here so the gate stays tested with the join). The
+     * source is found by the listing's main-checkout path, never by
+     * {@code session.repositoryId()}: the badge-source map is keyed by paths
+     * only, so an id-join revert is a compile error, and the tests below pin
+     * the behavioral regression. The branch comes from the session's own
+     * deepest worktree entry, so the main checkout's branch cannot shadow it.
+     */
+    static Map<ManagedSessionId, BranchPullRequest> sessionPullRequests(
+            List<ManagedAgentSession> sessions, Map<Path, BadgeSource> sources,
+            Function<Path, List<Worktree>> listingsOf,
+            Function<BadgeSource, Map<String, BranchPullRequest>> prsOf) {
         if (sources.isEmpty()) {
             return Map.of();
         }
@@ -505,7 +556,7 @@ final class TaskTreeInputs implements AutoCloseable {
             if (!Files.isDirectory(session.workingDirectory())) {
                 continue;
             }
-            List<Worktree> listed = worktreesOf(session.workingDirectory());
+            List<Worktree> listed = listingsOf.apply(session.workingDirectory());
             Optional<BadgeSource> source = listed.stream()
                     .filter(Worktree::mainCheckout)
                     .map(Worktree::path)
@@ -519,7 +570,7 @@ final class TaskTreeInputs implements AutoCloseable {
                 continue;
             }
             Map<String, BranchPullRequest> pullRequests = byRoot.computeIfAbsent(source.get().root(),
-                    ignored -> branchPullRequestsNow(source.get().root(), source.get().repository()));
+                    ignored -> prsOf.apply(source.get()));
             sessionPullRequest(pullRequests, branch.get(), session.pr().number())
                     .ifPresent(pullRequest -> matched.put(session.id(), pullRequest));
         }
@@ -546,15 +597,19 @@ final class TaskTreeInputs implements AutoCloseable {
     }
 
     /**
-     * The branch of {@code workingDirectory} within its repository's live
-     * worktree list — the same listing that resolved the main checkout, so
-     * no extra git run. A detached or prunable entry has no branch, and a
+     * The branch of the deepest listed worktree whose root contains
+     * {@code workingDirectory} — the same listing that resolved the main
+     * checkout, so no extra git run. Component-wise {@link Path#startsWith},
+     * so an equal path still matches and a session started in a subdirectory
+     * of a worktree resolves to that worktree's branch (the deepest entry
+     * wins, so a linked worktree's own branch is not shadowed by the main
+     * checkout's). A detached or prunable entry has no branch, and a
      * directory git does not list at all reads as none.
      */
     static Optional<String> branchOf(List<Worktree> listed, Path workingDirectory) {
         return listed.stream()
-                .filter(worktree -> worktree.path().equals(workingDirectory))
-                .findFirst()
+                .filter(worktree -> workingDirectory.startsWith(worktree.path()))
+                .max(Comparator.comparingInt(worktree -> worktree.path().getNameCount()))
                 .flatMap(Worktree::branch);
     }
 
@@ -720,38 +775,70 @@ final class TaskTreeInputs implements AutoCloseable {
         return listing.isDone() && listing.join() instanceof PullRequestListing.Failed;
     }
 
-    /** {@code root}'s worktrees, canonical paths; empty when git cannot list them. */
+    /**
+     * {@code root}'s worktrees, canonical paths; empty when git cannot list
+     * them (for this pass only — a failed listing is never cached).
+     */
     private List<Worktree> worktreesOf(Path root) {
-        return worktreeCache.computeIfAbsent(root, key -> {
-            try {
-                List<Worktree> listed = worktrees.list(key).get(GIT_TIMEOUT_SECONDS, TimeUnit.SECONDS).stream()
-                        .map(worktree -> new Worktree(RepositoryCatalog.canonicalize(worktree.path()),
-                                worktree.branch(), worktree.mainCheckout(), worktree.detached(), worktree.prunable(),
-                                worktree.locked(), worktree.lockReason(), worktree.merged()))
-                        .toList();
-                for (Worktree worktree : listed) {
-                    if (worktree.mainCheckout() || worktree.prunable()) {
-                        continue;
-                    }
-                    try {
-                        activityCache.put(worktree.path(), worktrees.lastActivity(worktree.path())
-                                .get(GIT_TIMEOUT_SECONDS, TimeUnit.SECONDS));
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        break;
-                    } catch (ExecutionException | TimeoutException | RuntimeException e) {
-                        LOG.log(Level.DEBUG, () -> "No activity time for " + worktree.path() + ": " + e);
-                    }
+        return worktreesOf(worktreeCache, root, key -> {
+            List<Worktree> listed = worktrees.list(key).get(GIT_TIMEOUT_SECONDS, TimeUnit.SECONDS).stream()
+                    .map(worktree -> new Worktree(RepositoryCatalog.canonicalize(worktree.path()),
+                            worktree.branch(), worktree.mainCheckout(), worktree.detached(), worktree.prunable(),
+                            worktree.locked(), worktree.lockReason(), worktree.merged()))
+                    .toList();
+            for (Worktree worktree : listed) {
+                if (worktree.mainCheckout() || worktree.prunable()) {
+                    continue;
                 }
-                return listed;
+                try {
+                    activityCache.put(worktree.path(), worktrees.lastActivity(worktree.path())
+                            .get(GIT_TIMEOUT_SECONDS, TimeUnit.SECONDS));
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                } catch (ExecutionException | TimeoutException | RuntimeException e) {
+                    LOG.log(Level.DEBUG, () -> "No activity time for " + worktree.path() + ": " + e);
+                }
+            }
+            return listed;
+        });
+    }
+
+    /**
+     * {@code root}'s worktrees through {@code cache}, one listing per root
+     * for one minute, cleared wholesale by {@link #invalidateWorktrees()}: a
+     * branch switch in a session worktree must surface on the badge within
+     * a bounded time, not wait for an explicit invalidation. A listing git
+     * cannot produce is never cached — the pass answers empty and the next
+     * gather re-lists, so a transient git failure is retried instead of
+     * pinning an empty worktree list; a legitimately empty listing IS cached
+     * under the TTL (the distinction is made only inside the compute
+     * lambda). Pure apart from {@code cache} and {@code lister}.
+     */
+    static List<Worktree> worktreesOf(Map<Path, CachedWorktrees> cache, Path root, WorktreeLister lister) {
+        CachedWorktrees cached = cache.get(root);
+        if (cached != null && cached.expiresAt() > System.nanoTime()) {
+            return cached.listed();
+        }
+        CachedWorktrees fresh = cache.compute(root, (key, stale) -> {
+            if (stale != null && stale.expiresAt() > System.nanoTime()) {
+                // A racing thread refreshed while this one waited for the compute lock.
+                return stale;
+            }
+            try {
+                List<Worktree> listed = lister.list(key);
+                return new CachedWorktrees(System.nanoTime() + WORKTREE_CACHE_NANOS, listed);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                return List.of();
+                LOG.log(Level.DEBUG, () -> "No worktrees for " + key + ": interrupted; not cached");
+                return null;
             } catch (ExecutionException | TimeoutException | RuntimeException e) {
                 LOG.log(Level.DEBUG, () -> "No worktrees for " + key + ": " + e);
-                return List.of();
+                return null;
             }
         });
+        // null: git gave no answer — inconclusive, no mapping recorded; empty for this pass only.
+        return fresh == null ? List.of() : fresh.listed();
     }
 
     /**
