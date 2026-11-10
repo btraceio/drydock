@@ -15,6 +15,8 @@ import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.git.GhCliService;
 import app.drydock.git.GitStatusService;
+import app.drydock.git.GitExecutableLocator;
+import app.drydock.git.WorktreeConfigGuard;
 import app.drydock.git.WorktreeService;
 import app.drydock.projects.SharedProjectsFile;
 import app.drydock.review.RepositoryPullRequests;
@@ -101,7 +103,8 @@ class ReviewEntryPointsTest extends FxTest {
         viewModel = new WorkspaceViewModel();
         recorder = new RecordingNavigator();
 
-        sidebar = new RepositorySidebar(repositoryManager, gitStatusService, worktreeService, repositoryPullRequests,
+        sidebar = new RepositorySidebar(repositoryManager, gitStatusService, worktreeService,
+                new WorktreeConfigGuard(new GitExecutableLocator()), repositoryPullRequests,
                 sessionManager, agentRegistry, recorder, viewModel);
         // The ◨n badge only renders when some reviewer has actually run;
         // without a count the row has no badge to click.

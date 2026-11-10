@@ -282,6 +282,15 @@
     -fx-text-fill: -drydock-text-dim;
 }
 
+/* extensions.worktreeConfig warning marker on a repo row: clickable (runs
+   the fix). Same amber as the handoff banner -- "fine to use, but know
+   something first" -- not an error red. */
+.repo-config-warning {
+    -fx-text-fill: -drydock-question;
+    -fx-font-size: 10.5px;
+    -fx-cursor: hand;
+}
+
 .repo-count {
     -fx-font-family: "JetBrains Mono", "Menlo", monospace;
     -fx-font-size: 10px;

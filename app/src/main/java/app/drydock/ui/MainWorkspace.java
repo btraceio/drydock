@@ -34,6 +34,7 @@ import app.drydock.git.UnifiedDiff;
 import app.drydock.git.GhCliService;
 import app.drydock.git.GitException;
 import app.drydock.git.PrCheckoutService;
+import app.drydock.git.WorktreeConfigGuard;
 import app.drydock.git.WorktreeNaming;
 import app.drydock.git.GitBranchState;
 import app.drydock.git.GitStatus;
@@ -291,6 +292,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     private final RepositoryManager repositoryManager;
     private final GitStatusService gitStatusService;
     private final WorktreeService worktreeService;
+    private final WorktreeConfigGuard worktreeConfigGuard;
     private final SessionSearchService searchService;
     private final GhCliService ghCliService;
     private final GitHubReviewService gitHubReviewService;
@@ -526,7 +528,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                           RepositoryManager repositoryManager,
                           GitStatusService gitStatusService, SessionSearchService searchService,
                           GhCliService ghCliService, GitHubReviewService gitHubReviewService,
-                          WorktreeService worktreeService, DiffService diffService,
+                          WorktreeService worktreeService, WorktreeConfigGuard worktreeConfigGuard,
+                          DiffService diffService,
                           ChangedLineService changedLineService, AnnotationStore annotationStore,
                           TourStore tourStore, ReviewScopeRegistry reviewScopeRegistry, McpActivityLog activityLog,
                           ExplorerTrailStore explorerTrailStore,
@@ -537,6 +540,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         this.repositoryManager = repositoryManager;
         this.gitStatusService = gitStatusService;
         this.worktreeService = worktreeService;
+        this.worktreeConfigGuard = worktreeConfigGuard;
         this.searchService = searchService;
         this.ghCliService = ghCliService;
         this.gitHubReviewService = gitHubReviewService;
@@ -5158,6 +5162,23 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 && tabPane.getSelectionModel().getSelectedItem() == placeholderTab.tab);
         opened.session().worktreeRoot().ifPresent(root ->
                 worktreeLifecycle.setupWorktreeHeader(placeholderTab, opened.session().id(), root));
+        // Session-launch detection point: a launched agent (Claude Code's
+        // worktree isolation in particular) can flip extensions.worktreeConfig
+        // while it runs; probing right after a session attaches keeps the
+        // repo row's warning current without waiting for the next rescan.
+        placeholderTab.repository().filter(repository -> !repository.isRemote())
+                .ifPresent(repository -> {
+                    int generation = viewModel.issueWorktreeConfigProbe(repository.id());
+                    worktreeConfigGuard.check(repository.root())
+                            .whenComplete((flag, failure) -> Platform.runLater(() -> {
+                                if (failure != null) {
+                                    LOG.log(Level.DEBUG,
+                                            "worktree-config probe failed for " + repository.root(), failure);
+                                    return;
+                                }
+                                viewModel.applyWorktreeConfigProbe(repository.id(), generation, flag);
+                            }));
+                });
         if (restoringSessionIds.remove(opened.session().id())) {
             persistOpenSessionIds();
         }

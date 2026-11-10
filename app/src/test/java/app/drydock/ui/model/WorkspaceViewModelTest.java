@@ -12,6 +12,7 @@ import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionStatus;
 import app.drydock.git.GitBranchState;
 import app.drydock.git.GitStatus;
+import app.drydock.git.WorktreeConfigGuard;
 import app.drydock.git.WorktreeService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -284,5 +285,68 @@ class WorkspaceViewModelTest {
         model.removeListener(listener);
         model.setRepoStatus(repoA, status("main", false));
         assertEquals(List.of(), listener.events);
+    }
+
+    // ---- Worktree-config flag -----------------------------------------------
+
+    @Test
+    void worktreeConfigFlagStoresFlaggedAndClearsClean() {
+        var flagged = new WorktreeConfigGuard.Flag(true, Optional.of("/repo/.git/config"));
+        model.setWorktreeConfigFlag(repoA, flagged);
+        assertEquals(Optional.of(flagged), model.worktreeConfigFlag(repoA));
+        assertEquals(List.of("repo:" + repoA.value()), listener.events);
+
+        listener.events.clear();
+        model.setWorktreeConfigFlag(repoA, flagged);
+        assertEquals(List.of(), listener.events);
+
+        listener.events.clear();
+        model.setWorktreeConfigFlag(repoA, WorktreeConfigGuard.Flag.clean());
+        assertTrue(model.worktreeConfigFlag(repoA).isEmpty());
+        assertEquals(List.of("repo:" + repoA.value()), listener.events);
+
+        // Clearing an already-clean repository emits nothing.
+        listener.events.clear();
+        model.setWorktreeConfigFlag(repoA, WorktreeConfigGuard.Flag.clean());
+        assertEquals(List.of(), listener.events);
+    }
+
+    @Test
+    void staleWorktreeConfigProbeIsDiscarded() {
+        int first = model.issueWorktreeConfigProbe(repoA);
+        model.issueWorktreeConfigProbe(repoA);
+        var flag = new WorktreeConfigGuard.Flag(true, Optional.empty());
+        model.applyWorktreeConfigProbe(repoA, first, flag);
+        assertTrue(model.worktreeConfigFlag(repoA).isEmpty());
+        assertEquals(List.of(), listener.events);
+
+        int latest = model.issueWorktreeConfigProbe(repoA);
+        model.applyWorktreeConfigProbe(repoA, latest, flag);
+        assertEquals(Optional.of(flag), model.worktreeConfigFlag(repoA));
+    }
+
+    @Test
+    void invalidatedWorktreeConfigProbeCannotResurrectTheWarningAfterAFix() {
+        var flagged = new WorktreeConfigGuard.Flag(true, Optional.empty());
+        // The warning is visible when the user clicks Fix.
+        model.setWorktreeConfigFlag(repoA, flagged);
+        listener.events.clear();
+        int generation = model.issueWorktreeConfigProbe(repoA);
+
+        // The fix starts while the probe is in flight and publishes clean.
+        model.invalidateWorktreeConfigProbes(repoA);
+        model.setWorktreeConfigFlag(repoA, WorktreeConfigGuard.Flag.clean());
+        assertEquals(List.of("repo:" + repoA.value()), listener.events);
+
+        // The stale result lands after the fix: discarded, no event.
+        listener.events.clear();
+        model.applyWorktreeConfigProbe(repoA, generation, flagged);
+        assertTrue(model.worktreeConfigFlag(repoA).isEmpty());
+        assertEquals(List.of(), listener.events);
+
+        // Probes issued after the fix still apply.
+        int fresh = model.issueWorktreeConfigProbe(repoA);
+        model.applyWorktreeConfigProbe(repoA, fresh, flagged);
+        assertEquals(Optional.of(flagged), model.worktreeConfigFlag(repoA));
     }
 }
