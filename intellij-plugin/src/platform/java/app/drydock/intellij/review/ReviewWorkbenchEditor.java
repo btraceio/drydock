@@ -3,6 +3,7 @@ package app.drydock.intellij.review;
 import app.drydock.intellij.review.workbench.model.WorkbenchState;
 import app.drydock.intellij.tasks.WorktreeReview;
 import app.drydock.review.tour.ReviewTour;
+import com.intellij.ide.util.PropertiesComponent;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.actionSystem.ActionManager;
 import com.intellij.openapi.actionSystem.ActionToolbar;
@@ -73,6 +74,12 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
     static final String INBOX_KEY = "drydock.review.inbox";
     /** Everything above | outbox. */
     static final String OUTBOX_KEY = "drydock.review.outbox";
+    /** The navigator's and inbox's collapsed states, per user. */
+    static final String NAV_COLLAPSED_KEY = "drydock.review.nav.collapsed";
+    static final String INBOX_COLLAPSED_KEY = "drydock.review.inbox.collapsed";
+    /** The panes' minimum widths while expanded, in UI-scaling units. */
+    static final int NAV_MIN_WIDTH = 200;
+    static final int INBOX_MIN_WIDTH = 320;
 
     /** The live review's diff, hosted in a workbench editor. */
     record HostedDiff(JComponent component, Supplier<JComponent> preferredFocus) {
@@ -151,6 +158,8 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
     final OnePixelSplitter navSplitter = new OnePixelSplitter(false, NAV_KEY, 0.2f);
     final OnePixelSplitter inboxSplitter = new OnePixelSplitter(false, INBOX_KEY, 0.68f);
     final OnePixelSplitter outboxSplitter = new OnePixelSplitter(true, OUTBOX_KEY, 0.8f);
+    final CollapsiblePane navigatorPane;
+    final CollapsiblePane inboxPane;
 
     ReviewWorkbenchEditor(Project project, ReviewWorkbenchFile file, Host host) {
         this.file = Objects.requireNonNull(file, "file");
@@ -161,12 +170,19 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
 
         navigator.add(host.hostNavigator(project, this, this::renderHeader)
                 .orElseGet(() -> emptyState(NAVIGATOR_EMPTY_TEXT)), BorderLayout.CENTER);
+        JComponent inbox = host.hostInbox(project, this).orElseGet(() -> emptyState(INBOX_EMPTY_TEXT));
+        navigatorPane = new CollapsiblePane(navSplitter, true, navigator, "Navigator", NAV_MIN_WIDTH,
+                collapsed -> rememberCollapsed(NAV_COLLAPSED_KEY, collapsed));
+        inboxPane = new CollapsiblePane(inboxSplitter, false, inbox, "Findings", INBOX_MIN_WIDTH,
+                collapsed -> rememberCollapsed(INBOX_COLLAPSED_KEY, collapsed));
         inboxSplitter.setFirstComponent(centre);
-        inboxSplitter.setSecondComponent(host.hostInbox(project, this).orElseGet(() -> emptyState(INBOX_EMPTY_TEXT)));
-        navSplitter.setFirstComponent(navigator);
+        inboxSplitter.setSecondComponent(inboxPane);
+        navSplitter.setFirstComponent(navigatorPane);
         navSplitter.setSecondComponent(inboxSplitter);
         outboxSplitter.setFirstComponent(navSplitter);
         outboxSplitter.setSecondComponent(host.hostOutbox(project, this).orElseGet(() -> emptyState(OUTBOX_EMPTY_TEXT)));
+        restoreCollapsed(navigatorPane, NAV_COLLAPSED_KEY);
+        restoreCollapsed(inboxPane, INBOX_COLLAPSED_KEY);
 
         header.setBorder(JBUI.Borders.empty(4, 8));
         viewActions = new DefaultActionGroup(
@@ -203,6 +219,18 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
     /** A text-only toggle renders as a blank button in a toolbar unless its presentation asks for the text. */
     static void showTextInToolbar(AnAction action) {
         action.getTemplatePresentation().putClientProperty(ActionUtil.SHOW_TEXT_IN_TOOLBAR, true);
+    }
+
+    /** Persists one pane's collapsed state under its key. */
+    private static void rememberCollapsed(String key, boolean collapsed) {
+        PropertiesComponent.getInstance().setValue(key, collapsed);
+    }
+
+    /** Restores one pane's persisted collapsed state before the splitter is first laid out. */
+    private static void restoreCollapsed(CollapsiblePane pane, String key) {
+        if (PropertiesComponent.getInstance().getBoolean(key, false)) {
+            pane.setCollapsed(true, false);
+        }
     }
 
     /**

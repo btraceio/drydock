@@ -108,7 +108,7 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
             assertSame(editor.inboxSplitter, editor.navSplitter.getSecondComponent());
             assertFalse(editor.inboxSplitter.isVertical());
             assertEquals(ReviewWorkbenchEditor.INBOX_EMPTY_TEXT,
-                    ((JBLabel) editor.inboxSplitter.getSecondComponent()).getText());
+                    ((JBLabel) ((CollapsiblePane) editor.inboxSplitter.getSecondComponent()).content()).getText());
             assertEquals(ReviewWorkbenchEditor.OUTBOX_EMPTY_TEXT,
                     ((JBLabel) editor.outboxSplitter.getSecondComponent()).getText());
             assertEquals(ReviewWorkbenchEditor.NAV_KEY, editor.navSplitter.getSplitterProportionKey());
