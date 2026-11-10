@@ -403,9 +403,13 @@ public final class TaskTreeModel {
 
     private static TaskRow row(Inputs in, Path main, ManagedAgentSession session) {
         Path directory = session.workingDirectory();
+        // The row's branch is the deepest listed worktree containing the
+        // session's directory, so a session started in a subdirectory still
+        // shows its worktree's branch; equality is the subset case, so
+        // existing exact-match rows are unchanged.
         Optional<String> branch = in.worktreesByMainRoot().getOrDefault(main, List.of()).stream()
-                .filter(worktree -> worktree.path().equals(directory))
-                .findFirst()
+                .filter(worktree -> directory.startsWith(worktree.path()))
+                .max(Comparator.comparingInt(worktree -> worktree.path().getNameCount()))
                 .flatMap(Worktree::branch);
         boolean running = in.running().contains(session.id());
         boolean resumable = !running && SessionCommands.resumable(
