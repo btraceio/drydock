@@ -3,6 +3,7 @@ package app.drydock.intellij.tasks;
 import app.drydock.git.GhCliService.BranchPullRequest;
 import app.drydock.git.GhCliService.PrInfo.PrLifecycle;
 import app.drydock.git.JiraIssueListing;
+import app.drydock.git.WorktreeService.Worktree;
 import app.drydock.intellij.tasks.TaskTreeModel.ViewFilter;
 import app.drydock.process.ProcessResult;
 import app.drydock.process.ProcessTimeoutException;
@@ -372,5 +373,28 @@ class TaskTreeInputsTest {
         assertEquals(Optional.empty(), TaskTreeInputs.sessionPullRequest(byHead, "pr-5", Optional.empty()),
                 "a number not listed");
         assertEquals(Optional.empty(), TaskTreeInputs.sessionPullRequest(byHead, "main", Optional.empty()));
+    }
+
+    @Test
+    void theBadgeBranchIsTheSessionWorktreeOwnListEntry() {
+        // The session sits in a linked worktree; the main checkout's branch
+        // (here: main) must not shadow the worktree's own.
+        List<Worktree> listed = List.of(
+                new Worktree(ROOT, Optional.of("main"), true, false, false, false, Optional.empty(), false),
+                new Worktree(Path.of("/work/.worktrees/backend-fix"), Optional.of("fix/branch"),
+                        false, false, false, false, Optional.empty(), false));
+        assertEquals(Optional.of("fix/branch"),
+                TaskTreeInputs.branchOf(listed, Path.of("/work/.worktrees/backend-fix")));
+        assertEquals(Optional.of("main"), TaskTreeInputs.branchOf(listed, ROOT));
+    }
+
+    @Test
+    void aDetachedOrUnlistedDirectoryHasNoBadgeBranch() {
+        List<Worktree> listed = List.of(
+                new Worktree(ROOT, Optional.of("main"), true, false, false, false, Optional.empty(), false),
+                new Worktree(Path.of("/work/.worktrees/backend-pin"), Optional.empty(),
+                        false, true, false, false, Optional.empty(), false));
+        assertEquals(Optional.empty(), TaskTreeInputs.branchOf(listed, Path.of("/work/.worktrees/backend-pin")));
+        assertEquals(Optional.empty(), TaskTreeInputs.branchOf(listed, Path.of("/elsewhere")));
     }
 }
