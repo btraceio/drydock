@@ -9,6 +9,8 @@ import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.Repository;
 import app.drydock.git.GhCliService;
 import app.drydock.git.GitStatusService;
+import app.drydock.git.GitExecutableLocator;
+import app.drydock.git.WorktreeConfigGuard;
 import app.drydock.git.WorktreeService;
 import app.drydock.projects.SharedProjectsFile;
 import app.drydock.review.RepositoryPullRequests;
@@ -99,7 +101,8 @@ class RepositorySidebarPullRequestDedupFxTest extends FxTest {
         RepositoryPullRequests repositoryPullRequests = new RepositoryPullRequests(source);
         viewModel = new WorkspaceViewModel();
 
-        sidebar = new RepositorySidebar(repositoryManager, gitStatusService, worktreeService, repositoryPullRequests,
+        sidebar = new RepositorySidebar(repositoryManager, gitStatusService, worktreeService,
+                new WorktreeConfigGuard(new GitExecutableLocator()), repositoryPullRequests,
                 sessionManager, agentRegistry, navigator, viewModel);
 
         TestStages.show(stage, new Scene(new StackPane(sidebar), 360, 640));

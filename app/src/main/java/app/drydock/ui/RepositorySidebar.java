@@ -20,6 +20,7 @@ import app.drydock.git.GitStatus;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.GitTarget;
 import app.drydock.git.SshUnreachableException;
+import app.drydock.git.WorktreeConfigGuard;
 import app.drydock.git.WorktreeLockedException;
 import app.drydock.git.WorktreeNotCleanException;
 import app.drydock.git.WorktreeService;
@@ -133,6 +134,7 @@ public final class RepositorySidebar extends VBox {
     private final RepositoryManager repositoryManager;
     private final GitStatusService gitStatusService;
     private final WorktreeService worktreeService;
+    private final WorktreeConfigGuard worktreeConfigGuard;
     private final RepositoryPullRequests repositoryPullRequests;
     private final SessionManager sessionManager;
     private final WorkspaceNavigator navigator;
@@ -300,13 +302,15 @@ public final class RepositorySidebar extends VBox {
     }
 
     public RepositorySidebar(RepositoryManager repositoryManager, GitStatusService gitStatusService,
-                              WorktreeService worktreeService, RepositoryPullRequests repositoryPullRequests,
+                              WorktreeService worktreeService, WorktreeConfigGuard worktreeConfigGuard,
+                              RepositoryPullRequests repositoryPullRequests,
                               SessionManager sessionManager, AgentRegistry agentRegistry,
                               WorkspaceNavigator navigator, WorkspaceViewModel viewModel) {
         this.repositoryManager = repositoryManager;
         this.agentRegistry = agentRegistry;
         this.gitStatusService = gitStatusService;
         this.worktreeService = worktreeService;
+        this.worktreeConfigGuard = worktreeConfigGuard;
         this.repositoryPullRequests = repositoryPullRequests;
         this.sessionManager = sessionManager;
         this.navigator = navigator;
@@ -2080,6 +2084,106 @@ public final class RepositorySidebar extends VBox {
                     // An unchanged list emits no model event; the rescan
                     // note / spinner stop still need the header re-rendered.
                     updateRepoRow(repository.id());
+                    // Piggybacked on every discovery: scan, rescan, and
+                    // worktree creation all land here (session launches add
+                    // their own check in MainWorkspace's open handling).
+                    refreshWorktreeConfigFlag(repository);
+                }));
+    }
+
+    /**
+     * Reads {@code extensions.worktreeConfig} for {@code repository} and
+     * records the result in the view model; a flagged repository row grows
+     * the warning marker and the fix action. Runs on the guard's background
+     * executor; the model write hops back to the FX thread. A failed probe
+     * is logged and dropped -- the guard must never turn a worktree rescan
+     * into an error the user has to dismiss.
+     */
+    private void refreshWorktreeConfigFlag(Repository repository) {
+        if (repository.isRemote()) {
+            return;
+        }
+        int generation = viewModel.issueWorktreeConfigProbe(repository.id());
+        worktreeConfigGuard.check(repository.root())
+                .whenComplete((flag, failure) -> Platform.runLater(() -> {
+                    if (failure != null) {
+                        LOG.log(Level.DEBUG, "worktree-config probe failed for " + repository.root(), failure);
+                        return;
+                    }
+                    viewModel.applyWorktreeConfigProbe(repository.id(), generation, flag);
+                }));
+    }
+
+    /**
+     * Asks before running the fix from the warning marker's click: the
+     * marker sits on an ordinary row the user clicks all the time, while
+     * the fix mutates the repository's shared git config. The context-menu
+     * item is its own confirmation and calls {@link #fixWorktreeConfigFlag}
+     * directly.
+     */
+    private void confirmWorktreeConfigFix(Repository repository) {
+        Alert confirm = new Alert(AlertType.CONFIRMATION);
+        confirm.setTitle("Remove worktree-config flag");
+        confirm.setHeaderText("Remove extensions.worktreeConfig from this repository?");
+        confirm.setContentText("The fix unsets the flag in the repository's shared git config"
+                + " and keeps it only where something still needs it (sparse checkout,"
+                + " per-worktree config values, a live Claude Code worktree).");
+        confirm.showAndWait().filter(button -> button == ButtonType.OK)
+                .ifPresent(button -> fixWorktreeConfigFlag(repository));
+    }
+
+    /** The warning marker's tooltip: what the flag is, who set it, what it breaks, what clicking does. */
+    private static String worktreeConfigWarningText(WorktreeConfigGuard.Flag flag) {
+        String origin = flag.originPath().map(o -> " (set in " + o + ")").orElse("");
+        return "extensions.worktreeConfig=true" + origin
+                + "\nClaude Code's worktree feature sets this flag silently. While it is on,"
+                + " git resolves per-worktree config in every worktree of this repository"
+                + " instead of the shared config. Click to remove it.";
+    }
+
+    /**
+     * The one-click fix behind the warning marker and the repo-menu item:
+     * remove the flag when nothing needs it, keep the row's transient note
+     * convention for the success feedback, alert on a refusal (sparse
+     * checkout, a live Claude Code worktree) and on a hard failure.
+     */
+    private void fixWorktreeConfigFlag(Repository repository) {
+        if (repository.isRemote()) {
+            return;
+        }
+        // Any probe still in flight was answered by the pre-fix config and
+        // must not overwrite the post-fix state.
+        viewModel.invalidateWorktreeConfigProbes(repository.id());
+        worktreeConfigGuard.fix(repository.root())
+                .whenComplete((result, failure) -> Platform.runLater(() -> {
+                    if (failure != null) {
+                        UiErrors.show("Could not remove the worktree-config flag", failure);
+                        return;
+                    }
+                    switch (result) {
+                        case WorktreeConfigGuard.FixResult.AlreadyClean alreadyClean ->
+                                viewModel.setWorktreeConfigFlag(repository.id(), WorktreeConfigGuard.Flag.clean());
+                        case WorktreeConfigGuard.FixResult.Fixed fixed -> {
+                            viewModel.setWorktreeConfigFlag(repository.id(), WorktreeConfigGuard.Flag.clean());
+                            rescanNotes.put(repository.id(), fixed.versionRestored()
+                                    ? "worktree-config flag removed, repository format restored"
+                                    : "worktree-config flag removed");
+                            updateRepoRow(repository.id());
+                            PauseTransition clearNote = new PauseTransition(Duration.seconds(2.4));
+                            clearNote.setOnFinished(e -> {
+                                rescanNotes.remove(repository.id());
+                                updateRepoRow(repository.id());
+                            });
+                            clearNote.play();
+                        }
+                        case WorktreeConfigGuard.FixResult.Refused refused -> {
+                            Alert refusedAlert = new Alert(AlertType.WARNING);
+                            refusedAlert.setTitle("Worktree-config flag kept");
+                            refusedAlert.setHeaderText("extensions.worktreeConfig stays on");
+                            refusedAlert.setContentText(refused.reason());
+                            refusedAlert.showAndWait();
+                        }
+                    }
                 }));
     }
 
@@ -2622,6 +2726,20 @@ public final class RepositorySidebar extends VBox {
             branchRow.setAlignment(Pos.CENTER_LEFT);
             if (anyRunning) {
                 branchRow.getChildren().add(SessionStatusStyles.createDot(5, SessionStatus.RUNNING));
+            }
+            // Persistent, clickable warning when Claude Code's worktree
+            // feature flipped extensions.worktreeConfig in the shared
+            // config; the fix itself also lives in the repo context menu.
+            // The click asks first: a stray click must not mutate the
+            // repository's shared config; the menu item carries explicit
+            // intent and stays direct.
+            if (viewModel.worktreeConfigFlag(repository.id()).isPresent()) {
+                WorktreeConfigGuard.Flag flag = viewModel.worktreeConfigFlag(repository.id()).orElseThrow();
+                Label configWarning = new Label("⚠");
+                configWarning.getStyleClass().add("repo-config-warning");
+                configWarning.setTooltip(new Tooltip(worktreeConfigWarningText(flag)));
+                configWarning.setOnMouseClicked(e -> confirmWorktreeConfigFix(repository));
+                branchRow.getChildren().add(configWarning);
             }
 
             VBox text = new VBox(1, nameRow, branchRow);
@@ -3431,6 +3549,12 @@ public final class RepositorySidebar extends VBox {
             MenuItem deleteStale = new MenuItem("Delete all stale sessions");
             deleteStale.setOnAction(e -> onDeleteStaleSessions(repository));
 
+            // The worktree-config fix: null for a remote repository, which
+            // has no git config to fix.
+            final MenuItem fixConfigFlag = repository.isRemote()
+                    ? null
+                    : new MenuItem("Remove worktree-config flag…");
+
             ContextMenu menu = new ContextMenu();
             menu.getItems().add(newSession);
             if (!repository.isRemote()) {
@@ -3444,6 +3568,12 @@ public final class RepositorySidebar extends VBox {
                 });
 
                 menu.getItems().addAll(newWorktree, rescan);
+
+                // Present but disabled until the probe has flagged this
+                // repository: the cached menu must not offer a fix that
+                // would run on a repository that has nothing to fix.
+                fixConfigFlag.setOnAction(e -> fixWorktreeConfigFlag(repository));
+                menu.getItems().add(fixConfigFlag);
             }
             menu.getItems().addAll(new SeparatorMenuItem(), closeInactive, deleteStale,
                     new SeparatorMenuItem(), refresh);
@@ -3460,8 +3590,14 @@ public final class RepositorySidebar extends VBox {
             // Relabel the bulk session items on every showing: a cached menu
             // would otherwise freeze the count at whatever was true when it
             // was first built, and disable/enable them when there is nothing
-            // to act on so the gesture cannot fire on an empty set.
-            menu.setOnShowing(e -> applyBulkSessionMenuLabels(closeInactive, deleteStale, repository));
+            // to act on so the gesture cannot fire on an empty set. The
+            // worktree-config fix follows the same cached-menu rule.
+            menu.setOnShowing(e -> {
+                applyBulkSessionMenuLabels(closeInactive, deleteStale, repository);
+                if (fixConfigFlag != null) {
+                    fixConfigFlag.setDisable(viewModel.worktreeConfigFlag(repository.id()).isEmpty());
+                }
+            });
             applyBulkSessionMenuLabels(closeInactive, deleteStale, repository);
             return menu;
         });

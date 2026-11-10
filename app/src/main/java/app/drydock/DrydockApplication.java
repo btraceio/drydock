@@ -16,6 +16,7 @@ import app.drydock.git.ChangedLineService;
 import app.drydock.git.DiffService;
 import app.drydock.git.GhCliService;
 import app.drydock.git.GitStatusService;
+import app.drydock.git.WorktreeConfigGuard;
 import app.drydock.git.WorktreeService;
 import app.drydock.github.GitHubReviewService;
 import app.drydock.github.GitHubService;
@@ -155,6 +156,7 @@ public final class DrydockApplication extends Application {
 
     private GitStatusService gitStatusService;
     private WorktreeService worktreeService;
+    private WorktreeConfigGuard worktreeConfigGuard;
     private DiffService diffService;
     private SessionSearchService searchService;
     private GhCliService ghCliService;
@@ -353,6 +355,7 @@ public final class DrydockApplication extends Application {
 
         gitStatusService = new GitStatusService();
         worktreeService = new WorktreeService();
+        worktreeConfigGuard = new WorktreeConfigGuard();
         diffService = new DiffService();
         searchService = new SessionSearchService();
         ghCliService = new GhCliService();
@@ -402,12 +405,12 @@ public final class DrydockApplication extends Application {
         mcpActivityLog = new McpActivityLog();
 
         mainWorkspace = new MainWorkspace(sessionManager, agentRegistry, repositoryManager, gitStatusService,
-                searchService, ghCliService, gitHubReviewService, worktreeService, diffService, changedLineService,
-                annotationStore, tourStore, reviewScopeRegistry, mcpActivityLog, explorerTrailStore, viewModel,
-                primaryStage, stateDir);
+                searchService, ghCliService, gitHubReviewService, worktreeService, worktreeConfigGuard, diffService,
+                changedLineService, annotationStore, tourStore, reviewScopeRegistry, mcpActivityLog, explorerTrailStore,
+                viewModel, primaryStage, stateDir);
         RepositorySidebar sidebar =
-                new RepositorySidebar(repositoryManager, gitStatusService, worktreeService, repositoryPullRequests,
-                        sessionManager, agentRegistry, mainWorkspace, viewModel);
+                new RepositorySidebar(repositoryManager, gitStatusService, worktreeService, worktreeConfigGuard,
+                        repositoryPullRequests, sessionManager, agentRegistry, mainWorkspace, viewModel);
         sidebar.setOpenFindingsAt(mainWorkspace::openFindingsAt);
         mainWorkspace.setOnReviewFindingsChanged(sidebar::refreshReviewBadges);
         // The sidebar owns worktree discovery; the workspace is what creates
@@ -1444,6 +1447,9 @@ public final class DrydockApplication extends Application {
         }
         if (worktreeService != null) {
             closeQuietly("WorktreeService", worktreeService::close);
+        }
+        if (worktreeConfigGuard != null) {
+            closeQuietly("WorktreeConfigGuard", worktreeConfigGuard::close);
         }
         if (diffService != null) {
             closeQuietly("DiffService", diffService::close);

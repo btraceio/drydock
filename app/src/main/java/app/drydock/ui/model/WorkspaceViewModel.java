@@ -6,6 +6,7 @@ import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionActivity;
 import app.drydock.git.GitStatus;
+import app.drydock.git.WorktreeConfigGuard;
 import app.drydock.git.WorktreeService;
 import app.drydock.review.RepositoryPullRequests;
 
@@ -244,9 +245,73 @@ public final class WorkspaceViewModel {
         boolean changed = repoStatuses.remove(repositoryId) != null;
         changed |= repoStatusFailures.remove(repositoryId) != null;
         changed |= worktrees.remove(repositoryId) != null;
+        changed |= worktreeConfigFlags.remove(repositoryId) != null;
+        changed |= worktreeConfigProbeGenerations.remove(repositoryId) != null;
         changed |= pullRequests.remove(repositoryId) != null;
         if (changed) {
             notify(Listener::structureChanged);
+        }
+    }
+
+    // ---- Worktree-config guard -----------------------------------------------
+
+    /** The {@code extensions.worktreeConfig} probe results; only repositories with the flag SET are held here. */
+    private final Map<RepositoryId, WorktreeConfigGuard.Flag> worktreeConfigFlags = new HashMap<>();
+
+    /**
+     * Monotonic probe generations per repository. A probe result may only
+     * update the flag while its generation is still the latest issued one:
+     * an in-flight check that completes after a successful fix would
+     * otherwise resurrect the warning for a flag that is already gone.
+     */
+    private final Map<RepositoryId, Integer> worktreeConfigProbeGenerations = new HashMap<>();
+
+    /** Issues a probe generation for {@code repositoryId}; the returned value must come back via {@link #applyWorktreeConfigProbe}. */
+    public int issueWorktreeConfigProbe(RepositoryId repositoryId) {
+        return worktreeConfigProbeGenerations.merge(repositoryId, 1, Integer::sum);
+    }
+
+    /**
+     * Applies a probe result that was issued under {@code generation}.
+     * Discarded silently when a newer probe was issued or a fix invalidated
+     * the generation in the meantime; the model write itself is
+     * {@link #setWorktreeConfigFlag}'s usual change-notifying path.
+     */
+    public void applyWorktreeConfigProbe(RepositoryId repositoryId, int generation, WorktreeConfigGuard.Flag flag) {
+        if (worktreeConfigProbeGenerations.getOrDefault(repositoryId, 0) != generation) {
+            return;
+        }
+        setWorktreeConfigFlag(repositoryId, flag);
+    }
+
+    /** Invalidates every in-flight probe for {@code repositoryId}; called when a fix starts. */
+    public void invalidateWorktreeConfigProbes(RepositoryId repositoryId) {
+        worktreeConfigProbeGenerations.merge(repositoryId, 1, Integer::sum);
+    }
+
+    /**
+     * The latest {@code extensions.worktreeConfig} probe for a repository;
+     * empty until its first check lands or the flag was found absent.
+     * Only repositories with the flag SET are held here.
+     */
+    public Optional<WorktreeConfigGuard.Flag> worktreeConfigFlag(RepositoryId repositoryId) {
+        return Optional.ofNullable(worktreeConfigFlags.get(repositoryId));
+    }
+
+    /**
+     * Stores the flag probe; a flagged repository row carries the warning
+     * marker, so a change emits {@code repoChanged}. A clean result clears
+     * any stored flag.
+     */
+    public void setWorktreeConfigFlag(RepositoryId repositoryId, WorktreeConfigGuard.Flag flag) {
+        boolean changed;
+        if (flag.set()) {
+            changed = !flag.equals(worktreeConfigFlags.put(repositoryId, flag));
+        } else {
+            changed = worktreeConfigFlags.remove(repositoryId) != null;
+        }
+        if (changed) {
+            notify(listener -> listener.repoChanged(repositoryId));
         }
     }
 
