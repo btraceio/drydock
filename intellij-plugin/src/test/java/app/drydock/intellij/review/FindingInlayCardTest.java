@@ -20,11 +20,19 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
+import com.intellij.ui.AnimatedIcon;
+import com.intellij.util.ui.UIUtil;
+import com.intellij.ui.components.JBLabel;
+
 import javax.swing.JButton;
+import javax.swing.JComponent;
+import javax.swing.JPanel;
 import javax.swing.JTextField;
+import java.awt.Font;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -78,6 +86,28 @@ class FindingInlayCardTest {
 
     private static FindingInlayCard card(ReviewAnnotation finding, Recording owner) {
         return card(finding, owner, Optional.empty());
+    }
+
+    @Test void theCardRestylesItsPersistentProgressLabelItself() {
+        ReviewAnnotation finding = finding(Triage.PROPOSED, AnnotationStatus.OPEN);
+        Recording owner = new Recording();
+        FindingInlayCard card = card(finding, owner);
+        try {
+            JBLabel progress = UIUtil.uiTraverser(card).filter(JBLabel.class).toList().stream()
+                    .filter(label -> label.getIcon() instanceof AnimatedIcon).findFirst().orElseThrow();
+            Font corrupt = new Font(Font.DIALOG, Font.ITALIC, 7);
+            progress.setFont(corrupt);
+            JPanel host = new JPanel();
+            host.add(card);
+            ReviewTypography.restyle(host);
+            assertEquals(corrupt, progress.getFont(),
+                    "the card is marked: the host's restyle walk does not enter it");
+            card.updateUI();
+            assertEquals(ReviewTypography.font(ReviewTypography.Role.META), progress.getFont(),
+                    "the card's own render path re-applies the persistent label");
+        } finally {
+            onEdt(card::dispose);
+        }
     }
 
     /** Records every callback plus what the card looked like at the moment the callback ran. */

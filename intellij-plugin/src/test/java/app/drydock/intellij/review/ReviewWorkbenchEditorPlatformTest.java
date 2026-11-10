@@ -377,7 +377,8 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
         List<String> shown = new ArrayList<>();
         UIUtil.uiTraverser(sections).filter(JTextComponent.class)
                 .filter(text -> text.isVisible() && !text.getText().isEmpty()).forEach(text -> shown.add(text.getText()));
-        assertTrue(shown.toString(), shown.contains("PR description: Make widgets."));
+        // The prose no longer carries the "PR description: " prefix: the eyebrow label names the block.
+        assertTrue(shown.toString(), shown.contains("Make widgets."));
     }
 
     public void testASectionRowsChipsAndCounts() {

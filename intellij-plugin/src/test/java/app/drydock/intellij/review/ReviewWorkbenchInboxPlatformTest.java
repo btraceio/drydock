@@ -19,6 +19,8 @@ import com.intellij.ui.components.JBTextArea;
 import com.intellij.util.ui.UIUtil;
 
 import javax.swing.AbstractButton;
+import javax.swing.JLabel;
+import javax.swing.JTextField;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -118,7 +120,7 @@ public class ReviewWorkbenchInboxPlatformTest extends BasePlatformTestCase {
         ReviewWorkbenchInbox inbox = new ReviewWorkbenchInbox(actions, Clock.fixed(Instant.EPOCH, ZoneOffset.UTC));
         try {
             inbox.render(state(List.of()));
-            assertTrue(UIUtil.uiTraverser(inbox).filter(JBLabel.class).toList().stream()
+            assertTrue(UIUtil.uiTraverser(inbox).filter(JLabel.class).toList().stream()
                     .anyMatch(label -> ReviewWorkbenchInbox.NO_REVIEW_TEXT.equals(label.getText())));
             assertNull("no sphinx plugin: no button", submitButtonOrNull(inbox, ReviewWorkbenchEditor.SPHINX_REVIEW));
             submitButton(inbox, ReviewWorkbenchEditor.SECTION_REVIEW).doClick();
@@ -138,7 +140,7 @@ public class ReviewWorkbenchInboxPlatformTest extends BasePlatformTestCase {
             // Reviewed (a finding sits in the Outbox tab), but nothing is left to triage.
             inbox.render(state(List.of(finding("a", Triage.CONFIRMED))));
             assertTrue(cards(inbox).isEmpty());
-            assertTrue(UIUtil.uiTraverser(inbox).filter(JBLabel.class).toList().stream()
+            assertTrue(UIUtil.uiTraverser(inbox).filter(JLabel.class).toList().stream()
                     .anyMatch(label -> ReviewWorkbenchInbox.EMPTY_TEXT.equals(label.getText())));
         } finally {
             Disposer.dispose(inbox);
@@ -250,6 +252,29 @@ public class ReviewWorkbenchInboxPlatformTest extends BasePlatformTestCase {
             inbox.render(state(List.of(a), WorkbenchState.Mode.PR));
             click(cards(inbox).get(0), "Post to PR");
             assertEquals(List.of("postToPr a"), calls);
+        } finally {
+            Disposer.dispose(inbox);
+        }
+    }
+
+    public void testAnUnchangedStateRenderKeepsTheInboxCardsAndTheirInput() {
+        ReviewWorkbenchInbox inbox = new ReviewWorkbenchInbox(actions, Clock.fixed(Instant.EPOCH, ZoneOffset.UTC));
+        try {
+            inbox.render(state(List.of(finding("a", Triage.PROPOSED))));
+            FindingInlayCard card = cards(inbox).get(0);
+            JTextField comment = UIUtil.uiTraverser(card).filter(JTextField.class).toList().get(0);
+            comment.setText("half-typed challenge");
+            // Same mode, same inbox snapshot: nothing the cards depend on changed.
+            inbox.render(state(List.of(finding("a", Triage.PROPOSED))));
+            assertSame("nothing the cards depend on changed: no dispose, no rebuild",
+                    card, cards(inbox).get(0));
+            assertEquals("an unchanged render must not destroy in-progress input",
+                    "half-typed challenge",
+                    UIUtil.uiTraverser(cards(inbox).get(0)).filter(JTextField.class).toList().get(0).getText());
+            // A surface change alone (LOCAL -> PR with the same snapshot) rebuilds.
+            inbox.render(state(List.of(finding("a", Triage.PROPOSED)), WorkbenchState.Mode.PR));
+            assertNotSame("a mode flip switches the card surface even when the snapshot is unchanged",
+                    card, cards(inbox).get(0));
         } finally {
             Disposer.dispose(inbox);
         }

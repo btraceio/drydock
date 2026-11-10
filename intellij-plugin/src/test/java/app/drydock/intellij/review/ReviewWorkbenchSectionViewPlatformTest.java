@@ -93,8 +93,8 @@ public class ReviewWorkbenchSectionViewPlatformTest extends BasePlatformTestCase
             view.render(state(hunk("A", false, Optional.empty(), Optional.of(TAKE)), hunk("B", false, Optional.empty())));
             HunkTakePanel take = view.cards.get(0).take;
             assertTrue(take.isVisible());
-            assertEquals(List.of("▾ Agent take · Diverges", "Calls bar() and drops its result.",
-                    "The intent says callers use the result.", "⚑ The result is ignored.", "⚑ No test covers it."),
+            assertEquals(List.of("Agent take · Diverges", "Calls bar() and drops its result.",
+                    "The intent says callers use the result.", "The result is ignored.", "No test covers it."),
                     take.shownTexts());
             assertFalse("a hunk without a take shows none", view.cards.get(1).take.isVisible());
 
@@ -105,7 +105,42 @@ public class ReviewWorkbenchSectionViewPlatformTest extends BasePlatformTestCase
             assertEquals(List.of("showFinding f1"), calls);
 
             take.toggle.doClick();
-            assertEquals(List.of("▸ Agent take · Diverges"), take.shownTexts());
+            assertEquals(List.of("Agent take · Diverges"), take.shownTexts());
+        } finally {
+            Disposer.dispose(view);
+        }
+    }
+
+    public void testAnUnchangedTakeReRendersWithoutRebuildingAndStillFolds() {
+        ReviewWorkbenchSectionView view = new ReviewWorkbenchSectionView(getProject(), actions);
+        try {
+            view.render(state(hunk("A", false, Optional.empty(), Optional.of(TAKE)),
+                    hunk("B", false, Optional.empty())));
+            HunkTakePanel take = view.cards.get(0).take;
+            Component headerRow = take.getComponent(0);
+            int bodyChildren = ((Container) take.getComponent(1)).getComponentCount();
+            view.render(state(hunk("A", false, Optional.empty(), Optional.of(TAKE)),
+                    hunk("B", false, Optional.empty())));   // identical take, the hot path
+            assertSame("the header chrome is permanent, not rebuilt per render",
+                    headerRow, take.getComponent(0));
+            assertEquals("an unchanged take rebuilds no body rows",
+                    bodyChildren, ((Container) take.getComponent(1)).getComponentCount());
+            assertEquals("an unchanged take renders the same texts",
+                    List.of("Agent take · Diverges", "Calls bar() and drops its result.",
+                            "The intent says callers use the result.", "The result is ignored.",
+                            "No test covers it."), take.shownTexts());
+            take.toggle.doClick();
+            assertEquals("the expansion-only path still folds the body",
+                    List.of("Agent take · Diverges"), take.shownTexts());
+            // A changed take still rebuilds fully (unfold first: a fold
+            // survives a changed take, as before).
+            take.toggle.doClick();
+            view.render(state(hunk("A", false, Optional.empty(), Optional.of(
+                    new HunkTake("d-A", "Different does", HunkTake.Alignment.CONTEXT, "",
+                            List.of(), Instant.EPOCH))), hunk("B", false, Optional.empty())));
+            assertEquals("a changed take rebuilds fully",
+                    List.of("Agent take · Context", "Different does"),
+                    view.cards.get(0).take.shownTexts());
         } finally {
             Disposer.dispose(view);
         }
@@ -205,11 +240,11 @@ public class ReviewWorkbenchSectionViewPlatformTest extends BasePlatformTestCase
         try {
             view.render(state(hunk("A", false, Optional.empty()), hunk("B", true, Optional.of(IN_FIRST))));
             assertEquals(2, view.cards.size());
-            assertEquals("src/A.java · 3–4 · −0 +2", view.cards.get(0).header.getText());
-            assertEquals("reviewed in §1 · Widgets", view.cards.get(1).header.getText());
+            assertEquals("src/A.java · 3–4 · −0 +2", view.cards.get(0).header.getCharSequence(false).toString());
+            assertEquals("reviewed in §1 · Widgets", view.cards.get(1).header.getCharSequence(false).toString());
 
             click(view.cards.get(1).component, ReviewWorkbenchSectionView.SHOW_AGAIN);
-            assertEquals("src/B.java · 3–4 · −0 +2", view.cards.get(1).header.getText());
+            assertEquals("src/B.java · 3–4 · −0 +2", view.cards.get(1).header.getCharSequence(false).toString());
             assertEquals(ReviewWorkbenchSectionView.REVIEWED, view.cards.get(1).markButton.getText());
             assertFalse(view.cards.get(1).markButton.isEnabled());
         } finally {

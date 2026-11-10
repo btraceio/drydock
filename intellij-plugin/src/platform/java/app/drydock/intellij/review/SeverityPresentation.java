@@ -4,8 +4,11 @@ import app.drydock.review.Severity;
 import com.intellij.icons.AllIcons;
 import com.intellij.openapi.editor.colors.CodeInsightColors;
 import com.intellij.openapi.editor.colors.TextAttributesKey;
+import com.intellij.util.ui.JBUI;
+import com.intellij.util.ui.UIUtil;
 
 import javax.swing.Icon;
+import java.awt.Color;
 
 /**
  * The one place a finding's severity becomes an icon, a colour or a word in the IDE:
@@ -56,6 +59,20 @@ final class SeverityPresentation {
             case QUESTION -> "Question";
             case DEVIATION -> "Deviation";
             case NIT -> "Nit";
+        };
+    }
+
+    /**
+     * The severity word's colour: the IDE's error and warning colours for
+     * the two severities a reviewer must act on, the context-help grey for
+     * the two that only inform. A platform named colour, so it follows the
+     * theme.
+     */
+    static Color foreground(Severity severity) {
+        return switch (severity) {
+            case BLOCKING -> JBUI.CurrentTheme.Label.errorForeground();
+            case DEVIATION -> JBUI.CurrentTheme.Label.warningForeground();
+            case QUESTION, NIT -> UIUtil.getContextHelpForeground();
         };
     }
 }

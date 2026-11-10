@@ -13,21 +13,28 @@ import com.intellij.openapi.Disposable;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.Disposer;
+import com.intellij.ui.JBColor;
+import com.intellij.ui.SimpleColoredComponent;
+import com.intellij.ui.SimpleTextAttributes;
+import com.intellij.ui.components.ActionLink;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBScrollPane;
-import com.intellij.ui.components.JBTextArea;
+import com.intellij.ui.components.panels.HorizontalLayout;
 import com.intellij.util.ui.JBUI;
 import com.intellij.util.ui.UIUtil;
+import com.intellij.util.ui.WrapLayout;
 
 import javax.swing.BoxLayout;
+import javax.swing.Box;
 import javax.swing.JButton;
+import javax.swing.JComponent;
 import javax.swing.JPanel;
+import javax.swing.JTextArea;
 import javax.swing.Scrollable;
 import javax.swing.SwingConstants;
 import java.awt.BorderLayout;
 import java.awt.Dimension;
 import java.awt.EventQueue;
-import java.awt.FlowLayout;
 import java.awt.Rectangle;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -35,6 +42,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.awt.event.ActionListener;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
@@ -105,8 +113,9 @@ final class ReviewWorkbenchSectionView extends JPanel implements Disposable {
 
     private final Project project;
     private final Actions actions;
-    private final JBLabel title = new JBLabel();
-    private final JBTextArea narrative = new JBTextArea();
+    private final JBLabel number = new JBLabel();
+    private final JTextArea titleText;
+    private final JTextArea narrative;
     private final JBLabel progress = new JBLabel();
     final JButton markSection = new JButton(MARK_SECTION);
     final JBLabel notice = new JBLabel();
@@ -136,34 +145,60 @@ final class ReviewWorkbenchSectionView extends JPanel implements Disposable {
         settings.setExpandByDefault(false);
         settings.setContextRange(CONTEXT_RANGE);
 
-        title.setFont(JBUI.Fonts.label().asBold());
-        narrative.setEditable(false);
-        narrative.setLineWrap(true);
-        narrative.setWrapStyleWord(true);
-        narrative.setOpaque(false);
-        narrative.setFont(JBUI.Fonts.label()); // a text area defaults to the editor's monospace font
-        progress.setForeground(UIUtil.getContextHelpForeground());
-        notice.setForeground(UIUtil.getContextHelpForeground());
+        // The title row: the §n in muted page-number type, the title in page-title type.
+        ReviewTypography.apply(number, ReviewTypography.Role.PAGE_NUMBER);
+        number.setVerticalAlignment(SwingConstants.TOP);
+        titleText = ReviewTypography.prose(ReviewTypography.Role.PAGE_TITLE);
+        JPanel titleRow = new JPanel(new BorderLayout(JBUI.scale(ReviewTypography.M), 0));
+        titleRow.setOpaque(false);
+        titleRow.add(number, BorderLayout.WEST);
+        titleRow.add(titleText, BorderLayout.CENTER);
+        narrative = ReviewTypography.prose(ReviewTypography.Role.BODY);
+        ReviewTypography.apply(progress, ReviewTypography.Role.META);
+        ReviewTypography.apply(notice, ReviewTypography.Role.META);
         markSection.addActionListener(e -> {
             if (shown != null) {
                 mark(shown, SectionsModel.unsettledDigests(shown));
             }
         });
-        JPanel bar = new JPanel(new FlowLayout(FlowLayout.LEFT, JBUI.scale(8), 0));
+        JPanel bar = new JPanel(new WrapLayout(WrapLayout.LEFT, JBUI.scale(ReviewTypography.M),
+                JBUI.scale(ReviewTypography.S)));
+        bar.setOpaque(false);
         bar.add(progress);
         bar.add(markSection);
         bar.add(notice);
-        JPanel north = new JPanel(new BorderLayout());
-        north.setBorder(JBUI.Borders.empty(6, 8));
-        north.add(title, BorderLayout.NORTH);
-        north.add(narrative, BorderLayout.CENTER);
-        north.add(bar, BorderLayout.SOUTH);
+        JPanel north = new JPanel();
+        north.setLayout(new BoxLayout(north, BoxLayout.Y_AXIS));
+        north.setOpaque(false);
+        north.setBorder(JBUI.Borders.compound(
+                JBUI.Borders.customLineBottom(JBUI.CurrentTheme.ToolWindow.borderColor()),
+                JBUI.Borders.empty(ReviewTypography.XL, ReviewTypography.XL, ReviewTypography.L,
+                        ReviewTypography.XL)));
+        JComponent measuredTitle = ReviewTypography.measured(titleRow);
+        measuredTitle.setAlignmentX(LEFT_ALIGNMENT);
+        JComponent measuredNarrative = ReviewTypography.measured(narrative);
+        measuredNarrative.setAlignmentX(LEFT_ALIGNMENT);
+        bar.setAlignmentX(LEFT_ALIGNMENT);
+        north.add(measuredTitle);
+        north.add(Box.createVerticalStrut(JBUI.scale(ReviewTypography.M)));
+        north.add(measuredNarrative);
+        north.add(Box.createVerticalStrut(JBUI.scale(ReviewTypography.L)));
+        north.add(bar);
 
         stack.setLayout(new BoxLayout(stack, BoxLayout.Y_AXIS));
+        stack.setBorder(JBUI.Borders.empty(ReviewTypography.XL, ReviewTypography.XL, 0, ReviewTypography.XL));
         scroll.getVerticalScrollBar().setUnitIncrement(JBUI.scale(20));
         scroll.getViewport().addChangeListener(e -> updateLiveCards());
         add(north, BorderLayout.NORTH);
         add(scroll, BorderLayout.CENTER);
+    }
+
+    @Override
+    public void updateUI() {
+        super.updateUI();
+        if (titleText != null) {
+            ReviewTypography.restyle(this);
+        }
     }
 
     /** Shows {@code state}'s selected section, if any. */
@@ -184,7 +219,8 @@ final class ReviewWorkbenchSectionView extends JPanel implements Disposable {
             advanceFrom = null; // the user went elsewhere before the mark showed
         }
         shown = next;
-        title.setText("§" + next.number() + "  " + next.title());
+        number.setText("§" + next.number());
+        titleText.setText(next.title());
         narrative.setText(next.narrative());
         narrative.setVisible(!next.narrative().isEmpty());
         progress.setText(next.progressText() + " reviewed");
@@ -321,7 +357,7 @@ final class ReviewWorkbenchSectionView extends JPanel implements Disposable {
                 return new Dimension(Integer.MAX_VALUE, getPreferredSize().height);
             }
         };
-        final JBLabel header = new JBLabel();
+        final SimpleColoredComponent header = new SimpleColoredComponent();
         final HunkTakePanel take = new HunkTakePanel(id -> actions.showFinding(id));
         final JButton markButton = new JButton(MARK_HUNK);
         private final JPanel holder = new JPanel(new BorderLayout());
@@ -334,14 +370,13 @@ final class ReviewWorkbenchSectionView extends JPanel implements Disposable {
         Card(SectionsModel.Hunk hunk, boolean collapsedRow) {
             this.hunk = hunk;
             this.collapsedRow = collapsedRow;
-            component.setBorder(JBUI.Borders.compound(JBUI.Borders.customLineBottom(JBUI.CurrentTheme.ToolWindow
-                    .borderColor()), JBUI.Borders.empty(4, 8)));
-            JPanel top = new JPanel(new BorderLayout());
-            top.add(header, BorderLayout.CENTER);
-            JPanel buttons = new JPanel(new FlowLayout(FlowLayout.RIGHT, JBUI.scale(4), 0));
+            component.setBorder(JBUI.Borders.emptyBottom(collapsedRow ? ReviewTypography.M : ReviewTypography.XL));
+            header.setOpaque(false);
+            header.setIpad(JBUI.emptyInsets());
+            JPanel buttons = new JPanel(new HorizontalLayout(JBUI.scale(ReviewTypography.M)));
+            buttons.setOpaque(false);
             if (collapsedRow) {
-                JButton again = new JButton(SHOW_AGAIN);
-                again.addActionListener(e -> {
+                ActionLink again = new ActionLink(SHOW_AGAIN, e -> {
                     shownAgain.add(this.hunk.hunkId());
                     if (shown != null) {
                         rebuild(layoutOf(shown));
@@ -354,19 +389,23 @@ final class ReviewWorkbenchSectionView extends JPanel implements Disposable {
                         mark(shown, List.of(this.hunk.digest()));
                     }
                 });
-                JButton fullFile = new JButton(FULL_FILE);
-                fullFile.addActionListener(e -> actions.fullFile(this.hunk.file()));
+                ActionLink fullFile = new ActionLink(FULL_FILE, (ActionListener) e -> actions.fullFile(this.hunk.file()));
                 buttons.add(markButton);
                 buttons.add(fullFile);
-                placeholder.setForeground(UIUtil.getContextHelpForeground());
+                ReviewTypography.apply(placeholder, ReviewTypography.Role.META);
                 holder.add(placeholder, BorderLayout.CENTER);
                 Dimension size = new Dimension(JBUI.scale(400), JBUI.scale(CARD_HEIGHT));
                 holder.setPreferredSize(size);
                 holder.setMinimumSize(new Dimension(JBUI.scale(100), size.height));
+                holder.setBorder(JBUI.Borders.customLine(JBColor.border(), 1));
                 component.add(holder, BorderLayout.CENTER);
             }
+            JPanel top = new JPanel(new BorderLayout(JBUI.scale(ReviewTypography.M), 0));
+            top.setOpaque(false);
+            top.add(header, BorderLayout.CENTER);
             top.add(buttons, BorderLayout.EAST);
             JPanel north = new JPanel(new BorderLayout());
+            north.setOpaque(false);
             north.add(top, BorderLayout.NORTH);
             if (!collapsedRow) {
                 north.add(take, BorderLayout.CENTER);
@@ -377,12 +416,30 @@ final class ReviewWorkbenchSectionView extends JPanel implements Disposable {
 
         void update(SectionsModel.Hunk next) {
             hunk = next;
+            header.clear();
             if (collapsedRow) {
-                header.setText(next.settledElsewhere().map(SectionsModel.Settled::text).orElse(headerText(next)));
-                header.setForeground(UIUtil.getContextHelpForeground());
+                String text = next.settledElsewhere().map(SectionsModel.Settled::text).orElse(headerText(next));
+                header.append(text, ReviewTypography.MUTED);
+                header.setToolTipText(text);
                 return;
             }
-            header.setText(headerText(next));
+            // The fragments concatenate to the pure headerText(next); the file
+            // name carries the weight, its directory and the counts recede.
+            String path = next.file();
+            int slash = path.lastIndexOf('/');
+            if (slash >= 0) {
+                header.append(path.substring(0, slash + 1), ReviewTypography.MUTED);
+            }
+            header.append(path.substring(slash + 1), SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES);
+            if (!next.lines().isEmpty()) {
+                header.append(" · " + next.lines(), ReviewTypography.MUTED);
+            }
+            header.append(" · −" + next.removed() + " +" + next.added(), ReviewTypography.MUTED);
+            if (!next.alsoIn().isEmpty()) {
+                header.append(" · also in " + next.alsoIn().stream().map(number -> "§" + number)
+                        .collect(Collectors.joining(", ")), ReviewTypography.MUTED);
+            }
+            header.setToolTipText(headerText(next));
             markButton.setText(next.reviewed() ? REVIEWED : MARK_HUNK);
             markButton.setEnabled(!marking && !next.reviewed());
             take.render(next.take());
