@@ -14,6 +14,7 @@ import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.actionSystem.DefaultActionGroup;
 import com.intellij.openapi.project.DumbAwareToggleAction;
 import com.intellij.ui.JBColor;
+import com.intellij.ui.components.ActionLink;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBPanel;
 import com.intellij.ui.components.JBScrollPane;
@@ -33,9 +34,10 @@ import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JRadioButton;
 import javax.swing.JTextArea;
+import javax.swing.JTextField;
 import javax.swing.JViewport;
 import javax.swing.Scrollable;
-import javax.swing.SwingConstants;
+import javax.swing.SwingUtilities;
 import java.awt.BorderLayout;
 import java.awt.Component;
 import java.awt.Dimension;
@@ -43,6 +45,8 @@ import java.awt.EventQueue;
 import java.awt.FlowLayout;
 import java.awt.Insets;
 import java.awt.Rectangle;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.EnumMap;
@@ -65,7 +69,6 @@ import java.util.concurrent.CompletableFuture;
  */
 final class ReviewWorkbenchInbox extends JPanel implements Disposable {
 
-    static final String EMPTY_TEXT = "No findings here.";
     static final String NO_REVIEW_TEXT = "No agent has reviewed this change yet.";
     private static final String TOOLBAR_PLACE = "DrydockReviewWorkbenchInbox";
 
@@ -186,6 +189,8 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
     private final JPanel severityRow = new JPanel(
             new WrapLayout(WrapLayout.LEFT, JBUI.scale(ReviewTypography.S), JBUI.scale(ReviewTypography.XS)));
     private Composer composer;
+    /** Notified when the composer opens or closes: the pane hosting the inbox stays visible while it does. */
+    private Runnable composerChange = () -> { };
     private InboxModel.Snapshot shown = InboxModel.Snapshot.empty(InboxModel.Tab.TO_TRIAGE, InboxModel.Scope.ALL);
     /** Whether no agent has reviewed the change yet; the inbox then offers the reviews. */
     private boolean unreviewed;
@@ -308,6 +313,7 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
         composerPanel.setVisible(true);
         revalidate();
         composerText.requestFocusInWindow();
+        composerChange.run();
     }
 
     /** The open composer, switched to {@code mode}: the same lines, the text kept. EDT. */
@@ -370,6 +376,13 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
         composer = null;
         composerPanel.setVisible(false);
         revalidate();
+        composerChange.run();
+    }
+
+    /** Sets the listener told when the composer opens or closes. EDT. */
+    void onComposerChange(Runnable listener) {
+        requireEdt();
+        composerChange = Objects.requireNonNull(listener);
     }
 
     /** Shows {@code state}'s inbox. */
@@ -431,16 +444,16 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
         stack.removeAll();
         if (unreviewed) {
             stack.add(askForReview());
-        } else if (inbox.cards().isEmpty()) {
-            JLabel empty = ReviewTypography.label(EMPTY_TEXT, ReviewTypography.Role.META);
-            empty.setHorizontalAlignment(SwingConstants.CENTER);
-            empty.setBorder(JBUI.Borders.empty(ReviewTypography.XXL, 0));
-            stack.add(empty);
         }
         for (InboxModel.Card card : inbox.cards()) {
+            FindingInlayCard.Callbacks callbacks = new CardCallbacks(card.finding());
             FindingInlayCard view = new FindingInlayCard(card.finding(), Optional.empty(), clock,
-                    new CardCallbacks(card.finding()), surface);
+                    callbacks, surface);
+            view.setAlignmentX(LEFT_ALIGNMENT);
             cards.put(card.finding().id(), view);
+            if (surface != FindingInlayCard.Surface.INLAY) {
+                installNavigationClick(view, card.finding());
+            }
             stack.add(view);
         }
         stack.revalidate();
@@ -466,6 +479,35 @@ final class ReviewWorkbenchInbox extends JPanel implements Disposable {
             inbox.cards().stream().filter(c -> c.finding().id().equals(id)).findFirst()
                     .ifPresent(c -> actions.showInDiff(c.finding()));
         });
+    }
+
+    /**
+     * A plain click on a card (not on its links, buttons or comment field)
+     * shows the finding in the review diff: the file's diff at the finding's
+     * line — the Whole PR scope's way into a finding from another file.
+     */
+    private void installNavigationClick(FindingInlayCard view, ReviewAnnotation finding) {
+        view.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent e) {
+                if (!SwingUtilities.isLeftMouseButton(e) || onControl(view, e)) {
+                    return;
+                }
+                new CardCallbacks(finding).showInDiff();
+            }
+        });
+    }
+
+    /** Whether the click landed on the card's own controls, which handle themselves. */
+    private static boolean onControl(FindingInlayCard card, MouseEvent e) {
+        Component deepest = SwingUtilities.getDeepestComponentAt(card, e.getX(), e.getY());
+        for (Component at = deepest; at != null && at != card; at = at.getParent()) {
+            if (at instanceof JButton || at instanceof ActionLink || at instanceof JRadioButton
+                    || at instanceof JTextField) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Runs one card action: the card is busy until the future completes; its text goes to the notice line. */

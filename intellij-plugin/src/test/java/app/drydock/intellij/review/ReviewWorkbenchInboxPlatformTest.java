@@ -21,6 +21,11 @@ import com.intellij.util.ui.UIUtil;
 import javax.swing.AbstractButton;
 import javax.swing.JLabel;
 import javax.swing.JTextField;
+import java.awt.Component;
+import java.awt.Container;
+import java.awt.Rectangle;
+import java.awt.event.MouseEvent;
+import javax.swing.SwingUtilities;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -134,16 +139,53 @@ public class ReviewWorkbenchInboxPlatformTest extends BasePlatformTestCase {
         }
     }
 
-    public void testAnEmptyTabSaysSo() {
+    public void testAnEmptyTabShowsNoPlaceholder() {
         ReviewWorkbenchInbox inbox = new ReviewWorkbenchInbox(actions, Clock.fixed(Instant.EPOCH, ZoneOffset.UTC));
         try {
-            // Reviewed (a finding sits in the Outbox tab), but nothing is left to triage.
+            // Reviewed (a finding sits in the Outbox tab), but nothing is left to triage:
+            // no dead "no findings here" section — the pane shows its tabs only.
             inbox.render(state(List.of(finding("a", Triage.CONFIRMED))));
             assertTrue(cards(inbox).isEmpty());
-            assertTrue(UIUtil.uiTraverser(inbox).filter(JLabel.class).toList().stream()
-                    .anyMatch(label -> ReviewWorkbenchInbox.EMPTY_TEXT.equals(label.getText())));
+            assertTrue("no dead empty section: the pane shows its tabs only",
+                    UIUtil.uiTraverser(inbox).filter(JBLabel.class).toList().stream()
+                            .noneMatch(label -> label.isVisible() && label.getText().startsWith("No findings")));
         } finally {
             Disposer.dispose(inbox);
+        }
+    }
+
+    public void testACardClickShowsTheFindingInTheDiffAndAControlClickDoesNot() {
+        ReviewWorkbenchInbox inbox = new ReviewWorkbenchInbox(actions, Clock.fixed(Instant.EPOCH, ZoneOffset.UTC));
+        try {
+            inbox.render(state(List.of(finding("a", Triage.PROPOSED))));
+            FindingInlayCard card = cards(inbox).get(0);
+            inbox.setSize(400, 900);
+            layOut(inbox);
+            long when = System.currentTimeMillis();
+            // A plain click on the card's text navigates.
+            card.dispatchEvent(new MouseEvent(card, MouseEvent.MOUSE_CLICKED, when, 0,
+                    5, 5, 1, false, MouseEvent.BUTTON1));
+            assertEquals(List.of("showInDiff a"), calls);
+
+            // A click on the card's own controls does not: they handle themselves.
+            AbstractButton link = UIUtil.uiTraverser(card).filter(AbstractButton.class).toList().stream()
+                    .filter(button -> "Request fix".equals(button.getText())).findFirst().orElseThrow();
+            assertTrue("laid out: the test clicks where the link really is", link.getWidth() > 0);
+            Rectangle at = SwingUtilities.convertRectangle(link.getParent(), link.getBounds(), card);
+            card.dispatchEvent(new MouseEvent(card, MouseEvent.MOUSE_CLICKED, when, 0,
+                    at.x + at.width / 2, at.y + at.height / 2, 1, false, MouseEvent.BUTTON1));
+            assertEquals("the link alone decides", List.of("showInDiff a"), calls);
+        } finally {
+            Disposer.dispose(inbox);
+        }
+    }
+
+    private static void layOut(Container root) {
+        root.doLayout();
+        for (Component child : root.getComponents()) {
+            if (child instanceof Container container) {
+                layOut(container);
+            }
         }
     }
 

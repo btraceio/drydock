@@ -1,5 +1,6 @@
 package app.drydock.intellij.review;
 
+import app.drydock.intellij.review.workbench.model.InboxModel;
 import app.drydock.intellij.review.workbench.model.WorkbenchState;
 import app.drydock.intellij.tasks.WorktreeReview;
 import app.drydock.review.tour.ReviewTour;
@@ -149,6 +150,10 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
     /** The header's Review ▾: the agent reviews that can be asked for. */
     final DefaultActionGroup reviewActions;
     private final JBPanel<?> navigator = new JBPanel<>(new BorderLayout());
+    /** The inbox pane, hidden while the review has no findings to reach and no composer is open. */
+    private JComponent inboxComponent;
+    /** Whether the pane is collapsed by this view's empty-yield (not the user): only our own yield re-expands. */
+    private boolean emptyYielded;
     static final String CENTRE_FILE = "file";
     static final String CENTRE_SECTION = "section";
     private final CardLayout centreCards = new CardLayout();
@@ -170,10 +175,13 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
 
         navigator.add(host.hostNavigator(project, this, this::renderHeader)
                 .orElseGet(() -> emptyState(NAVIGATOR_EMPTY_TEXT)), BorderLayout.CENTER);
-        JComponent inbox = host.hostInbox(project, this).orElseGet(() -> emptyState(INBOX_EMPTY_TEXT));
+        inboxComponent = host.hostInbox(project, this).orElseGet(() -> emptyState(INBOX_EMPTY_TEXT));
+        if (inboxComponent instanceof ReviewWorkbenchInbox inbox) {
+            inbox.onComposerChange(this::updateInboxVisibility);
+        }
         navigatorPane = new CollapsiblePane(navSplitter, true, navigator, "Navigator", NAV_MIN_WIDTH,
                 collapsed -> rememberCollapsed(NAV_COLLAPSED_KEY, collapsed));
-        inboxPane = new CollapsiblePane(inboxSplitter, false, inbox, "Findings", INBOX_MIN_WIDTH,
+        inboxPane = new CollapsiblePane(inboxSplitter, false, inboxComponent, "Findings", INBOX_MIN_WIDTH,
                 collapsed -> rememberCollapsed(INBOX_COLLAPSED_KEY, collapsed));
         inboxSplitter.setFirstComponent(centre);
         inboxSplitter.setSecondComponent(inboxPane);
@@ -247,6 +255,46 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
             centreCard = card;
             centreCards.show(centre, card);
         }
+        updateInboxVisibility();
+    }
+
+    /**
+     * Shows the inbox pane while there is something to reach in it: a
+     * finding on any tab, the ask-for-review panel, or an open composer (a
+     * comment can start with no findings at all). With nothing, the pane
+     * yields its space - collapsed to its strip, never recorded as the
+     * user's preference, so it comes back wherever they left it the moment
+     * a finding or the composer needs it. EDT.
+     */
+    private void updateInboxVisibility() {
+        WorkbenchState state = shown;
+        if (state == null || inboxPane == null) {
+            return;
+        }
+        boolean reachable = inboxShown(state)
+                || (inboxComponent instanceof ReviewWorkbenchInbox inbox && inbox.composer().isPresent());
+        if (reachable) {
+            if (emptyYielded) {
+                emptyYielded = false;
+                inboxPane.setCollapsed(false, false); // restore our yield, not the user's collapse
+            }
+        } else if (!inboxPane.isCollapsed()) {
+            emptyYielded = true;
+            inboxPane.setCollapsed(true, false);
+        }
+    }
+
+    /** Whether {@code state}'s review has anything for the inbox (pure): no review yet, or a finding on any tab. */
+    static boolean inboxShown(WorkbenchState state) {
+        if (ReviewWorkbenchInbox.unreviewed(state)) {
+            return true;
+        }
+        for (InboxModel.Tab tab : InboxModel.Tab.values()) {
+            if (state.inbox().count(tab) > 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** The centre card shown. EDT. */
