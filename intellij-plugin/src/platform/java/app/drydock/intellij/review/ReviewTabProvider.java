@@ -368,9 +368,11 @@ final class ReviewTabProvider {
                 target -> resolve(target).isPresent(),
                 target -> compose(project, Optional.of(target), ReviewWorkbenchInbox.Composer.Mode.COMMENT));
         ReviewDiffInlays layer = inlays;
+        ReviewSymbolNavigation symbolNavigation = new ReviewSymbolNavigation();
         diffEditor = ReviewDiffEditor.platform(project, diffParent, viewer -> {
             layer.viewerChanged(viewer);
             gutter.viewerChanged(viewer);
+            symbolNavigation.viewerChanged(viewer);
         });
 
         buildDecisionsBar();
@@ -2478,6 +2480,7 @@ final class ReviewTabProvider {
         public Consumer<FrameDiffTool.DiffViewer> decorator(String path, int hunkIndex, Disposable lifetime) {
             ReviewDiffInlays layer = new ReviewDiffInlays(ReviewDiffInlays.platformEdt(), labeledCards(
                     ReviewDiffInlays.triageCards(Clock.systemDefaultZone(), cardActions)));
+            ReviewSymbolNavigation symbolNavigation = new ReviewSymbolNavigation();
             ReviewGutterComments gutter = new ReviewGutterComments(
                     target -> resolve(target).isPresent(),
                     target -> compose(project, Optional.of(target), ReviewWorkbenchInbox.Composer.Mode.COMMENT));
@@ -2518,6 +2521,7 @@ final class ReviewTabProvider {
             return viewer -> {
                 layer.viewerChanged(viewer);
                 gutter.viewerChanged(viewer);
+                symbolNavigation.viewerChanged(viewer);
             };
         }
 
