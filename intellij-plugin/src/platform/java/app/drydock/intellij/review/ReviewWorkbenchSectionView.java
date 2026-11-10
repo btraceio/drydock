@@ -12,6 +12,7 @@ import com.intellij.diff.util.DiffUserDataKeysEx;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.project.Project;
+import com.intellij.ide.util.PropertiesComponent;
 import com.intellij.openapi.util.Disposer;
 import com.intellij.ui.JBColor;
 import com.intellij.ui.SimpleColoredComponent;
@@ -33,6 +34,7 @@ import javax.swing.JTextArea;
 import javax.swing.Scrollable;
 import javax.swing.SwingConstants;
 import java.awt.BorderLayout;
+import java.awt.Cursor;
 import java.awt.Dimension;
 import java.awt.EventQueue;
 import java.awt.Rectangle;
@@ -43,6 +45,8 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.awt.event.ActionListener;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
@@ -62,12 +66,21 @@ import java.util.stream.Collectors;
  * one card height of the viewport and disposed when it leaves; a placeholder
  * of the same height holds the scroll position. Every panel is disposed with
  * the view. EDT.</p>
+ *
+ * <p>The cards' diff height is the user's: the handle between a card's
+ * header and its diff drags every card's diff taller or shorter at once,
+ * and the height persists per project. A hunk marked reviewed collapses at
+ * once to a one-line row (Show Again re-expands), like the hunks settled
+ * in another section.</p>
  */
 final class ReviewWorkbenchSectionView extends JPanel implements Disposable {
 
     /** The diff place every card shares: its settings collapse unchanged code around the hunk. */
     static final String CARD_PLACE = "DrydockReviewSection";
-    static final int CARD_HEIGHT = 320;
+    static final String CARD_HEIGHT_KEY = "drydock.review.section.cardHeight";
+    static final int DEFAULT_CARD_HEIGHT = 320;
+    static final int MIN_CARD_HEIGHT = 96;
+    static final int MAX_CARD_HEIGHT = 1600;
     static final int CONTEXT_RANGE = 4;
     static final String LOADING = "Loading the diff…";
     static final String CHANGED_SINCE = "This file changed since the review was read: refresh the review.";
@@ -124,6 +137,8 @@ final class ReviewWorkbenchSectionView extends JPanel implements Disposable {
     final List<Card> cards = new ArrayList<>();
     /** The collapsed hunks the user asked to see again, for the section shown. */
     private final Set<String> shownAgain = new HashSet<>();
+    /** Every card's diff height, unscaled; dragged on the cards' handles, persisted per project. */
+    private int cardHeight;
     private SectionsModel.Section shown;
     /** What the cards were built for; a render with the same layout only updates them. */
     private List<String> layout = List.of();
@@ -144,6 +159,11 @@ final class ReviewWorkbenchSectionView extends JPanel implements Disposable {
         TextDiffSettingsHolder.TextDiffSettings settings = TextDiffSettingsHolder.TextDiffSettings.getSettings(CARD_PLACE);
         settings.setExpandByDefault(false);
         settings.setContextRange(CONTEXT_RANGE);
+        cardHeight = PropertiesComponent.getInstance(project)
+                .getInt(CARD_HEIGHT_KEY, DEFAULT_CARD_HEIGHT);
+        if (cardHeight < MIN_CARD_HEIGHT || cardHeight > MAX_CARD_HEIGHT) {
+            cardHeight = DEFAULT_CARD_HEIGHT;
+        }
 
         // The title row: the §n in muted page-number type, the title in page-title type.
         ReviewTypography.apply(number, ReviewTypography.Role.PAGE_NUMBER);
@@ -264,8 +284,77 @@ final class ReviewWorkbenchSectionView extends JPanel implements Disposable {
                 .toList();
     }
 
+    /**
+     * Whether the hunk shows as its one-line row: settled in another
+     * section, or reviewed (from this view's Mark Reviewed or anywhere
+     * else - a reviewed hunk's diff has said its piece), unless the user
+     * asked to see it again.
+     */
     private boolean collapsed(SectionsModel.Hunk hunk) {
-        return hunk.collapsed() && !shownAgain.contains(hunk.hunkId());
+        return (hunk.collapsed() || hunk.reviewed()) && !shownAgain.contains(hunk.hunkId());
+    }
+
+    /** The cards' shared diff height, as the layout wants it: scaled. */
+    private int scaledCardHeight() {
+        return JBUI.scale(cardHeight);
+    }
+
+    /**
+     * Sets every card's diff height, clamped; the value persists per project
+     * on the next drag's end. Re-lays the stack: a card in view is within
+     * the new height or not, and the placeholders follow.
+     */
+    void setCardHeight(int unscaled) {
+        requireEdt();
+        int clamped = Math.max(MIN_CARD_HEIGHT, Math.min(MAX_CARD_HEIGHT, unscaled));
+        if (clamped == cardHeight) {
+            return;
+        }
+        cardHeight = clamped;
+        for (Card card : cards) {
+            card.resizeHolder();
+        }
+        stack.revalidate();
+        stack.repaint();
+        updateLiveCards();
+    }
+
+    /** Persists {@link #cardHeight} per project. */
+    private void storeCardHeight() {
+        PropertiesComponent.getInstance(project).setValue(CARD_HEIGHT_KEY, cardHeight, DEFAULT_CARD_HEIGHT);
+    }
+
+    /** The strip between a card's header and its diff: dragging it resizes every card's diff. */
+    final class ResizeHandle extends JPanel {
+        private int dragStartY;
+        private int dragStartHeight;
+
+        private ResizeHandle() {
+            setPreferredSize(new Dimension(0, JBUI.scale(7)));
+            setCursor(Cursor.getPredefinedCursor(Cursor.N_RESIZE_CURSOR));
+            MouseAdapter drag = new MouseAdapter() {
+                @Override
+                public void mousePressed(MouseEvent e) {
+                    dragStartY = e.getYOnScreen();
+                    dragStartHeight = cardHeight;
+                }
+
+                @Override
+                public void mouseDragged(MouseEvent e) {
+                    // Down grows the diff below the handle; the drag works in
+                    // screen pixels, converted back through the user scale.
+                    setCardHeight(JBUI.unscale(JBUI.scale(dragStartHeight)
+                            + (e.getYOnScreen() - dragStartY)));
+                }
+
+                @Override
+                public void mouseReleased(MouseEvent e) {
+                    storeCardHeight();
+                }
+            };
+            addMouseListener(drag);
+            addMouseMotionListener(drag);
+        }
     }
 
     private void rebuild(List<String> nextLayout) {
@@ -290,7 +379,7 @@ final class ReviewWorkbenchSectionView extends JPanel implements Disposable {
     /** Creates the panels of the cards within one card height of the viewport, and disposes the others'. */
     void updateLiveCards() {
         Rectangle visible = scroll.getViewport().getViewRect();
-        int margin = JBUI.scale(CARD_HEIGHT);
+        int margin = scaledCardHeight();
         Rectangle near = new Rectangle(visible.x, visible.y - margin, Math.max(1, visible.width),
                 visible.height + 2 * margin);
         for (Card card : cards) {
@@ -360,7 +449,8 @@ final class ReviewWorkbenchSectionView extends JPanel implements Disposable {
         final SimpleColoredComponent header = new SimpleColoredComponent();
         final HunkTakePanel take = new HunkTakePanel(id -> actions.showFinding(id));
         final JButton markButton = new JButton(MARK_HUNK);
-        private final JPanel holder = new JPanel(new BorderLayout());
+        final JPanel holder = new JPanel(new BorderLayout());
+        final ResizeHandle resizeHandle = new ResizeHandle();
         private final JBLabel placeholder = new JBLabel(LOADING, SwingConstants.CENTER);
         private final boolean collapsedRow;
         private Disposable lifetime;
@@ -394,9 +484,7 @@ final class ReviewWorkbenchSectionView extends JPanel implements Disposable {
                 buttons.add(fullFile);
                 ReviewTypography.apply(placeholder, ReviewTypography.Role.META);
                 holder.add(placeholder, BorderLayout.CENTER);
-                Dimension size = new Dimension(JBUI.scale(400), JBUI.scale(CARD_HEIGHT));
-                holder.setPreferredSize(size);
-                holder.setMinimumSize(new Dimension(JBUI.scale(100), size.height));
+                resizeHolder();
                 holder.setBorder(JBUI.Borders.customLine(JBColor.border(), 1));
                 component.add(holder, BorderLayout.CENTER);
             }
@@ -409,16 +497,27 @@ final class ReviewWorkbenchSectionView extends JPanel implements Disposable {
             north.add(top, BorderLayout.NORTH);
             if (!collapsedRow) {
                 north.add(take, BorderLayout.CENTER);
+                north.add(resizeHandle, BorderLayout.SOUTH);
             }
             component.add(north, BorderLayout.NORTH);
             update(hunk);
+        }
+
+        /** The holder's size for the cards' shared height. */
+        void resizeHolder() {
+            holder.setPreferredSize(new Dimension(JBUI.scale(400), scaledCardHeight()));
+            holder.setMinimumSize(new Dimension(JBUI.scale(100), scaledCardHeight()));
         }
 
         void update(SectionsModel.Hunk next) {
             hunk = next;
             header.clear();
             if (collapsedRow) {
-                String text = next.settledElsewhere().map(SectionsModel.Settled::text).orElse(headerText(next));
+                // The row keeps the hunk's identity (several reviewed hunks
+                // in one section must stay distinguishable) and names its
+                // state; a hunk settled elsewhere names the section instead.
+                String text = next.settledElsewhere().map(SectionsModel.Settled::text)
+                        .orElse(REVIEWED + " · " + headerText(next));
                 header.append(text, ReviewTypography.MUTED);
                 header.setToolTipText(text);
                 return;
@@ -474,7 +573,7 @@ final class ReviewWorkbenchSectionView extends JPanel implements Disposable {
                 return;
             }
             Rectangle visible = scroll.getViewport().getViewRect();
-            int margin = JBUI.scale(CARD_HEIGHT);
+            int margin = scaledCardHeight();
             if (!new Rectangle(visible.x, visible.y - margin, Math.max(1, visible.width), visible.height + 2 * margin)
                     .intersects(component.getBounds())) {
                 return; // scrolled away while loading

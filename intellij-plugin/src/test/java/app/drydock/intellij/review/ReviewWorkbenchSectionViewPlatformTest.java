@@ -5,16 +5,19 @@ import app.drydock.intellij.review.workbench.model.WorkbenchState;
 import app.drydock.review.tour.HunkTake;
 import com.intellij.diff.FrameDiffTool;
 import com.intellij.diff.util.Side;
+import com.intellij.ide.util.PropertiesComponent;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.util.Disposer;
 import com.intellij.testFramework.PlatformTestUtil;
 import com.intellij.testFramework.fixtures.BasePlatformTestCase;
 import com.intellij.ui.components.ActionLink;
+import com.intellij.util.ui.JBUI;
 import com.intellij.util.ui.UIUtil;
 
 import javax.swing.JButton;
 import java.awt.Component;
 import java.awt.Container;
+import java.awt.event.MouseEvent;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -338,11 +341,72 @@ public class ReviewWorkbenchSectionViewPlatformTest extends BasePlatformTestCase
             PlatformTestUtil.dispatchAllEventsInIdeEventQueue();
             ReviewWorkbenchSectionView.Card card = view.cards.get(0);
 
-            view.render(state(hunk("A", true, Optional.empty())));
-            assertSame("a verdict only updates the card", card, view.cards.get(0));
+            view.render(state(hunk("A", false, Optional.empty())));
+            assertSame("a verdict-free render only updates the card", card, view.cards.get(0));
             assertTrue(card.live());
-            assertEquals(ReviewWorkbenchSectionView.REVIEWED, card.markButton.getText());
+
+            view.render(state(hunk("A", true, Optional.empty())));
+            assertTrue("a reviewed hunk collapses: the card is a one-line row",
+                    view.cards.get(0).resizeHandle.getParent() == null);
+            assertEquals("Reviewed · src/A.java · 3–4 · −0 +2",
+                    view.cards.get(0).header.getCharSequence(false).toString());
         } finally {
+            Disposer.dispose(view);
+        }
+    }
+
+    public void testAReviewedHunkCollapsesAtOnceAndShowAgainBringsItBack() {
+        ReviewWorkbenchSectionView view = new ReviewWorkbenchSectionView(getProject(), actions);
+        try {
+            view.render(state(hunk("A", false, Optional.empty())));
+            assertNotNull("an open hunk is a card with a diff area",
+                    view.cards.get(0).resizeHandle.getParent());
+
+            view.render(state(hunk("A", true, Optional.empty())));
+            assertNull("the verdict collapses the card at once",
+                    view.cards.get(0).resizeHandle.getParent());
+            assertEquals("Reviewed · src/A.java · 3–4 · −0 +2",
+                    view.cards.get(0).header.getCharSequence(false).toString());
+
+            click(view.cards.get(0).component, ReviewWorkbenchSectionView.SHOW_AGAIN);
+            assertEquals("src/A.java · 3–4 · −0 +2",
+                    view.cards.get(0).header.getCharSequence(false).toString());
+            assertEquals(ReviewWorkbenchSectionView.REVIEWED, view.cards.get(0).markButton.getText());
+            assertFalse(view.cards.get(0).markButton.isEnabled());
+        } finally {
+            Disposer.dispose(view);
+        }
+    }
+
+    public void testTheCardHeightDragsAndPersists() {
+        ReviewWorkbenchSectionView view = new ReviewWorkbenchSectionView(getProject(), actions);
+        PropertiesComponent properties = PropertiesComponent.getInstance(getProject());
+        String saved = properties.getValue(ReviewWorkbenchSectionView.CARD_HEIGHT_KEY);
+        try {
+            view.render(state(hunk("A", false, Optional.empty())));
+
+            view.setCardHeight(200);
+            assertEquals(JBUI.scale(200), view.cards.get(0).holder.getPreferredSize().height);
+
+            view.setCardHeight(5);
+            assertEquals("clamped", JBUI.scale(ReviewWorkbenchSectionView.MIN_CARD_HEIGHT),
+                    view.cards.get(0).holder.getPreferredSize().height);
+
+            // A drag: press on the handle (screen Y 0), move down 52 screen px, release -
+            // every card's diff follows and the height persists per project.
+            var handle = view.cards.get(0).resizeHandle;
+            long when = System.currentTimeMillis();
+            handle.dispatchEvent(new MouseEvent(handle, MouseEvent.MOUSE_PRESSED, when, 0,
+                    2, 2, 0, 0, 1, false, MouseEvent.BUTTON1));
+            handle.dispatchEvent(new MouseEvent(handle, MouseEvent.MOUSE_DRAGGED, when, 0,
+                    2, 52, 0, 52, 1, false, MouseEvent.BUTTON1));
+            handle.dispatchEvent(new MouseEvent(handle, MouseEvent.MOUSE_RELEASED, when, 0,
+                    2, 52, 0, 52, 1, false, MouseEvent.BUTTON1));
+            int stored = properties.getInt(ReviewWorkbenchSectionView.CARD_HEIGHT_KEY,
+                    ReviewWorkbenchSectionView.DEFAULT_CARD_HEIGHT);
+            assertEquals(JBUI.unscale(JBUI.scale(ReviewWorkbenchSectionView.MIN_CARD_HEIGHT) + 52), stored);
+        } finally {
+            properties.setValue(ReviewWorkbenchSectionView.CARD_HEIGHT_KEY, saved);
             Disposer.dispose(view);
         }
     }
