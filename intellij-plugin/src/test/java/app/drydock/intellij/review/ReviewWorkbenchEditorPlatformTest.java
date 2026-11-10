@@ -4,6 +4,12 @@ import com.intellij.diff.fragments.LineFragment;
 import com.intellij.diff.requests.DiffRequest;
 import app.drydock.intellij.review.workbench.model.SectionsModel;
 import app.drydock.intellij.review.workbench.model.WorkbenchState;
+import app.drydock.review.AnnotationStatus;
+import app.drydock.review.Confidence;
+import app.drydock.review.DiffSelection;
+import app.drydock.review.ReviewAnnotation;
+import app.drydock.review.Severity;
+import app.drydock.review.Triage;
 import app.drydock.review.tour.ReviewTour;
 import com.intellij.diff.DiffContentFactory;
 import com.intellij.diff.tools.util.base.TextDiffSettingsHolder;
@@ -18,6 +24,7 @@ import com.intellij.openapi.actionSystem.ex.ActionUtil;
 import com.intellij.openapi.fileEditor.FileEditorProvider;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.Disposer;
+import com.intellij.openapi.wm.impl.IdeGlassPaneImpl;
 import com.intellij.testFramework.LightVirtualFile;
 import com.intellij.testFramework.TestActionEvent;
 import com.intellij.testFramework.PlatformTestUtil;
@@ -26,12 +33,18 @@ import com.intellij.testFramework.fixtures.BasePlatformTestCase;
 import com.intellij.ui.components.JBLabel;
 
 import javax.swing.JComponent;
+import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.SwingUtilities;
 import javax.swing.text.JTextComponent;
+import java.awt.GraphicsEnvironment;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 
 /**
@@ -543,6 +556,214 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
         } finally {
             Disposer.dispose(editor);
         }
+    }
+
+    public void testInboxShownFollowsWhatThereIsToReach() {
+        SectionsModel.Snapshot tour = tour();
+        ReviewTabModel.Snapshot none = new ReviewTabModel.Snapshot(List.of(), 0, 0);
+        ReviewAnnotation finding = finding("a");
+
+        // No review yet: the ask-for-review panel must stay reachable.
+        assertTrue(ReviewWorkbenchEditor.inboxShown(WorkbenchState.of("drydock", WorkbenchState.Mode.LOCAL,
+                none, WorkbenchState.Filter.ALL, Optional.empty(), WorkbenchState.View.CHANGES_ONLY,
+                List.of(), WorkbenchState.InboxChoice.DEFAULT)));
+        // A tour, but no findings anywhere: nothing to reach — the pane yields.
+        assertFalse(ReviewWorkbenchEditor.inboxShown(WorkbenchState.of("drydock", WorkbenchState.Mode.LOCAL,
+                none, WorkbenchState.Filter.ALL, Optional.empty(), WorkbenchState.View.CHANGES_ONLY,
+                List.of(), WorkbenchState.InboxChoice.DEFAULT, tour,
+                WorkbenchState.SectionsChoice.DEFAULT)));
+        // A finding, even on a tab that is not shown: the pane stays.
+        assertTrue(ReviewWorkbenchEditor.inboxShown(WorkbenchState.of("drydock", WorkbenchState.Mode.LOCAL,
+                none, WorkbenchState.Filter.ALL, Optional.empty(), WorkbenchState.View.CHANGES_ONLY,
+                List.of(finding), WorkbenchState.InboxChoice.DEFAULT, tour,
+                WorkbenchState.SectionsChoice.DEFAULT)));
+    }
+
+    public void testTheInboxPaneYieldsItsSpaceWhileThereIsNothingToReach() {
+        List<Consumer<WorkbenchState>> headers = new ArrayList<>();
+        List<Disposable> parents = new ArrayList<>();
+        ReviewWorkbenchEditor.Host host = new ReviewWorkbenchEditor.Host() {
+            @Override
+            public Optional<ReviewWorkbenchEditor.HostedDiff> hostDiff(Project project, Disposable parent) {
+                return Optional.empty();
+            }
+
+            @Override
+            public Optional<JComponent> hostNavigator(Project project, Disposable parent,
+                                                      Consumer<WorkbenchState> header) {
+                headers.add(header);
+                return Optional.empty();
+            }
+
+            @Override
+            public void changeView(Project project, WorkbenchState.View view) {
+            }
+
+            @Override
+            public Optional<JComponent> hostInbox(Project project, Disposable parent) {
+                ReviewWorkbenchInbox inbox = new ReviewWorkbenchInbox(inboxActions(),
+                        Clock.fixed(Instant.EPOCH, ZoneOffset.UTC));
+                Disposer.register(parent, inbox);
+                parents.add(parent);
+                return Optional.of(inbox);
+            }
+        };
+        ReviewWorkbenchEditor editor = new ReviewWorkbenchEditor(getProject(), ReviewWorkbenchFile.of(getProject()),
+                host);
+        try {
+            ReviewWorkbenchInbox inbox = (ReviewWorkbenchInbox) editor.inboxPane.content();
+            assertTrue("expanded to begin with", !editor.inboxPane.isCollapsed());
+            assertTrue(inbox.isVisible());
+
+            headers.get(0).accept(noFindingsTourState());
+            assertTrue("no findings anywhere: the pane yields its space (collapsed to its strip)",
+                    editor.inboxPane.isCollapsed());
+            assertFalse(inbox.isVisible());
+
+            headers.get(0).accept(oneFindingTourState());
+            assertTrue("a finding brings the pane back", !editor.inboxPane.isCollapsed());
+            assertTrue(inbox.isVisible());
+
+            headers.get(0).accept(noFindingsTourState());
+            assertTrue(editor.inboxPane.isCollapsed());
+
+            // A comment can start with no findings at all: the composer keeps the pane.
+            inbox.openComposer(new ReviewWorkbenchInbox.Composer(
+                    ReviewWorkbenchInbox.Composer.Mode.COMMENT,
+                    new DiffSelection.Range("A.java", "n10", "n12", false)));
+            assertTrue("the composer needs its pane", !editor.inboxPane.isCollapsed());
+            assertTrue(inbox.isVisible());
+        } finally {
+            Disposer.dispose(editor);
+        }
+    }
+
+    public void testAnInboxVisibilityFlipRelayoutsTheSplitterAtOnce() {
+        if (GraphicsEnvironment.isHeadless()) {
+            return; // the relayout is only observable in a peer-created (packable) hierarchy
+        }
+        List<Consumer<WorkbenchState>> headers = new ArrayList<>();
+        ReviewWorkbenchEditor.Host host = new ReviewWorkbenchEditor.Host() {
+            @Override
+            public Optional<ReviewWorkbenchEditor.HostedDiff> hostDiff(Project project, Disposable parent) {
+                return Optional.empty();
+            }
+
+            @Override
+            public Optional<JComponent> hostNavigator(Project project, Disposable parent,
+                                                      Consumer<WorkbenchState> header) {
+                headers.add(header);
+                return Optional.empty();
+            }
+
+            @Override
+            public void changeView(Project project, WorkbenchState.View view) {
+            }
+
+            @Override
+            public Optional<JComponent> hostInbox(Project project, Disposable parent) {
+                ReviewWorkbenchInbox inbox = new ReviewWorkbenchInbox(inboxActions(),
+                        Clock.fixed(Instant.EPOCH, ZoneOffset.UTC));
+                Disposer.register(parent, inbox);
+                return Optional.of(inbox);
+            }
+        };
+        ReviewWorkbenchEditor editor = new ReviewWorkbenchEditor(getProject(), ReviewWorkbenchFile.of(getProject()),
+                host);
+        JFrame frame = new JFrame();
+        // The splitter's one-pixel divider asks IdeGlassPaneUtil.find for the root pane's glass
+        // pane on addNotify: a bare JFrame's JPanel glass pane is not an IdeGlassPane, so install
+        // one, the way the IDE window itself does, before packing.
+        frame.getRootPane().setGlassPane(new IdeGlassPaneImpl(frame.getRootPane(), false));
+        frame.setContentPane(editor.getComponent());
+        frame.pack();
+        try {
+            JComponent centre = editor.inboxSplitter.getFirstComponent();
+            JComponent inbox = (JComponent) editor.inboxPane.content();
+            assertTrue(inbox.isVisible());
+            // The inbox sits beside the centre in a horizontal splitter: the share it yields is
+            // width. (The frame's height can also re-balance here, because Splitter's minimum
+            // sizes skip hidden components in the outer vertical splitter — not what's under test.)
+            int withInbox = centre.getWidth();
+            assertTrue("precondition: the packed frame laid the splitters out", withInbox > 0);
+
+            headers.get(0).accept(noFindingsTourState());
+            PlatformTestUtil.dispatchAllEventsInIdeEventQueue();
+            assertTrue("no findings anywhere: the pane yields its space (collapsed to its strip)",
+                    editor.inboxPane.isCollapsed());
+            assertTrue("the yield relayouts the splitter at once: the centre reclaimed the inbox's "
+                            + "share (was " + withInbox + ", now " + centre.getWidth() + ")",
+                    centre.getWidth() > withInbox);
+        } finally {
+            frame.dispose();
+            Disposer.dispose(editor);
+        }
+    }
+
+    private static WorkbenchState noFindingsTourState() {
+        return WorkbenchState.of("drydock", WorkbenchState.Mode.LOCAL,
+                new ReviewTabModel.Snapshot(List.of(), 0, 0), WorkbenchState.Filter.ALL, Optional.empty(),
+                WorkbenchState.View.CHANGES_ONLY, List.of(), WorkbenchState.InboxChoice.DEFAULT,
+                tour(), WorkbenchState.SectionsChoice.DEFAULT);
+    }
+
+    private static WorkbenchState oneFindingTourState() {
+        return WorkbenchState.of("drydock", WorkbenchState.Mode.LOCAL,
+                new ReviewTabModel.Snapshot(List.of(), 0, 0), WorkbenchState.Filter.ALL, Optional.empty(),
+                WorkbenchState.View.CHANGES_ONLY, List.of(finding("a")), WorkbenchState.InboxChoice.DEFAULT,
+                tour(), WorkbenchState.SectionsChoice.DEFAULT);
+    }
+
+    private static SectionsModel.Snapshot tour() {
+        return new SectionsModel.Snapshot(SectionsModel.Source.TOUR, Optional.empty(),
+                List.of(new SectionsModel.Section("step:s1", 1, Optional.of("s1"), "Widgets", "Why.",
+                        List.of(), List.of(), List.of(), 0, 0, 0)));
+    }
+
+    private static ReviewAnnotation finding(String id) {
+        return new ReviewAnnotation("s1", id, "A.java", "n1", "n1", Severity.BLOCKING, Confidence.HIGH,
+                Optional.of("Title " + id), "Claude", Instant.EPOCH, List.of(), Optional.empty(), Optional.empty(),
+                List.of(), List.of(new ReviewAnnotation.Message("Claude", Instant.EPOCH, "body")), Optional.empty(),
+                AnnotationStatus.OPEN, Optional.empty(), false, Triage.PROPOSED, Optional.empty());
+    }
+
+    private static ReviewWorkbenchInbox.Actions inboxActions() {
+        return new ReviewWorkbenchInbox.Actions() {
+            @Override public CompletableFuture<Optional<String>> postToPr(ReviewAnnotation f) {
+                return CompletableFuture.completedFuture(Optional.empty());
+            }
+
+            @Override public CompletableFuture<Optional<String>> requestFix(ReviewAnnotation f) {
+                return CompletableFuture.completedFuture(Optional.empty());
+            }
+
+            @Override public CompletableFuture<Optional<String>> dismiss(ReviewAnnotation f) {
+                return CompletableFuture.completedFuture(Optional.empty());
+            }
+
+            @Override public CompletableFuture<Optional<String>> undo(ReviewAnnotation f) {
+                return CompletableFuture.completedFuture(Optional.empty());
+            }
+
+            @Override public CompletableFuture<Optional<String>> comment(ReviewAnnotation f, String t) {
+                return CompletableFuture.completedFuture(Optional.empty());
+            }
+
+            @Override public CompletableFuture<Optional<String>> challenge(ReviewAnnotation f, String t) {
+                return CompletableFuture.completedFuture(Optional.empty());
+            }
+
+            @Override public void showInDiff(ReviewAnnotation f) {
+            }
+
+            @Override public void choose(WorkbenchState.InboxChoice c) {
+            }
+
+            @Override public CompletableFuture<Optional<String>> submit(ReviewWorkbenchInbox.Composer c, String text,
+                                                                       Severity severity) {
+                return CompletableFuture.completedFuture(Optional.empty());
+            }
+        };
     }
 
     private static final ReviewWorkbenchEditor.Host NO_REVIEW = new ReviewWorkbenchEditor.Host() {

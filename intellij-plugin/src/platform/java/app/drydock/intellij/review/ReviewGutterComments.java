@@ -18,6 +18,7 @@ import com.intellij.openapi.editor.markup.GutterIconRenderer;
 import com.intellij.openapi.editor.markup.HighlighterLayer;
 import com.intellij.openapi.editor.markup.RangeHighlighter;
 import com.intellij.openapi.project.DumbAwareAction;
+import com.intellij.openapi.util.Disposer;
 import org.jetbrains.annotations.NotNull;
 
 import javax.swing.Icon;
@@ -60,15 +61,33 @@ final class ReviewGutterComments {
             EventQueue.invokeLater(() -> viewerChanged(viewer));
             return;
         }
-        if (!(viewer instanceof DiffViewerBase base) || !installed.add(viewer)) {
+        if (Disposer.isDisposed(viewer)) {
+            return; // the viewer died while the hop was pending: no editor to touch
+        }
+        if (!(viewer instanceof DiffViewerBase base) || installed.contains(viewer)) {
             return;
         }
         if (viewer instanceof TwosideTextDiffViewer twoside) {
-            install(base, twoside.getEditor(Side.LEFT), (path, line) -> line(path, DiffSelection.Side.OLD, line));
-            install(base, twoside.getEditor(Side.RIGHT), (path, line) -> line(path, DiffSelection.Side.NEW, line));
+            EditorEx left = twoside.getEditor(Side.LEFT);
+            EditorEx right = twoside.getEditor(Side.RIGHT);
+            if (left == null && right == null) {
+                return; // no editors yet: a later viewerChanged retries the install
+            }
+            if (left != null) {
+                install(base, left, (path, line) -> line(path, DiffSelection.Side.OLD, line));
+            }
+            if (right != null) {
+                install(base, right, (path, line) -> line(path, DiffSelection.Side.NEW, line));
+            }
+            installed.add(viewer);
         } else if (viewer instanceof UnifiedDiffViewer unified) {
-            install(base, unified.getEditor(), (path, line) -> ReviewSelection.unifiedTarget(path,
+            EditorEx editor = unified.getEditor();
+            if (editor == null) {
+                return; // no editor yet: a later viewerChanged retries the install
+            }
+            install(base, editor, (path, line) -> ReviewSelection.unifiedTarget(path,
                     new ReviewSelection.Span(line, line), unified::transferLineFromOnesideStrict));
+            installed.add(viewer);
         }
     }
 
