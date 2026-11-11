@@ -15,9 +15,12 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.Collections;
 
 /**
  * The confirmed launch selections of a staged cross-project start (T32a,
@@ -51,7 +54,8 @@ public record PlanLaunch(
         long graphRevision,
         List<String> launchIds,
         int cancellationGeneration,
-        Origin origin) {
+        Origin origin,
+        Map<RepositoryId, List<StackedUnit>> stacks) {
 
     /** The wire schema version this codec writes; any other is refused loudly. */
     public static final int SCHEMA_VERSION = 1;
@@ -62,12 +66,24 @@ public record PlanLaunch(
     /** Bound on any one list or map the launch carries. */
     public static final int MAX_ENTRIES = 4096;
 
+    /** The 7-arg form of a launch with NO persisted stack shape: the
+      * pre-stacked wire and every constructor that predates stacked
+      * execution. The driver reads an empty stack map as the legacy shape
+      * -- one root unit per repository share -- never as a refusal. */
+    public PlanLaunch(TaskId target, List<Integer> confirmedStages,
+            Map<TaskId, Selection> selections, long graphRevision, List<String> launchIds,
+            int cancellationGeneration, Origin origin) {
+        this(target, confirmedStages, selections, graphRevision, launchIds, cancellationGeneration,
+                origin, Map.of());
+    }
+
     public PlanLaunch {
         Objects.requireNonNull(target, "target");
         Objects.requireNonNull(confirmedStages, "confirmedStages");
         Objects.requireNonNull(selections, "selections");
         Objects.requireNonNull(launchIds, "launchIds");
         Objects.requireNonNull(origin, "origin");
+        Objects.requireNonNull(stacks, "stacks");
         if (confirmedStages.size() > MAX_STAGES) {
             throw new IllegalArgumentException("A plan launches at most " + MAX_STAGES + " stages");
         }
@@ -110,6 +126,90 @@ public record PlanLaunch(
         confirmedStages = List.copyOf(confirmedStages);
         selections = Map.copyOf(selections);
         launchIds = List.copyOf(launchIds);
+        stacks = copyOfStacks(stacks);
+    }
+
+    /** One launch unit of the stacked-branch execution (S1 of
+      * docs/StackedPrExecution.md), as the plan confirmation froze it:
+      * the unit's member tasks in branch order, the branch its first task's
+      * branch stacks on (null for a ROOT unit, which starts from the
+      * repository's default branch), and every branch its first task waits
+      * for before the unit's session may start (S2) -- the stack base is
+      * the first wait. A unit stacks on a branch exactly when it waits for
+      * one; every value is a stored branch name, never a live ref. */
+    public record StackedUnit(List<TaskId> tasks, String baseBranch, List<String> waitBranches) {
+
+        public StackedUnit {
+            Objects.requireNonNull(tasks, "tasks");
+            Objects.requireNonNull(waitBranches, "waitBranches");
+            if (tasks.isEmpty()) {
+                throw new IllegalArgumentException("A stacked unit carries at least one task");
+            }
+            if ((baseBranch == null) != waitBranches.isEmpty()) {
+                throw new IllegalArgumentException("A unit stacks on a branch exactly when it waits for one;");
+            }
+            if (baseBranch != null && !waitBranches.contains(baseBranch)) {
+                throw new IllegalArgumentException("A unit's stack base is one of its waits");
+            }
+            tasks = List.copyOf(tasks);
+            waitBranches = List.copyOf(waitBranches);
+        }
+
+        /** The serialized form: fixed key order, base and waits written only
+          * when present, so a root unit renders minimally. */
+        public JsonValue toJsonValue() {
+            JsonObject object = JsonObject.empty().put("tasks", new JsonArray(tasks.stream()
+                    .<JsonValue>map(task -> new JsonString(task.text())).toList()));
+            if (baseBranch != null) {
+                object = object.put("baseBranch", new JsonString(baseBranch));
+            }
+            if (!waitBranches.isEmpty()) {
+                object = object.put("waitBranches", new JsonArray(waitBranches.stream()
+                        .<JsonValue>map(JsonString::new).toList()));
+            }
+            return object;
+        }
+
+        /** Whether this unit's session may start immediately. */
+        public boolean isRoot() {
+            return baseBranch == null;
+        }
+    }
+
+    /** The stack map, defensively copied and validated: at most one unit
+      * list per repository, every unit non-empty, and no task id in two
+      * units of the same repository -- a task runs once. */
+    private static Map<RepositoryId, List<StackedUnit>> copyOfStacks(
+            Map<RepositoryId, List<StackedUnit>> stacks) {
+        if (stacks.isEmpty()) {
+            return Map.of();
+        }
+        if (stacks.size() > MAX_ENTRIES) {
+            throw new IllegalArgumentException("A plan carries stacks for at most " + MAX_ENTRIES
+                    + " repositories");
+        }
+        LinkedHashMap<RepositoryId, List<StackedUnit>> copy = new LinkedHashMap<>();
+        for (Map.Entry<RepositoryId, List<StackedUnit>> entry : stacks.entrySet()) {
+            List<StackedUnit> units = entry.getValue();
+            if (units == null || units.isEmpty()) {
+                throw new IllegalArgumentException("A repository's stack carries at least one unit");
+            }
+            if (units.size() > MAX_ENTRIES) {
+                throw new IllegalArgumentException("A repository's stack carries at most " + MAX_ENTRIES
+                        + " units");
+            }
+            Set<TaskId> seen = new LinkedHashSet<>();
+            for (StackedUnit unit : units) {
+                for (TaskId task : unit.tasks()) {
+                    if (!seen.add(task)) {
+                        throw new IllegalArgumentException("Task '" + task.text()
+                                + "' appears in two units of one repository's stack");
+                    }
+                }
+            }
+            copy.put(entry.getKey(), List.copyOf(units));
+        }
+        return Collections.unmodifiableMap(copy);
     }
 
     /** One task's launch selection, exactly as the plan dialog froze it: the
@@ -145,7 +245,7 @@ public record PlanLaunch(
      * (P4.12). Pure copy, no decision; the progression rule is T34. */
     public PlanLaunch withCancellationGeneration(int generation) {
         return new PlanLaunch(target, confirmedStages, selections, graphRevision, launchIds, generation,
-                origin);
+                origin, stacks);
     }
 
     /** The serialized form: a self-describing JSON object with fixed key
@@ -175,6 +275,20 @@ public record PlanLaunch(
         root.put("origin", JsonObject.empty()
                 .put("windowId", new JsonString(origin.windowId()))
                 .put("worktree", new JsonString(origin.worktree().toString())));
+        // The stack shape is ALWAYS written (an empty map writes an empty
+        // object) and READ as optional: a reader of an older file -- one
+        // written before stacked execution existed -- synthesizes the legacy
+        // shape (one root unit per repository) instead of refusing it, while
+        // a launch without stacks round-trips byte-stably to one without.
+        JsonObject stackObject = JsonObject.empty();
+        List<RepositoryId> repositories = new ArrayList<>(stacks.keySet());
+        repositories.sort(Comparator.comparing(RepositoryId::toString));
+        for (RepositoryId repository : repositories) {
+            JsonArray unitArray = new JsonArray(stacks.get(repository).stream()
+                    .<JsonValue>map(StackedUnit::toJsonValue).toList());
+            stackObject.put(repository.toString(), unitArray);
+        }
+        root.put("stacks", stackObject);
         return root;
     }
 
@@ -217,7 +331,74 @@ public record PlanLaunch(
                 requireLong(root, "graphRevision"),
                 launchIds,
                 requireInt(root, "cancellationGeneration"),
-                origin(requireObject(requireMember(root, "origin"), "an origin window")));
+                origin(requireObject(requireMember(root, "origin"), "an origin window")),
+                stacks(root, selections));
+    }
+
+    /** The stack shape of a parsed launch: the stored units per repository
+      * when the member is present, otherwise the legacy shape -- one root
+      * unit per selected repository carrying that repository's tasks -- so
+      * a plan persisted before stacked execution still resumes coherently
+      * instead of being refused (the envelope's version stays 1). */
+    private static Map<RepositoryId, List<StackedUnit>> stacks(JsonObject root,
+            Map<TaskId, Selection> selections) {
+        JsonValue member = root.get("stacks");
+        if (member == null) {
+            // The legacy unit's member order is the codec's canonical
+            // sorted-id order, never the iteration order of the selections
+            // map (an order-unspecified immutable copy) -- the launch wire
+            // format carries no stage task lists to read the order from.
+            List<TaskId> ids = new ArrayList<>(selections.keySet());
+            ids.sort(Comparator.comparing(TaskId::text));
+            Map<RepositoryId, List<TaskId>> grouped = new LinkedHashMap<>();
+            for (TaskId id : ids) {
+                grouped.computeIfAbsent(selections.get(id).repository(), any -> new ArrayList<>())
+                        .add(id);
+            }
+            Map<RepositoryId, List<StackedUnit>> legacy = new LinkedHashMap<>();
+            grouped.forEach((repository, tasks) -> legacy.put(repository,
+                    List.of(new StackedUnit(tasks, null, List.of()))));
+            return legacy;
+        }
+        JsonObject stackObject = requireObject(member, "stacks");
+        Map<RepositoryId, List<StackedUnit>> stacks = new LinkedHashMap<>();
+        for (Map.Entry<String, JsonValue> entry : stackObject.members().entrySet()) {
+            List<StackedUnit> units = new ArrayList<>();
+            if (!(entry.getValue() instanceof JsonArray array)) {
+                throw new IllegalArgumentException("Expected a JSON array for the stack of '"
+                        + entry.getKey() + "'");
+            }
+            for (JsonValue unit : array.elements()) {
+                units.add(stackedUnit(unit));
+            }
+            stacks.put(RepositoryId.of(entry.getKey()), units);
+        }
+        return stacks;
+    }
+
+    private static StackedUnit stackedUnit(JsonValue value) {
+        JsonObject object = requireObject(value, "a stacked unit");
+        List<TaskId> tasks = new ArrayList<>();
+        for (JsonValue task : requireArray(object, "tasks")) {
+            tasks.add(TaskId.of(stringValue(task, "a stacked unit's task id")));
+        }
+        JsonValue base = object.get("baseBranch");
+        String baseBranch = base == null ? null : stringValue(base, "baseBranch");
+        List<String> waits = new ArrayList<>();
+        if (object.get("waitBranches") != null) {
+            for (JsonValue wait : requireArray(object, "waitBranches")) {
+                waits.add(stringValue(wait, "a wait branch"));
+            }
+        }
+        return new StackedUnit(tasks, baseBranch, waits);
+    }
+
+    /** A string-typed JSON value, or a loud refusal. */
+    private static String stringValue(JsonValue value, String what) {
+        if (!(value instanceof JsonString string)) {
+            throw new IllegalArgumentException("Expected a JSON string for " + what);
+        }
+        return string.value();
     }
 
     private static Selection selection(JsonValue value) {

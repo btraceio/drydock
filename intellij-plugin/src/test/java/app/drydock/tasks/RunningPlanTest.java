@@ -28,6 +28,8 @@ class RunningPlanTest {
 
     private static final RepositoryId REPO =
             RepositoryId.of("11111111-1111-1111-1111-111111111111");
+    private static final RepositoryId OTHER_REPO =
+            RepositoryId.of("22222222-2222-2222-2222-222222222222");
     private static final Path WORKTREE = Path.of("/tmp/worktrees/alpha");
     private static final PlanLaunch.Origin ORIGIN = new PlanLaunch.Origin("win-1", WORKTREE);
 
@@ -264,6 +266,61 @@ class RunningPlanTest {
         for (String leak : forbidden) {
             assertFalse(json.contains(leak), "The wire must not contain '" + leak + "'");
         }
+    }
+
+    /** One root stacked unit carrying the named tasks (no base, no waits). */
+    private static PlanLaunch.StackedUnit rootUnit(String... taskIds) {
+        List<TaskId> tasks = new ArrayList<>();
+        for (String id : taskIds) {
+            tasks.add(TaskId.of(id));
+        }
+        return new PlanLaunch.StackedUnit(tasks, null, List.of());
+    }
+
+    @Test
+    void aStackedUnitsBaseMustBeOneOfItsWaits() {
+        PlanLaunch.StackedUnit stacked = new PlanLaunch.StackedUnit(
+                List.of(TaskId.of("b-task")), "dd/a-task", List.of("dd/a-task"));
+        assertFalse(stacked.isRoot());
+
+        IllegalArgumentException unrelatedBase = assertThrows(IllegalArgumentException.class,
+                () -> new PlanLaunch.StackedUnit(List.of(TaskId.of("b-task")), "dd/other",
+                        List.of("dd/unrelated")));
+        assertTrue(unrelatedBase.getMessage().contains("stack base is one of its waits"));
+    }
+
+    @Test
+    void aTaskIdMayNotAppearInTwoUnitsOfOneRepositorysStack() {
+        Map<RepositoryId, List<PlanLaunch.StackedUnit>> stacks = new LinkedHashMap<>();
+        stacks.put(REPO, List.of(rootUnit("a-task"), rootUnit("a-task")));
+        IllegalArgumentException duplicate = assertThrows(IllegalArgumentException.class,
+                () -> launchWithStacks(stacks));
+        assertTrue(duplicate.getMessage().contains("appears in two units of one repository's stack"));
+    }
+
+    @Test
+    void theSameTaskInTwoDifferentRepositoriesStacksIsValid() {
+        Map<RepositoryId, List<PlanLaunch.StackedUnit>> stacks = new LinkedHashMap<>();
+        stacks.put(REPO, List.of(rootUnit("a-task")));
+        stacks.put(OTHER_REPO, List.of(rootUnit("a-task")));
+        PlanLaunch built = launchWithStacks(stacks);
+        assertEquals(List.of(rootUnit("a-task")), built.stacks().get(REPO));
+        assertEquals(List.of(rootUnit("a-task")), built.stacks().get(OTHER_REPO));
+    }
+
+    @Test
+    void aMergedStackShapeCarriesEveryStagesUnitsForOneRepository() {
+        // One repository contributing tasks to two stages: each stage's units
+        // append to the same per-repository list, disjoint task ids.
+        Map<RepositoryId, List<PlanLaunch.StackedUnit>> stacks = new LinkedHashMap<>();
+        stacks.put(REPO, List.of(rootUnit("a-task"), rootUnit("b-task")));
+        PlanLaunch built = launchWithStacks(stacks);
+        assertEquals(List.of(rootUnit("a-task"), rootUnit("b-task")), built.stacks().get(REPO));
+    }
+
+    private static PlanLaunch launchWithStacks(Map<RepositoryId, List<PlanLaunch.StackedUnit>> stacks) {
+        return new PlanLaunch(TaskId.of("target-task"), List.of(1), selections("target-task"),
+                7L, List.of("launch-a"), 0, ORIGIN, stacks);
     }
 
     @Test
