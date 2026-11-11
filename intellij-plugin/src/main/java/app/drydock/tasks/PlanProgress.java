@@ -217,7 +217,8 @@ public final class PlanProgress {
         receipts.addAll(event.launchIds());
         RunningPlan confirmed = new RunningPlan(new PlanLaunch(launch.target(),
                 launch.confirmedStages(), launch.selections(), launch.graphRevision(), receipts,
-                launch.cancellationGeneration(), launch.origin()), launched.stages(), launched.status());
+                launch.cancellationGeneration(), launch.origin(), launch.stacks()),
+                launched.stages(), launched.status());
         return evaluate(new State(confirmed, state.statuses(), state.halted(), state.launchAttempts()));
     }
 

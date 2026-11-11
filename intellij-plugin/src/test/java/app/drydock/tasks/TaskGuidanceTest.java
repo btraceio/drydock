@@ -109,11 +109,11 @@ class TaskGuidanceTest {
         assertFalse(guidance.isInstalled(), "absent install answers false, builds nothing");
 
         Path dir = guidance.install();
-        assertEquals(stateRoot.resolve("tasks-guidance").resolve("1"), dir);
+        assertEquals(stateRoot.resolve("tasks-guidance").resolve("2"), dir);
         assertTrue(guidance.isInstalled());
 
         assertArrayEquals(resource(SKILL_RESOURCE), Files.readAllBytes(guidance.piSkillFile()));
-        assertArrayEquals(manifestFor("1").getBytes(StandardCharsets.UTF_8),
+        assertArrayEquals(manifestFor("2").getBytes(StandardCharsets.UTF_8),
                 Files.readAllBytes(dir.resolve(".claude-plugin").resolve("plugin.json")));
         assertEquals(new String(resource(SKILL_RESOURCE), StandardCharsets.UTF_8),
                 guidance.bundledSkillText(), "preview equals the bundled skill text");
@@ -152,12 +152,12 @@ class TaskGuidanceTest {
         }
         assertTrue(guidance.isInstalled());
         assertArrayEquals(resource(SKILL_RESOURCE), Files.readAllBytes(guidance.piSkillFile()));
-        assertArrayEquals(manifestFor("1").getBytes(StandardCharsets.UTF_8),
+        assertArrayEquals(manifestFor("2").getBytes(StandardCharsets.UTF_8),
                 Files.readAllBytes(guidance.guidanceDirectory()
                         .resolve(".claude-plugin").resolve("plugin.json")));
         // no staging leftovers: the loser discards its tree, so only the version dir remains
         try (var entries = Files.list(stateRoot.resolve("tasks-guidance"))) {
-            assertEquals(List.of("1"), entries
+            assertEquals(List.of("2"), entries
                     .map(path -> path.getFileName().toString()).sorted().toList());
         }
     }
@@ -171,7 +171,7 @@ class TaskGuidanceTest {
         assertFalse(guidance.isInstalled());
         String preview = guidance.bundledSkillText();
         assertArrayEquals(resource(SKILL_RESOURCE), preview.getBytes(StandardCharsets.UTF_8));
-        assertEquals(stateRoot.resolve("tasks-guidance").resolve("1"),
+        assertEquals(stateRoot.resolve("tasks-guidance").resolve("2"),
                 guidance.guidanceDirectory());
         assertEquals(guidance.guidanceDirectory(), guidance.claudePluginDirectory());
         assertEquals(guidance.guidanceDirectory()
@@ -205,7 +205,7 @@ class TaskGuidanceTest {
         assertEquals(dir, guidance.install(), "verify-only re-install returns the same path");
         assertArrayEquals(resource(SKILL_RESOURCE), Files.readAllBytes(skill),
                 "re-install is byte-stable, not a rewrite");
-        assertArrayEquals(manifestFor("1").getBytes(StandardCharsets.UTF_8),
+        assertArrayEquals(manifestFor("2").getBytes(StandardCharsets.UTF_8),
                 Files.readAllBytes(manifest));
         assertEquals(skillMtime, Files.getLastModifiedTime(skill), "skill bytes not rewritten");
         assertEquals(manifestMtime, Files.getLastModifiedTime(manifest),
@@ -249,7 +249,7 @@ class TaskGuidanceTest {
 
         assertFalse(Files.exists(home.resolve("tasks-guidance")),
                 "no guidance root appeared directly under the user home");
-        assertTrue(Files.isDirectory(stateRoot.resolve("tasks-guidance").resolve("1")),
+        assertTrue(Files.isDirectory(stateRoot.resolve("tasks-guidance").resolve("2")),
                 "the positive control: the injected root got the install");
         assertEquals(before, topLevelNames(home),
                 "the user home's top level is unchanged by install and re-install");

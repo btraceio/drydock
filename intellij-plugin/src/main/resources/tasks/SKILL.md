@@ -77,6 +77,18 @@ only when every prerequisite is done or dropped; a blocked task is not
   for a parent, report to your parent and let it update its own tasks;
   the assignment rule above already enforces this.
 
+## Stacked execution
+
+When Drydock starts a task stack, each task lands on its own git branch
+named `dd/<task-id>`, stacked on the previous task's branch. A session
+whose prompt says DRYDOCK STACK UNIT START works its tasks strictly in the
+order the prompt lists, commits each task's work on that task's own
+branch, and pushes the branch (`git push -u origin <branch>`) before
+moving to the next task. Never combine two tasks on one branch, and never
+reorder, rebase or delete an earlier branch: dependent sessions and pull
+requests build on these branches exactly as named. The pull requests
+themselves are Drydock's business, not yours.
+
 ## Human validation and the review pause
 
 - done_by defaults to human, and the stored front matter is what counts.

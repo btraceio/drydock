@@ -437,6 +437,14 @@ public final class TaskLauncher {
         NewTaskPlan.Inputs inputs() {
             return inputs;
         }
+
+        /** The worktree folder a NEW branch of this preparation would use:
+          * the dialog's own {@code folderFor} derivation for the prepared
+          * project and worktree base. The stacked launch units use it to
+          * mint one folder per stacked branch without reopening the dialog. */
+        public Path worktreeFolder(String branch) {
+            return NewTaskPlan.folderFor(inputs.worktreeBase(), inputs.repoName(), branch);
+        }
     }
 
     /**
@@ -453,8 +461,12 @@ public final class TaskLauncher {
             this.choice = Objects.requireNonNull(choice, "choice");
         }
 
-        /** The accepted launch choice; this package only. */
-        Choice choice() {
+        /** The accepted launch choice. Widened for the stacked launch
+          * (S1 of docs/StackedPrExecution.md): each unit's Choice is DERIVED
+          * from the confirmed one -- same agent, mode, window and start
+          * point, the branch and instructions replaced by the unit's own --
+          * and only the launcher's launch chain needs it. */
+        public Choice choice() {
             return choice;
         }
     }

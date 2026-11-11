@@ -24,6 +24,8 @@ import app.drydock.tasks.StartPlan.Stage;
 import app.drydock.tasks.TaskDocument;
 import app.drydock.tasks.TaskFilePatch;
 import app.drydock.tasks.TaskFiles;
+import app.drydock.tasks.StackBranches;
+import app.drydock.tasks.StackUnits;
 import app.drydock.tasks.TaskGraph;
 import app.drydock.tasks.TaskId;
 import app.drydock.tasks.TaskRun;
@@ -132,6 +134,8 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
       * running IDE application (a headless run constructs none), fed every published
       * watched snapshot and recovery report, disposed on close. */
     private volatile TaskNotifications notifications;
+    /** The stacked pull request lifecycle (S3): built with init, closed on disposal. */
+    private volatile StackPrService stackPrs;
 
     /** One owned driver subscription (T36a): the driver, its plan's task set, and the graph
       * revision its events carry -- the plan's own, so watcher noise never reads as stale. */
@@ -189,6 +193,7 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
             TaskFiles.scan(root); // readable probe: a root that cannot be listed fails init
             if (publishOrClose(built)) {
                 startNotifications();
+                startStackPrs();
                 startWatcher();
                 recoverPlans();
             }
@@ -241,6 +246,22 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
         }
     }
 
+    /** The stacked pull request lifecycle (S3 of docs/StackedPrExecution.md): built
+      * with init, driving off the watcher's snapshots; a close that won the race
+      * wins, so no GitHub write fires after disposal. */
+    private synchronized void startStackPrs() {
+        if (closed) {
+            return;
+        }
+        try {
+            stackPrs = StackPrService.over(id -> repositories.get().stream()
+                    .filter(repository -> repository.id().equals(id)).toList(), Optional.empty());
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, "The stacked pull request service on " + root
+                    + " could not start; no stacked pull request is opened", e);
+        }
+    }
+
     /** The watcher's re-read (T13a): one fresh scan, run on the watcher's
      * coalescing thread (never the EDT); its failures are composed by the
      * watcher, never thrown at the caller. */
@@ -275,6 +296,15 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
                         ownedPlanTasks());
             } catch (RuntimeException e) {
                 LOG.log(Level.WARNING, "The task notifications on " + root + " could not observe"
+                        + " the store", e);
+            }
+        }
+        StackPrService stackPulls = stackPrs;
+        if (stackPulls != null) {
+            try { // the stacked pull requests (S3) ride the same snapshots
+                stackPulls.observe(snapshot.snapshot(), this::slugOf);
+            } catch (RuntimeException e) {
+                LOG.log(Level.WARNING, "The stacked pull requests on " + root + " could not observe"
                         + " the store", e);
             }
         }
@@ -694,11 +724,14 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
 
     /** The persisted form of one confirmed plan (T38, D8): the confirmed stages, one
       * launch selection per planned task (its segment's chosen harness and project),
-      * the origin the start ran from, and every stage unlaunched -- the driving
-      * Continue launches stage 1. The graph revision is the confirmation's own: 1,
-      * the first graph this plan was confirmed against. */
+      * the stacked-branch shape of every repository's segment (S1: one launch unit
+      * per maximal linear chain, the fork points split off), the origin the start
+      * ran from, and every stage unlaunched -- the driving Continue launches stage 1.
+      * The graph revision is the confirmation's own: 1, the first graph this plan
+      * was confirmed against. */
     private static RunningPlan confirmedPlan(StartPlan plan, PlanLaunchChoices choices, Origin origin) {
         Map<TaskId, Selection> selections = new LinkedHashMap<>();
+        Map<RepositoryId, List<PlanLaunch.StackedUnit>> stacks = new LinkedHashMap<>();
         List<StageState> stages = new ArrayList<>();
         for (Stage stage : plan.stages()) {
             List<TaskId> tasks = new ArrayList<>();
@@ -713,11 +746,48 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
                     selections.put(task.id(), new Selection(choice.agent(), segment.repository(),
                             segment.projectName()));
                 }
+                // Stages append per repository: one repository may contribute
+                // tasks to several stages, and a later stage's units must
+                // never overwrite an earlier stage's persisted shape. Task
+                // ids are disjoint across stages, so the merged list keeps
+                // the per-repository uniqueness the launch validates loudly.
+                stacks.computeIfAbsent(segment.repository(), repository -> new ArrayList<>())
+                        .addAll(stackedUnits(segment));
             }
             stages.add(new StageState(stage.number(), List.copyOf(tasks), false, false));
         }
         return new RunningPlan(new PlanLaunch(plan.target(), choices.confirmedStages(), selections,
-                1, List.of(), 0, origin), stages, RunningPlan.Status.RUNNING);
+                1, List.of(), 0, origin, stacks), stages, RunningPlan.Status.RUNNING);
+    }
+
+    /** The confirmed stack shape of one segment (S1): its tasks in dependency
+      * order decomposed into launch units -- maximal linear chains, forks
+      * split off, each unit's waits being its first task's unfinished
+      * in-segment prerequisites, whose branches it stacks behind (S2). */
+    private static List<PlanLaunch.StackedUnit> stackedUnits(Segment segment) {
+        List<TaskId> ordered = segment.tasks().stream().map(TaskDocument::id).toList();
+        Map<TaskId, List<TaskId>> edges = StackUnits.inSegmentEdges(segment.tasks(),
+                TaskGraph.of(segmentSnapshot(segment), repository -> segment.projectName()));
+        List<StackUnits.Unit> units = StackUnits.decompose(ordered, edges);
+        List<PlanLaunch.StackedUnit> frozen = new ArrayList<>();
+        for (StackUnits.Unit unit : units) {
+            String base = unit.stackBase() == null ? null : StackBranches.name(unit.stackBase());
+            List<String> waits = unit.waits().stream().map(StackBranches::name).toList();
+            frozen.add(new PlanLaunch.StackedUnit(unit.tasks(), base, waits));
+        }
+        return frozen;
+    }
+
+    /** The snapshot of one segment's documents alone, the graph the stack
+      * decomposition resolves its edges through. */
+    private static TaskSnapshot segmentSnapshot(Segment segment) {
+        Map<TaskId, TaskDocument> byId = new LinkedHashMap<>();
+        for (TaskDocument task : segment.tasks()) {
+            byId.put(task.id(), task);
+        }
+        List<RepositoryId> repositories = segment.tasks().stream().map(TaskDocument::repository)
+                .distinct().toList();
+        return new TaskSnapshot(segment.tasks(), repositories, byId, Map.of(), List.of(), List.of());
     }
 
     /** The approved done_by changes (D16): exactly the tasks whose confirmed policy
@@ -944,6 +1014,15 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
         drivers.clear();
         TaskNotifications taskNotifications = notifications;
         notifications = null;
+        StackPrService stackPulls = stackPrs;
+        stackPrs = null;
+        if (stackPulls != null) {
+            try {
+                stackPulls.close();
+            } catch (RuntimeException e) {
+                LOG.log(Level.WARNING, "Could not stop the stacked pull request service on " + root, e);
+            }
+        }
         if (taskNotifications != null) {
             try {
                 taskNotifications.close(); // T39a: no balloon outlives the service

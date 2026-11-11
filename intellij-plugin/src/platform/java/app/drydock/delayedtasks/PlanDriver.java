@@ -5,6 +5,7 @@ import app.drydock.domain.RepositoryId;
 import app.drydock.tasks.PlanLaunch;
 import app.drydock.tasks.PlanLaunch.Origin;
 import app.drydock.tasks.PlanLaunch.Selection;
+import app.drydock.tasks.PlanLaunch.StackedUnit;
 import app.drydock.tasks.PlanProgress;
 import app.drydock.tasks.PlanProgress.Effect;
 import app.drydock.tasks.PlanProgress.LaunchReported;
@@ -20,10 +21,12 @@ import java.lang.System.Logger.Level;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
@@ -76,11 +79,18 @@ public final class PlanDriver implements AutoCloseable {
     /** One segment's fresh preparation; opaque on purpose, it only travels back to launch. */
     public interface Prepared { }
 
-    /** One segment launch request: STORED VALUES only -- no live project, inputs or window. */
-    public record SegmentRequest(int stage, List<TaskId> tasks, AgentKind agent, RepositoryId repository,
-            String projectName, String originWindow, Path originWorktree, int cancellationGeneration) {
+    /** One launch request: STORED VALUES only -- no live project, inputs or window.
+      * {@code baseBranch} and {@code waitBranches} carry the stacked-branch shape
+      * (S1/S2 of docs/StackedPrExecution.md): a unit with a base branch starts its
+      * first task's branch there once every wait branch exists, a unit without
+      * starts from the confirmed start point immediately. */
+    public record SegmentRequest(int stage, int stageCount, List<TaskId> tasks, AgentKind agent,
+            RepositoryId repository, String projectName, String originWindow, Path originWorktree,
+            int cancellationGeneration, String baseBranch, List<String> waitBranches) {
         public SegmentRequest {
             if (stage < 1) throw new IllegalArgumentException("Stage numbers start at 1, got: " + stage);
+            if (stageCount < stage) throw new IllegalArgumentException("The stage count covers the stage, got: "
+                    + stageCount + " < " + stage);
             Objects.requireNonNull(tasks, "tasks"); Objects.requireNonNull(agent, "agent");
             Objects.requireNonNull(repository, "repository"); Objects.requireNonNull(originWindow,
                     "originWindow"); Objects.requireNonNull(originWorktree, "originWorktree");
@@ -88,7 +98,19 @@ public final class PlanDriver implements AutoCloseable {
                     "The segment's project name is required");
             if (cancellationGeneration < 0) throw new IllegalArgumentException(
                     "Cancellation generations are never negative");
+            Objects.requireNonNull(waitBranches, "waitBranches");
+            if (baseBranch == null != waitBranches.isEmpty()) throw new IllegalArgumentException(
+                    "A unit stacks on a branch exactly when it waits for one");
             tasks = List.copyOf(tasks);
+            waitBranches = List.copyOf(waitBranches);
+        }
+
+        /** The 8-arg form of a request with NO stacked shape: the legacy
+          * single-session-per-segment launch, a root unit of the whole share. */
+        public SegmentRequest(int stage, List<TaskId> tasks, AgentKind agent, RepositoryId repository,
+                String projectName, String originWindow, Path originWorktree, int cancellationGeneration) {
+            this(stage, Math.max(stage, 1), tasks, agent, repository, projectName, originWindow,
+                    originWorktree, cancellationGeneration, null, List.of());
         }
     }
 
@@ -228,9 +250,9 @@ public final class PlanDriver implements AutoCloseable {
     private void dispatch(Flight flight, Segment segment) {
         try {
             Origin origin = state.plan().launch().origin();
-            SegmentRequest request = new SegmentRequest(flight.stage, segment.tasks, segment.agent,
-                    segment.repository, segment.projectName, origin.windowId(), origin.worktree(),
-                    flight.generation);
+            SegmentRequest request = new SegmentRequest(flight.stage, state.plan().stages().size(),
+                    segment.tasks, segment.agent, segment.repository, segment.projectName, origin.windowId(),
+                    origin.worktree(), flight.generation, segment.baseBranch(), segment.waitBranches());
             launcher.prepare(request).thenCompose(token -> token.isEmpty()
                             ? CompletableFuture.<Launched>failedFuture(refusal("the fresh preparation of"
                                     + " the segment of " + segment.projectName + " refused"))
@@ -272,7 +294,13 @@ public final class PlanDriver implements AutoCloseable {
         listener.halted(reason, started); // the started siblings keep running, never killed
     }
 
-    /** The stage's segments, one per repository share (D7), first-seen order, with minted ids. */
+    /** The stage's launches: one per STACKED LAUNCH UNIT (S1 of
+      * docs/StackedPrExecution.md) -- the persisted stack shape splits each
+      * repository share into maximal linear chains, so a fork runs as its
+      * own session behind its prerequisite's branch. A share with no
+      * persisted stack (the legacy shape) launches as one unit, exactly the
+      * pre-stacked one-session-per-segment behavior. First-seen order, with
+      * minted ids. */
     private List<Segment> segments(LaunchStage launch) {
         PlanLaunch plan = state.plan().launch();
         Map<RepositoryId, List<TaskId>> grouped = new LinkedHashMap<>();
@@ -283,20 +311,82 @@ public final class PlanDriver implements AutoCloseable {
         List<Segment> segments = new ArrayList<>();
         for (Map.Entry<RepositoryId, List<TaskId>> share : grouped.entrySet()) {
             Selection selection = plan.selections().get(share.getValue().get(0));
-            segments.add(new Segment(share.getKey(), selection.projectName(), selection.agent(),
-                    List.copyOf(share.getValue()), "stage-" + launch.stage() + "-" + MINT.incrementAndGet()));
+            List<StackedUnit> staged = stageUnits(plan.stacks().get(share.getKey()),
+                    share.getValue(), launch.stage(), share.getKey());
+            List<StackedUnit> units = staged.isEmpty()
+                    ? List.of(new StackedUnit(share.getValue(), null, List.of())) // the legacy shape
+                    : staged;
+            for (StackedUnit unit : units) {
+                segments.add(new Segment(share.getKey(), selection.projectName(), selection.agent(),
+                        unit.tasks(), unit.baseBranch(), unit.waitBranches(),
+                        "stage-" + launch.stage() + "-" + MINT.incrementAndGet()));
+            }
         }
         return segments;
     }
 
+    /** The persisted units of ONE stage's share: units fully inside the
+      * share belong to this stage (in persisted order), units fully outside
+      * belong to another stage and are skipped, a root unit partially
+      * overlapping is the legacy synthesized shape (one root unit per
+      * repository across all stages) and is sliced order-preservingly to
+      * the share, and any other partial overlap is a corrupt persisted
+      * shape, refused loudly. After selection, the union of the selected
+      * units' tasks must equal the share -- a share task in no selected
+      * unit means a persisted stack map omitting a task of this stage and
+      * is refused, never silently dropped. An empty result means no
+      * persisted unit touches the share (the legacy empty shape); the
+      * caller falls back to the whole share as one root unit. */
+    static List<StackedUnit> stageUnits(List<StackedUnit> persisted, List<TaskId> share,
+            int stage, RepositoryId repository) {
+        if (persisted == null || persisted.isEmpty()) {
+            return List.of();
+        }
+        Set<TaskId> inShare = new LinkedHashSet<>(share);
+        List<StackedUnit> mine = new ArrayList<>();
+        List<TaskId> selected = new ArrayList<>();
+        for (StackedUnit unit : persisted) {
+            boolean any = false;
+            boolean all = true;
+            for (TaskId task : unit.tasks()) {
+                any |= inShare.contains(task);
+                all &= inShare.contains(task);
+            }
+            if (all) {
+                mine.add(unit);
+                selected.addAll(unit.tasks());
+                continue;
+            }
+            if (!any) {
+                continue; // another stage's unit
+            }
+            if (unit.isRoot()) { // the legacy synthesized cross-stage root unit: slice to the share
+                List<TaskId> sliced = unit.tasks().stream().filter(inShare::contains).toList();
+                mine.add(new StackedUnit(sliced, null, List.of()));
+                selected.addAll(sliced);
+                continue;
+            }
+            throw new IllegalArgumentException("The persisted stack of '" + repository
+                    + "' carries a unit that is neither inside nor outside stage " + stage
+                    + "'s share: " + unit.tasks() + "; the plan's stack shape is corrupt");
+        }
+        List<TaskId> missing = share.stream().filter(task -> !selected.contains(task)).toList();
+        if (!missing.isEmpty()) {
+            throw new IllegalArgumentException("The persisted stack of '" + repository
+                    + "' omits stage " + stage + "'s share tasks " + missing
+                    + "; the plan's stack shape is corrupt");
+        }
+        return mine;
+    }
+
     /** The plan with the stage's minted launch ids -- the persisted launch intent. */
-    private static RunningPlan withLaunchIds(RunningPlan plan, List<Segment> segments) {
+    static RunningPlan withLaunchIds(RunningPlan plan, List<Segment> segments) {
         PlanLaunch launch = plan.launch();
         List<String> ids = new ArrayList<>(launch.launchIds());
         for (Segment segment : segments) ids.add(segment.launchId());
         return new RunningPlan(new PlanLaunch(launch.target(), launch.confirmedStages(),
                 launch.selections(), launch.graphRevision(), ids, launch.cancellationGeneration(),
-                launch.origin()), plan.stages(), plan.status());
+                launch.origin(), launch.stacks()), plan.stages(), plan.status());
     }
 
     /** The save itself (P4.13): the CAS revision advances on success; a failure throws visibly. */
@@ -341,9 +431,10 @@ public final class PlanDriver implements AutoCloseable {
         }
     }
 
-    /** One repository share of a stage: its confirmed selection and minted launch id. */
+    /** One repository share's launch unit: its confirmed selection, its
+      * stacked shape (S1) and minted launch id. */
     private record Segment(RepositoryId repository, String projectName, AgentKind agent,
-            List<TaskId> tasks, String launchId) { }
+            List<TaskId> tasks, String baseBranch, List<String> waitBranches, String launchId) { }
 
     /** One segment's settled outcome: the running session, or the failure. */
     private record Outcome(Launched launched, Throwable failure) { }
