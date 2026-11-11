@@ -235,6 +235,31 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         }
     };
     /**
+     * The Tasks node's Refresh: the same "show me now" gesture the session
+     * layer's Refresh is, scoped to what the Tasks layer can re-read -- the
+     * task store's fresh scan; the rebuild rides the store's publication.
+     */
+    private final AnAction refreshTasksAction = new DumbAwareAction("Refresh",
+            "Re-read the task store now; the tree follows the fresh snapshot",
+            AllIcons.Actions.Refresh) {
+        @Override
+        public void update(@NotNull AnActionEvent e) {
+            TaskActions.present(e, e.getData(SELECTED_TASKS_SECTION) != null);
+        }
+
+        @Override
+        public @NotNull ActionUpdateThread getActionUpdateThread() {
+            return ActionUpdateThread.BGT;
+        }
+
+        @Override
+        public void actionPerformed(@NotNull AnActionEvent e) {
+            if (e.getProject() != null) {
+                DelayedTaskActions.refresh(e.getProject());
+            }
+        }
+    };
+    /**
      * The refresh action's effects, tied to this panel's real caches and
      * rebuild scheduler: the seam the dispatch tests record against (F8).
      */
@@ -281,6 +306,11 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         @Override
         public void requestRebuild(boolean changedWorktrees) {
             TaskTreePanel.this.requestRebuild(changedWorktrees);
+        }
+
+        @Override
+        public void refreshTasks() {
+            DelayedTaskActions.refresh(project);
         }
     };
     /**
@@ -652,7 +682,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         menuActions.put(TaskMenu.Item.REFRESH, refresh);
         menuActions.put(TaskMenu.Item.FOCUS_PROJECT, focusProject);
         PopupHandler.installPopupMenu(tree,
-                new TreeMenu(menuActions, delayedTaskActions, newDelayedTask, JiraTreeActions::jiraEnabled),
+                new TreeMenu(menuActions, delayedTaskActions, newDelayedTask, refreshTasksAction,
+                        JiraTreeActions::jiraEnabled),
                 "Drydock.TaskTree.Popup");
 
         // The tool window's own buttons: start a task, then what can be done
@@ -891,6 +922,11 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
         /** Schedules one rebuild; {@code changedWorktrees} re-lists worktrees. */
         void requestRebuild(boolean changedWorktrees);
+
+        /** The delayed-task layer's share of the gesture: the task store's
+         * unsaved-guard and re-read request; the tree rebuild rides the
+         * store's own publication. */
+        void refreshTasks();
     }
 
     /**
@@ -914,7 +950,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
      * One refresh gesture, two scopes. From the toolbar — or the project
      * row's context menu, which names a whole project — it is the user
      * saying "show me now", so the cached GitHub listings (issues, pull
-     * requests) are dropped too, not just the worktree scan. From an
+     * requests) are dropped too, and the delayed-task store is asked for a
+     * fresh re-read (its refusal is its own balloon), not just the worktree
+     * scan. From an
      * issues node's own context menu it re-reads only that project's
      * listing(s): the GitHub node its GitHub listing, the Jira node every
      * group it shows, a Jira group its own query. The refresh records the
@@ -926,6 +964,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     static void refresh(RefreshTarget target, boolean fromContextMenu, TaskNode node, Path root) {
         if (!fromContextMenu) {
             target.invalidateAll();
+            target.refreshTasks();
             target.requestRebuild(true);
             return;
         }
@@ -938,6 +977,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             // The project row's menu entry names a whole project: the
             // toolbar's scope.
             target.invalidateAll();
+            target.refreshTasks();
             target.requestRebuild(true);
             return;
         }
@@ -1025,14 +1065,16 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         private final Map<TaskMenu.Item, AnAction> actions;
         private final AnAction[] delayedTaskActions;
         private final AnAction newDelayedTask;
+        private final AnAction refreshTasksAction;
         /** Whether a project root's Jira connection is enabled; it canonicalizes the root (filesystem IO). */
         private final Predicate<Path> jiraEnabled;
 
         TreeMenu(Map<TaskMenu.Item, AnAction> actions, AnAction[] delayedTaskActions, AnAction newDelayedTask,
-                 Predicate<Path> jiraEnabled) {
+                 AnAction refreshTasksAction, Predicate<Path> jiraEnabled) {
             this.actions = actions;
             this.delayedTaskActions = delayedTaskActions;
             this.newDelayedTask = newDelayedTask;
+            this.refreshTasksAction = refreshTasksAction;
             this.jiraEnabled = jiraEnabled;
         }
 
@@ -1053,12 +1095,13 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             // is override-only API, the platform's to call, not ours.
             // T20a: a task node carries the delayed-task layer's own
             // actions, and the Tasks node offers New Task over the T18a
-            // form -- everything else keeps the session-layer menu it had.
+            // form and the task store's fresh re-read -- everything else
+            // keeps the session-layer menu it had.
             if (e.getData(DelayedTaskActions.SELECTED_TASK) != null) {
                 return delayedTaskActions;
             }
             if (e.getData(SELECTED_TASKS_SECTION) != null) {
-                return new AnAction[] { newDelayedTask };
+                return new AnAction[] { newDelayedTask, refreshTasksAction };
             }
             List<TaskNode> selection = e.getData(SELECTED_NODES);
             Path root = e.getData(SELECTED_PROJECT_ROOT);

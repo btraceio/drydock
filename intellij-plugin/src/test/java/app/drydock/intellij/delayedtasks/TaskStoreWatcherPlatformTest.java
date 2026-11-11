@@ -180,7 +180,32 @@ public class TaskStoreWatcherPlatformTest extends BasePlatformTestCase {
         }
     }
 
-    // 6. A closed service publishes nothing: the coalescing thread stops, no composition follows.
+    // 6. The manual Refresh seam: the D6/P5 guard refuses up front and nothing re-reads; a clean store schedules its re-read.
+    public void testTheManualRefreshRefusesWhileUnsavedThenRereadsAfterTheSave() throws IOException {
+        RepositoryId repository = RepositoryId.newId();
+        TaskId id = createTask("Manual refresh subject", repository);
+        Document document = openDocument(storeFile(repository, id));
+        awaitWatched(c -> c.snapshot().byId().containsKey(id), "the opened task settling", EVENT_SECONDS);
+        TaskStoreWatcher.WatchedSnapshot baseline = settleFor(GRACE_MILLIS);
+        ApplicationManager.getApplication().runWriteAction(() -> document.setText(taskFile("Unsaved manual edit")));
+
+        DelayedTaskService.StoreRefresh refused = service.refreshStore();
+        assertFalse("The unsaved guard refuses the manual refresh", refused.requested());
+        assertEquals("The refusal names the unsaved file", storeFile(repository, id),
+                refused.conflicts().get(0).file());
+        assertSame("A refused manual refresh re-read nothing", baseline, settleFor(GRACE_MILLIS));
+
+        FileDocumentManager.getInstance().saveDocument(document);
+        DelayedTaskService.StoreRefresh taken = service.refreshStore();
+        assertTrue("A clean store takes the manual refresh",
+                taken.requested() && taken.conflicts().isEmpty());
+        TaskStoreWatcher.WatchedSnapshot reread = awaitWatched(
+                c -> "Unsaved manual edit".equals(titleOf(c, id)),
+                "the manual refresh's re-read", EVENT_SECONDS);
+        assertTrue(reread.saveConflicts().isEmpty() && reread.scanError() == null);
+    }
+
+    // 7. A closed service publishes nothing: the coalescing thread stops, no composition follows.
     public void testAClosedServicePublishesNothing() {
         RepositoryId repository = RepositoryId.newId();
         TaskId id = createTask("Closed before any further publication", repository);

@@ -9,9 +9,16 @@ import app.drydock.intellij.tasks.TaskMirroring;
 import app.drydock.tasks.TaskNode.DelayedTaskRow;
 import app.drydock.tasks.TaskState.Presentation;
 import app.drydock.tasks.*;
+import com.intellij.notification.Notification;
+import com.intellij.notification.Notifications;
+import com.intellij.notification.NotificationType;
 import com.intellij.openapi.actionSystem.*;
 import com.intellij.openapi.actionSystem.impl.SimpleDataContext;
+import com.intellij.openapi.application.ApplicationManager;
+import com.intellij.openapi.fileEditor.FileDocumentManager;
 import com.intellij.openapi.ui.TestDialogManager;
+import com.intellij.openapi.vfs.LocalFileSystem;
+import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.openapi.vfs.newvfs.impl.VfsRootAccess;
 import com.intellij.testFramework.PlatformTestUtil;
 import com.intellij.testFramework.fixtures.BasePlatformTestCase;
@@ -28,6 +35,7 @@ import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Instant;
 import java.util.*;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import java.util.stream.Stream;
@@ -217,6 +225,73 @@ public class DelayedTaskActionsPlatformTest extends BasePlatformTestCase {
                             && tagCount(action, "add-to-group") == 0);
         }
     }
+
+    // 7. Refresh applies whatever the presentation; applicable() hands back a fresh set per call.
+    public void testRefreshAppliesToEveryPresentation() {
+        for (Presentation presentation : Presentation.values()) {
+            Set<DelayedTaskActions.Item> applicable = DelayedTaskActions.applicable(presentation);
+            assertTrue("Refresh applies whatever the presentation (" + presentation + ")",
+                    applicable.contains(DelayedTaskActions.Item.REFRESH));
+            assertNotSame("applicable() returns a fresh set per call",
+                    applicable, DelayedTaskActions.applicable(presentation));
+        }
+    }
+
+    /** Notifications is not a functional interface in the IDE build (notify and
+     * register are all default), so the balloon sink needs the anonymous-class
+     * recorder idiom used by the sibling platform tests. */
+    private static Notifications recorder(List<Notification> into) {
+        return new Notifications() { @Override public void notify(Notification n) { into.add(n); } };
+    }
+
+    /** The refusal balloons the manual Refresh publishes, by title -- never by
+     * position, so the fixture's own READY balloon can never stand in. */
+    private static List<Notification> refusalBalloons(List<Notification> shown) {
+        return shown.stream()
+                .filter(n -> "Drydock did not refresh the tasks".equals(n.getTitle()))
+                .toList();
+    }
+
+    // 8. The save-conflict refusal of a clicked Refresh is exactly one visible balloon.
+    public void testTheManualRefreshsUnsavedRefusalIsOneVisibleBalloon() throws Exception {
+        // Create and settle FIRST, drain the fixture's own READY balloon, subscribe LAST.
+        TaskId id = task("Manual refresh refusal subject");
+        awaitWatched(id, "the created task settling into the watched snapshot");
+        pump(); pump(); pump();
+        List<Notification> shown = new CopyOnWriteArrayList<>();
+        getProject().getMessageBus().connect(getTestRootDisposable())
+                .subscribe(Notifications.TOPIC, recorder(shown));
+        // Dirty the task file WITHOUT saving: checkUnsaved reads unsaved documents, not editors.
+        TaskDocument document = plugin.taskService().snapshot()
+                .get(30, TimeUnit.SECONDS).byId().get(id);
+        Path file = storeRoot.resolve(document.repository().toString())
+                .resolve(id.text() + ".md");
+        VirtualFile virtual = LocalFileSystem.getInstance().refreshAndFindFileByNioFile(file);
+        assertNotNull("the task file must be visible in the VFS: " + file, virtual);
+        com.intellij.openapi.editor.Document unsaved =
+                FileDocumentManager.getInstance().getDocument(virtual);
+        assertNotNull("no document for " + file, unsaved);
+        ApplicationManager.getApplication().runWriteAction(
+                () -> unsaved.setText(unsaved.getText() + "\n<!-- unsaved edit -->\n"));
+        dispatch(DelayedTaskActions.Refresh.ID,
+                row(id, Presentation.READY, "Manual refresh refusal subject", ANYWHERE));
+        await(() -> !refusalBalloons(shown).isEmpty(), "the refusal balloon");
+        List<Notification> refusals = refusalBalloons(shown);
+        assertEquals(1, refusals.size());
+        assertEquals(NotificationType.WARNING, refusals.get(0).getType());
+        assertEquals("Drydock did not refresh the tasks", refusals.get(0).getTitle());
+        assertTrue("the balloon names the unsaved file",
+                refusals.get(0).getContent().contains("The reload was refused"));
+        pump(); pump();
+        assertEquals("the invariant is ONE balloon, not at-least-one", 1, refusalBalloons(shown).size());
+    }
+
+    // The RuntimeException catch in DelayedTaskActions.refresh is defensive only:
+    // markDirty's foreign-path startsWith on the IDE's MultiRoutingFileSystem
+    // answers false without touching the argument, so no watcher-root injection
+    // can make refreshStore throw -- the failure balloon has no sound automated
+    // seam and stays covered by the refusal test above (same title, one balloon).
+
     /** The actions key only on SELECTED_TASK, which the panel sinks for a task node;
      * a session row or section carries none, so their context carries none either. */
     private DataContext context(Object selection) {

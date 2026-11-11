@@ -92,6 +92,11 @@ public class TaskTreeRefreshPlatformTest extends BasePlatformTestCase {
         public void requestRebuild(boolean changedWorktrees) {
             calls.add("rebuild:" + changedWorktrees);
         }
+
+        @Override
+        public void refreshTasks() {
+            calls.add("tasks");
+        }
     }
 
     /** A listing section with its deferred child, as the tree shows one. */
@@ -124,8 +129,9 @@ public class TaskTreeRefreshPlatformTest extends BasePlatformTestCase {
                 section(SectionKind.ISSUES), REGISTERED_ROOT));
 
         // A section being selected in the tree must not scope the toolbar's
-        // gesture: it drops every project's listings and re-lists worktrees.
-        assertEquals(List.of("all", "rebuild:true"), target.calls);
+        // gesture: it drops every project's listings, asks the delayed-task
+        // store for a fresh re-read, and re-lists worktrees.
+        assertEquals(List.of("all", "tasks", "rebuild:true"), target.calls);
     }
 
     public void testAnIssuesSectionContextMenuRefreshFetchesItsGitHubNodeAndGroups() {
@@ -205,6 +211,6 @@ public class TaskTreeRefreshPlatformTest extends BasePlatformTestCase {
 
         // The project row's menu entry names a whole project, so it keeps
         // the toolbar's scope.
-        assertEquals(List.of("all", "rebuild:true"), target.calls);
+        assertEquals(List.of("all", "tasks", "rebuild:true"), target.calls);
     }
 }

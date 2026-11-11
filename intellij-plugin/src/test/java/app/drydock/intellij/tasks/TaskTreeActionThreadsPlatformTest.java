@@ -104,8 +104,10 @@ public class TaskTreeActionThreadsPlatformTest extends BasePlatformTestCase {
         Map<TaskMenu.Item, AnAction> actions = TaskActions.taskActions();
         AnAction[] delayed = { stub("Delayed") };
         AnAction newDelayed = stub("New Delayed");
+        AnAction refreshTasks = stub("Refresh Tasks");
         List<Path> jiraQueries = new ArrayList<>();
-        TaskTreePanel.TreeMenu menu = new TaskTreePanel.TreeMenu(actions, delayed, newDelayed, root -> {
+        TaskTreePanel.TreeMenu menu = new TaskTreePanel.TreeMenu(actions, delayed, newDelayed, refreshTasks,
+                root -> {
             jiraQueries.add(root);
             return false;
         });
@@ -116,10 +118,10 @@ public class TaskTreeActionThreadsPlatformTest extends BasePlatformTestCase {
                 .add(DelayedTaskActions.SELECTED_TASK, delayedRow()));
         assertSame(delayed, offEdt(() -> menu.getChildren(delayedRow)));
 
-        // The Tasks section offers New Task only.
+        // The Tasks section offers New Task, then the store's fresh re-read.
         AnActionEvent section = event(SimpleDataContext.builder()
                 .add(TaskTreePanel.SELECTED_TASKS_SECTION, new TasksSection("Tasks", List.of())));
-        assertEquals(List.of(newDelayed), List.of(offEdt(() -> menu.getChildren(section))));
+        assertEquals(List.of(newDelayed, refreshTasks), List.of(offEdt(() -> menu.getChildren(section))));
 
         // A session row gets TaskMenu's layout for the selection the event names,
         // and the Jira gate is asked about the event's project root.

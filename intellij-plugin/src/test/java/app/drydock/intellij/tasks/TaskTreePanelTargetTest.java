@@ -536,6 +536,11 @@ class TaskTreePanelTargetTest {
         public void requestRebuild(boolean changedWorktrees) {
             calls.add("rebuild:" + changedWorktrees);
         }
+
+        @Override
+        public void refreshTasks() {
+            calls.add("tasks");
+        }
     }
 
     /** A listing section with its deferred child, as the tree shows one. */
@@ -550,8 +555,9 @@ class TaskTreePanelTargetTest {
         TaskTreePanel.refresh(target, false, section(SectionKind.ISSUES), REGISTERED_ROOT);
 
         // Whatever the tree selection, the toolbar's gesture drops every
-        // project's listings and re-lists worktrees.
-        assertEquals(List.of("all", "rebuild:true"), target.calls);
+        // project's listings, asks the delayed-task store for a fresh
+        // re-read, and re-lists worktrees.
+        assertEquals(List.of("all", "tasks", "rebuild:true"), target.calls);
     }
 
     @Test
@@ -565,7 +571,7 @@ class TaskTreePanelTargetTest {
 
         // The project row's menu entry names a whole project, so it keeps
         // the toolbar's scope.
-        assertEquals(List.of("all", "rebuild:true"), target.calls);
+        assertEquals(List.of("all", "tasks", "rebuild:true"), target.calls);
     }
 
     @Test

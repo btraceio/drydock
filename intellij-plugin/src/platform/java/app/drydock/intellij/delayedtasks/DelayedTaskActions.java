@@ -2,6 +2,7 @@ package app.drydock.intellij.delayedtasks;
 
 import app.drydock.app.ApplicationStateStore;
 import app.drydock.delayedtasks.DelayedTaskService;
+import app.drydock.delayedtasks.TaskNotifications;
 import app.drydock.delayedtasks.TaskStoreWatcher;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.Repository;
@@ -24,6 +25,8 @@ import app.drydock.tasks.TaskState.Actor;
 import app.drydock.tasks.TaskStatus;
 
 import com.intellij.icons.AllIcons;
+import com.intellij.notification.NotificationGroupManager;
+import com.intellij.notification.NotificationType;
 import com.intellij.openapi.actionSystem.ActionUpdateThread;
 import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.AnActionEvent;
@@ -57,6 +60,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 
 /**
  * The delayed-task layer's tree actions (T20a): Edit, Drop, Confirm, Reopen
@@ -79,7 +83,7 @@ public final class DelayedTaskActions {
      * presentation, so it never appears in {@link #applicable} -- the Cancel
      * action resolves the CURRENT published plan record (P4.12). */
     public enum Item { START, CANCEL, EDIT, DROP, CONFIRM, REOPEN, GOTO_BLOCKER_SESSION, MIRROR_TO_GITHUB,
-        MIRROR_TO_JIRA, OPEN_MIRRORS }
+        MIRROR_TO_JIRA, OPEN_MIRRORS, REFRESH }
 
     /** The selected delayed-task row, for the task-node actions (T20a). */
     public static final DataKey<DelayedTaskRow> SELECTED_TASK = DataKey.create("drydock.delayedTask.node");
@@ -97,28 +101,33 @@ public final class DelayedTaskActions {
     private DelayedTaskActions() { }
 
     /** The task node's menu entries, in menu order (T20a; Start first, T31; Cancel after
-     * it, T40). */
+     * it, T40; the view gesture last). */
     public static Entry[] menu() {
         return new Entry[] { new Entry(Start.ID, new Start()), new Entry(Cancel.ID, new Cancel()),
                 new Entry(Edit.ID, new Edit()), new Entry(Drop.ID, new Drop()),
                 new Entry(Confirm.ID, new Confirm()), new Entry(Reopen.ID, new Reopen()),
                 new Entry(GotoBlockerSession.ID, new GotoBlockerSession()),
                 new Entry(MirrorToGitHub.ID, new MirrorToGitHub()), new Entry(MirrorToJira.ID, new MirrorToJira()),
-                new Entry(OpenMirrors.ID, new OpenMirrors()) };
+                new Entry(OpenMirrors.ID, new OpenMirrors()), new Entry(Refresh.ID, new Refresh()) };
     }
 
     /** Pure: which menu items apply, read off the presentation {@link TaskState}
      * CARRIED onto the row (never recomputed): Edit always; Drop for anything
      * not terminal; Confirm only while an agent's done awaits the human (REVIEW,
-     * D16); Reopen for the closed ones; Go to blocker session while blocked. */
+     * D16); Reopen for the closed ones; Go to blocker session while blocked;
+     * Refresh whatever the presentation -- a view gesture, never task work:
+     * unioned onto the state-specific set once, after the switch, so no arm
+     * can omit it. */
     public static Set<Item> applicable(TaskState.Presentation presentation) {
-        return switch (presentation) {
+        Set<Item> items = switch (presentation) {
             case REVIEW -> EnumSet.of(Item.EDIT, Item.DROP, Item.CONFIRM, Item.REOPEN);
             case TERMINAL -> EnumSet.of(Item.EDIT, Item.REOPEN);
             case BLOCKED -> EnumSet.of(Item.START, Item.EDIT, Item.DROP, Item.GOTO_BLOCKER_SESSION);
             case READY -> EnumSet.of(Item.START, Item.EDIT, Item.DROP);
             default -> EnumSet.of(Item.EDIT, Item.DROP);
         };
+        items.add(Item.REFRESH);
+        return items;
     }
 
     /** Pure: the first unfinished prerequisite of {@code task} that a live session
@@ -191,6 +200,65 @@ public final class DelayedTaskActions {
                 }
             }
         });
+    }
+
+    /** The Tasks layer's manual Refresh: the service's seam off the EDT -- the
+     * D6/P5 unsaved guard first, then the watcher's own coalesced cycle (batched
+     * VFS refresh, fresh re-read, publication); the tree rebuild rides the
+     * store's publication, so nothing here touches the tree. A refused refresh
+     * (a task file modified but unsaved in an editor) is one visible balloon,
+     * never a silent no-op. The background task IS the immediate progress and
+     * ends on every path. Shared by the tree's Refresh actions and the
+     * panel's refresh seam ({@code RefreshTarget.refreshTasks}). */
+    public static void refresh(Project from) {
+        ProgressManager.getInstance().run(new Task.Backgroundable(from, "Refreshing tasks…", true) {
+            @Override
+            public void run(@NotNull ProgressIndicator indicator) {
+                DelayedTaskService.StoreRefresh outcome;
+                try {
+                    outcome = DrydockPluginService.getInstance().taskService().refreshStore();
+                } catch (RuntimeException e) {
+                    LOG.log(Level.WARNING, "Could not request the task store refresh", e);
+                    refreshFailed(from, e);
+                    return;
+                }
+                if (!outcome.conflicts().isEmpty()) {
+                    refuseRefresh(from, outcome.conflicts());
+                }
+            }
+        });
+    }
+
+    /** Called from the background task; marshals the balloon to the EDT via
+     * invokeLater -- one balloon naming the unsaved task files whose edits refused
+     * the reload (D6/P5); a clicked Refresh is never silently refused. */
+    private static void refuseRefresh(Project from, List<TaskStoreWatcher.SaveConflict> conflicts) {
+        String files = conflicts.stream().map(conflict -> String.valueOf(conflict.file()))
+                .collect(Collectors.joining("\n"));
+        String message = "The reload was refused: " + conflicts.size()
+                + (conflicts.size() == 1 ? " task file is" : " task files are")
+                + " modified but unsaved in an open editor; save or revert them and refresh again."
+                + "\n" + files;
+        ApplicationManager.getApplication().invokeLater(() ->
+                NotificationGroupManager.getInstance()
+                        .getNotificationGroup(TaskNotifications.NOTIFICATION_GROUP)
+                        .createNotification("Drydock did not refresh the tasks", message,
+                                NotificationType.WARNING)
+                        .notify(from), ModalityState.nonModal(), from.getDisposed());
+    }
+
+    /** Called from the background task; marshals the balloon to the EDT via
+     * invokeLater -- the re-read request itself failed (D6/P5); a clicked
+     * Refresh is never silently refused. */
+    private static void refreshFailed(Project from, Throwable failure) {
+        ApplicationManager.getApplication().invokeLater(() ->
+                NotificationGroupManager.getInstance()
+                        .getNotificationGroup(TaskNotifications.NOTIFICATION_GROUP)
+                        .createNotification("Drydock did not refresh the tasks",
+                                "The task store re-read failed: "
+                                        + WorktreeErrors.visibleMessage(failure),
+                                NotificationType.WARNING)
+                        .notify(from), ModalityState.nonModal(), from.getDisposed());
     }
 
     /** The write path every task-node status action rides (T20a): the actor rules
@@ -487,5 +555,16 @@ public final class DelayedTaskActions {
         public GotoBlockerSession() { super(Item.GOTO_BLOCKER_SESSION, "Go to Blocker Session",
                 "Switch to the session that runs this task's blocker", AllIcons.Actions.Forward); }
         @Override void dispatch(Project project, DelayedTaskRow row) { gotoBlocker(project, row); }
+    }
+
+    /** Refresh: the Tasks layer's "show me now" -- the store re-read request; every
+     * presentation offers it, whatever the task's state (applicable() unions REFRESH
+     * onto every presentation's set). */
+    public static final class Refresh extends TaskNodeAction {
+        public static final String ID = "Drydock.DelayedTask.Refresh";
+        public Refresh() { super(Item.REFRESH, "Refresh",
+                "Re-read the task store now; a task file modified but unsaved in an editor refuses the reload",
+                AllIcons.Actions.Refresh); }
+        @Override void dispatch(Project project, DelayedTaskRow row) { refresh(project); }
     }
 }

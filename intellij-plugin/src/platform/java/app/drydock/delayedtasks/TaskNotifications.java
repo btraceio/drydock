@@ -50,6 +50,10 @@ import java.util.function.Function;
  */
 public final class TaskNotifications implements AutoCloseable {
 
+    /** The plugin.xml notificationGroup id the task balloons publish through (T39a);
+     * the manual refresh's refusal rides the same group. */
+    public static final String NOTIFICATION_GROUP = "Drydock tasks";
+
     /** What one balloon announces. */
     public enum Kind { READY, REVIEW, HALT, CONTINUE }
     /** One published transition: its kind, the task or plan id, and the balloon text. */
@@ -183,8 +187,8 @@ public final class TaskNotifications implements AutoCloseable {
       * answer resolving LATEST state by id (the AttentionNotifier idiom, focused window). */
     private static final class Ide implements Publisher {
 
-        /** Matches the plugin.xml notificationGroup id (T39a). */
-        static final String GROUP = "Drydock tasks";
+        /** Matches {@link #NOTIFICATION_GROUP}, the plugin.xml id (T39a). */
+        static final String GROUP = NOTIFICATION_GROUP;
         private final DelayedTaskService service;
         Ide(DelayedTaskService service) {
             this.service = service;
