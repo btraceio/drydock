@@ -1,12 +1,18 @@
 package app.drydock.delayedtasks;
 
+import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
+import app.drydock.domain.RepositorySettings;
+import app.drydock.domain.SshRemote;
+import app.drydock.projects.SharedProject;
 import app.drydock.tasks.StartPlan;
 import app.drydock.tasks.TaskDocument;
 import app.drydock.tasks.TaskId;
 import app.drydock.tasks.TaskStatus;
 import org.junit.jupiter.api.Test;
 
+import java.nio.file.Path;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -14,6 +20,7 @@ import java.util.Optional;
 
 import static app.drydock.tasks.StartPlan.Kind.OWNED_TASK;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -35,6 +42,48 @@ class DelayedTaskStartTest {
 
     private static StartPlan.Segment segment(String projectName, TaskDocument... tasks) {
         return new StartPlan.Segment(tasks[0].repository(), projectName, List.of(tasks));
+    }
+
+    // ---- the repository resolution (the shared-id fallback) --------------------
+
+    private static Repository registered(RepositoryId id, String root) {
+        return new Repository(id, Path.of(root), "repo", Instant.EPOCH, Instant.EPOCH,
+                RepositorySettings.DEFAULT);
+    }
+
+    @Test
+    void installCatalogRootWins() {
+        RepositoryId id = RepositoryId.newId();
+        assertEquals(Path.of("/install/root"), DelayedTaskStart.rootOf(
+                List.of(registered(id, "/install/root")),
+                List.of(SharedProject.local(id, Path.of("/shared/root"), "repo", Instant.EPOCH)),
+                id));
+    }
+
+    @Test
+    void sharedListResolvesAnIdTheInstallNeverMinted() {
+        RepositoryId id = RepositoryId.newId(); // the id task creation registered under
+        assertEquals(Path.of("/shared/root"), DelayedTaskStart.rootOf(
+                List.of(registered(RepositoryId.newId(), "/other/root")),
+                List.of(SharedProject.local(id, Path.of("/shared/root"), "repo", Instant.EPOCH)),
+                id));
+    }
+
+    @Test
+    void remoteSharedProjectYieldsNoRoot() {
+        RepositoryId id = RepositoryId.newId();
+        SharedProject remote = new SharedProject(id, Path.of("/placeholder"), "remote", Instant.EPOCH,
+                Optional.of(new SshRemote("host", "/remote/path")));
+        assertNull(DelayedTaskStart.rootOf(List.of(), List.of(remote), id));
+    }
+
+    @Test
+    void unknownIdYieldsNoRoot() {
+        assertNull(DelayedTaskStart.rootOf(
+                List.of(registered(RepositoryId.newId(), "/install/root")),
+                List.of(SharedProject.local(RepositoryId.newId(), Path.of("/shared/root"),
+                        "repo", Instant.EPOCH)),
+                RepositoryId.newId()));
     }
 
     private static StartPlan plan(List<StartPlan.Segment> segments, List<StartPlan.Stage> stages) {

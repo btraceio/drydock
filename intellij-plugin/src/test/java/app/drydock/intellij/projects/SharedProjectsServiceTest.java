@@ -13,6 +13,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -93,6 +94,18 @@ class SharedProjectsServiceTest {
 
         assertEquals(List.of(), service.projects());
         assertEquals(List.of(), file.read().projects());
+    }
+
+    @Test
+    void byIdNowReadsTheFileFreshNotTheLaggedCache() throws Exception {
+        SharedProjectsService service = new SharedProjectsService(file, List::of, executor);
+        service.start().join();
+        SharedProject added = project(dir.resolve("from-app"));
+        // Another tool's write the 2-second poll has not picked up yet.
+        new SharedProjectsFile(file.file()).update(list -> List.of(added));
+
+        assertEquals(Optional.of(added), service.byIdNow(added.id()));
+        assertEquals(Optional.empty(), service.byIdNow(RepositoryId.newId()));
     }
 
     @Test
