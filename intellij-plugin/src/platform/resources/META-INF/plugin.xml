@@ -266,6 +266,10 @@
                 class="app.drydock.intellij.delayedtasks.DelayedTaskActions$OpenMirrors"
                 text="Open Mirrored Issue"
                 description="Open the GitHub issue or Jira ticket this task is mirrored into"/>
+        <action id="Drydock.DelayedTask.Refresh"
+                class="app.drydock.intellij.delayedtasks.DelayedTaskActions$Refresh"
+                text="Refresh"
+                description="Re-read the task store now; a task file modified but unsaved in an editor refuses the reload"/>
         <!-- The agent console tab's own commands (A7): the header shortcuts
              ride EditorTabActionGroup, the platform's per-tab label-action
              seam, so every agent console tab carries them and a click

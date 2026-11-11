@@ -356,6 +356,35 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
         return watchedSnapshot;
     }
 
+    /** One manual Refresh's store effects: requested when the watcher took the
+     * re-read request, refused with the conflicts when the D6/P5 unsaved guard
+     * found a task file modified but unsaved in an editor. */
+    public record StoreRefresh(boolean requested, List<TaskStoreWatcher.SaveConflict> conflicts) {
+        public StoreRefresh {
+            conflicts = List.copyOf(conflicts);
+        }
+    }
+
+    /** The manual Refresh's seam: the D6/P5 unsaved guard runs UP FRONT, so a
+     * refusal is a deterministic answer rather than a race with the coalescing
+     * cycle; a clean store is marked dirty, which schedules the watcher's usual
+     * cycle (batched VFS refresh, fresh re-read, publication) and the tree
+     * follows through its own subscription. Without a watcher (outside an IDE,
+     * or before init) nothing is requested: there is no store watch to nudge.
+     * Same package as the watcher: markDirty stays package-private API. */
+    public StoreRefresh refreshStore() {
+        TaskStoreWatcher current = watcher;
+        if (current == null) {
+            return new StoreRefresh(false, List.of());
+        }
+        List<TaskStoreWatcher.SaveConflict> conflicts = current.checkUnsaved();
+        if (!conflicts.isEmpty()) {
+            return new StoreRefresh(false, conflicts);
+        }
+        current.markDirty(root);
+        return new StoreRefresh(true, List.of());
+    }
+
     /** The published Continue requirements (T36a), or null before the first recovery or
      * when the plan scan failed: what every persisted plan needs after this or a previous
      * restart. Recovery never launches anything (P4.10). */
