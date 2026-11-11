@@ -67,7 +67,7 @@ public final class TaskGuidance {
     private static final Logger LOG = System.getLogger(TaskGuidance.class.getName());
 
     /** The guidance content's version: the directory name and manifest version. */
-    static final String CURRENT_VERSION = "1";
+    static final String CURRENT_VERSION = "2";
 
     private static final String GUIDANCE_ROOT_DIRECTORY = "tasks-guidance";
     private static final String SKILL_RESOURCE = "/tasks/SKILL.md";
