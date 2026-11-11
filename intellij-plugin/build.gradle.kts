@@ -130,6 +130,18 @@ dependencies {
     "testImplementation"(platform("org.junit:junit-bom:5.11.4"))
     "testImplementation"("org.junit.jupiter:junit-jupiter")
     "testImplementation"("junit:junit:4.13.2")
+    // Behavioral tests for the generated pi extensions: the generated
+    // TypeScript-stripped JS runs on GraalVM Polyglot's embedded JS engine
+    // against a mock pi (there is no node/npm toolchain in this repo).
+    // polyglot is the API jar the test code compiles against; js-language is
+    // the engine jar. NOT org.graalvm.polyglot:js-community / org.graalvm.js:js
+    // -- both are <packaging>pom</packaging> aggregators, and Gradle resolves
+    // their .pom FILES onto the test classpath, where the worker JVM's
+    // ServiceLoader scan dies opening them (ExceptionInInitializerError in
+    // BootstrapLogger). js-language brings regex/truffle transitively.
+    // Test-scope ONLY -- the core purity gates must never see it.
+    "testImplementation"("org.graalvm.polyglot:polyglot:25.0.4")
+    "testImplementation"("org.graalvm.js:js-language:25.0.4")
     "testRuntimeOnly"("org.junit.vintage:junit-vintage-engine")
     "testRuntimeOnly"("org.junit.platform:junit-platform-launcher")
 
@@ -276,4 +288,19 @@ tasks.test {
     jvmArgumentProviders.add(CommandLineArgumentProvider {
         listOf("-Ddrydock.tasksDirectory=" + testTasks.get().asFile.absolutePath)
     })
+    // The IDE's restClient plugin bundles its own older GraalJS
+    // (intellij.libraries.graalvm.js.jar). On the platform test classpath it
+    // shadows the pinned polyglot test dependency: truffle 25.0.4 engine
+    // classes then fail to define against the old jar's Shape
+    // (sealed-subclass check) and every polyglot behavioral test aborts with
+    // IncompatibleClassChangeError. The platform suite never uses the
+    // bundled engine; the behavioral tests need exactly the pinned one.
+    classpath = classpath.filter { !it.name.startsWith("intellij.libraries.graalvm.js") }
+    // Truffle's multi-release sanity check reads the engine jar's manifest
+    // through the caller's classloader; the platform test worker's
+    // PathClassLoader does not surface jar manifests, so the check fails
+    // even though the pinned jars are the unmodified official artifacts.
+    // Disable the heuristic -- the real sealed-hierarchy conflict it also
+    // guards against is already handled by the classpath filter above.
+    jvmArgs("-Dpolyglotimpl.DisableMultiReleaseCheck=true")
 }

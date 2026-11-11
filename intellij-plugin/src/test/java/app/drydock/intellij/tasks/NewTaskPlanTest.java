@@ -1,6 +1,7 @@
 package app.drydock.intellij.tasks;
 
 import app.drydock.agent.api.AgentKind;
+import app.drydock.agent.api.CreateContext;
 import app.drydock.domain.ModelTiers;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionMode;
@@ -95,7 +96,37 @@ class NewTaskPlanTest {
 
         String prompt = NewTaskPlan.initialPrompt(choice).orElseThrow();
         assertTrue(prompt.startsWith("Before writing any code"), prompt);
+        assertTrue(prompt.contains(CreateContext.TASK_SEPARATOR), prompt);
         assertTrue(prompt.endsWith("Add farewell() to Greeter.\nKeep it short."), prompt);
+        assertTrue(prompt.indexOf(CreateContext.TASK_SEPARATOR) < prompt.indexOf("Add farewell()"), prompt);
+    }
+
+    @Test
+    void aSlashOneLinerIsSentExactlyAsTyped() {
+        Choice withRule = new Choice("Review", Optional.of("/sphinx review"), AgentKind.PI, SessionMode.WRITES,
+                WorkIn.NEW_WORKTREE, "review", "origin/main", Path.of("/b/r"), OpenIn.OWN_WINDOW,
+                Optional.empty(), Optional.empty(), Optional.of("When you dispatch subagents you MUST pass a model"));
+
+        assertEquals(Optional.of("/sphinx review"), NewTaskPlan.initialPrompt(withRule));
+    }
+
+    @Test
+    void aMultiLineTaskStartingWithSlashIsStillFramed() {
+        Choice choice = choice("Review", Optional.of("/sphinx review\npay attention to the diff"),
+                SessionMode.WRITES, WorkIn.NEW_WORKTREE, "review", Path.of("/b/r"));
+
+        String prompt = NewTaskPlan.initialPrompt(choice).orElseThrow();
+        assertTrue(prompt.contains(CreateContext.TASK_SEPARATOR), prompt);
+        assertTrue(prompt.endsWith("/sphinx review\npay attention to the diff"), prompt);
+    }
+
+    @Test
+    void slashOneLinerDetection() {
+        assertTrue(NewTaskPlan.isSlashOneLiner("/review"));
+        assertTrue(NewTaskPlan.isSlashOneLiner("  /review  \n"));
+        assertFalse(NewTaskPlan.isSlashOneLiner("/review\nthen more"));
+        assertFalse(NewTaskPlan.isSlashOneLiner("review /path"));
+        assertFalse(NewTaskPlan.isSlashOneLiner(""));
     }
 
     @Test
@@ -117,7 +148,7 @@ class NewTaskPlanTest {
     }
 
     @Test
-    void initialPromptAppendsTheSubagentModelRuleAfterABlankLine() {
+    void initialPromptRidesTheSubagentModelRuleInTheFramingBeforeTheSeparator() {
         Choice withRule = new Choice("Farewell", Optional.of("Do the thing."), AgentKind.CLAUDE,
                 SessionMode.WRITES, WorkIn.NEW_WORKTREE, "farewell", "origin/main", Path.of("/b/f"),
                 OpenIn.OWN_WINDOW, Optional.empty(), Optional.empty(),
@@ -125,7 +156,10 @@ class NewTaskPlanTest {
 
         String prompt = NewTaskPlan.initialPrompt(withRule).orElseThrow();
         assertTrue(prompt.contains("\n\nWhen you dispatch subagents you MUST pass an explicit model"), prompt);
-        assertTrue(prompt.indexOf("MUST") > prompt.indexOf("Do the thing."), "the rule rides after the task");
+        // The rule is framing, not task: it rides before the separator so the
+        // task half stays the user's words only (the pi extension splits there).
+        assertTrue(prompt.indexOf("MUST") < prompt.indexOf(CreateContext.TASK_SEPARATOR), prompt);
+        assertTrue(prompt.indexOf(CreateContext.TASK_SEPARATOR) < prompt.indexOf("Do the thing."), prompt);
     }
 
     @Test
