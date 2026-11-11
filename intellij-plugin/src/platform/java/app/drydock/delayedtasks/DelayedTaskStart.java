@@ -22,6 +22,8 @@ import app.drydock.tasks.StartPlan.Stage;
 import app.drydock.tasks.TaskDocument;
 import app.drydock.tasks.TaskGraph;
 import app.drydock.tasks.StartPlanner;
+import app.drydock.tasks.StackBranches;
+import app.drydock.tasks.StackUnits;
 import app.drydock.tasks.TaskId;
 import app.drydock.tasks.TaskNode.DelayedTaskRow;
 import app.drydock.tasks.TaskSnapshot;
@@ -181,11 +183,10 @@ public final class DelayedTaskStart {
                 refuse(from, "The plan changed while the dialog was open; nothing was started. " + stale.get());
                 return;
             }
-            CompletableFuture<ManagedAgentSession> launch = TaskLauncher.launchChosen(from, prepared.get(),
-                    chosen.get(), new SessionDialogs.PreparedSessionCallback() {
-                    }, bindingsOf(service, segment));
-            handedOff = true; // the launch's own completion releases the claim
-            launch.whenComplete((session, failure) -> {
+            CompletableFuture<List<ManagedAgentSession>> launch = launchStacked(from, service, plugin,
+                    fresh, prepared.get(), chosen.get().choice(), mainRoot, 0);
+            handedOff = true; // the launches' own completions release the claim
+            launch.whenComplete((sessions, failure) -> {
                 IN_FLIGHT.removeAll(whole);
                 if (failure != null) {
                     LOG.log(Level.WARNING, "Could not start '" + row.title() + "'", failure);
@@ -529,10 +530,12 @@ public final class DelayedTaskStart {
     }
 
     /** The production launch-effect factory (T38, P4.9): the confirmed choices become
-      * the driver's launcher -- every segment launches through the EXISTING TaskLauncher
-      * chain, freshly re-prepared per launch (never a stale inputs closure), in the
-      * window the plan was started from while it stays open, else ANY open Drydock
-      * window -- one origin/fallback rule for every segment, never re-derived. */
+      * the driver's launcher -- every STACKED LAUNCH UNIT (S1 of docs/StackedPrExecution.md)
+      * launches through the EXISTING TaskLauncher chain, freshly re-prepared per launch
+      * (never a stale inputs closure), in the window the plan was started from while it
+      * stays open, else ANY open Drydock window -- one origin/fallback rule for every
+      * unit, never re-derived. A stacked unit's launch waits for its prerequisite
+      * branches (S2) inside the unit's own future; the driver's lane never blocks. */
     static LauncherFactory productionLaunchers(Project from, Function<RepositoryId, Path> roots,
             DelayedTaskService service) {
         return (confirmed, origin) -> new SegmentLauncher() {
@@ -556,22 +559,144 @@ public final class DelayedTaskStart {
                 }
                 return TaskLauncher.prepareTask(window, Optional.of(mainRoot), Optional.empty())
                         .thenApply(prepared -> prepared.map(task -> (Prepared)
-                                new SegmentPrepared(window, task, TaskLauncher.chosen(choice))));
+                                new SegmentPrepared(window, task, TaskLauncher.chosen(choice), mainRoot)));
             }
 
             @Override
             public CompletableFuture<Launched> launch(Prepared prepared, SegmentRequest request) {
                 SegmentPrepared segment = (SegmentPrepared) prepared;
-                List<TaskLaunchBinding> bindings = request.tasks().stream()
-                        .map(task -> service.launchBinding(task, service.root(), List.of(),
-                                request.cancellationGeneration()))
-                        .toList();
-                return TaskLauncher.launchChosen(segment.window(), segment.prepared(), segment.chosen(),
-                        new SessionDialogs.PreparedSessionCallback() { }, bindings)
-                        .thenApply(session -> new Launched("stage-" + request.stage() + "-"
-                                + session.id(), session.id().toString()));
+                StackUnits.Unit unit;
+                try {
+                    unit = unitOf(request);
+                } catch (IllegalStateException refused) {
+                    return CompletableFuture.failedFuture(refused);
+                }
+                return service.snapshot().thenCompose(snapshot -> {
+                    TaskGraph graph = TaskGraph.of(snapshot, slugsOf(DrydockPluginService.getInstance()));
+                    List<TaskDocument> unitDocs = new ArrayList<>();
+                    for (TaskId task : request.tasks()) {
+                        TaskDocument document = snapshot.byId().get(task);
+                        if (document == null) {
+                            return CompletableFuture.failedFuture(new IllegalStateException("task '"
+                                    + task.text() + "' is no longer in the store; the unit of "
+                                    + request.projectName() + " launches nothing"));
+                        }
+                        unitDocs.add(document);
+                    }
+                    StackLaunch.PromptInputs inputs = StackLaunch.PromptInputs.of(confirmed.target(),
+                            request.stage(), request.stageCount(), request.projectName(), request.repository(),
+                            unitDocs, graph);
+                    return StackLaunch.launchUnit(segment.window(), service, segment.prepared(),
+                            segment.chosen().choice(), inputs, unit, segment.mainRoot(),
+                            NewTaskPreset.harnessOf(segment.chosen().choice().agent()),
+                            request.cancellationGeneration());
+                }).thenApply(session -> new Launched("stage-" + request.stage() + "-" + session.id(),
+                        session.id().toString()));
             }
         };
+    }
+
+    /** The persisted stack shape of one request as a unit: the branch names
+      * back to task ids (S1); a base or wait branch outside the naming
+      * convention is a visible refusal, never a silently-rooted unit. */
+    private static StackUnits.Unit unitOf(SegmentRequest request) {
+        TaskId base = StackBranches.taskOf(request.baseBranch());
+        if (request.baseBranch() != null && base == null) {
+            throw new IllegalStateException("the stack base branch '" + request.baseBranch()
+                    + "' is not a stacked task branch");
+        }
+        List<TaskId> waits = new ArrayList<>();
+        for (String name : request.waitBranches()) {
+            TaskId wait = StackBranches.taskOf(name);
+            if (wait == null) {
+                throw new IllegalStateException("the stack wait branch '" + name
+                        + "' is not a stacked task branch");
+            }
+            waits.add(wait);
+        }
+        return new StackUnits.Unit(request.tasks(), waits, base);
+    }
+
+    /** The stacked-branch launch of one confirmed single-segment start (S1/S2
+      * of docs/StackedPrExecution.md): the segment's fresh documents decompose
+      * into launch units, every unit becomes its own session on its own
+      * stacked branch, and a fork child waits for its prerequisite's branch
+      * inside its own future. The confirmed choice supplies the agent, mode,
+      * window and start point; the per-task branches are always the stack's
+      * own dd/<task-id> names (S1) -- the dialog's branch pick is superseded. */
+    private static CompletableFuture<List<ManagedAgentSession>> launchStacked(Project from,
+            DelayedTaskService service, DrydockPluginService plugin, StartPlan fresh,
+            PreparedTask prepared, Choice confirmedChoice, Path mainRoot, int cancellationGeneration) {
+        StackedEntry entry;
+        try {
+            entry = stackedEntryOf(fresh);
+        } catch (IllegalStateException refused) {
+            return CompletableFuture.failedFuture(refused);
+        }
+        Segment segment = entry.segment();
+        return service.snapshot().thenCompose(snapshot -> {
+            TaskGraph graph = TaskGraph.of(snapshot, slugsOf(plugin));
+            List<StackUnits.Unit> units = StackLaunch.units(segment.tasks(), graph);
+            Map<TaskId, TaskDocument> docs = new LinkedHashMap<>();
+            for (TaskDocument task : segment.tasks()) {
+                docs.put(task.id(), task);
+            }
+            return StackLaunch.launchStack(from, service, prepared, confirmedChoice, mainRoot, units,
+                    unit -> StackLaunch.PromptInputs.of(fresh.target(), entry.stage(), entry.stageCount(),
+                            segment.projectName(), segment.repository(),
+                            unitDocsOf(docs, unit.tasks(), segment.projectName()), graph),
+                    NewTaskPreset.harnessOf(confirmedChoice.agent()), cancellationGeneration);
+        });
+    }
+
+    /** The validated entry of one single-segment stacked launch: the loud
+      * guard (a refused, segment-less or multi-segment plan never launches a
+      * silent partial) and the stage position derived from the plan's stages
+      * -- the stage NUMBER whose segments hold the segment's repository, and
+      * the plan's stage count, never a hardcoded default. Pure and
+      * platform-free so plain JUnit can pin every refusal. */
+    record StackedEntry(Segment segment, int stage, int stageCount) { }
+
+    static StackedEntry stackedEntryOf(StartPlan fresh) {
+        if (!fresh.startable()) {
+            throw new IllegalStateException("Drydock cannot stack-launch '" + fresh.target().text() + "': "
+                    + String.join("  ", fresh.refusals().stream().map(StartPlan.Refusal::reason).toList()));
+        }
+        if (fresh.segments().isEmpty()) {
+            throw new IllegalStateException("the plan of '" + fresh.target().text()
+                    + "' carries no segment; nothing launches");
+        }
+        if (fresh.segments().size() != 1) {
+            throw new IllegalStateException("the plan of '" + fresh.target().text() + "' carries "
+                    + fresh.segments().size() + " segments; a stacked launch launches exactly one");
+        }
+        Segment segment = fresh.segments().get(0);
+        int stageCount = fresh.stages().size();
+        for (Stage stage : fresh.stages()) {
+            if (stage.segments().stream().anyMatch(s -> s.repository().equals(segment.repository()))) {
+                return new StackedEntry(segment, stage.number(), stageCount);
+            }
+        }
+        throw new IllegalStateException("the " + stageCount + " stage(s) of '" + fresh.target().text()
+                + "' hold no segment of '" + segment.projectName() + "'; nothing launches");
+    }
+
+    /** The unit's documents, refusing loudly when a task vanished from the
+      * store (the driver-path wording) instead of silently dropping it from
+      * the unit prompt; the consulted map is the one built from the plan's
+      * own segment tasks, never a later snapshot. */
+    static List<TaskDocument> unitDocsOf(Map<TaskId, TaskDocument> docs, List<TaskId> unitTasks,
+            String projectName) {
+        List<TaskDocument> unitDocs = new ArrayList<>();
+        for (TaskId task : unitTasks) {
+            TaskDocument document = docs.get(task);
+            if (document == null) {
+                throw new IllegalStateException("task '" + task.text() + "' is no longer in the store; the unit of "
+                        + projectName + " launches nothing");
+            }
+            unitDocs.add(document);
+        }
+        return List.copyOf(unitDocs);
     }
 
     /** The window a segment launches in (P4.9): the window the plan was started from,
@@ -603,7 +728,7 @@ public final class DelayedTaskStart {
 
     /** One freshly prepared segment launch: the resolved window, the CURRENT inputs
       * (re-read per launch, never a captured closure) and the confirmed choice. */
-    private record SegmentPrepared(Project window, PreparedTask prepared, ChosenTask chosen)
+    private record SegmentPrepared(Project window, PreparedTask prepared, ChosenTask chosen, Path mainRoot)
             implements Prepared { }
 
     /** The production listener (T38): every non-launch effect surfaces visibly; a

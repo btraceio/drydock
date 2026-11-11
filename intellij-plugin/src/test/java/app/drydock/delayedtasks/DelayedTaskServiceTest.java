@@ -2,6 +2,7 @@ package app.drydock.delayedtasks;
 
 import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.*;
+import app.drydock.intellij.tasks.NewTaskPlan;
 import app.drydock.mcp.*;
 import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonValue.JsonObject;
@@ -238,6 +239,94 @@ class DelayedTaskServiceTest {
                     .getMessage().contains("No registered project 'project-alpha'"),
                     "an ambiguous slug refuses the create, never picks a winner");
         }
+    }
+
+    // 7. The confirmed plan's persisted stack shape merges every stage's units per
+    //    repository -- a later stage never overwrites an earlier stage's shape -- and
+    //    the merged shape survives the plan store round trip.
+    @Test
+    void confirmingTwoStagesOfOneRepositoryMergesBothStagesUnits(@TempDir Path root) throws Exception {
+        RepositoryId repository = RepositoryId.newId();
+        PlanStore.PlanRecord record;
+        TaskId target;
+        TaskId stageOne;
+        TaskId stageTwo;
+        try (DelayedTaskService service = new DelayedTaskService(root, executor, List::of, List::of)) {
+            await(service.initialize());
+            TaskDocument first = await(service.create("Stage one work", List.of(), repository)).document();
+            TaskDocument second = await(service.create("Stage two work", List.of(), repository)).document();
+            target = second.id();
+            stageOne = first.id();
+            stageTwo = second.id();
+            StartPlan.Segment firstSegment = new StartPlan.Segment(repository, "Project Alpha", List.of(first));
+            StartPlan.Segment secondSegment = new StartPlan.Segment(repository, "Project Alpha", List.of(second));
+            StartPlan plan = new StartPlan(target, List.of(firstSegment, secondSegment),
+                    List.of(new StartPlan.Stage(1, List.of(firstSegment)),
+                            new StartPlan.Stage(2, List.of(secondSegment))),
+                    List.of(), List.of(), List.of());
+            PlanLaunchChoices choices = new PlanLaunchChoices(target, List.of(1, 2),
+                    Map.of(repository, choice(root)), Map.of());
+            record = await(service.persistConfirmedPlan(plan, choices,
+                    new PlanLaunch.Origin("win-1", root)));
+        }
+        List<PlanLaunch.StackedUnit> merged = record.plan().launch().stacks().get(repository);
+        assertNotNull(merged, "the repository's merged stack shape is persisted");
+        assertEquals(2, merged.size(),
+                "both stages' units survive the merge; a later stage never overwrites an earlier stage");
+        assertEquals(List.of(stageOne), merged.get(0).tasks(), "stage 1's unit is present");
+        assertEquals(List.of(stageTwo), merged.get(1).tasks(), "stage 2's unit is appended, not replacing");
+        assertTrue(merged.get(0).isRoot() && merged.get(1).isRoot(),
+                "independent tasks decompose to root units");
+        assertEquals(2, record.plan().launch().selections().size(),
+                "one launch selection per planned task");
+        try (PlanStore reloaded = new PlanStore(root)) {
+            PlanStore.PlanRecord persisted = await(reloaded.load(target)).orElseThrow();
+            assertEquals(record.plan().launch().stacks(), persisted.plan().launch().stacks(),
+                    "the merged shape is what a reopen reads back");
+        }
+    }
+
+    // 7a. One segment's fork decomposes into launch units whose stack base and waits
+    //     are the dd/<task> branch names, derived through the naming convention the
+    //     launch and PR machinery share.
+    @Test
+    void confirmingAForkSplitsTheSegmentIntoUnitsWithDdBranchNames(@TempDir Path root) throws Exception {
+        RepositoryId repository = RepositoryId.newId();
+        try (DelayedTaskService service = new DelayedTaskService(root, executor, List::of, List::of)) {
+            await(service.initialize());
+            TaskDocument base = await(service.create("Shared base", List.of(), repository)).document();
+            TaskDocument left = await(service.create("Left chain",
+                    List.of(base.id().text()), repository)).document();
+            TaskDocument right = await(service.create("Right chain",
+                    List.of(base.id().text()), repository)).document();
+            StartPlan.Segment segment = new StartPlan.Segment(repository, "Project Alpha",
+                    List.of(base, left, right));
+            StartPlan plan = new StartPlan(right.id(), List.of(segment),
+                    List.of(new StartPlan.Stage(1, List.of(segment))),
+                    List.of(), List.of(), List.of());
+            PlanLaunchChoices choices = new PlanLaunchChoices(right.id(), List.of(1),
+                    Map.of(repository, choice(root)), Map.of());
+            PlanStore.PlanRecord record = await(service.persistConfirmedPlan(plan, choices,
+                    new PlanLaunch.Origin("win-1", root)));
+            List<PlanLaunch.StackedUnit> units = record.plan().launch().stacks().get(repository);
+            assertEquals(2, units.size(), "a fork is one linear chain plus the split-off dependent");
+            assertEquals(List.of(base.id(), left.id()), units.get(0).tasks(),
+                    "the maximal chain keeps both members");
+            assertTrue(units.get(0).isRoot(), "the chain from an unprerequisited task is a root unit");
+            assertEquals(List.of(right.id()), units.get(1).tasks(), "the fork's other dependent opens its own unit");
+            assertEquals("dd/" + base.id().text(), units.get(1).baseBranch(),
+                    "the stack base is the dd/ branch of the shared prerequisite");
+            assertEquals(List.of("dd/" + base.id().text()), units.get(1).waitBranches(),
+                    "the unit waits for the same dd/ branch");
+        }
+    }
+
+    /** The launch choice a confirmation freezes for one segment: a plain value, as the
+      * New Session dialog's Configure action returns. */
+    private static NewTaskPlan.Choice choice(Path folder) {
+        return new NewTaskPlan.Choice("Plan choice", Optional.of("Do the work."), AgentKind.CLAUDE,
+                SessionMode.WRITES, NewTaskPlan.WorkIn.NEW_WORKTREE, "dd/plan", "origin/main", folder,
+                NewTaskPlan.OpenIn.OWN_WINDOW, Optional.empty(), Optional.empty(), Optional.empty());
     }
 
     private static <T> T await(CompletableFuture<T> future) throws Exception {
