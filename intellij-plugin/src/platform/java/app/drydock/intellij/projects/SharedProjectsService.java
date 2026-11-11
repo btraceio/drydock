@@ -112,6 +112,20 @@ public final class SharedProjectsService {
         return Optional.ofNullable(byCanonicalRoot.get(RepositoryCatalog.canonicalize(mainRoot)));
     }
 
+    /** The project whose id is {@code id}, read FRESH from the shared file: the polled
+      * cache can lag the file by one poll, and a caller resolving a stored task's
+      * repository at start time needs what is on disk now. Empty when the list does
+      * not carry the id. Blocking (one bounded file read); call off the EDT. */
+    public Optional<SharedProject> byIdNow(RepositoryId id) {
+        Objects.requireNonNull(id, "id");
+        for (SharedProject project : file.read().projects()) {
+            if (project.id().equals(id)) {
+                return Optional.of(project);
+            }
+        }
+        return Optional.empty();
+    }
+
     /** Registers {@code mainRoot} unless it already is; completes with its entry either way. */
     public CompletableFuture<SharedProject> register(Path mainRoot, String displayName) {
         return CompletableFuture.supplyAsync(() -> {

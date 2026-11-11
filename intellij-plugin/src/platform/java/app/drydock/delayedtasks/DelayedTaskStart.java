@@ -29,6 +29,8 @@ import app.drydock.tasks.TaskNode.DelayedTaskRow;
 import app.drydock.tasks.TaskSnapshot;
 
 import app.drydock.delayedtasks.PlanDriver.Launched;
+import app.drydock.domain.Repository;
+import app.drydock.projects.SharedProject;
 import app.drydock.delayedtasks.PlanDriver.Listener;
 import app.drydock.delayedtasks.PlanDriver.Prepared;
 import app.drydock.delayedtasks.PlanDriver.SegmentLauncher;
@@ -292,9 +294,27 @@ public final class DelayedTaskStart {
 
     /** The task's project main root as registered in the live catalog, or null when it is not registered. */
     private static Path rootOf(DrydockPluginService plugin, RepositoryId repository) {
-        for (Repository candidate : plugin.stateStore().state().repositories()) {
+        List<SharedProject> shared = plugin.sharedProjects().byIdNow(repository).map(List::of).orElse(List.of());
+        return rootOf(plugin.stateStore().state().repositories(), shared, repository);
+    }
+
+    /** The main root for one repository id: the install's own catalog first, then the
+      * shared projects list. Task creation registers the repository under the SHARED
+      * list's id ({@code TaskLauncher.saveTask}), while this start validates against the
+      * install's own state.json -- the two registries mint distinct UUIDs for one
+      * repository, so a task stored under the shared id is resolvable only through the
+      * shared list. A remote (SSH) project's placeholder root is never returned: no
+      * local session can launch in it. Null when neither registry knows the id. */
+    static Path rootOf(List<Repository> repositories, List<SharedProject> sharedProjects,
+            RepositoryId repository) {
+        for (Repository candidate : repositories) {
             if (candidate.id().equals(repository)) {
                 return candidate.root();
+            }
+        }
+        for (SharedProject project : sharedProjects) {
+            if (project.id().equals(repository) && !project.isRemote()) {
+                return project.root();
             }
         }
         return null;
