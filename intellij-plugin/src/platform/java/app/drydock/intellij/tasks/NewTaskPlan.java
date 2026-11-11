@@ -2,6 +2,7 @@ package app.drydock.intellij.tasks;
 
 import app.drydock.agent.api.Agent;
 import app.drydock.agent.api.AgentKind;
+import app.drydock.agent.api.CreateContext;
 import app.drydock.domain.ModelTiers;
 import app.drydock.domain.SessionMode;
 import app.drydock.git.BranchNameRules;
@@ -240,15 +241,42 @@ public final class NewTaskPlan {
             + "Rename only the session, not its branch or worktree folder.\n\n";
 
     /**
-     * What the agent is told on start: clarify-first and title guidance, then the instructions, or nothing.
-     * Never send the temporary name. A composed subagent model rule follows after a blank line.
+     * True when the instructions are exactly one harness command: a single
+     * line starting with {@code /}. Such a task goes to the agent as typed --
+     * framing it or appending the subagent model rule would corrupt the
+     * command, and the pi extension expands a leading {@code /} into the
+     * command it names.
+     */
+    public static boolean isSlashOneLiner(String text) {
+        String stripped = text.strip();
+        return stripped.startsWith("/") && stripped.indexOf('\n') < 0;
+    }
+
+    /**
+     * What the agent is told on start, or nothing when the instructions are
+     * blank. Never send the temporary name.
+     *
+     * <p>A {@code /} one-liner is returned exactly as typed: no framing, no
+     * model rule (see {@link #isSlashOneLiner}).</p>
+     *
+     * <p>Anything else is drydock's framing -- clarify-first, title guidance,
+     * then the subagent model rule when one was composed -- followed by
+     * {@link CreateContext#TASK_SEPARATOR} and the task. The rule rides in
+     * the framing half, before the separator: the task half must stay the
+     * user's words only, because the pi initial-prompt extension splits the
+     * prompt there and delivers the halves on separate channels. The CLIs
+     * that take a single positional prompt receive the same text whole.</p>
      */
     public static Optional<String> initialPrompt(Choice choice) {
-        return choice.instructions().filter(text -> !text.isBlank())
-                .map(text -> CLARIFY_FIRST + TITLE_GUIDANCE + text)
-                .map(text -> choice.subagentModelRule()
-                        .map(rule -> text + "\n\n" + rule)
-                        .orElse(text));
+        return choice.instructions().filter(text -> !text.isBlank()).map(text -> {
+            if (isSlashOneLiner(text)) {
+                return text;
+            }
+            String framing = choice.subagentModelRule()
+                    .map(rule -> CLARIFY_FIRST + TITLE_GUIDANCE + rule + "\n\n")
+                    .orElse(CLARIFY_FIRST + TITLE_GUIDANCE);
+            return framing + CreateContext.TASK_SEPARATOR + "\n" + text;
+        });
     }
 
     public static String primaryLabel(boolean warned) {

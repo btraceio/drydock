@@ -18,6 +18,8 @@ import app.drydock.agent.providers.pi.internal.PiMcpExtensionSource;
 import app.drydock.domain.SshRemote;
 import app.drydock.state.json.JsonParser;
 import app.drydock.state.json.JsonValue;
+import org.graalvm.polyglot.Context;
+import org.graalvm.polyglot.Value;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -769,7 +771,310 @@ class PiAgentProviderTest {
         assertTrue(source.contains("delete process.env[PROMPT_ENV]"), source);
         assertTrue(source.contains("pi.on(\"session_start\""), source);
         assertTrue(source.contains("if (submitted) return"), source);
-        assertTrue(source.contains("setTimeout(() => pi.sendUserMessage(prompt), 0)"), source);
+        assertTrue(source.contains("pi.sendUserMessage(task, { expandPromptTemplates: task.startsWith(\"/\") && task.indexOf(\"\\n\") < 0 })"),
+                source);
+        assertTrue(source.contains("framingPending = true"), source);
+    }
+
+    /**
+     * The framing/task split is a wire contract between the composer ({@code
+     * NewTaskPlan}) and this extension: the generated TypeScript must carry
+     * the exact separator byte sequence, and must deliver the framing as a
+     * non-displaying custom message on the run the extension itself
+     * submits.
+     *
+     * <p>This test is the drift tripwire: it pins substrings of the
+     * generated source, not behavior. The behavioral counterpart
+     * ({@code theGeneratedInitialPromptExtension*} scenarios below) executes
+     * the generated extension on a JVM-embedded JS engine with a mock pi.</p>
+     */
+    @Test
+    void theInitialPromptExtensionSplitsFramingFromTaskOnTheSeparatorContract() {
+        String source = PiInitialPromptExtensionSource.SOURCE;
+        assertTrue(source.contains("const TASK_SEPARATOR = \"" + CreateContext.TASK_SEPARATOR + "\";"), source);
+        assertTrue(source.contains("pi.on(\"before_agent_start\""), source);
+        assertTrue(source.contains("event.messageType !== \"user\""), source);
+        assertTrue(source.contains("customType: \"drydock.task-framing\""), source);
+        assertTrue(source.contains("display: false"), source);
+        assertTrue(source.contains("if (!framingPending || !framing) return"), source);
+        // The clearing pin must sit in HANDLER context: a bare
+        // contains("framingPending = false") is vacuously satisfied by the
+        // `let framingPending = false;` declaration alone.
+        int messageTypeGuard = source.indexOf("event.messageType !== \"user\"");
+        assertTrue(messageTypeGuard >= 0, source);
+        assertTrue(source.indexOf("framingPending = false", messageTypeGuard) >= 0, source);
+        // Empty-task drop is visible.
+        assertTrue(source.contains("initial prompt had framing but no task"), source);
+        // The setTimeout(0) deferral stays.
+        assertTrue(source.contains("setTimeout("), source);
+        // Expansion is on only for a single-line task starting with '/'.
+        assertTrue(source.contains("task.startsWith(\"/\") && task.indexOf(\"\\n\") < 0"), source);
+    }
+
+    // ------------------------------------------------------------------
+    // Behavioral coverage of the generated initial-prompt extension: the
+    // generated TypeScript-stripped source is executed on GraalVM
+    // Polyglot's embedded JS engine against a mock pi. This repo has no
+    // node/npm toolchain (the app module bundles a standalone esbuild
+    // binary), so a JVM-embedded engine is the only JS runtime available.
+    // The Buffer shim is identity on purpose: base64 transport is NOT
+    // exercised here -- it is covered Java-side by
+    // anImplementationPromptSurvivesBase64EnvironmentTransport and
+    // decodedInitialPrompt.
+    // ------------------------------------------------------------------
+
+    /**
+     * Shared JS harness for one extension run: recording mock pi, identity
+     * Buffer, mock console (warns land in {@code __warns}), and a
+     * recording {@code setTimeout} that never runs the callback inline --
+     * the test runs the deferred submission explicitly, which also pins
+     * the design's preserved deferral rule.
+     */
+    private static final String EXTENSION_HARNESS = """
+            var __sent = [];
+            var __warns = [];
+            var __deferred = [];
+            var __handlers = {};
+            var __failures = [];
+            function expect(cond, msg) { if (!cond) __failures.push(String(msg)); }
+            console = {
+              warn: function () { __warns.push(Array.prototype.join.call(arguments, " ")); },
+              log: function () {},
+              error: function () {}
+            };
+            var Buffer = { from: function (s, enc) { return { toString: function (e) { return s; } }; } };
+            var process = { env: {} };
+            function setTimeout(cb, ms) { __deferred.push(cb); return __deferred.length; }
+            var pi = {
+              on: function (name, handler) { (__handlers[name] = __handlers[name] || []).push(handler); },
+              sendUserMessage: function (message, options) { __sent.push({ message: message, options: options }); }
+            };
+            function fireSessionStart() { if (__handlers.session_start) __handlers.session_start[0](); }
+            function fireBeforeAgentStart(event) { return __handlers.before_agent_start[0](event); }
+            function runDeferred(i) { __deferred[i](); }
+            """;
+
+    /** Injected JS constants so the scenario scripts compare against real values. */
+    private static String scenarioConstants(String framing, String task) {
+        return "var FRAMING_TEXT = " + jsString(framing) + ";\n"
+                + "var TASK_TEXT = " + jsString(task) + ";\n"
+                + "var SEPARATOR_TEXT = " + jsString(CreateContext.TASK_SEPARATOR) + ";\n";
+    }
+
+    /** A JS string literal for an arbitrary Java string. */
+    private static String jsString(String s) {
+        StringBuilder sb = new StringBuilder("\"");
+        for (char c : s.toCharArray()) {
+            switch (c) {
+                case '\\' -> sb.append("\\\\");
+                case '"' -> sb.append("\\\"");
+                case '\n' -> sb.append("\\n");
+                case '\r' -> sb.append("\\r");
+                case '\t' -> sb.append("\\t");
+                default -> {
+                    if (c < 0x20) {
+                        sb.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        sb.append(c);
+                    }
+                }
+            }
+        }
+        return sb.append('"').toString();
+    }
+
+    /**
+     * Strips the four TypeScript-only constructs from the generated
+     * extension source so it loads as plain JS. Each strip is anchored:
+     * a future TEMPLATE rewrite that drops or renames one fails loudly
+     * here instead of silently testing a stale harness.
+     */
+    private static String stripTypeScript(String source) {
+        int importStart = requireExactlyOne(source, "import type {");
+        int lineEnd = source.indexOf('\n', importStart);
+        assertTrue(lineEnd > importStart, source);
+        String stripped = source.substring(0, importStart) + source.substring(lineEnd + 1);
+
+        requireExactlyOne(stripped, "export default function (pi: ExtensionAPI) {");
+        stripped = stripped.replace("export default function (pi: ExtensionAPI) {", "function extension(pi) {");
+
+        requireExactlyOne(stripped, "let prompt: string;");
+        stripped = stripped.replace("let prompt: string;", "let prompt;");
+
+        requireExactlyOne(stripped, "catch (e: any) {");
+        stripped = stripped.replace("catch (e: any) {", "catch (e) {");
+        return stripped;
+    }
+
+    private static int requireExactlyOne(String haystack, String needle) {
+        int first = haystack.indexOf(needle);
+        assertTrue(first >= 0, "expected exactly one occurrence of " + needle + " in:\n" + haystack);
+        assertTrue(haystack.indexOf(needle, first + 1) < 0,
+                "expected exactly one occurrence of " + needle + " in:\n" + haystack);
+        return first;
+    }
+
+    /**
+     * Loads the generated extension with {@code prompt} pre-set in the
+     * mock environment, fires {@code session_start} (the extension only
+     * schedules its deferred submission there), then evaluates the
+     * scenario script and surfaces every {@code expect} failure as a
+     * JUnit assertion failure.
+     */
+    private void runExtensionScenario(String prompt, String scenarioJs) {
+        String stripped = stripTypeScript(PiInitialPromptExtensionSource.SOURCE);
+        try (Context context = Context.newBuilder("js")
+                .option("engine.WarnInterpreterOnly", "false")
+                .build()) {
+            context.eval("js", EXTENSION_HARNESS);
+            context.eval("js", "process.env[\"DRYDOCK_PI_INITIAL_PROMPT\"] = " + jsString(prompt) + ";");
+            context.eval("js", stripped);
+            context.eval("js", "extension(pi);");
+            context.eval("js", "fireSessionStart();");
+            context.eval("js", scenarioJs);
+            Value failures = context.getBindings("js").getMember("__failures");
+            int count = (int) failures.getArraySize();
+            StringBuilder message = new StringBuilder();
+            for (int i = 0; i < count; i++) {
+                message.append("\n - ").append(failures.getArrayElement(i).asString());
+            }
+            assertEquals(0, count, "scenario failures:" + message);
+        }
+    }
+
+    /**
+     * The split happens at the FIRST occurrence of the separator only:
+     * the task half keeps a second separator's remainder verbatim, and
+     * the framing half excludes the separator and is trimmed.
+     */
+    @Test
+    void theGeneratedInitialPromptExtensionSplitsOnTheFirstSeparator() {
+        String framing = "Drydock framing rules. Clarify first, keep the task scoped.";
+        String task = "Add a farewell method";
+        String prompt = framing + CreateContext.TASK_SEPARATOR + "\n" + task
+                + "\n" + CreateContext.TASK_SEPARATOR + " ignored";
+        runExtensionScenario(prompt, scenarioConstants(framing, task) + """
+                expect(__deferred.length === 1, "submission deferred once");
+                expect(__sent.length === 0, "nothing submitted before the deferred callback runs");
+                runDeferred(0);
+                expect(__sent.length === 1, "exactly one submission after the deferral");
+                expect(__sent[0].message === "Add a farewell method\\n" + SEPARATOR_TEXT + " ignored",
+                        "task half is the remainder after the FIRST separator, verbatim: " + JSON.stringify(__sent[0].message));
+                var m = fireBeforeAgentStart({ messageType: "user" });
+                expect(m && m.message && m.message.customType === "drydock.task-framing",
+                        "first user run returns the framing custom message");
+                expect(m.message.display === false, "framing is non-displaying");
+                expect(m.message.content === FRAMING_TEXT, "framing content is the framing half");
+                expect(m.message.content.indexOf(SEPARATOR_TEXT) < 0, "framing half excludes the separator");
+                expect(!fireBeforeAgentStart({ messageType: "user" }), "second user run returns nothing");
+                expect(__warns.length === 0, "no warns on the happy path");
+                """);
+    }
+
+    /** The framing custom message is emitted exactly once, with display:false. */
+    @Test
+    void theGeneratedInitialPromptExtensionEmitsTheFramingExactlyOnce() {
+        String framing = "Drydock framing rules.";
+        String task = "Do the thing";
+        String prompt = framing + CreateContext.TASK_SEPARATOR + "\n" + task;
+        runExtensionScenario(prompt, scenarioConstants(framing, task) + """
+                runDeferred(0);
+                expect(__sent.length === 1 && __sent[0].message === TASK_TEXT, "task submitted once, verbatim");
+                var m = fireBeforeAgentStart({ messageType: "user" });
+                expect(m && m.message && m.message.customType === "drydock.task-framing"
+                        && m.message.display === false && m.message.content === FRAMING_TEXT,
+                        "first user run carries the non-displaying framing custom message");
+                expect(!fireBeforeAgentStart({ messageType: "user" }), "the second user run gets nothing");
+                expect(__warns.length === 0, "no warns on the happy path");
+                """);
+    }
+
+    /** A non-user event returns nothing and does NOT consume the pending flag. */
+    @Test
+    void theGeneratedInitialPromptExtensionKeepsThePendingFlagOnNonUserRuns() {
+        String framing = "Drydock framing rules.";
+        String task = "Do the thing";
+        String prompt = framing + CreateContext.TASK_SEPARATOR + "\n" + task;
+        runExtensionScenario(prompt, scenarioConstants(framing, task) + """
+                runDeferred(0);
+                expect(!fireBeforeAgentStart({ messageType: "custom" }), "a non-user event returns nothing");
+                var m = fireBeforeAgentStart({ messageType: "user" });
+                expect(m && m.message && m.message.customType === "drydock.task-framing",
+                        "the pending flag survives the non-user event and the next user run still carries the framing");
+                """);
+    }
+
+    /** A separator-less prompt is submitted whole, and no framing is ever emitted. */
+    @Test
+    void theGeneratedInitialPromptExtensionPassesSeparatorlessPromptsThrough() {
+        runExtensionScenario("just do it", scenarioConstants("", "just do it") + """
+                runDeferred(0);
+                expect(__sent.length === 1 && __sent[0].message === "just do it", "separator-less prompt submitted whole");
+                expect(!fireBeforeAgentStart({ messageType: "user" }), "no framing for a separator-less prompt");
+                """);
+    }
+
+    /** A non-blank prompt whose task half is empty is dropped, visibly. */
+    @Test
+    void theGeneratedInitialPromptExtensionDropsAnEmptyTaskVisibly() {
+        String framing = "Drydock framing rules.";
+        String prompt = framing + CreateContext.TASK_SEPARATOR + "  \n";
+        runExtensionScenario(prompt, scenarioConstants(framing, "") + """
+                expect(__deferred.length === 0, "no submission scheduled for an empty task half");
+                expect(__sent.length === 0, "nothing submitted");
+                expect(__warns.length === 1 && __warns[0].indexOf("framing but no task") >= 0,
+                        "the drop is visible: " + JSON.stringify(__warns));
+                """);
+    }
+
+    /** A prompt starting with the separator submits the task, but emits no framing. */
+    @Test
+    void theGeneratedInitialPromptExtensionSubmitsWithEmptyFraming() {
+        String task = "Do the thing";
+        String prompt = CreateContext.TASK_SEPARATOR + "\n" + task;
+        runExtensionScenario(prompt, scenarioConstants("", task) + """
+                runDeferred(0);
+                expect(__sent.length === 1 && __sent[0].message === TASK_TEXT, "task still submitted when framing is empty");
+                expect(!fireBeforeAgentStart({ messageType: "user" }), "empty framing emits nothing");
+                """);
+    }
+
+    /**
+     * Expansion is on ONLY for a single-line task starting with '/'
+     * (mirroring the composer's one-liner rule): a plain task never
+     * expands, and a multi-line task that merely starts with '/' is a
+     * framed task, not a command.
+     */
+    @Test
+    void theGeneratedInitialPromptExtensionExpandsOnlySingleLineSlashCommands() {
+        String framing = "Drydock framing rules.";
+        runExtensionScenario("/clear", scenarioConstants("", "/clear") + """
+                runDeferred(0);
+                expect(__sent[0].options.expandPromptTemplates === true, "single-line '/' task expands");
+                """);
+        String plain = "Fix the bug.\n\nCarefully.";
+        runExtensionScenario(framing + CreateContext.TASK_SEPARATOR + "\n" + plain,
+                scenarioConstants(framing, plain) + """
+                runDeferred(0);
+                expect(__sent[0].options.expandPromptTemplates === false, "a task without '/' does not expand");
+                """);
+        String multiline = "/plan\nstep two";
+        runExtensionScenario(framing + CreateContext.TASK_SEPARATOR + "\n" + multiline,
+                scenarioConstants(framing, multiline) + """
+                runDeferred(0);
+                expect(__sent[0].options.expandPromptTemplates === false,
+                        "a multi-line '/' task is a framed task, not a command");
+                """);
+    }
+
+    /** A genuinely blank prompt is dropped silently, without a warn. */
+    @Test
+    void theGeneratedInitialPromptExtensionDropsABlankPromptSilently() {
+        runExtensionScenario("   \n\t", scenarioConstants("", "") + """
+                expect(__deferred.length === 0, "no submission scheduled for a blank prompt");
+                expect(__sent.length === 0, "blank prompt dropped");
+                expect(__warns.length === 0, "blank prompt dropped silently, without a warn");
+                """);
     }
 
     /** The state words and the events that produce them, matching the Claude hook's contract. */

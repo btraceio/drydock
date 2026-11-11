@@ -60,6 +60,21 @@ public record CreateContext(String displayName, String sessionId, Path workingDi
                             Optional<SshRemote> remote, Optional<McpAccess> mcp, Optional<String> model,
                             boolean evalMode, boolean readOnly, Optional<String> initialPrompt,
                             List<StdioMcpServer> stdioMcpServers, Optional<LaunchResources> launchResources) {
+
+    /**
+     * Separates drydock's framing from the user's task inside a composed
+     * {@code initialPrompt}. A wire contract, not decoration: the composer
+     * ({@code NewTaskPlan.initialPrompt}) builds {@code framing + TASK_SEPARATOR
+     * + "\n" + task}, and the pi initial-prompt extension splits the prompt on
+     * this exact text to deliver the two halves on separate channels -- the task
+     * as the only user message, the framing as an in-run custom message. CLIs
+     * that take a single positional prompt receive the same text whole, with the
+     * line marking where drydock's framing ends. Never reword it in one place
+     * only: whoever composes and whoever splits must agree to the byte.
+     */
+    public static final String TASK_SEPARATOR =
+            "──────────────── The user's task starts below, verbatim ────────────────";
+
     public CreateContext {
         Objects.requireNonNull(displayName, "displayName");
         Objects.requireNonNull(sessionId, "sessionId");
