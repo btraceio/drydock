@@ -86,11 +86,13 @@ public final class TaskMirroring {
 
     /**
      * The mirror addresses of every task whose {@code sessions} list names
-     * the session, in snapshot order: the session-to-mirror half of the
-     * link, the way {@link #mirroredTask(String)} is the issue-to-task half.
-     * From the task service's cached watched snapshot only: no scan, no I/O
-     * (the same paint discipline as the plan annotation). Empty before the
-     * first snapshot and for a session no task claims.
+     * the session, in snapshot order, each address once: two tasks naming
+     * the same session may record the same mirror ({@link TaskMirror#byMirror}
+     * keeps the first for the same reason), and a repeat would paint a
+     * duplicate link and open a duplicate tab. From the task service's cached
+     * watched snapshot only: no scan, no I/O (the same paint discipline as the
+     * plan annotation). Empty before the first snapshot and for a session no
+     * task claims.
      */
     public static List<String> mirrorsOfSession(String sessionId) {
         if (sessionId == null || sessionId.isBlank()) {
@@ -106,7 +108,7 @@ public final class TaskMirroring {
                 .getOrDefault(sessionId, List.of())) {
             mirrors.addAll(document.mirrors());
         }
-        return List.copyOf(mirrors);
+        return TaskMirror.uniqueByAddress(mirrors);
     }
 
     /**
