@@ -29,6 +29,7 @@ import app.drydock.review.SessionReviewScopes;
 import app.drydock.ui.model.SessionFilter;
 import app.drydock.ui.model.WorkspaceViewModel;
 import java.io.File;
+import javafx.animation.Animation;
 import javafx.animation.KeyFrame;
 import javafx.animation.PauseTransition;
 import javafx.animation.RotateTransition;
@@ -91,6 +92,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -254,6 +256,22 @@ public final class RepositorySidebar extends VBox {
      */
     private List<ManagedAgentSession> statusRefreshedFor = List.of();
 
+    /** Minimum spacing between git-status refetch storms triggered by session-record churn (see {@link #maybeRefreshStatuses}). */
+    private static final long STATUS_REFRESH_COOLDOWN_NANOS = 2_000_000_000L;
+    private long lastStatusRefreshNanos;
+
+    /**
+     * Set when the cooldown swallowed a session-churn event; the one-shot
+     * {@link #statusRefreshCatchUp} timer then re-fetches once the cooldown
+     * expires, so a burst's final flip is not left stale until the next
+     * snapshot change.
+     */
+    private boolean pendingStatusRefresh;
+
+    /** One-shot trailing refresh armed when {@link #maybeRefreshStatuses} swallows a churn event (see {@link #pendingStatusRefresh}). */
+    private final PauseTransition statusRefreshCatchUp =
+            new PauseTransition(Duration.millis(STATUS_REFRESH_COOLDOWN_NANOS / 1_000_000.0));
+
     /**
      * Coalesces async-completion rebuilds: N git-status/worktree results
      * landing in the same FX pulse trigger ONE {@link #rebuildTree()}
@@ -334,6 +352,28 @@ public final class RepositorySidebar extends VBox {
         filterDebounce.setOnFinished(e -> {
             refreshQueryMatcher();
             rebuildTree();
+        });
+
+        // Trailing refresh for churn events the cooldown swallowed (see
+        // maybeRefreshStatuses): fires once the cooldown from the last storm
+        // has fully expired.
+        statusRefreshCatchUp.setOnFinished(e -> {
+            if (!pendingStatusRefresh) {
+                return;
+            }
+            pendingStatusRefresh = false;
+            lastStatusRefreshNanos = System.nanoTime();
+            // The git status service's executor can close while this timer is
+            // armed (app shutdown, test teardown); a fire after that makes
+            // getStatus's supplyAsync throw RejectedExecutionException
+            // synchronously on the FX thread, where TestFX misattributes it
+            // to whichever test runs next. A status refresh is cosmetic --
+            // drop it, same guard as SessionManager's shutdown paths.
+            try {
+                refreshAllStatuses();
+            } catch (RejectedExecutionException rejected) {
+                LOG.log(Level.DEBUG, "Skipping status refresh; git status service already closed", rejected);
+            }
         });
         filterField.textProperty().addListener((obs, oldText, newText) -> filterDebounce.playFromStart());
 
@@ -780,12 +820,62 @@ public final class RepositorySidebar extends VBox {
      * dots permanently stale; see {@link #statusRefreshedFor}). The fetches
      * are async; each completion writes into the model, which re-renders
      * exactly the affected rows.
+     *
+     * <p>The refetch storm is bounded: a session-record flip (status, PR
+     * chip, timestamp) no longer shells out one git process per repository
+     * plus one per worktree on every single event. A status flip stays the
+     * staleness-recovery trigger it was (the agent just did work, so its
+     * worktree's dirty dot may have changed), but bursts of flips -- the 1s
+     * activity rhythm, a bulk delete -- coalesce into at most one storm per
+     * {@link #STATUS_REFRESH_COOLDOWN_NANOS}. An event the cooldown swallows
+     * arms a one-shot trailing refresh that fires exactly when the cooldown
+     * from the last storm expires, so the burst's final flip is not left
+     * stale until the next snapshot change. Worktree membership changes
+     * always refresh immediately: a row whose worktree root just appeared
+     * has nothing to render from the cache.
      */
     private void maybeRefreshStatuses() {
-        if (viewModel.sessions() != statusRefreshedFor) {
-            statusRefreshedFor = viewModel.sessions();
-            refreshAllStatuses();
+        if (viewModel.sessions() == statusRefreshedFor) {
+            return;
         }
+        boolean worktreesChanged =
+                !worktreeRoots(viewModel.sessions()).equals(worktreeRoots(statusRefreshedFor));
+        long now = System.nanoTime();
+        boolean cooled = now - lastStatusRefreshNanos >= STATUS_REFRESH_COOLDOWN_NANOS;
+        statusRefreshedFor = viewModel.sessions();
+        if (!worktreesChanged && !cooled) {
+            armStatusRefreshCatchUp(now);
+            return;
+        }
+        pendingStatusRefresh = false;
+        statusRefreshCatchUp.stop();
+        lastStatusRefreshNanos = now;
+        refreshAllStatuses();
+    }
+
+    /**
+     * Arms the trailing refresh for a churn event the cooldown swallowed.
+     * The timer is set to fire when the cooldown from the last storm expires
+     * ({@code lastStatusRefreshNanos} only moves when a storm actually
+     * runs), and re-arming while it is already running is a no-op: the
+     * armed fire already lands at the earliest point the cooldown allows.
+     */
+    private void armStatusRefreshCatchUp(long now) {
+        pendingStatusRefresh = true;
+        if (statusRefreshCatchUp.getStatus() == Animation.Status.RUNNING) {
+            return;
+        }
+        long remaining = STATUS_REFRESH_COOLDOWN_NANOS - (now - lastStatusRefreshNanos);
+        statusRefreshCatchUp.setDuration(Duration.millis(Math.max(0, remaining) / 1_000_000.0));
+        statusRefreshCatchUp.playFromStart();
+    }
+
+    private static Set<Path> worktreeRoots(List<ManagedAgentSession> sessions) {
+        Set<Path> roots = new HashSet<>();
+        for (ManagedAgentSession session : sessions) {
+            session.worktreeRoot().ifPresent(roots::add);
+        }
+        return roots;
     }
 
     /**
@@ -2568,13 +2658,31 @@ public final class RepositorySidebar extends VBox {
                 + AgentLabels.displayName(agentRegistry, session)
                 + "'s own conversation history on disk is not deleted."
                 + "\n\nWorking directory: " + session.workingDirectory());
-        confirm.showAndWait().filter(button -> button == ButtonType.OK).ifPresent(button ->
-                sessionManager.deleteSession(session.id()).whenComplete((v, ex) -> Platform.runLater(() -> {
-                    if (ex != null) {
-                        UiErrors.show("Could not delete session", ex);
-                    }
-                    navigator.noteSessionDeleted(session.id());
-                })));
+        confirm.showAndWait().filter(button -> button == ButtonType.OK)
+                .ifPresent(button -> deleteSessionConfirmed(session));
+    }
+
+    /**
+     * The delete flow's post-confirm half: an optimistic begin (row and tab
+     * vanish in this pulse; see {@code WorkspaceNavigator#beginSessionDelete}),
+     * then the surface close and metadata removal in the background, settled
+     * by rollback on failure. Split from the dialog so the diag harness can
+     * drive it without a blocking {@code Alert#showAndWait}.
+     */
+    private void deleteSessionConfirmed(ManagedAgentSession session) {
+        navigator.beginSessionDelete(session.id());
+        sessionManager.deleteSession(session.id()).whenComplete((v, ex) -> Platform.runLater(() -> {
+            if (ex != null) {
+                navigator.cancelSessionDelete(session.id(), ex);
+            } else {
+                navigator.noteSessionDeleted(session.id());
+            }
+        }));
+    }
+
+    /** Diagnostic-only ({@code app.drydock.diag.tabScript}): runs {@link #deleteSessionConfirmed} without the confirm dialog. */
+    void diagDeleteSession(ManagedSessionId sessionId) {
+        viewModel.sessionById(sessionId).ifPresent(this::deleteSessionConfirmed);
     }
 
     private void onOpenInFinder(Repository repository) {
@@ -2873,8 +2981,17 @@ public final class RepositorySidebar extends VBox {
         }
 
         private StackPane buildSessionRow(ManagedAgentSession session, Repository repository) {
-            boolean live = SessionStatusStyles.isRunning(session.status());
+            // Optimistic closing overlay: the surface close is in flight (view
+            // model set by MainWorkspace the pulse the close started) but the
+            // persisted status still says RUNNING until the real state lands.
+            // Render the dot dimmed and non-pulsing rather than a RUNNING dot
+            // the row knows is about to flip; the row also dims via CSS.
+            boolean closing = viewModel.isSessionClosing(session.id());
+            boolean live = SessionStatusStyles.isRunning(session.status()) && !closing;
             Region dot = SessionStatusStyles.createDot(8, session.status(), live);
+            if (closing) {
+                dot.getStyleClass().add("closing");
+            }
             // Leading gutter: status dot, then the agent mark. Two independent
             // axes (is it running / what is it running), so two marks -- and
             // an HBox, because the StackPane this used to be would have stacked
@@ -2937,7 +3054,7 @@ public final class RepositorySidebar extends VBox {
 
             Button open = quickAction("↗", "Open", false, () -> navigator.resumeSession(session));
             Button stop = quickAction("■", "Stop process", true, () -> navigator.closeSession(session.id()));
-            stop.setDisable(!SessionStatusStyles.isRunning(session.status()));
+            stop.setDisable(!SessionStatusStyles.isRunning(session.status()) || closing);
             Button delete = quickAction("×", "Delete session", true, () -> onDeleteSession(session));
             HBox actions = new HBox(2, open, stop, delete);
             actions.setAlignment(Pos.CENTER_RIGHT);
@@ -2993,6 +3110,9 @@ public final class RepositorySidebar extends VBox {
             branchTag.maxWidthProperty().bind(
                     row.widthProperty().map(w -> SidebarRowMetrics.branchTagMaxWidth(w.doubleValue())));
             row.getStyleClass().addAll("session-row", "child-row");
+            if (closing) {
+                row.getStyleClass().add("closing");
+            }
             row.setAlignment(Pos.CENTER_LEFT);
             if (viewModel.activeSession().filter(session.id()::equals).isPresent()) {
                 row.getStyleClass().add("active");
@@ -3734,13 +3854,9 @@ public final class RepositorySidebar extends VBox {
             return;
         }
         for (ManagedAgentSession session : sessions) {
-            sessionManager.deleteSession(session.id()).whenComplete((v, ex) -> Platform.runLater(() -> {
-                if (ex != null) {
-                    UiErrors.show("Could not delete session", ex);
-                } else {
-                    navigator.noteSessionDeleted(session.id());
-                }
-            }));
+            // Same optimistic delete as onDeleteSession: rows vanish at once,
+            // each close settles in the background with its own rollback.
+            deleteSessionConfirmed(session);
         }
     }
 }

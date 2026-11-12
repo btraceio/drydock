@@ -13,6 +13,7 @@ import app.drydock.review.RepositoryPullRequests;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -113,6 +114,9 @@ public final class WorkspaceViewModel {
         }
         sessions = updated;
         resumeCostEstimates.keySet().retainAll(updated.stream().map(ManagedAgentSession::id).toList());
+        // A session that left the snapshot (deleted) cannot be closing anymore;
+        // clearing here keeps the overlay from outliving its row.
+        closingSessions.retainAll(updated.stream().map(ManagedAgentSession::id).toList());
         if (isRowLevelChange(previous, updated)) {
             Set<RepositoryId> affectedRepos = new LinkedHashSet<>();
             List<ManagedSessionId> changedIds = new ArrayList<>();
@@ -130,6 +134,30 @@ public final class WorkspaceViewModel {
             }
         } else {
             notify(Listener::structureChanged);
+        }
+    }
+
+    // ---- Closing overlay (optimistic UI) ------------------------------------
+
+    /**
+     * Sessions whose surface is being closed right now. Purely a view-layer
+     * fact: the persisted status stays authoritative and only lands (EXITED,
+     * or RUNNING-again for a tmux-backed session) when the graceful close
+     * actually finishes, which can take the whole grace period. Rows render
+     * a dimmed, non-pulsing dot while their id is here instead of lying with
+     * a RUNNING dot they know is about to flip.
+     */
+    private final Set<ManagedSessionId> closingSessions = new HashSet<>();
+
+    /** Whether {@code sessionId}'s surface close is in flight (row should render its closing treatment). */
+    public boolean isSessionClosing(ManagedSessionId sessionId) {
+        return closingSessions.contains(sessionId);
+    }
+
+    /** Marks one session's row as closing (or clears it); notifies that row only. */
+    public void setSessionClosing(ManagedSessionId sessionId, boolean closing) {
+        if (closing ? closingSessions.add(sessionId) : closingSessions.remove(sessionId)) {
+            notify(listener -> listener.sessionRowChanged(sessionId));
         }
     }
 
