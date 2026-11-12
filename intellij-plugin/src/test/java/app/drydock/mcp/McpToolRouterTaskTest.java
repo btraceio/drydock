@@ -27,7 +27,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * The T11b committed matrix, delegate half: a router with a TaskTools
- * delegate serves the four task tools over a real store-backed context
+ * delegate serves the task tools over a real store-backed context
  * exactly as far as the allowed set says, hides and refuses them for a set
  * that excludes them, and widens nothing (P7: session_start and
  * worktree_create refuse exactly as without the delegate).
@@ -103,6 +103,10 @@ class McpToolRouterTaskTest {
             return CompletableFuture.completedFuture(
                     mutate(() -> Outcome.committed(store.appendNote(task, note))));
         }
+        @Override public CompletableFuture<Outcome> claim(ManagedSessionId caller, TaskId task) {
+            return CompletableFuture.completedFuture(Outcome.refused("this fixture never"
+                    + " launches; the claim rules are ClaimLaunchTest's"));
+        }
     }
 
     @TempDir Path root;
@@ -129,12 +133,12 @@ class McpToolRouterTaskTest {
         tasks.store.close();
     }
 
-    // 1. Task-allowed session: exactly the four names advertised, all four
+    // 1. Task-allowed session: exactly the task names advertised, all of them
     // callable, task_get round-tripping committed data end to end.
     @Test
     void taskAllowedSessionListsFourToolsAndServesThemOverTheStore() throws Exception {
         assertEquals(McpToolRouter.TASK_TOOLS, names(router.toolDescriptors()),
-                "exactly the four task tools are advertised");
+                "exactly the task tools are advertised");
         TaskDocument assigned = tasks.store.create(alpha, "Fix the login redirect",
                 List.of(caller.toString()));
         String created = str(router.call(caller, "task_create",

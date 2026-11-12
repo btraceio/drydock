@@ -227,6 +227,10 @@
                 class="app.drydock.intellij.delayedtasks.DelayedTaskActions$Start"
                 text="Start Session…"
                 description="Start one session for this task and its same-project plan"/>
+        <action id="Drydock.DelayedTask.Claim"
+                class="app.drydock.intellij.delayedtasks.DelayedTaskActions$Claim"
+                text="Claim Stacked Session…"
+                description="Launch this follow-up as its own session, stacked on its prerequisite's dd/&lt;id&gt; branch"/>
         <action id="Drydock.DelayedTask.Cancel"
                 class="app.drydock.intellij.delayedtasks.DelayedTaskActions$Cancel"
                 text="Cancel Plan"

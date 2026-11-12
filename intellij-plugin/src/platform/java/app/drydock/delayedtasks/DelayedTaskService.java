@@ -1,13 +1,17 @@
 package app.drydock.delayedtasks;
 
+import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryCatalog;
 import app.drydock.domain.RepositoryId;
+import app.drydock.git.GitStatusService;
 import app.drydock.mcp.TaskTools;
 import app.drydock.mcp.TaskToolContext;
 import app.drydock.intellij.tasks.NewTaskPlan.Choice;
+import app.drydock.intellij.tasks.TaskLauncher;
+import com.intellij.openapi.project.Project;
 import app.drydock.tasks.PlanLaunch;
 import app.drydock.tasks.PlanLaunch.Origin;
 import app.drydock.tasks.PlanLaunch.Selection;
@@ -136,6 +140,43 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
     private volatile TaskNotifications notifications;
     /** The stacked pull request lifecycle (S3): built with init, closed on disposal. */
     private volatile StackPrService stackPrs;
+
+    /** The auto-start refusal gate (S4): the terminal refusals that can never heal
+      * -- the candidate never auto-starts again until restart. Key: the candidate's
+      * id; value: its document at refusal time. Registered ONLY by the auto-start
+      * pass (the unhealable validate refusals and the DONE-branch-missing launch
+      * marker), never by a manual claim -- a human-repaired condition (a re-pushed
+      * branch) unblocks auto-start without a restart. Entries are never cleared on
+      * document change and never evicted: the map lives until service disposal,
+      * bounded by the store's task count (one TaskId key plus one snapshot-held
+      * TaskDocument reference per entry). */
+    private final ConcurrentHashMap<TaskId, TaskDocument> terminalRefusals = new ConcurrentHashMap<>();
+
+    /** The auto-start gate's classification of one candidate over ONE snapshot (S4). */
+    enum GateKind { TERMINAL_CACHED, TRANSIENT_SKIP, VALIDATE_REFUSED, PROCEED }
+
+    /** One auto-start gate decision: the kind, the validate refusal when
+      * {@code VALIDATE_REFUSED}, and whether that refusal heals on its own
+      * without a human edit -- the S5 cross-repository refusal does (it stops
+      * firing once the cross-repo prerequisite reaches DONE), everything else
+      * is structural. */
+    record Gate(GateKind kind, String refusal, boolean healable) {
+    }
+
+    /** One follow-up launch answer (S4): the refusal reason when the claim was
+      * refused (null once the launch is under way), and whether the refusal is the
+      * terminal DONE-prerequisite-missing-branch one. The marker never registers
+      * anything itself: the CALLER decides whether to register the refusal
+      * terminally, and only the auto-start pass does -- a manual claim refusal
+      * never gates auto-start. */
+    private record FollowUpLaunch(String refusal, boolean terminal) {
+
+        static final FollowUpLaunch NONE = new FollowUpLaunch(null, false);
+
+        static FollowUpLaunch retryable(String refusal) {
+            return new FollowUpLaunch(refusal, false);
+        }
+    }
 
     /** One owned driver subscription (T36a): the driver, its plan's task set, and the graph
       * revision its events carry -- the plan's own, so watcher noise never reads as stale. */
@@ -307,6 +348,215 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
                 LOG.log(Level.WARNING, "The stacked pull requests on " + root + " could not observe"
                         + " the store", e);
             }
+        }
+        // The auto-start of follow-ups inside a running stack (S4 of
+        // docs/StackedPrExecution.md): off the watcher's thread, on the
+        // service executor -- the launch path probes git and spawns, never
+        // the publication cycle. No drivers, no running stack, no candidates.
+        if (!drivers.isEmpty() && snapshot.snapshot() != null) {
+            CompletableFuture.runAsync(() -> autoStartFollowUps(snapshot.snapshot()), executor)
+                    .whenComplete((ignored, failure) -> {
+                        if (failure != null) {
+                            LOG.log(Level.WARNING, "The follow-up auto-start on " + root
+                                    + " failed", failure);
+                        }
+                    });
+        }
+    }
+
+    /** The auto-start pass over ONE snapshot (S4): every open, unowned
+      * follow-up inside a RUNNING plan's tree launches as its own stacked
+      * session once its in-repository prerequisite branches exist (the
+      * confirmed trigger; S2 -- the review gate holds statuses, not
+      * stacking). A follow-up outside every running plan's tree is never a
+      * candidate: unrelated ready tasks keep D12's balloon-and-Start
+      * behavior. Refusals are logged, never thrown at the publication
+      * cycle; the launch path's own IN_FLIGHT guard keeps one snapshot's
+      * decision from racing the next one's. */
+    private void autoStartFollowUps(TaskSnapshot snapshot) {
+        if (closed || drivers.isEmpty()) {
+            return;
+        }
+        for (Map.Entry<TaskId, Subscription> entry : drivers.entrySet()) {
+            autoStartFollowUps(snapshot, entry.getKey(), entry.getValue().tasks());
+        }
+    }
+
+    /** The auto-start pass over ONE running plan's candidates (S4): every open,
+      * unowned follow-up inside the plan's tree launches as its own stacked session
+      * once its in-repository prerequisite branches exist. Package-private so the
+      * same-package tests can drive one pass headlessly (a headless run has no
+      * drivers, so the publication dispatch never fires). Refusals are logged,
+      * never thrown at the publication cycle; the launch path's own IN_FLIGHT
+      * guard keeps one pass's decision from racing the next one's. */
+    void autoStartFollowUps(TaskSnapshot snapshot, TaskId planId, Set<TaskId> planTasks) {
+        if (closed) {
+            return;
+        }
+        TaskGraph graph;
+        try {
+            graph = TaskGraph.of(snapshot, this::slugOf);
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, "The follow-up auto-start on " + root
+                    + " could not resolve the task graph", e);
+            return;
+        }
+        List<TaskId> candidates = ClaimLaunch.autoStartCandidates(snapshot, graph, planTasks,
+                liveSessionIds());
+        if (candidates.isEmpty()) {
+            return;
+        }
+        // A launch refusal is never cached: every publication re-probes the git,
+        // catalog and window facts (a pushed branch changes no task document, so a
+        // document-keyed cache would block the confirmed trigger forever); a
+        // terminally refused candidate never re-fires until restart (the manual
+        // claim path bypasses the gate). The plan's agents are read only when a
+        // candidate first proceeds -- at most once per plan per pass that needs it,
+        // never per pass that does not.
+        Map<RepositoryId, AgentKind> stackAgents = null;
+        boolean agentsResolved = false;
+        for (TaskId candidate : candidates) {
+            TaskDocument document = snapshot.byId().get(candidate);
+            Gate gate = autoStartGate(candidate, document, graph, liveSessionIds(),
+                    DelayedTaskStart.IN_FLIGHT, terminalRefusals);
+            switch (gate.kind()) {
+                case TERMINAL_CACHED, TRANSIENT_SKIP -> { }
+                case VALIDATE_REFUSED -> {
+                    if (gate.healable()) {
+                        // The S5 cross-repo refusal heals when the cross-repo
+                        // prerequisite reaches DONE (validate then ignores DONE
+                        // cross-repo prerequisites); it is never registered
+                        // terminally and never cached -- every publication
+                        // re-probes validate until then.
+                        LOG.log(Level.INFO, "The follow-up '" + candidate.text()
+                                + "' did not auto-start: " + gate.refusal());
+                    } else {
+                        // Unhealable: a broken or cyclic graph, or no in-repository
+                        // prerequisite (the not-open / live-session / in-flight
+                        // validate refusals are unreachable from the gate).
+                        registerTerminalRefusal(candidate, document);
+                        LOG.log(Level.INFO, "The follow-up '" + candidate.text()
+                                + "' will not auto-start: " + gate.refusal());
+                    }
+                }
+                case PROCEED -> {
+                    if (!agentsResolved) {
+                        stackAgents = stackAgentsOf(planId);
+                        agentsResolved = true;
+                    }
+                    FollowUpLaunch launched = launchFollowUp(candidate, snapshot, graph,
+                            stackAgents.get(document.repository()), null);
+                    if (launched.terminal()) {
+                        // The DONE-prerequisite-missing-branch marker: registered
+                        // ONLY here, never by a manual claim.
+                        registerTerminalRefusal(candidate, document);
+                        LOG.log(Level.INFO, "The follow-up '" + candidate.text()
+                                + "' will not auto-start: " + launched.refusal());
+                    } else {
+                        String log = applyLaunchOutcome(terminalRefusals, candidate,
+                                launched.refusal());
+                        if (log != null) {
+                            LOG.log(Level.INFO, log);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Pure classification of ONE auto-start candidate over ONE snapshot (S4): no
+     * I/O, no map mutation -- the caller owns the map. Order: a terminally
+     * refused candidate is skipped unconditionally; the transient conditions (an
+     * in-flight launch, live-session ownership) skip silently; a validate
+     * refusal is classified by healability -- the S5 cross-repo refusal is
+     * retryable (it re-probes on every publication and heals when the cross-repo
+     * prerequisite reaches DONE), everything else is structural and terminal;
+     * anything else proceeds to the launch. Nothing is cached: launch refusals
+     * are re-probed on every publication.
+     */
+    static Gate autoStartGate(TaskId candidate, TaskDocument document, TaskGraph graph,
+            Set<String> liveSessions, Set<TaskId> inFlight,
+            Map<TaskId, TaskDocument> terminal) {
+        if (terminal.containsKey(candidate)) {
+            return new Gate(GateKind.TERMINAL_CACHED, null, false);
+        }
+        boolean owned = inFlight.contains(candidate);
+        if (!owned) {
+            for (String session : document.sessions()) {
+                if (liveSessions.contains(session)) {
+                    owned = true;
+                    break;
+                }
+            }
+        }
+        if (owned) {
+            return new Gate(GateKind.TRANSIENT_SKIP, null, false);
+        }
+        ClaimLaunch.Attempt attempt = ClaimLaunch.validate(document, graph, liveSessions,
+                inFlight);
+        if (attempt.refused()) {
+            return new Gate(GateKind.VALIDATE_REFUSED, attempt.refusal(), attempt.healable());
+        }
+        return new Gate(GateKind.PROCEED, null, false);
+    }
+
+    /** Registers a candidate as terminally refused (S4): it never auto-starts again
+      * until restart. Registered ONLY by the auto-start pass (the unhealable
+      * validate refusals and the DONE-branch-missing launch marker), never by a
+      * manual claim -- a human-repaired condition (a re-pushed branch) unblocks
+      * auto-start without a restart. The value is the candidate's document at
+      * refusal time; the entry is never cleared on document change and never
+      * evicted -- the map lives until service disposal. */
+    private void registerTerminalRefusal(TaskId candidate, TaskDocument document) {
+        terminalRefusals.put(candidate, document);
+    }
+
+    /** The same-package test accessor for the terminal-refusal map. */
+    boolean terminallyRefused(TaskId candidate) {
+        return terminalRefusals.containsKey(candidate);
+    }
+
+    /**
+     * Post-outcome handling for a PROCEED candidate (S4), shared by
+     * {@code autoStartFollowUps} and the unit tests: on a refusal, keep an
+     * existing terminal entry (returning the distinguishable "will not auto-start"
+     * message so it is logged once) or report the plain refusal; on success (a
+     * null refusal) return null (nothing logged). Nothing is ever cached: every
+     * publication re-probes the launch facts. The terminal map is never cleared
+     * here: a terminal candidate cannot reach PROCEED (the gate returns
+     * TERMINAL_CACHED first). Returns the INFO message to log, or null.
+     */
+    static String applyLaunchOutcome(Map<TaskId, TaskDocument> terminal, TaskId candidate,
+            String refusal) {
+        if (refusal == null) {
+            return null;
+        }
+        if (terminal.containsKey(candidate)) {
+            return "The follow-up '" + candidate.text() + "' will not auto-start: " + refusal;
+        }
+        return "The follow-up '" + candidate.text() + "' did not auto-start: " + refusal;
+    }
+
+    /** The running plan's confirmed agent per repository (the auto-start's
+      * inheritance, the confirmed launch shape): the plan's selections, one
+      * agent per repository. An unreadable plan degrades alone -- the launch
+      * falls back to the prerequisite's live session's agent. */
+    private Map<RepositoryId, AgentKind> stackAgentsOf(TaskId planId) {
+        try {
+            PlanRecord record = answer(plans.load(planId)).orElseThrow(() ->
+                    new IllegalStateException("Plan '" + planId.text()
+                            + "' has no persisted plan to inherit agents from"));
+            Map<RepositoryId, AgentKind> agents = new LinkedHashMap<>();
+            for (Selection selection : record.plan().launch().selections().values()) {
+                agents.putIfAbsent(selection.repository(), selection.agent());
+            }
+            return agents;
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, "The agent inheritance of plan '" + planId.text()
+                    + "' could not be read; auto-starts fall back to the prerequisite's"
+                    + " session agent", e);
+            return Map.of();
         }
     }
 
@@ -1005,6 +1255,262 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
                 return Outcome.refused(e.getMessage());
             }
         });
+    }
+
+    @Override
+    public CompletableFuture<Outcome> claim(ManagedSessionId caller, TaskId task) {
+        Objects.requireNonNull(caller, "caller");
+        Objects.requireNonNull(task, "task");
+        return supply(store -> {
+            TaskSnapshot snapshot = scanFresh();
+            TaskGraph graph = TaskGraph.of(snapshot, this::slugOf);
+            FollowUpLaunch launched = launchFollowUp(task, snapshot, graph, null, caller);
+            if (launched.refusal() != null) {
+                // The tool path's audit trail: a refused claim leaves one trace
+                // naming the calling session, the claimed task and the reason
+                // (claimability probing stays visible; the tree's Claim action
+                // and the auto-start stay unattributed).
+                LOG.log(Level.INFO, "The task_claim tool claim of '" + task.text()
+                        + "' by session " + caller + " was refused: " + launched.refusal());
+                return Outcome.refused(launched.refusal());
+            }
+            return Outcome.committed(snapshot.byId().get(task));
+        });
+    }
+
+    /**
+     * The Tasks tree's Claim action (S4 of docs/StackedPrExecution.md): the
+     * same launch path as the {@code task_claim} tool, without a caller
+     * session. Answers the concrete refusal reason, or empty once the
+     * stacked launch is under way; the launched session's binding -- not
+     * this answer -- makes the ownership visible in the store.
+     */
+    public CompletableFuture<Optional<String>> claimFromUi(TaskId task) {
+        Objects.requireNonNull(task, "task");
+        return supply(store -> {
+            TaskSnapshot snapshot = scanFresh();
+            TaskGraph graph = TaskGraph.of(snapshot, this::slugOf);
+            return Optional.ofNullable(launchFollowUp(task, snapshot, graph, null, null).refusal());
+        });
+    }
+
+    /**
+     * Validates, branch-probes and launches ONE follow-up as its own
+     * stacked session (S4): the shared path of the {@code task_claim} tool,
+     * the tree's Claim action and the auto-start. Answers the concrete
+     * refusal reason, or {@link FollowUpLaunch#NONE} once the launch is
+     * under way -- from then on the launch chain owns the in-flight guard
+     * and reports its own failure in the log, never silently (a failed
+     * launch leaves the task open and claimable again). A refusal carries
+     * {@code terminal == false} except the DONE-prerequisite-missing-branch
+     * one: that refusal is reported via the marker and the CALLER decides
+     * whether to register it terminally -- only the auto-start pass does,
+     * so a manual claim refusal never permanently gates auto-start (a
+     * human-repaired condition, like a re-pushed branch, unblocks it).
+     *
+     * <p>{@code stackAgent} is the running stack's confirmed agent for the
+     * task's repository (the auto-start's inheritance); a claim without one
+     * resolves the agent from the prerequisite's live session, falling back
+     * to the first agent of the fixed preference order
+     * ({@code AgentKind.preferenceOrder().get(0)}; agent availability is NOT
+     * probed at claim time). {@code caller} is the claiming MCP session (the
+     * {@code task_claim} tool's audit trail); null for the unattributed
+     * surfaces -- the tree's Claim action and the auto-start. Runs on the
+     * service executor; the git probe and the window resolution are bounded,
+     * the launch itself is async.</p>
+     */
+    private FollowUpLaunch launchFollowUp(TaskId task, TaskSnapshot snapshot, TaskGraph graph,
+            AgentKind stackAgent, ManagedSessionId caller) {
+        TaskDocument document = snapshot.byId().get(task);
+        if (document == null) {
+            return FollowUpLaunch.retryable("No task with id '" + task.text() + "' in the task"
+                    + " store; task_list shows the tasks that exist.");
+        }
+        ClaimLaunch.Attempt attempt = ClaimLaunch.validate(document, graph, liveSessionIds(),
+                DelayedTaskStart.IN_FLIGHT);
+        if (attempt.refused()) {
+            return FollowUpLaunch.retryable(attempt.refusal());
+        }
+        if (!DelayedTaskStart.IN_FLIGHT.add(task)) {
+            return FollowUpLaunch.retryable("A claim or start of '" + task.text()
+                    + "' is already in flight; the task never launches twice.");
+        }
+        Repository registered = null;
+        for (Repository candidate : repositories.get()) {
+            if (candidate.id().equals(document.repository())) {
+                registered = candidate;
+                break;
+            }
+        }
+        if (registered == null) {
+            DelayedTaskStart.IN_FLIGHT.remove(task);
+            return FollowUpLaunch.retryable("The repository of '" + task.text()
+                    + "' is not registered; open it in Drydock first.");
+        }
+        final Repository repository = registered;
+        // The immediate branch probe (S4): a claim REFUSES when the
+        // prerequisite has no branch yet -- it never waits for one (that is
+        // a confirmed stack unit's luxury, inside its own bounded future).
+        try (GitStatusService git = new GitStatusService()) {
+            // Collect-then-classify (one probe per branch): terminal-vs-retryable
+            // must not depend on the waits' order -- a missing DONE prerequisite's
+            // branch is terminal however late it appears in the waits list, and
+            // the reported retryable branch is the FIRST missing non-DONE one.
+            String terminalBranch = null;
+            String retryableBranch = null;
+            for (TaskId wait : attempt.shape().waits()) {
+                String branch = StackBranches.name(wait);
+                if (git.commitForRefBlocking(repository.root(), branch).isEmpty()) {
+                    TaskDocument waitDocument = snapshot.byId().get(wait);
+                    if (waitDocument != null && waitDocument.status() == TaskStatus.DONE) {
+                        // Terminal: a DONE prerequisite's branch was likely merged
+                        // and deleted with its stacked pull request -- retrying can
+                        // never heal this refusal. Terminal-ness is decided; no
+                        // further probing is needed.
+                        terminalBranch = branch;
+                        break;
+                    }
+                    if (retryableBranch == null) {
+                        retryableBranch = branch; // a non-DONE miss never stops the loop
+                    }
+                }
+            }
+            if (terminalBranch != null) {
+                DelayedTaskStart.IN_FLIGHT.remove(task);
+                return new FollowUpLaunch("The prerequisite branch '" + terminalBranch
+                        + "' no longer exists (its task is done -- likely merged and deleted"
+                        + " with its stacked pull request); stacking on it is impossible --"
+                        + " start the follow-up from the Tasks tree (Start Session) instead.",
+                        true);
+            }
+            if (retryableBranch != null) {
+                DelayedTaskStart.IN_FLIGHT.remove(task);
+                return FollowUpLaunch.retryable("The prerequisite branch '" + retryableBranch
+                        + "' does not exist in the repository; the claim is refused (S4). A"
+                        + " claim stacks on the prerequisite's branch, so it must exist first"
+                        + " -- claim again once the prerequisite's session has pushed it.");
+            }
+        } catch (RuntimeException e) {
+            DelayedTaskStart.IN_FLIGHT.remove(task);
+            LOG.log(Level.WARNING, "The branch probe of '" + task.text()
+                    + "' failed; nothing was launched", e);
+            return FollowUpLaunch.retryable("The branch probe of '" + task.text() + "' failed: "
+                    + oneLine(e.getMessage()) + "; nothing was launched. Retry the claim.");
+        }
+        // The window (P4.9's rule): one hosting the task's repository while
+        // such a window is open, else ANY open Drydock window.
+        Project window = DelayedTaskStart.launchWindow(new Origin(
+                RepositoryCatalog.canonicalize(repository.root()).toString(), repository.root()));
+        if (window == null) {
+            DelayedTaskStart.IN_FLIGHT.remove(task);
+            return FollowUpLaunch.retryable("No open Drydock window can host the stacked"
+                    + " session of '" + task.text() + "'; open one and claim again.");
+        }
+        AgentKind agent = resolveAgent(attempt.shape(), snapshot, stackAgent);
+        String projectName = slugOf(document.repository());
+        String name = projectName != null ? projectName : repository.displayName();
+        if (caller != null) {
+            LOG.log(Level.INFO, "The follow-up '" + task.text() + "' was claimed by session "
+                    + caller + "; the stacked launch is starting");
+        }
+        try {
+            TaskLauncher.prepareTask(window, Optional.of(repository.root()), Optional.empty())
+                    .thenCompose(prepared -> {
+                        if (prepared.isEmpty()) { // the preparation reported its own refusal
+                            DelayedTaskStart.IN_FLIGHT.remove(task);
+                            LOG.log(Level.WARNING, "The preparation of the claimed follow-up '"
+                                    + task.text() + "' refused; nothing launched");
+                            recordLaunchFailureNote(task);
+                            return CompletableFuture.<ManagedAgentSession>completedFuture(null);
+                        }
+                        return ClaimLaunch.launch(window, this, prepared.get(), agent,
+                                attempt.shape(), document, graph, name, repository.root());
+                    })
+                    .whenComplete((session, failure) -> {
+                        DelayedTaskStart.IN_FLIGHT.remove(task);
+                        if (failure != null) {
+                            LOG.log(Level.WARNING, "The stacked launch of the claimed follow-up '"
+                                    + task.text() + "' failed; the task stays open and claimable",
+                                    failure);
+                            recordLaunchFailureNote(task);
+                        }
+                    });
+        } catch (RuntimeException e) { // a synchronous failure never wedges the in-flight guard
+            DelayedTaskStart.IN_FLIGHT.remove(task);
+            LOG.log(Level.WARNING, "The launch of the claimed follow-up '" + task.text()
+                    + "' failed to start", e);
+            return FollowUpLaunch.retryable("The launch of '" + task.text()
+                    + "' failed to start: " + e.getMessage()
+                    + "; nothing was launched. Retry the claim.");
+        }
+        return FollowUpLaunch.NONE;
+    }
+
+    /** Records one session note on the task after a claimed follow-up's
+      * asynchronous launch failed (a preparation refusal or a launch failure),
+      * so the claiming agent learns via task_get that nothing launched and the
+      * task stays open and claimable. Surface-neutral: the same path serves the
+      * MCP tool, the tree's Claim action and the auto-start, and it names no
+      * concrete preparation reason (prepareTask reports only an empty Optional
+      * plus its own log). Fire-and-forget: the note rides {@link #appendNote}'s
+      * supply path (the service executor, never the FX thread) and fails safely
+      * after close; a note refusal or failure is logged at WARNING, never
+      * rethrown or awaited (the launch chain's own failure handling already
+      * ran). Exactly one note per failure path by construction: the
+      * preparation-refusal and launch-failure branches are mutually exclusive. */
+    private void recordLaunchFailureNote(TaskId task) {
+        appendNote(task, "Drydock's launch of this claimed follow-up failed (preparation"
+                + " refused or launch error, see the IDE log); nothing was launched and the"
+                + " task stays open and claimable.")
+                .whenComplete((outcome, failure) -> {
+                    if (failure != null) {
+                        LOG.log(Level.WARNING, "Could not record the failed-launch note on '"
+                                + task.text() + "'", failure);
+                    } else if (outcome == null || outcome.refused()) {
+                        LOG.log(Level.WARNING, "Could not record the failed-launch note on '"
+                                + task.text() + "': "
+                                + (outcome == null ? "no outcome" : outcome.refusal()));
+                    }
+                });
+    }
+
+    /** Collapses control characters (including newlines) to single spaces and
+      * squeezes runs of spaces, so a refusal carrying an external exception
+      * message stays a single-line value (the service's refusals travel verbatim
+      * to the agent and the tests assert single-line values). Deliberately
+      * narrower than a presentation helper: no bidi or private-use replacement,
+      * no truncation. */
+    private static String oneLine(String text) {
+        if (text == null) {
+            return "";
+        }
+        return text.replaceAll("\\p{Cntrl}+", " ").replaceAll("  +", " ").strip();
+    }
+
+    /** The launch agent of one claim (the confirmed inheritance): the
+      * running stack's confirmed agent for the repository when there is
+      * one; else the prerequisite's live session's agent; else the first
+      * agent of the fixed preference order
+      * ({@code AgentKind.preferenceOrder().get(0)}). */
+    private AgentKind resolveAgent(ClaimLaunch.Shape shape, TaskSnapshot snapshot,
+            AgentKind stackAgent) {
+        if (stackAgent != null) {
+            return stackAgent;
+        }
+        TaskDocument base = snapshot.byId().get(shape.base());
+        if (base != null) {
+            for (String session : base.sessions()) {
+                if (!liveSessions.contains(session)) {
+                    continue;
+                }
+                for (ManagedAgentSession candidate : sessions.get()) {
+                    if (candidate.id().toString().equals(session)) {
+                        return candidate.binding().kind();
+                    }
+                }
+            }
+        }
+        return AgentKind.preferenceOrder().get(0);
     }
 
     /** Flushes pending writes, stops the plan drivers, removes the store watcher (T13a:

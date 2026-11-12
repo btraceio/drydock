@@ -67,7 +67,7 @@ public final class TaskGuidance {
     private static final Logger LOG = System.getLogger(TaskGuidance.class.getName());
 
     /** The guidance content's version: the directory name and manifest version. */
-    static final String CURRENT_VERSION = "2";
+    static final String CURRENT_VERSION = "3";
 
     private static final String GUIDANCE_ROOT_DIRECTORY = "tasks-guidance";
     private static final String SKILL_RESOURCE = "/tasks/SKILL.md";
@@ -268,7 +268,7 @@ public final class TaskGuidance {
         return ("{\n"
                 + "  \"name\": \"" + SKILL_NAME + "\",\n"
                 + "  \"version\": \"" + version + "\",\n"
-                + "  \"description\": \"Drydock delayed tasks: the four task tools, "
+                + "  \"description\": \"Drydock delayed tasks: the five task tools, "
                 + "dependency-aware planning and the review pause.\"\n"
                 + "}\n").getBytes(StandardCharsets.UTF_8);
     }

@@ -109,6 +109,20 @@ class TaskToolsTest {
             return CompletableFuture.supplyAsync(
                     () -> mutate(() -> Outcome.committed(store.appendNote(task, note))), executor);
         }
+        /** The claim seam's test answer: a refusal when one is staged, else the
+          * committed document; the claimed id is recorded for assertions. */
+        TaskId claimed;
+        String claimRefusal;
+        @Override
+        public CompletableFuture<Outcome> claim(ManagedSessionId caller, TaskId task) {
+            return CompletableFuture.supplyAsync(() -> {
+                if (claimRefusal != null) {
+                    return Outcome.refused(claimRefusal);
+                }
+                claimed = task;
+                return Outcome.committed(scan().byId().get(task));
+            }, executor);
+        }
     }
 
     @TempDir Path root;
@@ -132,6 +146,40 @@ class TaskToolsTest {
     void tearDown() {
         context.store.close();
         context.executor.shutdown();
+    }
+
+    @Test
+    void taskClaimDispatchesToTheContextAndAnswersTheLaunchingMarker() throws Exception {
+        TaskDocument followUp = seed(alpha, "Stacked follow-up", List.of(), caller.toString());
+        JsonValue claimed = tools.call(caller, "task_claim", args("id", followUp.id().text()));
+        assertEquals(followUp.id(), context.claimed, "the context received the claimed id");
+        assertEquals(followUp.id().text(), textOf(claimed, "id"));
+        assertEquals("open", textOf(claimed, "status"));
+        assertEquals("true", textOf(claimed, "launching"), "the answer marks the launch");
+        context.claimRefusal = "The prerequisite branch 'dd/x' does not exist in the repository;"
+                + " the claim is refused (S4).";
+        McpToolException refused = assertThrows(McpToolException.class,
+                () -> tools.call(caller, "task_claim", args("id", followUp.id().text())));
+        assertTrue(refused.getMessage().contains("refused (S4)"),
+                "the context's refusal travels verbatim: " + refused.getMessage());
+        assertTrue(refusalOf("task_claim", JsonObject.empty())
+                        .contains("Missing required argument 'id'."),
+                "the id argument is required");
+    }
+
+    @Test
+    void taskClaimDescriptorStatesTheLaunchingSemantics() {
+        String description = tools.toolDescriptors().stream()
+                .filter(d -> "task_claim".equals(textOf(d, "name")))
+                .map(d -> textOf(d, "description"))
+                .findFirst().orElseThrow();
+        assertTrue(description.contains("launching:true means validation passed"),
+                description);
+        assertTrue(description.contains("the stacked launch attempt is under way"),
+                description);
+        assertTrue(description.contains("leaves the task open and claimable again"),
+                description);
+        assertTrue(description.contains("verify the outcome with task_get"), description);
     }
 
     @Test
