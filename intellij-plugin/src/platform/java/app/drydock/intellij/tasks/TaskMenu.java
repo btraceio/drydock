@@ -323,7 +323,7 @@ final class TaskMenu {
             }
             case PullRequestRow pullRequest -> {
                 showTask = TaskLinks.taskOfBranch(pullRequest.pullRequest().headRefName(), watched)
-                        .flatMap(document -> delayedRowOf(document, tasks)).orElse(null);
+                        .flatMap(document -> delayedRowOf(document, displayed, tasks)).orElse(null);
                 showSession = TaskLinks.sessionOf(pullRequest, displayed).orElse(null);
             }
             case IssueRow issue -> showTask = TaskLinks.taskOf(issue, displayed, tasks).orElse(null);
@@ -341,8 +341,9 @@ final class TaskMenu {
 
     /** The displayed delayed-task row of a task document, by id; empty when the tree shows none. */
     private static Optional<DelayedTaskRow> delayedRowOf(TaskDocument document,
+                                                         List<TaskNode> displayed,
                                                          TaskTreePanel.TaskLayer tasks) {
-        return TaskLinks.taskOfId(document.id(), tasks);
+        return TaskLinks.taskOfId(document.id(), displayed, tasks);
     }
 
     /**

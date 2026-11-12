@@ -11,6 +11,13 @@ import app.drydock.tasks.TaskId;
 import app.drydock.tasks.TaskNode.DelayedTaskRow;
 import app.drydock.tasks.TaskNode.TasksSection;
 
+import com.intellij.openapi.actionSystem.ActionPlaces;
+import com.intellij.openapi.actionSystem.ActionUiKind;
+import com.intellij.openapi.actionSystem.AnAction;
+import com.intellij.openapi.actionSystem.AnActionEvent;
+import com.intellij.openapi.actionSystem.CommonDataKeys;
+import com.intellij.openapi.actionSystem.Presentation;
+import com.intellij.openapi.actionSystem.impl.SimpleDataContext;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.editor.Document;
 import com.intellij.openapi.fileEditor.FileDocumentManager;
@@ -177,6 +184,62 @@ public class DelayedTaskTreePlatformTest extends BasePlatformTestCase {
         inputs.close();
         inputs.subscribeToTasks(() -> { });
         assertEquals("no subscription survives close", List.of("sub", "unsub", "sub", "unsub"), lifecycle);
+    }
+
+    // 6. The jump action reveals the linked task row: the guarded reveal selects the
+    // target and expands its ancestors. The reveal resolves the target from the live
+    // selection on the EDT -- the seeded session row is selected before the dispatch.
+    public void testTheJumpActionRevealsTheLinkedTaskRow() throws IOException {
+        Task task = newTask("A task the jump action reveals");
+        publish(task, List.of(sessionId.toString()));
+        awaitTree(() -> underSession(task.id()), "the task under its session row");
+        tree.setSelectionPath(sessionPath());
+        AnAction showTask = panel.showLinkedAction(TaskTreePanel.ShowKind.TASK,
+                "Show Task", "Reveal the task row this row is linked to");
+        showTask.actionPerformed(jumpEvent());
+        Object selected = ((DefaultMutableTreeNode) tree.getSelectionPath().getLastPathComponent())
+                .getUserObject();
+        assertTrue("the jump revealed the linked task row",
+                selected instanceof DelayedTaskRow row && row.id().equals(task.id()));
+        assertTrue("the revealed row's ancestors are expanded by the programmatic guard",
+                tree.isExpanded(tree.getSelectionPath().getParentPath()));
+    }
+
+    // 7. A disposed panel reveals nothing: the disposed guard is the only stopper, so
+    // dropping it (or inverting the selection-diff guard) fails the unchanged selection.
+    public void testADisposedPanelRevealsNothing() throws IOException {
+        Task task = newTask("A task a disposed panel never reveals");
+        publish(task, List.of(sessionId.toString()));
+        awaitTree(() -> underSession(task.id()), "the task under its session row");
+        tree.setSelectionPath(sessionPath());
+        TreePath before = tree.getSelectionPath();
+        AnAction showTask = panel.showLinkedAction(TaskTreePanel.ShowKind.TASK,
+                "Show Task", "Reveal the task row this row is linked to");
+        Disposer.dispose(panel);
+        panel = null;
+        showTask.actionPerformed(jumpEvent());
+        assertEquals("a disposed panel leaves the selection alone", before, tree.getSelectionPath());
+    }
+
+    // 8. The console-selection twin of the reveal: the same disposed and
+    // selection-diff guards land the selection on the session row.
+    public void testConsoleSelectionSelectsTheSessionRow() throws IOException {
+        Task task = newTask("A task whose console selection selects the session");
+        publish(task, List.of(sessionId.toString()));
+        awaitTree(() -> underSession(task.id()), "the task under its session row");
+        tree.setSelectionPath(taskPath(task.id()));
+        panel.selectSessionRow(sessionId);
+        Object selected = ((DefaultMutableTreeNode) tree.getSelectionPath().getLastPathComponent())
+                .getUserObject();
+        assertTrue("the console selection landed on the session row",
+                selected instanceof TaskNode.TaskRow r && r.session().id().equals(sessionId));
+    }
+
+    /** A click event for a jump action's EDT path: the reveal reads only the tree. */
+    private static AnActionEvent jumpEvent() {
+        return AnActionEvent.createEvent(SimpleDataContext.builder()
+                        .add(CommonDataKeys.PROJECT, null).build(),
+                new Presentation(), ActionPlaces.UNKNOWN, ActionUiKind.NONE, null);
     }
 
     /** One store task: its title, id and the open IDE document of its file. */

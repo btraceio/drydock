@@ -204,8 +204,12 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     private Runnable unsubscribeShared = () -> { };
     private volatile boolean disposed;
     /** The delayed-task layer the last rebuild applied (T17a), for the fast
-     * worktree-rem acknowledgement, which re-applies the displayed rows. */
-    private TaskLayer displayedTasks = TaskLayer.EMPTY;
+     * worktree-rem acknowledgement, which re-applies the displayed rows.
+     * Read off-EDT too -- through the popup menu's supplier and the jump
+     * actions' BGT update passes -- so the EDT write in {@code apply} needs
+     * the volatile store to publish it; {@code apply} writes
+     * {@code displayedNodes} first and this field last. */
+    private volatile TaskLayer displayedTasks = TaskLayer.EMPTY;
     /**
      * The task node's actions (T20a): the plugin.xml-registered instances
      * when their ids resolve, locally built otherwise -- the same fallback
@@ -2001,14 +2005,19 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 DelayedTaskRows.rows(tasks.get(), liveSessionIds, slugs, now);
         Map<String, List<app.drydock.tasks.TaskNode.DelayedTaskRow>> attached = new LinkedHashMap<>();
         List<app.drydock.tasks.TaskNode.DelayedTaskRow> unattached = new ArrayList<>();
+        // The PR index over the tree's own rows, built once for the whole
+        // layer: one walk of the displayed nodes, however many task rows
+        // name a pull request below.
+        TaskLinks.PrIndex prIndex = TaskLinks.PrIndex.of(nodes);
         for (app.drydock.tasks.TaskNode.DelayedTaskRow row : DelayedTaskRows.sorted(rows)) {
-            // The task's pull request, resolved over the tree's own PR rows:
-            // the head branch that is the task's stacked branch, else a
-            // stored session's current branch (memory only, the same rule
-            // TaskLinks resolves the jumps by). The PR row's own record is
-            // carried verbatim -- no state is fabricated.
+            // The task's pull request, resolved within the task's own
+            // project over the tree's PR rows: the head branch that is the
+            // task's stacked branch, else a stored session's current branch
+            // (memory only, the same rule TaskLinks resolves the jumps by).
+            // The PR row's own record is carried verbatim -- no state is
+            // fabricated.
             app.drydock.tasks.TaskNode.DelayedTaskRow linked =
-                    TaskLinks.pullRequestOf(row, nodes)
+                    TaskLinks.pullRequestOf(row, prIndex)
                             .map(pr -> row.withPullRequest(pr.pullRequest()))
                             .orElse(row);
             DelayedTaskRows.attachedSession(linked, shown.keySet()).ifPresentOrElse(
@@ -2174,7 +2183,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
      * expands its collapsed ancestors, which is not the user's request to
      * open them. EDT.
      */
-    private void selectSessionRow(ManagedSessionId sessionId) {
+    void selectSessionRow(ManagedSessionId sessionId) {
         if (disposed) {
             return;
         }
@@ -2193,7 +2202,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
      * shows one -- the jump actions' reveal, the same programmatic guard and
      * expansion rule as {@link #selectSessionRow}. EDT.
      */
-    private void revealRow(Predicate<Object> match) {
+    void revealRow(Predicate<Object> match) {
         if (disposed) {
             return;
         }
@@ -2227,15 +2236,15 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     }
 
     /**
-     * The jump target of the selected session-layer row, resolved over the
-     * tree's current nodes (memory only): the task it works, its pull
-     * request, or its session. The target's kind is the caller's business;
-     * this only answers the row the menu item names.
+     * The jump target of the lead row, resolved over the tree's current
+     * nodes (memory only): the task it works, its pull request, or its
+     * session. The target's kind is the caller's business; this only
+     * answers the row the menu item names. The lead is a parameter, not a
+     * tree read: update passes run on a background thread (BGT) and take it
+     * from the event's data keys via {@link #leadFrom}; the EDT click
+     * re-resolves it from the live selection.
      */
-    private Optional<Object> jumpTarget(ShowKind kind) {
-        // The selection's raw value: a session-layer row OR a delayed-task
-        // row (an unrelated type), whichever the tree shows selected.
-        Object lead = selectedValue();
+    Optional<Object> jumpTarget(ShowKind kind, Object lead) {
         if (lead == null) {
             return Optional.empty();
         }
@@ -2250,6 +2259,22 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         return target.map(Object.class::cast);
     }
 
+    /**
+     * The jump lead for an update pass: the selection as the event's data
+     * keys carry it. Data keys are the sanctioned cross-thread channel --
+     * the jump actions run their update on a background thread, where a
+     * live Swing read of the tree's selection is forbidden.
+     * {@code uiDataSnapshot} publishes exactly this partition:
+     * {@code SELECTED_NODE} for session-layer rows,
+     * {@code SELECTED_TASK} for delayed-task rows. A TasksSection selection
+     * sets neither key, so the lead is null and the action disables --
+     * a section has no jump target.
+     */
+    private static Object leadFrom(AnActionEvent e) {
+        DelayedTaskRow task = e.getData(DelayedTaskActions.SELECTED_TASK);
+        return task != null ? task : e.getData(SELECTED_NODE);
+    }
+
     /** The task row the selected row links to; the selection may be any row kind. */
     private Optional<?> taskTarget(Object lead) {
         if (lead instanceof TaskRow row) {
@@ -2257,7 +2282,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         }
         if (lead instanceof PullRequestRow pullRequest) {
             return TaskLinks.taskOfBranch(pullRequest.pullRequest().headRefName(), watchedSnapshot())
-                    .flatMap(document -> TaskLinks.taskOfId(document.id(), displayedTasks));
+                    .flatMap(document -> TaskLinks.taskOfId(document.id(), displayedNodes, displayedTasks));
         }
         if (lead instanceof IssueRow issue) {
             return TaskLinks.taskOf(issue, displayedNodes, displayedTasks);
@@ -2291,7 +2316,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     }
 
     /** Which linked row a jump action reveals. */
-    private enum ShowKind { TASK, PULL_REQUEST, SESSION }
+    enum ShowKind { TASK, PULL_REQUEST, SESSION }
 
     /**
      * One jump action: enabled while the tree shows its linked row, a click
@@ -2299,11 +2324,11 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
      * re-resolved at update and at click time over the tree's current nodes,
      * so a jump never acts on a stale answer.
      */
-    private AnAction showLinkedAction(ShowKind kind, String text, String description) {
+    AnAction showLinkedAction(ShowKind kind, String text, String description) {
         return new DumbAwareAction(text, description, AllIcons.General.Locate) {
             @Override
             public void update(@NotNull AnActionEvent e) {
-                TaskActions.present(e, jumpTarget(kind).isPresent());
+                TaskActions.present(e, jumpTarget(kind, leadFrom(e)).isPresent());
             }
 
             @Override
@@ -2313,7 +2338,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
             @Override
             public void actionPerformed(@NotNull AnActionEvent e) {
-                Optional<Object> target = jumpTarget(kind);
+                // EDT: the live selection, not the event's data keys -- the
+                // click acts on what the tree shows selected now.
+                Optional<Object> target = jumpTarget(kind, selectedValue());
                 if (target.isEmpty()) {
                     return;
                 }

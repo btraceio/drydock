@@ -224,6 +224,18 @@ public class DelayedTaskRendererPlatformTest extends BasePlatformTestCase {
         assertFalse("nor a Done offer", text(paint(plain)).contains(TaskTreeRenderer.DONE_LINK_TEXT));
     }
 
+    // ---- a delayed task's pull-request tooltip composes into the FINAL tooltip ----
+
+    public void testADelayedTasksPullRequestTooltipSurvivesTheFinalComposition() {
+        GhCliService.OpenPullRequest pr = new GhCliService.OpenPullRequest(40, "Speed up the flaky suite",
+                "pr-40", "main", false, Optional.of("someone"), Optional.empty());
+        TaskTreeRenderer painted = paint(row(Presentation.READY, Optional.empty()).withPullRequest(pr));
+        assertTrue("the PR segment composes into the final tooltip, after plan and mirrors",
+                painted.getToolTipText().endsWith(DOT + TaskTreeRenderer.pullRequestLinkTooltip(pr)));
+        assertTrue("the badge is painted beside the title",
+                text(painted).contains(TaskTreeRenderer.pullRequestLinkBadge(pr)));
+    }
+
     // ---- fixtures: documents, rows and the model inputs ----
 
     private static TaskDocument doc(String id, String title, TaskStatus status, List<String> after, List<String> sessions) {

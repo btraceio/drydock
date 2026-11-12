@@ -10,10 +10,14 @@ import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
+import app.drydock.git.GhCliService;
 import app.drydock.git.GhCliService.BranchPullRequest;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.GhCliService.PrInfo.PrLifecycle;
 import app.drydock.git.JiraIssue;
+import app.drydock.tasks.TaskDocument;
+import app.drydock.tasks.TaskId;
+import app.drydock.tasks.TaskStatus;
 import app.drydock.intellij.tasks.TaskNode.Deferred;
 import app.drydock.intellij.tasks.TaskNode.GitHubNode;
 import app.drydock.intellij.tasks.TaskNode.IssueRow;
@@ -59,6 +63,16 @@ class TaskTreeRendererTest {
     private static JiraIssue jiraProj123() {
         return new JiraIssue("PROJ-123", "Fix allocation accounting",
                 "https://acme.atlassian.net/browse/PROJ-123", List.of("profiling"), Optional.empty());
+    }
+
+    private static GhCliService.OpenPullRequest openPr(int number, String title, String head) {
+        return new GhCliService.OpenPullRequest(number, title, head, "main", false,
+                Optional.of("someone"), Optional.of("https://github.com/o/r/pull/" + number));
+    }
+
+    private static TaskDocument document(TaskId id) {
+        return new TaskDocument(id, RepositoryId.newId(), "Fix allocation profile", TaskStatus.STARTED, null,
+                Optional.of(Instant.EPOCH), List.of(), List.of(), "", "");
     }
 
     private static TaskRow row(boolean running, TaskPlacement placement) {
@@ -321,6 +335,26 @@ class TaskTreeRendererTest {
                 TaskTreeRenderer.badgeKind(branchPr(PrLifecycle.MERGED, true)), "a merged draft is merged");
         assertEquals("Pull request #12 (draft) from feature/x: Fix it",
                 TaskTreeRenderer.pullRequestTooltip(branchPr(PrLifecycle.OPEN, true)));
+    }
+
+    @Test
+    void aDelayedTasksPullRequestBadgeReadsMarkNumberAndTitle() {
+        assertEquals(TaskTreeRenderer.MIRROR_MARK + " PR #40",
+                TaskTreeRenderer.pullRequestLinkBadge(openPr(40, "Speed up the flaky suite", "pr-40")));
+        assertEquals("Pull request #40 from pr-40: Speed up the flaky suite",
+                TaskTreeRenderer.pullRequestLinkTooltip(openPr(40, "Speed up the flaky suite", "pr-40")));
+    }
+
+    @Test
+    void aPullRequestWithABlankTitleTooltipNamesOnlyNumberAndBranch() {
+        assertEquals("Pull request #41 from pr-41",
+                TaskTreeRenderer.pullRequestLinkTooltip(openPr(41, "  ", "pr-41")));
+    }
+
+    @Test
+    void aPullRequestRowsLinkedTaskTooltipNamesTheTaskWorkingItsBranch() {
+        assertEquals("Task 'Fix allocation profile' (fix-alloc-k3f9) works this branch",
+                TaskTreeRenderer.linkedTaskTooltip(document(TaskId.of("fix-alloc-k3f9"))));
     }
 
     private static BranchPullRequest branchPr(PrLifecycle state, boolean draft) {

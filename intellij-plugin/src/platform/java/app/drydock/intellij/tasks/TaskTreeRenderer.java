@@ -28,6 +28,7 @@ import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
 import app.drydock.intellij.ui.SessionDots;
 import app.drydock.tasks.DelayedTaskRows;
+import app.drydock.tasks.TaskDocument;
 import app.drydock.tasks.TaskId;
 import app.drydock.tasks.TaskMirror;
 import app.drydock.tasks.TaskState;
@@ -505,7 +506,7 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
         TaskLinks.taskOfBranch(headRefName, watched).ifPresent(document -> {
             append("  " + mirroredTaskBadge(document.title()), MIRROR_ATTRIBUTES);
             setToolTipText((getToolTipText() == null ? "" : getToolTipText() + " · ")
-                    + "Task '" + document.title() + "' (" + document.id() + ") works this branch");
+                    + linkedTaskTooltip(document));
         });
     }
 
@@ -518,6 +519,11 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
     static String pullRequestLinkTooltip(GhCliService.OpenPullRequest pullRequest) {
         return "Pull request #" + pullRequest.number() + " from " + pullRequest.headRefName()
                 + (pullRequest.title().isBlank() ? "" : ": " + pullRequest.title());
+    }
+
+    /** Pure. A PR row's linked-task badge tooltip: the task working the PR's head branch. */
+    static String linkedTaskTooltip(TaskDocument document) {
+        return "Task '" + document.title() + "' (" + document.id() + ") works this branch";
     }
 
     /**
@@ -640,11 +646,8 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
         if (!task.mirrors().isEmpty()) {
             append("  " + mirrorsBadge(task.mirrors()), MIRROR_ATTRIBUTES);
         }
-        task.pullRequest().ifPresent(pullRequest -> {
-            append("  " + pullRequestLinkBadge(pullRequest), MIRROR_ATTRIBUTES);
-            setToolTipText((getToolTipText() == null ? "" : getToolTipText() + " · ")
-                    + pullRequestLinkTooltip(pullRequest));
-        });
+        task.pullRequest().ifPresent(pullRequest ->
+                append("  " + pullRequestLinkBadge(pullRequest), MIRROR_ATTRIBUTES));
         String age = delayedAge(task, now);
         if (!age.isEmpty()) {
             append(" · " + age, SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
@@ -657,7 +660,9 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
         }
         setToolTipText(delayedTooltip(task, now) + progress.map(annotation ->
                 " · plan " + annotation.text()).orElse("")
-                + (task.mirrors().isEmpty() ? "" : " · mirrored to " + String.join(", ", task.mirrors())));
+                + (task.mirrors().isEmpty() ? "" : " · mirrored to " + String.join(", ", task.mirrors()))
+                + task.pullRequest().map(TaskTreeRenderer::pullRequestLinkTooltip)
+                        .map(s -> " · " + s).orElse(""));
     }
 
     /**
