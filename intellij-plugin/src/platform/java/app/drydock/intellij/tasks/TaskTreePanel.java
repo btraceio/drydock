@@ -395,11 +395,11 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 }
             }
         };
-        AnAction openInGitHub = new DumbAwareAction("Open in GitHub", "Open this issue or pull request in the browser",
-                AllIcons.Vcs.Vendors.Github) {
+        AnAction openInGitHub = new DumbAwareAction("Open in GitHub",
+                "Open the pull request or GitHub issue in the browser", AllIcons.Vcs.Vendors.Github) {
             @Override
             public void update(@NotNull AnActionEvent e) {
-                TaskActions.present(e, TaskMenu.urlOf(e.getData(SELECTED_NODE)).isPresent());
+                TaskActions.present(e, !TaskMenu.githubUrlsOf(e.getData(SELECTED_NODE)).isEmpty());
             }
 
             @Override
@@ -409,7 +409,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
             @Override
             public void actionPerformed(@NotNull AnActionEvent e) {
-                TaskMenu.urlOf(e.getData(SELECTED_NODE)).ifPresent(BrowserUtil::browse);
+                TaskMenu.githubUrlsOf(e.getData(SELECTED_NODE)).forEach(BrowserUtil::browse);
             }
         };
         // The issue-to-task half of a mirror: the task file whose mirrors
@@ -751,6 +751,12 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 } else if (node instanceof TaskRow task && primaryButton && event.getClickCount() == 1
                         && onLink(path, event, TaskTreeRenderer.DONE_LINK)) {
                     PullRequestDoneOffers.offerOf(task).ifPresent(offer -> PullRequestDoneOffers.done(project, offer));
+                } else if (node instanceof TaskRow task && primaryButton && event.getClickCount() == 1
+                        && onLink(path, event, TaskTreeRenderer.PR_LINK)) {
+                    TaskTreeRenderer.pullRequestUrl(task).ifPresent(BrowserUtil::browse);
+                } else if (primaryButton && event.getClickCount() == 1
+                        && fragmentTag(path, event) instanceof TaskTreeRenderer.MirrorLink mirror) {
+                    BrowserUtil.browse(mirror.url());
                 } else if (node instanceof TaskRow task && primaryButton && event.getClickCount() == 1
                         && onLink(path, event)) {
                     hereLink(task);
@@ -1137,16 +1143,21 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
     /** Whether {@code event} landed on the fragment tagged {@code tag} in the row at {@code path}. EDT. */
     private boolean onLink(TreePath path, MouseEvent event, Object tag) {
+        return fragmentTag(path, event) == tag;
+    }
+
+    /** The tag of the fragment {@code event} landed on, in the row at {@code path}; null elsewhere. EDT. */
+    private Object fragmentTag(TreePath path, MouseEvent event) {
         Rectangle bounds = tree.getPathBounds(path);
         if (bounds == null) {
-            return false;
+            return null;
         }
         int row = tree.getRowForPath(path);
         Component rendered = tree.getCellRenderer().getTreeCellRendererComponent(tree,
                 path.getLastPathComponent(), tree.isRowSelected(row), tree.isExpanded(row),
                 tree.getModel().isLeaf(path.getLastPathComponent()), row, false);
         return rendered instanceof SimpleColoredComponent colored
-                && colored.getFragmentTagAt(event.getX() - bounds.x) == tag;
+                ? colored.getFragmentTagAt(event.getX() - bounds.x) : null;
     }
 
     /** The main checkout of the project row at or above {@code path}. */

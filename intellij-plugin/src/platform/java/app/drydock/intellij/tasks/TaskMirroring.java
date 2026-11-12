@@ -33,6 +33,8 @@ import org.jetbrains.annotations.NotNull;
 
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ExecutionException;
@@ -80,6 +82,31 @@ public final class TaskMirroring {
     /** Opens every recorded mirror of the task in the browser. */
     public static void openMirrors(DelayedTaskRow row) {
         row.mirrors().forEach(BrowserUtil::browse);
+    }
+
+    /**
+     * The mirror addresses of every task whose {@code sessions} list names
+     * the session, in snapshot order: the session-to-mirror half of the
+     * link, the way {@link #mirroredTask(String)} is the issue-to-task half.
+     * From the task service's cached watched snapshot only: no scan, no I/O
+     * (the same paint discipline as the plan annotation). Empty before the
+     * first snapshot and for a session no task claims.
+     */
+    public static List<String> mirrorsOfSession(String sessionId) {
+        if (sessionId == null || sessionId.isBlank()) {
+            return List.of();
+        }
+        TaskStoreWatcher.WatchedSnapshot watched =
+                DrydockPluginService.getInstance().taskService().watchedSnapshot();
+        if (watched == null) {
+            return List.of();
+        }
+        List<String> mirrors = new ArrayList<>();
+        for (TaskDocument document : watched.snapshot().bySessionReference()
+                .getOrDefault(sessionId, List.of())) {
+            mirrors.addAll(document.mirrors());
+        }
+        return List.copyOf(mirrors);
     }
 
     /**

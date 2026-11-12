@@ -7,6 +7,7 @@ import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionWorkspace;
+import app.drydock.git.GhCliService;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.JiraIssue;
 import app.drydock.git.GhCliService.OpenPullRequest;
@@ -59,6 +60,15 @@ class TaskMenuTest {
                 placement, false, false, false);
     }
 
+    /** The same row carrying a branch pull request; {@code url} is what gh reported for its page. */
+    private static TaskRow rowWithPullRequest(TaskRow row, Optional<String> url) {
+        return new TaskRow(row.session(), row.activity(), row.running(), row.branch(), row.placement(),
+                row.readOnly(), row.folderMissing(), row.resumable(),
+                Optional.of(new GhCliService.BranchPullRequest(9,
+                        GhCliService.PrInfo.PrLifecycle.OPEN, false, "fix-allocation-profile",
+                        "Fix allocation profile", url)));
+    }
+
     private static IdleWorktree worktree(boolean locked, boolean open) {
         return new IdleWorktree(WORKTREE, "fix-allocation-profile", Optional.empty(), locked, open);
     }
@@ -85,6 +95,71 @@ class TaskMenuTest {
 
     private static List<List<TaskMenu.Item>> sectionsOf(TaskNode lead) {
         return TaskMenu.sections(lead, List.of(), NO_TRANSFER);
+    }
+
+    private static final TaskMenu.MenuFacts SESSION_LINKS =
+            new TaskMenu.MenuFacts(false, false, false, true, true);
+
+    @Test
+    void aTaskRowWithAttachedLinksOffersOpenInGithubAndJira() {
+        // The link section sits with the row's management items, before the
+        // cleanup section; each entry follows its own fact.
+        assertEquals(List.of(
+                List.of(TaskMenu.Item.SWITCH_TO_TASK),
+                List.of(TaskMenu.Item.RESUME),
+                List.of(TaskMenu.Item.RENAME, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
+                List.of(TaskMenu.Item.OPEN_IN_GITHUB, TaskMenu.Item.OPEN_IN_JIRA),
+                List.of(TaskMenu.Item.DONE_WITH_TASK)),
+                TaskMenu.sections(task(false, new TaskPlacement.Idle(true)), List.of(), SESSION_LINKS));
+        // Only GitHub known: no Jira entry, and never an empty section.
+        assertEquals(List.of(
+                List.of(TaskMenu.Item.SWITCH_TO_TASK),
+                List.of(TaskMenu.Item.RESUME),
+                List.of(TaskMenu.Item.RENAME, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
+                List.of(TaskMenu.Item.OPEN_IN_GITHUB),
+                List.of(TaskMenu.Item.DONE_WITH_TASK)),
+                TaskMenu.sections(task(false, new TaskPlacement.Idle(true)), List.of(),
+                        new TaskMenu.MenuFacts(false, false, false, true, false)));
+    }
+
+    @Test
+    void aRunningTaskRowWithAttachedLinksOffersThemBeforeCleanup() {
+        assertEquals(List.of(
+                List.of(TaskMenu.Item.SWITCH_TO_TASK),
+                List.of(TaskMenu.Item.DEACTIVATE, TaskMenu.Item.REVIEW_CHANGES),
+                List.of(TaskMenu.Item.RENAME, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
+                List.of(TaskMenu.Item.OPEN_IN_JIRA),
+                List.of(TaskMenu.Item.DEACTIVATE_AND_CLOSE, TaskMenu.Item.DONE_WITH_TASK)),
+                TaskMenu.sections(task(true, new TaskPlacement.ThisWindow()), List.of(),
+                        new TaskMenu.MenuFacts(false, false, false, false, true)));
+    }
+
+    @Test
+    void aSessionRowsGithubLinksAreItsPullRequestPlusItsMirrors() {
+        // Pure over the given mirrors: the PR's page first, then the GitHub
+        // mirrors in order; Jira mirrors and unknown addresses stay out.
+        TaskRow row = task(false, new TaskPlacement.Idle(true));
+        assertEquals(List.of("https://github.com/o/r/pull/9", "https://github.com/o/r/issues/12"),
+                TaskMenu.githubUrlsOf(rowWithPullRequest(row, Optional.of("https://github.com/o/r/pull/9")),
+                        List.of("https://github.com/o/r/issues/12",
+                                "https://acme.atlassian.net/browse/PROJ-7")));
+        assertEquals(List.of("https://acme.atlassian.net/browse/PROJ-7"),
+                TaskMenu.jiraUrlsOf(rowWithPullRequest(row, Optional.empty()),
+                        List.of("https://github.com/o/r/issues/12",
+                                "https://acme.atlassian.net/browse/PROJ-7")));
+        // No pull request, no mirrors: nothing to offer.
+        assertTrue(TaskMenu.githubUrlsOf(rowWithPullRequest(row, Optional.empty()), List.of()).isEmpty());
+    }
+
+    @Test
+    void issueAndPullRequestRowsKeepTheirOwnUrlAsTheGithubLink() {
+        assertEquals(List.of("https://github.com/o/r/issues/42"),
+                TaskMenu.githubUrlsOf(issue(Optional.of("https://github.com/o/r/issues/42")), List.of()));
+        assertEquals(List.of("https://github.com/o/r/pull/40"),
+                TaskMenu.githubUrlsOf(pullRequest(Optional.of("https://github.com/o/r/pull/40")), List.of()));
+        assertEquals(List.of("https://acme.atlassian.net/browse/PROJ-123"),
+                TaskMenu.jiraUrlsOf(jiraIssue(), List.of()));
+        assertEquals(List.of(), TaskMenu.jiraUrlsOf(issue(Optional.empty()), List.of()));
     }
 
     @Test
