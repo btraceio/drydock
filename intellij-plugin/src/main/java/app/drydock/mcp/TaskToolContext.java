@@ -63,6 +63,15 @@ public interface TaskToolContext {
     CompletableFuture<Optional<RepositoryId>> defaultRepository(ManagedSessionId caller);
 
     /**
+     * The display slugs that resolve to exactly one registered repository,
+     * in registration order, for refusals that name what an explicit
+     * project can be. A slug two projects share is omitted: it would
+     * refuse in {@link #repositoryBySlug} anyway (never picks a winner),
+     * so advertising it would only offer a dead-end retry.
+     */
+    CompletableFuture<List<String>> registeredProjectSlugs();
+
+    /**
      * The ids of the tasks assigned to the calling session (their sessions
      * list carries this session's id). Status writes are scoped to these
      * (clarification 2); reads never are.

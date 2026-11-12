@@ -209,13 +209,17 @@ class DelayedTaskServiceTest {
         ManagedSessionId resident = ManagedSessionId.newId();
         ManagedSessionId visitor = ManagedSessionId.newId();
         ManagedSessionId nested = ManagedSessionId.newId();
+        ManagedSessionId worktreeSession = ManagedSessionId.newId();
+        RepositoryId unregisteredId = RepositoryId.newId();
         List<ManagedAgentSession> sessions = List.of(
                 session(resident, alphaId, worktree, Optional.empty()),
-                session(visitor, alphaId, elsewhere, Optional.empty()),
-                session(nested, alphaId, worktree.resolve("nested"), Optional.of(worktree)));
+                session(visitor, unregisteredId, elsewhere, Optional.empty()),
+                session(nested, alphaId, worktree.resolve("nested"), Optional.of(worktree)),
+                session(worktreeSession, alphaId, elsewhere, Optional.empty()));
         List<Repository> repositories = List.of(repository(alphaId, worktree, "Project Alpha"),
                 repository(betaId, dir.resolve("beta"), "Beta Project"),
-                repository(RepositoryId.newId(), dir.resolve("duplicate"), "Project Alpha!"));
+                repository(RepositoryId.newId(), dir.resolve("duplicate"), "Project Alpha!"),
+                repository(RepositoryId.newId(), dir.resolve("nonslug"), "---"));
         try (DelayedTaskService service = new DelayedTaskService(store, executor,
                 () -> sessions, () -> repositories)) {
             await(service.initialize());
@@ -223,17 +227,28 @@ class DelayedTaskServiceTest {
                     "a working root that is a registered repository resolves its id");
             assertEquals(Optional.of(alphaId), await(service.defaultRepository(nested)),
                     "an unregistered working root falls back to its registered worktree root");
+            assertEquals(Optional.of(alphaId), await(service.defaultRepository(worktreeSession)),
+                    "an unregistered working root with a registered owning repository resolves"
+                            + " through the session's repositoryId (a detached worktree session)");
             assertTrue(await(service.defaultRepository(visitor)).isEmpty(),
-                    "an unresolvable working root yields empty");
+                    "an unresolvable working root with an unregistered owning repository yields empty");
             assertTrue(await(service.repositoryBySlug("project-alpha")).isEmpty(),
                     "an ambiguous slug yields empty (accepted deviation)");
             String created = textOf(service.taskTools().call(resident, "task_create",
                     args("title", "Resident default")), "id");
             assertTrue(Files.exists(committedFile(store, alphaId, TaskId.of(created))),
                     "a create without a project lands in the caller's resolved repository");
-            assertTrue(assertThrows(McpToolException.class, () -> service.taskTools().call(visitor,
-                    "task_create", args("title", "Visitor task"))).getMessage()
-                    .contains("no default project"), "an unresolvable caller has no create default");
+            assertTrue(await(service.registeredProjectSlugs()).equals(List.of("beta-project")),
+                    "the offer names only slugs that resolve uniquely: the ambiguous"
+                            + " project-alpha pair is omitted, and a name with no slug"
+                            + " characters (---) contributes nothing rather than null");
+            String refusal = assertThrows(McpToolException.class, () -> service.taskTools().call(visitor,
+                    "task_create", args("title", "Visitor task"))).getMessage();
+            assertTrue(refusal.contains("no default project"),
+                    "an unresolvable caller with an unregistered owning repository has no create default");
+            assertTrue(refusal.contains("beta-project") && !refusal.contains("project-alpha"),
+                    "the no-default refusal offers only a slug that, when passed, resolves: "
+                            + "the ambiguous pair would dead-end in the second refusal");
             assertTrue(assertThrows(McpToolException.class, () -> service.taskTools().call(resident,
                     "task_create", args("title", "Ambiguous", "project", "project-alpha")))
                     .getMessage().contains("No registered project 'project-alpha'"),
