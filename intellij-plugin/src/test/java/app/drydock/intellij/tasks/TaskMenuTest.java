@@ -339,9 +339,17 @@ class TaskMenuTest {
                 sectionsOf(new Section(SectionKind.ISSUES, List.of(issue(Optional.empty())))));
         assertEquals(List.of(List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.GITHUB_SETTINGS)),
                 sectionsOf(new Section(SectionKind.PULL_REQUESTS, List.of(pullRequest(Optional.empty())))));
-        assertEquals(List.of(), sectionsOf(new Section(SectionKind.SESSIONS, List.of(
-                task(true, new TaskPlacement.ThisWindow())))));
+        assertEquals(List.of(List.of(TaskMenu.Item.CLEANUP_DONE_SESSIONS)),
+                sectionsOf(new Section(SectionKind.SESSIONS, List.of(
+                        task(true, new TaskPlacement.ThisWindow())))));
         assertEquals(List.of(), sectionsOf(new Section(SectionKind.WORKTREES, List.of(worktree(false, false)))));
+    }
+
+    @Test
+    void sessionsSectionOffersOnlyItsBulkCleanup() {
+        assertEquals(List.of(List.of(TaskMenu.Item.CLEANUP_DONE_SESSIONS)),
+                sectionsOf(new Section(SectionKind.SESSIONS, List.of(
+                        task(true, new TaskPlacement.ThisWindow())))));
     }
 
     @Test

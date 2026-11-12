@@ -662,6 +662,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         Map<TaskMenu.Item, AnAction> taskActions = TaskActions.taskActions();
         Map<TaskMenu.Item, AnAction> menuActions = new EnumMap<>(TaskMenu.Item.class);
         menuActions.putAll(taskActions);
+        menuActions.put(TaskMenu.Item.CLEANUP_DONE_SESSIONS, new CleanupDoneSessionsAction());
         menuActions.put(TaskMenu.Item.SWITCH_TO_TASK, switchToTask);
         menuActions.put(TaskMenu.Item.NEW_TASK, newTask);
         menuActions.put(TaskMenu.Item.NEW_TASK_IN_MAIN, newTaskInMain);

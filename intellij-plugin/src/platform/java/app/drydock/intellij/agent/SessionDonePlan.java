@@ -1,5 +1,7 @@
 package app.drydock.intellij.agent;
 
+import app.drydock.git.WorktreeService;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -92,6 +94,61 @@ public final class SessionDonePlan {
         }
         String path = porcelainLine.substring(3);
         return path.equals(".idea/") || (path.endsWith(".iml") && !path.contains("/"));
+    }
+
+    /**
+     * Pure: whether a session is done -- its worktree is a non-main,
+     * non-locked linked worktree whose work has already landed: the branch
+     * merged (ancestry, or its pull request recorded as merged), or the
+     * worktree prunable (its directory already gone) or detached. The same
+     * test the standalone app's stale bucket applies to session-less
+     * worktrees, applied to the worktree a session sits on. A merely idle
+     * session on an unmerged branch is not done and is never touched by the
+     * bulk cleanup; a main-checkout or locked worktree never counts either.
+     */
+    public static boolean doneSession(WorktreeService.Worktree worktree) {
+        return !worktree.mainCheckout() && !worktree.locked()
+                && (worktree.merged() || worktree.prunable() || worktree.detached());
+    }
+
+    /** Under the bulk dialog's "Forget task only". */
+    public static String bulkForgetDetail() {
+        return "Removes the tasks from Drydock. Worktrees and branches stay.";
+    }
+
+    /** Under the bulk dialog's "Forget + remove worktrees": the per-session guards stay on. */
+    public static String bulkRemoveDetail() {
+        return "Also removes each clean worktree. A worktree with uncommitted or untracked files,"
+                + " or another session still using it, is kept.";
+    }
+
+    /** Under the bulk dialog's branch checkbox: merged only, and never a pruned worktree's. */
+    public static String bulkDeleteBranchDetail() {
+        return "Branches of removed worktrees are deleted only when their work is merged;"
+                + " a pruned worktree keeps its branch.";
+    }
+
+    /**
+     * Pure: the bulk dialog's summary line. {@code running} says how many
+     * of the done sessions' agents still run and will be stopped.
+     */
+    public static String bulkSummary(int count, int running) {
+        String sessions = count + (count == 1 ? " session" : " sessions");
+        if (running == 0) {
+            return "Forget " + sessions + " whose work has landed (merged, pruned, or detached)?";
+        }
+        return "Forget " + sessions + " whose work has landed (merged, pruned, or detached)? "
+                + running + (running == 1 ? " agent still runs and will be stopped."
+                        : " agents still run and will be stopped.");
+    }
+
+    /**
+     * Pure: why the bulk removal kept a worktree -- the count of what
+     * removing it would have lost, the same risk line the per-session
+     * dialog shows as a warning; the fallback names the unreadable state.
+     */
+    public static String bulkKeptReason(Risks risks) {
+        return riskLine(risks).orElse("its state could not be read");
     }
 
     /** Whether removing asks first: anything in {@link #riskLine}. */
