@@ -82,7 +82,7 @@ public final class DelayedTaskActions {
      * T40): one entry per action. CANCEL keys on the task's PLAN, not its
      * presentation, so it never appears in {@link #applicable} -- the Cancel
      * action resolves the CURRENT published plan record (P4.12). */
-    public enum Item { START, CANCEL, EDIT, DROP, CONFIRM, REOPEN, GOTO_BLOCKER_SESSION, MIRROR_TO_GITHUB,
+    public enum Item { START, CLAIM, CANCEL, EDIT, DROP, CONFIRM, REOPEN, GOTO_BLOCKER_SESSION, MIRROR_TO_GITHUB,
         MIRROR_TO_JIRA, OPEN_MIRRORS, REFRESH }
 
     /** The selected delayed-task row, for the task-node actions (T20a). */
@@ -103,7 +103,8 @@ public final class DelayedTaskActions {
     /** The task node's menu entries, in menu order (T20a; Start first, T31; Cancel after
      * it, T40; the view gesture last). */
     public static Entry[] menu() {
-        return new Entry[] { new Entry(Start.ID, new Start()), new Entry(Cancel.ID, new Cancel()),
+        return new Entry[] { new Entry(Start.ID, new Start()), new Entry(Claim.ID, new Claim()),
+                new Entry(Cancel.ID, new Cancel()),
                 new Entry(Edit.ID, new Edit()), new Entry(Drop.ID, new Drop()),
                 new Entry(Confirm.ID, new Confirm()), new Entry(Reopen.ID, new Reopen()),
                 new Entry(GotoBlockerSession.ID, new GotoBlockerSession()),
@@ -122,8 +123,15 @@ public final class DelayedTaskActions {
         Set<Item> items = switch (presentation) {
             case REVIEW -> EnumSet.of(Item.EDIT, Item.DROP, Item.CONFIRM, Item.REOPEN);
             case TERMINAL -> EnumSet.of(Item.EDIT, Item.REOPEN);
-            case BLOCKED -> EnumSet.of(Item.START, Item.EDIT, Item.DROP, Item.GOTO_BLOCKER_SESSION);
-            case READY -> EnumSet.of(Item.START, Item.EDIT, Item.DROP);
+            // CLAIM (S4 of docs/StackedPrExecution.md) on the blocked and
+            // ready rows alike: a blocked follow-up whose prerequisite's
+            // branch exists is claimable even while the prerequisite runs
+            // (S2 -- the review gate holds statuses, not stacking); the
+            // click validates the claim and refuses visibly when the branch
+            // does not exist yet.
+            case BLOCKED -> EnumSet.of(Item.START, Item.CLAIM, Item.EDIT, Item.DROP,
+                    Item.GOTO_BLOCKER_SESSION);
+            case READY -> EnumSet.of(Item.START, Item.CLAIM, Item.EDIT, Item.DROP);
             default -> EnumSet.of(Item.EDIT, Item.DROP);
         };
         items.add(Item.REFRESH);
@@ -446,6 +454,42 @@ public final class DelayedTaskActions {
         public Start() { super(Item.START, "Start Session…",
                 "Start one session for this task and its same-project plan", AllIcons.Actions.Execute); }
         @Override void dispatch(Project project, DelayedTaskRow row) { DelayedTaskStart.start(project, row); }
+    }
+
+    /** Claim (S4 of docs/StackedPrExecution.md): launch this follow-up as its OWN stacked session, its
+      * work cut from its in-repository prerequisite's {@code dd/<id>} branch -- the same launch path
+      * the {@code task_claim} MCP tool drives. Offered on blocked and ready rows; the click validates
+      * the claim and refuses visibly when the prerequisite's branch does not exist yet. */
+    public static final class Claim extends TaskNodeAction {
+        public static final String ID = "Drydock.DelayedTask.Claim";
+        public Claim() { super(Item.CLAIM, "Claim Stacked Session…",
+                "Launch this follow-up as its own session, stacked on its prerequisite's branch",
+                AllIcons.Actions.MenuOpen); }
+        @Override void dispatch(Project project, DelayedTaskRow row) { claim(project, row); }
+    }
+
+    /** The Claim write (S4): visible progress, the service's seam off the EDT, and a visible refusal
+      * on every refused path -- a refused claim changes nothing. */
+    static void claim(Project from, DelayedTaskRow row) {
+        DelayedTaskService service = DrydockPluginService.getInstance().taskService();
+        ProgressManager.getInstance().run(new Task.Backgroundable(from,
+                "Claiming '" + row.title() + "'…", true) {
+            @Override
+            public void run(@NotNull ProgressIndicator indicator) {
+                indicator.setText("Claiming '" + row.title() + "'");
+                try {
+                    Optional<String> refused = service.claimFromUi(row.id()).get(60, TimeUnit.SECONDS);
+                    refused.ifPresent(reason -> refuse(from, "Drydock did not claim '"
+                            + row.title() + "': " + reason));
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } catch (ExecutionException | TimeoutException | RuntimeException e) {
+                    LOG.log(Level.WARNING, "Could not claim " + row.id().text(), e);
+                    refuse(from, "Drydock could not claim '" + row.title() + "': "
+                            + WorktreeErrors.visibleMessage(e));
+                }
+            }
+        });
     }
 
     /** Cancel Plan (T40, P4.12): offered wherever the row sits -- in the section
