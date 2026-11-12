@@ -72,6 +72,13 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
 
     static final String DONE_LINK_TEXT = "Done\u2026";
 
+    /** The tag on a session row's {@code PR #n} link, shown while its pull request's page is known. */
+    static final Object PR_LINK = new Object();
+
+    /** The tag on a session row's mirrored-issue link ({@code #12}, {@code PROJ-7}); the tag carries the address. */
+    record MirrorLink(String url) {
+    }
+
     /** The tag on a conflicting pull request row's {@code Resolve Conflicts…} link. */
     static final Object RESOLVE_CONFLICTS_LINK = new Object();
 
@@ -393,12 +400,34 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
         if (task.readOnly()) {
             append("  RO", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
         }
-        // The state is the leading icon; the tooltip names the PR. Without a
-        // known state the number stays as grey text.
-        task.branchPullRequest().ifPresent(pullRequest -> setToolTipText(pullRequestTooltip(pullRequest)));
-        if (task.branchPullRequest().flatMap(TaskTreeRenderer::pullRequestIcon).isEmpty()) {
-            task.branchPullRequest().map(BranchPullRequest::number).or(() -> pullRequestOf(task)).ifPresent(number ->
+        // The state is the leading icon; the tooltip names the PR. With the
+        // page known the number is the link to it (merged or closed too: the
+        // page stays useful after merge); without one the number stays grey
+        // text, as before.
+        Optional<BranchPullRequest> pullRequest = task.branchPullRequest();
+        pullRequest.ifPresent(pr -> setToolTipText(pullRequestTooltip(pr)));
+        if (pullRequestUrl(task).isPresent()) {
+            append("  PR #" + pullRequest.orElseThrow().number(),
+                    SimpleTextAttributes.LINK_ATTRIBUTES, PR_LINK);
+        } else if (pullRequest.flatMap(TaskTreeRenderer::pullRequestIcon).isEmpty()) {
+            pullRequest.map(BranchPullRequest::number).or(() -> pullRequestOf(task)).ifPresent(number ->
                     append("  PR #" + number, SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES));
+        }
+        // The session's attached issues: every mirror of a task that names
+        // this session, each label its own link (memory-only, cached snapshot).
+        List<MirrorLink> mirrors = mirrorLinks(TaskMirroring.mirrorsOfSession(
+                task.session().id().toString()));
+        if (!mirrors.isEmpty()) {
+            append("  " + MIRROR_MARK, MIRROR_ATTRIBUTES);
+            for (int i = 0; i < mirrors.size(); i++) {
+                if (i > 0) {
+                    append(", ", MIRROR_ATTRIBUTES);
+                }
+                append(TaskMirror.label(mirrors.get(i).url()), MIRROR_ATTRIBUTES, mirrors.get(i));
+            }
+            setToolTipText((getToolTipText() == null ? "" : getToolTipText() + " · ")
+                    + "mirrored to " + mirrors.stream().map(m -> TaskMirror.label(m.url()))
+                            .reduce((a, b) -> a + ", " + b).orElse(""));
         }
         String agent = AgentLabels.displayName(DrydockPluginService.getInstance().registry(),
                 task.session().agentKind());
@@ -425,6 +454,16 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
     static Optional<Integer> pullRequestOf(TaskRow task) {
         Optional<Integer> linked = task.session().pr().number();
         return linked.isPresent() ? linked : task.branch().flatMap(PrCheckoutService::pullRequestNumberOf);
+    }
+
+    /** Pure. The pull request's page address a session row offers as its link, when gh reported it. */
+    static Optional<String> pullRequestUrl(TaskRow task) {
+        return task.branchPullRequest().flatMap(BranchPullRequest::url);
+    }
+
+    /** Pure. A session row's mirrored-issue links, one per recorded mirror, in order. */
+    static List<MirrorLink> mirrorLinks(List<String> mirrors) {
+        return mirrors.stream().map(MirrorLink::new).toList();
     }
 
     /** What a branch's pull request badge reads as, which also picks its colour. */

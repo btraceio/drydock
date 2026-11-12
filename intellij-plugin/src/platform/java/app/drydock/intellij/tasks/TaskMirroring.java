@@ -33,6 +33,8 @@ import org.jetbrains.annotations.NotNull;
 
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ExecutionException;
@@ -80,6 +82,33 @@ public final class TaskMirroring {
     /** Opens every recorded mirror of the task in the browser. */
     public static void openMirrors(DelayedTaskRow row) {
         row.mirrors().forEach(BrowserUtil::browse);
+    }
+
+    /**
+     * The mirror addresses of every task whose {@code sessions} list names
+     * the session, in snapshot order, each address once: two tasks naming
+     * the same session may record the same mirror ({@link TaskMirror#byMirror}
+     * keeps the first for the same reason), and a repeat would paint a
+     * duplicate link and open a duplicate tab. From the task service's cached
+     * watched snapshot only: no scan, no I/O (the same paint discipline as the
+     * plan annotation). Empty before the first snapshot and for a session no
+     * task claims.
+     */
+    public static List<String> mirrorsOfSession(String sessionId) {
+        if (sessionId == null || sessionId.isBlank()) {
+            return List.of();
+        }
+        TaskStoreWatcher.WatchedSnapshot watched =
+                DrydockPluginService.getInstance().taskService().watchedSnapshot();
+        if (watched == null) {
+            return List.of();
+        }
+        List<String> mirrors = new ArrayList<>();
+        for (TaskDocument document : watched.snapshot().bySessionReference()
+                .getOrDefault(sessionId, List.of())) {
+            mirrors.addAll(document.mirrors());
+        }
+        return TaskMirror.uniqueByAddress(mirrors);
     }
 
     /**

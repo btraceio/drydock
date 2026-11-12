@@ -327,6 +327,41 @@ class TaskTreeRendererTest {
         return new BranchPullRequest(12, state, draft, "feature/x", "Fix it", Optional.empty());
     }
 
+    private static BranchPullRequest branchPr(PrLifecycle state, boolean draft, Optional<String> url) {
+        return new BranchPullRequest(12, state, draft, "feature/x", "Fix it", url);
+    }
+
+    private static TaskRow row(BranchPullRequest pullRequest) {
+        ManagedAgentSession session = new ManagedAgentSession.Builder(ManagedSessionId.newId(), RepositoryId.newId(),
+                "Fix chunk memory growth", AgentBinding.unlaunched(AgentKind.PI, SessionMode.WRITES),
+                SessionWorkspace.inRepository(DIR), Instant.EPOCH).status(SessionStatus.INACTIVE).build();
+        return new TaskRow(session, Optional.empty(), false, Optional.of("fix/chunk_memory"),
+                new TaskPlacement.Idle(false), false, false, false, Optional.of(pullRequest));
+    }
+
+    @Test
+    void aSessionRowOffersItsPullRequestsPageWhenGhReportedOne() {
+        assertEquals(Optional.of("https://github.com/o/r/pull/12"), TaskTreeRenderer.pullRequestUrl(
+                row(branchPr(PrLifecycle.OPEN, false, Optional.of("https://github.com/o/r/pull/12")))),
+                "gh's url is the link, whatever the state");
+        assertEquals(Optional.of("https://github.com/o/r/pull/12"), TaskTreeRenderer.pullRequestUrl(
+                row(branchPr(PrLifecycle.MERGED, false, Optional.of("https://github.com/o/r/pull/12")))),
+                "a merged PR's page stays useful");
+        assertEquals(Optional.empty(), TaskTreeRenderer.pullRequestUrl(row(branchPr(PrLifecycle.OPEN, false))),
+                "no url from gh: no link to offer");
+        assertEquals(Optional.empty(), TaskTreeRenderer.pullRequestUrl(row(false, new TaskPlacement.Idle(false))),
+                "no pull request known: no link to offer");
+    }
+
+    @Test
+    void aSessionRowsMirrorsBecomeLinksInTheRecordedOrder() {
+        assertEquals(List.of(new TaskTreeRenderer.MirrorLink("https://github.com/o/r/issues/12"),
+                        new TaskTreeRenderer.MirrorLink("https://acme.atlassian.net/browse/PROJ-7")),
+                TaskTreeRenderer.mirrorLinks(List.of("https://github.com/o/r/issues/12",
+                        "https://acme.atlassian.net/browse/PROJ-7")));
+        assertEquals(List.of(), TaskTreeRenderer.mirrorLinks(List.of()));
+    }
+
     @Test
     void aSessionIconKeepsTheStateSlotSoNamesAlign() {
         Icon dot = TaskTreeRenderer.PR_OPEN_ICON;

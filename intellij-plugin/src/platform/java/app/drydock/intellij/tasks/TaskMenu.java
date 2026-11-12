@@ -1,6 +1,7 @@
 package app.drydock.intellij.tasks;
 
 import app.drydock.intellij.agent.SessionTransfer;
+import app.drydock.tasks.TaskMirror;
 import app.drydock.intellij.tasks.TaskNode.Ghost;
 import app.drydock.intellij.tasks.TaskNode.GhostSource;
 import app.drydock.intellij.tasks.TaskNode.GitHubNode;
@@ -24,6 +25,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Stream;
 
 /**
  * The Drydock tree's context menu, as pure layout: which actions apply to
@@ -98,11 +100,17 @@ final class TaskMenu {
     }
 
     /** The non-pure answers of one menu build, computed once by {@link #factsFor}. */
-    record MenuFacts(boolean transferAvailable, boolean jiraEnabled, boolean mirroredTask) {
+    record MenuFacts(boolean transferAvailable, boolean jiraEnabled, boolean mirroredTask,
+                     boolean sessionGitHubLink, boolean sessionJiraLink) {
 
         /** The facts before issue rows could mirror a task: no mirrored task. */
         MenuFacts(boolean transferAvailable, boolean jiraEnabled) {
             this(transferAvailable, jiraEnabled, false);
+        }
+
+        /** The facts before session rows carried attached links: no session link. */
+        MenuFacts(boolean transferAvailable, boolean jiraEnabled, boolean mirroredTask) {
+            this(transferAvailable, jiraEnabled, mirroredTask, false, false);
         }
     }
 
@@ -126,7 +134,7 @@ final class TaskMenu {
         TaskNode node = selected.isEmpty() ? lead : selected.get(0);
         return switch (node) {
             case null -> List.of();
-            case TaskRow row -> row.running() ? running(row, facts) : idle(row);
+            case TaskRow row -> row.running() ? running(row, facts) : idle(row, facts);
             case PullRequestRow pullRequest -> nonEmpty(List.of(
                     section(Item.OPEN_IN_WORKBENCH,
                             pullRequest.pullRequest().conflicting() ? Item.RESOLVE_CONFLICTS : null),
@@ -175,16 +183,20 @@ final class TaskMenu {
                         TaskActions.reviewsChanges(row) ? Item.REVIEW_CHANGES : null,
                         facts.transferAvailable() ? Item.TRANSFER_TO : null),
                 List.of(Item.RENAME, Item.FLAG, Item.NEW_TASK),
+                section(facts.sessionGitHubLink() ? Item.OPEN_IN_GITHUB : null,
+                        facts.sessionJiraLink() ? Item.OPEN_IN_JIRA : null),
                 section(TaskActions.closesOwnWindow(row) ? Item.DEACTIVATE_AND_CLOSE : null,
                         Item.DONE_WITH_TASK)));
     }
 
     /** An idle task: the honest lifecycle variants, then management, cleanup last. */
-    private static List<List<Item>> idle(TaskRow row) {
+    private static List<List<Item>> idle(TaskRow row, MenuFacts facts) {
         return nonEmpty(List.of(
                 List.of(Item.SWITCH_TO_TASK),
                 section(Item.RESUME, TaskActions.resumesElsewhere(row) ? Item.RESUME_IN_OWN_WINDOW : null),
                 List.of(Item.RENAME, Item.FLAG, Item.NEW_TASK),
+                section(facts.sessionGitHubLink() ? Item.OPEN_IN_GITHUB : null,
+                        facts.sessionJiraLink() ? Item.OPEN_IN_JIRA : null),
                 List.of(Item.DONE_WITH_TASK)));
     }
 
@@ -251,7 +263,9 @@ final class TaskMenu {
     static MenuFacts factsFor(TaskNode lead, boolean jiraEnabled) {
         return new MenuFacts(lead instanceof TaskRow row
                 && SessionTransfer.available(row.session(), row.activity()), jiraEnabled,
-                issueUrlOf(lead).flatMap(TaskMirroring::mirroredTask).isPresent());
+                issueUrlOf(lead).flatMap(TaskMirroring::mirroredTask).isPresent(),
+                lead instanceof TaskRow row && !githubUrlsOf(row).isEmpty(),
+                lead instanceof TaskRow row && !jiraUrlsOf(row).isEmpty());
     }
 
     /** The page of a GitHub or Jira issue row, the address a task mirror records. Pure. */
@@ -261,6 +275,49 @@ final class TaskMenu {
             case JiraIssueRow jira -> Optional.of(jira.issue().url());
             case null, default -> Optional.empty();
         };
+    }
+
+    /**
+     * Any thread: the GitHub pages the selected row leads to — an issue's or
+     * pull request's own page, or a session row's pull request plus every
+     * GitHub issue its tasks mirror. The Open in GitHub action opens all of
+     * them, the way Open Mirrors does.
+     */
+    static List<String> githubUrlsOf(TaskNode node) {
+        return githubUrlsOf(node, node instanceof TaskRow row
+                ? TaskMirroring.mirrorsOfSession(row.session().id().toString()) : List.of());
+    }
+
+    /** Pure over the given session mirrors: {@link #githubUrlsOf(TaskNode)} without the snapshot read. */
+    static List<String> githubUrlsOf(TaskNode node, List<String> sessionMirrors) {
+        return switch (node) {
+            case IssueRow issue -> issue.issue().url().stream().toList();
+            case PullRequestRow pullRequest -> pullRequest.pullRequest().url().stream().toList();
+            case TaskRow task -> Stream.concat(
+                    TaskTreeRenderer.pullRequestUrl(task).stream(),
+                    sessionMirrors.stream().filter(TaskMenu::isGitHub)).toList();
+            case null, default -> List.of();
+        };
+    }
+
+    /** Any thread: the Jira pages the selected row leads to, as {@link #githubUrlsOf(TaskNode)} for Jira. */
+    static List<String> jiraUrlsOf(TaskNode node) {
+        return jiraUrlsOf(node, node instanceof TaskRow row
+                ? TaskMirroring.mirrorsOfSession(row.session().id().toString()) : List.of());
+    }
+
+    /** Pure over the given session mirrors: {@link #jiraUrlsOf(TaskNode)} without the snapshot read. */
+    static List<String> jiraUrlsOf(TaskNode node, List<String> sessionMirrors) {
+        return switch (node) {
+            case JiraIssueRow jira -> List.of(jira.issue().url());
+            case TaskRow task -> sessionMirrors.stream().filter(url ->
+                    TaskMirror.kindOf(url).filter(TaskMirror.Kind.JIRA::equals).isPresent()).toList();
+            case null, default -> List.of();
+        };
+    }
+
+    private static boolean isGitHub(String url) {
+        return TaskMirror.kindOf(url).filter(TaskMirror.Kind.GITHUB::equals).isPresent();
     }
 
     /**
