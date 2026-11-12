@@ -117,6 +117,20 @@ class DelayedTaskRowsTest {
         return DelayedTaskTreeModel.derive(new Inputs(WATCHED, SESSION_ROWS, LIVE, SLUGS, view, filter, NOW));
     }
 
+    /**
+     * A row carries its repository's display slug from the same mapping the
+     * graph resolves references with: the hint a Tasks-section row needs to
+     * say which project it applies to. A mapping that names no repository
+     * yields no hint, never an invented name.
+     */
+    @Test
+    void rowsCarryTheirProjectSlugFromTheMapping() {
+        assertEquals("alpha", byTitle(ROWS, "Free the harbour").project());
+        assertEquals("beta", byTitle(ROWS, "Beta blocker").project());
+        List<DelayedTaskRow> unnamed = DelayedTaskRows.rows(WATCHED, LIVE, repository -> "  ", NOW);
+        assertNull(byTitle(unnamed, "Free the harbour").project());
+    }
+
     /** Matrix 1 and 4: D9-D11 placement, hints, broken and cyclic rows. */
     @Test
     void placementCarriesPresentationsAndHints() {

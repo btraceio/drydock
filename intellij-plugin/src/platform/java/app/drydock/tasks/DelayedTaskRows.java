@@ -236,8 +236,12 @@ public final class DelayedTaskRows {
             TaskState.TaskView view = state.viewOf(document.id()).orElseThrow();
             boolean stale = document.created().map(created -> created.isBefore(now.minus(STALE_AFTER)))
                     .orElse(false);
+            // The row's project hint (P2): the same slug mapping the graph
+            // resolves references with; null when it names no repository, so
+            // the renderer stays silent instead of inventing a name.
+            String project = projectSlugs.apply(document.repository());
             out.add(new TaskNode.DelayedTaskRow(view, document.title(), document.repository(),
-                    document.created(), stale, document.sessions(), document.mirrors()));
+                    document.created(), stale, document.sessions(), document.mirrors(), project));
         }
         return out;
     }

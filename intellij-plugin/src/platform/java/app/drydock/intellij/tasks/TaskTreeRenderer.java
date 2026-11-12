@@ -219,7 +219,8 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
             // Fully-qualified on purpose: the delayed-task layer reuses the
             // simple name TaskNode in app.drydock.tasks; this class's own
             // TaskNode (app.drydock.intellij.tasks) stays unqualified above.
-            case app.drydock.tasks.TaskNode.DelayedTaskRow task -> paintDelayedTask(task);
+            case app.drydock.tasks.TaskNode.DelayedTaskRow task ->
+                    paintDelayedTask(task, underTasksSection(node));
             case app.drydock.tasks.TaskNode.SessionTasks session ->
                     // A session row plus task children: the session row itself
                     // renders exactly as it always did (below), unchanged.
@@ -552,6 +553,17 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
             SimpleTextAttributes.STYLE_PLAIN, new JBColor(new Color(0xB5, 0x4A, 0x0E), new Color(0xD9, 0x8A, 0x5A)));
 
     /**
+     * Whether this delayed task paints under the Tasks section node: the
+     * one place whose rows span every project, so a row there needs its
+     * project named to say what it applies to. A row under a session row
+     * sits inside its project's subtree and needs no such hint.
+     */
+    private static boolean underTasksSection(DefaultMutableTreeNode node) {
+        return node.getParent() instanceof DefaultMutableTreeNode parent
+                && parent.getUserObject() instanceof app.drydock.tasks.TaskNode.TasksSection;
+    }
+
+    /**
      * Paints one delayed task (D9-D11) from the CARRIED row only: the
      * presentation's icon and hint word, the age and stale flag against one
      * clock read for this paint, and the carried blocker texts - never a
@@ -560,13 +572,18 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
      * service's CACHED publications only (published plan records, watched
      * snapshot, live-session view), so the progress stays visible wherever
      * the row sits -- in the section or under its session row (D10) -- and no
-     * plan file is ever read at paint time.
+     * plan file is ever read at paint time. Under the Tasks section the row
+     * also names its project (the section spans every project); the slug is
+     * carried on the row, resolved once at derivation time.
      */
-    private void paintDelayedTask(app.drydock.tasks.TaskNode.DelayedTaskRow task) {
+    private void paintDelayedTask(app.drydock.tasks.TaskNode.DelayedTaskRow task, boolean underTasksSection) {
         Instant now = Instant.now();
         setIcon(delayedIcon(task));
         append(task.title());
         append("  " + delayedHint(task), delayedHintAttributes(task.presentation()));
+        if (underTasksSection && task.project() != null) {
+            append(" · " + task.project(), SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
+        }
         Optional<DelayedTaskRows.PlanProgress> progress = planProgressOf(task.id());
         progress.ifPresent(annotation -> append("  " + annotation.text(),
                 SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES));
@@ -687,6 +704,9 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
     static String delayedTooltip(app.drydock.tasks.TaskNode.DelayedTaskRow task, Instant now) {
         StringBuilder tip = new StringBuilder("Task ").append(task.id().text())
                 .append(" (").append(delayedHint(task)).append(')');
+        if (task.project() != null) {
+            tip.append(" · project ").append(task.project());
+        }
         task.created().ifPresent(created -> tip.append(" · created ")
                 .append(AgentStripText.relativeAge(Duration.between(created, now))).append(" ago"));
         if (task.stale()) {

@@ -115,6 +115,31 @@ public class DelayedTaskRendererPlatformTest extends BasePlatformTestCase {
         assertSame(AllIcons.Actions.Checked, terminal.getIcon());
     }
 
+    /**
+     * A row under the Tasks section names its project (the section spans
+     * every project, so the row must say which one it applies to); the same
+     * row under a session row paints no project hint, its project's subtree
+     * already says it. The tooltip names the project in both places.
+     */
+    public void testARowUnderTheTasksSectionNamesItsProjectAndASessionChildDoesNot() {
+        DelayedTaskRow projected = new DelayedTaskRow(new TaskView(TaskId.of("fix-alloc-k3f9"),
+                Presentation.READY, List.of(), List.of()), TITLE, REPO, Optional.empty(), false, List.of(),
+                List.of(), "alpha");
+        TaskTreeRenderer inSection = paintUnder(new TasksSection("Tasks", List.of()), projected);
+        assertEquals(TITLE + "  ready" + DOT + "alpha", text(inSection));
+        assertEquals(SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES, attributes(inSection, DOT + "alpha"));
+        assertEquals("Task fix-alloc-k3f9 (ready)" + DOT + "project alpha", inSection.getToolTipText());
+        TaskTreeRenderer detached = paint(projected);
+        assertEquals("the same row under a session row paints no project hint", TITLE + "  ready",
+                text(detached));
+        assertEquals("Task fix-alloc-k3f9 (ready)" + DOT + "project alpha", detached.getToolTipText());
+        assertEquals("a row whose mapping names no repository paints no made-up name",
+                TITLE + "  ready", text(paintUnder(new TasksSection("Tasks", List.of()),
+                        new DelayedTaskRow(new TaskView(TaskId.of("fix-alloc-k3f9"), Presentation.READY,
+                                List.of(), List.of()), TITLE, REPO, Optional.empty(), false, List.of(),
+                                List.of(), " "))));
+    }
+
     // ---- matrix 2: the accessible label carries status, age, blocker and stale text ----
 
     public void testTheAccessibleLabelCarriesStatusAgeBlockerAndStaleText() {
@@ -278,6 +303,16 @@ public class DelayedTaskRendererPlatformTest extends BasePlatformTestCase {
         TaskTreeRenderer renderer = new TaskTreeRenderer();
         renderer.customizeCellRenderer(new JTree(), new DefaultMutableTreeNode(userObject), false, true, false, 1,
                 false);
+        return renderer;
+    }
+
+    /** Paints one row as the child of the given node, the way the tree paints a section's child. */
+    private static TaskTreeRenderer paintUnder(Object parentUserObject, Object userObject) {
+        DefaultMutableTreeNode parent = new DefaultMutableTreeNode(parentUserObject);
+        DefaultMutableTreeNode child = new DefaultMutableTreeNode(userObject);
+        parent.add(child);
+        TaskTreeRenderer renderer = new TaskTreeRenderer();
+        renderer.customizeCellRenderer(new JTree(), child, false, true, false, 1, false);
         return renderer;
     }
 

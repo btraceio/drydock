@@ -36,9 +36,15 @@ public sealed interface TaskNode {
      * an INJECTED clock by {@link DelayedTaskRows}, never
      * {@code System.now} deep in row code. {@code mirrors} is the
      * document's stored mirror addresses (GitHub issues, Jira tickets).
+     * {@code project} is the repository's display slug from the caller's
+     * mapping, the hint a row under the Tasks section needs to say WHICH
+     * project it belongs to (the section spans every project); null when
+     * the mapping supplies none, so an unregistered repository renders no
+     * made-up name.
      */
     record DelayedTaskRow(TaskState.TaskView view, String title, RepositoryId repository,
-            Optional<Instant> created, boolean stale, List<String> storedSessions, List<String> mirrors)
+            Optional<Instant> created, boolean stale, List<String> storedSessions, List<String> mirrors,
+            String project)
             implements TaskNode {
 
         public DelayedTaskRow {
@@ -48,6 +54,13 @@ public sealed interface TaskNode {
             Objects.requireNonNull(created, "created");
             storedSessions = List.copyOf(storedSessions);
             mirrors = List.copyOf(mirrors);
+            project = project != null && !project.isBlank() ? project : null;
+        }
+
+        /** The shape before rows carried their project slug: no project hint. */
+        public DelayedTaskRow(TaskState.TaskView view, String title, RepositoryId repository,
+                Optional<Instant> created, boolean stale, List<String> storedSessions, List<String> mirrors) {
+            this(view, title, repository, created, stale, storedSessions, mirrors, null);
         }
 
         /** The shape before tasks could be mirrored: no mirror. */
