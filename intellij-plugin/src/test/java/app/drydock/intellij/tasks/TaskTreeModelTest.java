@@ -578,6 +578,19 @@ class TaskTreeModelTest {
     }
 
     @Test
+    void withViewFilterChangesOnlyTheView() {
+        In in = new In().project(BTRACE).githubIssues(BTRACE);
+        in.pendingIssueRoots.add(BTRACE);
+        TaskTreeModel.Inputs gathered = in.build();
+
+        TaskTreeModel.Inputs active = gathered.withViewFilter(ViewFilter.ACTIVE);
+
+        assertEquals(ViewFilter.ACTIVE, active.viewFilter());
+        in.viewFilter = ViewFilter.ACTIVE;
+        assertEquals(in.build(), active, "every other input is carried over unchanged");
+    }
+
+    @Test
     void neitherSourceConfiguredGivesNoIssuesSection() {
         In in = new In().project(BTRACE);
 

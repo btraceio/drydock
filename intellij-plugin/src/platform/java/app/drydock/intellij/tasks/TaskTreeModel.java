@@ -248,6 +248,16 @@ public final class TaskTreeModel {
             pendingJiraGroups = Set.copyOf(pendingJiraGroups);
         }
 
+        /** These inputs under another view: the view fetches nothing, so no gather is needed. */
+        Inputs withViewFilter(ViewFilter view) {
+            return new Inputs(projects, sessions, worktreesByMainRoot, mainRootOf, currentMainRoot,
+                    currentWorkingRoot, activity, running, hosts, missingFolders, recordedRoots,
+                    worktreeContainers, pullRequestContainers, githubIssueRoots, githubGhostRoots, jiraRoots,
+                    jiraGhostRoots, openFolders, lastActivity, now, issuesByMainRoot, jiraGroupsByMainRoot,
+                    pullRequestsByMainRoot, pullRequestDedupWorktrees, listProblem, filter, view, resumable,
+                    pullRequestsBySession, pendingIssueRoots, pendingJiraGroups);
+        }
+
         /** The shape before sessions carried their branch's pull request: none known, no listing pending. */
         public Inputs(List<SharedProject> projects, List<ManagedAgentSession> sessions,
                       Map<Path, List<Worktree>> worktreesByMainRoot, Map<Path, Path> mainRootOf,
