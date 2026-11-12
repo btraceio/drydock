@@ -91,6 +91,47 @@ class WorktreeServiceTest {
     }
 
     @Test
+    void checkoutOfNamesTheMainCheckoutAndBranchFromALinkedWorktreeAndItsSubdirectory(@TempDir Path repoDir,
+            @TempDir Path worktreeParent) throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        Path linked = worktreeParent.resolve("linked-wt");
+        runGit(repo, "worktree", "add", linked.toString(), "-b", "feat/linked");
+        Path subdirectory = Files.createDirectories(linked.resolve("deep/inside"));
+
+        for (Path directory : List.of(linked, subdirectory)) {
+            WorktreeService.Checkout checkout = service.checkoutOf(directory).get();
+            assertEquals(repo.toRealPath(), checkout.mainCheckout().toRealPath());
+            assertEquals(Optional.of("feat/linked"), checkout.branch());
+        }
+        assertEquals(Optional.of("main"), service.checkoutOf(repo).get().branch());
+    }
+
+    @Test
+    void checkoutOfADetachedWorktreeHasNoBranch(@TempDir Path repoDir, @TempDir Path worktreeParent)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir);
+        String head = runGitCapture(repo, "rev-parse", "HEAD").trim();
+        Path detachedDir = worktreeParent.resolve("detached-wt");
+        runGit(repo, "worktree", "add", "--detach", detachedDir.toString(), head);
+
+        assertEquals(Optional.empty(), service.checkoutOf(detachedDir).get().branch());
+    }
+
+    @Test
+    void checkoutOfOutsideAnyRepositoryFails(@TempDir Path notARepo) {
+        assertThrows(CompletionException.class, () -> service.checkoutOf(notARepo).join());
+    }
+
+    @Test
+    void aCommonGitDirectoryNotNamedDotGitNamesNoMainCheckout() {
+        List<String> command = List.of("git", "rev-parse");
+        assertThrows(GitCommandFailedException.class,
+                () -> WorktreeService.parseCheckout(command, "/srv/repo.git\nmain\n"));
+        assertThrows(GitCommandFailedException.class,
+                () -> WorktreeService.parseCheckout(command, "/srv/repo/.git\n"));
+    }
+
+    @Test
     void listOnNonGitDirectoryThrowsNotAGitRepositoryException(@TempDir Path notARepo) {
         CompletionException completion = assertThrows(CompletionException.class,
                 () -> service.list(notARepo).join());

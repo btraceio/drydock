@@ -18,6 +18,7 @@ import app.drydock.git.JiraIssueListing;
 import app.drydock.git.JiraService;
 import app.drydock.git.PrCheckoutService;
 import app.drydock.git.WorktreeService;
+import app.drydock.git.WorktreeService.Checkout;
 import app.drydock.git.WorktreeService.Worktree;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.agent.AgentConsoles;
@@ -50,7 +51,6 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -104,6 +104,8 @@ final class TaskTreeInputs implements AutoCloseable {
     private final JiraIssueSource jira = new JiraIssueSource();
     private final GitExecutableLocator gitLocator = new GitExecutableLocator();
     private final Map<Path, CachedWorktrees> worktreeCache = new ConcurrentHashMap<>();
+    /** Each session directory's checkout, under the worktree lists' TTL and invalidation. */
+    private final Map<Path, CachedCheckout> checkoutCache = new ConcurrentHashMap<>();
     private final Map<Path, Instant> activityCache = new ConcurrentHashMap<>();
     private final Map<Path, Boolean> remoteCache = new ConcurrentHashMap<>();
     private final Map<IssueKey, CachedIssues> issueCache = new ConcurrentHashMap<>();
@@ -173,6 +175,8 @@ final class TaskTreeInputs implements AutoCloseable {
      */
     record CachedWorktrees(long expiresAt, List<Worktree> listed) { }
 
+    private record CachedCheckout(long expiresAt, Checkout checkout) { }
+
     /** One {@code git remote get-url origin} run in {@code root}; throws when git gave no answer. */
     @FunctionalInterface
     interface OriginProbe {
@@ -194,6 +198,7 @@ final class TaskTreeInputs implements AutoCloseable {
 
     void invalidateWorktrees() {
         worktreeCache.clear();
+        checkoutCache.clear();
         activityCache.clear();
         resumability.clear();
     }
@@ -515,37 +520,38 @@ final class TaskTreeInputs implements AutoCloseable {
     /**
      * Each session's pull request, matched by its current branch against
      * the head branches of its project's PRs. A session joins its project
-     * through paths, never through ids: the live worktree list of its
-     * working directory names the main checkout, whose canonical path is
-     * the badge source's key (a session's {@code repositoryId} is a
-     * state-store id that shares no UUID space with the shared-projects
-     * file's ids, so an id join matches nothing). Only projects that list
-     * pull requests take part, and only sessions whose folder still exists.
+     * through paths, never through ids: {@code git rev-parse} in its working
+     * directory names the main checkout, whose canonical path is the badge
+     * source's key (a session's {@code repositoryId} is a state-store id that
+     * shares no UUID space with the shared-projects file's ids, so an id join
+     * matches nothing). Only projects that list pull requests take part, and
+     * only sessions whose folder still exists. One short git run per session
+     * directory, cached like the worktree lists; never a worktree scan.
      * Never waits on {@code gh}: a lookup still running yields the last
      * answer (none on the very first pass), and its completion requests
      * one more rebuild through {@link #onLateData}.
      */
     private Map<ManagedSessionId, BranchPullRequest> sessionPullRequests(
             List<ManagedAgentSession> sessions, Map<Path, BadgeSource> sources) {
-        return sessionPullRequests(sessions, sources, this::worktreesOf,
+        return sessionPullRequests(sessions, sources, this::checkoutOf,
                 source -> branchPullRequestsNow(source.root(), source.repository()));
     }
 
     /**
      * The session-to-badge join as a pure seam: the same join the instance
-     * method runs, with the two blocking edges injected — the per-session
-     * live worktree listing ({@code listingsOf}) and the project's head-branch
+     * method runs, with the two blocking edges injected — the session
+     * directory's checkout ({@code checkoutOf}: canonical main checkout and
+     * branch, empty when git gives no answer) and the project's head-branch
      * PR map ({@code prsOf}). Pure apart from the directory-existence check
      * (a disk read, kept here so the gate stays tested with the join). The
-     * source is found by the listing's main-checkout path, never by
+     * source is found by the checkout's main-checkout path, never by
      * {@code session.repositoryId()}: the badge-source map is keyed by paths
      * only, so an id-join revert is a compile error, and the tests below pin
-     * the behavioral regression. The branch comes from the session's own
-     * deepest worktree entry, so the main checkout's branch cannot shadow it.
+     * the behavioral regression. A detached checkout has no branch, so no badge.
      */
     static Map<ManagedSessionId, BranchPullRequest> sessionPullRequests(
             List<ManagedAgentSession> sessions, Map<Path, BadgeSource> sources,
-            Function<Path, List<Worktree>> listingsOf,
+            Function<Path, Optional<Checkout>> checkoutOf,
             Function<BadgeSource, Map<String, BranchPullRequest>> prsOf) {
         if (sources.isEmpty()) {
             return Map.of();
@@ -556,17 +562,10 @@ final class TaskTreeInputs implements AutoCloseable {
             if (!Files.isDirectory(session.workingDirectory())) {
                 continue;
             }
-            List<Worktree> listed = listingsOf.apply(session.workingDirectory());
-            Optional<BadgeSource> source = listed.stream()
-                    .filter(Worktree::mainCheckout)
-                    .map(Worktree::path)
-                    .findFirst()
-                    .map(sources::get);
-            if (source.isEmpty()) {
-                continue;
-            }
-            Optional<String> branch = branchOf(listed, session.workingDirectory());
-            if (branch.isEmpty()) {
+            Optional<Checkout> checkout = checkoutOf.apply(session.workingDirectory());
+            Optional<BadgeSource> source = checkout.map(found -> sources.get(found.mainCheckout()));
+            Optional<String> branch = checkout.flatMap(Checkout::branch);
+            if (source.isEmpty() || branch.isEmpty()) {
                 continue;
             }
             Map<String, BranchPullRequest> pullRequests = byRoot.computeIfAbsent(source.get().root(),
@@ -594,23 +593,6 @@ final class TaskTreeInputs implements AutoCloseable {
         return number.flatMap(wanted -> byHeadBranch.values().stream()
                 .filter(pullRequest -> pullRequest.number() == wanted)
                 .findFirst());
-    }
-
-    /**
-     * The branch of the deepest listed worktree whose root contains
-     * {@code workingDirectory} — the same listing that resolved the main
-     * checkout, so no extra git run. Component-wise {@link Path#startsWith},
-     * so an equal path still matches and a session started in a subdirectory
-     * of a worktree resolves to that worktree's branch (the deepest entry
-     * wins, so a linked worktree's own branch is not shadowed by the main
-     * checkout's). A detached or prunable entry has no branch, and a
-     * directory git does not list at all reads as none.
-     */
-    static Optional<String> branchOf(List<Worktree> listed, Path workingDirectory) {
-        return listed.stream()
-                .filter(worktree -> workingDirectory.startsWith(worktree.path()))
-                .max(Comparator.comparingInt(worktree -> worktree.path().getNameCount()))
-                .flatMap(Worktree::branch);
     }
 
     /**
@@ -773,6 +755,31 @@ final class TaskTreeInputs implements AutoCloseable {
         // openPullRequestsBlocking never completes exceptionally (every
         // failure becomes a Failed listing), so join on a done future is safe.
         return listing.isDone() && listing.join() instanceof PullRequestListing.Failed;
+    }
+
+    /**
+     * {@code directory}'s checkout with a canonical main checkout, cached for
+     * the worktree lists' TTL; empty when git gives no answer (for this pass
+     * only, never cached).
+     */
+    private Optional<Checkout> checkoutOf(Path directory) {
+        long now = System.nanoTime();
+        CachedCheckout cached = checkoutCache.get(directory);
+        if (cached != null && cached.expiresAt() > now) {
+            return Optional.of(cached.checkout());
+        }
+        try {
+            Checkout found = worktrees.checkoutOf(directory).get(GIT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            Checkout canonical = new Checkout(RepositoryCatalog.canonicalize(found.mainCheckout()), found.branch());
+            checkoutCache.put(directory, new CachedCheckout(now + WORKTREE_CACHE_NANOS, canonical));
+            return Optional.of(canonical);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return Optional.empty();
+        } catch (ExecutionException | TimeoutException | RuntimeException e) {
+            LOG.log(Level.DEBUG, () -> "No checkout for " + directory + ": " + e);
+            return Optional.empty();
+        }
     }
 
     /**
