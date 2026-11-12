@@ -67,8 +67,10 @@ public final class TaskTools {
     public List<JsonValue> toolDescriptors() {
         return List.of(
                 descriptor("task_get",
-                        "Reads one task by id, from any registered repository: committed title,"
-                                + " status, done_by, created, after references and sessions. review"
+                        "Reads one task by id, from any registered repository: committed title,"+
+                                " body (the full description and session notes -- a title is one"
+                                + " bounded line and may be a truncation), status, done_by, created,"
+                                + " after references and sessions. review"
                                 + " means an agent reported done on a human-validated task and a"
                                 + " human must confirm; done is final.",
                         JsonObject.empty().put("id", schemaString("Task id, as task_list or"
@@ -138,7 +140,9 @@ public final class TaskTools {
                     + " (never stored, or excluded after an id collision); task_list shows the"
                     + " tasks that exist.");
         }
-        return taskJson(document);
+        // The body rides task_get only: task_list stays lean over every task,
+        // and a session needing the full description reads the one task.
+        return taskJson(document).put("body", new JsonString(document.rawBody()));
     }
 
     private JsonValue taskList(ManagedSessionId caller, JsonObject args) throws McpToolException {
@@ -150,11 +154,12 @@ public final class TaskTools {
             documents = documents.filter(d -> d.repository().equals(filter));
         }
         return JsonObject.empty()
-                .put("tasks", new JsonArray(documents.map(TaskTools::taskJson).toList()));
+                .put("tasks", new JsonArray(
+                        documents.map(document -> (JsonValue) taskJson(document)).toList()));
     }
 
     /** The committed fields of one task, with the review-vs-done distinction. */
-    private static JsonValue taskJson(TaskDocument document) {
+    private static JsonObject taskJson(TaskDocument document) {
         return JsonObject.empty()
                 .put("id", new JsonString(document.id().text()))
                 .put("title", new JsonString(document.title()))

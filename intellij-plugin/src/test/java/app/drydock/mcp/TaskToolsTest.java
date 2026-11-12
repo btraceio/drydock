@@ -153,6 +153,22 @@ class TaskToolsTest {
                 refusalOf("task_get", args("id", "no-such-task-w1w2")));
     }
 
+    /** task_get returns the stored body -- description and session notes --
+      * so a session can read the full work after launch; task_list stays
+      * lean and carries no body at all. */
+    @Test
+    void taskGetCarriesTheBodyAndTaskListStaysLean() throws Exception {
+        TaskDocument seeded = seed(alpha, "Cover the login fix", List.of(), caller.toString());
+        context.store.appendNote(seeded.id(), "The full requirement, far longer than the title.");
+        JsonValue got = tools.call(caller, "task_get", args("id", seeded.id().text()));
+        assertTrue(textOf(got, "body").contains("The full requirement, far longer than the title."),
+                "the body carries the description and the appended session note");
+        JsonObject listed = (JsonObject) tools.call(caller, "task_list", args());
+        for (JsonValue task : ((JsonArray) listed.get("tasks")).elements()) {
+            assertTrue(!((JsonObject) task).has("body"), "task_list carries no body");
+        }
+    }
+
     // 2. task_list spans repositories; 6. create defaults, slugs, after refs, title.
     @Test
     void createDefaultsSlugResolutionAndListSpansRepositories() throws Exception {
