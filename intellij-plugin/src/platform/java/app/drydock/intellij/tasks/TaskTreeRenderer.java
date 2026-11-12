@@ -4,6 +4,7 @@ import app.drydock.agent.api.AgentRegistry;
 import app.drydock.delayedtasks.DelayedTaskService;
 import app.drydock.delayedtasks.TaskStoreWatcher;
 import app.drydock.domain.SessionStatus;
+import app.drydock.git.GhCliService;
 import app.drydock.git.GhCliService.BranchPullRequest;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.JiraIssue;
@@ -215,6 +216,7 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
                     setToolTipText("#" + pullRequest.pullRequest().number()
                             + " cannot merge into " + pullRequest.pullRequest().baseRefName() + ": it has conflicts");
                 }
+                paintLinkedTask(pullRequest.pullRequest().headRefName());
                 append(" · ", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
                 append("Review ▸", SimpleTextAttributes.LINK_ATTRIBUTES, LINK);
                 if (pullRequest.pullRequest().conflicting()) {
@@ -493,6 +495,32 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
     }
 
     /**
+     * The badge of a PR row whose head branch is a task's stacked branch,
+     * looked up in the task service's cached snapshot (memory only, like
+     * the mirror badge): the link mark and the task's title, the twin of
+     * the task row's pull-request badge.
+     */
+    private void paintLinkedTask(String headRefName) {
+        TaskStoreWatcher.WatchedSnapshot watched = DrydockPluginService.getInstance().taskService().watchedSnapshot();
+        TaskLinks.taskOfBranch(headRefName, watched).ifPresent(document -> {
+            append("  " + mirroredTaskBadge(document.title()), MIRROR_ATTRIBUTES);
+            setToolTipText((getToolTipText() == null ? "" : getToolTipText() + " · ")
+                    + "Task '" + document.title() + "' (" + document.id() + ") works this branch");
+        });
+    }
+
+    /** Pure. A task row's pull-request badge: the link mark and the PR number. */
+    static String pullRequestLinkBadge(GhCliService.OpenPullRequest pullRequest) {
+        return MIRROR_MARK + " PR #" + pullRequest.number();
+    }
+
+    /** Pure. A task row's pull-request badge tooltip: the PR, its branch and its title. */
+    static String pullRequestLinkTooltip(GhCliService.OpenPullRequest pullRequest) {
+        return "Pull request #" + pullRequest.number() + " from " + pullRequest.headRefName()
+                + (pullRequest.title().isBlank() ? "" : ": " + pullRequest.title());
+    }
+
+    /**
      * Pure. The state icon of a branch's pull request: GitHub's green, grey,
      * purple and red glyphs for open, draft, merged and closed (each with a
      * dark-theme variant); none when gh reported no state.
@@ -612,6 +640,11 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
         if (!task.mirrors().isEmpty()) {
             append("  " + mirrorsBadge(task.mirrors()), MIRROR_ATTRIBUTES);
         }
+        task.pullRequest().ifPresent(pullRequest -> {
+            append("  " + pullRequestLinkBadge(pullRequest), MIRROR_ATTRIBUTES);
+            setToolTipText((getToolTipText() == null ? "" : getToolTipText() + " · ")
+                    + pullRequestLinkTooltip(pullRequest));
+        });
         String age = delayedAge(task, now);
         if (!age.isEmpty()) {
             append(" · " + age, SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);

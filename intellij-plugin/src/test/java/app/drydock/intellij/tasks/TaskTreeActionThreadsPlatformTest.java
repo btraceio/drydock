@@ -110,7 +110,7 @@ public class TaskTreeActionThreadsPlatformTest extends BasePlatformTestCase {
                 root -> {
             jiraQueries.add(root);
             return false;
-        });
+        }, () -> List.<TaskNode>of(), () -> TaskTreePanel.TaskLayer.EMPTY, () -> null);
         assertEquals(ActionUpdateThread.BGT, menu.getActionUpdateThread());
 
         // A delayed-task row carries its own layer's actions.

@@ -1,6 +1,7 @@
 package app.drydock.tasks;
 
 import app.drydock.domain.RepositoryId;
+import app.drydock.git.GhCliService.OpenPullRequest;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
 
 import java.time.Instant;
@@ -38,7 +39,8 @@ public sealed interface TaskNode {
      * document's stored mirror addresses (GitHub issues, Jira tickets).
      */
     record DelayedTaskRow(TaskState.TaskView view, String title, RepositoryId repository,
-            Optional<Instant> created, boolean stale, List<String> storedSessions, List<String> mirrors)
+            Optional<Instant> created, boolean stale, List<String> storedSessions, List<String> mirrors,
+            Optional<OpenPullRequest> pullRequest)
             implements TaskNode {
 
         public DelayedTaskRow {
@@ -48,12 +50,29 @@ public sealed interface TaskNode {
             Objects.requireNonNull(created, "created");
             storedSessions = List.copyOf(storedSessions);
             mirrors = List.copyOf(mirrors);
+            pullRequest = Objects.requireNonNullElse(pullRequest, Optional.empty());
         }
 
         /** The shape before tasks could be mirrored: no mirror. */
         public DelayedTaskRow(TaskState.TaskView view, String title, RepositoryId repository,
                 Optional<Instant> created, boolean stale, List<String> storedSessions) {
-            this(view, title, repository, created, stale, storedSessions, List.of());
+            this(view, title, repository, created, stale, storedSessions, List.of(), Optional.empty());
+        }
+
+        /**
+         * The shape before the tree resolved a task's pull request: none
+         * known. The canonical constructor carries it when the tree's PR
+         * listing answers.
+         */
+        public DelayedTaskRow(TaskState.TaskView view, String title, RepositoryId repository,
+                Optional<Instant> created, boolean stale, List<String> storedSessions, List<String> mirrors) {
+            this(view, title, repository, created, stale, storedSessions, mirrors, Optional.empty());
+        }
+
+        /** This row with {@code pullRequest} carried; everything else unchanged. Pure. */
+        public DelayedTaskRow withPullRequest(OpenPullRequest pullRequest) {
+            return new DelayedTaskRow(view, title, repository, created, stale, storedSessions, mirrors,
+                    Optional.of(pullRequest));
         }
 
         /**
