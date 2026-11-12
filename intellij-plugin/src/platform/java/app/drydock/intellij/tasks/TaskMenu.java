@@ -89,6 +89,8 @@ final class TaskMenu {
         /** Delete a Jira group, after confirmation; only a group node offers it. */
         DELETE_JIRA_GROUP,
         REFRESH,
+        /** On the Sessions node: run Done on every done session of the project at once. */
+        CLEANUP_DONE_SESSIONS,
         /** Show only this project in the tree, or every project again when it is focused already. */
         FOCUS_PROJECT,
         NEW_TASK_IN_MAIN,
@@ -163,6 +165,9 @@ final class TaskMenu {
                     section(TaskActions.removable(idleWorktree).isEmpty() ? null : Item.REMOVE_WORKTREE)));
             case StaleWorktrees ignored -> List.of(List.of(Item.REMOVE_STALE_WORKTREES));
             case WorktreeGroup ignored -> List.of(List.of(Item.NEW_TASK));
+            // The Sessions node is where the project's bulk cleanup lives.
+            case Section section when section.kind() == SectionKind.SESSIONS ->
+                    List.of(List.of(Item.CLEANUP_DONE_SESSIONS));
             case Section section when section.kind() == SectionKind.ISSUES
                     || section.kind() == SectionKind.PULL_REQUESTS ->
                     section.kind() == SectionKind.ISSUES
