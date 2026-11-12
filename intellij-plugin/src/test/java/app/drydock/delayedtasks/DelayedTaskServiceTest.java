@@ -218,7 +218,8 @@ class DelayedTaskServiceTest {
                 session(worktreeSession, alphaId, elsewhere, Optional.empty()));
         List<Repository> repositories = List.of(repository(alphaId, worktree, "Project Alpha"),
                 repository(betaId, dir.resolve("beta"), "Beta Project"),
-                repository(RepositoryId.newId(), dir.resolve("duplicate"), "Project Alpha!"));
+                repository(RepositoryId.newId(), dir.resolve("duplicate"), "Project Alpha!"),
+                repository(RepositoryId.newId(), dir.resolve("nonslug"), "---"));
         try (DelayedTaskService service = new DelayedTaskService(store, executor,
                 () -> sessions, () -> repositories)) {
             await(service.initialize());
@@ -237,14 +238,17 @@ class DelayedTaskServiceTest {
                     args("title", "Resident default")), "id");
             assertTrue(Files.exists(committedFile(store, alphaId, TaskId.of(created))),
                     "a create without a project lands in the caller's resolved repository");
-            assertTrue(assertThrows(McpToolException.class, () -> service.taskTools().call(visitor,
-                    "task_create", args("title", "Visitor task"))).getMessage()
-                    .contains("no default project"), "an unresolvable caller has no create default");
-            assertTrue(assertThrows(McpToolException.class, () -> service.taskTools().call(visitor,
-                    "task_create", args("title", "Visitor task"))).getMessage()
-                    .contains("project-alpha"),
-                    "the no-default refusal names the registered slugs so an explicit project"
-                            + " can be passed");
+            assertTrue(await(service.registeredProjectSlugs()).equals(List.of("beta-project")),
+                    "the offer names only slugs that resolve uniquely: the ambiguous"
+                            + " project-alpha pair is omitted, and a name with no slug"
+                            + " characters (---) contributes nothing rather than null");
+            String refusal = assertThrows(McpToolException.class, () -> service.taskTools().call(visitor,
+                    "task_create", args("title", "Visitor task"))).getMessage();
+            assertTrue(refusal.contains("no default project"),
+                    "an unresolvable caller with an unregistered owning repository has no create default");
+            assertTrue(refusal.contains("beta-project") && !refusal.contains("project-alpha"),
+                    "the no-default refusal offers only a slug that, when passed, resolves: "
+                            + "the ambiguous pair would dead-end in the second refusal");
             assertTrue(assertThrows(McpToolException.class, () -> service.taskTools().call(resident,
                     "task_create", args("title", "Ambiguous", "project", "project-alpha")))
                     .getMessage().contains("No registered project 'project-alpha'"),

@@ -915,10 +915,23 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
 
     @Override
     public CompletableFuture<List<String>> registeredProjectSlugs() {
-        return supply(store -> repositories.get().stream()
-                .map(repository -> slugOf(repository.id()))
-                .filter(Objects::nonNull)
-                .toList());
+        return supply(store -> {
+            // Only slugs that resolve uniquely are offered: a slug two projects share
+            // refuses in repositoryBySlug (never picks a winner), so advertising it in a
+            // refusal would send the caller into a dead-end retry. Duplicate names also
+            // collapse here, and a name with no slug characters contributes nothing.
+            Map<String, Long> occurrences = new LinkedHashMap<>();
+            repositories.get().forEach(repository -> {
+                String slug = slugOf(repository.id());
+                if (slug != null) {
+                    occurrences.merge(slug, 1L, Long::sum);
+                }
+            });
+            return occurrences.entrySet().stream()
+                    .filter(entry -> entry.getValue() == 1)
+                    .map(Map.Entry::getKey)
+                    .toList();
+        });
     }
 
     @Override
@@ -1130,6 +1143,10 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
         return repositories.get().stream()
                 .filter(candidate -> candidate.id().equals(repository))
                 .map(candidate -> slugOf(candidate.displayName()))
+                // A name with no slug characters maps to null; findFirst would wrap that
+                // in Optional.of and throw, so unnameable repositories skip the search
+                // and answer null like an unregistered one.
+                .filter(Objects::nonNull)
                 .findFirst().orElse(null);
     }
     /** The display-name slug (P2): lowercase letters, digits and inner hyphens, capped. */

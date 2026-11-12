@@ -63,10 +63,11 @@ public interface TaskToolContext {
     CompletableFuture<Optional<RepositoryId>> defaultRepository(ManagedSessionId caller);
 
     /**
-     * The display slugs of every registered repository, in registration
-     * order, for refusals that name what an explicit project can be. A
-     * slug here resolves through {@link #repositoryBySlug} unless two
-     * projects share one (then that slug refuses, never picks a winner).
+     * The display slugs that resolve to exactly one registered repository,
+     * in registration order, for refusals that name what an explicit
+     * project can be. A slug two projects share is omitted: it would
+     * refuse in {@link #repositoryBySlug} anyway (never picks a winner),
+     * so advertising it would only offer a dead-end retry.
      */
     CompletableFuture<List<String>> registeredProjectSlugs();
 
