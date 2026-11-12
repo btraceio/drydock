@@ -238,6 +238,15 @@ final class OpenSessionTab {
     // -- Worktree context + chips + Finish (worktree handoff, section B) ----
     private final Label worktreeContextLine = new Label();
     private final Label aheadChip = new Label();
+
+    /**
+     * The reconciled PR state, kept so the two independent header updaters
+     * (PR chip and worktree status) can each re-derive the ahead chip's
+     * visibility in either arrival order.
+     */
+    private PrState prState = PrState.NONE;
+    /** The last commitsAhead this tab was told about; see {@link #refreshAheadChip()}. */
+    private int lastCommitsAhead;
     private final Label dirtyPill = new Label();
     private final Label headerPrChip = new Label();
     private final HBox worktreeChips = new HBox(6);
@@ -1343,11 +1352,18 @@ final class OpenSessionTab {
         }
     }
 
-    /** Updates the ↑n-ahead chip + dirty/clean pill from the worktree's observed state. */
+    /**
+     * Updates the ↑n-ahead chip + dirty/clean pill from the worktree's
+     * observed state. The ahead count is measured against the LOCAL base
+     * branch, so once the branch's PR is merged -- a squash or rebase merge
+     * never makes those commits ancestors of the base -- it still reads
+     * "N ahead" and implies unmerged work that is in fact already in the
+     * PR. Hidden while the PR state is MERGED for that reason.
+     */
     void updateWorktreeStatus(boolean dirty, int commitsAhead) {
         aheadChip.setText("↑" + commitsAhead + " ahead");
-        aheadChip.setVisible(commitsAhead > 0);
-        aheadChip.setManaged(commitsAhead > 0);
+        lastCommitsAhead = commitsAhead;
+        refreshAheadChip();
         dirtyPill.setText(dirty ? "uncommitted" : "clean");
         dirtyPill.getStyleClass().removeAll("chip-dirty", "chip-clean");
         dirtyPill.getStyleClass().add(dirty ? "chip-dirty" : "chip-clean");
@@ -1357,6 +1373,7 @@ final class OpenSessionTab {
 
     /** Updates the header PR chip ({@code PR #n} blue / {@code merged} purple / hidden). */
     void updatePrChip(PrState prState, Optional<Integer> prNumber) {
+        this.prState = prState;
         headerPrChip.getStyleClass().removeAll("pr-chip", "pr-chip-merged");
         switch (prState) {
             case NONE -> {
@@ -1376,6 +1393,17 @@ final class OpenSessionTab {
                 headerPrChip.setManaged(true);
             }
         }
+        // Either updater can land last (the PR state is reconciled when the
+        // Finish panel opens, while the status refresh is async), so both
+        // re-derive the ahead chip instead of one owning visibility.
+        refreshAheadChip();
+    }
+
+    /** Shows the ahead chip only when there is something ahead AND the PR is not already merged. */
+    private void refreshAheadChip() {
+        boolean show = lastCommitsAhead > 0 && prState != PrState.MERGED;
+        aheadChip.setVisible(show);
+        aheadChip.setManaged(show);
     }
 
     /** Sets the project-group color badge, or hides it when there is no repository. */
@@ -1546,6 +1574,16 @@ final class OpenSessionTab {
             }
         }
         return texts;
+    }
+
+    /** Diagnostic/test-only: whether the ahead chip is on the header at all. */
+    boolean diagAheadChipShown() {
+        return aheadChip.isVisible() && aheadChip.isManaged();
+    }
+
+    /** Diagnostic/test-only: the ahead chip's text, e.g. "↑3 ahead". */
+    String diagAheadChipText() {
+        return aheadChip.getText();
     }
 
     /** Whether the tab header's ⇅ SSH badge is shown: visible AND taking layout space. */
