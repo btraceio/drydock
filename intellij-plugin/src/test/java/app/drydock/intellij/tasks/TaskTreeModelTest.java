@@ -93,6 +93,8 @@ class TaskTreeModelTest {
         Optional<String> problem = Optional.empty();
         String filter = "";
         ViewFilter viewFilter = ViewFilter.ALL;
+        final Set<Path> pendingIssueRoots = new HashSet<>();
+        final Set<ListingExpansionTracker.GroupKey> pendingJiraGroups = new HashSet<>();
 
         In project(Path root) {
             projects.add(SharedProject.local(RepositoryId.newId(), root, root.getFileName().toString(), T));
@@ -144,7 +146,7 @@ class TaskTreeModelTest {
                     pullRequestContainers, githubIssueRoots, githubGhostRoots, jiraRoots, jiraGhostRoots,
                     openFolders, lastActivity, T,
                     issues, jiraGroups, pullRequests, pullRequestDedupWorktrees, problem, filter, viewFilter,
-                    resumable);
+                    resumable, Map.of(), pendingIssueRoots, pendingJiraGroups);
         }
     }
 
@@ -556,6 +558,23 @@ class TaskTreeModelTest {
         // The Jira node stands beside it; with no groups defined it says so.
         JiraNode jira = assertInstanceOf(JiraNode.class, children.get(1));
         assertEquals(List.of(new TaskNode.Placeholder("No Jira groups")), jira.children());
+    }
+
+    @Test
+    void anOpenedListingStillRunningShowsALoadingChildInsteadOfNotLoaded() {
+        In in = new In().project(BTRACE).githubIssues(BTRACE).jira(BTRACE);
+        JiraGroup group = new JiraGroup("g-sprint", "Sprint", "project = DRY");
+        in.jiraGroups.put(BTRACE, List.of(new JiraGroups.Listing(group, Optional.empty())));
+        in.pendingIssueRoots.add(BTRACE);
+        in.pendingJiraGroups.add(new ListingExpansionTracker.GroupKey(BTRACE, group.id()));
+
+        List<TaskNode> children = issueNodes(projectRow(TaskTreeModel.build(in.build()), BTRACE));
+
+        GitHubNode github = assertInstanceOf(GitHubNode.class, children.get(0));
+        assertEquals(List.of(new TaskNode.Deferred(TaskTreeModel.LOADING_ISSUES)), github.children());
+        JiraGroupRow row = assertInstanceOf(JiraGroupRow.class,
+                assertInstanceOf(JiraNode.class, children.get(1)).children().getFirst());
+        assertEquals(List.of(new TaskNode.Deferred(TaskTreeModel.LOADING_ISSUES)), row.children());
     }
 
     @Test

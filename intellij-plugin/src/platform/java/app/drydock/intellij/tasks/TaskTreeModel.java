@@ -74,6 +74,9 @@ public final class TaskTreeModel {
     /** The muted child of a configured listing node the user has not opened yet. */
     static final String NOT_LOADED = "Not loaded";
 
+    /** The child of an opened listing node whose first answer is still running. */
+    static final String LOADING_ISSUES = "Loading issues…";
+
     /** The one child of a listing that answered with nothing: the renderer's "answered" discriminator. */
     static final String NO_ISSUES = "No issues";
 
@@ -207,7 +210,9 @@ public final class TaskTreeModel {
                          Map<Path, List<Worktree>> pullRequestDedupWorktrees,
                          Optional<String> listProblem, String filter,
                          ViewFilter viewFilter, Map<ManagedSessionId, Boolean> resumable,
-                         Map<ManagedSessionId, BranchPullRequest> pullRequestsBySession) {
+                         Map<ManagedSessionId, BranchPullRequest> pullRequestsBySession,
+                         Set<Path> pendingIssueRoots,
+                         Set<ListingExpansionTracker.GroupKey> pendingJiraGroups) {
         public Inputs {
             projects = List.copyOf(projects);
             sessions = List.copyOf(sessions);
@@ -239,9 +244,11 @@ public final class TaskTreeModel {
             Objects.requireNonNull(viewFilter, "viewFilter");
             resumable = Map.copyOf(resumable);
             pullRequestsBySession = Map.copyOf(pullRequestsBySession);
+            pendingIssueRoots = Set.copyOf(pendingIssueRoots);
+            pendingJiraGroups = Set.copyOf(pendingJiraGroups);
         }
 
-        /** The shape before sessions carried their branch's pull request: none known. */
+        /** The shape before sessions carried their branch's pull request: none known, no listing pending. */
         public Inputs(List<SharedProject> projects, List<ManagedAgentSession> sessions,
                       Map<Path, List<Worktree>> worktreesByMainRoot, Map<Path, Path> mainRootOf,
                       Optional<Path> currentMainRoot, Optional<Path> currentWorkingRoot,
@@ -263,7 +270,7 @@ public final class TaskTreeModel {
                     pullRequestContainers, githubIssueRoots, githubGhostRoots, jiraRoots, jiraGhostRoots,
                     openFolders, lastActivity, now, issuesByMainRoot, jiraGroupsByMainRoot,
                     pullRequestsByMainRoot, pullRequestDedupWorktrees, listProblem, filter, viewFilter,
-                    resumable, Map.of());
+                    resumable, Map.of(), Set.of(), Set.of());
         }
     }
 
@@ -577,7 +584,8 @@ public final class TaskTreeModel {
         boolean nodeMatches = itemFilter.isEmpty() || contains("GitHub", itemFilter);
         List<TaskNode> children = new ArrayList<>();
         switch (in.issuesByMainRoot().get(main)) {
-            case null -> children.add(new TaskNode.Placeholder(NOT_LOADED));
+            case null -> children.add(in.pendingIssueRoots().contains(main)
+                    ? new TaskNode.Deferred(LOADING_ISSUES) : new TaskNode.Placeholder(NOT_LOADED));
             case IssueListing.Listed listed -> listed.issues().stream()
                     .filter(issue -> nodeMatches || matches(itemFilter, issue))
                     .forEach(issue -> children.add(new IssueRow(main, issue)));
@@ -639,7 +647,9 @@ public final class TaskTreeModel {
         boolean groupMatches = itemFilter.isEmpty() || contains(listing.group().name(), itemFilter);
         List<TaskNode> children = new ArrayList<>();
         switch (listing.listing().orElse(null)) {
-            case null -> children.add(new TaskNode.Placeholder(NOT_LOADED));
+            case null -> children.add(
+                    in.pendingJiraGroups().contains(new ListingExpansionTracker.GroupKey(main, listing.group().id()))
+                            ? new TaskNode.Deferred(LOADING_ISSUES) : new TaskNode.Placeholder(NOT_LOADED));
             case JiraIssueListing.Failed failed ->
                     children.add(new TaskNode.ListProblem(
                             "Jira group \"" + listing.group().name() + "\": " + failed.message()));
