@@ -474,4 +474,61 @@ class TaskMenuTest {
                 List.of(TaskMenu.Item.NEW_TASK)),
                 sectionsOf(conflicting));
     }
+
+    // ---- the cross-row jumps: navigation first, only when a target resolved ----
+
+    /** Facts with every jump target resolved to non-null markers. */
+    private static TaskMenu.MenuFacts jumps(Object task, Object pullRequest, Object session) {
+        return new TaskMenu.MenuFacts(false, false, false, false, false,
+                (app.drydock.tasks.TaskNode.DelayedTaskRow) task,
+                (PullRequestRow) pullRequest, (TaskRow) session);
+    }
+
+    @Test
+    void aPullRequestRowLeadsWithItsTaskAndSessionJumps() {
+        TaskMenu.MenuFacts facts = jumps(newDelayedTaskRow(), pullRequest(Optional.empty()),
+                task(false, new TaskPlacement.Here()));
+        assertEquals(List.of(
+                List.of(TaskMenu.Item.SHOW_TASK, TaskMenu.Item.SHOW_SESSION),
+                List.of(TaskMenu.Item.OPEN_IN_WORKBENCH),
+                List.of(TaskMenu.Item.NEW_TASK)),
+                TaskMenu.sections(pullRequest(Optional.empty()), List.of(), facts));
+    }
+
+    @Test
+    void aTaskRowLeadsWithItsPullRequestAndTaskJumpsWhenTheyResolved() {
+        TaskMenu.MenuFacts facts = jumps(newDelayedTaskRow(), pullRequest(Optional.empty()), null);
+        assertTrue(TaskMenu.sections(task(true, new TaskPlacement.Here()), List.of(), facts)
+                .get(0).equals(List.of(TaskMenu.Item.SHOW_PULL_REQUEST, TaskMenu.Item.SHOW_TASK)));
+        // No resolved target, no jump section: today's menu shape, unchanged.
+        assertEquals(List.of(
+                List.of(TaskMenu.Item.SWITCH_TO_TASK),
+                List.of(TaskMenu.Item.DEACTIVATE, TaskMenu.Item.REVIEW_CHANGES),
+                List.of(TaskMenu.Item.RENAME, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
+                List.of(TaskMenu.Item.DONE_WITH_TASK)),
+                TaskMenu.sections(task(true, new TaskPlacement.Here()), List.of(), NO_TRANSFER));
+    }
+
+    @Test
+    void anIdleTaskRowLeadsWithItsJumpsToo() {
+        TaskMenu.MenuFacts facts = jumps(null, pullRequest(Optional.empty()), null);
+        assertEquals(List.of(TaskMenu.Item.SHOW_PULL_REQUEST),
+                TaskMenu.sections(task(false, new TaskPlacement.Here()), List.of(), facts).get(0));
+    }
+
+    @Test
+    void anIssueRowAddsTheShowTaskJumpBesideTheMirroredTaskOpen() {
+        TaskMenu.MenuFacts facts = new TaskMenu.MenuFacts(false, false, true, false, false, newDelayedTaskRow(), null, null);
+        IssueRow github = issue(Optional.of("https://github.com/DataDog/profiling-backend/issues/42"));
+        assertEquals(List.of(TaskMenu.Item.SHOW_TASK, TaskMenu.Item.OPEN_MIRRORED_TASK),
+                TaskMenu.sections(github, List.of(), facts).get(0));
+    }
+
+    /** A minimal delayed-task row for the facts' showTask target; its fields are never read here. */
+    private static app.drydock.tasks.TaskNode.DelayedTaskRow newDelayedTaskRow() {
+        return new app.drydock.tasks.TaskNode.DelayedTaskRow(
+                new app.drydock.tasks.TaskState.TaskView(app.drydock.tasks.TaskId.of("fix-alloc-k3f9"),
+                        app.drydock.tasks.TaskState.Presentation.READY, List.of(), List.of()),
+                "Fix allocation profile", RepositoryId.newId(), Optional.empty(), false, List.of());
+    }
 }

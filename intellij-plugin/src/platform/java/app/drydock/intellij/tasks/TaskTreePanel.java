@@ -35,6 +35,7 @@ import app.drydock.intellij.tasks.TaskNode.Section;
 import app.drydock.intellij.tasks.TaskNode.SectionKind;
 import app.drydock.intellij.tasks.TaskNode.StaleWorktrees;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
+import app.drydock.intellij.tasks.TaskLinks;
 import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
 import app.drydock.intellij.tasks.TaskTreeModel.ViewFilter;
 import app.drydock.tasks.DelayedTaskRows;
@@ -119,6 +120,7 @@ import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -180,7 +182,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     private final Alarm searchAlarm = new Alarm(Alarm.ThreadToUse.SWING_THREAD, this);
     private volatile String filter = "";
     private volatile ViewFilter viewFilter = ViewFilter.ALL;
-    private List<TaskNode> displayedNodes = List.of();
+    private volatile List<TaskNode> displayedNodes = List.of();
     /** The last applied rows before the focus narrowed them: where a hidden session's project is looked up. */
     private List<TaskNode> displayedUnfocusedNodes = List.of();
     /** The registered project the tree shows alone, or null for every project. Written on the EDT. */
@@ -202,14 +204,20 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     private Runnable unsubscribeShared = () -> { };
     private volatile boolean disposed;
     /** The delayed-task layer the last rebuild applied (T17a), for the fast
-     * worktree-rem acknowledgement, which re-applies the displayed rows. */
-    private TaskLayer displayedTasks = TaskLayer.EMPTY;
+     * worktree-rem acknowledgement, which re-applies the displayed rows.
+     * Read off-EDT too -- through the popup menu's supplier and the jump
+     * actions' BGT update passes -- so the EDT write in {@code apply} needs
+     * the volatile store to publish it; {@code apply} writes
+     * {@code displayedNodes} first and this field last. */
+    private volatile TaskLayer displayedTasks = TaskLayer.EMPTY;
     /**
      * The task node's actions (T20a): the plugin.xml-registered instances
      * when their ids resolve, locally built otherwise -- the same fallback
-     * shape the toolbar's own action lookup uses.
+     * shape the toolbar's own action lookup uses. The jump actions come
+     * last: they are the panel's own (they reveal rows in this tree), and
+     * a task node's menu has no other way to reach them.
      */
-    private final AnAction[] delayedTaskActions = taskNodeMenu();
+    private final AnAction[] delayedTaskActions = withTaskJumps(taskNodeMenu());
     /**
      * The Tasks node's New Task (T20a, P5): the T18a creation form; a
      * confirmed OK saves through the production saveTask core, a cancel
@@ -692,9 +700,16 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         menuActions.put(TaskMenu.Item.DELETE_JIRA_GROUP, JiraTreeActions.deleteGroup(project, afterJiraGroupChange));
         menuActions.put(TaskMenu.Item.REFRESH, refresh);
         menuActions.put(TaskMenu.Item.FOCUS_PROJECT, focusProject);
+        menuActions.put(TaskMenu.Item.SHOW_TASK, showLinkedAction(ShowKind.TASK, "Show Task",
+                "Reveal the task row this row is linked to"));
+        menuActions.put(TaskMenu.Item.SHOW_PULL_REQUEST, showLinkedAction(ShowKind.PULL_REQUEST, "Show Pull Request",
+                "Reveal the pull request this row works"));
+        menuActions.put(TaskMenu.Item.SHOW_SESSION, showLinkedAction(ShowKind.SESSION, "Show Session",
+                "Reveal the session row this pull request belongs to"));
         PopupHandler.installPopupMenu(tree,
                 new TreeMenu(menuActions, delayedTaskActions, newDelayedTask, refreshTasksAction,
-                        JiraTreeActions::jiraEnabled),
+                        JiraTreeActions::jiraEnabled, () -> displayedNodes, () -> displayedTasks,
+                        TaskTreePanel::watchedSnapshot),
                 "Drydock.TaskTree.Popup");
 
         // The tool window's own buttons: start a task, then what can be done
@@ -899,6 +914,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     static Set<TaskMenu.Item> panelMenuItems() {
         return EnumSet.of(TaskMenu.Item.SWITCH_TO_TASK, TaskMenu.Item.NEW_TASK, TaskMenu.Item.NEW_TASK_IN_MAIN,
                 TaskMenu.Item.OPEN_IN_GITHUB, TaskMenu.Item.OPEN_IN_JIRA, TaskMenu.Item.OPEN_MIRRORED_TASK,
+                TaskMenu.Item.SHOW_TASK, TaskMenu.Item.SHOW_PULL_REQUEST, TaskMenu.Item.SHOW_SESSION,
                 TaskMenu.Item.OPEN_IN_WORKBENCH, TaskMenu.Item.RESOLVE_CONFLICTS,
                 TaskMenu.Item.QUICK_REVIEW, TaskMenu.Item.REVIEW, TaskMenu.Item.REVIEW_IN_SPHINX,
                 TaskMenu.Item.IMPLEMENT, TaskMenu.Item.TRIAGE,
@@ -1085,14 +1101,24 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         private final AnAction refreshTasksAction;
         /** Whether a project root's Jira connection is enabled; it canonicalizes the root (filesystem IO). */
         private final Predicate<Path> jiraEnabled;
+        /** The tree's current nodes, its task layer and the task service's cached snapshot,
+         * for the cross-row links. */
+        private final Supplier<List<TaskNode>> displayed;
+        private final Supplier<TaskLayer> tasks;
+        private final Supplier<WatchedSnapshot> watched;
 
         TreeMenu(Map<TaskMenu.Item, AnAction> actions, AnAction[] delayedTaskActions, AnAction newDelayedTask,
-                 AnAction refreshTasksAction, Predicate<Path> jiraEnabled) {
+                 AnAction refreshTasksAction, Predicate<Path> jiraEnabled,
+                 Supplier<List<TaskNode>> displayed, Supplier<TaskLayer> tasks,
+                 Supplier<WatchedSnapshot> watched) {
             this.actions = actions;
             this.delayedTaskActions = delayedTaskActions;
             this.newDelayedTask = newDelayedTask;
             this.refreshTasksAction = refreshTasksAction;
             this.jiraEnabled = jiraEnabled;
+            this.displayed = displayed;
+            this.tasks = tasks;
+            this.watched = watched;
         }
 
         @Override
@@ -1123,7 +1149,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             List<TaskNode> selection = e.getData(SELECTED_NODES);
             Path root = e.getData(SELECTED_PROJECT_ROOT);
             return TaskMenu.group(e.getData(SELECTED_NODE), selection == null ? List.of() : selection, actions,
-                    root != null && jiraEnabled.test(root)).getChildActionsOrStubs();
+                    root != null && jiraEnabled.test(root), displayed.get(), tasks.get(), watched.get())
+                    .getChildActionsOrStubs();
         }
     }
 
@@ -1372,6 +1399,22 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             AnAction registered = manager.getAction(entry.id());
             return registered != null ? registered : entry.local();
         }).toArray(AnAction[]::new);
+    }
+
+    /**
+     * The task node's menu with the panel's jump actions appended: a task
+     * row reveals its pull request or its session. Their targets resolve at
+     * update/click time over the tree's current nodes, so nothing here
+     * captures a stale answer.
+     */
+    private AnAction[] withTaskJumps(AnAction[] menu) {
+        AnAction[] withJumps = new AnAction[menu.length + 2];
+        System.arraycopy(menu, 0, withJumps, 0, menu.length);
+        withJumps[menu.length] = showLinkedAction(ShowKind.PULL_REQUEST, "Show Pull Request",
+                "Reveal the pull request this task works");
+        withJumps[menu.length + 1] = showLinkedAction(ShowKind.SESSION, "Show Session",
+                "Reveal the session row this task names");
+        return withJumps;
     }
 
     /**
@@ -1962,10 +2005,24 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 DelayedTaskRows.rows(tasks.get(), liveSessionIds, slugs, now);
         Map<String, List<app.drydock.tasks.TaskNode.DelayedTaskRow>> attached = new LinkedHashMap<>();
         List<app.drydock.tasks.TaskNode.DelayedTaskRow> unattached = new ArrayList<>();
+        // The PR index over the tree's own rows, built once for the whole
+        // layer: one walk of the displayed nodes, however many task rows
+        // name a pull request below.
+        TaskLinks.PrIndex prIndex = TaskLinks.PrIndex.of(nodes);
         for (app.drydock.tasks.TaskNode.DelayedTaskRow row : DelayedTaskRows.sorted(rows)) {
-            DelayedTaskRows.attachedSession(row, shown.keySet()).ifPresentOrElse(
-                    session -> attached.computeIfAbsent(session, any -> new ArrayList<>()).add(row),
-                    () -> unattached.add(row));
+            // The task's pull request, resolved within the task's own
+            // project over the tree's PR rows: the head branch that is the
+            // task's stacked branch, else a stored session's current branch
+            // (memory only, the same rule TaskLinks resolves the jumps by).
+            // The PR row's own record is carried verbatim -- no state is
+            // fabricated.
+            app.drydock.tasks.TaskNode.DelayedTaskRow linked =
+                    TaskLinks.pullRequestOf(row, prIndex)
+                            .map(pr -> row.withPullRequest(pr.pullRequest()))
+                            .orElse(row);
+            DelayedTaskRows.attachedSession(linked, shown.keySet()).ifPresentOrElse(
+                    session -> attached.computeIfAbsent(session, any -> new ArrayList<>()).add(linked),
+                    () -> unattached.add(linked));
         }
         Map<String, List<app.drydock.tasks.TaskNode.DelayedTaskRow>> bySession = new LinkedHashMap<>();
         for (Map.Entry<String, List<app.drydock.tasks.TaskNode.DelayedTaskRow>> entry : attached.entrySet()) {
@@ -2126,7 +2183,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
      * expands its collapsed ancestors, which is not the user's request to
      * open them. EDT.
      */
-    private void selectSessionRow(ManagedSessionId sessionId) {
+    void selectSessionRow(ManagedSessionId sessionId) {
         if (disposed) {
             return;
         }
@@ -2138,6 +2195,159 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 });
             }
         });
+    }
+
+    /**
+     * Selects and scrolls to the first row the matcher accepts, if the tree
+     * shows one -- the jump actions' reveal, the same programmatic guard and
+     * expansion rule as {@link #selectSessionRow}. EDT.
+     */
+    void revealRow(Predicate<Object> match) {
+        if (disposed) {
+            return;
+        }
+        findPath((DefaultMutableTreeNode) tree.getModel().getRoot(), match).ifPresent(path -> {
+            if (!path.equals(tree.getSelectionPath())) {
+                expansions.runProgrammatic(() -> {
+                    tree.setSelectionPath(path);
+                    tree.scrollPathToVisible(path);
+                });
+            }
+        });
+    }
+
+    /** Depth-first search of the tree's Swing nodes for one the matcher accepts. */
+    private static Optional<TreePath> findPath(DefaultMutableTreeNode node, Predicate<Object> match) {
+        if (match.test(node.getUserObject())) {
+            return Optional.of(new TreePath(node.getPath()));
+        }
+        for (int i = 0; i < node.getChildCount(); i++) {
+            Optional<TreePath> found = findPath((DefaultMutableTreeNode) node.getChildAt(i), match);
+            if (found.isPresent()) {
+                return found;
+            }
+        }
+        return Optional.empty();
+    }
+
+    /** The task service's cached watched snapshot; null before the first publication. */
+    private static WatchedSnapshot watchedSnapshot() {
+        return DrydockPluginService.getInstance().taskService().watchedSnapshot();
+    }
+
+    /**
+     * The jump target of the lead row, resolved over the tree's current
+     * nodes (memory only): the task it works, its pull request, or its
+     * session. The target's kind is the caller's business; this only
+     * answers the row the menu item names. The lead is a parameter, not a
+     * tree read: update passes run on a background thread (BGT) and take it
+     * from the event's data keys via {@link #leadFrom}; the EDT click
+     * re-resolves it from the live selection.
+     */
+    Optional<Object> jumpTarget(ShowKind kind, Object lead) {
+        if (lead == null) {
+            return Optional.empty();
+        }
+        // if-chains, not switch patterns: the three arms answer different
+        // row types (delayed-task rows are unrelated to the session-layer
+        // TaskNode), and a switch would have to infer one common type.
+        Optional<?> target = switch (kind) {
+            case TASK -> taskTarget(lead);
+            case PULL_REQUEST -> pullRequestTarget(lead);
+            case SESSION -> sessionTarget(lead);
+        };
+        return target.map(Object.class::cast);
+    }
+
+    /**
+     * The jump lead for an update pass: the selection as the event's data
+     * keys carry it. Data keys are the sanctioned cross-thread channel --
+     * the jump actions run their update on a background thread, where a
+     * live Swing read of the tree's selection is forbidden.
+     * {@code uiDataSnapshot} publishes exactly this partition:
+     * {@code SELECTED_NODE} for session-layer rows,
+     * {@code SELECTED_TASK} for delayed-task rows. A TasksSection selection
+     * sets neither key, so the lead is null and the action disables --
+     * a section has no jump target.
+     */
+    private static Object leadFrom(AnActionEvent e) {
+        DelayedTaskRow task = e.getData(DelayedTaskActions.SELECTED_TASK);
+        return task != null ? task : e.getData(SELECTED_NODE);
+    }
+
+    /** The task row the selected row links to; the selection may be any row kind. */
+    private Optional<?> taskTarget(Object lead) {
+        if (lead instanceof TaskRow row) {
+            return TaskLinks.taskOfSession(row, displayedNodes, displayedTasks);
+        }
+        if (lead instanceof PullRequestRow pullRequest) {
+            return TaskLinks.taskOfBranch(pullRequest.pullRequest().headRefName(), watchedSnapshot())
+                    .flatMap(document -> TaskLinks.taskOfId(document.id(), displayedNodes, displayedTasks));
+        }
+        if (lead instanceof IssueRow issue) {
+            return TaskLinks.taskOf(issue, displayedNodes, displayedTasks);
+        }
+        if (lead instanceof JiraIssueRow jira) {
+            return TaskLinks.taskOf(jira, displayedNodes, displayedTasks);
+        }
+        return Optional.empty();
+    }
+
+    /** The pull request the selected row works; the selection may be any row kind. */
+    private Optional<?> pullRequestTarget(Object lead) {
+        if (lead instanceof TaskRow row) {
+            return TaskLinks.pullRequestOf(row, displayedNodes);
+        }
+        if (lead instanceof DelayedTaskRow task) {
+            return TaskLinks.pullRequestOf(task, displayedNodes);
+        }
+        return Optional.empty();
+    }
+
+    /** The session the selected row belongs to; the selection may be any row kind. */
+    private Optional<?> sessionTarget(Object lead) {
+        if (lead instanceof PullRequestRow pullRequest) {
+            return TaskLinks.sessionOf(pullRequest, displayedNodes);
+        }
+        if (lead instanceof DelayedTaskRow task) {
+            return TaskLinks.sessionOf(task, displayedNodes);
+        }
+        return Optional.empty();
+    }
+
+    /** Which linked row a jump action reveals. */
+    enum ShowKind { TASK, PULL_REQUEST, SESSION }
+
+    /**
+     * One jump action: enabled while the tree shows its linked row, a click
+     * reveals and selects it. The label names the target kind; the target is
+     * re-resolved at update and at click time over the tree's current nodes,
+     * so a jump never acts on a stale answer.
+     */
+    AnAction showLinkedAction(ShowKind kind, String text, String description) {
+        return new DumbAwareAction(text, description, AllIcons.General.Locate) {
+            @Override
+            public void update(@NotNull AnActionEvent e) {
+                TaskActions.present(e, jumpTarget(kind, leadFrom(e)).isPresent());
+            }
+
+            @Override
+            public @NotNull ActionUpdateThread getActionUpdateThread() {
+                return ActionUpdateThread.BGT;
+            }
+
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                // EDT: the live selection, not the event's data keys -- the
+                // click acts on what the tree shows selected now.
+                Optional<Object> target = jumpTarget(kind, selectedValue());
+                if (target.isEmpty()) {
+                    return;
+                }
+                Object wanted = target.get();
+                revealRow(wanted::equals);
+            }
+        };
     }
 
     /** A registered project the tree can show alone: its main root and the name the focus bar shows. */
