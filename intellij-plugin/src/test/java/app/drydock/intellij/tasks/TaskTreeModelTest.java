@@ -1164,6 +1164,74 @@ class TaskTreeModelTest {
     }
 
     @Test
+    void activeViewStillShowsTheIssuesAndPullRequestSections() {
+        In in = new In().project(DRYDOCK).githubIssues(DRYDOCK);
+        ManagedAgentSession active = session("Running task", DRYDOCK.resolve("a"));
+        in.sessions.add(active);
+        in.running.add(active.id());
+        in.issues.put(DRYDOCK, new IssueListing.Listed(List.of(
+                new OpenIssue(9, "Allocation regression", Optional.empty(), List.of(), List.of(), Optional.of(T)))));
+        in.pullRequestContainers.add(DRYDOCK);
+        in.pullRequests.put(DRYDOCK, new PullRequestListing.Listed(List.of(
+                pullRequest(40, "New one", "feature/new", false))));
+        in.viewFilter = ViewFilter.ACTIVE;
+
+        ProjectRow row = projectRow(TaskTreeModel.build(in.build()), DRYDOCK);
+
+        GitHubNode github = assertInstanceOf(GitHubNode.class, issueNodes(row).get(0));
+        assertEquals(List.of(9), github.children().stream()
+                .filter(IssueRow.class::isInstance)
+                .map(node -> ((IssueRow) node).issue().number()).toList());
+        assertEquals(List.of(40), pullRequestNodes(row).stream()
+                .map(PullRequestRow.class::cast)
+                .map(pr -> pr.pullRequest().number()).toList());
+    }
+
+    @Test
+    void activeViewKeepsAProjectWithNothingButPullRequests() {
+        In in = new In().project(DRYDOCK);
+        in.pullRequestContainers.add(DRYDOCK);
+        in.pullRequests.put(DRYDOCK, new PullRequestListing.Listed(List.of(
+                pullRequest(40, "New one", "feature/new", false))));
+        in.viewFilter = ViewFilter.ACTIVE;
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build());
+
+        // No active session to show, but the PR section is the answer the
+        // project stays for.
+        assertEquals(List.of(DRYDOCK), projectRoots(nodes));
+        ProjectRow row = projectRow(nodes, DRYDOCK);
+        assertTrue(section(row, SectionKind.SESSIONS).isEmpty());
+        assertTrue(section(row, SectionKind.WORKTREES).isEmpty());
+        assertEquals(List.of(40), pullRequestNodes(row).stream()
+                .map(PullRequestRow.class::cast)
+                .map(pr -> pr.pullRequest().number()).toList());
+    }
+
+    @Test
+    void searchStillNarrowsThePullRequestRowsInTheActiveView() {
+        In in = new In().project(DRYDOCK);
+        ManagedAgentSession active = session("Running task", DRYDOCK.resolve("a"));
+        in.sessions.add(active);
+        in.running.add(active.id());
+        in.pullRequestContainers.add(DRYDOCK);
+        in.pullRequests.put(DRYDOCK, new PullRequestListing.Listed(List.of(
+                pullRequest(9, "Allocation regression", "feature/alloc", false),
+                pullRequest(12, "Unrelated", "feature/other", false))));
+        in.viewFilter = ViewFilter.ACTIVE;
+        in.filter = "alloc";
+
+        ProjectRow row = projectRow(TaskTreeModel.build(in.build()), DRYDOCK);
+
+        // The view ribbon never hides the PR rows, but the search text
+        // narrows them like any other row; the unmatched session row goes.
+        assertEquals(List.of(9), pullRequestNodes(row).stream()
+                .map(PullRequestRow.class::cast)
+                .map(pr -> pr.pullRequest().number()).toList());
+        assertTrue(section(row, SectionKind.SESSIONS).isEmpty());
+    }
+
+    @Test
     void pullRequestsExcludeDraftsAndCheckedOutOnesNewestFirst() {
         In in = new In().project(DRYDOCK).worktree(DRYDOCK, Path.of("/wt/drydock-feature"), "feature/taken");
         in.pullRequestContainers.add(DRYDOCK);
