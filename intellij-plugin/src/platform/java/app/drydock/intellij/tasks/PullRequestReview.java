@@ -200,6 +200,26 @@ public final class PullRequestReview {
      * and offers Done once it merges. Shares the in-flight guard. EDT entry.
      */
     public void resolveConflicts(Project from, Path mainRoot, String repositoryName, OpenPullRequest pullRequest) {
+        openTaskDialogOnCheckout(from, mainRoot, repositoryName, pullRequest,
+                NewTaskPreset.resolveConflicts(pullRequest));
+    }
+
+    /**
+     * "New Task…" on a pull request row: checks the PR out into its {@code
+     * pr-<n>} worktree exactly as {@link #resolveConflicts} does (an existing
+     * one is reused as it stands; {@code gh pr checkout}, so a fork PR
+     * checks out too), then opens the plain New task dialog fixed to that
+     * worktree — the branch is the checkout's, and the agent, model and
+     * instructions stay the user's to pick. Shares the in-flight guard. EDT
+     * entry.
+     */
+    public void newTaskOnBranch(Project from, Path mainRoot, String repositoryName, OpenPullRequest pullRequest) {
+        openTaskDialogOnCheckout(from, mainRoot, repositoryName, pullRequest, NewTaskPreset.empty());
+    }
+
+    /** The shared shape of {@link #resolveConflicts} and {@link #newTaskOnBranch}: checkout, then the dialog. */
+    private void openTaskDialogOnCheckout(Project from, Path mainRoot, String repositoryName,
+                                          OpenPullRequest pullRequest, NewTaskPreset preset) {
         String key = mainRoot + "#" + pullRequest.number();
         if (!inFlight.add(key)) {
             return;
@@ -217,7 +237,7 @@ public final class PullRequestReview {
                                 if (!from.isDisposed()) {
                                     TaskLauncher.open(from, Optional.of(mainRoot),
                                             Optional.of(new NewTaskPlan.FixedWorktree(worktree, branch)),
-                                            NewTaskPreset.resolveConflicts(pullRequest));
+                                            preset);
                                 }
                             }, ModalityState.nonModal()));
                 } finally {

@@ -479,18 +479,20 @@ public final class TaskTreeModel {
         } else if (!sessionlessWorktrees.isEmpty()) {
             children.add(new Section(SectionKind.WORKTREES, sessionlessWorktrees));
         }
-        if (in.viewFilter() == ViewFilter.ALL) {
-            issueChildren(in, main, itemFilter).ifPresent(issueChildren ->
-                    children.add(new Section(SectionKind.ISSUES, issueChildren)));
-        }
-        if (in.viewFilter() == ViewFilter.ALL) {
-            if (in.pullRequestContainers().contains(main) && !in.pullRequestsByMainRoot().containsKey(main)) {
-                children.add(new Section(SectionKind.PULL_REQUESTS,
-                        List.of(new TaskNode.Deferred("Loading pull requests…"))));
-            } else {
-                pullRequestChildren(in, main, itemFilter).ifPresent(pullRequestChildren ->
-                        children.add(new Section(SectionKind.PULL_REQUESTS, pullRequestChildren)));
-            }
+        // The Issues and Pull Requests sections answer "what could I work
+        // on", not "what is running", so the view ribbon never hides them:
+        // they render in every view, with only the search text narrowing the
+        // rows inside (a project whose name matches keeps all of them, as
+        // with its tasks). Only a section with nothing configured to show is
+        // absent.
+        issueChildren(in, main, itemFilter).ifPresent(issueChildren ->
+                children.add(new Section(SectionKind.ISSUES, issueChildren)));
+        if (in.pullRequestContainers().contains(main) && !in.pullRequestsByMainRoot().containsKey(main)) {
+            children.add(new Section(SectionKind.PULL_REQUESTS,
+                    List.of(new TaskNode.Deferred("Loading pull requests…"))));
+        } else {
+            pullRequestChildren(in, main, itemFilter).ifPresent(pullRequestChildren ->
+                    children.add(new Section(SectionKind.PULL_REQUESTS, pullRequestChildren)));
         }
         return new Children(List.copyOf(children), List.copyOf(inactive));
     }
