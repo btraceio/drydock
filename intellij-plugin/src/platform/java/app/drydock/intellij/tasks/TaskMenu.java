@@ -138,6 +138,9 @@ final class TaskMenu {
             case PullRequestRow pullRequest -> nonEmpty(List.of(
                     section(Item.OPEN_IN_WORKBENCH,
                             pullRequest.pullRequest().conflicting() ? Item.RESOLVE_CONFLICTS : null),
+                    // Start a task on the PR's branch: its checkout, then the
+                    // New task dialog fixed to that worktree.
+                    List.of(Item.NEW_TASK),
                     section(urlOf(node).isPresent() ? Item.OPEN_IN_GITHUB : null)));
             case IssueRow ignored -> nonEmpty(List.of(
                     section(facts.mirroredTask() ? Item.OPEN_MIRRORED_TASK : null),

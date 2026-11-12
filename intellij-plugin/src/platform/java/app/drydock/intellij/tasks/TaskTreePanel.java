@@ -357,8 +357,13 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 "Start a task for this project or worktree", AllIcons.General.Add) {
             @Override
             public void update(@NotNull AnActionEvent e) {
-                Path root = e.getData(SELECTED_PROJECT_ROOT);
-                TaskActions.present(e, newTaskTarget(e.getData(SELECTED_NODE), root).isPresent());
+                TaskNode node = e.getData(SELECTED_NODE);
+                TaskActions.present(e, newTaskTarget(node, e.getData(SELECTED_PROJECT_ROOT)).isPresent()
+                        || node instanceof PullRequestRow);
+                boolean pr = node instanceof PullRequestRow;
+                e.getPresentation().setDescription(pr
+                        ? "Check the pull request out into its worktree and start a task on its branch"
+                        : "Start a task for this project or worktree");
             }
 
             @Override
@@ -368,8 +373,13 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
             @Override
             public void actionPerformed(@NotNull AnActionEvent e) {
+                TaskNode node = e.getData(SELECTED_NODE);
+                if (node instanceof PullRequestRow pullRequest) {
+                    newTaskOnPullRequest(pullRequest);
+                    return;
+                }
                 Path root = e.getData(SELECTED_PROJECT_ROOT);
-                newTaskTarget(e.getData(SELECTED_NODE), root).ifPresent(target ->
+                newTaskTarget(node, root).ifPresent(target ->
                         TaskLauncher.open(project, Optional.of(target.mainRoot()), target.fixedWorktree()));
             }
         };
@@ -1241,6 +1251,12 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     /** Checks the pull request out and opens the conflict-resolution task's dialog on it. EDT. */
     private void resolvePullRequestConflicts(PullRequestRow pullRequest) {
         pullRequestReview.resolveConflicts(project, pullRequest.mainRoot(), repositoryName(pullRequest.mainRoot()),
+                pullRequest.pullRequest());
+    }
+
+    /** Checks the pull request out and opens the plain New task dialog on its worktree. EDT. */
+    private void newTaskOnPullRequest(PullRequestRow pullRequest) {
+        pullRequestReview.newTaskOnBranch(project, pullRequest.mainRoot(), repositoryName(pullRequest.mainRoot()),
                 pullRequest.pullRequest());
     }
 
