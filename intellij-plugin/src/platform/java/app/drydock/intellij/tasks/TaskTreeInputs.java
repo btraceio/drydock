@@ -15,9 +15,9 @@ import app.drydock.git.GhCliService.IssueListing;
 import app.drydock.git.GhCliService.PullRequestListing;
 import app.drydock.git.GitExecutableLocator;
 import app.drydock.git.JiraIssueListing;
-import app.drydock.git.JiraService;
 import app.drydock.git.PrCheckoutService;
 import app.drydock.git.WorktreeService;
+import app.drydock.git.WorktreeService.Checkout;
 import app.drydock.git.WorktreeService.Worktree;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.agent.AgentConsoles;
@@ -50,7 +50,6 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -87,13 +86,6 @@ final class TaskTreeInputs implements AutoCloseable {
     private static final Logger LOG = System.getLogger(TaskTreeInputs.class.getName());
 
     private static final long GIT_TIMEOUT_SECONDS = 15;
-    private static final long GITHUB_TIMEOUT_SECONDS = 20;
-    // The tree waits longer than the client's own bound (connect + request
-    // plus slack): the client timeout turns a slow site into a Failed
-    // listing. This outer bound is ONE deadline shared by every group of a
-    // gather, so a hung future costs one budget, never one per group.
-    private static final long JIRA_TIMEOUT_SECONDS =
-            JiraService.CONNECT_TIMEOUT.plus(JiraService.REQUEST_TIMEOUT).plusSeconds(5).toSeconds();
     private static final long ISSUE_CACHE_NANOS = TimeUnit.MINUTES.toNanos(1);
     // Deliberately mirrors but does NOT share ISSUE_CACHE_NANOS: the two
     // caches must stay free to diverge.
@@ -104,13 +96,17 @@ final class TaskTreeInputs implements AutoCloseable {
     private final JiraIssueSource jira = new JiraIssueSource();
     private final GitExecutableLocator gitLocator = new GitExecutableLocator();
     private final Map<Path, CachedWorktrees> worktreeCache = new ConcurrentHashMap<>();
+    /** Each session directory's checkout, under the worktree lists' TTL and invalidation. */
+    private final Map<Path, CachedCheckout> checkoutCache = new ConcurrentHashMap<>();
     private final Map<Path, Instant> activityCache = new ConcurrentHashMap<>();
     private final Map<Path, Boolean> remoteCache = new ConcurrentHashMap<>();
     private final Map<IssueKey, CachedIssues> issueCache = new ConcurrentHashMap<>();
     private final Map<PullRequestKey, CachedPullRequests> pullRequestCache = new ConcurrentHashMap<>();
     private final Map<PullRequestKey, CachedBranchPullRequests> branchPullRequestCache = new ConcurrentHashMap<>();
-    /** Runs when a badge lookup this gather did not wait for completes; the panel rebuilds. */
+    /** Runs when a badge lookup or listing this gather did not wait for completes; the panel rebuilds. */
     private volatile Runnable lateData = () -> { };
+    /** What each GitHub and Jira listing shows now; a gather never waits for one. */
+    private final ListingAnswers listingAnswers = new ListingAnswers(() -> lateData.run());
     private final ResumabilityCache resumability = new ResumabilityCache();
     /** Task-change notifications (T17a); production observes the VFS, fakes inject. */
     private final TaskChanges taskChanges;
@@ -149,6 +145,16 @@ final class TaskTreeInputs implements AutoCloseable {
     /** One Jira group listing request: a group id is unique per project, and the map spans projects. */
     private record JiraRequestKey(Path root, String groupId) { }
 
+    /** A Jira group's shown answer: an edited query never shows the old query's issues. */
+    private record JiraAnswerKey(Path root, String groupId, String jql) { }
+
+    private static final IssueListing ISSUES_DID_NOT_COMPLETE =
+            new IssueListing.Failed("GitHub issue lookup did not complete");
+    private static final PullRequestListing PULL_REQUESTS_DID_NOT_COMPLETE =
+            new PullRequestListing.Failed("GitHub pull-request lookup did not complete");
+    private static final JiraIssueListing JIRA_DID_NOT_COMPLETE =
+            new JiraIssueListing.Failed("The Jira lookup did not complete");
+
     private record IssueKey(Path root, Optional<String> repository) { }
 
     private record PullRequestKey(Path root, Optional<String> repository) { }
@@ -173,6 +179,8 @@ final class TaskTreeInputs implements AutoCloseable {
      */
     record CachedWorktrees(long expiresAt, List<Worktree> listed) { }
 
+    private record CachedCheckout(long expiresAt, Checkout checkout) { }
+
     /** One {@code git remote get-url origin} run in {@code root}; throws when git gave no answer. */
     @FunctionalInterface
     interface OriginProbe {
@@ -194,6 +202,7 @@ final class TaskTreeInputs implements AutoCloseable {
 
     void invalidateWorktrees() {
         worktreeCache.clear();
+        checkoutCache.clear();
         activityCache.clear();
         resumability.clear();
     }
@@ -203,11 +212,13 @@ final class TaskTreeInputs implements AutoCloseable {
         pullRequestCache.clear();
         branchPullRequestCache.clear();
         remoteCache.clear();
+        listingAnswers.forgetAll();
     }
 
     /**
-     * Sets what runs when a session's pull-request lookup, which a gather
-     * never waits for, completes later: the panel's rebuild request.
+     * Sets what runs when a session's pull-request lookup or a GitHub or
+     * Jira listing, none of which a gather waits for, completes later: the
+     * panel's rebuild request.
      */
     void onLateData(Runnable callback) {
         lateData = Objects.requireNonNull(callback, "callback");
@@ -216,17 +227,20 @@ final class TaskTreeInputs implements AutoCloseable {
     /** Forgets every cached Jira listing, so the next gather re-queries each project. */
     void invalidateJira() {
         jira.invalidate();
+        listingAnswers.forgetAll();
     }
 
     /** Forgets {@code root}'s cached issue listing, so the next gather re-queries it. */
     void invalidateIssues(Path root) {
         issueCache.keySet().removeIf(key -> key.root().equals(root));
+        listingAnswers.forget(root);
     }
 
     /** Forgets {@code root}'s cached pull-request listing, so the next gather re-queries it. */
     void invalidatePullRequests(Path root) {
         pullRequestCache.keySet().removeIf(key -> key.root().equals(root));
         branchPullRequestCache.keySet().removeIf(key -> key.root().equals(root));
+        listingAnswers.forget(root);
     }
 
     /**
@@ -291,6 +305,7 @@ final class TaskTreeInputs implements AutoCloseable {
     /** Forgets {@code root}'s cached Jira listing, so the next gather re-queries it. */
     void invalidateJiraIssues(Path root) {
         jira.invalidate(root);
+        listingAnswers.forget(root);
     }
 
     TaskTreeModel.Inputs gather(Project here, String filter, TaskTreeModel.ViewFilter viewFilter,
@@ -302,10 +317,15 @@ final class TaskTreeInputs implements AutoCloseable {
         Map<Path, List<Worktree>> byMain = new HashMap<>();
         Map<Path, Path> mainRootOf = new HashMap<>();
         Map<Path, List<JiraGroups.Listing>> jiraGroupListings = new HashMap<>();
-        Map<Path, CompletableFuture<IssueListing>> issueRequests = new LinkedHashMap<>();
+        // A gather never waits for a listing (ListingAnswers): a running one
+        // shows its last answer, or a loading row, and its completion
+        // requests one more rebuild.
+        Map<Path, IssueListing> issues = new HashMap<>();
+        Set<Path> pendingIssues = new HashSet<>();
         Map<JiraRequestKey, CompletableFuture<JiraIssueListing>> jiraRequests = new LinkedHashMap<>();
         Map<Path, List<JiraGroup>> jiraGroupRequests = new LinkedHashMap<>();
-        Map<Path, CompletableFuture<PullRequestListing>> pullRequestRequests = new LinkedHashMap<>();
+        Set<ListingExpansionTracker.GroupKey> pendingJiraGroups = new HashSet<>();
+        Map<Path, PullRequestListing> pullRequests = new HashMap<>();
         Set<Path> worktreeContainers = new HashSet<>();
         Set<Path> pullRequestContainers = new HashSet<>();
         Set<Path> githubIssueRoots = new HashSet<>();
@@ -347,7 +367,9 @@ final class TaskTreeInputs implements AutoCloseable {
                 if (githubSettings.repository().isPresent() || githubRemoteDetectable(root, git)) {
                     githubIssueRoots.add(root);
                     if (githubIssuesWanted(requestedGitHubIssues, root, scope, project.displayName())) {
-                        issueRequests.put(root, issuesOf(root, githubSettings.repository()));
+                        listingAnswers.now(root, new IssueKey(root, githubSettings.repository()),
+                                        issuesOf(root, githubSettings.repository()), ISSUES_DID_NOT_COMPLETE)
+                                .ifPresentOrElse(listing -> issues.put(root, listing), () -> pendingIssues.add(root));
                     }
                 } else {
                     githubGhostRoots.add(root);
@@ -387,7 +409,9 @@ final class TaskTreeInputs implements AutoCloseable {
                 // be pure waste. Ordinary unscoped text is not a scope: a
                 // plain search still spans projects.
                 if (pullRequestsWanted(requestedPullRequests, root, scope, project.displayName())) {
-                    pullRequestRequests.put(root, pullRequestsOf(root, githubSettings.repository()));
+                    listingAnswers.now(root, new PullRequestKey(root, githubSettings.repository()),
+                                    pullRequestsOf(root, githubSettings.repository()), PULL_REQUESTS_DID_NOT_COMPLETE)
+                            .ifPresent(listing -> pullRequests.put(root, listing));
                     // Dedup needs the worktree list even when the user has never
                     // opened the Worktrees section (byMain is filled lazily), but
                     // only once pull requests themselves have been requested.
@@ -463,38 +487,22 @@ final class TaskTreeInputs implements AutoCloseable {
                     // keeps the Add row without enumerating any worktrees.
                     .or(() -> Optional.of(working));
         });
-        Map<Path, IssueListing> issues = new HashMap<>();
-        for (Map.Entry<Path, CompletableFuture<IssueListing>> entry : issueRequests.entrySet()) {
-            try {
-                issues.put(entry.getKey(), entry.getValue().get(GITHUB_TIMEOUT_SECONDS, TimeUnit.SECONDS));
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                break;
-            } catch (ExecutionException | TimeoutException | RuntimeException e) {
-                LOG.log(Level.DEBUG, () -> "No GitHub issues for " + entry.getKey() + ": " + e);
-                issues.put(entry.getKey(), new IssueListing.Failed("GitHub issue lookup did not complete"));
-            }
-        }
-        // One deadline for every group of every project, computed once here,
-        // right before the first Jira wait, never per project or per group.
-        long jiraDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(JIRA_TIMEOUT_SECONDS);
         for (Map.Entry<Path, List<JiraGroup>> entry : jiraGroupRequests.entrySet()) {
             Path root = entry.getKey();
-            jiraGroupListings.put(root, jiraListings(root, entry.getValue(),
-                    group -> jiraRequests.get(new JiraRequestKey(root, group.id())), jiraDeadline));
-        }
-        Map<Path, PullRequestListing> pullRequests = new HashMap<>();
-        for (Map.Entry<Path, CompletableFuture<PullRequestListing>> entry : pullRequestRequests.entrySet()) {
-            try {
-                pullRequests.put(entry.getKey(), entry.getValue().get(GITHUB_TIMEOUT_SECONDS, TimeUnit.SECONDS));
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                break;
-            } catch (ExecutionException | TimeoutException | RuntimeException e) {
-                LOG.log(Level.DEBUG, () -> "No GitHub pull requests for " + entry.getKey() + ": " + e);
-                pullRequests.put(entry.getKey(),
-                        new PullRequestListing.Failed("GitHub pull-request lookup did not complete"));
+            List<JiraGroups.Listing> listings = new ArrayList<>();
+            for (JiraGroup group : entry.getValue()) {
+                // A group the user has not opened has no future: its listing
+                // stays empty, the tree's "Not loaded" state.
+                CompletableFuture<JiraIssueListing> future = jiraRequests.get(new JiraRequestKey(root, group.id()));
+                Optional<JiraIssueListing> answer = future == null ? Optional.empty()
+                        : listingAnswers.now(root, new JiraAnswerKey(root, group.id(), group.jql()), future,
+                                JIRA_DID_NOT_COMPLETE);
+                if (future != null && answer.isEmpty()) {
+                    pendingJiraGroups.add(new ListingExpansionTracker.GroupKey(root, group.id()));
+                }
+                listings.add(new JiraGroups.Listing(group, answer));
             }
+            jiraGroupListings.put(root, listings);
         }
         // T17a: the cached task snapshot, read here in this same background
         // pass (a volatile read of the service's last publication, never a
@@ -506,7 +514,7 @@ final class TaskTreeInputs implements AutoCloseable {
                 pullRequestContainers, githubIssueRoots, githubGhostRoots, jiraRoots, jiraGhostRoots,
                 openFolders, Map.copyOf(activityCache), Instant.now(),
                 issues, jiraGroupListings, pullRequests, pullRequestDedupWorktrees, plugin.sharedProjects().problem(),
-                filter, viewFilter, resumable, sessionPullRequests);
+                filter, viewFilter, resumable, sessionPullRequests, pendingIssues, pendingJiraGroups);
     }
 
     /** Where a project's pull-request badges come from: its main checkout and its configured repository. */
@@ -515,37 +523,38 @@ final class TaskTreeInputs implements AutoCloseable {
     /**
      * Each session's pull request, matched by its current branch against
      * the head branches of its project's PRs. A session joins its project
-     * through paths, never through ids: the live worktree list of its
-     * working directory names the main checkout, whose canonical path is
-     * the badge source's key (a session's {@code repositoryId} is a
-     * state-store id that shares no UUID space with the shared-projects
-     * file's ids, so an id join matches nothing). Only projects that list
-     * pull requests take part, and only sessions whose folder still exists.
+     * through paths, never through ids: {@code git rev-parse} in its working
+     * directory names the main checkout, whose canonical path is the badge
+     * source's key (a session's {@code repositoryId} is a state-store id that
+     * shares no UUID space with the shared-projects file's ids, so an id join
+     * matches nothing). Only projects that list pull requests take part, and
+     * only sessions whose folder still exists. One short git run per session
+     * directory, cached like the worktree lists; never a worktree scan.
      * Never waits on {@code gh}: a lookup still running yields the last
      * answer (none on the very first pass), and its completion requests
      * one more rebuild through {@link #onLateData}.
      */
     private Map<ManagedSessionId, BranchPullRequest> sessionPullRequests(
             List<ManagedAgentSession> sessions, Map<Path, BadgeSource> sources) {
-        return sessionPullRequests(sessions, sources, this::worktreesOf,
+        return sessionPullRequests(sessions, sources, this::checkoutOf,
                 source -> branchPullRequestsNow(source.root(), source.repository()));
     }
 
     /**
      * The session-to-badge join as a pure seam: the same join the instance
-     * method runs, with the two blocking edges injected — the per-session
-     * live worktree listing ({@code listingsOf}) and the project's head-branch
+     * method runs, with the two blocking edges injected — the session
+     * directory's checkout ({@code checkoutOf}: canonical main checkout and
+     * branch, empty when git gives no answer) and the project's head-branch
      * PR map ({@code prsOf}). Pure apart from the directory-existence check
      * (a disk read, kept here so the gate stays tested with the join). The
-     * source is found by the listing's main-checkout path, never by
+     * source is found by the checkout's main-checkout path, never by
      * {@code session.repositoryId()}: the badge-source map is keyed by paths
      * only, so an id-join revert is a compile error, and the tests below pin
-     * the behavioral regression. The branch comes from the session's own
-     * deepest worktree entry, so the main checkout's branch cannot shadow it.
+     * the behavioral regression. A detached checkout has no branch, so no badge.
      */
     static Map<ManagedSessionId, BranchPullRequest> sessionPullRequests(
             List<ManagedAgentSession> sessions, Map<Path, BadgeSource> sources,
-            Function<Path, List<Worktree>> listingsOf,
+            Function<Path, Optional<Checkout>> checkoutOf,
             Function<BadgeSource, Map<String, BranchPullRequest>> prsOf) {
         if (sources.isEmpty()) {
             return Map.of();
@@ -556,17 +565,10 @@ final class TaskTreeInputs implements AutoCloseable {
             if (!Files.isDirectory(session.workingDirectory())) {
                 continue;
             }
-            List<Worktree> listed = listingsOf.apply(session.workingDirectory());
-            Optional<BadgeSource> source = listed.stream()
-                    .filter(Worktree::mainCheckout)
-                    .map(Worktree::path)
-                    .findFirst()
-                    .map(sources::get);
-            if (source.isEmpty()) {
-                continue;
-            }
-            Optional<String> branch = branchOf(listed, session.workingDirectory());
-            if (branch.isEmpty()) {
+            Optional<Checkout> checkout = checkoutOf.apply(session.workingDirectory());
+            Optional<BadgeSource> source = checkout.map(found -> sources.get(found.mainCheckout()));
+            Optional<String> branch = checkout.flatMap(Checkout::branch);
+            if (source.isEmpty() || branch.isEmpty()) {
                 continue;
             }
             Map<String, BranchPullRequest> pullRequests = byRoot.computeIfAbsent(source.get().root(),
@@ -597,23 +599,6 @@ final class TaskTreeInputs implements AutoCloseable {
     }
 
     /**
-     * The branch of the deepest listed worktree whose root contains
-     * {@code workingDirectory} — the same listing that resolved the main
-     * checkout, so no extra git run. Component-wise {@link Path#startsWith},
-     * so an equal path still matches and a session started in a subdirectory
-     * of a worktree resolves to that worktree's branch (the deepest entry
-     * wins, so a linked worktree's own branch is not shadowed by the main
-     * checkout's). A detached or prunable entry has no branch, and a
-     * directory git does not list at all reads as none.
-     */
-    static Optional<String> branchOf(List<Worktree> listed, Path workingDirectory) {
-        return listed.stream()
-                .filter(worktree -> workingDirectory.startsWith(worktree.path()))
-                .max(Comparator.comparingInt(worktree -> worktree.path().getNameCount()))
-                .flatMap(Worktree::branch);
-    }
-
-    /**
      * The head-branch PR map for {@code root} as far as it is known now.
      * A missing or expired entry starts a lookup whose completion calls
      * {@link #lateData}; until it completes the previous answer is served.
@@ -641,47 +626,6 @@ final class TaskTreeInputs implements AutoCloseable {
             return lookup.join();
         }
         return cached.previous();
-    }
-
-    /**
-     * One group's future against the gather's shared deadline (an absolute
-     * {@link System#nanoTime()} value): it waits only for the time left, so N
-     * groups together never wait longer than one budget. A future already done
-     * answers even past the deadline; one still running becomes a
-     * {@code Failed} listing and is left running (never cancelled — the source
-     * caches it).
-     */
-    static JiraIssueListing resolveJira(Path root, CompletableFuture<JiraIssueListing> future,
-                                        long deadlineNanos) {
-        try {
-            return future.get(Math.max(0L, deadlineNanos - System.nanoTime()), TimeUnit.NANOSECONDS);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return new JiraIssueListing.Failed("The Jira lookup was interrupted");
-        } catch (ExecutionException | TimeoutException | RuntimeException e) {
-            LOG.log(Level.DEBUG, () -> "No Jira issues for " + root + ": " + e.getClass().getSimpleName());
-            return new JiraIssueListing.Failed("The Jira lookup did not complete");
-        }
-    }
-
-    /**
-     * One project's group listings, in group order: every group yields exactly
-     * one listing, so no group is ever dropped or left looking "not requested".
-     * A group the user has not opened has no future — its listing stays empty
-     * (the tree's "Not loaded" state); one the user opened is waited for
-     * against the shared deadline and answers even when it misses it, as a
-     * {@code Failed} listing.
-     */
-    static List<JiraGroups.Listing> jiraListings(Path root, List<JiraGroup> groups,
-                                                 Function<JiraGroup, CompletableFuture<JiraIssueListing>> futureOf,
-                                                 long deadlineNanos) {
-        List<JiraGroups.Listing> listings = new ArrayList<>();
-        for (JiraGroup group : groups) {
-            CompletableFuture<JiraIssueListing> future = futureOf.apply(group);
-            listings.add(new JiraGroups.Listing(group, future == null ? Optional.empty()
-                    : Optional.of(resolveJira(root, future, deadlineNanos))));
-        }
-        return listings;
     }
 
     /**
@@ -773,6 +717,31 @@ final class TaskTreeInputs implements AutoCloseable {
         // openPullRequestsBlocking never completes exceptionally (every
         // failure becomes a Failed listing), so join on a done future is safe.
         return listing.isDone() && listing.join() instanceof PullRequestListing.Failed;
+    }
+
+    /**
+     * {@code directory}'s checkout with a canonical main checkout, cached for
+     * the worktree lists' TTL; empty when git gives no answer (for this pass
+     * only, never cached).
+     */
+    private Optional<Checkout> checkoutOf(Path directory) {
+        long now = System.nanoTime();
+        CachedCheckout cached = checkoutCache.get(directory);
+        if (cached != null && cached.expiresAt() > now) {
+            return Optional.of(cached.checkout());
+        }
+        try {
+            Checkout found = worktrees.checkoutOf(directory).get(GIT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            Checkout canonical = new Checkout(RepositoryCatalog.canonicalize(found.mainCheckout()), found.branch());
+            checkoutCache.put(directory, new CachedCheckout(now + WORKTREE_CACHE_NANOS, canonical));
+            return Optional.of(canonical);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return Optional.empty();
+        } catch (ExecutionException | TimeoutException | RuntimeException e) {
+            LOG.log(Level.DEBUG, () -> "No checkout for " + directory + ": " + e);
+            return Optional.empty();
+        }
     }
 
     /**

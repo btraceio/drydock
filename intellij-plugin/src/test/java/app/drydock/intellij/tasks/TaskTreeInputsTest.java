@@ -9,7 +9,7 @@ import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.git.GhCliService.BranchPullRequest;
 import app.drydock.git.GhCliService.PrInfo.PrLifecycle;
-import app.drydock.git.JiraIssueListing;
+import app.drydock.git.WorktreeService.Checkout;
 import app.drydock.git.WorktreeService.Worktree;
 import app.drydock.intellij.tasks.TaskTreeModel.ViewFilter;
 import app.drydock.process.ProcessResult;
@@ -23,28 +23,22 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/**
- * {@link TaskTreeInputs}' pure fetch gates — no plugin service — and the
- * Jira gather's shared-deadline waits ({@code resolveJira}, {@code
- * jiraListings}).
- */
+/** {@link TaskTreeInputs}' pure fetch gates and seams — no plugin service. */
 class TaskTreeInputsTest {
 
     private static final Path ROOT = Path.of("/work/profiling-backend");
@@ -96,124 +90,6 @@ class TaskTreeInputsTest {
         // An empty scope (//) matches every project.
         TaskTreeModel.ProjectScope every = TaskTreeModel.parseFilter("//");
         assertTrue(TaskTreeInputs.pullRequestsWanted(Set.of(ROOT), ROOT, every, "profiling-backend"));
-    }
-
-    private static final JiraIssueListing.Failed DID_NOT_COMPLETE =
-            new JiraIssueListing.Failed("The Jira lookup did not complete");
-
-    private static long millisSince(long startNanos) {
-        return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
-    }
-
-    @Test
-    void aJiraFuturePastTheSharedDeadlineFailsAtOnce() {
-        CompletableFuture<JiraIssueListing> never = new CompletableFuture<>();
-
-        long start = System.nanoTime();
-        JiraIssueListing listing = TaskTreeInputs.resolveJira(ROOT, never, System.nanoTime() - 1);
-
-        assertEquals(DID_NOT_COMPLETE, listing);
-        assertTrue(millisSince(start) < 5_000, "an expired deadline must not wait a fresh budget");
-    }
-
-    @Test
-    void groupsShareOneDeadlineAndEachStillGetsAFailedListing() {
-        JiraGroup g1 = new JiraGroup("g1", "Sprint", "project = DRY");
-        JiraGroup g2 = new JiraGroup("g2", "Bugs", "labels = bug");
-        JiraGroup g3 = new JiraGroup("g3", "Ops", "labels = on-call");
-        Map<JiraGroup, CompletableFuture<JiraIssueListing>> futures = Map.of(
-                g1, new CompletableFuture<>(), g2, new CompletableFuture<>(), g3, new CompletableFuture<>());
-
-        long start = System.nanoTime();
-        long deadline = start + TimeUnit.SECONDS.toNanos(1);
-        List<JiraGroups.Listing> listings =
-                TaskTreeInputs.jiraListings(ROOT, List.of(g1, g2, g3), futures::get, deadline);
-        long elapsed = millisSince(start);
-
-        assertEquals(3, listings.size());
-        assertEquals(List.of(g1, g2, g3), listings.stream().map(JiraGroups.Listing::group).toList());
-        for (JiraGroups.Listing listing : listings) {
-            assertEquals(Optional.of(DID_NOT_COMPLETE), listing.listing());
-        }
-        assertTrue(elapsed < 2_500, "three groups must share one deadline, took " + elapsed + " ms");
-        assertTrue(elapsed >= 800, "the shared deadline must actually be waited for, took " + elapsed + " ms");
-    }
-
-    @Test
-    void aDoneJiraFutureAnswersEvenPastTheDeadline() {
-        JiraIssueListing listed = new JiraIssueListing.Listed(List.of());
-
-        assertEquals(listed, TaskTreeInputs.resolveJira(ROOT,
-                CompletableFuture.completedFuture(listed), System.nanoTime() - 1));
-
-        JiraGroup done = new JiraGroup("g1", "Sprint", "project = DRY");
-        JiraGroup pending = new JiraGroup("g2", "Bugs", "labels = bug");
-        Map<JiraGroup, CompletableFuture<JiraIssueListing>> futures = Map.of(
-                done, CompletableFuture.completedFuture(listed), pending, new CompletableFuture<>());
-        List<JiraGroups.Listing> listings = TaskTreeInputs.jiraListings(ROOT, List.of(done, pending),
-                futures::get, System.nanoTime() - 1);
-
-        assertEquals(List.of(Optional.of(listed), Optional.of(DID_NOT_COMPLETE)),
-                listings.stream().map(JiraGroups.Listing::listing).toList());
-    }
-
-    @Test
-    void aTimedOutJiraFutureIsNeverCancelled() {
-        CompletableFuture<JiraIssueListing> never = new CompletableFuture<>();
-
-        TaskTreeInputs.resolveJira(ROOT, never, System.nanoTime() - 1);
-
-        assertFalse(never.isCancelled(), "the source caches the future; it must stay usable");
-        assertFalse(never.isDone());
-    }
-
-    @Test
-    void anInterruptedJiraWaitFailsAndKeepsTheInterrupt() {
-        CompletableFuture<JiraIssueListing> never = new CompletableFuture<>();
-        try {
-            Thread.currentThread().interrupt();
-            long start = System.nanoTime();
-            JiraIssueListing listing = TaskTreeInputs.resolveJira(ROOT, never,
-                    System.nanoTime() + TimeUnit.SECONDS.toNanos(10));
-
-            assertEquals(new JiraIssueListing.Failed("The Jira lookup was interrupted"), listing);
-            assertTrue(Thread.currentThread().isInterrupted(), "the interrupt flag must be set again");
-            assertTrue(millisSince(start) < 5_000);
-        } finally {
-            Thread.interrupted();
-        }
-    }
-
-    @Test
-    void aJiraFutureThatCompletesBeforeTheDeadlineIsWaitedFor() {
-        JiraIssueListing listed = new JiraIssueListing.Listed(List.of());
-        CompletableFuture<JiraIssueListing> later = new CompletableFuture<>();
-        CompletableFuture.delayedExecutor(100, TimeUnit.MILLISECONDS).execute(() -> later.complete(listed));
-        assertFalse(later.isDone());
-
-        long start = System.nanoTime();
-        JiraIssueListing listing = TaskTreeInputs.resolveJira(ROOT, later,
-                System.nanoTime() + TimeUnit.SECONDS.toNanos(5));
-
-        assertEquals(listed, listing);
-        assertTrue(millisSince(start) < 4_000);
-
-        JiraGroup g1 = new JiraGroup("g1", "Sprint", "project = DRY");
-        JiraGroup g2 = new JiraGroup("g2", "Bugs", "labels = bug");
-        JiraIssueListing listed1 = new JiraIssueListing.Listed(List.of());
-        JiraIssueListing listed2 = new JiraIssueListing.Listed(List.of());
-        CompletableFuture<JiraIssueListing> first = new CompletableFuture<>();
-        CompletableFuture<JiraIssueListing> second = new CompletableFuture<>();
-        CompletableFuture.delayedExecutor(100, TimeUnit.MILLISECONDS).execute(() -> first.complete(listed1));
-        CompletableFuture.delayedExecutor(200, TimeUnit.MILLISECONDS).execute(() -> second.complete(listed2));
-        Map<JiraGroup, CompletableFuture<JiraIssueListing>> futures = Map.of(g1, first, g2, second);
-
-        List<JiraGroups.Listing> listings = TaskTreeInputs.jiraListings(ROOT, List.of(g1, g2),
-                futures::get, System.nanoTime() + TimeUnit.SECONDS.toNanos(5));
-
-        assertEquals(List.of(g1, g2), listings.stream().map(JiraGroups.Listing::group).toList());
-        assertSame(listed1, listings.get(0).listing().orElseThrow());
-        assertSame(listed2, listings.get(1).listing().orElseThrow());
     }
 
     // --- Origin-remote detection: only git's definitive answer is cached ---
@@ -387,56 +263,6 @@ class TaskTreeInputsTest {
         assertEquals(Optional.empty(), TaskTreeInputs.sessionPullRequest(byHead, "main", Optional.empty()));
     }
 
-    @Test
-    void theBadgeBranchIsTheSessionWorktreeOwnListEntry() {
-        // The session sits in a linked worktree; the main checkout's branch
-        // (here: main) must not shadow the worktree's own.
-        List<Worktree> listed = List.of(
-                new Worktree(ROOT, Optional.of("main"), true, false, false, false, Optional.empty(), false),
-                new Worktree(Path.of("/work/.worktrees/backend-fix"), Optional.of("fix/branch"),
-                        false, false, false, false, Optional.empty(), false));
-        assertEquals(Optional.of("fix/branch"),
-                TaskTreeInputs.branchOf(listed, Path.of("/work/.worktrees/backend-fix")));
-        assertEquals(Optional.of("main"), TaskTreeInputs.branchOf(listed, ROOT));
-    }
-
-    @Test
-    void aDetachedOrUnlistedDirectoryHasNoBadgeBranch() {
-        List<Worktree> listed = List.of(
-                new Worktree(ROOT, Optional.of("main"), true, false, false, false, Optional.empty(), false),
-                new Worktree(Path.of("/work/.worktrees/backend-pin"), Optional.empty(),
-                        false, true, false, false, Optional.empty(), false));
-        assertEquals(Optional.empty(), TaskTreeInputs.branchOf(listed, Path.of("/work/.worktrees/backend-pin")));
-        assertEquals(Optional.empty(), TaskTreeInputs.branchOf(listed, Path.of("/elsewhere")));
-    }
-
-    // --- branchOf: the deepest worktree containing the directory wins ---
-
-    @Test
-    void aSessionInASubdirectoryOfTheMainCheckoutBadgesTheMainBranch() {
-        List<Worktree> listed = List.of(
-                new Worktree(ROOT, Optional.of("main"), true, false, false, false, Optional.empty(), false));
-        assertEquals(Optional.of("main"), TaskTreeInputs.branchOf(listed, ROOT.resolve("src/main")),
-                "a session in a subdirectory still badges the enclosing worktree's branch");
-        assertEquals(Optional.of("main"), TaskTreeInputs.branchOf(listed, ROOT),
-                "an equal path still matches (the exact-match case is the subset)");
-    }
-
-    @Test
-    void theDeepestWorktreeEntryWinsForANestedSubdirectory() {
-        Path linked = ROOT.resolve(".wt/fix");
-        List<Worktree> listed = List.of(
-                new Worktree(ROOT, Optional.of("main"), true, false, false, false, Optional.empty(), false),
-                new Worktree(linked, Optional.of("task-centric"), false, false, false, false, Optional.empty(), false));
-        assertEquals(Optional.of("task-centric"), TaskTreeInputs.branchOf(listed, linked.resolve("nested/dir")),
-                "the linked worktree is the deepest prefix ancestor: its branch wins, not the main checkout's");
-        assertEquals(Optional.of("task-centric"), TaskTreeInputs.branchOf(listed, linked),
-                "an equal path still matches");
-        assertEquals(Optional.empty(),
-                        TaskTreeInputs.branchOf(listed, Path.of("/work/profiling-backend-evil")),
-                "startsWith is component-wise, never a string prefix");
-    }
-
     // --- Worktree cache: TTL, failures never pinned ---
 
     /** A scripted lister: each call counts, then answers or throws what {@code next} holds. */
@@ -580,6 +406,10 @@ class TaskTreeInputsTest {
     @TempDir
     Path tempDir;
 
+    private static Optional<Checkout> on(Path main, String branch) {
+        return Optional.of(new Checkout(main, Optional.of(branch)));
+    }
+
     @Test
     void aSessionJoinsItsBadgeThroughTheMainCheckoutPathEvenWhenItsRepositoryIdMatchesNothing()
             throws IOException {
@@ -593,57 +423,91 @@ class TaskTreeInputsTest {
         ManagedAgentSession session = session(wt);
         Map<Path, TaskTreeInputs.BadgeSource> sources =
                 Map.of(main, new TaskTreeInputs.BadgeSource(main, Optional.of("o/r")));
-        List<Worktree> listing = List.of(mainCheckout(main, "main"), linkedCheckout(wt, "fix/branch"));
         BranchPullRequest feature =
                 new BranchPullRequest(12, PrLifecycle.OPEN, false, "fix/branch", "", Optional.empty());
 
         Map<ManagedSessionId, BranchPullRequest> matched = TaskTreeInputs.sessionPullRequests(
-                List.of(session), sources, dir -> listing, source -> Map.of("fix/branch", feature));
+                List.of(session), sources, dir -> on(main, "fix/branch"), source -> Map.of("fix/branch", feature));
 
         assertEquals(Map.of(session.id(), feature), matched,
                 "the badge joins through the main checkout's path, never through repositoryId");
     }
 
     @Test
-    void aSessionSittingInTheMainCheckoutJoinsThroughItsOwnPath() throws IOException {
+    void eachSessionAsksForItsOwnCheckoutAndNoProjectIsScanned() throws IOException {
         Path main = Files.createDirectories(tempDir.resolve("repo"));
-        ManagedAgentSession session = session(main);
-        Map<Path, TaskTreeInputs.BadgeSource> sources =
-                Map.of(main, new TaskTreeInputs.BadgeSource(main, Optional.of("o/r")));
-        List<Worktree> listing = List.of(mainCheckout(main, "main"));
-        BranchPullRequest onMain =
-                new BranchPullRequest(12, PrLifecycle.OPEN, false, "main", "", Optional.empty());
+        Path other = Files.createDirectories(tempDir.resolve("other"));
+        Path fix = Files.createDirectories(tempDir.resolve("repo/.wt/fix"));
+        Path feat = Files.createDirectories(tempDir.resolve("repo/.wt/feat"));
+        ManagedAgentSession onFix = session(fix);
+        ManagedAgentSession onFeat = session(feat);
+        BranchPullRequest fixPr = new BranchPullRequest(12, PrLifecycle.OPEN, false, "fix/branch", "", Optional.empty());
+        BranchPullRequest featPr =
+                new BranchPullRequest(13, PrLifecycle.OPEN, false, "feat/branch", "", Optional.empty());
+        Map<Path, Optional<Checkout>> checkouts = Map.of(fix, on(main, "fix/branch"), feat, on(main, "feat/branch"));
+        List<Path> asked = new ArrayList<>();
+        AtomicInteger prs = new AtomicInteger();
 
         Map<ManagedSessionId, BranchPullRequest> matched = TaskTreeInputs.sessionPullRequests(
-                List.of(session), sources, dir -> listing, source -> Map.of("main", onMain));
+                List.of(onFix, onFeat),
+                Map.of(main, new TaskTreeInputs.BadgeSource(main, Optional.of("o/r")),
+                        other, new TaskTreeInputs.BadgeSource(other, Optional.of("o/other"))),
+                dir -> {
+                    asked.add(dir);
+                    return checkouts.get(dir);
+                },
+                source -> {
+                    prs.incrementAndGet();
+                    return Map.of("fix/branch", fixPr, "feat/branch", featPr);
+                });
 
-        assertEquals(Map.of(session.id(), onMain), matched);
+        assertEquals(Map.of(onFix.id(), fixPr, onFeat.id(), featPr), matched);
+        assertEquals(List.of(fix, feat), asked,
+                "one checkout question per session directory; a project without sessions is never asked");
+        assertEquals(1, prs.get(), "one PR map per project, shared by its sessions");
     }
 
     @Test
-    void aSessionWithNoMainCheckoutInItsListingGetsNoBadge() throws IOException {
+    void aSessionWhoseCheckoutIsNoBadgeSourceGetsNoBadge() throws IOException {
         Path main = Files.createDirectories(tempDir.resolve("repo"));
-        Path wt = Files.createDirectories(tempDir.resolve("repo/.wt/fix"));
-        List<Worktree> listing = List.of(linkedCheckout(wt, "fix/branch"));
+        Path wt = Files.createDirectories(tempDir.resolve("elsewhere/fix"));
+        AtomicInteger prs = new AtomicInteger();
 
         Map<ManagedSessionId, BranchPullRequest> matched = TaskTreeInputs.sessionPullRequests(
                 List.of(session(wt)), Map.of(main, new TaskTreeInputs.BadgeSource(main, Optional.of("o/r"))),
-                dir -> listing, source -> Map.of());
+                dir -> on(tempDir.resolve("elsewhere"), "fix/branch"),
+                source -> {
+                    prs.incrementAndGet();
+                    return Map.of();
+                });
 
-        assertEquals(Map.of(), matched, "no main checkout in the listing: no badge source to join");
+        assertEquals(Map.of(), matched, "a main checkout that lists no pull requests: no badge source to join");
+        assertEquals(0, prs.get());
+    }
+
+    @Test
+    void aSessionGitCannotPlaceGetsNoBadge() throws IOException {
+        Path main = Files.createDirectories(tempDir.resolve("repo"));
+        Path wt = Files.createDirectories(tempDir.resolve("repo/.wt/fix"));
+
+        Map<ManagedSessionId, BranchPullRequest> matched = TaskTreeInputs.sessionPullRequests(
+                List.of(session(wt)), Map.of(main, new TaskTreeInputs.BadgeSource(main, Optional.of("o/r"))),
+                dir -> Optional.empty(), source -> Map.of());
+
+        assertEquals(Map.of(), matched);
     }
 
     @Test
     void aProjectWithoutBadgeSourcesIsNeverJoined() throws IOException {
         Path wt = Files.createDirectories(tempDir.resolve("repo/.wt/fix"));
-        AtomicInteger listings = new AtomicInteger();
+        AtomicInteger checkouts = new AtomicInteger();
         AtomicInteger prs = new AtomicInteger();
 
         Map<ManagedSessionId, BranchPullRequest> matched = TaskTreeInputs.sessionPullRequests(
                 List.of(session(wt)), Map.of(),
                 dir -> {
-                    listings.incrementAndGet();
-                    return List.of();
+                    checkouts.incrementAndGet();
+                    return Optional.empty();
                 },
                 source -> {
                     prs.incrementAndGet();
@@ -652,7 +516,7 @@ class TaskTreeInputsTest {
 
         assertEquals(Map.of(), matched,
                 "pull requests disabled for every project: the join is skipped entirely");
-        assertEquals(0, listings.get());
+        assertEquals(0, checkouts.get());
         assertEquals(0, prs.get());
     }
 
@@ -660,14 +524,11 @@ class TaskTreeInputsTest {
     void aDetachedSessionHasNoBadgeBranchToJoinWith() throws IOException {
         Path main = Files.createDirectories(tempDir.resolve("repo"));
         Path wt = Files.createDirectories(tempDir.resolve("repo/detached"));
-        List<Worktree> listing = List.of(
-                mainCheckout(main, "main"),
-                new Worktree(wt, Optional.empty(), false, true, false, false, Optional.empty(), false));
         AtomicInteger prs = new AtomicInteger();
 
         Map<ManagedSessionId, BranchPullRequest> matched = TaskTreeInputs.sessionPullRequests(
                 List.of(session(wt)), Map.of(main, new TaskTreeInputs.BadgeSource(main, Optional.of("o/r"))),
-                dir -> listing,
+                dir -> Optional.of(new Checkout(main, Optional.empty())),
                 source -> {
                     prs.incrementAndGet();
                     return Map.of();
@@ -675,5 +536,22 @@ class TaskTreeInputsTest {
 
         assertEquals(Map.of(), matched, "a detached worktree has no branch, so no badge");
         assertEquals(0, prs.get());
+    }
+
+    @Test
+    void aSessionWhoseFolderIsGoneIsNeverAskedAbout() {
+        Path main = tempDir.resolve("repo");
+        AtomicInteger checkouts = new AtomicInteger();
+
+        TaskTreeInputs.sessionPullRequests(
+                List.of(session(tempDir.resolve("gone"))),
+                Map.of(main, new TaskTreeInputs.BadgeSource(main, Optional.of("o/r"))),
+                dir -> {
+                    checkouts.incrementAndGet();
+                    return Optional.empty();
+                },
+                source -> Map.of());
+
+        assertEquals(0, checkouts.get());
     }
 }

@@ -119,6 +119,7 @@ import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Predicate;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -180,6 +181,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     private final Alarm searchAlarm = new Alarm(Alarm.ThreadToUse.SWING_THREAD, this);
     private volatile String filter = "";
     private volatile ViewFilter viewFilter = ViewFilter.ALL;
+    /** The inputs of the last completed gather, re-derived when only the view changes; null before one. */
+    private volatile TaskTreeModel.Inputs lastGathered;
     private List<TaskNode> displayedNodes = List.of();
     /** The last applied rows before the focus narrowed them: where a hidden session's project is looked up. */
     private List<TaskNode> displayedUnfocusedNodes = List.of();
@@ -713,9 +716,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             // The ribbon owns only the chips; the chosen view stays here,
             // and every real change (not a re-click of the selected chip)
             // narrows the tree the same way the old chip row did. No view
-            // fetches anything, so none needs a busy wait.
+            // fetches anything, so none needs a busy wait or a new gather.
             viewFilter = candidate;
-            requestRebuild(false);
+            applyViewFilter();
         }), BorderLayout.CENTER);
         query.add(focusBar, BorderLayout.SOUTH);
         top.add(query, BorderLayout.SOUTH);
@@ -1531,34 +1534,16 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             // group, an unregistered project or a disabled connection stops being
             // remembered as open. A failed gather never gets here and forgets nothing.
             expansions.retainDefinedJiraGroups(gathered.jiraGroupsByMainRoot());
-            List<TaskNode> nodes = TaskTreeModel.build(gathered);
-            // T17a: the task layer rides this same background pass -- the
-            // cached snapshot the gather read, the T15a row derivation, and
-            // the in-memory catalog for slugs; never a fresh scan, never
-            // the EDT.
-            TaskLayer tasks = taskLayer(nodes, inputs.watchedTasks(),
-                    plugin.taskService().liveSessionIds(), displayNamesByRepository(plugin),
-                    requestedFilter, Instant.now());
-            // The focus narrows what this pass built; the unfocused rows ride
-            // along so a session the focus hides can still be placed.
-            List<TaskNode> shown = nodes;
-            TaskLayer shownTasks = tasks;
-            if (requestedFocus != null) {
-                shown = ProjectFocus.focused(nodes, requestedFocus.root());
-                Map<RepositoryId, Path> roots = repositoryRoots(plugin);
-                shownTasks = ProjectFocus.focused(tasks, repository -> ProjectFocus.inFocus(repository,
-                        requestedFocus.root(), roots, gathered.mainRootOf()));
-            }
-            List<TaskNode> applied = shown;
-            TaskLayer appliedTasks = shownTasks;
+            lastGathered = gathered;
+            Derived derived = derive(plugin, gathered, requestedFocus);
             // A session whose pull request merged or closed is offered its
             // Done flow once, by whichever window's pass sees it first.
             List<PullRequestDoneOffers.Offer> doneOffers =
                     PullRequestDoneOffers.claim(gathered.sessions(), gathered.pullRequestsBySession());
             ApplicationManager.getApplication().invokeLater(
                     () -> {
-                        finishRebuild(requestedVersion, requestedFilter, requestedViewFilter, applied, nodes,
-                                appliedTasks, null);
+                        finishRebuild(requestedVersion, requestedFilter, requestedViewFilter, derived.shown(),
+                                derived.nodes(), derived.tasks(), null);
                         doneOffers.forEach(offer -> PullRequestDoneOffers.notify(project, offer));
                     },
                     ModalityState.any(), project.getDisposed());
@@ -1568,6 +1553,63 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                             List.of(), TaskLayer.EMPTY, failure),
                     ModalityState.any(), project.getDisposed());
             return null;
+        });
+    }
+
+    /** The rows one set of inputs yields: the focused rows shown, every row, and the task layer. */
+    private record Derived(List<TaskNode> shown, List<TaskNode> nodes, TaskLayer tasks) { }
+
+    /** Background only: the rows {@code gathered} yields under {@code requestedFocus}; reads no git and no gh. */
+    private Derived derive(DrydockPluginService plugin, TaskTreeModel.Inputs gathered, Focus requestedFocus) {
+        List<TaskNode> nodes = TaskTreeModel.build(gathered);
+        // T17a: the task layer rides this same background pass -- the
+        // cached snapshot the gather read, the T15a row derivation, and
+        // the in-memory catalog for slugs; never a fresh scan, never
+        // the EDT.
+        TaskLayer tasks = taskLayer(nodes, inputs.watchedTasks(),
+                plugin.taskService().liveSessionIds(), displayNamesByRepository(plugin),
+                gathered.filter(), Instant.now());
+        // The focus narrows what this pass built; the unfocused rows ride
+        // along so a session the focus hides can still be placed.
+        if (requestedFocus == null) {
+            return new Derived(nodes, nodes, tasks);
+        }
+        Map<RepositoryId, Path> roots = repositoryRoots(plugin);
+        return new Derived(ProjectFocus.focused(nodes, requestedFocus.root()), nodes,
+                ProjectFocus.focused(tasks, repository -> ProjectFocus.inFocus(repository,
+                        requestedFocus.root(), roots, gathered.mainRootOf())));
+    }
+
+    /**
+     * EDT: shows the chosen view at once, derived from the last gathered
+     * inputs instead of a new gather — a view fetches nothing, and a gather
+     * waits for git. Before any gather there is nothing to derive from, so
+     * the chosen view rides the next gather.
+     */
+    private void applyViewFilter() {
+        TaskTreeModel.Inputs gathered = lastGathered;
+        if (gathered == null) {
+            requestRebuild(false);
+            return;
+        }
+        ViewFilter requestedViewFilter = viewFilter;
+        Focus requestedFocus = focus;
+        DrydockPluginService plugin = DrydockPluginService.getInstance();
+        CompletableFuture.supplyAsync(() -> derive(plugin, gathered.withViewFilter(requestedViewFilter),
+                requestedFocus), plugin.executor()).whenComplete((derived, failure) -> {
+            if (failure != null) {
+                LOG.log(Level.WARNING, "Could not apply the Drydock task view", failure);
+                return;
+            }
+            ApplicationManager.getApplication().invokeLater(() -> {
+                // A newer gather, view or focus supersedes this derivation;
+                // whichever lands last re-derives the view the user chose.
+                if (disposed || project.isDisposed() || lastGathered != gathered
+                        || viewFilter != requestedViewFilter || focus != requestedFocus) {
+                    return;
+                }
+                apply(derived.shown(), derived.nodes(), derived.tasks(), gathered.filter(), requestedViewFilter);
+            }, ModalityState.any(), project.getDisposed());
         });
     }
 
@@ -1591,6 +1633,10 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             }
         } else if (requestedVersion == refreshRequests.version() && !disposed && !project.isDisposed()) {
             apply(nodes, unfocused, tasks, requestedFilter, requestedViewFilter);
+            if (viewFilter != requestedViewFilter) {
+                // The chip changed while this pass gathered under the old view.
+                applyViewFilter();
+            }
         }
         refreshRequests.finishPass();
         if (!disposed && !project.isDisposed() && newerPassPending) {
