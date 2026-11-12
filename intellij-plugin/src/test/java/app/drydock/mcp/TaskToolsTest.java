@@ -68,6 +68,10 @@ class TaskToolsTest {
             return CompletableFuture.completedFuture(Optional.ofNullable(home.get(caller)));
         }
         @Override
+        public CompletableFuture<List<String>> registeredProjectSlugs() {
+            return CompletableFuture.completedFuture(List.copyOf(slugs.keySet()));
+        }
+        @Override
         public CompletableFuture<Set<TaskId>> assignedTaskIds(ManagedSessionId caller) {
             return CompletableFuture.supplyAsync(() -> Set.copyOf(scan().documents().stream()
                     .filter(d -> d.sessions().contains(caller.toString()))
@@ -177,6 +181,10 @@ class TaskToolsTest {
                 .contains("No registered project 'gamma'"));
         assertEquals("Missing required argument 'title'.",
                 refusalOf("task_create", JsonObject.empty()));
+        context.home.clear();
+        String refusal = refusalOf("task_create", args("title", "No default"));
+        assertTrue(refusal.contains("no default project") && refusal.contains("alpha, beta"),
+                "the no-default refusal names the registered slugs: " + refusal);
     }
 
     @Test

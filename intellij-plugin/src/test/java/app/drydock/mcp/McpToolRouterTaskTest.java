@@ -75,6 +75,9 @@ class McpToolRouterTaskTest {
         @Override public CompletableFuture<Optional<RepositoryId>> defaultRepository(ManagedSessionId caller) {
             return CompletableFuture.completedFuture(Optional.of(repository));
         }
+        @Override public CompletableFuture<List<String>> registeredProjectSlugs() {
+            return CompletableFuture.completedFuture(List.of());
+        }
         @Override public CompletableFuture<Set<TaskId>> assignedTaskIds(ManagedSessionId caller) {
             return CompletableFuture.completedFuture(Set.copyOf(scan().documents().stream()
                     .filter(d -> d.sessions().contains(caller.toString())).map(TaskDocument::id).toList()));

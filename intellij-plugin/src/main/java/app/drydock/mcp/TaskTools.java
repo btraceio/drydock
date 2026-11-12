@@ -216,10 +216,12 @@ public final class TaskTools {
         if (project.isPresent()) {
             repository = resolveProject(project.get());
         } else {
-            repository = join(context.defaultRepository(caller), "resolving this session's repository")
-                    .orElseThrow(() -> new McpToolException("This session's working root maps to"
-                            + " no registered repository, so there is no default project to create"
-                            + " the task in; pass an explicit project."));
+            Optional<RepositoryId> resolved = join(context.defaultRepository(caller),
+                    "resolving this session's repository");
+            if (resolved.isEmpty()) {
+                throw new McpToolException(noDefaultProjectRefusal());
+            }
+            repository = resolved.get();
         }
         TaskToolContext.Outcome created = join(context.create(title, after, repository),
                 "creating the task");
@@ -244,6 +246,22 @@ public final class TaskTools {
                 .orElseThrow(() -> new McpToolException("No registered project '" + slug + "';"
                         + " pass a project exactly as the platform names it, or omit it to use"
                         + " this session's own repository."));
+    }
+
+    /**
+     * The refusal for a caller whose working root maps to no registered
+     * repository, naming the registered slugs so the call can still be
+     * retried with an explicit project.
+     */
+    private String noDefaultProjectRefusal() throws McpToolException {
+        List<String> slugs = join(context.registeredProjectSlugs(),
+                "listing the registered projects");
+        String offer = slugs.isEmpty()
+                ? "no projects are registered yet"
+                : "registered projects, by slug: " + String.join(", ", slugs);
+        return "This session's working root maps to no registered repository, so there is"
+                + " no default project to create the task in; pass an explicit project ("
+                + offer + ").";
     }
 
     /**

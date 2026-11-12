@@ -914,6 +914,14 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
     }
 
     @Override
+    public CompletableFuture<List<String>> registeredProjectSlugs() {
+        return supply(store -> repositories.get().stream()
+                .map(repository -> slugOf(repository.id()))
+                .filter(Objects::nonNull)
+                .toList());
+    }
+
+    @Override
     public CompletableFuture<Outcome> create(String title, List<String> after, RepositoryId repository) {
         List<String> prerequisites = after == null ? List.of() : List.copyOf(after);
         return supply(store -> {
@@ -1080,7 +1088,14 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
     }
 
     /** The caller's repository: its session's working root (the worktree the session runs
-     * in), mapped to the registered repository that owns that root. Empty when it resolves to none. */
+     * in), mapped to the registered repository that owns that root. Empty when it resolves to none.
+     *
+     * <p>The path matches only hit a working root that IS a registered root; a session
+     * living in a worktree of a registered repository (a detached {@code .worktrees/}
+     * checkout is the common case) matches none of them, yet the session still names its
+     * owning repository. The {@code repositoryId} fallback answers that case, and only
+     * when the owning repository is still registered -- an unregistered owner is not a
+     * default project, whatever the paths say.</p> */
     private Optional<RepositoryId> resolveDefaultRepository(ManagedSessionId caller) {
         Objects.requireNonNull(caller, "caller");
         List<Repository> catalog = repositories.get();
@@ -1090,7 +1105,11 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
                         .findByCanonicalRoot(catalog, session.workingDirectory()).map(Repository::id)
                         .or(() -> session.worktreeRoot().flatMap(
                                 root -> RepositoryCatalog.findByCanonicalRoot(catalog, root)
-                                        .map(Repository::id))));
+                                        .map(Repository::id)))
+                        .or(() -> catalog.stream()
+                                .filter(repository -> repository.id().equals(session.repositoryId()))
+                                .map(Repository::id)
+                                .findFirst()));
     }
 
     /** The repository a display slug names (P2); an unknown OR ambiguous slug answers

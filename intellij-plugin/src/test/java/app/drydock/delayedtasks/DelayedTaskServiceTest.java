@@ -209,10 +209,13 @@ class DelayedTaskServiceTest {
         ManagedSessionId resident = ManagedSessionId.newId();
         ManagedSessionId visitor = ManagedSessionId.newId();
         ManagedSessionId nested = ManagedSessionId.newId();
+        ManagedSessionId worktreeSession = ManagedSessionId.newId();
+        RepositoryId unregisteredId = RepositoryId.newId();
         List<ManagedAgentSession> sessions = List.of(
                 session(resident, alphaId, worktree, Optional.empty()),
-                session(visitor, alphaId, elsewhere, Optional.empty()),
-                session(nested, alphaId, worktree.resolve("nested"), Optional.of(worktree)));
+                session(visitor, unregisteredId, elsewhere, Optional.empty()),
+                session(nested, alphaId, worktree.resolve("nested"), Optional.of(worktree)),
+                session(worktreeSession, alphaId, elsewhere, Optional.empty()));
         List<Repository> repositories = List.of(repository(alphaId, worktree, "Project Alpha"),
                 repository(betaId, dir.resolve("beta"), "Beta Project"),
                 repository(RepositoryId.newId(), dir.resolve("duplicate"), "Project Alpha!"));
@@ -223,8 +226,11 @@ class DelayedTaskServiceTest {
                     "a working root that is a registered repository resolves its id");
             assertEquals(Optional.of(alphaId), await(service.defaultRepository(nested)),
                     "an unregistered working root falls back to its registered worktree root");
+            assertEquals(Optional.of(alphaId), await(service.defaultRepository(worktreeSession)),
+                    "an unregistered working root with a registered owning repository resolves"
+                            + " through the session's repositoryId (a detached worktree session)");
             assertTrue(await(service.defaultRepository(visitor)).isEmpty(),
-                    "an unresolvable working root yields empty");
+                    "an unresolvable working root with an unregistered owning repository yields empty");
             assertTrue(await(service.repositoryBySlug("project-alpha")).isEmpty(),
                     "an ambiguous slug yields empty (accepted deviation)");
             String created = textOf(service.taskTools().call(resident, "task_create",
@@ -234,6 +240,11 @@ class DelayedTaskServiceTest {
             assertTrue(assertThrows(McpToolException.class, () -> service.taskTools().call(visitor,
                     "task_create", args("title", "Visitor task"))).getMessage()
                     .contains("no default project"), "an unresolvable caller has no create default");
+            assertTrue(assertThrows(McpToolException.class, () -> service.taskTools().call(visitor,
+                    "task_create", args("title", "Visitor task"))).getMessage()
+                    .contains("project-alpha"),
+                    "the no-default refusal names the registered slugs so an explicit project"
+                            + " can be passed");
             assertTrue(assertThrows(McpToolException.class, () -> service.taskTools().call(resident,
                     "task_create", args("title", "Ambiguous", "project", "project-alpha")))
                     .getMessage().contains("No registered project 'project-alpha'"),
