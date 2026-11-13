@@ -38,6 +38,8 @@ import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import app.drydock.intellij.tasks.TaskLinks;
 import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
 import app.drydock.intellij.tasks.TaskTreeModel.ViewFilter;
+import app.drydock.intellij.workspace.WorkspaceBoxDialog;
+import app.drydock.intellij.workspace.WorkspaceSettings;
 import app.drydock.tasks.DelayedTaskRows;
 import app.drydock.tasks.TaskId;
 import app.drydock.tasks.TaskNode.DelayedTaskRow;
@@ -634,6 +636,12 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         // pair is gone).
         AnAction githubSettings = githubSettingsAction(node -> node instanceof IssueRow
                 || githubSettingsNode(node));
+        // The workspace-box settings for a project row, next to GitHub
+        // settings. The experimental opt-in gates both halves: TaskMenu
+        // lays the entry out only while the flag is on, and TreeMenu
+        // registers the action per menu build only then, so a flag-off
+        // build has no workspace-box surface anywhere.
+        AnAction workspaceBoxSettings = workspaceBoxSettingsAction(node -> node instanceof ProjectRow);
         // The manual refresh, one shared instance for the toolbar and the
         // tree's context menu alike: it is the same "show me now" gesture
         // (A10), but what it drops depends on where it ran — global from the
@@ -707,8 +715,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         menuActions.put(TaskMenu.Item.SHOW_SESSION, showLinkedAction(ShowKind.SESSION, "Show Session",
                 "Reveal the session row this pull request belongs to"));
         PopupHandler.installPopupMenu(tree,
-                new TreeMenu(menuActions, delayedTaskActions, newDelayedTask, refreshTasksAction,
-                        JiraTreeActions::jiraEnabled, () -> displayedNodes, () -> displayedTasks,
+                new TreeMenu(menuActions, workspaceBoxSettings, delayedTaskActions, newDelayedTask,
+                        refreshTasksAction, JiraTreeActions::jiraEnabled, () -> displayedNodes, () -> displayedTasks,
                         TaskTreePanel::watchedSnapshot),
                 "Drydock.TaskTree.Popup");
 
@@ -1096,6 +1104,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     static final class TreeMenu extends ActionGroup implements DumbAware {
 
         private final Map<TaskMenu.Item, AnAction> actions;
+        private final AnAction workspaceBoxSettings;
         private final AnAction[] delayedTaskActions;
         private final AnAction newDelayedTask;
         private final AnAction refreshTasksAction;
@@ -1107,11 +1116,12 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         private final Supplier<TaskLayer> tasks;
         private final Supplier<WatchedSnapshot> watched;
 
-        TreeMenu(Map<TaskMenu.Item, AnAction> actions, AnAction[] delayedTaskActions, AnAction newDelayedTask,
-                 AnAction refreshTasksAction, Predicate<Path> jiraEnabled,
+        TreeMenu(Map<TaskMenu.Item, AnAction> actions, AnAction workspaceBoxSettings, AnAction[] delayedTaskActions,
+                 AnAction newDelayedTask, AnAction refreshTasksAction, Predicate<Path> jiraEnabled,
                  Supplier<List<TaskNode>> displayed, Supplier<TaskLayer> tasks,
                  Supplier<WatchedSnapshot> watched) {
             this.actions = actions;
+            this.workspaceBoxSettings = workspaceBoxSettings;
             this.delayedTaskActions = delayedTaskActions;
             this.newDelayedTask = newDelayedTask;
             this.refreshTasksAction = refreshTasksAction;
@@ -1148,8 +1158,19 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             }
             List<TaskNode> selection = e.getData(SELECTED_NODES);
             Path root = e.getData(SELECTED_PROJECT_ROOT);
+            // The opt-in is read per menu build, so toggling it in Settings
+            // takes effect on the next popup: on, the workspace-box action is
+            // registered for this build; off, the entry is neither laid out
+            // (TaskMenu) nor registered, so no flag-off build can show it —
+            // TaskMenu skips an Item without one, never shows it broken.
+            Map<TaskMenu.Item, AnAction> actions = this.actions;
+            if (WorkspaceSettings.enabled()) {
+                actions = new EnumMap<>(this.actions);
+                actions.put(TaskMenu.Item.WORKSPACE_BOX, workspaceBoxSettings);
+            }
             return TaskMenu.group(e.getData(SELECTED_NODE), selection == null ? List.of() : selection, actions,
-                    root != null && jiraEnabled.test(root), displayed.get(), tasks.get(), watched.get())
+                    root != null && jiraEnabled.test(root), displayed.get(), tasks.get(), watched.get(),
+                    WorkspaceSettings.enabled())
                     .getChildActionsOrStubs();
         }
     }
@@ -1266,6 +1287,17 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 requestRebuild(false);
             }
         });
+    }
+
+    /**
+     * Opens the workspace-box settings for {@code root}'s project. EDT, modal,
+     * and no process spawns: the dialog only writes {@code WorkspaceSettings},
+     * which the launch path reads when a remote session starts, so no tree
+     * cache needs invalidating afterwards.
+     */
+    private void openWorkspaceBoxSettings(Path root) {
+        DrydockPluginService.getInstance().sharedProjects().byRoot(root).ifPresent(registered ->
+                new WorkspaceBoxDialog(project, registered).showAndGet());
     }
 
     /** Opens the pull request's review workbench in its worktree's window. EDT. */
@@ -1506,6 +1538,32 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                     return;
                 }
                 openGitHubSettings(root);
+            }
+        };
+    }
+
+    /** One workspace-box settings action for every project row; laid out next to GitHub settings. */
+    private AnAction workspaceBoxSettingsAction(Predicate<TaskNode> applies) {
+        return new DumbAwareAction("Workspace Box…",
+                "Configure the workspace box this Drydock project's agent sessions run on",
+                AllIcons.General.Settings) {
+            @Override
+            public void update(@NotNull AnActionEvent e) {
+                TaskActions.present(e, applies.test(e.getData(SELECTED_NODE)));
+            }
+
+            @Override
+            public @NotNull ActionUpdateThread getActionUpdateThread() {
+                return ActionUpdateThread.BGT;
+            }
+
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                Path root = e.getData(SELECTED_PROJECT_ROOT);
+                if (root == null) {
+                    return;
+                }
+                openWorkspaceBoxSettings(root);
             }
         };
     }

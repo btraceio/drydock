@@ -8,12 +8,14 @@ import app.drydock.domain.ModelTiers;
 import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryCatalog;
 import app.drydock.domain.RepositoryId;
+import app.drydock.domain.WorkspaceBoxBinding;
 import app.drydock.git.BranchListing;
 import app.drydock.git.BranchRef;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.JiraIssue;
 import app.drydock.git.WorktreeService;
+import app.drydock.github.GitHubLinkService;
 import app.drydock.delayedtasks.DelayedTaskService;
 import app.drydock.delayedtasks.TaskLaunchBinding;
 import app.drydock.intellij.DrydockPluginService;
@@ -25,12 +27,23 @@ import app.drydock.intellij.tasks.NewTaskPlan.Choice;
 import app.drydock.intellij.tasks.NewTaskPlan.FixedWorktree;
 import app.drydock.intellij.tasks.NewTaskPlan.OpenIn;
 import app.drydock.intellij.tasks.NewTaskPlan.WorkIn;
+import app.drydock.intellij.workspace.WorkspaceSettings;
 import app.drydock.intellij.worktree.WorktreeErrors;
+import app.drydock.process.ProcessResult;
+import app.drydock.process.ProcessRunner;
+import app.drydock.process.ProcessTimeoutException;
 import app.drydock.mcp.TaskToolContext;
 import app.drydock.projects.SharedProject;
 import app.drydock.projects.SharedProjectsSeed;
 import app.drydock.tasks.NewTaskLauncherResult;
 import app.drydock.tasks.TaskDocument;
+import app.drydock.workspace.BoxCheckout;
+import app.drydock.workspace.BoxLifecycle;
+import app.drydock.workspace.BoxShell;
+import app.drydock.workspace.CommandRunner;
+import app.drydock.workspace.ProxyBootstrap;
+import app.drydock.workspace.WorkspaceBoxNames;
+import app.drydock.workspace.WorkspacesCli;
 
 import com.intellij.ide.impl.ProjectUtil;
 import com.intellij.openapi.application.ApplicationManager;
@@ -47,12 +60,16 @@ import git4idea.repo.GitRepositoryManager;
 import git4idea.ui.branch.GitRefDialog;
 import org.jetbrains.annotations.NotNull;
 
+import java.io.IOException;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -60,6 +77,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -119,6 +138,421 @@ public final class TaskLauncher {
             }
         }
         return defaultBranch;
+    }
+
+    // ---- the workspace-box remote branch (T20) ---------------------------------
+
+    /** The one local git query of the remote branch: quick, like {@code GitHubLinkService}'s own. */
+    private static final Duration ORIGIN_TIMEOUT = Duration.ofSeconds(10);
+
+    /** A remote URL is a few dozen bytes; anything past this is drift the launch refuses. */
+    private static final int ORIGIN_MAX_OUTPUT_BYTES = 4096;
+
+    /** The progress texts, one per step, in call order; every exit clears them (INV-8). */
+    static final String ORIGIN_STEP = "Checking the project's GitHub origin…";
+    static final String LIST_STEP = "Listing the workspace boxes…";
+    static final String BOOTSTRAP_STEP = "Bootstrapping the box proxy…";
+    static final String WORKTREE_STEP = "Preparing the box worktree…";
+
+    /** The create step's text; {@code ≈3 min} is the measured end-to-end create time
+      * ({@code workspace-persistent-sessions/find-box-provisioning-facts}). */
+    static String createStep(String boxName) {
+        return "Creating workspace box " + boxName + " (≈3 min)…";
+    }
+
+    /** The probe step's text. */
+    static String probeStep(String boxName) {
+        return "Probing workspace box " + boxName + "…";
+    }
+
+    /**
+     * The launcher-half gates before any box command runs (INV-16): only
+     * a Claude launch, in a new worktree or the main checkout, without
+     * task bindings, may go remote. The dialog enforces the same
+     * conditions on its checkbox (T19); this is the belt-and-braces half
+     * for a programmatically built {@link Choice}, and it refuses BEFORE
+     * the origin query, so no box create or bootstrap can ever run for a
+     * launch the session service would refuse anyway. The service keeps
+     * its own refusal as the last line (the service tests pin it).
+     */
+    static Optional<String> remoteLaunchRefusal(AgentKind kind, WorkIn workIn, boolean taskBindings) {
+        if (kind != AgentKind.CLAUDE) {
+            return Optional.of(kind + " (" + kind.persistedName()
+                    + ") sessions cannot run on a workspace box; only Claude sessions can");
+        }
+        if (taskBindings) {
+            return Optional.of("A task-bound launch cannot run on a workspace box");
+        }
+        if (workIn != WorkIn.NEW_WORKTREE && workIn != WorkIn.MAIN_CHECKOUT) {
+            return Optional.of("A session in an existing worktree cannot run on a workspace box");
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * The orgs whose repositories may run on workspace boxes, compared
+     * case-insensitively because GitHub names are: the {@code workspaces}
+     * CLI refuses every other org even with {@code -R}
+     * ({@code workspace-persistent-sessions/find-box-provisioning-facts}),
+     * so the launch refuses before any {@code workspaces create} can run
+     * (AC-15's launcher half).
+     */
+    private static boolean datadogOrg(String owner) {
+        return "DataDog".equalsIgnoreCase(owner) || "ddoghq".equalsIgnoreCase(owner);
+    }
+
+    /**
+     * The whole box half of one remote launch, in the contract's exact
+     * call order: origin ({@code GitHubLinkService.parseRemote} of the one
+     * local git query) → refusal for non-GitHub origins and non-DataDog
+     * owners before any {@code workspaces create} → the repo's mapping
+     * ({@code WorkspaceSettings}' {@code .box} key, through the {@link
+     * BoxMapping} seam) → {@link BoxShell} probe → {@link WorkspacesCli}
+     * {@code list} → {@link BoxLifecycle#decide} → {@code workspaces
+     * create} or the destructive re-create confirmation ({@link
+     * RecreateConfirm}; {@code nextGeneration} never reuses a name the
+     * mapping has pointed at, INV-25) → {@link BoxBootstrap} (the {@link
+     * ProxyBootstrap} seam) → {@link BoxCheckout} prepare → the {@link
+     * RemoteBoxOutcome.ReadyBox} binding the launch chain receives.
+     *
+     * <p>No {@code workspaces restart}, {@code delete}, or any other
+     * mutating subcommand is ever issued — the CLI class cannot express
+     * one, and this path only ever asks it to {@code list} and {@code
+     * create}; stopped and gone boxes are left in place (INV-11, AC-18).
+     * A failed bootstrap refuses the launch visibly with its reason
+     * (INV-19). Box create and re-create happen ONLY here — never from
+     * Resume, Stop, Forget, or startup (INV-12).</p>
+     *
+     * <p>Every exit clears the progress (INV-8): the {@code finally} covers
+     * success, refusal, cancellation ({@link InterruptedException}
+     * propagates) and every early return. Blocking — never call on the EDT;
+     * the platform half runs this inside the existing {@code
+     * Task.Backgroundable}.</p>
+     */
+    static RemoteBoxOutcome prepareBox(RemoteBoxDeps deps, RemoteBoxRequest request) throws InterruptedException {
+        Objects.requireNonNull(deps, "deps");
+        Objects.requireNonNull(request, "request");
+        try {
+            return prepareBoxSteps(deps, request);
+        } finally {
+            deps.progress().clear();
+        }
+    }
+
+    private static RemoteBoxOutcome prepareBoxSteps(RemoteBoxDeps deps, RemoteBoxRequest request)
+            throws InterruptedException {
+        // 1. Origin: one local git query through the CommandRunner seam,
+        //    parsed by the one GitHub remote parser.
+        deps.progress().step(ORIGIN_STEP);
+        String originUrl = originUrl(deps.runner(), request.mainRoot());
+        if (originUrl == null) {
+            return refuse(deps, "Drydock could not read the project's GitHub origin"
+                    + " (git remote get-url origin failed), so the task cannot start on a workspace box");
+        }
+        Optional<GitHubLinkService.Remote> parsed = GitHubLinkService.parseRemote(originUrl);
+        if (parsed.isEmpty()) {
+            return refuse(deps, "The project's origin is not a GitHub repository"
+                    + " (" + ProcessRunner.excerpt(originUrl) + "), so its sessions cannot run on a workspace box");
+        }
+        GitHubLinkService.Remote origin = parsed.get();
+        if (!datadogOrg(origin.owner())) {
+            return refuse(deps, "Workspace boxes can only be created for DataDog or ddoghq"
+                    + " repositories; the origin " + origin.owner() + "/" + origin.repo() + " is not one");
+        }
+
+        // 2. The repo's mapping: the `.box` key — a user override or a
+        //    re-created generation; empty on a first launch.
+        Optional<String> mapped = deps.mapping().box();
+        if (mapped.isPresent() && !WorkspaceBoxNames.validate(mapped.get())) {
+            return refuse(deps, "The workspace box name \"" + mapped.get() + "\" recorded for this"
+                    + " repository is not a valid box name; fix it in the Workspace box dialog");
+        }
+        String base = mapped.orElseGet(() -> WorkspaceBoxNames.defaultName(request.repoName()));
+        String host = "workspace-" + base; // the alias WorkspacesBinding.sshRemote() derives
+
+        // 3-5. Probe, list, decide.
+        deps.progress().step(probeStep(base));
+        BoxShell.BoxResult probe = new BoxShell(deps.runner()).probe(host);
+        deps.progress().step(LIST_STEP);
+        WorkspacesCli.ListResult listed = deps.cli().list();
+        BoxLifecycle.Outcome decision = BoxLifecycle.decide(probe,
+                BoxLifecycle.cliStatus(listed, base), mapped.isPresent(), deps.boxAlreadyBootstrapped());
+
+        return switch (decision) {
+            case BoxLifecycle.Outcome.Reuse ignored -> readyBox(deps, request, base, host, origin);
+            case BoxLifecycle.Outcome.BootstrapThenReuse ignored -> readyBox(deps, request, base, host, origin);
+            case BoxLifecycle.Outcome.Create ignored -> {
+                deps.progress().step(createStep(base));
+                Optional<String> failure = createBox(deps, request, origin, base);
+                if (failure.isPresent()) {
+                    yield refuse(deps, failure.get());
+                }
+                // The mapping now points at the box it created, so a later
+                // gone box is OFFER_RECREATE(GONE) — never a same-name CREATE
+                // that would rebind old rows to a fresh box (D2, INV-25).
+                deps.mapping().recordBox(base);
+                yield readyBox(deps, request, base, host, origin);
+            }
+            case BoxLifecycle.Outcome.OfferRecreate(BoxLifecycle.RecreateReason reason) -> {
+                String root = generationRoot(base);
+                Set<String> neverReuse = neverReuseNames(listed, base, root);
+                String fresh = WorkspaceBoxNames.nextGeneration(root, neverReuse);
+                String message = reason == BoxLifecycle.RecreateReason.GONE
+                        ? "Box " + base + " no longer exists, so its conversations are gone and are"
+                        + " not recovered by this action. Create a fresh workspace box " + fresh
+                        + " for this repository?"
+                        : "Box " + base + " is stopped, so its conversations are unreachable and are"
+                        + " not recovered by this action. The stopped box is left in place. Create a"
+                        + " fresh workspace box " + fresh + " for this repository?";
+                if (!deps.confirm().reCreate(message)) {
+                    // Cancelled: nothing is created, nothing is written, no
+                    // launch happens (AC-18) — a user decision, not a failure.
+                    yield new RemoteBoxOutcome.BoxCancelled();
+                }
+                deps.progress().step(createStep(fresh));
+                Optional<String> failure = createBox(deps, request, origin, fresh);
+                if (failure.isPresent()) {
+                    yield refuse(deps, failure.get());
+                }
+                deps.mapping().recordBox(fresh);
+                yield readyBox(deps, request, fresh, "workspace-" + fresh, origin);
+            }
+            case BoxLifecycle.Outcome.TransientError ignored -> refuse(deps,
+                    "The workspace box " + base + " could not be reached and its status could not"
+                            + " be determined; try again");
+        };
+    }
+
+    /**
+     * The post-decision steps every surviving path shares: bootstrap the
+     * box proxy, then prepare the box worktree. A failed bootstrap refuses
+     * the launch with its reason (INV-19) — never a launch without the
+     * proxy.
+     */
+    private static RemoteBoxOutcome readyBox(RemoteBoxDeps deps, RemoteBoxRequest request,
+            String boxName, String host, GitHubLinkService.Remote origin) throws InterruptedException {
+        deps.progress().step(BOOTSTRAP_STEP);
+        try {
+            deps.bootstrap().ensure(host);
+        } catch (BootstrapRefusal e) {
+            return refuse(deps, "The box proxy bootstrap failed, so the launch was refused: " + e.getMessage());
+        }
+        deps.progress().step(WORKTREE_STEP);
+        BoxCheckout.Outcome prepared = new BoxCheckout(deps.runner())
+                .prepare(host, origin, request.work(), deps.mapping().cloneCache());
+        return switch (prepared) {
+            case BoxCheckout.Outcome.Ready(String clone, String workingPath) ->
+                    new RemoteBoxOutcome.ReadyBox(new WorkspaceBoxBinding(boxName, workingPath));
+            case BoxCheckout.Outcome.Refused(String reason) -> refuse(deps, reason);
+        };
+    }
+
+    /**
+     * Runs {@code workspaces create <name> -R <owner>/<repo> -s bash -y --no-color} in
+     * the local main checkout (the CLI derives the box's repo context from
+     * the cwd); empty when the box was created, else the visible refusal
+     * reason — the CLI's own typed, already-logged outcome, so a failed or
+     * hung create is never a silent success (INV-9, AC-17).
+     */
+    private static Optional<String> createBox(RemoteBoxDeps deps, RemoteBoxRequest request,
+            GitHubLinkService.Remote origin, String name) throws InterruptedException {
+        WorkspacesCli.CreateResult result = deps.cli().create(name,
+                origin.owner() + "/" + origin.repo(), request.mainRoot());
+        return switch (result) {
+            case WorkspacesCli.Created ignored -> Optional.empty();
+            case WorkspacesCli.NotInstalled(String detail) -> Optional.of(
+                    "Creating workspace box " + name + " failed: the workspaces CLI is not"
+                            + " installed (" + detail + ")");
+            case WorkspacesCli.Failed(int exit, String excerpt) -> Optional.of(
+                    "Creating workspace box " + name + " failed (exit " + exit + "): " + excerpt);
+            case WorkspacesCli.TimedOut(String excerpt) -> Optional.of(
+                    "Creating workspace box " + name + " timed out after 10 minutes: " + excerpt);
+            case WorkspacesCli.OutputTooLarge(String excerpt) -> Optional.of(
+                    "Creating workspace box " + name + " produced more output than Drydock accepts: "
+                            + excerpt);
+        };
+    }
+
+    /**
+     * The lineage root for the next generation: the mapped name with one
+     * trailing {@code -N} generation suffix removed. The mapping holds a
+     * single {@code .box} key — no separate root key — so a generation
+     * like {@code drydock-x-2} recovers its {@code drydock-x} lineage this
+     * way; the caller always excludes the un-stripped name too, so the
+     * strip can never make a candidate collide with the box being replaced.
+     */
+    private static String generationRoot(String name) {
+        String stripped = name.replaceFirst("-[0-9]+$", "");
+        return WorkspaceBoxNames.validate(stripped) ? stripped : name;
+    }
+
+    /**
+     * The names a re-create must never reuse (INV-25): everything {@code
+     * workspaces list} already answers for (stopped boxes stay listed;
+     * existing boxes of other users are name-scoped anyway), plus the
+     * mapped name and its lineage root — the names this repo's mapping
+     * has pointed at that the launcher can know without a second
+     * settings key.
+     */
+    private static Set<String> neverReuseNames(WorkspacesCli.ListResult listed, String base, String root) {
+        Set<String> names = new HashSet<>();
+        if (listed instanceof WorkspacesCli.Listed table) {
+            names.addAll(table.names());
+        }
+        names.add(base);
+        names.add(root);
+        return names;
+    }
+
+    /**
+     * The project's own origin, through the one local git query —
+     * {@code git -C <mainRoot> remote get-url origin} over the {@link
+     * CommandRunner} seam (argument list, 10 s timeout, stdin from
+     * {@code /dev/null}, bounded output), parsed upstream by {@link
+     * GitHubLinkService#parseRemote}, the one GitHub remote parser. Null
+     * means the query failed: a failed query is a refusal, never an empty
+     * origin (INV-9).
+     */
+    private static String originUrl(CommandRunner runner, Path mainRoot) throws InterruptedException {
+        List<String> argv = List.of("git", "-C", mainRoot.toString(), "remote", "get-url", "origin");
+        ProcessResult result;
+        try {
+            result = runner.run(argv,
+                    new ProcessRunner.Options(null, ORIGIN_TIMEOUT, true, Map.of()), ORIGIN_MAX_OUTPUT_BYTES);
+        } catch (ProcessTimeoutException e) {
+            LOG.log(Level.WARNING, "Reading the project's origin timed out", e);
+            return null;
+        } catch (IOException e) {
+            LOG.log(Level.WARNING, "Reading the project's origin failed", e);
+            return null;
+        }
+        if (result.exitCode() != 0) {
+            LOG.log(Level.WARNING, "git remote get-url origin exited {0}: {1}",
+                    new Object[] {result.exitCode(), ProcessRunner.excerpt(result.stderr())});
+            return null;
+        }
+        return result.stdout();
+    }
+
+    /** One refusal: surfaced through the deps' reporter, and carried back to the caller. */
+    private static RemoteBoxOutcome refuse(RemoteBoxDeps deps, String reason) {
+        deps.reporter().accept(reason);
+        return new RemoteBoxOutcome.RefusedBox(reason);
+    }
+
+    /**
+     * The platform halves of one remote launch: every dependency the pure
+     * box chain above cannot own — the {@link CommandRunner} seam, the
+     * CLI, the bootstrap and confirmation and progress and reporting
+     * bindings — so tests drive the whole chain on fakes with no IDE
+     * behind it. {@code boxAlreadyBootstrapped} is whether the box is
+     * known provisioned; production passes {@code false} because nothing
+     * records it and {@link ProxyBootstrap#ensure} is idempotent — a
+     * second run on a bootstrapped box issues no scp and no start — so
+     * REUSE and BOOTSTRAP_THEN_REUSE behave identically here and the
+     * bootstrap still runs on every launch.
+     */
+    record RemoteBoxDeps(CommandRunner runner, WorkspacesCli cli, BoxBootstrap bootstrap, BoxMapping mapping,
+                         RecreateConfirm confirm, Consumer<String> reporter, ProgressSink progress,
+                         boolean boxAlreadyBootstrapped) {
+        RemoteBoxDeps {
+            Objects.requireNonNull(runner, "runner");
+            Objects.requireNonNull(cli, "cli");
+            Objects.requireNonNull(bootstrap, "bootstrap");
+            Objects.requireNonNull(mapping, "mapping");
+            Objects.requireNonNull(confirm, "confirm");
+            Objects.requireNonNull(reporter, "reporter");
+            Objects.requireNonNull(progress, "progress");
+        }
+    }
+
+    /**
+     * One remote launch's box-side request: the local main checkout (the
+     * create cwd and the origin the box clone must match), the repository
+     * name the default box name derives from, and the box work to prepare.
+     */
+    record RemoteBoxRequest(Path mainRoot, String repoName, BoxCheckout.Work work) {
+        RemoteBoxRequest {
+            Objects.requireNonNull(mainRoot, "mainRoot");
+            Objects.requireNonNull(repoName, "repoName");
+            Objects.requireNonNull(work, "work");
+        }
+    }
+
+    /** What preparing the box for one remote launch ended in. */
+    sealed interface RemoteBoxOutcome {
+
+        /** The box is ready; {@code binding} is what the launch chain receives. */
+        record ReadyBox(WorkspaceBoxBinding binding) implements RemoteBoxOutcome {
+        }
+
+        /** The launch is refused; the reason was already surfaced through the reporter. */
+        record RefusedBox(String reason) implements RemoteBoxOutcome {
+        }
+
+        /** The user declined the destructive re-create; nothing changed. */
+        record BoxCancelled() implements RemoteBoxOutcome {
+        }
+    }
+
+    /**
+     * The repo's box mapping — {@code WorkspaceSettings}' {@code .box} and
+     * {@code .clone} keys — bound to the registered repository's stable
+     * id in production; tests record writes against an in-memory fake.
+     */
+    interface BoxMapping {
+
+        /** The repository's current box name — a user override or a re-created generation. */
+        Optional<String> box();
+
+        /** Records the box the repo now maps to (a first create or a confirmed re-create). */
+        void recordBox(String boxName);
+
+        /** The per-repo {@code .clone} cache {@link BoxCheckout} reads and stores through. */
+        BoxCheckout.CloneCache cloneCache();
+    }
+
+    /**
+     * The bootstrap seam: production binds the real {@link ProxyBootstrap#ensure},
+     * carrying its typed refusal as this launcher's own {@link BootstrapRefusal}
+     * so tests (and callers) need no IDE to refuse a launch.
+     */
+    @FunctionalInterface
+    interface BoxBootstrap {
+
+        /** Makes the box serve the gateway-only proxy; throws {@link BootstrapRefusal} on failure. */
+        void ensure(String host) throws InterruptedException, BootstrapRefusal;
+    }
+
+    /** A bootstrap refusal as the launcher surfaces it: the message is the visible, secret-free reason (INV-19). */
+    static final class BootstrapRefusal extends Exception {
+
+        BootstrapRefusal(String reason) {
+            super(reason);
+        }
+    }
+
+    /**
+     * The destructive re-create confirmation. Production hops to the EDT
+     * for a {@code Messages} yes/no dialog carrying the full message the
+     * box chain composed — naming the old box and the loss of its
+     * conversations; tests answer directly.
+     */
+    @FunctionalInterface
+    interface RecreateConfirm {
+
+        /** {@code true} = create the new generation; {@code false} = leave everything unchanged. */
+        boolean reCreate(String message);
+    }
+
+    /** The progress the box chain sets per step and clears on every exit (INV-8). */
+    interface ProgressSink {
+
+        /** Shows one step's text. */
+        void step(String text);
+
+        /** Clears the progress; called on every exit of the chain. */
+        void clear();
     }
 
     /**
@@ -690,11 +1124,17 @@ public final class TaskLauncher {
     /** As {@link #start(Project, NewTaskPlan.Inputs, Choice, SessionDialogs.PreparedSessionCallback)}, with the
       * one-project segment's pre-spawn bindings (T31a, T28a): an empty list is the byte-identical no-binding
       * chain; a non-empty one composes the bind step before the tab and the spawn, where a refusal prevents
-      * the launch. */
+      * the launch. A choice that asks for a workspace box is refused before the local chain runs at all. */
     static CompletableFuture<ManagedAgentSession> start(Project from, NewTaskPlan.Inputs inputs, Choice choice,
                                                         SessionDialogs.PreparedSessionCallback preparedSession,
                                                         List<TaskLaunchBinding> bindings) {
         Objects.requireNonNull(bindings, "bindings");
+        if (choice.onWorkspaceBox()) {
+            // The remote arm (T20): the whole box chain, then the same
+            // launch chain with a binding. The local half below runs
+            // byte-identically for every local choice (INV-1).
+            return startRemote(from, inputs, choice, preparedSession, bindings);
+        }
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         Path mainRoot = inputs.project().root();
         TrackedLaunch tracked = new TrackedLaunch();
@@ -773,6 +1213,174 @@ public final class TaskLauncher {
             }
         });
         return tracked.future();
+    }
+
+    /**
+     * The remote half of one {@link #start} (T20): the whole box chain runs
+     * inside the same {@code Task.Backgroundable} as the local half, with
+     * per-step progress cleared on every exit (INV-8 — {@link #prepareBox}'s
+     * finally covers refusal, cancel, failure and early return, and the
+     * task's own end covers the rest), and the launch itself — {@link
+     * SessionDialogs#launchNewSession} receiving the {@link WorkspaceBoxBinding}
+     * — hops to the EDT like the local half's window open. No local worktree
+     * is created and no project window opens: the console is an ssh client of
+     * the box-side tmux session, shown as a tab in the window the launch
+     * came from (the dialog's open-in choice is a local-workspace notion).
+     *
+     * <p>This is the ONLY path that creates or re-creates a box (INV-12):
+     * Resume, Stop, Forget and startup never reach it, and nothing here
+     * issues any mutating workspaces subcommand but {@code create}
+     * (INV-11). With the flag off (INV-31) or a launch the dialog's gates
+     * would have refused (INV-16), the launch is refused before a single
+     * box command runs.</p>
+     */
+    static CompletableFuture<ManagedAgentSession> startRemote(Project from, NewTaskPlan.Inputs inputs,
+                                                                Choice choice,
+                                                                SessionDialogs.PreparedSessionCallback preparedSession,
+                                                                List<TaskLaunchBinding> bindings) {
+        TrackedLaunch tracked = new TrackedLaunch();
+        if (!WorkspaceSettings.enabled()) {
+            String reason = "Workspace sessions are turned off in Settings › Tools › Drydock";
+            report(from, reason);
+            tracked.failed(new IllegalStateException(reason));
+            return tracked.future();
+        }
+        Optional<String> gated = remoteLaunchRefusal(choice.agent(), choice.workIn(), !bindings.isEmpty());
+        if (gated.isPresent()) {
+            report(from, gated.get());
+            tracked.failed(new IllegalStateException(gated.get()));
+            return tracked.future();
+        }
+        Path mainRoot = inputs.project().root();
+        DrydockPluginService plugin = DrydockPluginService.getInstance();
+        ProgressManager.getInstance().run(new Task.Backgroundable(from, "Starting " + choice.name() + "…", true) {
+            @Override
+            public void run(@NotNull ProgressIndicator indicator) {
+                try {
+                    // The stable RepositoryId the box mapping's keys hang
+                    // off — the same register-first step the local half
+                    // takes, so a remote row and its mapping agree.
+                    Optional<SharedProject> registered = plugin.sharedProjects().byRoot(mainRoot);
+                    if (registered.isEmpty()) {
+                        indicator.setText("Adding " + inputs.repoName() + " to Drydock…");
+                        registered = Optional.of(plugin.sharedProjects()
+                                .register(mainRoot, inputs.repoName())
+                                .get(PREPARE_TIMEOUT_SECONDS, TimeUnit.SECONDS));
+                    }
+                    RemoteBoxDeps deps = new RemoteBoxDeps(CommandRunner.PRODUCTION,
+                            new WorkspacesCli(CommandRunner.PRODUCTION), productionBootstrap(),
+                            settingsMapping(registered.get().id()),
+                            message -> confirmRecreateOnEdt(from, message),
+                            reason -> report(from, reason),
+                            new ProgressSink() {
+                                @Override
+                                public void step(String text) {
+                                    indicator.setText(text);
+                                }
+
+                                @Override
+                                public void clear() {
+                                    indicator.setText("");
+                                }
+                            }, false);
+                    RemoteBoxRequest request = new RemoteBoxRequest(mainRoot, inputs.repoName(),
+                            choice.workIn() == WorkIn.MAIN_CHECKOUT
+                                    ? new BoxCheckout.Work.MainCheckout()
+                                    : new BoxCheckout.Work.NewWorktree(choice.branch(),
+                                            Optional.of(choice.start())));
+                    switch (prepareBox(deps, request)) {
+                        case RemoteBoxOutcome.RefusedBox(String reason) ->
+                                // Already surfaced through the reporter.
+                                tracked.failed(new IllegalStateException(reason));
+                        case RemoteBoxOutcome.BoxCancelled ignored -> tracked.cancelled();
+                        case RemoteBoxOutcome.ReadyBox(WorkspaceBoxBinding binding) ->
+                                ApplicationManager.getApplication().invokeLater(() -> tracked.launched(
+                                        SessionDialogs.launchNewSession(from,
+                                                binding.sshRemote().placeholderRoot(), mainRoot,
+                                                choice.agent(), choice.name(), choice.mode(),
+                                                NewTaskPlan.initialPrompt(choice), choice.model(), choice.tiers(),
+                                                false, preparedSession, bindings, Optional.of(binding))),
+                                        ModalityState.nonModal());
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    tracked.cancelled();
+                } catch (ExecutionException | TimeoutException | RuntimeException e) {
+                    LOG.log(Level.WARNING, "Could not start task " + choice.name() + " on a workspace box", e);
+                    report(from, "Could not start \"" + choice.name() + "\" on a workspace box: "
+                            + WorktreeErrors.visibleMessage(e));
+                    tracked.failed(e);
+                }
+            }
+        });
+        return tracked.future();
+    }
+
+    /**
+     * The production bootstrap seam: the real {@link ProxyBootstrap} on the
+     * production runner, its typed refusal carried as this launcher's own
+     * {@link BootstrapRefusal} (the reason text is the visible, secret-free
+     * reason the bootstrap composed).
+     */
+    private static BoxBootstrap productionBootstrap() {
+        return host -> {
+            try {
+                new ProxyBootstrap(CommandRunner.PRODUCTION).ensure(host);
+            } catch (ProxyBootstrap.BootstrapException e) {
+                throw new BootstrapRefusal(e.reason());
+            }
+        };
+    }
+
+    /**
+     * The repo's box mapping bound to the {@code WorkspaceSettings} keys —
+     * {@code .box} for the current box, {@code .clone} for the discovered
+     * box clone — keyed by the registered repository's stable id, the same
+     * key family the Workspace box dialog edits (ASM-17's escape hatch).
+     */
+    static BoxMapping settingsMapping(RepositoryId repositoryId) {
+        Objects.requireNonNull(repositoryId, "repositoryId");
+        return new BoxMapping() {
+            @Override
+            public Optional<String> box() {
+                return WorkspaceSettings.box(repositoryId);
+            }
+
+            @Override
+            public void recordBox(String boxName) {
+                WorkspaceSettings.setBox(repositoryId, boxName);
+            }
+
+            @Override
+            public BoxCheckout.CloneCache cloneCache() {
+                return new BoxCheckout.CloneCache() {
+                    @Override
+                    public Optional<String> cached() {
+                        return WorkspaceSettings.clonePath(repositoryId);
+                    }
+
+                    @Override
+                    public void store(String clonePath) {
+                        WorkspaceSettings.setClonePath(repositoryId, clonePath);
+                    }
+                };
+            }
+        };
+    }
+
+    /**
+     * The destructive re-create confirmation on the EDT (INV-8: the box
+     * chain blocks on a background thread, the dialog shows on the EDT):
+     * the message already names the old box and the loss of its
+     * conversations (AC-18); only an explicit Yes creates the new
+     * generation.
+     */
+    private static boolean confirmRecreateOnEdt(Project from, String message) {
+        AtomicBoolean confirmed = new AtomicBoolean();
+        ApplicationManager.getApplication().invokeAndWait(() -> confirmed.set(
+                Messages.showYesNoDialog(from, message, "Create a new workspace box?",
+                        Messages.getQuestionIcon()) == Messages.YES), ModalityState.nonModal());
+        return confirmed.get();
     }
 
     /**

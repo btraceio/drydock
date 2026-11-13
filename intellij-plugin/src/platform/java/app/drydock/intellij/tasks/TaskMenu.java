@@ -20,6 +20,7 @@ import app.drydock.intellij.tasks.TaskNode.SectionKind;
 import app.drydock.intellij.tasks.TaskNode.StaleWorktrees;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
+import app.drydock.intellij.workspace.WorkspaceSettings;
 
 import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.DefaultActionGroup;
@@ -89,6 +90,8 @@ final class TaskMenu {
         IMPLEMENT,
         TRIAGE,
         GITHUB_SETTINGS,
+        /** Per-project workspace-box configuration: box-name override and clone path; only while the opt-in flag is on. */
+        WORKSPACE_BOX,
         /** Per-project Jira configuration: site, credentials. */
         JIRA_SETTINGS,
         /** Add a user-defined Jira group (name + JQL) to the Issues section. */
@@ -117,25 +120,46 @@ final class TaskMenu {
      * resolved cross-row links (issues, sessions, pull requests, tasks).
      * An empty target keeps its jump item out, so the menu never offers a
      * reveal the tree cannot perform.
+     *
+     * <p>{@code workspaceBoxEnabled} is the workspace-box opt-in flag as of
+     * this menu build: the entry it gates is laid out for project rows only,
+     * and the panel registers its action for a build only while the flag is
+     * on, so a flag-off build has no workspace-box surface anywhere.</p>
      */
     record MenuFacts(boolean transferAvailable, boolean jiraEnabled, boolean mirroredTask,
+                     boolean workspaceBoxEnabled,
                      boolean sessionGitHubLink, boolean sessionJiraLink,
                      DelayedTaskRow showTask, PullRequestRow showPullRequest, TaskRow showSession) {
 
         /** The facts before any cross-row link existed: nothing resolved. */
         MenuFacts(boolean transferAvailable, boolean jiraEnabled) {
-            this(transferAvailable, jiraEnabled, false, false, false, null, null, null);
+            this(transferAvailable, jiraEnabled, false);
         }
 
-        /** The facts before issue rows could mirror a task: no mirrored task. */
+        /** The facts before the workspace-box opt-in existed: the flag off. */
         MenuFacts(boolean transferAvailable, boolean jiraEnabled, boolean mirroredTask) {
-            this(transferAvailable, jiraEnabled, mirroredTask, false, false, null, null, null);
+            this(transferAvailable, jiraEnabled, mirroredTask, false);
+        }
+
+        /** The facts before any cross-row link existed: nothing resolved. */
+        MenuFacts(boolean transferAvailable, boolean jiraEnabled, boolean mirroredTask,
+                  boolean sessionGitHubLink, boolean sessionJiraLink,
+                  DelayedTaskRow showTask, PullRequestRow showPullRequest, TaskRow showSession) {
+            this(transferAvailable, jiraEnabled, mirroredTask, false, sessionGitHubLink, sessionJiraLink,
+                    showTask, showPullRequest, showSession);
+        }
+
+        /** The facts with the workspace-box opt-in stated by the caller (tests). */
+        MenuFacts(boolean transferAvailable, boolean jiraEnabled, boolean mirroredTask,
+                  boolean workspaceBoxEnabled) {
+            this(transferAvailable, jiraEnabled, mirroredTask, workspaceBoxEnabled,
+                    false, false, null, null, null);
         }
 
         /** The facts before session rows carried attached links: no session link. */
         MenuFacts(boolean transferAvailable, boolean jiraEnabled, boolean mirroredTask,
                   boolean sessionGitHubLink, boolean sessionJiraLink) {
-            this(transferAvailable, jiraEnabled, mirroredTask, sessionGitHubLink, sessionJiraLink,
+            this(transferAvailable, jiraEnabled, mirroredTask, false, sessionGitHubLink, sessionJiraLink,
                     null, null, null);
         }
     }
@@ -245,7 +269,9 @@ final class TaskMenu {
         return nonEmpty(List.of(
                 List.of(Item.NEW_TASK, Item.NEW_TASK_IN_MAIN),
                 List.of(Item.FOCUS_PROJECT),
-                section(Item.REFRESH, Item.GITHUB_SETTINGS, Item.JIRA_SETTINGS,
+                section(Item.REFRESH, Item.GITHUB_SETTINGS,
+                        facts.workspaceBoxEnabled() ? Item.WORKSPACE_BOX : null,
+                        Item.JIRA_SETTINGS,
                         facts.jiraEnabled() ? Item.ADD_JIRA_GROUP : null),
                 section(TaskActions.removable(row).isEmpty() ? null : Item.REMOVE_INACTIVE_WORKTREES,
                         Item.REMOVE_FROM_DRYDOCK)));
@@ -299,9 +325,18 @@ final class TaskMenu {
      * adding a group hinges on it (the Jira settings entry is always offered).
      * {@code mirroredTask} asks the task service's cached snapshot whether a
      * task mirrors the selected issue row, memory only.
+     * {@code workspaceBoxEnabled} reads the workspace-box opt-in flag from
+     * the application properties as of this build, so toggling it in Settings
+     * takes effect on the next popup without a panel rebuild.
      */
     static MenuFacts factsFor(TaskNode lead, boolean jiraEnabled) {
-        return factsFor(lead, jiraEnabled, List.of(), TaskTreePanel.TaskLayer.EMPTY, null);
+        return factsFor(lead, jiraEnabled, WorkspaceSettings.enabled());
+    }
+
+    /** Same, with the workspace-box opt-in stated by the caller (tests). */
+    static MenuFacts factsFor(TaskNode lead, boolean jiraEnabled, boolean workspaceBoxEnabled) {
+        return factsFor(lead, jiraEnabled, List.of(), TaskTreePanel.TaskLayer.EMPTY, null,
+                workspaceBoxEnabled);
     }
 
     /**
@@ -313,6 +348,12 @@ final class TaskMenu {
      */
     static MenuFacts factsFor(TaskNode lead, boolean jiraEnabled, List<TaskNode> displayed,
                               TaskTreePanel.TaskLayer tasks, WatchedSnapshot watched) {
+        return factsFor(lead, jiraEnabled, displayed, tasks, watched, WorkspaceSettings.enabled());
+    }
+
+    static MenuFacts factsFor(TaskNode lead, boolean jiraEnabled, List<TaskNode> displayed,
+                              TaskTreePanel.TaskLayer tasks, WatchedSnapshot watched,
+                              boolean workspaceBoxEnabled) {
         DelayedTaskRow showTask = null;
         PullRequestRow showPullRequest = null;
         TaskRow showSession = null;
@@ -334,6 +375,7 @@ final class TaskMenu {
         return new MenuFacts(lead instanceof TaskRow row
                 && SessionTransfer.available(row.session(), row.activity()), jiraEnabled,
                 issueUrlOf(lead).flatMap(TaskMirroring::mirroredTask).isPresent(),
+                workspaceBoxEnabled,
                 lead instanceof TaskRow row && !githubUrlsOf(row).isEmpty(),
                 lead instanceof TaskRow row && !jiraUrlsOf(row).isEmpty(),
                 showTask, showPullRequest, showSession);
@@ -398,17 +440,19 @@ final class TaskMenu {
      */
     static DefaultActionGroup group(TaskNode lead, List<TaskNode> selection, Map<Item, AnAction> actions,
                                     boolean jiraEnabled) {
-        return group(lead, selection, actions, jiraEnabled, List.of(), TaskTreePanel.TaskLayer.EMPTY, null);
+        return group(lead, selection, actions, jiraEnabled, List.of(), TaskTreePanel.TaskLayer.EMPTY, null,
+                WorkspaceSettings.enabled());
     }
 
     /** Same popup, with the cross-row links resolved over the tree's current nodes. */
     static DefaultActionGroup group(TaskNode lead, List<TaskNode> selection, Map<Item, AnAction> actions,
                                     boolean jiraEnabled, List<TaskNode> displayed,
-                                    TaskTreePanel.TaskLayer tasks, WatchedSnapshot watched) {
+                                    TaskTreePanel.TaskLayer tasks, WatchedSnapshot watched,
+                                    boolean workspaceBoxEnabled) {
         DefaultActionGroup menu = new DefaultActionGroup();
         boolean separated = false;
         for (List<Item> section : sections(lead, selection,
-                factsFor(lead, jiraEnabled, displayed, tasks, watched))) {
+                factsFor(lead, jiraEnabled, displayed, tasks, watched, workspaceBoxEnabled))) {
             List<AnAction> present = new ArrayList<>();
             for (Item item : section) {
                 AnAction action = actions.get(item);

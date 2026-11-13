@@ -7,6 +7,7 @@ import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.ModelTiers;
 import app.drydock.domain.SessionMode;
+import app.drydock.domain.WorkspaceBoxBinding;
 import app.drydock.intellij.agent.AgentConsoles;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.startup.DrydockStartupActivity;
@@ -144,11 +145,29 @@ public final class SessionDialogs {
             Path repositoryRoot, AgentKind kind, String displayName, SessionMode mode, Optional<String> task,
             Optional<String> model, Optional<ModelTiers> tiers, boolean freshWindow,
             PreparedSessionCallback preparedSession, List<TaskLaunchBinding> bindings) {
+        return launchNewSession(project, workingDirectory, repositoryRoot, kind, displayName, mode, task, model,
+                tiers, freshWindow, preparedSession, bindings, Optional.empty());
+    }
+
+    /**
+     * The remote arm of {@link #launchNewSession} (T20): {@code workspaceBox}
+     * is the box binding the launcher's box chain resolved — present, this
+     * prepares a <em>remote</em> row (the binding derives the row's
+     * placeholder working directory, the ssh remote every context carries,
+     * and the tmux session the agent lives in); empty, every local launch,
+     * byte-identical to before. The progress wrapper, the tab opening and
+     * the failure surfacing are the launch chain's own, unchanged.
+     */
+    public static CompletableFuture<ManagedAgentSession> launchNewSession(Project project, Path workingDirectory,
+            Path repositoryRoot, AgentKind kind, String displayName, SessionMode mode, Optional<String> task,
+            Optional<String> model, Optional<ModelTiers> tiers, boolean freshWindow,
+            PreparedSessionCallback preparedSession, List<TaskLaunchBinding> bindings,
+            Optional<WorkspaceBoxBinding> workspaceBox) {
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         String agentName = AgentLabels.displayName(plugin.registry(), kind);
         CompletableFuture<ManagedAgentSession> launch = launchSession(project, workingDirectory, repositoryRoot,
                 kind, displayName, mode, session -> CompletableFuture.completedFuture(task), freshWindow, model,
-                tiers, preparedSession, bindings);
+                tiers, preparedSession, bindings, workspaceBox);
         ProgressManager.getInstance().run(new Task.Backgroundable(project,
                 "Starting " + agentName + " session…", true) {
             @Override
@@ -335,9 +354,28 @@ public final class SessionDialogs {
             Function<ManagedAgentSession, CompletableFuture<Optional<String>>> prompt, boolean freshWindow,
             Optional<String> model, Optional<ModelTiers> tiers, PreparedSessionCallback preparedSession,
             List<TaskLaunchBinding> bindings) {
+        return launchSession(project, workingDirectory, repositoryRoot, kind, displayName, mode, prompt, freshWindow,
+                model, tiers, preparedSession, bindings, Optional.empty());
+    }
+
+    /**
+     * The launch chain itself, remote arm included (T20): {@code workspaceBox}
+     * present prepares a remote row through the session service's binding
+     * overload (the row stores the binding's placeholder working directory,
+     * and the launch resolves its remote context from the binding); empty
+     * is every local launch, byte-identical to before (INV-1). Everything
+     * else — the prepared-session callback, the bindings, the tab, the
+     * prompt, the launch — is the same chain.
+     */
+    public static CompletableFuture<ManagedAgentSession> launchSession(Project project, Path workingDirectory,
+            Path repositoryRoot, AgentKind kind, String displayName, SessionMode mode,
+            Function<ManagedAgentSession, CompletableFuture<Optional<String>>> prompt, boolean freshWindow,
+            Optional<String> model, Optional<ModelTiers> tiers, PreparedSessionCallback preparedSession,
+            List<TaskLaunchBinding> bindings, Optional<WorkspaceBoxBinding> workspaceBox) {
         Objects.requireNonNull(bindings, "bindings");
+        Objects.requireNonNull(workspaceBox, "workspaceBox");
         CompletableFuture<ManagedAgentSession> chain = DrydockStartupActivity.sessions(project)
-                .prepareSession(workingDirectory, repositoryRoot, kind, displayName, mode)
+                .prepareSession(workingDirectory, repositoryRoot, kind, displayName, mode, workspaceBox)
                 .thenApply(session -> preparedSessionNotified(preparedSession, session));
         for (TaskLaunchBinding binding : bindings) {
             chain = chain.thenCompose(session -> bindingBound(binding, session));

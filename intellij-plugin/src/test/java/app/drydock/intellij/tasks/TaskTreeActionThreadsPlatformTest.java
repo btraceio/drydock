@@ -206,8 +206,10 @@ public class TaskTreeActionThreadsPlatformTest extends BasePlatformTestCase {
         AnAction[] delayed = { stub("Delayed") };
         AnAction newDelayed = stub("New Delayed");
         AnAction refreshTasks = stub("Refresh Tasks");
+        AnAction workspaceBox = stub("Workspace Box…");
         List<Path> jiraQueries = new ArrayList<>();
-        TaskTreePanel.TreeMenu menu = new TaskTreePanel.TreeMenu(actions, delayed, newDelayed, refreshTasks,
+        TaskTreePanel.TreeMenu menu = new TaskTreePanel.TreeMenu(actions, workspaceBox, delayed, newDelayed,
+                refreshTasks,
                 root -> {
             jiraQueries.add(root);
             return false;

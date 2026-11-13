@@ -49,6 +49,7 @@ class TaskMenuTest {
     private static final TaskMenu.MenuFacts TRANSFER = new TaskMenu.MenuFacts(true, false);
     private static final TaskMenu.MenuFacts NO_TRANSFER = new TaskMenu.MenuFacts(false, false);
     private static final TaskMenu.MenuFacts JIRA = new TaskMenu.MenuFacts(false, true);
+    private static final TaskMenu.MenuFacts WORKSPACE_BOX = new TaskMenu.MenuFacts(false, false, false, true);
 
     private static TaskRow task(boolean running, TaskPlacement placement) {
         ManagedAgentSession session = new ManagedAgentSession.Builder(
@@ -530,5 +531,59 @@ class TaskMenuTest {
                 new app.drydock.tasks.TaskState.TaskView(app.drydock.tasks.TaskId.of("fix-alloc-k3f9"),
                         app.drydock.tasks.TaskState.Presentation.READY, List.of(), List.of()),
                 "Fix allocation profile", RepositoryId.newId(), Optional.empty(), false, List.of());
+    }
+
+    @Test
+    void projectRowOffersWorkspaceBoxNextToGitHubSettingsOnlyWhileTheOptInIsOn() {
+        // Flag on: the entry sits next to GitHub settings, before Jira's —
+        // both settings facts on at once keeps every other entry in place.
+        assertEquals(List.of(
+                List.of(TaskMenu.Item.NEW_TASK, TaskMenu.Item.NEW_TASK_IN_MAIN),
+                List.of(TaskMenu.Item.FOCUS_PROJECT),
+                List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.GITHUB_SETTINGS, TaskMenu.Item.WORKSPACE_BOX,
+                        TaskMenu.Item.JIRA_SETTINGS),
+                List.of(TaskMenu.Item.REMOVE_FROM_DRYDOCK)),
+                TaskMenu.sections(project(), List.of(), WORKSPACE_BOX));
+        assertEquals(List.of(
+                List.of(TaskMenu.Item.NEW_TASK, TaskMenu.Item.NEW_TASK_IN_MAIN),
+                List.of(TaskMenu.Item.FOCUS_PROJECT),
+                List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.GITHUB_SETTINGS, TaskMenu.Item.WORKSPACE_BOX,
+                        TaskMenu.Item.JIRA_SETTINGS, TaskMenu.Item.ADD_JIRA_GROUP),
+                List.of(TaskMenu.Item.REMOVE_FROM_DRYDOCK)),
+                TaskMenu.sections(project(), List.of(), new TaskMenu.MenuFacts(false, true, false, true)));
+        // Flag off — every delegating MenuFacts constructor keeps it off, so
+        // the existing flag-off assertions already pin this: no project menu
+        // contains the entry, and neither does any other row that shares
+        // the settings section.
+        assertEquals(List.of(
+                List.of(TaskMenu.Item.NEW_TASK, TaskMenu.Item.NEW_TASK_IN_MAIN),
+                List.of(TaskMenu.Item.FOCUS_PROJECT),
+                List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.GITHUB_SETTINGS, TaskMenu.Item.JIRA_SETTINGS),
+                List.of(TaskMenu.Item.REMOVE_FROM_DRYDOCK)),
+                sectionsOf(project()));
+        assertFalse(TaskMenu.sections(new Section(SectionKind.ISSUES, List.of(issue(Optional.empty()))), List.of(),
+                        WORKSPACE_BOX).stream()
+                .anyMatch(section -> section.contains(TaskMenu.Item.WORKSPACE_BOX)));
+    }
+
+    @Test
+    void noOtherRowOffersWorkspaceBoxEvenWithTheOptInOn() {
+        List<TaskNode> rows = List.of(
+                task(true, new TaskPlacement.OwnWindow()),
+                task(false, new TaskPlacement.Idle(false)),
+                issue(Optional.empty()),
+                jiraIssue(),
+                pullRequest(Optional.empty()),
+                worktree(false, false),
+                new WorktreeGroup(WORKTREE, "fix-allocation-profile", List.of(task(false, new TaskPlacement.Idle(false)))),
+                new Section(SectionKind.ISSUES, List.of(issue(Optional.empty()))),
+                new Section(SectionKind.PULL_REQUESTS, List.of(pullRequest(Optional.empty()))),
+                new TaskNode.StaleWorktrees(List.of(worktree(false, false))),
+                new TaskNode.AddCurrentProject(ROOT, "profiling-backend"));
+        for (TaskNode row : rows) {
+            assertTrue(TaskMenu.sections(row, List.of(), WORKSPACE_BOX).stream()
+                            .noneMatch(section -> section.contains(TaskMenu.Item.WORKSPACE_BOX)),
+                    "only a project row may offer the workspace-box settings: " + row.getClass().getSimpleName());
+        }
     }
 }
