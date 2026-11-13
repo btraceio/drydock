@@ -414,6 +414,12 @@ public final class DrydockPluginService implements Disposable {
         return sharedProjects;
     }
 
+    /** The install's own repository catalog (the projects this IDE registered), empty
+      * before initialization. EDT-safe: a memory read of the published state, no I/O. */
+    public List<Repository> repositories() {
+        return catalogState().repositories();
+    }
+
     /**
      * The first shared list, when none exists: the standalone app's own
      * projects, from its newest state file, read-only. The plugin's own
