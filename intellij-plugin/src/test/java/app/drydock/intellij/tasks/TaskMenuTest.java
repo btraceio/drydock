@@ -49,6 +49,10 @@ class TaskMenuTest {
     private static final TaskMenu.MenuFacts TRANSFER = new TaskMenu.MenuFacts(true, false);
     private static final TaskMenu.MenuFacts NO_TRANSFER = new TaskMenu.MenuFacts(false, false);
     private static final TaskMenu.MenuFacts JIRA = new TaskMenu.MenuFacts(false, true);
+    private static final TaskMenu.MenuFacts WORKSPACE_BOX = new TaskMenu.MenuFacts(false, false, false, true);
+    /** The facts of an ALIVE-detached workspace-box row: the remote Stop. */
+    private static final TaskMenu.MenuFacts REMOTE_STOP =
+            new TaskMenu.MenuFacts(false, false, false, false, true, false, false, null, null, null);
 
     private static TaskRow task(boolean running, TaskPlacement placement) {
         ManagedAgentSession session = new ManagedAgentSession.Builder(
@@ -242,6 +246,73 @@ class TaskMenuTest {
                 List.of(TaskMenu.Item.RENAME, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
                 List.of(TaskMenu.Item.DONE_WITH_TASK)),
                 sectionsOf(task(false, new TaskPlacement.Idle(true))));
+    }
+
+    @Test
+    void anIdleRemoteRowWithTheAliveFactGainsTheStopBesideItsResume() {
+        // The restart scenario (review R3 defect 1): the row runs nowhere in
+        // this IDE but its box-bound agent is ALIVE — the menu keeps the
+        // honest Resume and adds the Stop ahead of it, routed to the same
+        // remote Deactivate the strip and the tab use, so the live agent is
+        // never stranded behind a Resume-only menu.
+        assertEquals(List.of(
+                List.of(TaskMenu.Item.SWITCH_TO_TASK),
+                List.of(TaskMenu.Item.DEACTIVATE, TaskMenu.Item.RESUME, TaskMenu.Item.RESUME_IN_OWN_WINDOW),
+                List.of(TaskMenu.Item.RENAME, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
+                List.of(TaskMenu.Item.DONE_WITH_TASK)),
+                TaskMenu.sections(task(false, new TaskPlacement.Idle(false)), List.of(), REMOTE_STOP));
+        // This window's own worktree keeps its plain Resume line; the Stop
+        // joins the same section.
+        assertEquals(List.of(
+                List.of(TaskMenu.Item.SWITCH_TO_TASK),
+                List.of(TaskMenu.Item.DEACTIVATE, TaskMenu.Item.RESUME),
+                List.of(TaskMenu.Item.RENAME, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
+                List.of(TaskMenu.Item.DONE_WITH_TASK)),
+                TaskMenu.sections(task(false, new TaskPlacement.Idle(true)), List.of(), REMOTE_STOP));
+    }
+
+    @Test
+    void theRemoteStopFactChangesNoOtherRowsMenu() {
+        // Only an idle task row carries the Stop; every other row — and every
+        // running task, whose menu already has it — keeps its byte-identical
+        // list under the same facts.
+        assertEquals(List.of(
+                List.of(TaskMenu.Item.SWITCH_TO_TASK),
+                List.of(TaskMenu.Item.DEACTIVATE, TaskMenu.Item.REVIEW_CHANGES),
+                List.of(TaskMenu.Item.RENAME, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
+                List.of(TaskMenu.Item.DONE_WITH_TASK)),
+                TaskMenu.sections(task(true, new TaskPlacement.Here()), List.of(), REMOTE_STOP));
+        List<TaskNode> rows = List.of(
+                issue(Optional.empty()),
+                jiraIssue(),
+                pullRequest(Optional.empty()),
+                worktree(false, false),
+                project(worktree(false, false)),
+                new TaskNode.StaleWorktrees(List.of(worktree(false, false))),
+                new WorktreeGroup(WORKTREE, "fix-allocation-profile",
+                        List.of(task(false, new TaskPlacement.Idle(false)))),
+                new Section(SectionKind.ISSUES, List.of(issue(Optional.empty()))));
+        for (TaskNode row : rows) {
+            assertEquals(TaskMenu.sections(row, List.of(), NO_TRANSFER),
+                    TaskMenu.sections(row, List.of(), REMOTE_STOP),
+                    "the Stop fact must not touch this row: " + row.getClass().getSimpleName());
+        }
+    }
+
+    @Test
+    void aLocalIdleRowWithoutTheFactKeepsItsExactPreRemoteMenu() {
+        // Every legacy MenuFacts shape carries no remote Stop, so a local
+        // idle row's menu is the byte-identical pre-remote list — the fact
+        // is computed from the row's own box binding and liveness, never
+        // defaulted on.
+        assertEquals(List.of(
+                List.of(TaskMenu.Item.SWITCH_TO_TASK),
+                List.of(TaskMenu.Item.RESUME, TaskMenu.Item.RESUME_IN_OWN_WINDOW),
+                List.of(TaskMenu.Item.RENAME, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
+                List.of(TaskMenu.Item.DONE_WITH_TASK)),
+                TaskMenu.sections(task(false, new TaskPlacement.Idle(false)), List.of(), WORKSPACE_BOX));
+        assertFalse(TaskMenu.sections(task(false, new TaskPlacement.Idle(false)), List.of(), WORKSPACE_BOX)
+                .stream().anyMatch(section -> section.contains(TaskMenu.Item.DEACTIVATE)));
     }
 
     @Test
@@ -530,5 +601,59 @@ class TaskMenuTest {
                 new app.drydock.tasks.TaskState.TaskView(app.drydock.tasks.TaskId.of("fix-alloc-k3f9"),
                         app.drydock.tasks.TaskState.Presentation.READY, List.of(), List.of()),
                 "Fix allocation profile", RepositoryId.newId(), Optional.empty(), false, List.of());
+    }
+
+    @Test
+    void projectRowOffersWorkspaceBoxNextToGitHubSettingsOnlyWhileTheOptInIsOn() {
+        // Flag on: the entry sits next to GitHub settings, before Jira's —
+        // both settings facts on at once keeps every other entry in place.
+        assertEquals(List.of(
+                List.of(TaskMenu.Item.NEW_TASK, TaskMenu.Item.NEW_TASK_IN_MAIN),
+                List.of(TaskMenu.Item.FOCUS_PROJECT),
+                List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.GITHUB_SETTINGS, TaskMenu.Item.WORKSPACE_BOX,
+                        TaskMenu.Item.JIRA_SETTINGS),
+                List.of(TaskMenu.Item.REMOVE_FROM_DRYDOCK)),
+                TaskMenu.sections(project(), List.of(), WORKSPACE_BOX));
+        assertEquals(List.of(
+                List.of(TaskMenu.Item.NEW_TASK, TaskMenu.Item.NEW_TASK_IN_MAIN),
+                List.of(TaskMenu.Item.FOCUS_PROJECT),
+                List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.GITHUB_SETTINGS, TaskMenu.Item.WORKSPACE_BOX,
+                        TaskMenu.Item.JIRA_SETTINGS, TaskMenu.Item.ADD_JIRA_GROUP),
+                List.of(TaskMenu.Item.REMOVE_FROM_DRYDOCK)),
+                TaskMenu.sections(project(), List.of(), new TaskMenu.MenuFacts(false, true, false, true)));
+        // Flag off — every delegating MenuFacts constructor keeps it off, so
+        // the existing flag-off assertions already pin this: no project menu
+        // contains the entry, and neither does any other row that shares
+        // the settings section.
+        assertEquals(List.of(
+                List.of(TaskMenu.Item.NEW_TASK, TaskMenu.Item.NEW_TASK_IN_MAIN),
+                List.of(TaskMenu.Item.FOCUS_PROJECT),
+                List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.GITHUB_SETTINGS, TaskMenu.Item.JIRA_SETTINGS),
+                List.of(TaskMenu.Item.REMOVE_FROM_DRYDOCK)),
+                sectionsOf(project()));
+        assertFalse(TaskMenu.sections(new Section(SectionKind.ISSUES, List.of(issue(Optional.empty()))), List.of(),
+                        WORKSPACE_BOX).stream()
+                .anyMatch(section -> section.contains(TaskMenu.Item.WORKSPACE_BOX)));
+    }
+
+    @Test
+    void noOtherRowOffersWorkspaceBoxEvenWithTheOptInOn() {
+        List<TaskNode> rows = List.of(
+                task(true, new TaskPlacement.OwnWindow()),
+                task(false, new TaskPlacement.Idle(false)),
+                issue(Optional.empty()),
+                jiraIssue(),
+                pullRequest(Optional.empty()),
+                worktree(false, false),
+                new WorktreeGroup(WORKTREE, "fix-allocation-profile", List.of(task(false, new TaskPlacement.Idle(false)))),
+                new Section(SectionKind.ISSUES, List.of(issue(Optional.empty()))),
+                new Section(SectionKind.PULL_REQUESTS, List.of(pullRequest(Optional.empty()))),
+                new TaskNode.StaleWorktrees(List.of(worktree(false, false))),
+                new TaskNode.AddCurrentProject(ROOT, "profiling-backend"));
+        for (TaskNode row : rows) {
+            assertTrue(TaskMenu.sections(row, List.of(), WORKSPACE_BOX).stream()
+                            .noneMatch(section -> section.contains(TaskMenu.Item.WORKSPACE_BOX)),
+                    "only a project row may offer the workspace-box settings: " + row.getClass().getSimpleName());
+        }
     }
 }

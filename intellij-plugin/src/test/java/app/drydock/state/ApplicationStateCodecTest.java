@@ -21,6 +21,7 @@ import app.drydock.domain.Workflow;
 import app.drydock.domain.WorkflowBrief;
 import app.drydock.domain.WorkflowId;
 import app.drydock.domain.WorkflowStatus;
+import app.drydock.domain.WorkspaceBoxBinding;
 import app.drydock.domain.WorkspaceUiState;
 import app.drydock.review.SessionReviewScopes;
 import app.drydock.state.json.JsonParser;
@@ -1161,8 +1162,155 @@ class ApplicationStateCodecTest {
         assertTrue(decoded.workflows().isEmpty());
     }
 
+    // ---- the workspaceBox member (AC-10) -------------------------------------
+
+    /**
+     * The byte-identity oracle for AC-10: the exact session JSON a local row
+     * serialized to before the {@code workspaceBox} member existed. The pinned
+     * literal must stay byte-identical after the change -- a local row neither
+     * gains the member nor shifts by a byte.
+     */
     @Test
-    void aSessionWithoutWorkflowIdDecodesAsUnaffiliated() {
+    void aLocalRowSessionJsonIsByteIdenticalToBeforeTheWorkspaceBoxMember() {
+        ManagedAgentSession session = new ManagedAgentSession(
+                ManagedSessionId.of(SESSION_ID), RepositoryId.of(REPO_ID), "pinned session",
+                new AgentBinding(AgentKind.CLAUDE, Optional.of("conv-42"), Optional.empty()),
+                new SessionWorkspace(Path.of("/tmp/repo/wd"), Optional.of(Path.of("/tmp/repo/wt")), true),
+                SessionStatus.IDLE, Instant.EPOCH, Instant.EPOCH, Optional.of(7),
+                PrLink.of(PrState.OPEN, Optional.of(128)), true, Optional.empty(),
+                true, Optional.empty(), true, true);
+        ApplicationState state = new ApplicationState(List.of(), List.of(session), List.of(),
+                WorkspaceUiState.empty(), List.of());
+
+        JsonObject sessionObj = (JsonObject) ((JsonArray) ((JsonObject) ApplicationStateCodec.toJson(state))
+                .get("sessions")).elements().getFirst();
+
+        assertFalse(sessionObj.has("workspaceBox"));
+        String expected = """
+                {
+                  "id": "22222222-3333-4444-5555-666666666666",
+                  "repositoryId": "11111111-2222-3333-4444-555555555555",
+                  "displayName": "pinned session",
+                  "agentKind": "claude",
+                  "agentSessionId": "conv-42",
+                  "agentSessionName": null,
+                  "mode": "WRITES",
+                  "workingDirectory": "/tmp/repo/wd",
+                  "worktreeRoot": "/tmp/repo/wt",
+                  "status": "IDLE",
+                  "createdAt": "1970-01-01T00:00:00Z",
+                  "lastOpenedAt": "1970-01-01T00:00:00Z",
+                  "lastExitCode": 7,
+                  "prState": "OPEN",
+                  "prNumber": 128,
+                  "branchCreatedHere": true,
+                  "namePinned": true,
+                  "forkedFrom": null,
+                  "evalMode": true,
+                  "workflowId": null,
+                  "startedWithTask": true,
+                  "flagged": true
+                }
+                """;
+        assertEquals(expected, JsonWriter.write(sessionObj));
+    }
+
+    @Test
+    void workspaceBoxRoundTripsWhenPresentAndIsOmittedWhenAbsent() {
+        Repository repo = new Repository(RepositoryId.newId(), Path.of("/tmp/repo"), "repo",
+                Instant.EPOCH, Instant.EPOCH, RepositorySettings.DEFAULT);
+        WorkspaceBoxBinding binding = new WorkspaceBoxBinding(
+                "drydock-profiling-rt-ai-plugins", "/home/user/profiling-rt-ai-plugins");
+        ManagedAgentSession remote = new ManagedAgentSession(
+                ManagedSessionId.newId(), repo.id(), "box session",
+                new AgentBinding(AgentKind.CLAUDE, Optional.of("conv-9"), Optional.empty()),
+                new SessionWorkspace(Path.of("/tmp/repo/wd"), Optional.empty(), true),
+                SessionStatus.IDLE, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
+                PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty())
+                .toBuilder().workspaceBox(Optional.of(binding)).build();
+        ApplicationState state = new ApplicationState(List.of(repo), List.of(remote), List.of(),
+                WorkspaceUiState.empty(), List.of());
+
+        ApplicationState decoded = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state));
+
+        ManagedAgentSession row = decoded.sessions().getFirst();
+        assertEquals(Optional.of(binding), row.workspaceBox());
+        // A remote row's working directory is derived from the binding, and
+        // the decode re-derives it rather than trusting the file.
+        assertEquals(binding.sshRemote().placeholderRoot(), row.workingDirectory());
+        assertTrue(row.worktreeRoot().isEmpty());
+        assertFalse(row.branchCreatedHere());
+
+        // The member itself: written only when present, with name and path.
+        JsonObject remoteObj = (JsonObject) ((JsonArray) ((JsonObject) ApplicationStateCodec.toJson(state))
+                .get("sessions")).elements().getFirst();
+        JsonObject box = (JsonObject) remoteObj.get("workspaceBox");
+        assertEquals("drydock-profiling-rt-ai-plugins",
+                ((JsonString) box.get("name")).value());
+        assertEquals("/home/user/profiling-rt-ai-plugins",
+                ((JsonString) box.get("path")).value());
+
+        // A local row writes no member at all — the byte-identity test above
+        // pins the exact local shape; this pins the presence rule.
+        ApplicationState local = new ApplicationState(List.of(repo), List.of(plainSession()), List.of(),
+                WorkspaceUiState.empty(), List.of());
+        JsonObject localObj = (JsonObject) ((JsonArray) ((JsonObject) ApplicationStateCodec.toJson(local))
+                .get("sessions")).elements().getFirst();
+        assertFalse(localObj.has("workspaceBox"));
+        assertTrue(ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(local))
+                .sessions().getFirst().workspaceBox().isEmpty());
+    }
+
+    @Test
+    void aSessionWrittenBeforeWorkspaceBoxExistedDecodesUnchangedToALocalRow() {
+        // VALID_SESSION has no "workspaceBox" member at all, as every state
+        // file written before this change.
+        ApplicationState decoded = ApplicationStateCodec.fromJson(JsonParser.parse(sessionDocument(VALID_SESSION)));
+
+        ManagedAgentSession row = decoded.sessions().getFirst();
+        assertTrue(row.workspaceBox().isEmpty());
+        assertEquals(Path.of("/tmp/repo"), row.workingDirectory());
+        assertTrue(row.worktreeRoot().isEmpty());
+    }
+
+    @Test
+    void aMalformedWorkspaceBoxMemberDecodesToALocalRowWithoutFailingTheFile() {
+        // Lenient like the repository "remote" member: a malformed member
+        // must never cost the user their whole state file.
+        String session = VALID_SESSION.replace(
+                "\"lastOpenedAt\": \"2026-01-02T00:00:00Z\"",
+                "\"lastOpenedAt\": \"2026-01-02T00:00:00Z\",\n  \"workspaceBox\": \"not-an-object\"");
+
+        ApplicationState decoded = ApplicationStateCodec.fromJson(JsonParser.parse(sessionDocument(session)));
+
+        assertEquals(1, decoded.sessions().size(), "the session itself must survive");
+        assertTrue(decoded.sessions().getFirst().workspaceBox().isEmpty());
+    }
+
+    @Test
+    void anInvalidWorkspaceBoxMemberDecodesToEmptyRatherThanFailingTheFile() {
+        // Well-formed JSON carrying a binding the record rejects: a name
+        // that fails the box-name guard, and a relative box path. Both are
+        // the same class of failure as a malformed member (INV-22).
+        String badName = VALID_SESSION.replace(
+                "\"lastOpenedAt\": \"2026-01-02T00:00:00Z\"",
+                "\"lastOpenedAt\": \"2026-01-02T00:00:00Z\",\n"
+                        + "  \"workspaceBox\": {\"name\": \"Not_A_Box_Name\", \"path\": \"/home/u/clone\"}");
+        String relativePath = VALID_SESSION.replace(
+                "\"lastOpenedAt\": \"2026-01-02T00:00:00Z\"",
+                "\"lastOpenedAt\": \"2026-01-02T00:00:00Z\",\n"
+                        + "  \"workspaceBox\": {\"name\": \"drydock-box\", \"path\": \"relative/clone\"}");
+
+        for (String session : List.of(badName, relativePath)) {
+            ApplicationState decoded = ApplicationStateCodec.fromJson(JsonParser.parse(sessionDocument(session)));
+
+            assertEquals(1, decoded.sessions().size(), "the session itself must survive");
+            assertTrue(decoded.sessions().getFirst().workspaceBox().isEmpty());
+        }
+    }
+
+    @Test
+    void aSessionWithoutAWorkflowIdDecodesAsUnaffiliated() {
         // Old state written before workflowId existed; the session must
         // decode with an empty workflowId, not fail.
         JsonValue json = JsonParser.parse("""

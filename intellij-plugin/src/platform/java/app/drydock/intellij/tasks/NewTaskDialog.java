@@ -9,6 +9,7 @@ import app.drydock.intellij.settings.DrydockConfigurable;
 import app.drydock.intellij.tasks.NewTaskPlan.Choice;
 import app.drydock.intellij.tasks.NewTaskPlan.OpenIn;
 import app.drydock.intellij.tasks.NewTaskPlan.WorkIn;
+import app.drydock.intellij.workspace.WorkspaceSettings;
 import app.drydock.review.ReviewInstructions;
 import app.drydock.tasks.DoneBy;
 import app.drydock.tasks.NewTaskLauncherResult;
@@ -129,6 +130,23 @@ final class NewTaskDialog extends DialogWrapper {
     /** The save-later switch (P5): checked, the dialog saves a task file and starts nothing. */
     private final JCheckBox saveForLater = new JCheckBox("Save as task for later");
 
+    /**
+     * The per-launch remote offer (workspace boxes): visible only while the
+     * opt-in flag is on, off by default, and enableable only for a Claude
+     * launch the remote arm can serve -- a new worktree or the main
+     * checkout, no fixed worktree, no binding-carrying preset, a non-fish
+     * login shell, and a project that is not itself an SSH remote. A gate
+     * that fails clears the selection, so the value can never ride a choice
+     * whose conditions no longer hold.
+     */
+    private final JCheckBox workspaceBox = new JCheckBox("Run on workspace box");
+
+    /**
+     * The login shell that would run the launch ({@code $SHELL}), read once
+     * at construction: the environment does not change mid-run.
+     */
+    private String loginShell = System.getenv("SHELL");
+
     /** Where generated folders go; starts as the inputs' and follows "Change base…". */
     private Path worktreeBase;
 
@@ -241,6 +259,10 @@ final class NewTaskDialog extends DialogWrapper {
         modelField.setAgent(selectedAgent(), inputs.lastUsedModel());
         agentButtons.forEach((kind, button) -> button.addActionListener(
                 e -> modelField.setAgent(kind, inputs.lastUsedModel())));
+        // The remote offer follows the selected harness: a non-Claude agent
+        // is no remote launch, so the offer's gate re-runs on every switch
+        // and clears a checked box the moment it stops holding.
+        agentButtons.forEach((kind, button) -> button.addActionListener(e -> refresh()));
 
         // The tier pickers share the suggestion pool with the starting model
         // (one harness, one model space) and seed from the repository's
@@ -319,6 +341,7 @@ final class NewTaskDialog extends DialogWrapper {
                 .addLabeledComponent("Model:", modelField)
                 .addComponent(tierRows, JBUI.scale(4))
                 .addLabeledComponent("Mode:", modes)
+                .addComponent(workspaceBox, JBUI.scale(4))
                 .addComponent(saveForLater, JBUI.scale(4))
                 .addComponent(summaryRow, JBUI.scale(8))
                 .addComponent(details)
@@ -511,6 +534,7 @@ final class NewTaskDialog extends DialogWrapper {
             }
         }
         modelField.setEnabled(!saving);
+        refreshWorkspaceBox(saving);
         boolean tiersVisible = !saving && tiersShown(selectedAgent());
         boolean tiersWere = tierRows.isVisible();
         tierRows.setVisible(tiersVisible);
@@ -540,6 +564,43 @@ final class NewTaskDialog extends DialogWrapper {
             // last row.
             pack();
         }
+    }
+
+    /**
+     * The remote offer's visibility and enablement (T19). Visible only
+     * while the opt-in flag is on; enabled only when every condition the
+     * remote arm requires holds: a Claude agent, Work in a new worktree or
+     * the main checkout, no fixed worktree, no binding-carrying preset, a
+     * non-fish login shell, and a project that is not itself an SSH remote.
+     * A gate that fails clears the selection, so a checked box can never
+     * outlive the conditions that permitted it.
+     */
+    private void refreshWorkspaceBox(boolean saving) {
+        boolean flagOn = WorkspaceSettings.enabled();
+        workspaceBox.setVisible(flagOn);
+        // A composed preset is the single-project start, whose confirmed
+        // choice launches through the binding-carrying staged chain -- the
+        // dialog's only path whose launch runs pre-spawn task bindings, and
+        // the remote arm refuses bindings outright.
+        boolean gatesHold = flagOn && preset.composed().isEmpty()
+                && inputs.fixedWorktree().isEmpty() && !fishLoginShell(loginShell)
+                && inputs.project().remote().isEmpty();
+        boolean selectable = gatesHold && selectedAgent() == AgentKind.CLAUDE
+                && (workIn() == WorkIn.NEW_WORKTREE || workIn() == WorkIn.MAIN_CHECKOUT);
+        workspaceBox.setEnabled(startEnabled(saving, selectable));
+        if (!selectable) {
+            workspaceBox.setSelected(false);
+        }
+    }
+
+    /**
+     * Whether {@code shell} is fish: fish sets variables with {@code set},
+     * so it cannot carry the remote plan's nested POSIX quoting, and v1
+     * offers no remote launch under it. Mirrors {@code ShellCommandAdapter}'s
+     * own check of the same {@code $SHELL} value.
+     */
+    private static boolean fishLoginShell(String shell) {
+        return shell != null && shell.substring(shell.lastIndexOf('/') + 1).equals("fish");
     }
 
     private WorkIn workIn() {
@@ -574,7 +635,8 @@ final class NewTaskDialog extends DialogWrapper {
                 preset.mode(readOnly.isSelected()), workIn, chosenBranch,
                 startPoint(), chosenFolder,
                 ownWindow.isSelected() ? OpenIn.OWN_WINDOW : OpenIn.THIS_WINDOW,
-                modelField.selected(), tiers, tiers.flatMap(this::subagentModelRule));
+                modelField.selected(), tiers, tiers.flatMap(this::subagentModelRule),
+                workspaceBox.isSelected());
     }
 
     /**
@@ -635,6 +697,12 @@ final class NewTaskDialog extends DialogWrapper {
     /** Diagnostic-only: types into the description, through the real document listener. */
     void diagSetInstructions(String text) {
         instructions.setText(text);
+    }
+
+    /** Diagnostic-only: replaces the login shell and refreshes, as a shell change would. */
+    void diagSetLoginShell(String shell) {
+        loginShell = shell;
+        refresh();
     }
 
     /** The immutable submission captured before the dialog closed. */

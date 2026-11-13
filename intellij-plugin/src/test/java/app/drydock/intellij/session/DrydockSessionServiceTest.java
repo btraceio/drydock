@@ -16,9 +16,18 @@ import app.drydock.agent.api.SessionIdDiscovery;
 import app.drydock.agent.api.SessionIdStrategy;
 import app.drydock.agent.api.StdioMcpServer;
 import app.drydock.agent.providers.AgentCommands;
+import app.drydock.agent.providers.HostBinaryLocator;
+import app.drydock.agent.providers.claude.ClaudeAgentProvider;
+import app.drydock.agent.providers.claude.internal.ClaudeExecutableLocator;
+import app.drydock.agent.providers.codex.CodexAgentProvider;
+import app.drydock.agent.providers.codex.internal.CodexExecutableLocator;
+import app.drydock.agent.providers.pi.PiAgentProvider;
+import app.drydock.agent.providers.pi.internal.PiExecutableLocator;
 import app.drydock.agent.providers.terminal.TerminalAgentProvider;
 import app.drydock.agent.spi.AgentProvider;
 import app.drydock.app.ApplicationStateStore;
+import app.drydock.app.LoginShellEnvironment;
+import app.drydock.delayedtasks.TaskLaunchResources;
 import app.drydock.domain.AgentBinding;
 import app.drydock.domain.ApplicationState;
 import app.drydock.domain.ManagedAgentSession;
@@ -28,23 +37,38 @@ import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.RepositorySettings;
 import app.drydock.domain.SessionStatus;
+import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionWorkspace;
+import app.drydock.domain.WorkspaceBoxBinding;
 import app.drydock.intellij.agent.AgentConsoleHost;
 import app.drydock.intellij.agent.AgentExecutionListener;
+import app.drydock.intellij.agent.AgentExecutionRegistry;
 import app.drydock.intellij.agent.LaunchClaims;
 import app.drydock.intellij.review.SessionMcpAccess;
+import app.drydock.intellij.workspace.RemoteSessionLiveness;
 import app.drydock.mcp.McpSessionContext.RenameKind;
 import app.drydock.mcp.McpSessionContext.RenameOutcome;
+import app.drydock.process.ProcessResult;
+import app.drydock.process.ProcessRunner;
+import app.drydock.process.ProcessTimeoutException;
 import app.drydock.state.JsonApplicationStateRepository;
+import app.drydock.tasks.TaskGuidance;
+import app.drydock.tasks.TaskId;
+import app.drydock.tasks.TaskRuns;
+import app.drydock.workspace.BoxShell;
+import app.drydock.workspace.CommandRunner;
+import app.drydock.workspace.WorkspacesCli;
 
 
 import com.intellij.openapi.project.Project;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.nio.file.Files;
+import java.io.IOException;
 import java.lang.reflect.Field;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -55,6 +79,7 @@ import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.AbstractExecutorService;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -62,8 +87,11 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 import java.util.function.Predicate;
 
@@ -74,6 +102,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * The create-flow contract of the IDE session orchestrator: PRESET vs
@@ -270,6 +299,13 @@ class DrydockSessionServiceTest {
         final List<ManagedSessionId> forgotten = new CopyOnWriteArrayList<>();
         /** When set, {@link #startConsole} throws it synchronously instead of returning a future. */
         volatile RuntimeException startFailure;
+        /**
+         * When set, the next {@link #startConsole} returns this future
+         * instead of a completed one — a launch whose console-open is still
+         * pending, so a test can deliver events inside the launch's claim
+         * window. Taken and cleared on use.
+         */
+        volatile CompletableFuture<Void> pendingOpen;
 
         record Open(ManagedSessionId sessionId, Path workingDirectory, LaunchPlan plan) { }
 
@@ -284,6 +320,11 @@ class DrydockSessionServiceTest {
                 throw startFailure;
             }
             opens.add(new Open(sessionId, workingDirectory, plan));
+            CompletableFuture<Void> open = pendingOpen;
+            if (open != null) {
+                pendingOpen = null;
+                return open;
+            }
             return CompletableFuture.completedFuture(null);
         }
 
@@ -321,7 +362,18 @@ class DrydockSessionServiceTest {
             }
         }
 
-        @Override public void execute(Runnable command) { queued.addLast(command); }
+
+        /**
+         * A submission to a shut-down executor is rejected, as a drained
+         * plugin executor rejects at IDE shutdown: the dependent stage the
+         * submission would have run never starts.
+         */
+        @Override public void execute(Runnable command) {
+            if (terminated) {
+                throw new RejectedExecutionException("shut down");
+            }
+            queued.addLast(command);
+        }
         @Override public void shutdown() { terminated = true; }
         @Override public List<Runnable> shutdownNow() { terminated = true; return List.of(); }
         @Override public boolean isShutdown() { return terminated; }
@@ -351,6 +403,8 @@ class DrydockSessionServiceTest {
         final List<String> events = new CopyOnWriteArrayList<>();
         final FakeConsoleHost consoles = new FakeConsoleHost(events);
         final ExecutorService executor;
+        /** The working directories a remote-aware service was asked for stdio MCP servers, proving it never was. */
+        final List<Path> stdioMcpAsked = new CopyOnWriteArrayList<>();
         /**
          * By default an execution is live once {@code consoles} opened it and
          * has neither stopped nor forgotten it; a forget drops the execution,
@@ -359,6 +413,67 @@ class DrydockSessionServiceTest {
         Predicate<ManagedSessionId> liveExecution = id ->
                 consoles.opens.stream().anyMatch(open -> open.sessionId().equals(id))
                         && !consoles.stopped.contains(id) && !consoles.forgotten.contains(id);
+
+        /**
+         * The requested-client-end coordination the service's Stop and close
+         * paths mark and its end settle settles by. Mirrors the registry's
+         * mark semantics, with the live-execution answer delegated to this
+         * harness's (mutable) predicate.
+         */
+        final RecordingClientEnds clientEnds = new RecordingClientEnds();
+
+        /**
+         * A fake of the registry's requested-client-end coordination: the
+         * same mark semantics, the live-execution answer delegated to the
+         * harness's predicate, and the marks readable so a test can assert
+         * what the Stop and close paths marked. Never consults the IDE.
+         */
+        final class RecordingClientEnds implements AgentExecutionRegistry.RemoteClientEnds {
+
+            private final Map<ManagedSessionId, AgentExecutionRegistry.RemoteClientEnds.RequestedEnd> marks =
+                    new ConcurrentHashMap<>();
+
+            @Override public void beginExplicitStop(ManagedSessionId id) {
+                marks.put(id, AgentExecutionRegistry.RemoteClientEnds.RequestedEnd.explicitStopPending());
+            }
+
+            @Override public void stopVerdict(ManagedSessionId id, boolean killConfirmed) {
+                marks.compute(id, (session, existing) ->
+                        existing != null
+                                && existing.origin() == AgentExecutionRegistry.RemoteClientEnds.Origin.EXPLICIT_STOP
+                                ? AgentExecutionRegistry.RemoteClientEnds.RequestedEnd.explicitStopVerdict(killConfirmed)
+                                : existing);
+            }
+
+            @Override public void endExplicitStop(ManagedSessionId id) {
+                marks.compute(id, (session, existing) ->
+                        existing != null
+                                && existing.origin() == AgentExecutionRegistry.RemoteClientEnds.Origin.EXPLICIT_STOP
+                                ? null : existing);
+            }
+
+            @Override public void beginClose(ManagedSessionId id) {
+                marks.put(id, AgentExecutionRegistry.RemoteClientEnds.RequestedEnd.close());
+            }
+
+            @Override public void endClose(ManagedSessionId id) {
+                marks.compute(id, (session, existing) ->
+                        existing != null && existing.origin() == AgentExecutionRegistry.RemoteClientEnds.Origin.CLOSE
+                                ? null : existing);
+            }
+
+            @Override public void clear(ManagedSessionId id) {
+                marks.remove(id);
+            }
+
+            @Override public Optional<AgentExecutionRegistry.RemoteClientEnds.RequestedEnd> requestedEnd(ManagedSessionId id) {
+                return Optional.ofNullable(marks.get(id));
+            }
+
+            @Override public boolean hasLiveExecution(ManagedSessionId id) {
+                return liveExecution.test(id);
+            }
+        }
 
         private Harness(Path base, Repository repository, ExecutorService executor) {
             this.base = base;
@@ -391,6 +506,44 @@ class DrydockSessionServiceTest {
             return new DrydockSessionService(CompletableFuture.completedFuture(null),
                     () -> store, () -> registry, () -> watcher, resolver, consoles, executor, stdioMcpServers,
                     mcpAccess, new LaunchClaims(id -> liveExecution.test(id)));
+        }
+
+        /**
+         * The remote seam: the full constructor with the workspace-box
+         * components -- the opt-in flag, the box ssh/list runner, and the
+         * detached liveness map -- wired to the recording fakes. The stdio
+         * MCP function records every ask, so a remote launch's "no stdio
+         * MCP servers" is observable.
+         */
+        DrydockSessionService remoteService(BooleanSupplier flag, CommandRunner runner,
+                RemoteSessionLiveness liveness, SessionMcpAccess mcpAccess,
+                TaskLaunchResources resources, AgentProvider... providers) {
+            return remoteService(flag, runner, liveness, mcpAccess, resources,
+                    question -> CompletableFuture.completedFuture(false), providers);
+        }
+
+        /**
+         * The full remote seam with the Forget's confirm dialog wired to a
+         * fake too: the kill/probe/list runner, the liveness map, and the
+         * question the Forget asks when its kill could not conclude.
+         */
+        DrydockSessionService remoteService(BooleanSupplier flag, CommandRunner runner,
+                RemoteSessionLiveness liveness, SessionMcpAccess mcpAccess,
+                TaskLaunchResources resources, Function<String, CompletableFuture<Boolean>> confirm,
+                AgentProvider... providers) {
+            AgentRegistry registry = new AgentRegistry(List.of(providers),
+                    new AgentContext(base, base.resolve("activity"), executor));
+            SessionActivityWatcher watcher = new SessionActivityWatcher(base.resolve("activity"), executor);
+            Function<Path, CompletableFuture<RepositoryId>> resolver =
+                    path -> CompletableFuture.completedFuture(repository.id());
+            return new DrydockSessionService(CompletableFuture.completedFuture(null),
+                    () -> store, () -> registry, () -> watcher, resolver, consoles, executor,
+                    path -> {
+                        stdioMcpAsked.add(path);
+                        return List.of();
+                    },
+                    mcpAccess, new LaunchClaims(id -> liveExecution.test(id)), resources, flag,
+                    new BoxShell(runner), new WorkspacesCli(boxBinary(), runner), liveness, confirm, clientEnds);
         }
     }
 
@@ -2231,5 +2384,1502 @@ class DrydockSessionServiceTest {
                 Optional.of("opus"), Optional.empty());
 
         assertEquals(List.of(a.id(), b.id()), updated.repositories().stream().map(Repository::id).toList());
+    }
+
+    // ---- characterization: today's local plans through the service (INV-1 oracle) ------
+
+    /** The claude env cleanup prefix, as today's local launches render it. */
+    private static final String CLAUDE_ENV = "env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT"
+            + " -u CLAUDE_CODE_EXECPATH -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION"
+            + " -u CLAUDE_EFFORT LANG=en_US.UTF-8 CLAUDE_CODE_NO_FLICKER=1 ";
+
+    /** The codex env scrub prefix, as today's local launches render it. */
+    private static final String CODEX_ENV = "env -u CODEX_SANDBOX -u CODEX_SANDBOX_NETWORK_DISABLED ";
+
+    /** The pi env scrub prefix, as today's local launches render it. */
+    private static final String PI_ENV = "env -u PI_CODING_AGENT ";
+
+    /** The plan the console host was handed for launch number {@code index}. */
+    private static LaunchPlan openedPlan(Harness harness, int index) {
+        return harness.consoles.opens.get(index).plan();
+    }
+
+    /**
+     * INV-1 oracle, service half: a local Claude launch through the real
+     * service and the real provider opens a console with exactly today's
+     * plan, on create and on resume. The provider's executable is forced to
+     * "not found", so the conservative capabilities render the bare
+     * binary and no flags, and the PATH the ddtool locator probes is pinned
+     * to a directory holding a fake ddtool, so no host ddtool can splice a
+     * {@code PATH=} override into the pinned string (the injection's guard
+     * compares against that same PATH, so a ddtool on it never injects).
+     */
+    @Test
+    void claudeLocalCreateAndResumeKeepTodaysPlans(@TempDir Path base) throws Exception {
+        Path pinnedPath = Files.createDirectories(base.resolve("pinned-path"));
+        Path fakeDdtool = Files.createFile(pinnedPath.resolve("ddtool"));
+        assertTrue(fakeDdtool.toFile().setExecutable(true));
+        String originalPath = LoginShellEnvironment.currentRealPath();
+        assumeTrue(originalPath != null, "a test JVM without PATH cannot pin the ddtool probe");
+        LoginShellEnvironment.useShellPath(pinnedPath + ":" + originalPath);
+        try {
+            Harness harness = harness(base);
+            ClaudeAgentProvider provider = new ClaudeAgentProvider(
+                    new ClaudeExecutableLocator(Path.of("/nonexistent/claude")));
+            DrydockSessionService service = harness.service(provider);
+
+            service.launchSession(service.prepareSession(base, AgentKind.CLAUDE, "My session")
+                    .get(TIMEOUT_SECONDS, TimeUnit.SECONDS)).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            assertEquals(CLAUDE_ENV + "claude", openedPlan(harness, 0).command());
+
+            ManagedAgentSession second = service.prepareSession(base, AgentKind.CLAUDE, "With a task")
+                    .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            service.launchSession(second, Optional.of("Do the thing"), Optional.of("sonnet"), Optional.empty())
+                    .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            assertEquals(CLAUDE_ENV
+                    + "claude --model 'sonnet' -- 'Do the thing'", openedPlan(harness, 1).command());
+
+            ManagedAgentSession stored = persistSession(harness, AgentKind.CLAUDE, "Old work",
+                    new AgentBinding(AgentKind.CLAUDE, Optional.of("conv-42"), Optional.empty()),
+                    base, SessionStatus.INACTIVE, Instant.parse("2026-08-12T10:00:00Z"));
+            service.resumeSession(stored.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            assertEquals(CLAUDE_ENV + "claude --resume 'conv-42'", openedPlan(harness, 2).command());
+            harness.store.flush();
+        } finally {
+            LoginShellEnvironment.useShellPath(originalPath);
+        }
+    }
+
+    /**
+     * INV-1 oracle, service half, Codex: the local create opens today's
+     * sandboxed picker-less command and a resume by id re-renders it with
+     * the {@code resume} subcommand. DISCOVERED ids mean neither plan
+     * carries one.
+     */
+    @Test
+    void codexLocalCreateAndResumeKeepTodaysPlans(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        CodexAgentProvider provider = new CodexAgentProvider(
+                new CodexExecutableLocator(Path.of("/nonexistent/codex")));
+        DrydockSessionService service = harness.service(provider);
+
+        service.launchSession(service.prepareSession(base, AgentKind.CODEX, "Codex work")
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS)).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        assertEquals(CODEX_ENV + "codex --sandbox danger-full-access", openedPlan(harness, 0).command());
+
+        ManagedAgentSession stored = persistSession(harness, AgentKind.CODEX, "Old codex",
+                new AgentBinding(AgentKind.CODEX, Optional.of("conv-7"), Optional.empty()),
+                base, SessionStatus.INACTIVE, Instant.parse("2026-08-12T10:00:00Z"));
+        service.resumeSession(stored.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        assertEquals(CODEX_ENV + "codex --sandbox danger-full-access resume 'conv-7'",
+                openedPlan(harness, 1).command());
+        harness.store.flush();
+    }
+
+    /**
+     * INV-1 oracle, service half, Pi: every launch scrubs the inherited
+     * agent marker, carries the activity dir and the activity extension,
+     * and mints a fresh {@code PI_SESSION_ID} per invocation — normalized
+     * here, since it is per-launch by design. The resume pins the
+     * {@code --session} form.
+     */
+    @Test
+    void piLocalCreateAndResumeKeepTodaysPlans(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        PiAgentProvider provider = new PiAgentProvider(new PiExecutableLocator(Path.of("/nonexistent/pi")));
+        DrydockSessionService service = harness.service(provider);
+
+        service.launchSession(service.prepareSession(base, AgentKind.PI, "Pi work")
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS)).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        assertEquals(PI_ENV + "DRYDOCK_ACTIVITY_DIR='" + base.resolve("activity")
+                        + "' PI_SESSION_ID='<id>' pi -e '" + base.resolve("pi").resolve("drydock-activity.ts") + "'",
+                normalizedPiSessionId(openedPlan(harness, 0).command()));
+
+        ManagedAgentSession stored = persistSession(harness, AgentKind.PI, "Old pi",
+                new AgentBinding(AgentKind.PI, Optional.of("conv-7"), Optional.empty()),
+                base, SessionStatus.INACTIVE, Instant.parse("2026-08-12T10:00:00Z"));
+        service.resumeSession(stored.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        assertEquals(PI_ENV + "DRYDOCK_ACTIVITY_DIR='" + base.resolve("activity")
+                        + "' PI_SESSION_ID='<id>' pi -e '"
+                        + base.resolve("pi").resolve("drydock-activity.ts") + "' --session 'conv-7'",
+                normalizedPiSessionId(openedPlan(harness, 1).command()));
+        harness.store.flush();
+    }
+
+    /** {@code PI_SESSION_ID} is minted fresh per launch; everything else in the plan is exact. */
+    private static String normalizedPiSessionId(String command) {
+        return command.replaceAll("PI_SESSION_ID='[^']*'", "PI_SESSION_ID='<id>'");
+    }
+
+    /**
+     * INV-1 oracle, service half, Terminal: create and resume both open
+     * the login-shell literal — a terminal has no conversation to resume,
+     * so reopening is the same command.
+     */
+    @Test
+    void terminalLocalCreateAndResumeKeepTodaysPlans(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        DrydockSessionService service = harness.service(new TerminalAgentProvider());
+
+        service.launchSession(service.prepareSession(base, AgentKind.TERMINAL, "Shell")
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS)).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        assertEquals(TerminalAgentProvider.SHELL_COMMAND, openedPlan(harness, 0).command());
+
+        ManagedAgentSession stored = persistSession(harness, AgentKind.TERMINAL, "Old shell",
+                AgentBinding.unlaunched(AgentKind.TERMINAL), base, SessionStatus.INACTIVE,
+                Instant.parse("2026-08-12T10:00:00Z"));
+        service.resumeSession(stored.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        assertEquals(TerminalAgentProvider.SHELL_COMMAND, openedPlan(harness, 1).command());
+        harness.store.flush();
+    }
+
+    // ---- workspace-box remote rows: create and resume (T15) -------------------------
+
+    /** The box a test row is bound to: one binding, one box name, one clone path. */
+    private static final WorkspaceBoxBinding BOX =
+            new WorkspaceBoxBinding("drydock-repo", "/home/dev/repo");
+
+    /** The box agent environment as the persistent plan renders it. */
+    private static final String BOX_PROXY_ENTRY = "ANTHROPIC_BASE_URL='http://127.0.0.1:4000'";
+
+    /**
+     * The remote shell string inside an ssh plan for the test box, with its
+     * POSIX single-quote escapes resolved through both quoting layers below
+     * the outer one: the layer tmux's shell-command receives, where the
+     * agent exec's own quotes are plain.
+     */
+    private static String remoteShell(String sshCommand) {
+        String marker = "-- 'workspace-drydock-repo' ";
+        int at = sshCommand.indexOf(marker);
+        assertTrue(at >= 0, "not the box plan: " + sshCommand);
+        return sshCommand.substring(at + marker.length())
+                .replace("'\\''", "'")
+                .replace("'\\''", "'");
+    }
+
+    /**
+     * A locator that always resolves the `workspaces` binary, whatever the
+     * host has installed, so the {@code workspaces list} calls are decided
+     * by the recording runner's replies alone.
+     */
+    private static HostBinaryLocator boxBinary() {
+        return new HostBinaryLocator("workspaces", List.of()) {
+            @Override protected Optional<Path> discover() {
+                return Optional.of(Path.of("/opt/homebrew/bin/workspaces"));
+            }
+        };
+    }
+
+    /**
+     * Records every box command the service issues and answers the four
+     * shapes a stop, forget, resume or client-end settle can run -- the batch
+     * ssh probe, the kill-session, the has-session probe, and `workspaces
+     * list` -- from canned replies. Any other box command fails the test
+     * loudly.
+     */
+    static final class RecordingBoxRunner implements CommandRunner {
+
+        final List<List<String>> argv = new CopyOnWriteArrayList<>();
+        volatile ProcessResult probe = new ProcessResult(0, "", "");
+        volatile ProcessResult kill = new ProcessResult(0, "", "");
+        /** The has-session probe's reply — what a client-end settle would conclude from. */
+        volatile ProcessResult hasSession = new ProcessResult(0, "", "");
+        /** When set, runs while the kill-session round trip is in flight (an ssh client can end during it). */
+        volatile Runnable duringKill;
+        /** When set, a kill-session throws it (the runner's way to simulate a hung kill). */
+        volatile RuntimeException killFailure;
+        volatile ProcessResult list = new ProcessResult(0, "", "");
+        volatile IOException listFailure;
+
+        @Override
+        public ProcessResult run(List<String> argv, ProcessRunner.Options options, int maxOutputBytes)
+                throws IOException, InterruptedException {
+            this.argv.add(List.copyOf(argv));
+            if (isKillSession(argv)) {
+                if (duringKill != null) {
+                    duringKill.run();
+                }
+                if (killFailure != null) {
+                    throw killFailure;
+                }
+                return kill;
+            }
+            if (argv.contains("has-session")) {
+                return hasSession;
+            }
+            if ("ssh".equals(argv.get(0))) {
+                return probe;
+            }
+            if (argv.contains("list")) {
+                if (listFailure != null) {
+                    throw listFailure;
+                }
+                return list;
+            }
+            throw new IllegalStateException("unexpected box command: " + argv);
+        }
+
+        /** The kill-session argv shape: the batch ssh form whose remote command names the kill. */
+        static boolean isKillSession(List<String> argv) {
+            return "ssh".equals(argv.get(0))
+                    && argv.getLast() != null && argv.getLast().contains("kill-session");
+        }
+    }
+
+    /**
+     * A remote row as a restart would have loaded it: persisted with the
+     * binding, so the constructor derives the placeholder working directory
+     * (a path that does not exist on this Mac -- the point of the resume
+     * tests), and the given binding, status and task framing.
+     */
+    private static ManagedAgentSession persistRemoteSession(Harness harness, RepositoryId repositoryId,
+            AgentBinding binding, SessionStatus status, boolean startedWithTask) {
+        ManagedAgentSession session = new ManagedAgentSession.Builder(
+                ManagedSessionId.newId(), repositoryId, "Box work", binding,
+                SessionWorkspace.inRepository(harness.base.toAbsolutePath().normalize()),
+                Instant.parse("2026-08-12T10:00:00Z"))
+                .status(status)
+                .startedWithTask(startedWithTask)
+                .workspaceBox(Optional.of(BOX))
+                .build();
+        harness.store.update(state -> {
+            List<ManagedAgentSession> sessions = new ArrayList<>(state.sessions());
+            sessions.add(session);
+            return state.withSessions(sessions);
+        });
+        return session;
+    }
+
+    private static ManagedAgentSession persistRemoteSession(Harness harness, AgentBinding binding,
+            SessionStatus status, boolean startedWithTask) {
+        return persistRemoteSession(harness, harness.repository.id(), binding, status, startedWithTask);
+    }
+
+    /**
+     * The exact batch probe argv a remote resume issues for the box alias:
+     * the four batch options, `--` before the host, and the remote no-op.
+     */
+    private static final List<String> PROBE_ARGV = List.of(
+            "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+            "-o", "ServerAliveInterval=3", "-o", "ServerAliveCountMax=2",
+            "--", "workspace-drydock-repo", "'true'");
+
+    /**
+     * AC-3/AC-6, service half, create: a remote Claude launch through the
+     * real provider opens the console with the persistent plan -- the ssh
+     * attach-or-create form naming the tmux session after the row's managed
+     * id, the generated UUID as `--session-id` (persisted as the row's
+     * `agentSessionId`), the display name as `-n`, plan mode for a read-only
+     * session, and the initial prompt after `--` -- with the console in a
+     * directory that exists on this Mac (the repository root, never the
+     * row's box placeholder). No MCP access is minted, no stdio MCP servers
+     * are asked for, and no box command runs: the create probes nothing
+     * (the box lifecycle is the launcher's, not the service's).
+     */
+    @Test
+    void remoteCreateRendersTheAttachOrCreatePlanAndPersistsTheGeneratedId(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingAccess access = RecordingAccess.granting();
+        RecordingBoxRunner runner = new RecordingBoxRunner();
+        ClaudeAgentProvider provider = new ClaudeAgentProvider(
+                new ClaudeExecutableLocator(Path.of("/nonexistent/claude")));
+        DrydockSessionService service = harness.remoteService(() -> true, runner,
+                new RemoteSessionLiveness(), access, null, provider);
+
+        ManagedAgentSession prepared = service.prepareSession(base, base, AgentKind.CLAUDE,
+                "My session", SessionMode.READ_ONLY, Optional.of(BOX))
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        // The row is remote by construction: the binding derives the
+        // placeholder workspace, not the local checkout.
+        assertEquals(Optional.of(BOX), prepared.workspaceBox());
+        assertEquals(BOX.sshRemote().placeholderRoot(), prepared.workingDirectory());
+
+        ManagedAgentSession running = service.launchSession(prepared, Optional.of("Fix the parser"))
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        assertEquals(SessionStatus.RUNNING, running.status());
+
+        assertEquals(1, harness.consoles.opens.size());
+        FakeConsoleHost.Open open = harness.consoles.opens.get(0);
+        assertEquals(running.id(), open.sessionId());
+        // The console cwd is the repository's local root, never the placeholder.
+        assertEquals(base.toAbsolutePath().normalize(), open.workingDirectory());
+        String command = open.plan().command();
+        assertTrue(command.startsWith("ssh -t "), command);
+        assertTrue(command.contains("-- 'workspace-drydock-repo'"), command);
+        String remote = remoteShell(command);
+        assertTrue(remote.contains("new-session -A -s drydock-" + running.id()),
+                "AC-3: the tmux session is named after the managed id: " + remote);
+        assertTrue(remote.contains("-n 'My session'"), remote);
+        assertTrue(remote.contains(" --permission-mode plan"), remote);
+        assertTrue(remote.contains("-- 'Fix the parser'"), remote);
+        assertTrue(remote.contains(BOX_PROXY_ENTRY), remote);
+        // The generated UUID appears literally, so the row persists it.
+        String generated = persisted(harness, running.id()).agentSessionId().orElseThrow();
+        assertTrue(remote.contains("--session-id '" + generated + "'"), remote);
+
+        // INV-15/16: nothing was minted, nothing was spawned on the box, no
+        // stdio MCP servers were resolved for the remote context.
+        assertTrue(access.requested.isEmpty(), "a remote launch mints no MCP access");
+        assertTrue(harness.stdioMcpAsked.isEmpty(), "a remote launch resolves no stdio MCP servers");
+        assertTrue(runner.argv.isEmpty(), "a remote create issues no box command");
+        harness.store.flush();
+    }
+
+    /**
+     * AC-3/AC-6/AC-14, service half, resume: a remote row with a recorded
+     * conversation id attaches with the same `new-session -A -s drydock-<id>`
+     * plan, resumes the exact conversation, adds plan mode for a read-only
+     * row, and delivers the fixed re-orientation prompt the row's task
+     * framing earned. Exactly one batch ssh probe runs and `workspaces list`
+     * never does. The state after the resume is the state before it, apart
+     * from the two settle fields: RUNNING (legal -- this IDE owns the live
+     * ssh execution) and `lastOpenedAt`. No MCP access is minted, no stdio
+     * servers are asked for, no `agentSessionId` is rewritten.
+     */
+    @Test
+    void remoteResumeAttachesByIdAndSettlesOnlyTheRowStatusAndLastOpenedAt(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingAccess access = RecordingAccess.granting();
+        RecordingBoxRunner runner = new RecordingBoxRunner();
+        ClaudeAgentProvider provider = new ClaudeAgentProvider(
+                new ClaudeExecutableLocator(Path.of("/nonexistent/claude")));
+        DrydockSessionService service = harness.remoteService(() -> true, runner,
+                new RemoteSessionLiveness(), access, null, provider);
+
+        ManagedAgentSession row = persistRemoteSession(harness,
+                new AgentBinding(AgentKind.CLAUDE, Optional.of("conv-7"), Optional.empty(),
+                        SessionMode.READ_ONLY),
+                SessionStatus.INACTIVE, true);
+        ApplicationState before = harness.store.state();
+
+        ManagedAgentSession running = service.resumeSession(row.id())
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        assertEquals(SessionStatus.RUNNING, running.status());
+
+        // One probe, no listing: the box was reachable.
+        assertEquals(List.of(PROBE_ARGV), runner.argv);
+        assertEquals(1, harness.consoles.opens.size());
+        FakeConsoleHost.Open open = harness.consoles.opens.get(0);
+        assertEquals(row.id(), open.sessionId());
+        assertEquals(base.toAbsolutePath().normalize(), open.workingDirectory());
+        String command = open.plan().command();
+        String remote = remoteShell(command);
+        assertTrue(remote.contains("new-session -A -s drydock-" + row.id()),
+                "AC-3: resume runs the identical attach-or-create command: " + remote);
+        assertTrue(remote.contains("claude --resume 'conv-7' --permission-mode plan"), remote);
+        assertTrue(remote.contains("-- 'You are resuming this task in a fresh session."), remote);
+        assertTrue(remote.contains(BOX_PROXY_ENTRY), remote);
+
+        // AC-14: identical state apart from the settle fields. No repository
+        // settings changed, no binding was rebound, no id was rewritten.
+        ApplicationState after = harness.store.state();
+        assertEquals(before.repositories(), after.repositories());
+        assertEquals(1, after.sessions().size());
+        ManagedAgentSession settled = after.sessions().get(0);
+        assertEquals(Optional.of(BOX), settled.workspaceBox());
+        assertEquals(row.binding(), settled.binding());
+        assertEquals(row.displayName(), settled.displayName());
+        assertEquals(row.createdAt(), settled.createdAt());
+        assertEquals(row.lastExitCode(), settled.lastExitCode());
+        assertEquals(row.agentSessionId(), settled.agentSessionId());
+        assertTrue(settled.lastOpenedAt().compareTo(row.lastOpenedAt()) >= 0,
+                "the settle bumps lastOpenedAt, never rewinds it");
+        assertTrue(access.requested.isEmpty(), "a remote resume mints no MCP access");
+        assertTrue(harness.stdioMcpAsked.isEmpty(), "a remote resume resolves no stdio MCP servers");
+        harness.store.flush();
+    }
+
+    /**
+     * AC-11: `resumeOrStartSession` on a remote row ALWAYS resumes. The
+     * provider's conversation source answers `transcriptExists` with false
+     * ("nothing is recorded locally") and the row's working directory is the
+     * box placeholder this Mac never had — both of which would send today's
+     * local logic to a fresh create or a MISSING_WORKING_DIRECTORY — yet the
+     * remote branch consults neither: it builds a resume context, opens the
+     * console, and settles the row RUNNING.
+     */
+    @Test
+    void restoreAlwaysResumesARemoteRowEvenWithNoLocalTranscript(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        List<String> events = harness.events;
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, false, null, events) {
+            @Override public Optional<ConversationSource> conversations() {
+                return Optional.of(new ConversationSource() {
+                    @Override public List<Conversation> listConversations(Path workingDirectory) {
+                        return List.of();
+                    }
+                    @Override public boolean transcriptExists(Path workingDirectory, String agentSessionId) {
+                        events.add("transcript-probe");
+                        return false;
+                    }
+                });
+            }
+        };
+        RecordingBoxRunner runner = new RecordingBoxRunner();
+        DrydockSessionService service = harness.remoteService(() -> true, runner,
+                new RemoteSessionLiveness(), SessionMcpAccess.none(), null, provider);
+
+        ManagedAgentSession row = persistRemoteSession(harness,
+                new AgentBinding(AgentKind.CLAUDE, Optional.of("conv-9"), Optional.empty()),
+                SessionStatus.INACTIVE, true);
+        ManagedAgentSession running = service.resumeOrStartSession(row.id())
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(SessionStatus.RUNNING, running.status());
+        assertEquals(SessionStatus.RUNNING, persisted(harness, row.id()).status());
+        assertEquals(1, provider.resumeContexts.size(), "the row resumes, never starts fresh");
+        assertTrue(provider.createContexts.isEmpty(), "no fresh create ran for the remote row");
+        assertEquals(Optional.of("conv-9"), provider.resumeContexts.get(0).agentSessionId());
+        assertEquals(1, harness.consoles.opens.size());
+        assertFalse(events.contains("transcript-probe"),
+                "the local-only transcript probe must not decide anything for a remote row");
+        harness.store.flush();
+    }
+
+    /**
+     * R1 defect 3: the remote Resume's deletion gap. The row is read in one
+     * executor stage and attached in another; a Forget that completes in
+     * between removes the row and frees the claim, and the attach must not
+     * recreate the just-forgotten box session from its stale snapshot — the
+     * same guard the create-on-existing-row path carries.
+     */
+    @Test
+    void aRemoteResumeWhoseRowWasForgottenMidFlightIsRefusedBeforeAttaching(@TempDir Path base) throws Exception {
+        SteppedExecutorService executor = new SteppedExecutorService();
+        Harness harness = concurrentHarness(base, executor);
+        RecordingBoxRunner runner = new RecordingBoxRunner();
+        // The recording provider queues nothing on the executor at init, so
+        // the first stepped task is the resume's own read stage.
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, false, null, harness.events);
+        DrydockSessionService service = harness.remoteService(() -> true, runner,
+                new RemoteSessionLiveness(), SessionMcpAccess.none(), null, provider);
+
+        ManagedAgentSession row = persistRemoteSession(harness,
+                new AgentBinding(AgentKind.CLAUDE, Optional.of("conv-7"), Optional.empty()),
+                SessionStatus.IDLE, false);
+        CompletableFuture<ManagedAgentSession> resumed = service.resumeSession(row.id());
+        assertTrue(executor.runNext(), "the stage that reads the row");
+        // What a Forget that finished in this window leaves: the row gone,
+        // no claim held.
+        harness.store.update(state -> state.withSessions(List.of()));
+        executor.runAll();
+
+        ExecutionException refused = assertThrows(ExecutionException.class,
+                () -> resumed.get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+        assertTrue(refused.getCause() instanceof IllegalStateException,
+                String.valueOf(refused.getCause()));
+        assertNull(persistedOrNull(harness, row.id()), "the forgotten row stays forgotten");
+        assertTrue(runner.argv.isEmpty(), "the refusal probes nothing — the row is gone");
+        assertTrue(harness.consoles.opens.isEmpty(), "the refusal attaches to nothing");
+        harness.store.flush();
+    }
+
+    /**
+     * INV-31: with the flag off, resuming a remote row is refused with the
+     * settings reason — before any probe, any console, any state write — and
+     * never falls through to a local launch of the same row.
+     */
+    @Test
+    void flagOffRemoteResumeIsRefusedAndNeverFallsBackToLocal(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingBoxRunner runner = new RecordingBoxRunner();
+        ClaudeAgentProvider provider = new ClaudeAgentProvider(
+                new ClaudeExecutableLocator(Path.of("/nonexistent/claude")));
+        DrydockSessionService service = harness.remoteService(() -> false, runner,
+                new RemoteSessionLiveness(), SessionMcpAccess.none(), null, provider);
+
+        ManagedAgentSession row = persistRemoteSession(harness,
+                new AgentBinding(AgentKind.CLAUDE, Optional.of("conv-7"), Optional.empty()),
+                SessionStatus.INACTIVE, false);
+        ExecutionException refused = assertThrows(ExecutionException.class,
+                () -> service.resumeSession(row.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+        assertEquals("Workspace sessions are turned off in Settings › Tools › Drydock",
+                refused.getCause().getMessage());
+        // And the restore gesture refuses the same way, rather than
+        // quietly launching a local session in the row's place.
+        ExecutionException restoreRefused = assertThrows(ExecutionException.class,
+                () -> service.resumeOrStartSession(row.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+        assertEquals("Workspace sessions are turned off in Settings › Tools › Drydock",
+                restoreRefused.getCause().getMessage());
+
+        assertTrue(runner.argv.isEmpty(), "the flag-off refusal probes nothing");
+        assertTrue(harness.consoles.opens.isEmpty(), "the flag-off refusal never launches");
+        ManagedAgentSession stored = persisted(harness, row.id());
+        assertEquals(SessionStatus.INACTIVE, stored.status());
+        assertEquals(Optional.of(BOX), stored.workspaceBox());
+        harness.store.flush();
+    }
+
+    /**
+     * AC-2, non-Claude half: a remote launch of Codex, Pi or Terminal is
+     * refused with a message naming the agent, before any row persist, MCP
+     * mint, box command or console — for every kind, in isolation.
+     */
+    @Test
+    void nonClaudeRemoteLaunchesAreRefusedBeforeAnythingHappens(@TempDir Path base) throws Exception {
+        for (AgentKind kind : List.of(AgentKind.CODEX, AgentKind.PI, AgentKind.TERMINAL)) {
+            Harness harness = harness(Files.createDirectories(base.resolve(kind.persistedName())));
+            RecordingProvider provider = new RecordingProvider(
+                    kind, SessionIdStrategy.DISCOVERED, null, true, false, null, harness.events);
+            RecordingAccess access = RecordingAccess.granting();
+            RecordingBoxRunner runner = new RecordingBoxRunner();
+            DrydockSessionService service = harness.remoteService(() -> true, runner,
+                    new RemoteSessionLiveness(), access, null, provider);
+
+            ManagedAgentSession prepared = service.prepareSession(harness.base, harness.base, kind,
+                    "No box for " + kind, SessionMode.WRITES, Optional.of(BOX))
+                    .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            ExecutionException refused = assertThrows(ExecutionException.class,
+                    () -> service.launchSession(prepared).get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+            String message = refused.getCause().getMessage();
+            assertTrue(message.contains(kind.toString()) && message.contains(kind.persistedName()),
+                    "the refusal must name the agent: " + message);
+
+            assertTrue(runner.argv.isEmpty(), kind + ": no box command may run");
+            assertTrue(harness.consoles.opens.isEmpty(), kind + ": no console may open");
+            assertTrue(harness.store.state().sessions().isEmpty(), kind + ": no row may be persisted");
+            assertTrue(access.requested.isEmpty(), kind + ": no MCP access may be minted");
+            assertTrue(provider.createContexts.isEmpty(), kind + ": the provider was never asked");
+            harness.store.flush();
+        }
+    }
+
+    /**
+     * AC-2, resource half: a remote launch whose task resources resolve — a
+     * retained receipt naming an existing prerequisite directory on THIS
+     * Mac, resolved with an empty MCP access so no mint ever happened — is
+     * refused naming Claude, before any row, box command or console.
+     */
+    @Test
+    void resourceBoundRemoteLaunchIsRefusedNamingTheAgent(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        Path tasksRoot = base.resolve("task-store");
+        TaskLaunchResources resources = new TaskLaunchResources(tasksRoot,
+                new TaskGuidance(tasksRoot), () -> false);
+        RecordingAccess access = RecordingAccess.granting();
+        RecordingBoxRunner runner = new RecordingBoxRunner();
+        ClaudeAgentProvider provider = new ClaudeAgentProvider(
+                new ClaudeExecutableLocator(Path.of("/nonexistent/claude")));
+        DrydockSessionService service = harness.remoteService(() -> true, runner,
+                new RemoteSessionLiveness(), access, resources, provider);
+
+        ManagedAgentSession prepared = service.prepareSession(base, base, AgentKind.CLAUDE,
+                "Dependent work", SessionMode.WRITES, Optional.of(BOX))
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        Path prerequisite = Files.createDirectories(base.resolve("prerequisite"));
+        Path ownerCatalog = tasksRoot.resolve("catalog.json");
+        try (TaskRuns runs = new TaskRuns(tasksRoot)) {
+            runs.reserve(new TaskId("t15-receipt"), prepared.id().toString(), tasksRoot,
+                    ownerCatalog, List.of(prerequisite));
+            runs.flush();
+        }
+        Files.writeString(ownerCatalog, "{}");
+
+        ExecutionException refused = assertThrows(ExecutionException.class,
+                () -> service.launchSession(prepared).get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+        String message = refused.getCause().getMessage();
+        assertTrue(message.contains("CLAUDE") && message.contains("claude"),
+                "the refusal must name the agent: " + message);
+
+        assertTrue(runner.argv.isEmpty(), "no box command may run");
+        assertTrue(harness.consoles.opens.isEmpty(), "no console may open");
+        assertTrue(harness.store.state().sessions().isEmpty(), "no row may be persisted");
+        assertTrue(access.requested.isEmpty(), "the resource check mints no MCP access");
+        harness.store.flush();
+    }
+
+    /**
+     * The `workspaces list` table shape observed from the real CLI
+     * (find-box-provisioning-facts), with the test box in the given status.
+     */
+    private static String boxTable(String status) {
+        return """
+                NAME                  REGION      STATUS   DEVCONTAINER REPO   AGE    TTL*
+                drydock-repo          us-east-1   %-8s ddoghq/dd-source    20d    159d
+                * Maximum time-to-live for the workspace. Garbage collector may delete sooner if unused.
+                """.formatted(status);
+    }
+
+    /** A table that does not list the test box at all: the box is gone. */
+    private static final String TABLE_WITHOUT_THE_BOX = """
+            NAME                  REGION      STATUS   DEVCONTAINER REPO   AGE    TTL*
+            jb-tester             us-east-1   2        ddoghq/dd-source    28d    151d
+            * Maximum time-to-live for the workspace. Garbage collector may delete sooner if unused.
+            """;
+
+    /**
+     * AC-18's resume-refusal half, stopped box: a probe that cannot reach the
+     * box, classified by `workspaces list` as status 8, refuses the resume
+     * with the box-stopped reason, records BOX_STOPPED liveness, and changes
+     * nothing else — the row keeps its binding (no rebind), its idle status
+     * (no FAILED), and no console opens. Only the probe and the listing run:
+     * no restart, no delete, no kill.
+     */
+    @Test
+    void aStoppedBoxRefusesTheResumeWithItsReasonAndRecordsBoxStopped(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingBoxRunner runner = new RecordingBoxRunner();
+        runner.probe = new ProcessResult(255, "", "ssh: connect to host: Connection refused");
+        runner.list = new ProcessResult(0, boxTable("8"), "");
+        RemoteSessionLiveness liveness = new RemoteSessionLiveness();
+        ClaudeAgentProvider provider = new ClaudeAgentProvider(
+                new ClaudeExecutableLocator(Path.of("/nonexistent/claude")));
+        DrydockSessionService service = harness.remoteService(() -> true, runner,
+                liveness, SessionMcpAccess.none(), null, provider);
+
+        ManagedAgentSession row = persistRemoteSession(harness,
+                new AgentBinding(AgentKind.CLAUDE, Optional.of("conv-7"), Optional.empty()),
+                SessionStatus.INACTIVE, true);
+        ExecutionException refused = assertThrows(ExecutionException.class,
+                () -> service.resumeSession(row.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+        assertEquals("Box drydock-repo is stopped; its conversations are unreachable",
+                refused.getCause().getMessage());
+        assertEquals(Optional.of(RemoteSessionLiveness.State.BOX_STOPPED), liveness.state(row.id()));
+
+        assertEquals(List.of(PROBE_ARGV, List.of("/opt/homebrew/bin/workspaces", "list", "--no-color")),
+                runner.argv);
+        assertTrue(harness.consoles.opens.isEmpty());
+        ManagedAgentSession stored = persisted(harness, row.id());
+        assertEquals(Optional.of(BOX), stored.workspaceBox(), "the binding never changes");
+        assertEquals(SessionStatus.INACTIVE, stored.status(), "no FAILED is persisted for a box refusal");
+        assertEquals(row.agentSessionId(), stored.agentSessionId());
+        harness.store.flush();
+    }
+
+    /**
+     * AC-18's resume-refusal half, gone box: an unlisted name refuses with the
+     * box-gone reason and records BOX_GONE. Same shape as the stopped case:
+     * no rebind, no FAILED, no console.
+     */
+    @Test
+    void aGoneBoxRefusesTheResumeWithItsReasonAndRecordsBoxGone(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingBoxRunner runner = new RecordingBoxRunner();
+        runner.probe = new ProcessResult(255, "", "ssh: connect to host: Connection refused");
+        runner.list = new ProcessResult(0, TABLE_WITHOUT_THE_BOX, "");
+        RemoteSessionLiveness liveness = new RemoteSessionLiveness();
+        ClaudeAgentProvider provider = new ClaudeAgentProvider(
+                new ClaudeExecutableLocator(Path.of("/nonexistent/claude")));
+        DrydockSessionService service = harness.remoteService(() -> true, runner,
+                liveness, SessionMcpAccess.none(), null, provider);
+
+        ManagedAgentSession row = persistRemoteSession(harness,
+                new AgentBinding(AgentKind.CLAUDE, Optional.of("conv-7"), Optional.empty()),
+                SessionStatus.INACTIVE, false);
+        ExecutionException refused = assertThrows(ExecutionException.class,
+                () -> service.resumeOrStartSession(row.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+        assertEquals("Box drydock-repo no longer exists", refused.getCause().getMessage());
+        assertEquals(Optional.of(RemoteSessionLiveness.State.BOX_GONE), liveness.state(row.id()));
+        assertTrue(harness.consoles.opens.isEmpty());
+        ManagedAgentSession stored = persisted(harness, row.id());
+        assertEquals(Optional.of(BOX), stored.workspaceBox(), "the binding never changes");
+        assertEquals(SessionStatus.INACTIVE, stored.status());
+        harness.store.flush();
+    }
+
+    /**
+     * The transient class of refusals: a probe failure the listing cannot
+     * pin on a stopped or gone box — the box is listed but not stopped, or
+     * the listing itself failed, timed out or was unparseable — refuses with
+     * the try-again reason and UNKNOWN liveness (INV-13: ambiguity never
+     * becomes a box verdict).
+     */
+    @Test
+    void anUnclassifiableBoxRefusesTheResumeAsTransientUnknown(@TempDir Path base) throws Exception {
+        for (RecordingBoxRunner runner : transientRunners()) {
+            Harness harness = harness(Files.createDirectories(
+                    base.resolve("transient-" + runner.list.stdout().hashCode() + runner.list.exitCode())));
+            RemoteSessionLiveness liveness = new RemoteSessionLiveness();
+            ClaudeAgentProvider provider = new ClaudeAgentProvider(
+                    new ClaudeExecutableLocator(Path.of("/nonexistent/claude")));
+            DrydockSessionService service = harness.remoteService(() -> true, runner,
+                    liveness, SessionMcpAccess.none(), null, provider);
+
+            ManagedAgentSession row = persistRemoteSession(harness,
+                    new AgentBinding(AgentKind.CLAUDE, Optional.of("conv-7"), Optional.empty()),
+                    SessionStatus.INACTIVE, false);
+            ExecutionException refused = assertThrows(ExecutionException.class,
+                    () -> service.resumeSession(row.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+            assertEquals("Box drydock-repo is unreachable; try again", refused.getCause().getMessage());
+            assertEquals(Optional.of(RemoteSessionLiveness.State.UNKNOWN), liveness.state(row.id()));
+            assertTrue(harness.consoles.opens.isEmpty());
+            assertEquals(SessionStatus.INACTIVE, persisted(harness, row.id()).status());
+            harness.store.flush();
+        }
+    }
+
+    /** The transient probe/list reply pairs: listed-but-running, and a listing that failed outright. */
+    private static List<RecordingBoxRunner> transientRunners() {
+        RecordingBoxRunner listedRunning = new RecordingBoxRunner();
+        listedRunning.probe = new ProcessResult(255, "", "ssh: connect to host: Connection refused");
+        listedRunning.list = new ProcessResult(0, boxTable("2"), "");
+        RecordingBoxRunner listingFailed = new RecordingBoxRunner();
+        listingFailed.probe = new ProcessResult(255, "", "ssh: connect to host: Connection refused");
+        listingFailed.list = new ProcessResult(3, "", "workspaces: boom");
+        return List.of(listedRunning, listingFailed);
+    }
+
+    /**
+     * OQ7's fallback: a remote row whose repository is no longer recorded
+     * opens its console in the user's home — a directory that exists on
+     * this Mac — never in the box placeholder the row stores.
+     */
+    @Test
+    void aRowWithoutARepositoryRecordOpensItsConsoleAtHome(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingBoxRunner runner = new RecordingBoxRunner();
+        ClaudeAgentProvider provider = new ClaudeAgentProvider(
+                new ClaudeExecutableLocator(Path.of("/nonexistent/claude")));
+        DrydockSessionService service = harness.remoteService(() -> true, runner,
+                new RemoteSessionLiveness(), SessionMcpAccess.none(), null, provider);
+
+        // A repository id nothing in this state records — the row was
+        // created against a project this install no longer knows.
+        ManagedAgentSession row = persistRemoteSession(harness, RepositoryId.newId(),
+                new AgentBinding(AgentKind.CLAUDE, Optional.of("conv-7"), Optional.empty()),
+                SessionStatus.INACTIVE, false);
+        service.resumeSession(row.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(1, harness.consoles.opens.size());
+        assertEquals(Path.of(System.getProperty("user.home")),
+                harness.consoles.opens.get(0).workingDirectory());
+        harness.store.flush();
+    }
+
+    // ---- workspace-box remote rows: stop, close, forget, refusals (T16) -------------
+
+    /**
+     * The exact kill-session argv the explicit Stop and the Forget issue
+     * for the box alias: the four batch options, `--` before the host, and
+     * the remote kill naming the tmux session after the row's managed id.
+     */
+    private static List<String> killArgv(ManagedSessionId id) {
+        return List.of("ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+                "-o", "ServerAliveInterval=3", "-o", "ServerAliveCountMax=2",
+                "--", "workspace-drydock-repo", "'tmux' 'kill-session' '-t' 'drydock-" + id + "'");
+    }
+
+    /** The stderr tmux itself prints when asked to kill a session it does not have. */
+    private static final String NO_SUCH_SESSION = "can't find session: drydock-";
+
+    /**
+     * Records every question asked and answers from a canned answer, so a
+     * Forget that asks is observable and one that must not ask is provable.
+     */
+    private static final class RecordingConfirm implements Function<String, CompletableFuture<Boolean>> {
+
+        final List<String> questions = new CopyOnWriteArrayList<>();
+        volatile Boolean answer;
+
+        @Override
+        public CompletableFuture<Boolean> apply(String question) {
+            questions.add(question);
+            return CompletableFuture.completedFuture(answer != null && answer);
+        }
+    }
+
+    /**
+     * AC-9, success: the explicit Stop on an attached remote row (resumed
+     * first, so this IDE owns its live ssh execution) issues the
+     * kill-session argv, ends the ssh client, and settles the row INACTIVE
+     * with liveness DEAD.
+     */
+    @Test
+    void stoppingARemoteRowKillsTheBoxSessionAndSettlesItInactiveAndDead(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingBoxRunner runner = new RecordingBoxRunner();
+        RemoteSessionLiveness liveness = new RemoteSessionLiveness();
+        ClaudeAgentProvider provider = new ClaudeAgentProvider(
+                new ClaudeExecutableLocator(Path.of("/nonexistent/claude")));
+        DrydockSessionService service = harness.remoteService(() -> true, runner,
+                liveness, SessionMcpAccess.none(), null, provider);
+
+        ManagedAgentSession row = persistRemoteSession(harness,
+                new AgentBinding(AgentKind.CLAUDE, Optional.of("conv-7"), Optional.empty()),
+                SessionStatus.INACTIVE, false);
+        service.resumeSession(row.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        assertEquals(SessionStatus.RUNNING, persisted(harness, row.id()).status());
+
+        service.stopSession(row.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(List.of(PROBE_ARGV, killArgv(row.id())), runner.argv,
+                "AC-9: the Stop runs exactly the probe of the resume and then the kill");
+        assertTrue(harness.consoles.stopped.contains(row.id()), "the ssh client ends with the Stop");
+        assertEquals(SessionStatus.INACTIVE, persisted(harness, row.id()).status(),
+                "AC-9: a successful kill settles the row INACTIVE");
+        assertEquals(Optional.of(RemoteSessionLiveness.State.DEAD), liveness.state(row.id()));
+        harness.store.flush();
+    }
+
+    /**
+     * AC-9, the other settled form: a kill that reports "can't find session"
+     * (the agent was already gone on the box) settles the row INACTIVE
+     * with liveness DEAD too, exactly like exit 0 — the Stop's goal state
+     * was already true.
+     */
+    @Test
+    void stoppingARemoteRowSettlesInactiveWhenTheBoxSessionIsAlreadyGone(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingBoxRunner runner = new RecordingBoxRunner();
+        runner.kill = new ProcessResult(1, "", NO_SUCH_SESSION + "<id>");
+        RemoteSessionLiveness liveness = new RemoteSessionLiveness();
+        DrydockSessionService service = harness.remoteService(() -> true, runner,
+                liveness, SessionMcpAccess.none(), null);
+
+        ManagedAgentSession row = persistRemoteSession(harness,
+                new AgentBinding(AgentKind.CLAUDE, Optional.of("conv-7"), Optional.empty()),
+                SessionStatus.RUNNING, false);
+
+        service.stopSession(row.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(SessionStatus.INACTIVE, persisted(harness, row.id()).status());
+        assertEquals(Optional.of(RemoteSessionLiveness.State.DEAD), liveness.state(row.id()));
+        harness.store.flush();
+    }
+
+    /**
+     * AC-9, failure: a kill that cannot conclude — the box is unreachable —
+     * surfaces an error naming the box, settles the row IDLE with liveness
+     * UNKNOWN, and never reports the row stopped: no INACTIVE anywhere.
+     */
+    @Test
+    void aFailedRemoteStopSurfacesAnErrorNamingTheBoxAndNeverReportsTheRowStopped(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingBoxRunner runner = new RecordingBoxRunner();
+        runner.kill = new ProcessResult(255, "", "ssh: connect to host: Connection refused");
+        RemoteSessionLiveness liveness = new RemoteSessionLiveness();
+        DrydockSessionService service = harness.remoteService(() -> true, runner,
+                liveness, SessionMcpAccess.none(), null);
+
+        ManagedAgentSession row = persistRemoteSession(harness,
+                new AgentBinding(AgentKind.CLAUDE, Optional.of("conv-7"), Optional.empty()),
+                SessionStatus.RUNNING, false);
+
+        ExecutionException failed = assertThrows(ExecutionException.class,
+                () -> service.stopSession(row.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+        assertTrue(failed.getCause().getMessage().contains("drydock-repo"),
+                "the error names the box: " + failed.getCause().getMessage());
+
+        ManagedAgentSession stored = persisted(harness, row.id());
+        assertNotEquals(SessionStatus.INACTIVE, stored.status(),
+                "AC-9: a failed Stop is never reported as a stopped agent");
+        assertNotEquals(SessionStatus.EXITED, stored.status());
+        assertEquals(Optional.of(RemoteSessionLiveness.State.UNKNOWN), liveness.state(row.id()));
+        assertTrue(harness.consoles.stopped.contains(row.id()), "the ssh client still ends");
+        harness.store.flush();
+    }
+
+    /**
+     * AC-9, timeout: a kill that hangs past its 10 s budget (the runner
+     * throws the timeout the real seam would) is the failure table's third
+     * row — the same error, IDLE, UNKNOWN, never INACTIVE.
+     */
+    @Test
+    void aHungRemoteStopIsTheFailureTableNotAStoppedRow(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingBoxRunner runner = new RecordingBoxRunner();
+        runner.killFailure = new ProcessTimeoutException(List.of("ssh"), Duration.ofSeconds(10));
+        RemoteSessionLiveness liveness = new RemoteSessionLiveness();
+        DrydockSessionService service = harness.remoteService(() -> true, runner,
+                liveness, SessionMcpAccess.none(), null);
+
+        ManagedAgentSession row = persistRemoteSession(harness,
+                new AgentBinding(AgentKind.CLAUDE, Optional.of("conv-7"), Optional.empty()),
+                SessionStatus.RUNNING, false);
+
+        ExecutionException failed = assertThrows(ExecutionException.class,
+                () -> service.stopSession(row.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+        assertTrue(failed.getCause().getMessage().contains("drydock-repo"),
+                "the timeout error names the box: " + failed.getCause().getMessage());
+        assertEquals(SessionStatus.IDLE, persisted(harness, row.id()).status());
+        assertEquals(Optional.of(RemoteSessionLiveness.State.UNKNOWN), liveness.state(row.id()));
+        harness.store.flush();
+    }
+
+    /**
+     * INV-8/AC-9's busy half, on a stepped executor: the STOPPING busy state
+     * is up before the blocking kill begins — the first executor task marks
+     * the row, the second kills — so the click's window never shows a
+     * running agent while its stop is already in flight. The mark is legal
+     * exactly because this IDE owns the row's live ssh execution (INV-4).
+     */
+    @Test
+    void theRemoteStopShowsTheStoppingBusyStateBeforeTheKillRuns(@TempDir Path base) throws Exception {
+        SteppedExecutorService executor = new SteppedExecutorService();
+        Harness harness = concurrentHarness(base, executor);
+        RecordingBoxRunner runner = new RecordingBoxRunner();
+        RemoteSessionLiveness liveness = new RemoteSessionLiveness();
+        ClaudeAgentProvider provider = new ClaudeAgentProvider(
+                new ClaudeExecutableLocator(Path.of("/nonexistent/claude")));
+        DrydockSessionService service = harness.remoteService(() -> true, runner,
+                liveness, SessionMcpAccess.none(), null, provider);
+
+        ManagedAgentSession row = persistRemoteSession(harness,
+                new AgentBinding(AgentKind.CLAUDE, Optional.of("conv-7"), Optional.empty()),
+                SessionStatus.INACTIVE, false);
+        CompletableFuture<ManagedAgentSession> resumed = service.resumeSession(row.id());
+        executor.runAll();
+        resumed.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        assertEquals(SessionStatus.RUNNING, persisted(harness, row.id()).status());
+
+        CompletableFuture<Void> stopping = service.stopSession(row.id());
+        assertFalse(stopping.isDone());
+        executor.runNext();  // the mark task, and only it
+        assertEquals(SessionStatus.STOPPING, persisted(harness, row.id()).status(),
+                "the busy state is up before the kill lands");
+        assertTrue(runner.argv.stream().noneMatch(RecordingBoxRunner::isKillSession),
+                "the kill has not run yet");
+        executor.runAll();  // the kill task
+        stopping.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        assertEquals(SessionStatus.INACTIVE, persisted(harness, row.id()).status());
+        assertEquals(Optional.of(RemoteSessionLiveness.State.DEAD), liveness.state(row.id()));
+        harness.store.flush();
+    }
+
+    /**
+     * R1 defect 1: an inconclusive Stop on an already-IDLE detached row (the
+     * normal state of a detached-alive session) still records the UNKNOWN
+     * liveness — the row needs no status change, but the map must not keep
+     * claiming ALIVE for a kill that could not conclude. With no local
+     * execution, no termination callback ever repairs this: the Stop's own
+     * settle is the only writer.
+     */
+    @Test
+    void aFailedStopOnADetachedIdleRowStillRecordsUnknownLiveness(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingBoxRunner runner = new RecordingBoxRunner();
+        runner.kill = new ProcessResult(255, "", "ssh: connect to host: Connection refused");
+        RemoteSessionLiveness liveness = new RemoteSessionLiveness();
+        DrydockSessionService service = harness.remoteService(() -> true, runner,
+                liveness, SessionMcpAccess.none(), null);
+
+        ManagedAgentSession row = persistRemoteSession(harness,
+                new AgentBinding(AgentKind.CLAUDE, Optional.of("conv-7"), Optional.empty()),
+                SessionStatus.IDLE, false);
+        liveness.set(row.id(), RemoteSessionLiveness.State.ALIVE);
+
+        ExecutionException failed = assertThrows(ExecutionException.class,
+                () -> service.stopSession(row.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+        assertTrue(failed.getCause().getMessage().contains("drydock-repo"),
+                "the error names the box: " + failed.getCause().getMessage());
+
+        assertEquals(SessionStatus.IDLE, persisted(harness, row.id()).status(),
+                "the row stays resumable-idle");
+        assertEquals(Optional.of(RemoteSessionLiveness.State.UNKNOWN), liveness.state(row.id()),
+                "the inconclusive kill records UNKNOWN even though no status change was needed");
+        harness.store.flush();
+    }
+
+    /**
+     * R1 defect 2, first ordering: the ssh client terminates during the Stop's
+     * kill round-trip — before `stopConsole` could mark the execution's
+     * stop-requested flag — so the end reaches the recorder as an ordinary
+     * one (stopRequested=false) and, pre-fix, its DEAD probe would persist
+     * EXITED over the Stop's later confirmed INACTIVE. The Stop is
+     * identified before the kill, so the end settles nothing and probes
+     * nothing: the kill's verdict is the only settle.
+     */
+    @Test
+    void anExplicitStopSettlesByTheKillEvenWhenTheClientEndsDuringIt(@TempDir Path base) throws Exception {
+        SteppedExecutorService executor = new SteppedExecutorService();
+        Harness harness = concurrentHarness(base, executor);
+        RecordingBoxRunner runner = new RecordingBoxRunner();
+        // A probe would say DEAD — and settle EXITED over the Stop's verdict.
+        runner.hasSession = new ProcessResult(1, "", "can't find session: drydock-<id>");
+        RemoteSessionLiveness liveness = new RemoteSessionLiveness();
+        ClaudeAgentProvider provider = new ClaudeAgentProvider(
+                new ClaudeExecutableLocator(Path.of("/nonexistent/claude")));
+        DrydockSessionService service = harness.remoteService(() -> true, runner,
+                liveness, SessionMcpAccess.none(), null, provider);
+
+        ManagedAgentSession row = persistRemoteSession(harness,
+                new AgentBinding(AgentKind.CLAUDE, Optional.of("conv-7"), Optional.empty()),
+                SessionStatus.INACTIVE, false);
+        CompletableFuture<ManagedAgentSession> resumed = service.resumeSession(row.id());
+        executor.runAll();
+        resumed.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        assertEquals(SessionStatus.RUNNING, persisted(harness, row.id()).status());
+
+        runner.duringKill = () -> service.endRecorder().executionTerminated(row.id(), false, 0);
+        CompletableFuture<Void> stopping = service.stopSession(row.id());
+        executor.runAll();
+        stopping.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(SessionStatus.INACTIVE, persisted(harness, row.id()).status(),
+                "the kill's confirmed verdict settles, unoverwritten by the client's end");
+        assertEquals(Optional.of(RemoteSessionLiveness.State.DEAD), liveness.state(row.id()));
+        assertEquals(List.of(PROBE_ARGV, killArgv(row.id())), runner.argv,
+                "the client's end issued no has-session probe against the in-flight Stop");
+        harness.store.flush();
+    }
+
+    /**
+     * R1 defect 2, second ordering: the client remains live briefly after
+     * `stopConsole` — `destroyProcess` does not wait for termination — so the
+     * Stop's own settle is suppressed by the claim guard while the dying
+     * client is still the live execution it sees. Pre-fix, the eventual
+     * probe overwrote the confirmed kill (an UNKNOWN probe settled
+     * IDLE/UNKNOWN over INACTIVE). Post-fix the dying client's end settles
+     * by the verdict the Stop recorded.
+     */
+    @Test
+    void anExplicitStopSettlesByTheKillEvenWhenItsOwnSettleWasSuppressedByTheDyingClient(
+            @TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingBoxRunner runner = new RecordingBoxRunner();
+        // A probe would be UNREACHABLE — and settle IDLE/UNKNOWN over the verdict.
+        runner.hasSession = new ProcessResult(255, "", "ssh: connect to host: Connection timed out");
+        RemoteSessionLiveness liveness = new RemoteSessionLiveness();
+        ClaudeAgentProvider provider = new ClaudeAgentProvider(
+                new ClaudeExecutableLocator(Path.of("/nonexistent/claude")));
+        DrydockSessionService service = harness.remoteService(() -> true, runner,
+                liveness, SessionMcpAccess.none(), null, provider);
+
+        ManagedAgentSession row = persistRemoteSession(harness,
+                new AgentBinding(AgentKind.CLAUDE, Optional.of("conv-7"), Optional.empty()),
+                SessionStatus.INACTIVE, false);
+        service.resumeSession(row.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        assertEquals(SessionStatus.RUNNING, persisted(harness, row.id()).status());
+
+        // The dying client: still the live execution the claim guard sees,
+        // until the test says it terminated.
+        AtomicBoolean clientEnded = new AtomicBoolean();
+        harness.liveExecution = id -> !clientEnded.get();
+
+        service.stopSession(row.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        assertEquals(SessionStatus.STOPPING, persisted(harness, row.id()).status(),
+                "the Stop's own settle was suppressed by the still-dying client");
+
+        clientEnded.set(true);
+        service.endRecorder().executionTerminated(row.id(), true, 0);
+
+        assertEquals(SessionStatus.INACTIVE, persisted(harness, row.id()).status(),
+                "the end settles the kill's recorded verdict, never a probe's guess");
+        assertEquals(Optional.of(RemoteSessionLiveness.State.DEAD), liveness.state(row.id()));
+        assertEquals(List.of(PROBE_ARGV, killArgv(row.id())), runner.argv,
+                "no has-session probe ran against the Stop's verdict");
+        harness.store.flush();
+    }
+
+    /**
+     * R1 defect 5: a cancellation of the Stop's returned future between the
+     * two executor stages — after the mark task wrote STOPPING, before the
+     * kill task starts — must clear the busy mark: no client was stopped, so
+     * no termination callback ever repairs it (INV-8's every-path rule).
+     */
+    @Test
+    void aCancelledRemoteStopClearsTheStoppingMark(@TempDir Path base) throws Exception {
+        SteppedExecutorService executor = new SteppedExecutorService();
+        Harness harness = concurrentHarness(base, executor);
+        RecordingBoxRunner runner = new RecordingBoxRunner();
+        RemoteSessionLiveness liveness = new RemoteSessionLiveness();
+        ClaudeAgentProvider provider = new ClaudeAgentProvider(
+                new ClaudeExecutableLocator(Path.of("/nonexistent/claude")));
+        DrydockSessionService service = harness.remoteService(() -> true, runner,
+                liveness, SessionMcpAccess.none(), null, provider);
+
+        ManagedAgentSession row = persistRemoteSession(harness,
+                new AgentBinding(AgentKind.CLAUDE, Optional.of("conv-7"), Optional.empty()),
+                SessionStatus.INACTIVE, false);
+        CompletableFuture<ManagedAgentSession> resumed = service.resumeSession(row.id());
+        executor.runAll();
+        resumed.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        assertEquals(SessionStatus.RUNNING, persisted(harness, row.id()).status());
+
+        CompletableFuture<Void> stopping = service.stopSession(row.id());
+        executor.runNext();   // the mark task, and only it
+        assertEquals(SessionStatus.STOPPING, persisted(harness, row.id()).status());
+        stopping.cancel(true);
+
+        assertEquals(SessionStatus.RUNNING, persisted(harness, row.id()).status(),
+                "a cancelled Stop leaves no stranded STOPPING mark");
+        assertTrue(runner.argv.stream().noneMatch(RecordingBoxRunner::isKillSession),
+                "the kill never ran");
+        harness.store.flush();
+    }
+
+    /**
+     * R1 defect 5, the rejected-submission hole: a second-stage submission
+     * the executor refuses (shutdown raced it) completes the chain
+     * exceptionally without ever invoking the kill — the same stranded
+     * STOPPING, repaired the same way.
+     */
+    @Test
+    void aRejectedRemoteStopStageClearsTheStoppingMark(@TempDir Path base) throws Exception {
+        SteppedExecutorService executor = new SteppedExecutorService();
+        Harness harness = concurrentHarness(base, executor);
+        RecordingBoxRunner runner = new RecordingBoxRunner();
+        RemoteSessionLiveness liveness = new RemoteSessionLiveness();
+        ClaudeAgentProvider provider = new ClaudeAgentProvider(
+                new ClaudeExecutableLocator(Path.of("/nonexistent/claude")));
+        DrydockSessionService service = harness.remoteService(() -> true, runner,
+                liveness, SessionMcpAccess.none(), null, provider);
+
+        ManagedAgentSession row = persistRemoteSession(harness,
+                new AgentBinding(AgentKind.CLAUDE, Optional.of("conv-7"), Optional.empty()),
+                SessionStatus.INACTIVE, false);
+        CompletableFuture<ManagedAgentSession> resumed = service.resumeSession(row.id());
+        executor.runAll();
+        resumed.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        assertEquals(SessionStatus.RUNNING, persisted(harness, row.id()).status());
+
+        CompletableFuture<Void> stopping = service.stopSession(row.id());   // the mark task is queued
+        executor.shutdown();   // its kill submission, inside the mark task, is refused
+        executor.runNext();    // the mark task runs; the kill stage never starts
+
+        assertEquals(SessionStatus.RUNNING, persisted(harness, row.id()).status(),
+                "a rejected kill submission leaves no stranded STOPPING mark");
+        assertTrue(runner.argv.stream().noneMatch(RecordingBoxRunner::isKillSession));
+        assertTrue(stopping.isCompletedExceptionally(), "the chain failed, and completed");
+        harness.store.flush();
+    }
+
+    /**
+     * R1 defect 4: a remote resume's ssh client ends early — a fast remote
+     * failure — while the launch still holds its claim, so the end's settle
+     * is suppressed under that claim. Pre-fix the suppression discarded the
+     * result and the finalize persisted RUNNING over a dead client, forever.
+     * Post-fix the settle is deferred and re-applied when the claim ends:
+     * the launch completes and the row settles by the probe's verdict.
+     */
+    @Test
+    void anEarlyRemoteClientEndUnderTheLaunchsOwnClaimSettlesWhenTheClaimEnds(@TempDir Path base) throws Exception {
+        SteppedExecutorService executor = new SteppedExecutorService();
+        Harness harness = concurrentHarness(base, executor);
+        RecordingBoxRunner runner = new RecordingBoxRunner();
+        runner.hasSession = new ProcessResult(0, "", "");   // the probe says ALIVE → IDLE
+        RemoteSessionLiveness liveness = new RemoteSessionLiveness();
+        // The recording provider queues nothing at init, so the stepped
+        // stages below are the resume's own.
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, false, null, harness.events);
+        DrydockSessionService service = harness.remoteService(() -> true, runner,
+                liveness, SessionMcpAccess.none(), null, provider);
+        harness.liveExecution = id -> false;   // the client ended: no execution is live
+        CompletableFuture<Void> open = new CompletableFuture<>();
+        harness.consoles.pendingOpen = open;
+
+        ManagedAgentSession row = persistRemoteSession(harness,
+                new AgentBinding(AgentKind.CLAUDE, Optional.of("conv-7"), Optional.empty()),
+                SessionStatus.IDLE, false);
+        CompletableFuture<ManagedAgentSession> resumed = service.resumeSession(row.id());
+        executor.runNext();   // the read stage
+        executor.runNext();   // the claim, the probe, the console open — the future is pending
+
+        // The ssh client ends immediately, under the launch's own claim.
+        service.endRecorder().executionTerminated(row.id(), false, 0);
+
+        open.complete(null);   // the console opened
+        // The probe (suppressed under the claim, deferred), the finalize
+        // (persisting RUNNING), and the claim's end (re-applying the
+        // deferred settle) all run here, in that order.
+        executor.runAll();
+        resumed.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        ManagedAgentSession settled = persisted(harness, row.id());
+        assertEquals(SessionStatus.IDLE, settled.status(),
+                "the early end's deferred settle lands once the claim ends — never a stranded RUNNING");
+        assertEquals(Optional.of(RemoteSessionLiveness.State.ALIVE), liveness.state(row.id()));
+        harness.store.flush();
+    }
+
+    /**
+     * The detached half of the Stop offer: a row with no ssh execution here
+     * (IDLE, ALIVE in the liveness map) takes the same path — kill, settle
+     * INACTIVE with DEAD — because Stop is offered on ALIVE-detached rows
+     * even though no local execution exists to stop.
+     */
+    @Test
+    void stoppingADetachedRemoteRowKillsTheBoxSessionToo(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingBoxRunner runner = new RecordingBoxRunner();
+        RemoteSessionLiveness liveness = new RemoteSessionLiveness();
+        DrydockSessionService service = harness.remoteService(() -> true, runner,
+                liveness, SessionMcpAccess.none(), null);
+
+        ManagedAgentSession row = persistRemoteSession(harness,
+                new AgentBinding(AgentKind.CLAUDE, Optional.of("conv-7"), Optional.empty()),
+                SessionStatus.IDLE, false);
+        liveness.set(row.id(), RemoteSessionLiveness.State.ALIVE);
+
+        service.stopSession(row.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(List.of(killArgv(row.id())), runner.argv);
+        assertEquals(SessionStatus.INACTIVE, persisted(harness, row.id()).status());
+        assertEquals(Optional.of(RemoteSessionLiveness.State.DEAD), liveness.state(row.id()));
+        harness.store.flush();
+    }
+
+    /**
+     * AC-7's service half: window close on a remote row issues no
+     * kill-session and persists neither EXITED nor INACTIVE — the row keeps
+     * the status it was decoded with, and only its ssh client ends (INV-10:
+     * the close paths touch the box never).
+     */
+    @Test
+    void closingTheWindowEndsARemoteRowsClientWithoutKillingOrSettlingIt(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingBoxRunner runner = new RecordingBoxRunner();
+        RemoteSessionLiveness liveness = new RemoteSessionLiveness();
+        DrydockSessionService service = harness.remoteService(() -> true, runner,
+                liveness, SessionMcpAccess.none(), null);
+
+        ManagedAgentSession row = persistRemoteSession(harness,
+                new AgentBinding(AgentKind.CLAUDE, Optional.of("conv-7"), Optional.empty()),
+                SessionStatus.RUNNING, false);
+        service.stopSessionsForClose(List.of(row.id()));
+
+        assertTrue(runner.argv.isEmpty(), "AC-7: close never issues kill-session");
+        ManagedAgentSession stored = persisted(harness, row.id());
+        assertNotEquals(SessionStatus.INACTIVE, stored.status(),
+                "AC-7: close persists no INACTIVE for a remote row");
+        assertNotEquals(SessionStatus.EXITED, stored.status(),
+                "AC-7: close persists no EXITED for a remote row");
+        assertTrue(harness.consoles.stopped.contains(row.id()),
+                "the ssh client ends with the close");
+        harness.store.flush();
+    }
+
+    /**
+     * R1 defect 6: the close's indirect termination. The close path ends
+     * the ssh client (the box-side agent is never touched); the client's
+     * eventual end used to reach the recorder with the stop flag set and
+     * settle INACTIVE through the DEAD probe branch — or EXITED, when the
+     * client had already ended before the flag could be set. The close is
+     * identified before the client is asked to end, so the end settles the
+     * durable row IDLE (AC-7): never EXITED, never INACTIVE, and no probe
+     * runs against the box.
+     */
+    @Test
+    void aCloseOriginatedClientEndSettlesTheRemoteRowIdleNeverInactiveOrExited(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingBoxRunner runner = new RecordingBoxRunner();
+        // A probe would say DEAD — the box-side agent had independently
+        // exited — and, pre-fix, settle INACTIVE through the requested-stop
+        // branch.
+        runner.hasSession = new ProcessResult(1, "", "can't find session: drydock-<id>");
+        RemoteSessionLiveness liveness = new RemoteSessionLiveness();
+        DrydockSessionService service = harness.remoteService(() -> true, runner,
+                liveness, SessionMcpAccess.none(), null);
+
+        ManagedAgentSession row = persistRemoteSession(harness,
+                new AgentBinding(AgentKind.CLAUDE, Optional.of("conv-7"), Optional.empty()),
+                SessionStatus.RUNNING, false);
+        // The client is live until the close ends it; the end is delivered below.
+        AtomicBoolean clientEnded = new AtomicBoolean();
+        harness.liveExecution = id -> !clientEnded.get();
+
+        service.stopSessionsForClose(List.of(row.id()));
+        assertTrue(harness.consoles.stopped.contains(row.id()), "the ssh client ends with the close");
+
+        clientEnded.set(true);
+        service.endRecorder().executionTerminated(row.id(), true, 0);
+
+        ManagedAgentSession stored = persisted(harness, row.id());
+        assertNotEquals(SessionStatus.INACTIVE, stored.status(), "AC-7: a close never persists INACTIVE");
+        assertNotEquals(SessionStatus.EXITED, stored.status(), "AC-7: a close never persists EXITED");
+        assertEquals(SessionStatus.IDLE, stored.status(), "the close-originated end settles the row IDLE");
+        assertEquals(Optional.empty(), liveness.state(row.id()),
+                "no probe ran, so no liveness answer was earned");
+        assertTrue(runner.argv.isEmpty(),
+                "no kill-session, no has-session: the close touches the box never (INV-10)");
+        harness.store.flush();
+    }
+
+    /**
+     * AC-21, kill-ok: the Forget on a remote row kills the box session first
+     * and then removes the row — no confirmation needed, because the kill
+     * itself confirmed the agent gone. The liveness entry leaves with the
+     * row.
+     */
+    @Test
+    void forgettingARemoteRowKillsTheBoxSessionThenRemovesTheRow(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingBoxRunner runner = new RecordingBoxRunner();
+        RecordingConfirm confirm = new RecordingConfirm();
+        RemoteSessionLiveness liveness = new RemoteSessionLiveness();
+        DrydockSessionService service = harness.remoteService(() -> true, runner,
+                liveness, SessionMcpAccess.none(), null, confirm);
+
+        ManagedAgentSession row = persistRemoteSession(harness,
+                new AgentBinding(AgentKind.CLAUDE, Optional.of("conv-7"), Optional.empty()),
+                SessionStatus.IDLE, false);
+        liveness.set(row.id(), RemoteSessionLiveness.State.ALIVE);
+
+        service.deleteSession(row.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(List.of(killArgv(row.id())), runner.argv,
+                "AC-21: the Forget kills the tmux session first");
+        assertTrue(confirm.questions.isEmpty(), "a kill that confirmed the agent gone asks nothing");
+        assertNull(persistedOrNull(harness, row.id()), "the row is removed");
+        assertTrue(harness.consoles.forgotten.contains(row.id()));
+        assertEquals(Optional.empty(), liveness.state(row.id()),
+                "the liveness entry leaves with the row");
+        harness.store.flush();
+    }
+
+    /**
+     * AC-21, kill-no-session: a kill answering "can't find session" — the
+     * agent was already gone on the box — removes the row without asking,
+     * exactly like a confirmed kill.
+     */
+    @Test
+    void forgettingARemoteRowRemovesItWhenTheBoxSessionIsAlreadyGone(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingBoxRunner runner = new RecordingBoxRunner();
+        runner.kill = new ProcessResult(1, "", NO_SUCH_SESSION + "<id>");
+        RecordingConfirm confirm = new RecordingConfirm();
+        DrydockSessionService service = harness.remoteService(() -> true, runner,
+                new RemoteSessionLiveness(), SessionMcpAccess.none(), null, confirm);
+
+        ManagedAgentSession row = persistRemoteSession(harness,
+                new AgentBinding(AgentKind.CLAUDE, Optional.of("conv-7"), Optional.empty()),
+                SessionStatus.IDLE, false);
+
+        service.deleteSession(row.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertTrue(confirm.questions.isEmpty(), "no confirm is asked for an already-gone session");
+        assertNull(persistedOrNull(harness, row.id()), "the row is removed");
+        harness.store.flush();
+    }
+
+    /**
+     * AC-21, unreachable-confirmed: a kill that cannot reach the box asks
+     * "The agent may still be running on box <name>. Forget anyway?" and
+     * removes the row only on the user's Yes.
+     */
+    @Test
+    void anUnreachableBoxAsksBeforeForgettingAndRemovesTheRowOnConfirm(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingBoxRunner runner = new RecordingBoxRunner();
+        runner.kill = new ProcessResult(255, "", "ssh: connect to host: Connection refused");
+        RecordingConfirm confirm = new RecordingConfirm();
+        confirm.answer = true;
+        DrydockSessionService service = harness.remoteService(() -> true, runner,
+                new RemoteSessionLiveness(), SessionMcpAccess.none(), null, confirm);
+
+        ManagedAgentSession row = persistRemoteSession(harness,
+                new AgentBinding(AgentKind.CLAUDE, Optional.of("conv-7"), Optional.empty()),
+                SessionStatus.IDLE, false);
+
+        service.deleteSession(row.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(List.of("The agent may still be running on box drydock-repo. Forget anyway?"),
+                confirm.questions);
+        assertNull(persistedOrNull(harness, row.id()), "a confirmed forget removes the row");
+        harness.store.flush();
+    }
+
+    /**
+     * AC-21, unreachable-cancelled: a declined confirm removes nothing — the
+     * row, its binding and its ssh client all stay exactly as they were.
+     */
+    @Test
+    void aDeclinedForgetConfirmRemovesNothing(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingBoxRunner runner = new RecordingBoxRunner();
+        runner.kill = new ProcessResult(255, "", "ssh: connect to host: Connection refused");
+        RecordingConfirm confirm = new RecordingConfirm();
+        confirm.answer = false;
+        DrydockSessionService service = harness.remoteService(() -> true, runner,
+                new RemoteSessionLiveness(), SessionMcpAccess.none(), null, confirm);
+
+        ManagedAgentSession row = persistRemoteSession(harness,
+                new AgentBinding(AgentKind.CLAUDE, Optional.of("conv-7"), Optional.empty()),
+                SessionStatus.IDLE, false);
+
+        service.deleteSession(row.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(1, confirm.questions.size());
+        ManagedAgentSession stored = persisted(harness, row.id());
+        assertEquals(Optional.of(BOX), stored.workspaceBox(), "the row keeps its binding");
+        assertEquals(SessionStatus.IDLE, stored.status());
+        assertTrue(harness.consoles.forgotten.isEmpty(), "nothing was forgotten");
+        harness.store.flush();
+    }
+
+    /**
+     * The fresh-start refusal, remote half: {@code startSession} on a remote
+     * row is refused with a reason naming the box, before any box command,
+     * console or state change.
+     */
+    @Test
+    void aRemoteRowIsNeverStartedFreshButRefusedNamingItsBox(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingBoxRunner runner = new RecordingBoxRunner();
+        DrydockSessionService service = harness.remoteService(() -> true, runner,
+                new RemoteSessionLiveness(), SessionMcpAccess.none(), null);
+
+        ManagedAgentSession row = persistRemoteSession(harness,
+                new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
+                SessionStatus.IDLE, false);
+
+        ExecutionException refused = assertThrows(ExecutionException.class,
+                () -> service.startSession(row.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+        assertTrue(refused.getCause().getMessage().contains("drydock-repo"),
+                "the refusal names the box: " + refused.getCause().getMessage());
+        assertTrue(runner.argv.isEmpty(), "the refusal runs no box command");
+        assertTrue(harness.consoles.opens.isEmpty(), "the refusal opens no console");
+        assertEquals(SessionStatus.IDLE, persisted(harness, row.id()).status());
+        harness.store.flush();
+    }
+
+    /**
+     * The transfer refusal, remote half: a remote row's conversation lives on
+     * its box and cannot be transferred to a local agent; the refusal names
+     * the box and changes nothing.
+     */
+    @Test
+    void aRemoteRowIsNeverTransferredButRefusedNamingItsBox(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingBoxRunner runner = new RecordingBoxRunner();
+        DrydockSessionService service = harness.remoteService(() -> true, runner,
+                new RemoteSessionLiveness(), SessionMcpAccess.none(), null);
+
+        ManagedAgentSession row = persistRemoteSession(harness,
+                new AgentBinding(AgentKind.CLAUDE, Optional.of("conv-7"), Optional.empty()),
+                SessionStatus.INACTIVE, false);
+
+        ExecutionException refused = assertThrows(ExecutionException.class,
+                () -> service.transferStoppedSession(row.id(), AgentKind.CODEX)
+                        .get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+        assertTrue(refused.getCause().getMessage().contains("drydock-repo"),
+                "the refusal names the box: " + refused.getCause().getMessage());
+        assertTrue(runner.argv.isEmpty());
+        assertTrue(harness.consoles.opens.isEmpty());
+        ManagedAgentSession stored = persisted(harness, row.id());
+        assertEquals(AgentKind.CLAUDE, stored.agentKind(), "the binding is untouched");
+        assertEquals(SessionStatus.INACTIVE, stored.status());
+        harness.store.flush();
+    }
+
+    /**
+     * The Done flow's gate: a remote row is refused with a named reason (the
+     * flow is local-worktree semantics throughout), and a local row passes
+     * the gate untouched — the flow runs exactly as before for it.
+     */
+    @Test
+    void theDoneFlowRefusesARemoteRowAndPassesALocalRow(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        DrydockSessionService service = harness.service(new TerminalAgentProvider());
+
+        ManagedAgentSession remote = persistRemoteSession(harness,
+                new AgentBinding(AgentKind.CLAUDE, Optional.of("conv-7"), Optional.empty()),
+                SessionStatus.IDLE, false);
+        Optional<String> refusal = service.doneFlowRefusal(remote.id());
+        assertTrue(refusal.isPresent());
+        assertTrue(refusal.get().contains("drydock-repo"),
+                "the refusal names the box: " + refusal.get());
+        assertTrue(refusal.get().contains("Stop or Forget"),
+                "the refusal names the row's real endings: " + refusal.get());
+
+        ManagedAgentSession local = persistSession(harness, AgentKind.CLAUDE, "Local work",
+                new AgentBinding(AgentKind.CLAUDE, Optional.of("conv-1"), Optional.empty()),
+                base, SessionStatus.INACTIVE, Instant.parse("2026-08-12T10:00:00Z"));
+        assertEquals(Optional.empty(), service.doneFlowRefusal(local.id()),
+                "a local row passes the gate untouched");
+        harness.store.flush();
     }
 }

@@ -55,11 +55,19 @@ import java.util.Optional;
  * it is a create-time input: what the launch carries, not a session
  * property, and resuming a conversation re-receives whatever resources
  * that resume is given rather than inheriting these.</p>
+ *
+ * <p>{@code persistence}, when present, means this launch must live on a
+ * workspace box inside the tmux session named after its {@link
+ * RemotePersistence#managedSessionId()} — a persistent remote session
+ * rather than a plain SSH launch. It is present only together with
+ * {@code remote}; the constructor rejects persistence without a remote.
+ * Empty means exactly the launches of today.</p>
  */
 public record CreateContext(String displayName, String sessionId, Path workingDirectory,
                             Optional<SshRemote> remote, Optional<McpAccess> mcp, Optional<String> model,
                             boolean evalMode, boolean readOnly, Optional<String> initialPrompt,
-                            List<StdioMcpServer> stdioMcpServers, Optional<LaunchResources> launchResources) {
+                            List<StdioMcpServer> stdioMcpServers, Optional<LaunchResources> launchResources,
+                            Optional<RemotePersistence> persistence) {
 
     /**
      * Separates drydock's framing from the user's task inside a composed
@@ -84,9 +92,44 @@ public record CreateContext(String displayName, String sessionId, Path workingDi
         Objects.requireNonNull(initialPrompt, "initialPrompt");
         stdioMcpServers = List.copyOf(Objects.requireNonNull(stdioMcpServers, "stdioMcpServers"));
         Objects.requireNonNull(launchResources, "launchResources");
+        Objects.requireNonNull(persistence, "persistence");
+        // A persistent session lives on a remote box; persistence without
+        // a remote is a wiring mistake, never a launch mode.
+        if (persistence.isPresent() && remote.isEmpty()) {
+            throw new IllegalArgumentException("persistence requires a remote");
+        }
         // A blank task is no task: rendering it would launch the agent with
         // an empty first message.
         initialPrompt = initialPrompt.filter(prompt -> !prompt.isBlank());
+    }
+
+    /** As the canonical constructor with no persistence. */
+    public CreateContext(String displayName, String sessionId, Path workingDirectory,
+                         Optional<SshRemote> remote, Optional<McpAccess> mcp, Optional<String> model,
+                         boolean evalMode, boolean readOnly, Optional<String> initialPrompt,
+                         List<StdioMcpServer> stdioMcpServers, Optional<LaunchResources> launchResources) {
+        this(displayName, sessionId, workingDirectory, remote, mcp, model, evalMode, readOnly,
+                initialPrompt, stdioMcpServers, launchResources, Optional.empty());
+    }
+
+    /** This context, with {@code servers} as the stdio MCP servers the agent starts. */
+    public CreateContext withStdioMcpServers(List<StdioMcpServer> servers) {
+        return new CreateContext(displayName, sessionId, workingDirectory, remote, mcp, model, evalMode, readOnly,
+                initialPrompt, servers, launchResources, persistence);
+    }
+
+    /** This context, with {@code resources} as the launch resources. */
+    public CreateContext withLaunchResources(LaunchResources resources) {
+        return new CreateContext(displayName, sessionId, workingDirectory, remote, mcp, model, evalMode, readOnly,
+                initialPrompt, stdioMcpServers, Optional.of(Objects.requireNonNull(resources, "resources")),
+                persistence);
+    }
+
+    /** This context, with {@code persistence} as the remote box persistence. */
+    public CreateContext withPersistence(RemotePersistence persistence) {
+        return new CreateContext(displayName, sessionId, workingDirectory, remote, mcp, model, evalMode, readOnly,
+                initialPrompt, stdioMcpServers, launchResources,
+                Optional.of(Objects.requireNonNull(persistence, "persistence")));
     }
 
     /** As the canonical constructor with no launch resources. */
@@ -96,18 +139,6 @@ public record CreateContext(String displayName, String sessionId, Path workingDi
                          List<StdioMcpServer> stdioMcpServers) {
         this(displayName, sessionId, workingDirectory, remote, mcp, model, evalMode, readOnly,
                 initialPrompt, stdioMcpServers, Optional.empty());
-    }
-
-    /** This context, with {@code servers} as the stdio MCP servers the agent starts. */
-    public CreateContext withStdioMcpServers(List<StdioMcpServer> servers) {
-        return new CreateContext(displayName, sessionId, workingDirectory, remote, mcp, model, evalMode, readOnly,
-                initialPrompt, servers, launchResources);
-    }
-
-    /** This context, with {@code resources} as the launch resources. */
-    public CreateContext withLaunchResources(LaunchResources resources) {
-        return new CreateContext(displayName, sessionId, workingDirectory, remote, mcp, model, evalMode, readOnly,
-                initialPrompt, stdioMcpServers, Optional.of(Objects.requireNonNull(resources, "resources")));
     }
 
     /** As the canonical constructor with no model and no stdio MCP servers. */

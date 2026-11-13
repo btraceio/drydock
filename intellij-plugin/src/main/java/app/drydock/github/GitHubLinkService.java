@@ -155,8 +155,15 @@ public final class GitHubLinkService implements AutoCloseable {
      * Parses {@code origin}'s URL into a GitHub identity, if it is one.
      * Accepts the shapes GitHub hands out: {@code https://github.com/{owner}/{repo}[.git]},
      * {@code git@github.com:{owner}/{repo}[.git]}, and {@code ssh://git@github.com/{owner}/{repo}[.git]}.
+     *
+     * <p>Public because the workspace-box machinery shares this one parser
+     * — {@code app.drydock.workspace.BoxCheckout} reads the origins of the
+     * box's checkouts through it during auto-clone discovery, and a second
+     * URL parser would be a second truth about what a GitHub remote is.
+     * There is deliberately no behavior here beyond the parsing; callers
+     * that need it async wrap it themselves ({@link #remoteOf}).
      */
-    static Optional<Remote> parseRemote(String url) {
+    public static Optional<Remote> parseRemote(String url) {
         String trimmed = url.strip();
         // Strip a trailing .git once; the owner/name split follows it.
         if (trimmed.endsWith(".git")) {

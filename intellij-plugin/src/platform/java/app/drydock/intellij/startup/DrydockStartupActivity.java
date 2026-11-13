@@ -38,7 +38,11 @@ import java.util.concurrent.TimeoutException;
  *
  * <p>It starts nothing. Opening a project restores whatever console tabs the
  * platform persisted, all of them in their Not-running state, and no agent
- * runs until a human asks for one.</p>
+ * runs until a human asks for one. The one startup probe it does fire is the
+ * remote-session revalidation pass — after the warm-up, off the EDT, and
+ * only when the workspace-boxes flag is on — which asks each box for its
+ * tmux session names and marks liveness: it spawns no console, creates no
+ * box, prompts for nothing, and writes no row.</p>
  *
  * <p>Threading (AC7/AC12): every constructor here is cheap and EDT-safe
  * ({@link DrydockPluginService}'s own initialization runs on its executor);
@@ -134,6 +138,12 @@ public final class DrydockStartupActivity implements ProjectActivity {
                 // <repo> · <branch> for the surfaces that name this window on
                 // the EDT, where git cannot be asked.
                 ProjectIdentity.resolve(project);
+                // Revalidate detached remote-session liveness (workspace
+                // boxes): once per IDE run, coalesced, flag-gated, and
+                // bounded — after the warm-up so the catalog is loaded, and
+                // on this background thread so no box I/O runs on the EDT.
+                // The pass starts nothing: no console, no box, no prompt.
+                DrydockPluginService.getInstance().workspaceRevalidation().runOnce();
             }
         });
         // The warm-up itself belongs to the background task above. This
