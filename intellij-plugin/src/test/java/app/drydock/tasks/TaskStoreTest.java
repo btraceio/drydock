@@ -9,14 +9,17 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermission;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -64,6 +67,40 @@ class TaskStoreTest {
 
     private static String validTask(String title) {
         return "---\ntitle: \"" + title + "\"\nstatus: open\ndone_by: human\nafter: []\nsessions: []\n---\nBody.\n";
+    }
+
+    @Test
+    void movingToDoneStampsDoneAtAndOtherUpdatesLeaveIt() throws Exception {
+        writeTask(REPO_A, "stamp-task", validTask("Stamp task"));
+        TaskId id = TaskId.of("stamp-task");
+        TaskStore store = store();
+
+        store.update(id, status(TaskStatus.REVIEW));
+        assertEquals(Optional.empty(), parse(REPO_A, id).doneAt(), "review is not done");
+
+        Instant before = Instant.now();
+        store.update(id, status(TaskStatus.DONE));
+        Instant after = Instant.now();
+        Instant stamped = parse(REPO_A, id).doneAt().orElseThrow();
+        assertFalse(stamped.isBefore(before) || stamped.isAfter(after), "stamped with the update's instant");
+
+        store.update(id, new TaskFilePatch.Updates("Renamed", TaskStatus.DONE, null, null, null, null));
+        assertEquals(Optional.of(stamped), parse(REPO_A, id).doneAt(), "already done: no new date");
+
+        store.update(id, status(TaskStatus.OPEN));
+        assertEquals(Optional.of(stamped), parse(REPO_A, id).doneAt(), "reopening keeps the old date");
+        store.close();
+    }
+
+    @Test
+    void stampDoneKeepsACallerSuppliedDate() {
+        TaskDocument open = new TaskDocument(TaskId.of("t"), RepositoryId.of(REPO_A), "T", TaskStatus.OPEN,
+                DoneBy.HUMAN, Optional.empty(), List.of(), List.of(), "", "");
+        Instant now = Instant.parse("2026-11-13T12:00:00Z");
+        Instant own = Instant.parse("2026-11-01T08:00:00Z");
+        assertEquals(now, TaskStore.stampDone(open, status(TaskStatus.DONE), now).doneAt());
+        assertEquals(own, TaskStore.stampDone(open, status(TaskStatus.DONE).withDoneAt(own), now).doneAt());
+        assertEquals(null, TaskStore.stampDone(open, status(TaskStatus.REVIEW), now).doneAt());
     }
 
     /** 2: status+note round-trip keeps unknown metadata byte for byte. */

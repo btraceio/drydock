@@ -361,4 +361,30 @@ class TaskFilePatchTest {
         assertEquals(List.of(jira), parse(TaskFilePatch.newFile(mirrored)).document().mirrors());
         assertRefused("a non-list mirrors value", () -> parse("---\ntitle: T\nmirrors: one\n---\n"));
     }
+
+    @Test
+    void doneAtIsReadInsertedReplacedAndWrittenByNewFileOnlyWhenPresent() throws Exception {
+        String source = "---\ntitle: T\nstatus: review\nowner: jb   # kept\n---\nBody.\n";
+        Instant first = Instant.parse("2026-11-13T09:30:00Z");
+        Instant second = Instant.parse("2026-11-14T17:05:00Z");
+        assertEquals(Optional.empty(), parse(source).document().doneAt(), "a missing key is no date");
+
+        String inserted = TaskFilePatch.patch(parse(source), source,
+                up(null, TaskStatus.DONE, null, null, null, null).withDoneAt(first));
+        assertEquals("---\ntitle: T\nstatus: done\nowner: jb   # kept\ndone_at: 2026-11-13T09:30:00Z\n---\nBody.\n",
+                inserted);
+        assertEquals(Optional.of(first), parse(inserted).document().doneAt());
+        String replaced = TaskFilePatch.patch(parse(inserted), inserted,
+                up(null, null, null, null, null, null).withDoneAt(second));
+        assertEquals(inserted.replace("2026-11-13T09:30:00Z", "2026-11-14T17:05:00Z"), replaced,
+                "the existing entry is replaced in place");
+        assertEquals(Optional.of(second), patched(replaced, up(null, TaskStatus.OPEN, null, null, null, null))
+                .doneAt(), "updates without doneAt leave done_at alone");
+
+        assertFalse(TaskFilePatch.newFile(document("T", null, List.of(), "")).contains("done_at"),
+                "a task with no date gets no done_at key");
+        TaskDocument done = new TaskDocument(ID, REPO, "T", TaskStatus.DONE, DoneBy.HUMAN, Optional.empty(),
+                List.of(), List.of(), List.of(), Optional.of(first), "", "");
+        assertEquals(Optional.of(first), parse(TaskFilePatch.newFile(done)).document().doneAt());
+    }
 }
