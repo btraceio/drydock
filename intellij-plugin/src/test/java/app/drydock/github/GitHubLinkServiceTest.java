@@ -2,6 +2,7 @@ package app.drydock.github;
 
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Modifier;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -58,5 +59,20 @@ class GitHubLinkServiceTest {
                 link.githubUrl());
         assertEquals("https://github.dev/DataDog/profiling-backend/blob/a8f1c0e/app/Foo.java#L41",
                 link.vscodeUrl(), "github.dev is github.com with the editor host; the #L line comes with it");
+    }
+
+    /**
+     * The widened visibility is a contract with the workspace-box arm:
+     * {@code app.drydock.workspace.BoxCheckout} shares this one parser to
+     * read the origins of the box's checkouts during auto-clone discovery,
+     * so the method stays public — no second URL parser is ever written.
+     * The parser's own behavior is pinned by the cases above and changes
+     * not at all here.
+     */
+    @Test
+    void parseRemoteIsPublicForTheBoxCloneDiscovery() throws Exception {
+        assertTrue(Modifier.isPublic(GitHubLinkService.class
+                .getMethod("parseRemote", String.class).getModifiers()),
+                "BoxCheckout, in app.drydock.workspace, calls this parser directly");
     }
 }
