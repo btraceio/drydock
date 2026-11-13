@@ -15,6 +15,7 @@ import app.drydock.process.ProcessTimeoutException;
 import app.drydock.projects.SharedProject;
 import app.drydock.workspace.BoxCheckout;
 import app.drydock.workspace.CommandRunner;
+import app.drydock.workspace.WorkspaceBoxNames;
 import app.drydock.workspace.WorkspacesCli;
 
 import org.junit.jupiter.api.Test;
@@ -24,8 +25,11 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -184,16 +188,29 @@ class TaskLauncherTest {
         }
     }
 
-    /** The mapping fake: the `.box` and `.clone` keys as in-memory records. */
+    /** The mapping fake: the `.box`, `.usedBoxes` and `.clone` keys as in-memory records. */
     private static final class RecordingMapping implements TaskLauncher.BoxMapping {
 
         Optional<String> box;
         Optional<String> clone = Optional.empty();
+        String cloneBox; // the box the cached clone path was recorded for
+        final Set<String> usedNames = new LinkedHashSet<>();
         final List<String> recordedBoxes = new ArrayList<>();
         final List<String> storedClones = new ArrayList<>();
 
         RecordingMapping(Optional<String> box) {
             this.box = box;
+        }
+
+        /** Seeds the used-names history with a name the mapping pointed at before. */
+        void boxUsed(String name) {
+            usedNames.add(name);
+        }
+
+        /** Pre-seeds the clone cache as recorded for {@code boxName} (a discovery or dialog override). */
+        void cachedClone(String boxName, String path) {
+            clone = Optional.of(path);
+            cloneBox = boxName;
         }
 
         @Override
@@ -205,22 +222,50 @@ class TaskLauncherTest {
         public void recordBox(String boxName) {
             recordedBoxes.add(boxName);
             box = Optional.of(boxName);
+            usedNames.add(boxName); // the settings store records the history on the same write
         }
 
         @Override
-        public BoxCheckout.CloneCache cloneCache() {
+        public Set<String> usedBoxes() {
+            return new HashSet<>(usedNames);
+        }
+
+        @Override
+        public BoxCheckout.CloneCache cloneCache(String boxName) {
             return new BoxCheckout.CloneCache() {
                 @Override
                 public Optional<String> cached() {
-                    return clone;
+                    // Box-scoped like the settings store: a path recorded for
+                    // another box generation is not served.
+                    return boxName.equals(cloneBox) ? clone : Optional.empty();
                 }
 
                 @Override
                 public void store(String clonePath) {
                     storedClones.add(clonePath);
                     RecordingMapping.this.clone = Optional.of(clonePath);
+                    RecordingMapping.this.cloneBox = boxName;
                 }
             };
+        }
+    }
+
+    /** The provisioning-claim fake: the acquires, the releases, and a switch to deny. */
+    private static final class RecordingGuard implements TaskLauncher.ProvisioningGuard {
+
+        final List<Path> acquired = new ArrayList<>();
+        final List<Path> released = new ArrayList<>();
+        boolean allow = true;
+
+        @Override
+        public boolean acquire(Path mainRoot) {
+            acquired.add(mainRoot);
+            return allow;
+        }
+
+        @Override
+        public void release(Path mainRoot) {
+            released.add(mainRoot);
         }
     }
 
@@ -251,6 +296,7 @@ class TaskLauncherTest {
         final RecordingRunner runner;
         final RecordingMapping mapping;
         final RecordingProgress progress = new RecordingProgress();
+        final RecordingGuard guard = new RecordingGuard();
         final List<String> confirmations = new ArrayList<>();
         final List<String> refusals = new ArrayList<>();
         final List<String> bootstrappedHosts = new ArrayList<>();
@@ -273,6 +319,7 @@ class TaskLauncherTest {
                         }
                     },
                     mapping,
+                    guard,
                     message -> {
                         confirmations.add(message);
                         return confirmAnswer;
@@ -341,20 +388,34 @@ class TaskLauncherTest {
         };
     }
 
-    /** A scenario whose box is unreachable over ssh, lists no boxes, and creates on demand. */
-    private static CommandRunner unreachableProbeScenario() {
+    /** A scenario whose box is unreachable over ssh, lists the given rows, and creates on
+      * demand; a fresh box's own clone is discovered at /home/dev/profiling-plugins. */
+    private static CommandRunner absentBoxScenario(String... rows) {
         return (argv, ignoredOptions, ignoredCap) -> {
             if ("git".equals(argv.get(0))) {
                 return new ProcessResult(0, DD_ORIGIN, "");
             }
-            if ("ssh".equals(argv.get(0)) && argv.get(argv.size() - 1).equals("'true'")) {
-                return new ProcessResult(255, "", "ssh: connect to host " + BOX_HOST);
-            }
-            if ("ssh".equals(argv.get(0)) && argv.get(argv.size() - 1).contains("'cat'")) {
-                return new ProcessResult(0, ".drydock-worktrees/\n", "");
+            if ("ssh".equals(argv.get(0))) {
+                String remote = argv.get(argv.size() - 1);
+                if (remote.equals("'true'")) {
+                    return new ProcessResult(255, "", "ssh: connect to host " + BOX_HOST);
+                }
+                if (remote.contains("find")) {
+                    return new ProcessResult(0, "/home/dev/profiling-plugins/.git\n", "");
+                }
+                if (remote.contains("get-url")) {
+                    return new ProcessResult(0, DD_ORIGIN, "");
+                }
+                if (remote.contains("'cat'")) {
+                    return new ProcessResult(0, ".drydock-worktrees/\n", "");
+                }
+                if (remote.contains("echo")) {
+                    return new ProcessResult(0, "", "");
+                }
+                throw new IllegalStateException("unexpected ssh in this scenario: " + remote);
             }
             if (argv.contains("list")) {
-                return listing();
+                return listing(rows);
             }
             if (argv.contains("create")) {
                 return new ProcessResult(0, "created\n", "");
@@ -363,26 +424,14 @@ class TaskLauncherTest {
         };
     }
 
+    /** A scenario whose box is unreachable over ssh, lists no boxes, and creates on demand. */
+    private static CommandRunner unreachableProbeScenario() {
+        return absentBoxScenario();
+    }
+
     /** As {@link #unreachableProbeScenario()}, but the table lists the box stopped (status 8). */
     private static CommandRunner stoppedBoxScenario() {
-        return (argv, ignoredOptions, ignoredCap) -> {
-            if ("git".equals(argv.get(0))) {
-                return new ProcessResult(0, DD_ORIGIN, "");
-            }
-            if ("ssh".equals(argv.get(0)) && argv.get(argv.size() - 1).equals("'true'")) {
-                return new ProcessResult(255, "", "ssh: connect to host " + BOX_HOST);
-            }
-            if ("ssh".equals(argv.get(0)) && argv.get(argv.size() - 1).contains("'cat'")) {
-                return new ProcessResult(0, ".drydock-worktrees/\n", "");
-            }
-            if (argv.contains("list")) {
-                return listing(DEFAULT_BOX + " us1 8");
-            }
-            if (argv.contains("create")) {
-                return new ProcessResult(0, "created\n", "");
-            }
-            throw new IllegalStateException("unexpected command: " + argv);
-        };
+        return absentBoxScenario(DEFAULT_BOX + " us1 8");
     }
 
     @Test
@@ -454,7 +503,7 @@ class TaskLauncherTest {
             // The REUSE and BOOTSTRAP_THEN_REUSE rows of the lifecycle table,
             // wired: both reuse the box and run the (idempotent) bootstrap.
             BoxHarness harness = new BoxHarness(reachableScenario("1"), Optional.of(DEFAULT_BOX));
-            harness.mapping.clone = Optional.of("/home/dev/profiling-plugins");
+            harness.mapping.cachedClone(DEFAULT_BOX, "/home/dev/profiling-plugins");
             TaskLauncher.RemoteBoxOutcome outcome = TaskLauncher.prepareBox(
                     harness.deps(bootstrapped), mainCheckoutRequest());
             assertInstanceOf(TaskLauncher.RemoteBoxOutcome.ReadyBox.class, outcome);
@@ -474,7 +523,7 @@ class TaskLauncherTest {
     @Test
     void anUnmappedAbsentBoxIsCreatedUnderTheBaseName() throws Exception {
         BoxHarness harness = new BoxHarness(unreachableProbeScenario(), Optional.empty());
-        harness.mapping.clone = Optional.of("/home/dev/profiling-plugins");
+        harness.mapping.cachedClone(DEFAULT_BOX, "/home/dev/profiling-plugins");
         TaskLauncher.RemoteBoxOutcome outcome = TaskLauncher.prepareBox(
                 harness.deps(false), mainCheckoutRequest());
         assertInstanceOf(TaskLauncher.RemoteBoxOutcome.ReadyBox.class, outcome);
@@ -499,7 +548,7 @@ class TaskLauncherTest {
     @Test
     void aStoppedMappedBoxConfirmedRecreatesTheNextGeneration() throws Exception {
         BoxHarness harness = new BoxHarness(stoppedBoxScenario(), Optional.of(DEFAULT_BOX));
-        harness.mapping.clone = Optional.of("/home/dev/profiling-plugins");
+        harness.mapping.cachedClone(DEFAULT_BOX, "/home/dev/profiling-plugins");
         TaskLauncher.RemoteBoxOutcome outcome = TaskLauncher.prepareBox(
                 harness.deps(false), mainCheckoutRequest());
         assertInstanceOf(TaskLauncher.RemoteBoxOutcome.ReadyBox.class, outcome);
@@ -524,7 +573,7 @@ class TaskLauncherTest {
     @Test
     void aCancelledRecreateChangesNothing() throws Exception {
         BoxHarness harness = new BoxHarness(stoppedBoxScenario(), Optional.of(DEFAULT_BOX));
-        harness.mapping.clone = Optional.of("/home/dev/profiling-plugins");
+        harness.mapping.cachedClone(DEFAULT_BOX, "/home/dev/profiling-plugins");
         harness.confirmAnswer = false;
         TaskLauncher.RemoteBoxOutcome outcome = TaskLauncher.prepareBox(
                 harness.deps(false), mainCheckoutRequest());
@@ -539,7 +588,7 @@ class TaskLauncherTest {
     @Test
     void aGoneMappedBoxConfirmedRecreatesTheNextGeneration() throws Exception {
         BoxHarness harness = new BoxHarness(unreachableProbeScenario(), Optional.of(DEFAULT_BOX));
-        harness.mapping.clone = Optional.of("/home/dev/profiling-plugins");
+        harness.mapping.cachedClone(DEFAULT_BOX, "/home/dev/profiling-plugins");
         TaskLauncher.RemoteBoxOutcome outcome = TaskLauncher.prepareBox(
                 harness.deps(false), mainCheckoutRequest());
         assertInstanceOf(TaskLauncher.RemoteBoxOutcome.ReadyBox.class, outcome);
@@ -638,7 +687,7 @@ class TaskLauncherTest {
         }, Optional.of(DEFAULT_BOX));
         TaskLauncher.RemoteBoxDeps deps = new TaskLauncher.RemoteBoxDeps(missing.runner,
                 new WorkspacesCli(missingBinary(), missing.runner), host -> {
-                }, missing.mapping, message -> true, reason -> {
+                }, missing.mapping, missing.guard, message -> true, reason -> {
                 }, missing.progress, false);
         assertInstanceOf(TaskLauncher.RemoteBoxOutcome.RefusedBox.class,
                 TaskLauncher.prepareBox(deps, mainCheckoutRequest()));
@@ -700,7 +749,7 @@ class TaskLauncherTest {
         // AC-19: a failed bootstrap never launches; the refusal carries
         // the bootstrap's own reason and the chain stops there.
         BoxHarness harness = new BoxHarness(reachableScenario("1"), Optional.of(DEFAULT_BOX));
-        harness.mapping.clone = Optional.of("/home/dev/profiling-plugins");
+        harness.mapping.cachedClone(DEFAULT_BOX, "/home/dev/profiling-plugins");
         harness.bootstrapFails = true;
         TaskLauncher.RemoteBoxOutcome outcome = TaskLauncher.prepareBox(
                 harness.deps(false), mainCheckoutRequest());
@@ -772,5 +821,181 @@ class TaskLauncherTest {
                 () -> TaskLauncher.prepareBox(harness.deps(false), mainCheckoutRequest()));
         assertEquals(1, harness.progress.clears);
         assertEquals(List.of(), harness.refusals); // a cancel is not a failure
+    }
+
+    // ---- R2 fix round: the five review findings, each pinned ------------------
+
+    @Test
+    void anEarlierGenerationAbsentFromTheListIsNeverReused() throws Exception {
+        // R2 defect 1: the repo used drydock-profiling-plugins, then -2, then
+        // -3; the earlier boxes have been garbage-collected, so the current
+        // listing shows only -3 (stopped). The persisted used-names history —
+        // not the current listing — must keep -2 out of the re-create's reach.
+        BoxHarness harness = new BoxHarness(absentBoxScenario(DEFAULT_BOX + "-3 us1 8"),
+                Optional.of(DEFAULT_BOX + "-3"));
+        harness.mapping.boxUsed(DEFAULT_BOX);
+        harness.mapping.boxUsed(DEFAULT_BOX + "-2");
+        harness.mapping.boxUsed(DEFAULT_BOX + "-3");
+        TaskLauncher.RemoteBoxOutcome outcome = TaskLauncher.prepareBox(
+                harness.deps(false), mainCheckoutRequest());
+        assertInstanceOf(TaskLauncher.RemoteBoxOutcome.ReadyBox.class, outcome);
+        // -2 is absent from the listing yet still taken: the fresh box is -4.
+        String fresh = DEFAULT_BOX + "-4";
+        assertEquals(fresh, ((TaskLauncher.RemoteBoxOutcome.ReadyBox) outcome).binding().boxName());
+        assertEquals(List.of("/opt/homebrew/bin/workspaces", "create", fresh,
+                "-R", "DataDog/profiling-plugins", "-s", "bash", "-y", "--no-color"),
+                harness.runner.workspacesCreate().argv());
+        assertEquals(List.of(fresh), harness.mapping.recordedBoxes);
+        assertEquals(1, harness.progress.clears);
+    }
+
+    @Test
+    void anUnmappedDefaultBoxIsRememberedOnceUsedSoItsLaterLossIsARecreateOffer() throws Exception {
+        // R2 defect 2, first half: a launch on an unmapped reachable default
+        // box must record it — otherwise the box's later disappearance is a
+        // first-ever same-name CREATE, silently rebinding old rows' alias to
+        // a fresh box.
+        BoxHarness harness = new BoxHarness(reachableScenario("1"), Optional.empty());
+        harness.mapping.cachedClone(DEFAULT_BOX, "/home/dev/profiling-plugins");
+        TaskLauncher.RemoteBoxOutcome first = TaskLauncher.prepareBox(
+                harness.deps(false), mainCheckoutRequest());
+        assertInstanceOf(TaskLauncher.RemoteBoxOutcome.ReadyBox.class, first);
+        assertEquals(DEFAULT_BOX, ((TaskLauncher.RemoteBoxOutcome.ReadyBox) first).binding().boxName());
+        assertEquals(List.of(DEFAULT_BOX), harness.mapping.recordedBoxes, "the used box is remembered");
+        assertEquals(List.of("list"), harness.runner.workspacesSubcommands(), "a reuse never creates");
+        assertEquals(List.of(), harness.confirmations, "a reuse never confirms");
+
+        // Second half: the box has disappeared entirely. Its loss is the
+        // destructive GONE re-create offer under a fresh name — never a
+        // silent create of the same default name.
+        harness.runner.setScenario(absentBoxScenario());
+        TaskLauncher.RemoteBoxOutcome second = TaskLauncher.prepareBox(
+                harness.deps(false), mainCheckoutRequest());
+        assertInstanceOf(TaskLauncher.RemoteBoxOutcome.ReadyBox.class, second);
+        assertEquals(DEFAULT_BOX + "-2", ((TaskLauncher.RemoteBoxOutcome.ReadyBox) second).binding().boxName());
+        assertEquals(1, harness.confirmations.size());
+        assertTrue(harness.confirmations.get(0).contains("no longer exists"),
+                harness.confirmations.get(0));
+        assertEquals(List.of("/opt/homebrew/bin/workspaces", "create", DEFAULT_BOX + "-2",
+                "-R", "DataDog/profiling-plugins", "-s", "bash", "-y", "--no-color"),
+                harness.runner.workspacesCreate().argv());
+        assertEquals(List.of(DEFAULT_BOX, DEFAULT_BOX + "-2"), harness.mapping.recordedBoxes);
+    }
+
+    @Test
+    void aClearedOverrideDoesNotMakeAUsedBoxFirstEverAgain() throws Exception {
+        // R2 defect 2, the cleared-override variant: the Workspace box dialog
+        // can clear `.box` while rows still bind the old box. The used-names
+        // history keeps the box's loss a GONE re-create offer — never a
+        // first-ever CREATE of the same name without any confirmation.
+        BoxHarness harness = new BoxHarness(absentBoxScenario(), Optional.empty());
+        harness.mapping.boxUsed(DEFAULT_BOX); // used before; the override was since cleared
+        TaskLauncher.RemoteBoxOutcome outcome = TaskLauncher.prepareBox(
+                harness.deps(false), mainCheckoutRequest());
+        assertInstanceOf(TaskLauncher.RemoteBoxOutcome.ReadyBox.class, outcome);
+        assertEquals(DEFAULT_BOX + "-2", ((TaskLauncher.RemoteBoxOutcome.ReadyBox) outcome).binding().boxName());
+        assertEquals(1, harness.confirmations.size(), "the loss is offered, never silent");
+        assertTrue(harness.confirmations.get(0).contains("no longer exists"), harness.confirmations.get(0));
+        assertEquals(List.of("/opt/homebrew/bin/workspaces", "create", DEFAULT_BOX + "-2",
+                "-R", "DataDog/profiling-plugins", "-s", "bash", "-y", "--no-color"),
+                harness.runner.workspacesCreate().argv());
+    }
+
+    @Test
+    void anOverlappingLaunchForTheSameRepositoryFailsVisiblyWithoutASecondCreate() throws Exception {
+        // R2 defect 3: a second launch for the same repository while another
+        // holds the provisioning claim refuses visibly — never a second,
+        // differently-named concurrent create.
+        BoxHarness harness = new BoxHarness(absentBoxScenario(), Optional.empty());
+        harness.guard.allow = false; // another launch already holds the claim
+        TaskLauncher.RemoteBoxOutcome outcome = TaskLauncher.prepareBox(
+                harness.deps(false), mainCheckoutRequest());
+        assertInstanceOf(TaskLauncher.RemoteBoxOutcome.RefusedBox.class, outcome);
+        String reason = ((TaskLauncher.RemoteBoxOutcome.RefusedBox) outcome).reason();
+        assertTrue(reason.contains("already preparing"), reason);
+        assertEquals(0, harness.runner.calls.size(), "no command at all — the claim is checked first");
+        assertEquals(List.of(), harness.runner.workspacesSubcommands());
+        assertEquals(List.of(), harness.confirmations);
+        assertEquals(List.of(), harness.mapping.recordedBoxes);
+        assertEquals(1, harness.progress.clears);
+    }
+
+    @Test
+    void theProductionProvisioningClaimAllowsOneLaunchPerRepositoryAtATime() {
+        Path repo = Path.of("/w/one-repo");
+        Path other = Path.of("/w/other-repo");
+        assertTrue(TaskLauncher.PRODUCTION_PROVISIONING.acquire(repo));
+        // A second overlapping launch for the SAME repository is refused…
+        assertFalse(TaskLauncher.PRODUCTION_PROVISIONING.acquire(repo));
+        // …while another repository's launch proceeds.
+        assertTrue(TaskLauncher.PRODUCTION_PROVISIONING.acquire(other));
+        TaskLauncher.PRODUCTION_PROVISIONING.release(other);
+        // The claim is returned on every exit, so the next launch may take it.
+        TaskLauncher.PRODUCTION_PROVISIONING.release(repo);
+        assertTrue(TaskLauncher.PRODUCTION_PROVISIONING.acquire(repo));
+        TaskLauncher.PRODUCTION_PROVISIONING.release(repo);
+    }
+
+    @Test
+    void theProvisioningClaimIsReleasedOnEveryExit() throws Exception {
+        // Cancel and refusal both hand the claim back, so a later launch for
+        // the same repository is never stranded behind a dead claim.
+        BoxHarness harness = new BoxHarness(stoppedBoxScenario(), Optional.of(DEFAULT_BOX));
+        harness.confirmAnswer = false; // the cancel path
+        assertInstanceOf(TaskLauncher.RemoteBoxOutcome.BoxCancelled.class,
+                TaskLauncher.prepareBox(harness.deps(false), mainCheckoutRequest()));
+        assertEquals(List.of(BOX_MAIN), harness.guard.acquired);
+        assertEquals(List.of(BOX_MAIN), harness.guard.released);
+
+        harness.confirmAnswer = true;
+        harness.bootstrapFails = true; // the refusal path
+        assertInstanceOf(TaskLauncher.RemoteBoxOutcome.RefusedBox.class,
+                TaskLauncher.prepareBox(harness.deps(false), mainCheckoutRequest()));
+        assertEquals(2, harness.guard.acquired.size());
+        assertEquals(2, harness.guard.released.size());
+    }
+
+    @Test
+    void aFreshBoxGenerationDiscoversItsOwnCloneNotTheOldBoxCache() throws Exception {
+        // R2 defect 4: the old box's clone was a manual override at
+        // /home/dev/custom-repo (the dialog's escape hatch, recorded for the
+        // old box). After the confirmed re-create, the fresh box must
+        // discover its own clone — the cached path is not carried into a
+        // different box generation.
+        BoxHarness harness = new BoxHarness(absentBoxScenario(DEFAULT_BOX + " us1 8"),
+                Optional.of(DEFAULT_BOX));
+        harness.mapping.cachedClone(DEFAULT_BOX, "/home/dev/custom-repo");
+        TaskLauncher.RemoteBoxOutcome outcome = TaskLauncher.prepareBox(
+                harness.deps(false), mainCheckoutRequest());
+        assertInstanceOf(TaskLauncher.RemoteBoxOutcome.ReadyBox.class, outcome);
+        WorkspaceBoxBinding binding = ((TaskLauncher.RemoteBoxOutcome.ReadyBox) outcome).binding();
+        assertEquals(DEFAULT_BOX + "-2", binding.boxName());
+        assertEquals("/home/dev/profiling-plugins", binding.boxWorkingPath(),
+                "the fresh box's own discovery, never the old box's cached path");
+        assertTrue(harness.runner.calls.stream()
+                        .anyMatch(call -> String.join(" ", call.argv()).contains("find")),
+                "the fresh box ran its own discovery scan");
+        assertTrue(harness.mapping.storedClones.contains("/home/dev/profiling-plugins"));
+    }
+
+    @Test
+    void aMappedNameTooLongToSuffixRefusesBeforeTheRecreateIsOffered() throws Exception {
+        // R2 defect 5: a valid 62-character mapped override leaves no valid
+        // generation name. The launch refuses visibly BEFORE the
+        // confirmation is offered — never offering a candidate the CLI
+        // adapter itself would reject after the user confirms it.
+        String longBox = "drydock-" + "x".repeat(54); // 62 characters, valid
+        assertTrue(WorkspaceBoxNames.validate(longBox), longBox);
+        BoxHarness harness = new BoxHarness(absentBoxScenario(longBox + " us1 8"), Optional.of(longBox));
+        TaskLauncher.RemoteBoxOutcome outcome = TaskLauncher.prepareBox(
+                harness.deps(false), mainCheckoutRequest());
+        assertInstanceOf(TaskLauncher.RemoteBoxOutcome.RefusedBox.class, outcome);
+        String reason = ((TaskLauncher.RemoteBoxOutcome.RefusedBox) outcome).reason();
+        assertTrue(reason.contains("63-character"), reason);
+        assertTrue(reason.contains(longBox), reason);
+        assertEquals(List.of(), harness.confirmations, "no re-create is ever offered");
+        assertEquals(List.of("list"), harness.runner.workspacesSubcommands());
+        assertEquals(List.of(), harness.mapping.recordedBoxes);
+        assertEquals(1, harness.progress.clears);
     }
 }

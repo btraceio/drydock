@@ -74,6 +74,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -215,6 +216,13 @@ public final class TaskLauncher {
      * ProxyBootstrap} seam) → {@link BoxCheckout} prepare → the {@link
      * RemoteBoxOutcome.ReadyBox} binding the launch chain receives.
      *
+     * <p>The whole chain holds the repo-scoped provisioning claim
+     * ({@link ProvisioningGuard}) from the first mapping read through the
+     * create's mapping write, so two overlapping launches for one
+     * repository converge on one provisioning attempt: the second fails
+     * visibly while the first holds the claim — never two concurrent
+     * creates.</p>
+     *
      * <p>No {@code workspaces restart}, {@code delete}, or any other
      * mutating subcommand is ever issued — the CLI class cannot express
      * one, and this path only ever asks it to {@code list} and {@code
@@ -232,9 +240,23 @@ public final class TaskLauncher {
     static RemoteBoxOutcome prepareBox(RemoteBoxDeps deps, RemoteBoxRequest request) throws InterruptedException {
         Objects.requireNonNull(deps, "deps");
         Objects.requireNonNull(request, "request");
+        // The repo-scoped provisioning claim: one launch at a time may read
+        // this repository's mapping and provision its box. Held from the
+        // first mapping read through the create's mapping write, it makes a
+        // second overlapping launch for the same repository fail visibly
+        // instead of racing a second, differently-named create — the
+        // approved topology is ONE shared box per user and repo.
+        boolean claimed = deps.provisioning().acquire(request.mainRoot());
         try {
+            if (!claimed) {
+                return refuse(deps, "Another Drydock launch is already preparing a workspace box for this"
+                        + " repository; wait for it to finish and start the session again");
+            }
             return prepareBoxSteps(deps, request);
         } finally {
+            if (claimed) {
+                deps.provisioning().release(request.mainRoot());
+            }
             deps.progress().clear();
         }
     }
@@ -261,7 +283,10 @@ public final class TaskLauncher {
         }
 
         // 2. The repo's mapping: the `.box` key — a user override or a
-        //    re-created generation; empty on a first launch.
+        //    re-created generation; empty on a first launch. The
+        //    used-names history holds every name the mapping has ever
+        //    pointed at, so a box the repo has used before is never a
+        //    first-ever box even when the override was cleared.
         Optional<String> mapped = deps.mapping().box();
         if (mapped.isPresent() && !WorkspaceBoxNames.validate(mapped.get())) {
             return refuse(deps, "The workspace box name \"" + mapped.get() + "\" recorded for this"
@@ -269,6 +294,13 @@ public final class TaskLauncher {
         }
         String base = mapped.orElseGet(() -> WorkspaceBoxNames.defaultName(request.repoName()));
         String host = "workspace-" + base; // the alias WorkspacesBinding.sshRemote() derives
+        Set<String> usedBoxes = deps.mapping().usedBoxes();
+        // A box the repo has used before — the mapping points at it now, or
+        // the history shows an earlier incarnation of the same name — is
+        // NEVER a first-ever box: its absence is OFFER_RECREATE(GONE),
+        // never a same-name CREATE that would rebind old rows' alias to a
+        // fresh box (D2, INV-25).
+        boolean boxKnown = mapped.isPresent() || usedBoxes.contains(base);
 
         // 3-5. Probe, list, decide.
         deps.progress().step(probeStep(base));
@@ -276,11 +308,12 @@ public final class TaskLauncher {
         deps.progress().step(LIST_STEP);
         WorkspacesCli.ListResult listed = deps.cli().list();
         BoxLifecycle.Outcome decision = BoxLifecycle.decide(probe,
-                BoxLifecycle.cliStatus(listed, base), mapped.isPresent(), deps.boxAlreadyBootstrapped());
+                BoxLifecycle.cliStatus(listed, base), boxKnown, deps.boxAlreadyBootstrapped());
 
         return switch (decision) {
-            case BoxLifecycle.Outcome.Reuse ignored -> readyBox(deps, request, base, host, origin);
-            case BoxLifecycle.Outcome.BootstrapThenReuse ignored -> readyBox(deps, request, base, host, origin);
+            case BoxLifecycle.Outcome.Reuse ignored -> usedBox(deps, request, base, host, origin, mapped);
+            case BoxLifecycle.Outcome.BootstrapThenReuse ignored ->
+                    usedBox(deps, request, base, host, origin, mapped);
             case BoxLifecycle.Outcome.Create ignored -> {
                 deps.progress().step(createStep(base));
                 Optional<String> failure = createBox(deps, request, origin, base);
@@ -295,8 +328,19 @@ public final class TaskLauncher {
             }
             case BoxLifecycle.Outcome.OfferRecreate(BoxLifecycle.RecreateReason reason) -> {
                 String root = generationRoot(base);
-                Set<String> neverReuse = neverReuseNames(listed, base, root);
-                String fresh = WorkspaceBoxNames.nextGeneration(root, neverReuse);
+                Set<String> neverReuse = neverReuseNames(listed, base, root, usedBoxes);
+                String fresh;
+                try {
+                    fresh = WorkspaceBoxNames.nextGeneration(root, neverReuse);
+                } catch (IllegalArgumentException e) {
+                    // A mapped name too long to suffix (a valid 62/63-character
+                    // override) leaves no valid generation: refuse BEFORE the
+                    // confirmation is offered, never offer and then submit a
+                    // candidate the same CLI adapter necessarily rejects.
+                    yield refuse(deps, "The workspace box name \"" + base + "\" leaves no valid"
+                            + " fresh box name (a generation name would exceed the 63-character"
+                            + " box-name limit); choose a shorter box name in the Workspace box dialog");
+                }
                 String message = reason == BoxLifecycle.RecreateReason.GONE
                         ? "Box " + base + " no longer exists, so its conversations are gone and are"
                         + " not recovered by this action. Create a fresh workspace box " + fresh
@@ -324,6 +368,26 @@ public final class TaskLauncher {
     }
 
     /**
+     * The post-decision steps every surviving path shares: an unmapped
+     * default box is remembered as used before anything else (R2: its
+     * later loss must be a GONE re-create under a fresh name, never a
+     * first-ever same-name create), then bootstrap the box proxy, then
+     * prepare the box worktree. A failed bootstrap refuses the launch
+     * with its reason (INV-19) — never a launch without the proxy.
+     */
+    private static RemoteBoxOutcome usedBox(RemoteBoxDeps deps, RemoteBoxRequest request, String base,
+            String host, GitHubLinkService.Remote origin, Optional<String> mapped) throws InterruptedException {
+        if (mapped.isEmpty()) {
+            // The launch is about to use this default box for a persisted
+            // session: record it now, so once it disappears the next launch
+            // offers the destructive re-create instead of silently creating
+            // the same name again (old rows would alias to a fresh box).
+            deps.mapping().recordBox(base);
+        }
+        return readyBox(deps, request, base, host, origin);
+    }
+
+    /**
      * The post-decision steps every surviving path shares: bootstrap the
      * box proxy, then prepare the box worktree. A failed bootstrap refuses
      * the launch with its reason (INV-19) — never a launch without the
@@ -338,8 +402,11 @@ public final class TaskLauncher {
             return refuse(deps, "The box proxy bootstrap failed, so the launch was refused: " + e.getMessage());
         }
         deps.progress().step(WORKTREE_STEP);
+        // The clone cache is scoped to THIS box: a path discovered or
+        // chosen on another box generation is not trusted, so a fresh
+        // generation discovers its own clone (R2 defect 4).
         BoxCheckout.Outcome prepared = new BoxCheckout(deps.runner())
-                .prepare(host, origin, request.work(), deps.mapping().cloneCache());
+                .prepare(host, origin, request.work(), deps.mapping().cloneCache(boxName));
         return switch (prepared) {
             case BoxCheckout.Outcome.Ready(String clone, String workingPath) ->
                     new RemoteBoxOutcome.ReadyBox(new WorkspaceBoxBinding(boxName, workingPath));
@@ -389,18 +456,23 @@ public final class TaskLauncher {
     /**
      * The names a re-create must never reuse (INV-25): everything {@code
      * workspaces list} already answers for (stopped boxes stay listed;
-     * existing boxes of other users are name-scoped anyway), plus the
-     * mapped name and its lineage root — the names this repo's mapping
-     * has pointed at that the launcher can know without a second
-     * settings key.
+     * existing boxes of other users are name-scoped anyway), the mapped
+     * name and its lineage root, and — decisively, because the listing
+     * only shows boxes that still exist — every name the repo's mapping
+     * has EVER pointed at, from the persisted used-names history. An
+     * earlier generation that has been garbage-collected is absent from
+     * the current listing; the history is what keeps it out of the
+     * re-create's reach.
      */
-    private static Set<String> neverReuseNames(WorkspacesCli.ListResult listed, String base, String root) {
+    private static Set<String> neverReuseNames(WorkspacesCli.ListResult listed, String base, String root,
+            Set<String> usedBoxes) {
         Set<String> names = new HashSet<>();
         if (listed instanceof WorkspacesCli.Listed table) {
             names.addAll(table.names());
         }
         names.add(base);
         names.add(root);
+        names.addAll(usedBoxes);
         return names;
     }
 
@@ -453,13 +525,14 @@ public final class TaskLauncher {
      * bootstrap still runs on every launch.
      */
     record RemoteBoxDeps(CommandRunner runner, WorkspacesCli cli, BoxBootstrap bootstrap, BoxMapping mapping,
-                         RecreateConfirm confirm, Consumer<String> reporter, ProgressSink progress,
-                         boolean boxAlreadyBootstrapped) {
+                         ProvisioningGuard provisioning, RecreateConfirm confirm, Consumer<String> reporter,
+                         ProgressSink progress, boolean boxAlreadyBootstrapped) {
         RemoteBoxDeps {
             Objects.requireNonNull(runner, "runner");
             Objects.requireNonNull(cli, "cli");
             Objects.requireNonNull(bootstrap, "bootstrap");
             Objects.requireNonNull(mapping, "mapping");
+            Objects.requireNonNull(provisioning, "provisioning");
             Objects.requireNonNull(confirm, "confirm");
             Objects.requireNonNull(reporter, "reporter");
             Objects.requireNonNull(progress, "progress");
@@ -496,21 +569,67 @@ public final class TaskLauncher {
     }
 
     /**
-     * The repo's box mapping — {@code WorkspaceSettings}' {@code .box} and
-     * {@code .clone} keys — bound to the registered repository's stable
-     * id in production; tests record writes against an in-memory fake.
+     * The repo's box mapping — {@code WorkspaceSettings}' {@code .box},
+     * {@code .usedBoxes} and {@code .clone} keys — bound to the registered
+     * repository's stable id in production; tests record writes against an
+     * in-memory fake.
      */
     interface BoxMapping {
 
         /** The repository's current box name — a user override or a re-created generation. */
         Optional<String> box();
 
-        /** Records the box the repo now maps to (a first create or a confirmed re-create). */
+        /** Records the box the repo now maps to (a first create, a confirmed re-create,
+          * or a first use of an unmapped default box); the write also lands the name in the
+          * used-names history. */
         void recordBox(String boxName);
 
-        /** The per-repo {@code .clone} cache {@link BoxCheckout} reads and stores through. */
-        BoxCheckout.CloneCache cloneCache();
+        /** Every name the repo's mapping has ever pointed at — earlier generations and
+          * cleared overrides included (INV-25); a fresh box never takes one of them back,
+          * even after the old boxes have left {@code workspaces list}. */
+        Set<String> usedBoxes();
+
+        /** The per-repo {@code .clone} cache {@link BoxCheckout} reads and stores through,
+          * scoped to {@code boxName}: a path recorded for another box generation is not
+          * served, so a fresh generation discovers its own clone. */
+        BoxCheckout.CloneCache cloneCache(String boxName);
     }
+
+    /**
+     * The repo-scoped, in-process provisioning claim: one launch at a time
+     * may read a repository's mapping and provision its box. A second
+     * overlapping launch for the same repository fails visibly (the refusal
+     * names the overlap) instead of racing a second, differently-named
+     * create — the approved topology is one shared box per user and repo.
+     * {@link #acquire} is granted before the mapping is first read and
+     * {@link #release} is called on every exit of the chain, so two
+     * concurrent creates can never interleave. Production binds the
+     * process-wide set below; tests inject fakes.
+     */
+    interface ProvisioningGuard {
+
+        /** Whether this launch now owns the repository's provisioning; {@code false} = another launch holds it. */
+        boolean acquire(Path mainRoot);
+
+        /** Returns a claim {@link #acquire} granted; every exit of the chain calls it. */
+        void release(Path mainRoot);
+    }
+
+    /** The repositories whose box provisioning one launch currently owns (in-process, repo-scoped). */
+    private static final Set<Path> PROVISIONING_REPOS = ConcurrentHashMap.newKeySet();
+
+    /** The production {@link ProvisioningGuard} bound into every remote launch's deps. */
+    static final ProvisioningGuard PRODUCTION_PROVISIONING = new ProvisioningGuard() {
+        @Override
+        public boolean acquire(Path mainRoot) {
+            return PROVISIONING_REPOS.add(mainRoot);
+        }
+
+        @Override
+        public void release(Path mainRoot) {
+            PROVISIONING_REPOS.remove(mainRoot);
+        }
+    };
 
     /**
      * The bootstrap seam: production binds the real {@link ProxyBootstrap#ensure},
@@ -1269,7 +1388,7 @@ public final class TaskLauncher {
                     }
                     RemoteBoxDeps deps = new RemoteBoxDeps(CommandRunner.PRODUCTION,
                             new WorkspacesCli(CommandRunner.PRODUCTION), productionBootstrap(),
-                            settingsMapping(registered.get().id()),
+                            settingsMapping(registered.get().id()), PRODUCTION_PROVISIONING,
                             message -> confirmRecreateOnEdt(from, message),
                             reason -> report(from, reason),
                             new ProgressSink() {
@@ -1352,16 +1471,23 @@ public final class TaskLauncher {
             }
 
             @Override
-            public BoxCheckout.CloneCache cloneCache() {
+            public Set<String> usedBoxes() {
+                return new HashSet<>(WorkspaceSettings.usedBoxes(repositoryId));
+            }
+
+            @Override
+            public BoxCheckout.CloneCache cloneCache(String boxName) {
                 return new BoxCheckout.CloneCache() {
                     @Override
                     public Optional<String> cached() {
-                        return WorkspaceSettings.clonePath(repositoryId);
+                        // Trusted only when recorded for THIS box: a fresh
+                        // generation is served no path and discovers its own.
+                        return WorkspaceSettings.clonePathFor(repositoryId, boxName);
                     }
 
                     @Override
                     public void store(String clonePath) {
-                        WorkspaceSettings.setClonePath(repositoryId, clonePath);
+                        WorkspaceSettings.recordDiscoveredClone(repositoryId, boxName, clonePath);
                     }
                 };
             }

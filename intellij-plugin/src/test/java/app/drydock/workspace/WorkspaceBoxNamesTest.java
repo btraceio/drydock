@@ -96,6 +96,50 @@ class WorkspaceBoxNamesTest {
                 () -> WorkspaceBoxNames.nextGeneration("drydock-foo", null));
     }
 
+    // --- nextGeneration: every returned candidate passes validate (R2 defect 5) ---
+
+    @Test
+    void nextGenerationReturnsOnlyCandidatesThatThemselvesValidate() {
+        // A 61-character base still leaves room for one two-digit-free
+        // suffix: base + "-2" is exactly the 63-character maximum.
+        String longBase = "drydock-" + "x".repeat(53); // 61 characters
+        assertTrue(WorkspaceBoxNames.validate(longBase), longBase);
+        assertEquals(longBase + "-2", WorkspaceBoxNames.nextGeneration(longBase, Set.of()));
+        // The next free generation of the same length is fine too.
+        assertEquals(longBase + "-3",
+                WorkspaceBoxNames.nextGeneration(longBase, Set.of(longBase + "-2")));
+    }
+
+    @Test
+    void nextGenerationRefusesABaseTooLongToSuffix() {
+        // A 62- or 63-character valid mapped name leaves NO valid
+        // generation: every suffix pushes the candidate past the
+        // 63-character limit, so the CLI adapter would reject whatever
+        // was offered. The refusal happens here, before a dialog offers
+        // the name — never an offered-then-rejected candidate.
+        for (int length : new int[] {62, 63}) {
+            String base = "drydock-" + "x".repeat(length - "drydock-".length());
+            assertTrue(WorkspaceBoxNames.validate(base), base);
+            IllegalArgumentException refused = assertThrows(IllegalArgumentException.class,
+                    () -> WorkspaceBoxNames.nextGeneration(base, Set.of()), base);
+            assertTrue(refused.getMessage().contains(base), refused.getMessage());
+        }
+    }
+
+    @Test
+    void nextGenerationRefusesWhenEveryValidGenerationIsTaken() {
+        // 61-character base: "-2" through "-9" are the only suffixes that
+        // fit the 63-character limit; once they are all excluded, the
+        // first "-10" candidate is 64 characters and invalid.
+        String base = "drydock-" + "x".repeat(53);
+        Set<String> taken = new java.util.HashSet<>();
+        for (int generation = 2; generation <= 9; generation++) {
+            taken.add(base + "-" + generation);
+        }
+        assertThrows(IllegalArgumentException.class,
+                () -> WorkspaceBoxNames.nextGeneration(base, taken));
+    }
+
     // --- validate: the accept/reject table (ASM-11) ---
 
     @Test

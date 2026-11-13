@@ -64,11 +64,22 @@ public final class WorkspaceBoxNames {
     /**
      * The name for a re-created box: the first of {@code <base>-2},
      * {@code <base>-3}, … that is absent from {@code existingNames}, the
-     * names the caller parsed from {@code workspaces list}. Re-created boxes
-     * never reuse a name the repo mapping has pointed at (INV-25), so a
-     * stopped or gone box is always left in place under its old name.
+     * names the caller parsed from {@code workspaces list} plus every
+     * name the repo mapping has pointed at (INV-25). Re-created boxes
+     * never reuse a name the repo mapping has pointed at, so a stopped or
+     * gone box is always left in place under its old name.
      *
-     * @throws IllegalArgumentException if {@code base} fails {@link #validate}
+     * <p>Every returned candidate must itself pass {@link #validate}: a
+     * base of 62 or 63 characters (a valid mapped name) leaves no valid
+     * generation, because every suffix pushes the candidate past the
+     * 63-character limit — and once one candidate is too long, every
+     * later one is longer still. In that case the method refuses with
+     * {@link IllegalArgumentException}, so the caller can fail visibly
+     * BEFORE offering a re-create, never submitting a candidate the
+     * workspaces CLI would reject.</p>
+     *
+     * @throws IllegalArgumentException if {@code base} fails {@link #validate},
+     *      or no valid free generation can be derived from it
      */
     public static String nextGeneration(String base, Set<String> existingNames) {
         if (!validate(base)) {
@@ -77,6 +88,12 @@ public final class WorkspaceBoxNames {
         Objects.requireNonNull(existingNames, "existingNames");
         for (int generation = 2; ; generation++) {
             String candidate = base + "-" + generation;
+            if (!validate(candidate)) {
+                // Candidates only lengthen: no valid fresh name can be
+                // derived from this base at all.
+                throw new IllegalArgumentException(
+                        "no valid generation name can be derived from: " + base);
+            }
             if (!existingNames.contains(candidate)) {
                 return candidate;
             }

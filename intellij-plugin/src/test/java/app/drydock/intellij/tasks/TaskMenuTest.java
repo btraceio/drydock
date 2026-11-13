@@ -50,6 +50,9 @@ class TaskMenuTest {
     private static final TaskMenu.MenuFacts NO_TRANSFER = new TaskMenu.MenuFacts(false, false);
     private static final TaskMenu.MenuFacts JIRA = new TaskMenu.MenuFacts(false, true);
     private static final TaskMenu.MenuFacts WORKSPACE_BOX = new TaskMenu.MenuFacts(false, false, false, true);
+    /** The facts of an ALIVE-detached workspace-box row: the remote Stop. */
+    private static final TaskMenu.MenuFacts REMOTE_STOP =
+            new TaskMenu.MenuFacts(false, false, false, false, true, false, false, null, null, null);
 
     private static TaskRow task(boolean running, TaskPlacement placement) {
         ManagedAgentSession session = new ManagedAgentSession.Builder(
@@ -243,6 +246,73 @@ class TaskMenuTest {
                 List.of(TaskMenu.Item.RENAME, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
                 List.of(TaskMenu.Item.DONE_WITH_TASK)),
                 sectionsOf(task(false, new TaskPlacement.Idle(true))));
+    }
+
+    @Test
+    void anIdleRemoteRowWithTheAliveFactGainsTheStopBesideItsResume() {
+        // The restart scenario (review R3 defect 1): the row runs nowhere in
+        // this IDE but its box-bound agent is ALIVE — the menu keeps the
+        // honest Resume and adds the Stop ahead of it, routed to the same
+        // remote Deactivate the strip and the tab use, so the live agent is
+        // never stranded behind a Resume-only menu.
+        assertEquals(List.of(
+                List.of(TaskMenu.Item.SWITCH_TO_TASK),
+                List.of(TaskMenu.Item.DEACTIVATE, TaskMenu.Item.RESUME, TaskMenu.Item.RESUME_IN_OWN_WINDOW),
+                List.of(TaskMenu.Item.RENAME, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
+                List.of(TaskMenu.Item.DONE_WITH_TASK)),
+                TaskMenu.sections(task(false, new TaskPlacement.Idle(false)), List.of(), REMOTE_STOP));
+        // This window's own worktree keeps its plain Resume line; the Stop
+        // joins the same section.
+        assertEquals(List.of(
+                List.of(TaskMenu.Item.SWITCH_TO_TASK),
+                List.of(TaskMenu.Item.DEACTIVATE, TaskMenu.Item.RESUME),
+                List.of(TaskMenu.Item.RENAME, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
+                List.of(TaskMenu.Item.DONE_WITH_TASK)),
+                TaskMenu.sections(task(false, new TaskPlacement.Idle(true)), List.of(), REMOTE_STOP));
+    }
+
+    @Test
+    void theRemoteStopFactChangesNoOtherRowsMenu() {
+        // Only an idle task row carries the Stop; every other row — and every
+        // running task, whose menu already has it — keeps its byte-identical
+        // list under the same facts.
+        assertEquals(List.of(
+                List.of(TaskMenu.Item.SWITCH_TO_TASK),
+                List.of(TaskMenu.Item.DEACTIVATE, TaskMenu.Item.REVIEW_CHANGES),
+                List.of(TaskMenu.Item.RENAME, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
+                List.of(TaskMenu.Item.DONE_WITH_TASK)),
+                TaskMenu.sections(task(true, new TaskPlacement.Here()), List.of(), REMOTE_STOP));
+        List<TaskNode> rows = List.of(
+                issue(Optional.empty()),
+                jiraIssue(),
+                pullRequest(Optional.empty()),
+                worktree(false, false),
+                project(worktree(false, false)),
+                new TaskNode.StaleWorktrees(List.of(worktree(false, false))),
+                new WorktreeGroup(WORKTREE, "fix-allocation-profile",
+                        List.of(task(false, new TaskPlacement.Idle(false)))),
+                new Section(SectionKind.ISSUES, List.of(issue(Optional.empty()))));
+        for (TaskNode row : rows) {
+            assertEquals(TaskMenu.sections(row, List.of(), NO_TRANSFER),
+                    TaskMenu.sections(row, List.of(), REMOTE_STOP),
+                    "the Stop fact must not touch this row: " + row.getClass().getSimpleName());
+        }
+    }
+
+    @Test
+    void aLocalIdleRowWithoutTheFactKeepsItsExactPreRemoteMenu() {
+        // Every legacy MenuFacts shape carries no remote Stop, so a local
+        // idle row's menu is the byte-identical pre-remote list — the fact
+        // is computed from the row's own box binding and liveness, never
+        // defaulted on.
+        assertEquals(List.of(
+                List.of(TaskMenu.Item.SWITCH_TO_TASK),
+                List.of(TaskMenu.Item.RESUME, TaskMenu.Item.RESUME_IN_OWN_WINDOW),
+                List.of(TaskMenu.Item.RENAME, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
+                List.of(TaskMenu.Item.DONE_WITH_TASK)),
+                TaskMenu.sections(task(false, new TaskPlacement.Idle(false)), List.of(), WORKSPACE_BOX));
+        assertFalse(TaskMenu.sections(task(false, new TaskPlacement.Idle(false)), List.of(), WORKSPACE_BOX)
+                .stream().anyMatch(section -> section.contains(TaskMenu.Item.DEACTIVATE)));
     }
 
     @Test

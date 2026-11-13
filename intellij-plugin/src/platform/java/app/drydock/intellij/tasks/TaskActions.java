@@ -145,7 +145,7 @@ final class TaskActions {
      */
     static Map<TaskMenu.Item, AnAction> taskActions() {
         AnAction deactivate = task("Deactivate", "Deactivate this task's agent", AllIcons.Actions.Suspend,
-                TaskRow::running, TaskActions::notBusy,
+                TaskActions::deactivatable, TaskActions::notBusy,
                 (project, row) -> SessionCommandHandlers.deactivate(project, row.session(), false, () -> {}));
         AnAction askReview = task("Ask Agent to Review Changes", "Ask this task's agent to review its changes",
                 AllIcons.Actions.Diff, TaskActions::reviewsChanges, TaskActions::reviewChanges);
@@ -256,6 +256,37 @@ final class TaskActions {
     /** Whether Ask Agent to Review Changes applies: the agent runs, whatever its mode. Pure. */
     static boolean reviewsChanges(TaskRow row) {
         return row.running();
+    }
+
+    /**
+     * Whether the tree's Deactivate — its Stop — applies to {@code row}:
+     * the agent runs in this IDE, or the row is a workspace-box row whose
+     * detached liveness the box last reported ALIVE while no execution here
+     * runs it (the restart scenario: the agent lives on in the box's tmux
+     * after the IDE comes back). The second case is the same lifecycle
+     * verdict every other surface's Stop follows, so the tree offers the
+     * one Stop the strip and the tab already do — routed to the same remote
+     * handler, never a second kill path. Memory-only, safe on any thread.
+     */
+    static boolean deactivatable(TaskRow row) {
+        return row.running() || remoteStopOffered(row);
+    }
+
+    /**
+     * Whether the remote Stop applies to an idle row: a workspace-box row
+     * whose lifecycle verdict is {@link SessionCommands.Lifecycle#DEACTIVATE}
+     * — the box says an agent is there, so the Stop claims a real one.
+     * Every other verdict keeps the honest Resume/Start, as everywhere
+     * else. A row that runs here, or has no box, answers false before any
+     * read, so a local row's applicability is unchanged. Memory-only (the
+     * registry and the plugin's liveness map), safe on any thread.
+     */
+    static boolean remoteStopOffered(TaskRow row) {
+        if (row.running() || row.session().workspaceBox().isEmpty()) {
+            return false;
+        }
+        return SessionCommands.lifecycle(SessionCommands.stateOf(row.session(), Optional.of(row.resumable())))
+                == SessionCommands.Lifecycle.DEACTIVATE;
     }
 
     /**
