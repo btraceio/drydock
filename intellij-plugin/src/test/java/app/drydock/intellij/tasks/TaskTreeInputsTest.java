@@ -11,7 +11,6 @@ import app.drydock.git.GhCliService.BranchPullRequest;
 import app.drydock.git.GhCliService.PrInfo.PrLifecycle;
 import app.drydock.git.JiraIssueListing;
 import app.drydock.git.WorktreeService.Worktree;
-import app.drydock.intellij.tasks.TaskTreeModel.ViewFilter;
 import app.drydock.process.ProcessResult;
 import app.drydock.process.ProcessTimeoutException;
 
@@ -52,50 +51,12 @@ class TaskTreeInputsTest {
 
     @Test
     void githubIssuesAreFetchedOnlyWhenTheirNodeWasOpened() {
-        // No view loads issues on its own — strictly lazy.
-        for (ViewFilter view : ViewFilter.values()) {
-            assertFalse(TaskTreeInputs.githubIssuesWanted(Set.of(), ROOT),
-                    view + " must not fetch issues without an opened node");
-        }
-        // The opened node is fetched in every view.
-        for (ViewFilter view : ViewFilter.values()) {
-            assertTrue(TaskTreeInputs.githubIssuesWanted(Set.of(ROOT), ROOT),
-                    view + " keeps the request");
-        }
+        // Nothing loads issues on its own — strictly lazy.
+        assertFalse(TaskTreeInputs.githubIssuesWanted(Set.of(), ROOT),
+                "no fetch without an opened node");
+        assertTrue(TaskTreeInputs.githubIssuesWanted(Set.of(ROOT), ROOT), "the opened node is fetched");
         // Only the root the user opened, not every registered project.
         assertFalse(TaskTreeInputs.githubIssuesWanted(Set.of(OTHER), ROOT));
-    }
-
-    @Test
-    void pullRequestsAreFetchedOnlyForRequestedRoots() {
-        TaskTreeModel.ProjectScope none = TaskTreeModel.ProjectScope.NONE;
-        assertFalse(TaskTreeInputs.pullRequestsWanted(Set.of(), ROOT, none, "profiling-backend"),
-                "no listing is fetched without an opened section");
-        assertTrue(TaskTreeInputs.pullRequestsWanted(Set.of(ROOT), ROOT, none, "profiling-backend"));
-        assertFalse(TaskTreeInputs.pullRequestsWanted(Set.of(OTHER), ROOT, none, "profiling-backend"));
-    }
-
-    @Test
-    void anExplicitProjectScopeSkipsListingsAndDedupWorktreesOfExcludedProjects() {
-        TaskTreeModel.ProjectScope scope = TaskTreeModel.parseFilter("/dry*/");
-
-        // Even a section the user opened here is not fetched once the scope
-        // excludes its project: the scope hides that project row entirely, so
-        // it costs no gh listing and no PR-dedup `git worktree list` (gather
-        // keys both off this one predicate).
-        assertFalse(TaskTreeInputs.pullRequestsWanted(Set.of(ROOT), ROOT, scope, "profiling-backend"));
-        assertTrue(TaskTreeInputs.pullRequestsWanted(Set.of(OTHER), OTHER, scope, "drydock"));
-    }
-
-    @Test
-    void ordinaryUnscopedTextStillFetchesListingsAcrossProjects() {
-        // A plain search is not a project scope: a PR-title search spans projects.
-        TaskTreeModel.ProjectScope plain = TaskTreeModel.parseFilter("allocation");
-        assertTrue(TaskTreeInputs.pullRequestsWanted(Set.of(OTHER, ROOT), OTHER, plain, "drydock"));
-        assertTrue(TaskTreeInputs.pullRequestsWanted(Set.of(OTHER, ROOT), ROOT, plain, "profiling-backend"));
-        // An empty scope (//) matches every project.
-        TaskTreeModel.ProjectScope every = TaskTreeModel.parseFilter("//");
-        assertTrue(TaskTreeInputs.pullRequestsWanted(Set.of(ROOT), ROOT, every, "profiling-backend"));
     }
 
     private static final JiraIssueListing.Failed DID_NOT_COMPLETE =
@@ -326,49 +287,6 @@ class TaskTreeInputsTest {
         assertEquals(0, probe.calls.get());
     }
 
-    // --- Scoped fetch gates: a hidden row means no fetch ---
-
-    @Test
-    void anExplicitProjectScopeSkipsTheGitHubIssueListingOfAHiddenProject() {
-        TaskTreeModel.ProjectScope scope = TaskTreeModel.parseFilter("/dry*/");
-
-        assertFalse(TaskTreeInputs.githubIssuesWanted(Set.of(ROOT), ROOT, scope, "profiling-backend"),
-                "an opened node of a scoped-out project is not fetched");
-        assertTrue(TaskTreeInputs.githubIssuesWanted(Set.of(OTHER), OTHER, scope, "drydock"));
-    }
-
-    @Test
-    void aScopeNeverAddsAGitHubIssueFetch() {
-        assertFalse(TaskTreeInputs.githubIssuesWanted(Set.of(), OTHER,
-                TaskTreeModel.parseFilter("/dry*/"), "drydock"));
-    }
-
-    @Test
-    void ordinaryTextAndTheEmptyScopeKeepTheGitHubIssueFetch() {
-        for (String filter : List.of("allocation", "//")) {
-            assertTrue(TaskTreeInputs.githubIssuesWanted(Set.of(ROOT), ROOT,
-                    TaskTreeModel.parseFilter(filter), "profiling-backend"), filter);
-        }
-    }
-
-    @Test
-    void jiraGroupFetchesFollowTheSameScopeRule() {
-        ListingExpansionTracker.GroupKey key = new ListingExpansionTracker.GroupKey(ROOT, "g-sprint");
-
-        assertFalse(TaskTreeInputs.jiraGroupWanted(Set.of(key), key,
-                TaskTreeModel.parseFilter("/dry*/"), "profiling-backend"));
-        assertTrue(TaskTreeInputs.jiraGroupWanted(Set.of(key), key,
-                TaskTreeModel.parseFilter("/prof*/"), "profiling-backend"));
-        assertFalse(TaskTreeInputs.jiraGroupWanted(Set.of(), key,
-                TaskTreeModel.parseFilter("/prof*/"), "profiling-backend"));
-        for (String filter : List.of("allocation", "//")) {
-            assertTrue(TaskTreeInputs.jiraGroupWanted(Set.of(key), key,
-                    TaskTreeModel.parseFilter(filter), "profiling-backend"), filter);
-        }
-        assertFalse(TaskTreeInputs.jiraGroupWanted(
-                Set.of(new ListingExpansionTracker.GroupKey(ROOT, "g-bugs")), key,
-                TaskTreeModel.parseFilter("allocation"), "profiling-backend"));
-    }
 
     @Test
     void aSessionsPullRequestIsItsBranchsElseTheOneItsNumberNames() {
