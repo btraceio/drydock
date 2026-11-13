@@ -21,6 +21,9 @@ import app.drydock.domain.SessionStatus;
 import app.drydock.git.WorktreeService;
 import app.drydock.intellij.projects.SharedProjectsService;
 import app.drydock.intellij.startup.DrydockStartupActivity;
+import app.drydock.intellij.workspace.RemoteSessionLiveness;
+import app.drydock.intellij.workspace.WorkspaceRevalidation;
+import app.drydock.intellij.workspace.WorkspaceSettings;
 import app.drydock.mcp.McpSessionContext;
 import app.drydock.mcp.McpSessionContext.RenameOutcome;
 import app.drydock.mcp.TaskTools;
@@ -30,6 +33,7 @@ import app.drydock.projects.SharedProject;
 import app.drydock.projects.SharedProjectsFile;
 import app.drydock.projects.SharedProjectsSeed;
 import app.drydock.state.JsonApplicationStateRepository;
+import app.drydock.workspace.CommandRunner;
 
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.application.ApplicationManager;
@@ -176,6 +180,16 @@ public final class DrydockPluginService implements Disposable {
                 }));
         this.repository = new JsonApplicationStateRepository(baseDir.resolve("state.json"));
         this.executor = Executors.newVirtualThreadPerTaskExecutor();
+        // The detached-remote liveness map and the startup revalidation pass
+        // (workspace boxes): both application-scoped, both memory-only. The
+        // revalidation pass reads the catalog lazily (the state store is
+        // volatile and only published during initialize(); its production
+        // trigger awaits the warm-up before calling runOnce), rides the
+        // executor above — INV-27 — and holds no resource of its own, so
+        // neither adds anything to dispose().
+        this.workspaceRevalidation = new WorkspaceRevalidation(
+                () -> catalogState().sessions(), executor, remoteLiveness,
+                CommandRunner.PRODUCTION, WorkspaceSettings::enabled);
         // The application-level task domain (T12a): one per-user store root
         // (never under this IDE's session-state dir), initialized on the
         // shared executor; its failures are isolated and non-fatal, and it
@@ -196,6 +210,12 @@ public final class DrydockPluginService implements Disposable {
     private final DelayedTaskService taskService;
     private final AtomicBoolean disposed = new AtomicBoolean();
     private final CompletableFuture<Void> initialization;
+
+    /** The detached-remote liveness map (workspace boxes); memory-only, never persisted, resource-free. */
+    private final RemoteSessionLiveness remoteLiveness = new RemoteSessionLiveness();
+
+    /** The once-per-IDE-run startup revalidation pass over the remote rows; memory-only, resource-free. */
+    private final WorkspaceRevalidation workspaceRevalidation;
 
     private volatile ApplicationStateStore stateStore;
     private volatile AgentRegistry registry;
@@ -397,6 +417,31 @@ public final class DrydockPluginService implements Disposable {
      */
     public DelayedTaskService taskService() {
         return taskService;
+    }
+
+    /**
+     * The application-level liveness map for detached remote sessions
+     * (workspace boxes): id → ALIVE/DEAD/UNKNOWN/BOX_STOPPED/BOX_GONE,
+     * memory-only and never persisted (INV-4). Every change publishes a
+     * sessions-changed event. The map owns no resource, so it adds nothing
+     * to this service's dispose path.
+     */
+    public RemoteSessionLiveness remoteSessionLiveness() {
+        return remoteLiveness;
+    }
+
+    /**
+     * The startup revalidation pass over the remote rows: one run per IDE
+     * life (concurrent triggers coalesce), gated on the workspace-sessions
+     * flag, bounded, and write-free — it feeds only {@link #remoteSessionLiveness()}.
+     * The production trigger is {@code DrydockStartupActivity}'s background
+     * task, after the warm-up; calling it earlier would read an empty
+     * catalog (the pass is still once-per-run, so do not). Holds no resource
+     * of its own (INV-27: it rides this service's executor), so it adds
+     * nothing to dispose either.
+     */
+    public WorkspaceRevalidation workspaceRevalidation() {
+        return workspaceRevalidation;
     }
 
     /** The live session/repository catalogs for the task service; empty until initialization. */
