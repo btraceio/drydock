@@ -4,6 +4,7 @@ import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.*;
 import app.drydock.intellij.tasks.NewTaskPlan;
 import app.drydock.mcp.*;
+import app.drydock.projects.SharedProject;
 import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonValue.JsonObject;
 import app.drydock.state.json.JsonValue.JsonString;
@@ -832,6 +833,113 @@ class DelayedTaskServiceTest {
         return new NewTaskPlan.Choice("Plan choice", Optional.of("Do the work."), AgentKind.CLAUDE,
                 SessionMode.WRITES, NewTaskPlan.WorkIn.NEW_WORKTREE, "dd/plan", "origin/main", folder,
                 NewTaskPlan.OpenIn.OWN_WINDOW, Optional.empty(), Optional.empty(), Optional.empty());
+    }
+
+    // 1b. The created task stores the SHARED registry's id: an install-catalog id whose
+    // root the shared list carries is remapped at create, an id the shared list carries
+    // stays, and an id neither registry maps stays too (the mirror resolves it by root).
+    @Test
+    void createStampsTheSharedIdForAnInstallCatalogRepository(@TempDir Path root) throws Exception {
+        RepositoryId sharedId = RepositoryId.newId();
+        RepositoryId installId = RepositoryId.newId();
+        Path checkout = root.resolve("checkout");
+        SharedProject shared = SharedProject.local(sharedId, checkout, "java-profiler", Instant.EPOCH);
+        Repository install = repository(installId, checkout, "java-profiler");
+        try (DelayedTaskService service = new DelayedTaskService(root, executor, List::of,
+                () -> List.of(install), () -> List.of(shared))) {
+            await(service.initialize());
+            TaskToolContext.Outcome created = await(service.create("Follow up", List.of(), installId));
+            assertFalse(created.refused(), created.refusal());
+            assertEquals(sharedId, created.document().repository(),
+                    "the task stores the shared registry's id for the same checkout");
+            assertTrue(Files.exists(committedFile(root, sharedId, created.document().id())),
+                    "the task file lands under the shared id's directory");
+        }
+    }
+
+    @Test
+    void createKeepsAnIdTheSharedListAlreadyCarries(@TempDir Path root) throws Exception {
+        RepositoryId sharedId = RepositoryId.newId();
+        Path checkout = root.resolve("checkout");
+        SharedProject shared = SharedProject.local(sharedId, checkout, "java-profiler", Instant.EPOCH);
+        try (DelayedTaskService service = new DelayedTaskService(root, executor, List::of,
+                List::of, () -> List.of(shared))) {
+            await(service.initialize());
+            TaskToolContext.Outcome created = await(service.create("Follow up", List.of(), sharedId));
+            assertFalse(created.refused(), created.refusal());
+            assertEquals(sharedId, created.document().repository());
+        }
+    }
+
+    // 1c. Shared-id match before root-match: with an unrelated shared entry BEFORE the
+    // entry whose id the caller passes -- and an install entry whose root matches the
+    // FIRST entry -- the id match still wins, at the second entry.
+    @Test
+    void createKeepsTheSecondSharedEntryIdWhenAnUnrelatedEntryComesFirst(@TempDir Path root)
+            throws Exception {
+        RepositoryId unrelatedId = RepositoryId.newId();
+        RepositoryId secondSharedId = RepositoryId.newId();
+        RepositoryId installId = RepositoryId.newId();
+        Path unrelatedCheckout = root.resolve("unrelated");
+        Path secondCheckout = root.resolve("second");
+        SharedProject unrelated = SharedProject.local(unrelatedId, unrelatedCheckout,
+                "unrelated", Instant.EPOCH);
+        SharedProject second = SharedProject.local(secondSharedId, secondCheckout,
+                "java-profiler", Instant.EPOCH);
+        Repository install = repository(installId, unrelatedCheckout, "unrelated");
+        try (DelayedTaskService service = new DelayedTaskService(root, executor, List::of,
+                () -> List.of(install), () -> List.of(unrelated, second))) {
+            await(service.initialize());
+            TaskToolContext.Outcome created = await(service.create("Follow up", List.of(),
+                    secondSharedId));
+            assertFalse(created.refused(), created.refusal());
+            assertEquals(secondSharedId, created.document().repository(),
+                    "the caller's shared id stays, even though an unrelated entry precedes it");
+            assertTrue(Files.exists(committedFile(root, secondSharedId, created.document().id())),
+                    "the task file lands under the second entry's id directory");
+        }
+    }
+
+    // 1d. Root-match fallback runs past an earlier unrelated shared entry: an
+    // install-catalog id whose root the SECOND shared entry carries resolves to that
+    // second entry's shared id, never an early id-mismatch short-circuit keeping the
+    // install id.
+    @Test
+    void createResolvesAnInstallIdThroughTheLaterSharedRoot(@TempDir Path root) throws Exception {
+        RepositoryId unrelatedId = RepositoryId.newId();
+        RepositoryId laterSharedId = RepositoryId.newId();
+        RepositoryId installId = RepositoryId.newId();
+        Path unrelatedCheckout = root.resolve("unrelated");
+        Path laterCheckout = root.resolve("later");
+        SharedProject unrelated = SharedProject.local(unrelatedId, unrelatedCheckout,
+                "unrelated", Instant.EPOCH);
+        SharedProject later = SharedProject.local(laterSharedId, laterCheckout,
+                "java-profiler", Instant.EPOCH);
+        Repository install = repository(installId, laterCheckout, "java-profiler");
+        try (DelayedTaskService service = new DelayedTaskService(root, executor, List::of,
+                () -> List.of(install), () -> List.of(unrelated, later))) {
+            await(service.initialize());
+            TaskToolContext.Outcome created = await(service.create("Follow up", List.of(), installId));
+            assertFalse(created.refused(), created.refusal());
+            assertEquals(laterSharedId, created.document().repository(),
+                    "the install id resolves to the later shared entry's id by root");
+            assertTrue(Files.exists(committedFile(root, laterSharedId, created.document().id())),
+                    "the task file lands under the shared id's directory");
+        }
+    }
+
+    @Test
+    void createKeepsTheCallerIdWhenNothingMaps(@TempDir Path root) throws Exception {
+        RepositoryId installId = RepositoryId.newId();
+        Repository install = repository(installId, root.resolve("checkout"), "java-profiler");
+        try (DelayedTaskService service = new DelayedTaskService(root, executor, List::of,
+                () -> List.of(install), List::of)) {
+            await(service.initialize());
+            TaskToolContext.Outcome created = await(service.create("Follow up", List.of(), installId));
+            assertFalse(created.refused(), created.refusal());
+            assertEquals(installId, created.document().repository(),
+                    "a project only the install knows is not remapped");
+        }
     }
 
     private static <T> T await(CompletableFuture<T> future) throws Exception {

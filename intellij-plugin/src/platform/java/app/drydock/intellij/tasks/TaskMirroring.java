@@ -1,7 +1,9 @@
 package app.drydock.intellij.tasks;
 
 import app.drydock.delayedtasks.DelayedTaskService;
+import app.drydock.delayedtasks.SharedProjectResolver;
 import app.drydock.delayedtasks.TaskStoreWatcher;
+import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
 import app.drydock.git.JiraConnection;
 import app.drydock.intellij.delayedtasks.DelayedTaskActions;
@@ -308,19 +310,39 @@ public final class TaskMirroring {
      */
     private static Optional<SharedProject> registeredProject(Project from, RepositoryId repository,
                                                              boolean needsCheckout) {
-        Optional<SharedProject> project = DrydockPluginService.getInstance().sharedProjects().projects().stream()
-                .filter(candidate -> candidate.id().equals(repository))
-                .findFirst();
+        DrydockPluginService plugin = DrydockPluginService.getInstance();
+        Optional<SharedProject> project = resolveShared(plugin.sharedProjects().projects(),
+                plugin.repositories(), repository);
         if (project.isEmpty()) {
             refuse(from, "The task's project is not registered in Drydock.");
             return Optional.empty();
         }
-        if (needsCheckout && project.get().isRemote()) {
-            refuse(from, "Mirroring to GitHub needs a local checkout; " + project.get().displayName()
+        return checkedOut(from, project.get(), needsCheckout);
+    }
+
+    /** Any thread: the project when it fits the mirror's checkout demand, or the visible
+      * refusal and empty. */
+    private static Optional<SharedProject> checkedOut(Project from, SharedProject project,
+                                                      boolean needsCheckout) {
+        if (needsCheckout && project.isRemote()) {
+            refuse(from, "Mirroring to GitHub needs a local checkout; " + project.displayName()
                     + " is a remote project.");
             return Optional.empty();
         }
-        return project;
+        return Optional.of(project);
+    }
+
+    /**
+     * Pure: the shared-list project a task's repository id names. Delegates to
+     * {@link SharedProjectResolver#resolve}, the single copy of the dual-registry
+     * resolution this package shares with delayedtasks, so the mirror-time resolution
+     * and the create-time stamp cannot drift apart. The shared entry is what the flow
+     * needs: the Jira and GitHub settings are keyed by the shared registry's id. Empty
+     * when neither registry maps the id -- the caller refuses.
+     */
+    static Optional<SharedProject> resolveShared(List<SharedProject> shared, List<Repository> install,
+                                                 RepositoryId repository) {
+        return SharedProjectResolver.resolve(shared, install, repository);
     }
 
     /** Any thread: one visible refusal, shown on the EDT. */

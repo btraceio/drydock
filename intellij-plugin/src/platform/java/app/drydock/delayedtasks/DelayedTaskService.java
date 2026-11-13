@@ -11,6 +11,7 @@ import app.drydock.mcp.TaskTools;
 import app.drydock.mcp.TaskToolContext;
 import app.drydock.intellij.tasks.NewTaskPlan.Choice;
 import app.drydock.intellij.tasks.TaskLauncher;
+import app.drydock.projects.SharedProject;
 import com.intellij.openapi.project.Project;
 import app.drydock.tasks.PlanLaunch;
 import app.drydock.tasks.PlanLaunch.Origin;
@@ -105,6 +106,7 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
     private final Executor executor;
     private final Supplier<List<ManagedAgentSession>> sessions;
     private final Supplier<List<Repository>> repositories;
+    private final Supplier<List<SharedProject>> sharedProjects;
 
     private volatile TaskStore store;
     private volatile String initFailure;
@@ -189,13 +191,23 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
         this(defaultRoot(), executor, sessions, repositories);
     }
 
-    /** As the production constructor, at an explicit root for tests and sandboxes. */
+    /** As the production constructor, at an explicit root for tests and sandboxes: no
+      * shared projects list, so created tasks keep the repository id they are given. */
     public DelayedTaskService(Path root, Executor executor, Supplier<List<ManagedAgentSession>> sessions,
             Supplier<List<Repository>> repositories) {
+        this(root, executor, sessions, repositories, List::of);
+    }
+
+    /** The full constructor: {@code sharedProjects} is what {@link #stableRepository}
+      * maps an install-catalog id through, so created tasks store the shared registry's
+      * id when it names the same checkout. */
+    public DelayedTaskService(Path root, Executor executor, Supplier<List<ManagedAgentSession>> sessions,
+            Supplier<List<Repository>> repositories, Supplier<List<SharedProject>> sharedProjects) {
         this.root = Objects.requireNonNull(root, "root").toAbsolutePath().normalize();
         this.executor = Objects.requireNonNull(executor, "executor");
         this.sessions = Objects.requireNonNull(sessions, "sessions");
         this.repositories = Objects.requireNonNull(repositories, "repositories");
+        this.sharedProjects = Objects.requireNonNull(sharedProjects, "sharedProjects");
         initialize();
     }
 
@@ -1202,7 +1214,7 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
                         }
                     }
                 }
-                TaskDocument created = store.create(repository, title, List.of());
+                TaskDocument created = store.create(stableRepository(repository), title, List.of());
                 // The core's create carries no prerequisites; the after refs land via one committed update.
                 return Outcome.committed(prerequisites.isEmpty() ? created
                         : store.update(created.id(),
@@ -1211,6 +1223,31 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
                 return Outcome.refused(e.getMessage());
             }
         });
+    }
+
+    /** The repository id a created task stores: the caller's id unchanged when the shared
+      * list already carries it, else the shared id of the same checkout when the id names
+      * an install-catalog repository the shared list knows by root. The task MCP tools
+      * resolve the caller's repository from the IDE install's own catalog
+      * ({@code defaultRepository}, {@code repositoryBySlug}), whose UUIDs are distinct
+      * from the shared registry's -- and every consumer that keys by repository id (the
+      * tool window's project rows, the Jira and GitHub settings, the mirror flows) keys
+      * the SHARED registry. Tasks created through the IDE dialog already store the shared
+      * id ({@code TaskLauncher.saveTask}); the remap makes the MCP-created ones agree for
+      * tasks created after the registries publish the checkout. The root-matching
+      * fallback must stay: legacy (pre-change) tasks and creates inside the
+      * initialization window still rely on it, as do late registrations. Both registries
+      * store canonical roots (each registers through {@code RepositoryCatalog.canonicalize}),
+      * so root equality is the match and this stays a memory-only read. An id neither
+      * registry maps keeps the caller's id: creating a task for a project only the
+      * install knows must not fail, and the mirror flow still resolves it by root.
+      * Delegates to {@link SharedProjectResolver#resolve}, the single copy this package
+      * shares with intellij.tasks, so the create-time stamp and the mirror-time
+      * resolution cannot drift apart. */
+    private RepositoryId stableRepository(RepositoryId repository) {
+        return SharedProjectResolver.resolve(sharedProjects.get(), repositories.get(), repository)
+                .map(SharedProject::id)
+                .orElse(repository);
     }
 
     @Override
