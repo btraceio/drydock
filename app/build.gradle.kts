@@ -393,9 +393,18 @@ tasks.test {
     // a host signing problem into a misleading, intermittent failure. Git's
     // Global hooks are equally host-specific: a commit-msg hook may contact
     // company services or wait for credentials even though the fixture is a
-    // disposable local repository. Replace the user's global config with an
-    // empty task-local file. This still permits tests to install repository
+    // disposable local repository. Replace the user's global config with a
+    // task-local file. This still permits tests to install repository
     // hooks under .git/hooks when hook behaviour is what they exercise.
+    //
+    // The replacement config must still carry a usable user.name/user.email.
+    // Without one, any git command that writes a reflog without an explicit
+    // -c identity (e.g. `git worktree add` creating the branch ref) falls
+    // back to synthesizing an identity from pw_name + hostname, which calls
+    // getaddrinfo; on hosts where the bare hostname resolves slowly (mDNS
+    // timeouts of ~10s per lookup) that blocks far past the services' 15s
+    // process timeout and kills the command. A fixed identity mirrors a
+    // normally configured machine, where user.email is always present.
     //
     // GIT_CONFIG_* env injection overrides file config (global/local) but is
     // itself overridden by an explicit `-c`, so it cannot mask a test that
@@ -408,7 +417,13 @@ tasks.test {
     environment("GIT_CONFIG_VALUE_0", "false")
     doFirst {
         isolatedGlobalGitConfig.parentFile.mkdirs()
-        isolatedGlobalGitConfig.writeText("")
+        isolatedGlobalGitConfig.writeText(
+            """
+            [user]
+                name = Drydock Tests
+                email = drydock-tests@example.com
+            """.trimIndent() + "\n"
+        )
     }
 
     // Inputs for RuntimeImageModuleListTest: the packaged app jar, its runtime

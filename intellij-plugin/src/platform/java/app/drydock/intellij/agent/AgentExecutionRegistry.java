@@ -107,6 +107,153 @@ public final class AgentExecutionRegistry implements Disposable {
         return launchClaims;
     }
 
+    /**
+     * The memory-only coordination between the paths that request the end of
+     * a remote row's ssh client — the explicit Stop, a close path — and the
+     * end recorder that settles the durable row. The registry is its shared
+     * home because the window whose service requests the end and the window
+     * whose recorder settles it can be different windows (cross-project
+     * tabs), and because the end can overtake the request: an ssh client can
+     * terminate during a Stop's kill round-trip, before the flag {@link #stop}
+     * sets could be set on an already-ended execution.
+     *
+     * <p>The mark answers one question at end time — <em>which</em> end was
+     * this — so the recorder settles by origin: an explicit Stop settles by
+     * the kill's own verdict (AC-9), a close settles the row IDLE (AC-7:
+     * neither EXITED nor INACTIVE), and neither runs the spontaneous-end
+     * probe (AC-8 is the story of an end nobody requested). Marks are set
+     * before the client is asked to end and consumed when the end is
+     * delivered ({@code terminated}); a mark nothing consumed (the client
+     * never ended) is cleared by the next launch of the session.
+     */
+    public interface RemoteClientEnds {
+
+        /** How the IDE asked for a remote row's ssh client to end. */
+        enum Origin {
+            /** The explicit Stop: the box-side kill's verdict settles the row. */
+            EXPLICIT_STOP,
+            /** A close path (window close, quit, {@code hostClosed}, {@code dispose}): the row settles IDLE. */
+            CLOSE
+        }
+
+        /**
+         * A requested client end that has not been delivered yet.
+         * {@code killConfirmed} is empty while the explicit Stop's kill is
+         * still in flight, and decided once the kill returned.
+         */
+        record RequestedEnd(Origin origin, Optional<Boolean> killConfirmed) {
+
+            /** The explicit Stop, before its kill concluded. */
+            public static RequestedEnd explicitStopPending() {
+                return new RequestedEnd(Origin.EXPLICIT_STOP, Optional.empty());
+            }
+
+            /** The explicit Stop, with its kill's verdict. */
+            public static RequestedEnd explicitStopVerdict(boolean killConfirmed) {
+                return new RequestedEnd(Origin.EXPLICIT_STOP, Optional.of(killConfirmed));
+            }
+
+            /** A close path ending the client. */
+            public static RequestedEnd close() {
+                return new RequestedEnd(Origin.CLOSE, Optional.empty());
+            }
+        }
+
+        /** Does nothing and answers nothing: the seam for construction sites that never request a client end. */
+        RemoteClientEnds INERT = new RemoteClientEnds() {
+            @Override public void beginExplicitStop(ManagedSessionId id) { }
+            @Override public void stopVerdict(ManagedSessionId id, boolean killConfirmed) { }
+            @Override public void endExplicitStop(ManagedSessionId id) { }
+            @Override public void beginClose(ManagedSessionId id) { }
+            @Override public void endClose(ManagedSessionId id) { }
+            @Override public void clear(ManagedSessionId id) { }
+            @Override public Optional<RequestedEnd> requestedEnd(ManagedSessionId id) { return Optional.empty(); }
+            @Override public boolean hasLiveExecution(ManagedSessionId id) { return false; }
+        };
+
+        /** Marks that an explicit remote Stop of {@code id} has begun, before its box-side kill runs. */
+        void beginExplicitStop(ManagedSessionId id);
+
+        /** Records the kill's verdict for the explicit Stop in flight for {@code id}. */
+        void stopVerdict(ManagedSessionId id, boolean killConfirmed);
+
+        /** Ends the explicit Stop's mark: no client end will consult it. */
+        void endExplicitStop(ManagedSessionId id);
+
+        /** Marks that a close path is ending {@code id}'s ssh client. */
+        void beginClose(ManagedSessionId id);
+
+        /** Ends the close mark: no client end will consult it. */
+        void endClose(ManagedSessionId id);
+
+        /** Ends every mark for {@code id}: a new launch starts, so any stale mark must not steer its ends. */
+        void clear(ManagedSessionId id);
+
+        /** The requested client end pending for {@code id}: what an end settles by. */
+        Optional<RequestedEnd> requestedEnd(ManagedSessionId id);
+
+        /** Whether {@code id} has a live execution anywhere in the IDE. */
+        boolean hasLiveExecution(ManagedSessionId id);
+    }
+
+    /** This registry's requested-client-end coordination; see {@link RemoteClientEnds}. */
+    private final RemoteClientEndsImpl remoteClientEnds = new RemoteClientEndsImpl();
+
+    /** The requested client ends this IDE has not delivered yet, keyed by session. */
+    private final class RemoteClientEndsImpl implements RemoteClientEnds {
+
+        private final Map<ManagedSessionId, RemoteClientEnds.RequestedEnd> marks = new ConcurrentHashMap<>();
+
+        @Override public void beginExplicitStop(ManagedSessionId id) {
+            marks.put(id, RemoteClientEnds.RequestedEnd.explicitStopPending());
+        }
+
+        @Override public void stopVerdict(ManagedSessionId id, boolean killConfirmed) {
+            // Only the explicit Stop's own mark carries the verdict: a close
+            // that overwrote the mark while the kill ran keeps its own origin.
+            marks.compute(id, (session, existing) ->
+                    existing != null && existing.origin() == RemoteClientEnds.Origin.EXPLICIT_STOP
+                            ? RemoteClientEnds.RequestedEnd.explicitStopVerdict(killConfirmed)
+                            : existing);
+        }
+
+        @Override public void endExplicitStop(ManagedSessionId id) {
+            marks.compute(id, (session, existing) ->
+                    existing != null && existing.origin() == RemoteClientEnds.Origin.EXPLICIT_STOP ? null : existing);
+        }
+
+        @Override public void beginClose(ManagedSessionId id) {
+            marks.put(id, RemoteClientEnds.RequestedEnd.close());
+        }
+
+        @Override public void endClose(ManagedSessionId id) {
+            marks.compute(id, (session, existing) ->
+                    existing != null && existing.origin() == RemoteClientEnds.Origin.CLOSE ? null : existing);
+        }
+
+        @Override public void clear(ManagedSessionId id) {
+            marks.remove(id);
+        }
+
+        @Override public Optional<RemoteClientEnds.RequestedEnd> requestedEnd(ManagedSessionId id) {
+            return Optional.ofNullable(marks.get(id));
+        }
+
+        @Override public boolean hasLiveExecution(ManagedSessionId id) {
+            return AgentExecutionRegistry.this.isRunning(id);
+        }
+
+        /** Ends the mark for {@code id}: its end was delivered, so it is consumed. */
+        void consume(ManagedSessionId id) {
+            marks.remove(id);
+        }
+    }
+
+    /** This registry's requested-client-end coordination; see {@link RemoteClientEnds}. */
+    public RemoteClientEnds remoteClientEnds() {
+        return remoteClientEnds;
+    }
+
     public static AgentExecutionRegistry getInstance() {
         return ApplicationManager.getApplication().getService(AgentExecutionRegistry.class);
     }
@@ -336,6 +483,9 @@ public final class AgentExecutionRegistry implements Disposable {
         } catch (RuntimeException e) {
             LOG.log(Level.WARNING, () -> "Could not record the end of " + sessionId + ": " + e);
         }
+        // The requested end, if any, was delivered: its mark is consumed, so
+        // it can never steer a later end (a future launch's client).
+        remoteClientEnds.consume(sessionId);
         if (execution.host().isEmpty()) {
             // Nothing shows it, so there is no transcript to keep around.
             executions.remove(sessionId, execution);
@@ -480,6 +630,9 @@ public final class AgentExecutionRegistry implements Disposable {
                 continue;   // about to be shown in the window it is moving to
             }
             if (execution.isRunning()) {
+                // A close path ends the client; the mark tells the end settle
+                // the end is close-originated (IDLE, never EXITED/INACTIVE).
+                remoteClientEnds.beginClose(execution.sessionId());
                 stop(execution.sessionId());
             } else {
                 executions.remove(execution.sessionId(), execution);
@@ -653,6 +806,11 @@ public final class AgentExecutionRegistry implements Disposable {
     @Override
     public void dispose() {
         for (ManagedSessionId sessionId : runningSessions()) {
+            // Quit is a close path too: its ends settle a remote row IDLE,
+            // never EXITED/INACTIVE (AC-7). The marks outlive this call on
+            // purpose — the ends they steer are delivered asynchronously,
+            // after the processes actually terminate.
+            remoteClientEnds.beginClose(sessionId);
             stop(sessionId);
         }
         executions.clear();

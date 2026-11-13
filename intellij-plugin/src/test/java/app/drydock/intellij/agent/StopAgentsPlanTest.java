@@ -1,9 +1,22 @@
 package app.drydock.intellij.agent;
 
+import app.drydock.agent.api.AgentKind;
+import app.drydock.domain.AgentBinding;
+import app.drydock.domain.ManagedAgentSession;
+import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.PrLink;
+import app.drydock.domain.PrState;
+import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionActivity;
+import app.drydock.domain.SessionStatus;
+import app.drydock.domain.SessionWorkspace;
+import app.drydock.domain.WorkspaceBoxBinding;
 
 import org.junit.jupiter.api.Test;
 
+import java.nio.file.Path;
+import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -35,6 +48,47 @@ class StopAgentsPlanTest {
         assertTrue(StopAgentsPlan.confirmsSingleStop(Optional.empty()));
         assertFalse(StopAgentsPlan.confirmsSingleStop(Optional.of(SessionActivity.IDLE)));
         assertFalse(StopAgentsPlan.confirmsSingleStop(Optional.of(SessionActivity.NEEDS_ATTENTION)));
+    }
+
+    @Test
+    void aWorkspaceBoxSessionIsAbsentFromEveryCount() {
+        // Closing a window (either answer) and quitting the IDE end only a
+        // workspace-box session's ssh client; its agent keeps running in the
+        // box-side tmux. No question asks the user to agree to deactivate an
+        // agent that is not deactivated, so it is absent from every count.
+        ManagedAgentSession local = session(ManagedSessionId.newId());
+        ManagedAgentSession onBox = session(ManagedSessionId.newId())
+                .toBuilder()
+                .workspaceBox(Optional.of(new WorkspaceBoxBinding(
+                        "drydock-profiling-rt-ai-plugins", "/home/user/profiling-rt-ai-plugins")))
+                .build();
+        assertEquals(List.of(local.id()),
+                StopAgentsPlan.countedOnClose(List.of(local.id(), onBox.id()), List.of(local, onBox)));
+        // Also absent when only the box session runs: the question is not
+        // asked at all.
+        assertTrue(StopAgentsPlan.countedOnClose(List.of(onBox.id()), List.of(local, onBox)).isEmpty());
+    }
+
+    @Test
+    void localRowsAreCountedExactlyAsBefore() {
+        ManagedAgentSession first = session(ManagedSessionId.newId());
+        ManagedAgentSession second = session(ManagedSessionId.newId());
+        assertEquals(List.of(second.id(), first.id()),
+                StopAgentsPlan.countedOnClose(List.of(second.id(), first.id()), List.of(first, second)));
+        // A session not running is not counted, as before; a running id
+        // without a row passes through, as the caller's row lookup drops it.
+        ManagedSessionId unknown = ManagedSessionId.newId();
+        assertEquals(List.of(first.id(), unknown),
+                StopAgentsPlan.countedOnClose(List.of(first.id(), unknown), List.of(first, second)));
+    }
+
+    /** A running session row, local by construction. */
+    private static ManagedAgentSession session(ManagedSessionId id) {
+        return new ManagedAgentSession(id, RepositoryId.of("11111111-2222-3333-4444-555555555555"),
+                "session", new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
+                new SessionWorkspace(Path.of("/tmp/repo/wd"), Optional.empty(), true),
+                SessionStatus.RUNNING, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
+                PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty());
     }
 
     @Test

@@ -21,6 +21,7 @@ import app.drydock.domain.Workflow;
 import app.drydock.domain.WorkflowBrief;
 import app.drydock.domain.WorkflowId;
 import app.drydock.domain.WorkflowStatus;
+import app.drydock.domain.WorkspaceBoxBinding;
 import app.drydock.domain.WorkspaceUiState;
 import app.drydock.review.SessionReviewScopes;
 import app.drydock.state.json.JsonValue;
@@ -83,7 +84,8 @@ import java.util.Set;
  *       "evalMode": <boolean>,
  *       "workflowId": "<uuid>" | null,
  *       "startedWithTask": <boolean>,
- *       "flagged": <boolean>
+ *       "flagged": <boolean>,
+ *       "workspaceBox": {"name": "<box name>", "path": "<absolute box path>"} (optional; present only on a session that runs on a workspace box)
  *     }
  *   ],
  *   "handoffBriefs": [
@@ -205,7 +207,17 @@ import java.util.Set;
  * too. No row is dropped by the migration; the durable error states
  * {@code FAILED}, {@code MISSING_WORKING_DIRECTORY} and {@code
  * UNSUPPORTED_AGENT} decode as themselves so failures stay visible.
- * Unrecognized status values still fail the decode, exactly as before.</p>
+ * Unrecognized status values still fail the decode, exactly as before.
+ * The session {@code workspaceBox} member (sessions that run on a Datadog
+ * workspace box) was likewise added leniently within version 2, after the
+ * {@code remote} member's pattern rather than {@code statusFromPersisted}'s
+ * strictness: {@link #toJson} writes it only when the binding is present,
+ * and an absent, malformed, or invalid member decodes to empty (a local
+ * row) rather than failing the file — so no version bump, and an older
+ * build that drops the member on re-save turns the row local with its
+ * placeholder path, never a rejected state file. A remote row's {@code
+ * workingDirectory} is the box's deterministic placeholder root, re-derived
+ * from the binding on decode rather than trusted from the file.</p>
  */
 public final class ApplicationStateCodec {
 
@@ -315,6 +327,12 @@ public final class ApplicationStateCodec {
                 .orElse(JsonValue.JsonNull.INSTANCE));
         obj.put("startedWithTask", new JsonBoolean(session.startedWithTask()));
         obj.put("flagged", new JsonBoolean(session.flagged()));
+        session.workspaceBox().ifPresent(binding -> {
+            JsonObject box = JsonObject.empty();
+            box.put("name", new JsonString(binding.boxName()));
+            box.put("path", new JsonString(binding.boxWorkingPath()));
+            obj.put("workspaceBox", box);
+        });
         return obj;
     }
 
@@ -656,6 +674,10 @@ public final class ApplicationStateCodec {
             // Lenient like evalMode: a session persisted before this member
             // existed was never flagged. No schema bump.
             boolean flagged = obj.get("flagged") instanceof JsonBoolean fl && fl.value();
+            // Lenient like remoteFromJson (the member, not the row): absent,
+            // malformed, or an invalid binding decodes to empty — a local
+            // row — rather than failing the whole state file.
+            Optional<WorkspaceBoxBinding> workspaceBox = workspaceBoxFromJson(obj);
             // The persisted shape stays FLAT: grouping is a Java-side change,
             // and schemaVersion must not move for it.
             return new ManagedAgentSession(id, repositoryId, displayName,
@@ -663,9 +685,30 @@ public final class ApplicationStateCodec {
                     new SessionWorkspace(workingDirectory, worktreeRoot, branchCreatedHere),
                     status, createdAt, lastOpenedAt, lastExitCode,
                     PrLink.fromPersisted(prState, prNumber), namePinned, forkedFrom, evalMode, workflowId,
-                    startedWithTask, flagged);
+                    startedWithTask, flagged, workspaceBox);
         } catch (IllegalArgumentException | DateTimeException e) {
             throw new StateDecodeException("Malformed session entry: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Decodes the optional session-level {@code "workspaceBox"} member,
+     * added leniently within schemaVersion 2 (see class doc) for sessions
+     * that run on a workspace box. Absent or malformed decodes to empty (a
+     * local row) rather than failing, exactly like {@link #remoteFromJson}:
+     * a bad value here must never make the whole state file look corrupt and
+     * cost the user every repository and session. An <em>invalid</em> binding
+     * (a name that fails the box-name guard, a relative path) is the same
+     * class of failure and decodes the same way.
+     */
+    private static Optional<WorkspaceBoxBinding> workspaceBoxFromJson(JsonObject obj) {
+        if (!(obj.get("workspaceBox") instanceof JsonObject box)) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(new WorkspaceBoxBinding(requireString(box, "name"), requireString(box, "path")));
+        } catch (RuntimeException e) {
+            return Optional.empty();
         }
     }
 

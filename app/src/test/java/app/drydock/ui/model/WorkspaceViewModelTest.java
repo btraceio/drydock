@@ -287,6 +287,42 @@ class WorkspaceViewModelTest {
         assertEquals(List.of(), listener.events);
     }
 
+    // ---- Closing overlay ------------------------------------------------------
+
+    @Test
+    void closingOverlayEmitsOneRowChangePerTransition() {
+        ManagedSessionId id = ManagedSessionId.newId();
+        model.setSessions(List.of(session(id, repoA, "One")));
+        listener.events.clear();
+
+        model.setSessionClosing(id, true);
+        model.setSessionClosing(id, true);
+        assertEquals(List.of("session:" + id.value()), listener.events);
+        assertTrue(model.isSessionClosing(id));
+
+        listener.events.clear();
+        model.setSessionClosing(id, false);
+        model.setSessionClosing(id, false);
+        assertEquals(List.of("session:" + id.value()), listener.events);
+        assertTrue(!model.isSessionClosing(id));
+    }
+
+    @Test
+    void closingOverlayIsDroppedWhenItsSessionLeavesTheSnapshot() {
+        ManagedSessionId id = ManagedSessionId.newId();
+        ManagedAgentSession s = session(id, repoA, "One");
+        model.setSessions(List.of(s));
+        model.setSessionClosing(id, true);
+        listener.events.clear();
+
+        // Optimistic delete: the tombstoned session vanishes from the pushed
+        // snapshot while its surface close is still running; the overlay must
+        // not outlive the row.
+        model.setSessions(List.of());
+        assertTrue(!model.isSessionClosing(id));
+        assertEquals(List.of("structure"), listener.events);
+    }
+
     // ---- Worktree-config flag -----------------------------------------------
 
     @Test

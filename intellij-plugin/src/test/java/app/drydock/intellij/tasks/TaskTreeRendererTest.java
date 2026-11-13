@@ -10,10 +10,14 @@ import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
+import app.drydock.git.GhCliService;
 import app.drydock.git.GhCliService.BranchPullRequest;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.GhCliService.PrInfo.PrLifecycle;
 import app.drydock.git.JiraIssue;
+import app.drydock.tasks.TaskDocument;
+import app.drydock.tasks.TaskId;
+import app.drydock.tasks.TaskStatus;
 import app.drydock.intellij.tasks.TaskNode.Deferred;
 import app.drydock.intellij.tasks.TaskNode.GitHubNode;
 import app.drydock.intellij.tasks.TaskNode.IssueRow;
@@ -61,6 +65,16 @@ class TaskTreeRendererTest {
                 "https://acme.atlassian.net/browse/PROJ-123", List.of("profiling"), Optional.empty());
     }
 
+    private static GhCliService.OpenPullRequest openPr(int number, String title, String head) {
+        return new GhCliService.OpenPullRequest(number, title, head, "main", false,
+                Optional.of("someone"), Optional.of("https://github.com/o/r/pull/" + number));
+    }
+
+    private static TaskDocument document(TaskId id) {
+        return new TaskDocument(id, RepositoryId.newId(), "Fix allocation profile", TaskStatus.STARTED, null,
+                Optional.of(Instant.EPOCH), List.of(), List.of(), "", "");
+    }
+
     private static TaskRow row(boolean running, TaskPlacement placement) {
         return row(running, placement, true);
     }
@@ -98,44 +112,9 @@ class TaskTreeRendererTest {
     }
 
     @Test
-    void aNotShownRowOffersShowHere() {
-        TaskRow row = row(true, new TaskPlacement.NotShown());
-
-        assertEquals("fix/chunk_memory · not shown · Pi", TaskTreeRenderer.secondary(row, "Pi", Duration.ZERO));
-        assertEquals(Optional.of("Show here"), TaskTreeRenderer.link(row));
-    }
-
-    @Test
-    void anIdleRowFromAnotherWorktreeOffersResumeHereWhenResumable() {
-        assertEquals(Optional.of("Resume here"),
-                TaskTreeRenderer.link(row(false, new TaskPlacement.Idle(false), true)));
-    }
-
-    @Test
-    void anIdleRowFromAnotherWorktreeOffersStartHereWhenNotResumable() {
-        // "Resume" on a task with no conversation left to resume into is a
-        // broken promise: the click would start a fresh one, so say that.
-        assertEquals(Optional.of("Start here"),
-                TaskTreeRenderer.link(row(false, new TaskPlacement.Idle(false), false)));
-    }
-
-    @Test
-    void anIdleRowFromThisWorktreeKeepsItsMvpMeta() {
-        TaskRow row = row(false, new TaskPlacement.Idle(true));
-
-        assertEquals("fix/chunk_memory · this window · Pi", TaskTreeRenderer.secondary(row, "Pi", Duration.ZERO));
-        assertEquals(Optional.empty(), TaskTreeRenderer.link(row));
-    }
-
-    @Test
     void anIdleRowElsewhereKeepsItsMvpMeta() {
         assertEquals("⑂ fix/chunk_memory · Pi · 5m",
                 TaskTreeRenderer.secondary(row(false, new TaskPlacement.Idle(false)), "Pi", Duration.ofMinutes(5)));
-    }
-
-    @Test
-    void aRowShownElsewhereOffersNoInlineLink() {
-        assertEquals(Optional.empty(), TaskTreeRenderer.link(row(true, new TaskPlacement.OwnWindow())));
     }
 
     @Test
@@ -306,34 +285,59 @@ class TaskTreeRendererTest {
     }
 
     @Test
-    void aBranchPullRequestsStatePicksItsIcon() {
-        assertEquals(Optional.of(TaskTreeRenderer.PR_OPEN_ICON),
-                TaskTreeRenderer.pullRequestIcon(branchPr(PrLifecycle.OPEN, false)));
-        assertEquals(Optional.of(TaskTreeRenderer.PR_DRAFT_ICON),
-                TaskTreeRenderer.pullRequestIcon(branchPr(PrLifecycle.OPEN, true)));
-        assertEquals(Optional.of(TaskTreeRenderer.PR_MERGED_ICON),
-                TaskTreeRenderer.pullRequestIcon(branchPr(PrLifecycle.MERGED, false)));
-        assertEquals(Optional.of(TaskTreeRenderer.PR_CLOSED_ICON),
-                TaskTreeRenderer.pullRequestIcon(branchPr(PrLifecycle.CLOSED, false)));
-        assertEquals(Optional.empty(), TaskTreeRenderer.pullRequestIcon(branchPr(PrLifecycle.UNKNOWN, false)),
-                "no state from gh: no state icon");
-        assertEquals(TaskTreeRenderer.PullRequestBadgeKind.MERGED,
-                TaskTreeRenderer.badgeKind(branchPr(PrLifecycle.MERGED, true)), "a merged draft is merged");
-        assertEquals("Pull request #12 (draft) from feature/x: Fix it",
-                TaskTreeRenderer.pullRequestTooltip(branchPr(PrLifecycle.OPEN, true)));
+    void aPullRequestWithABlankTitleTooltipNamesOnlyNumberAndBranch() {
+        assertEquals("Pull request #41 from pr-41",
+                TaskTreeRenderer.pullRequestLinkTooltip(openPr(41, "  ", "pr-41")));
+    }
+
+    @Test
+    void aPullRequestRowsLinkedTaskTooltipNamesTheTaskWorkingItsBranch() {
+        assertEquals("Task 'Fix allocation profile' (fix-alloc-k3f9) works this branch",
+                TaskTreeRenderer.linkedTaskTooltip(document(TaskId.of("fix-alloc-k3f9"))));
     }
 
     private static BranchPullRequest branchPr(PrLifecycle state, boolean draft) {
         return new BranchPullRequest(12, state, draft, "feature/x", "Fix it", Optional.empty());
     }
 
+    private static BranchPullRequest branchPr(PrLifecycle state, boolean draft, Optional<String> url) {
+        return new BranchPullRequest(12, state, draft, "feature/x", "Fix it", url);
+    }
+
+    private static TaskRow row(BranchPullRequest pullRequest) {
+        ManagedAgentSession session = new ManagedAgentSession.Builder(ManagedSessionId.newId(), RepositoryId.newId(),
+                "Fix chunk memory growth", AgentBinding.unlaunched(AgentKind.PI, SessionMode.WRITES),
+                SessionWorkspace.inRepository(DIR), Instant.EPOCH).status(SessionStatus.INACTIVE).build();
+        return new TaskRow(session, Optional.empty(), false, Optional.of("fix/chunk_memory"),
+                new TaskPlacement.Idle(false), false, false, false, Optional.of(pullRequest));
+    }
+
     @Test
-    void aSessionIconKeepsTheStateSlotSoNamesAlign() {
-        Icon dot = TaskTreeRenderer.PR_OPEN_ICON;
-        Icon withPr = TaskTreeRenderer.sessionIcon(dot, Optional.of(branchPr(PrLifecycle.MERGED, false)));
-        Icon withoutPr = TaskTreeRenderer.sessionIcon(dot, Optional.empty());
-        assertEquals(withPr.getIconWidth(), withoutPr.getIconWidth(), "a row without a PR keeps an empty slot");
-        assertSame(withPr, TaskTreeRenderer.sessionIcon(dot, Optional.of(branchPr(PrLifecycle.MERGED, false))),
-                "the composite is cached, not rebuilt per paint");
+    void aSessionRowOffersItsPullRequestsPageWhenGhReportedOne() {
+        assertEquals(Optional.of("https://github.com/o/r/pull/12"), TaskTreeRenderer.pullRequestUrl(
+                row(branchPr(PrLifecycle.OPEN, false, Optional.of("https://github.com/o/r/pull/12")))),
+                "gh's url is the link, whatever the state");
+        assertEquals(Optional.of("https://github.com/o/r/pull/12"), TaskTreeRenderer.pullRequestUrl(
+                row(branchPr(PrLifecycle.MERGED, false, Optional.of("https://github.com/o/r/pull/12")))),
+                "a merged PR's page stays useful");
+        assertEquals(Optional.empty(), TaskTreeRenderer.pullRequestUrl(row(branchPr(PrLifecycle.OPEN, false))),
+                "no url from gh: no link to offer");
+        assertEquals(Optional.empty(), TaskTreeRenderer.pullRequestUrl(row(false, new TaskPlacement.Idle(false))),
+                "no pull request known: no link to offer");
+    }
+
+
+    @Test
+    void theSecondaryTextNamesTheBranchWhereItRunsAndTheAgent() {
+        assertEquals("fix/chunk_memory · this window · Pi",
+                TaskTreeRenderer.secondary(row(false, new TaskPlacement.Idle(true)), "Pi", Duration.ZERO));
+        assertEquals("fix/chunk_memory · not shown · Pi",
+                TaskTreeRenderer.secondary(row(true, new TaskPlacement.NotShown()), "Pi", Duration.ZERO));
+    }
+
+    @Test
+    void aDelayedTasksPullRequestTooltipNamesNumberBranchAndTitle() {
+        assertEquals("Pull request #40 from pr-40: Speed up the flaky suite",
+                TaskTreeRenderer.pullRequestLinkTooltip(openPr(40, "Speed up the flaky suite", "pr-40")));
     }
 }

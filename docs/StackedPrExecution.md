@@ -1,10 +1,10 @@
 # Stacked-PR execution of task trees — requirements
 
-Status: S1, S2, S3 and S5 IMPLEMENTED on the stacked-PR branch (see "As
-built"); S4 (claimable follow-ups) is recorded as follow-up task
-`stacked-prs-claimable-follow-ups-task-claim-mcp-tool-tasks-u-yr8o` and not
-implemented. Decisions confirmed in conversation 2026-11-10 (O1–O4 defaults
-confirmed by "looks ok"). Extends `DelayedTasksRequirements.md`
+Status: S1, S2, S3, S4 and S5 IMPLEMENTED on the stacked-PR branch (see "As
+built"). Decisions confirmed in conversation 2026-11-10 (O1–O4 defaults
+confirmed by "looks ok"); O3 and the S4 launch-shape decisions confirmed
+2026-11-11 (launch immediately; auto-start on branch existence; follow-ups
+only; inherit the stack). Extends `DelayedTasksRequirements.md`
 (D-numbers referenced as Dxx); that document's task model, store, plan store
 and review gate are unchanged except where overridden here.
 
@@ -103,7 +103,56 @@ on their prerequisite's branch, and ready follow-ups start by themselves.
   branch, else the default branch; exactly one attempt per task per
   session, every refusal logged visibly. The agent pushes (O4); Drydock
   never pushes.
-- Guidance skill version 2 gained the stacked-execution section.
+- Guidance skill version 3 gained the stacked-execution section and the
+  `task_claim` tool description.
+- `ClaimLaunch` (S4): the shared single-task claim path. Pure validation
+  (`validate`) pins the claimability rules -- open, unowned by a live
+  session, at least one in-repository non-dropped prerequisite (DONE
+  included: claiming "later", after the prerequisite finished, stacks on
+  its surviving branch; a DROPPED prerequisite is no base), graph soundness
+  (P3) -- and computes the shape (base = first in-repository prerequisite,
+  waits = all of them). The launch half composes the exact
+  `StackLaunch.launchUnit` primitives a confirmed unit launches through
+  (same stacked prompt, WRITES mode, fresh worktree).
+- `task_claim` (S4, O3): the fifth task MCP tool, dispatched over a new
+  `TaskToolContext.claim` seam implemented by `DelayedTaskService`. The
+  service validates, branch-probes (an immediate refusal when a wait branch
+  does not exist yet -- a claim never waits, unlike a confirmed unit),
+  resolves the window (P4.9's rule) and launches. The claim launches
+  IMMEDIATELY (O3, confirmed 2026-11-11): an explicit, documented deviation
+  from D12 scoped to claimable follow-ups. The claim's answer
+  (`launching:true`) reports that validation passed and the stacked launch
+  attempt is under way; an asynchronous failure (preparation refusal or
+  launch failure) is logged, appends a session note on the task, and
+  launches nothing -- the task stays open and claimable again, and the
+  claiming agent verifies the outcome with `task_get` (the new session's id
+  appears in the task's sessions list once the launch succeeded).
+  In-flight claims share the start flow's guard set, so a claim never races
+  a Start; a failed launch is logged visibly and leaves the task open and
+  claimable again.
+- Tasks tree Claim action (S4): `Claim Stacked Session…` on blocked and
+  ready rows, the same launch path through `DelayedTaskService.claimFromUi`.
+- Auto-start (S4): on every published snapshot, `DelayedTaskService`
+  launches each open, unowned follow-up that is a descendant of a RUNNING
+  plan's tasks (created inside the executed stack; no confirmed stage
+  covers it) once its prerequisite branches exist -- the confirmed trigger.
+  The stack's confirmed agent per repository is inherited; a claim without
+  a plan inherits the prerequisite's live session's agent, else the first
+  agent of the fixed preference order (`AgentKind.preferenceOrder().get(0)`;
+  as built, the fallback does not probe agent availability). No launch
+  refusal is cached: every publication re-probes the git, catalog and
+  window facts. A candidate refused for a terminal reason -- an unhealable
+  validate refusal (a broken or cyclic dependency graph, no in-repository
+  prerequisite) or the DONE-prerequisite missing-branch probe refusal --
+  never auto-starts again until restart -- claim it manually. The
+  cross-repository validate refusal (the follow-up waits only on unfinished
+  prerequisites in other repositories) is not terminal: it re-probes on
+  every publication and heals when the cross-repo prerequisite reaches
+  DONE. Manual claims (`task_claim`, the Tasks tree Claim action) never
+  register a terminal refusal, so a human-repaired condition (e.g. a
+  re-pushed branch) unblocks auto-start without a restart. Unrelated
+  ready tasks keep D12's balloon-and-Start behavior, and nothing
+  auto-starts while no plan runs.
 
 ## Open (to confirm)
 
@@ -114,6 +163,7 @@ on their prerequisite's branch, and ready follow-ups start by themselves.
   pushed-but-unfinished branch opens nothing.
 - O3: Agent `task_claim` launches immediately, or only with a user-visible
   confirmation balloon (drydock otherwise never lets an agent start work
-  without a confirmed plan, D12)? -- OPEN with S4 (not implemented).
+  without a confirmed plan, D12)? -- CONFIRMED 2026-11-11: launch
+  immediately, the deviation from D12 documented above.
 - O4: Push responsibility: agent pushes (assumed above) vs. Drydock pushing
   task branches at PR-creation time. -- CONFIRMED: the agent pushes.

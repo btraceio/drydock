@@ -420,6 +420,16 @@
     -fx-border-width: 1.5;
     -fx-border-radius: 100;
 }
+/* Optimistic closing overlay: the surface close is in flight but the real
+   status has not landed yet. The dot dims (and renders non-pulsing -- the
+   row passes filled=false while closing) so a RUNNING dot is never shown
+   for a session the row knows is stopping. */
+.status-dot.closing {
+    -fx-opacity: 0.4;
+}
+.session-row.closing .session-name {
+    -fx-text-fill: -drydock-text-faint;
+}
 
 .sidebar-footer {
     -fx-min-height: 36px; -fx-max-height: 36px;

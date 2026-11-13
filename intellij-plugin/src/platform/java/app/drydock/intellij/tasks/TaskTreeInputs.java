@@ -62,8 +62,11 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 
 /**
@@ -100,11 +103,19 @@ final class TaskTreeInputs implements AutoCloseable {
     private static final long WORKTREE_CACHE_NANOS = TimeUnit.MINUTES.toNanos(1);
 
     private final WorktreeService worktrees = new WorktreeService();
+    /** Runs the session→PR badge join off the gather's thread; owned and shut down by close(). */
+    private final ExecutorService badgeJoinExecutor =
+            Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("drydock-badge-join-", 0).factory());
+    /** One badge join at a time; a request arriving mid-join is dropped (the join's completion rebuilds). */
+    private final AtomicBoolean badgeJoinInFlight = new AtomicBoolean();
+    /** The last completed badge join's answer, served by gathers while the next join runs. */
+    private volatile Map<ManagedSessionId, BranchPullRequest> publishedSessionPullRequests = Map.of();
     private final GhCliService github = new GhCliService();
     private final JiraIssueSource jira = new JiraIssueSource();
     private final GitExecutableLocator gitLocator = new GitExecutableLocator();
     private final Map<Path, CachedWorktrees> worktreeCache = new ConcurrentHashMap<>();
-    private final Map<Path, Instant> activityCache = new ConcurrentHashMap<>();
+    /** Last-activity stamps, computed only for the Worktrees section, with the listing's TTL cadence. */
+    private final Map<Path, CachedActivity> activityCache = new ConcurrentHashMap<>();
     private final Map<Path, Boolean> remoteCache = new ConcurrentHashMap<>();
     private final Map<IssueKey, CachedIssues> issueCache = new ConcurrentHashMap<>();
     private final Map<PullRequestKey, CachedPullRequests> pullRequestCache = new ConcurrentHashMap<>();
@@ -173,6 +184,9 @@ final class TaskTreeInputs implements AutoCloseable {
      */
     record CachedWorktrees(long expiresAt, List<Worktree> listed) { }
 
+    /** One worktree's last-activity stamp with its expiry: recomputed after the TTL, never eagerly. */
+    record CachedActivity(long expiresAt, Instant activity) { }
+
     /** One {@code git remote get-url origin} run in {@code root}; throws when git gave no answer. */
     @FunctionalInterface
     interface OriginProbe {
@@ -196,6 +210,7 @@ final class TaskTreeInputs implements AutoCloseable {
         worktreeCache.clear();
         activityCache.clear();
         resumability.clear();
+        publishedSessionPullRequests = Map.of();
     }
 
     void invalidateGitHub() {
@@ -239,61 +254,12 @@ final class TaskTreeInputs implements AutoCloseable {
         return requested.contains(root);
     }
 
-    /**
-     * Whether {@code root}'s GitHub issue listing is requested by the next gather:
-     * the opened-node rule of {@link #githubIssuesWanted(Set, Path)}, with the search
-     * box's explicit {@code /<glob>/} project scope applied first — the same rule as
-     * {@link #pullRequestsWanted(Set, Path, TaskTreeModel.ProjectScope, String)}.
-     * A scoped-out project's row is not shown at all, so fetching its listing would
-     * be pure waste. Ordinary unscoped text is not a scope. Pure.
-     */
-    static boolean githubIssuesWanted(Set<Path> requested, Path root,
-                                      TaskTreeModel.ProjectScope scope, String displayName) {
-        if (scope.scoped() && !scope.matchesProject(displayName)) {
-            return false;
-        }
-        return githubIssuesWanted(requested, root);
-    }
-
-    /**
-     * Whether one Jira group's listing is fetched on the next gather: only
-     * when the user opened that group here, and — as for GitHub issues and
-     * pull requests — never for a project the search box's explicit
-     * {@code /<glob>/} scope hides. Ordinary unscoped text is not a scope.
-     * The group definitions travel regardless; this gates the fetch only. Pure.
-     */
-    static boolean jiraGroupWanted(Set<ListingExpansionTracker.GroupKey> requested,
-                                   ListingExpansionTracker.GroupKey group,
-                                   TaskTreeModel.ProjectScope scope, String displayName) {
-        if (scope.scoped() && !scope.matchesProject(displayName)) {
-            return false;
-        }
-        return requested.contains(group);
-    }
-
-    /**
-     * Whether {@code root}'s pull-request listing is requested by the next gather:
-     * only when the user opened its section here, with the search box's
-     * explicit {@code /<glob>/} project scope applied first. A scoped-out project's
-     * row is not shown at all, so fetching its listing — or the worktree list the
-     * pull-request dedup needs — would be pure waste. Ordinary unscoped text is
-     * not a scope: a plain search still spans projects. The one predicate gates
-     * the listing request and the dedup worktree read alike. Pure.
-     */
-    static boolean pullRequestsWanted(Set<Path> requested, Path root,
-                                      TaskTreeModel.ProjectScope scope, String displayName) {
-        if (scope.scoped() && !scope.matchesProject(displayName)) {
-            return false;
-        }
-        return requested.contains(root);
-    }
-
     /** Forgets {@code root}'s cached Jira listing, so the next gather re-queries it. */
     void invalidateJiraIssues(Path root) {
         jira.invalidate(root);
     }
 
-    TaskTreeModel.Inputs gather(Project here, String filter, TaskTreeModel.ViewFilter viewFilter,
+    TaskTreeModel.Inputs gather(Project here, String filter,
                                 Set<Path> requestedWorktrees, Set<Path> requestedGitHubIssues,
                                 Set<ListingExpansionTracker.GroupKey> requestedJiraGroups,
                                 Set<Path> requestedPullRequests) {
@@ -315,7 +281,6 @@ final class TaskTreeInputs implements AutoCloseable {
         Map<Path, List<Worktree>> pullRequestDedupWorktrees = new HashMap<>();
         Map<Path, BadgeSource> badgeSources = new HashMap<>();
         Set<Path> missing = new HashSet<>();
-        TaskTreeModel.ProjectScope scope = TaskTreeModel.parseFilter(filter);
         // Resolved once per pass, not once per project: remote detection reuses it.
         Optional<Path> git = gitLocator.locate();
         for (SharedProject project : plugin.sharedProjects().projects()) {
@@ -342,11 +307,10 @@ final class TaskTreeInputs implements AutoCloseable {
                 // the user's opening the node decides the fetch. An empty
                 // repository setting is not unconfigured — gh auto-detects
                 // from origin — but no origin to detect from is: that is the
-                // ghost, not a broken listing. An explicit /glob/ scope that
-                // hides the project skips the fetch, as for pull requests.
+                // ghost, not a broken listing.
                 if (githubSettings.repository().isPresent() || githubRemoteDetectable(root, git)) {
                     githubIssueRoots.add(root);
-                    if (githubIssuesWanted(requestedGitHubIssues, root, scope, project.displayName())) {
+                    if (githubIssuesWanted(requestedGitHubIssues, root)) {
                         issueRequests.put(root, issuesOf(root, githubSettings.repository()));
                     }
                 } else {
@@ -358,11 +322,9 @@ final class TaskTreeInputs implements AutoCloseable {
                 // Each group's listing is its own fetch trigger: only the
                 // groups the user opened here are queried, the definitions
                 // always travel so the tree can offer edit and delete before
-                // any fetch — and, like the other listings, none of a project
-                // an explicit /glob/ scope hides.
+                // any fetch.
                 for (JiraGroup group : jiraGroups) {
-                    if (jiraGroupWanted(requestedJiraGroups,
-                            new ListingExpansionTracker.GroupKey(root, group.id()), scope, project.displayName())) {
+                    if (requestedJiraGroups.contains(new ListingExpansionTracker.GroupKey(root, group.id()))) {
                         jiraRequests.put(new JiraRequestKey(root, group.id()),
                                 jira.issuesOf(root, jiraSettings, group));
                     }
@@ -382,11 +344,8 @@ final class TaskTreeInputs implements AutoCloseable {
                 // UUID space with the shared-projects file's ids, so an id
                 // join matches nothing (the badge-everywhere-missing bug).
                 badgeSources.put(root, new BadgeSource(root, githubSettings.repository()));
-                // A scoped-out project's row is not shown at all, so fetching
-                // its listing — or the worktree list the dedup needs — would
-                // be pure waste. Ordinary unscoped text is not a scope: a
-                // plain search still spans projects.
-                if (pullRequestsWanted(requestedPullRequests, root, scope, project.displayName())) {
+                // Only once the user opened the project's pull requests here.
+                if (requestedPullRequests.contains(root)) {
                     pullRequestRequests.put(root, pullRequestsOf(root, githubSettings.repository()));
                     // Dedup needs the worktree list even when the user has never
                     // opened the Worktrees section (byMain is filled lazily), but
@@ -398,6 +357,7 @@ final class TaskTreeInputs implements AutoCloseable {
             }
             if (requestedWorktrees.contains(root)) {
                 List<Worktree> list = worktreesOf(root);
+                fillActivity(list);
                 byMain.put(root, list);
                 list.forEach(worktree -> mainRootOf.put(worktree.path(), root));
             }
@@ -441,8 +401,15 @@ final class TaskTreeInputs implements AutoCloseable {
         // catalog) by ResumabilityCache so a gather does not re-ask for it.
         Map<ManagedSessionId, Boolean> resumable =
                 resumability.refresh(sessions, running, AgentConsoles::hasConversation);
-        Map<ManagedSessionId, BranchPullRequest> sessionPullRequests =
-                sessionPullRequests(sessions, badgeSources);
+        Map<ManagedSessionId, BranchPullRequest> sessionPullRequests = publishedSessionPullRequests;
+        // The badge join itself runs off this pass: per-session worktree
+        // listings here made the initial gather cost one "git worktree
+        // list" plus an activity probe per listed worktree, per session
+        // (measured: ~69 s / ~1000 git spawns for 32 sessions). The join's
+        // completion publishes its map and requests one more rebuild
+        // through onLateData, exactly like the PR badge lookups it joins
+        // with.
+        scheduleSessionPullRequestJoin(sessions, badgeSources);
         Map<RepositoryId, Path> recordedRoots = new HashMap<>();
         for (Repository repository : plugin.stateStore().state().repositories()) {
             if (!repository.isRemote()) {
@@ -504,16 +471,18 @@ final class TaskTreeInputs implements AutoCloseable {
         return new TaskTreeModel.Inputs(projects, sessions, byMain, mainRootOf, currentMain, currentWorking,
                 activity, running, hosts, missing, recordedRoots, worktreeContainers,
                 pullRequestContainers, githubIssueRoots, githubGhostRoots, jiraRoots, jiraGhostRoots,
-                openFolders, Map.copyOf(activityCache), Instant.now(),
+                openFolders, freshActivity(), Instant.now(),
                 issues, jiraGroupListings, pullRequests, pullRequestDedupWorktrees, plugin.sharedProjects().problem(),
-                filter, viewFilter, resumable, sessionPullRequests);
+                filter, resumable, sessionPullRequests);
     }
 
     /** Where a project's pull-request badges come from: its main checkout and its configured repository. */
     record BadgeSource(Path root, Optional<String> repository) { }
 
     /**
-     * Each session's pull request, matched by its current branch against
+     * Schedules the session-to-badge join off the gather's thread.
+     *
+     * <p>Each session's pull request is matched by its current branch against
      * the head branches of its project's PRs. A session joins its project
      * through paths, never through ids: the live worktree list of its
      * working directory names the main checkout, whose canonical path is
@@ -523,12 +492,45 @@ final class TaskTreeInputs implements AutoCloseable {
      * pull requests take part, and only sessions whose folder still exists.
      * Never waits on {@code gh}: a lookup still running yields the last
      * answer (none on the very first pass), and its completion requests
-     * one more rebuild through {@link #onLateData}.
+     * one more rebuild through {@link #onLateData}.</p>
+     *
+     * <p>The join never runs on the gather's thread: it costs one
+     * {@code git worktree list} per session, which on the initial pass made
+     * the first tree block for minutes. The gather serves the last published
+     * map instead; this pass's answer arrives through the rebuild the
+     * completion requests, one gather later — the same late-arrival shape
+     * the PR badge lookups already have.</p>
+     *
+     * <p>The completion publishes and requests a rebuild only when the
+     * answer changed: an unchanged map (the steady state — the same empty
+     * map most passes) must not schedule the next join, or every join
+     * completion would loop gathers forever.</p>
      */
-    private Map<ManagedSessionId, BranchPullRequest> sessionPullRequests(
-            List<ManagedAgentSession> sessions, Map<Path, BadgeSource> sources) {
-        return sessionPullRequests(sessions, sources, this::worktreesOf,
-                source -> branchPullRequestsNow(source.root(), source.repository()));
+    private void scheduleSessionPullRequestJoin(List<ManagedAgentSession> sessions,
+                                                Map<Path, BadgeSource> sources) {
+        if (sources.isEmpty() || sessions.isEmpty()) {
+            return;
+        }
+        if (!badgeJoinInFlight.compareAndSet(false, true)) {
+            return;
+        }
+        CompletableFuture
+                .supplyAsync(() -> sessionPullRequests(sessions, sources, this::worktreesOf,
+                                source -> branchPullRequestsNow(source.root(), source.repository())),
+                        badgeJoinExecutor)
+                .thenAccept(matched -> {
+                    if (!publishedSessionPullRequests.equals(matched)) {
+                        publishedSessionPullRequests = Map.copyOf(matched);
+                        lateData.run();
+                    }
+                })
+                .whenComplete((ignored, failure) -> {
+                    badgeJoinInFlight.set(false);
+                    if (failure != null) {
+                        // The published map stands; the next gather's schedule call retries the join.
+                        LOG.log(Level.WARNING, "The session pull-request badge join failed", failure);
+                    }
+                });
     }
 
     /**
@@ -777,31 +779,61 @@ final class TaskTreeInputs implements AutoCloseable {
 
     /**
      * {@code root}'s worktrees, canonical paths; empty when git cannot list
-     * them (for this pass only — a failed listing is never cached).
+     * them (for this pass only — a failed listing is never cached). Never
+     * computes activity stamps: those belong to the Worktrees section's
+     * display pass alone (see {@link #fillActivity}), never to a listing a
+     * badge join or a PR dedup happens to trigger.
      */
     private List<Worktree> worktreesOf(Path root) {
-        return worktreesOf(worktreeCache, root, key -> {
-            List<Worktree> listed = worktrees.list(key).get(GIT_TIMEOUT_SECONDS, TimeUnit.SECONDS).stream()
-                    .map(worktree -> new Worktree(RepositoryCatalog.canonicalize(worktree.path()),
-                            worktree.branch(), worktree.mainCheckout(), worktree.detached(), worktree.prunable(),
-                            worktree.locked(), worktree.lockReason(), worktree.merged()))
-                    .toList();
-            for (Worktree worktree : listed) {
-                if (worktree.mainCheckout() || worktree.prunable()) {
-                    continue;
-                }
-                try {
-                    activityCache.put(worktree.path(), worktrees.lastActivity(worktree.path())
-                            .get(GIT_TIMEOUT_SECONDS, TimeUnit.SECONDS));
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    break;
-                } catch (ExecutionException | TimeoutException | RuntimeException e) {
-                    LOG.log(Level.DEBUG, () -> "No activity time for " + worktree.path() + ": " + e);
-                }
+        return worktreesOf(worktreeCache, root, key ->
+                worktrees.list(key).get(GIT_TIMEOUT_SECONDS, TimeUnit.SECONDS).stream()
+                        .map(worktree -> new Worktree(RepositoryCatalog.canonicalize(worktree.path()),
+                                worktree.branch(), worktree.mainCheckout(), worktree.detached(), worktree.prunable(),
+                                worktree.locked(), worktree.lockReason(), worktree.merged()))
+                        .toList());
+    }
+
+    /**
+     * Stamps the listed worktrees' last activity into {@code activityCache}
+     * — Worktrees-section display data, recomputed with the listing's TTL
+     * cadence and never by a badge join or a PR-dedup listing. One blocking
+     * probe per worktree that has no fresh stamp; sequential, as the
+     * section listing itself is.
+     */
+    private void fillActivity(List<Worktree> listed) {
+        long now = System.nanoTime();
+        for (Worktree worktree : listed) {
+            if (worktree.mainCheckout() || worktree.prunable()) {
+                continue;
             }
-            return listed;
+            CachedActivity cached = activityCache.get(worktree.path());
+            if (cached != null && cached.expiresAt() > now) {
+                continue;
+            }
+            try {
+                activityCache.put(worktree.path(),
+                        new CachedActivity(now + WORKTREE_CACHE_NANOS,
+                                worktrees.lastActivity(worktree.path())
+                                        .get(GIT_TIMEOUT_SECONDS, TimeUnit.SECONDS)));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            } catch (ExecutionException | TimeoutException | RuntimeException e) {
+                LOG.log(Level.DEBUG, () -> "No activity time for " + worktree.path() + ": " + e);
+            }
+        }
+    }
+
+    /** The fresh activity stamps, for the model's staleness display. */
+    private Map<Path, Instant> freshActivity() {
+        long now = System.nanoTime();
+        Map<Path, Instant> fresh = new HashMap<>();
+        activityCache.forEach((path, cached) -> {
+            if (cached.expiresAt() > now) {
+                fresh.put(path, cached.activity());
+            }
         });
+        return Map.copyOf(fresh);
     }
 
     /**
@@ -934,6 +966,7 @@ final class TaskTreeInputs implements AutoCloseable {
         Runnable unsubscribe = unsubscribeTasks;
         unsubscribeTasks = () -> { };
         unsubscribe.run();
+        badgeJoinExecutor.shutdown();
         worktrees.close();
         github.close();
         jira.close();

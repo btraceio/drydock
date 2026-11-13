@@ -3,6 +3,7 @@ package app.drydock.intellij.tasks;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.delayedtasks.TaskStoreWatcher.WatchedSnapshot;
 import app.drydock.domain.*;
+import app.drydock.git.GhCliService.OpenPullRequest;
 import app.drydock.tasks.*;
 import app.drydock.tasks.DelayedTaskTreeModel.*;
 import app.drydock.tasks.TaskNode.*;
@@ -119,8 +120,8 @@ class DelayedTaskRowsTest {
 
     /**
      * A row carries its repository's display slug from the same mapping the
-     * graph resolves references with: the hint a Tasks-section row needs to
-     * say which project it applies to. A mapping that names no repository
+     * graph resolves references with, so its tooltip can name the project
+     * across the inbox's state groups. A mapping that names no repository
      * yields no hint, never an invented name.
      */
     @Test
@@ -129,6 +130,19 @@ class DelayedTaskRowsTest {
         assertEquals("beta", byTitle(ROWS, "Beta blocker").project());
         List<DelayedTaskRow> unnamed = DelayedTaskRows.rows(WATCHED, LIVE, repository -> "  ", NOW);
         assertNull(byTitle(unnamed, "Free the harbour").project());
+        List<DelayedTaskRow> unknown = DelayedTaskRows.rows(WATCHED, LIVE, repository -> null, NOW);
+        assertNull(byTitle(unknown, "Free the harbour").project());
+    }
+
+    @Test
+    void linkingAPullRequestPreservesTheProjectSlug() {
+        DelayedTaskRow row = byTitle(ROWS, "Free the harbour");
+        OpenPullRequest pr = new OpenPullRequest(102, "Free the harbour", "dd/ready-zebra", "main", false,
+                Optional.empty(), Optional.of("https://github.com/o/r/pull/102"));
+        DelayedTaskRow linked = row.withPullRequest(pr);
+        assertEquals("alpha", linked.project());
+        assertEquals(Optional.of(pr), linked.pullRequest());
+        assertTrue(row.pullRequest().isEmpty(), "linking leaves the source row unchanged");
     }
 
     /** Matrix 1 and 4: D9-D11 placement, hints, broken and cyclic rows. */

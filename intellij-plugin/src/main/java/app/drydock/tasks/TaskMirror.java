@@ -8,12 +8,15 @@ import app.drydock.state.json.JsonValue.JsonString;
 import app.drydock.state.json.JsonWriter;
 
 import java.net.URI;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -168,6 +171,24 @@ public final class TaskMirror {
     /** Whether the task already has a mirror of {@code kind}. */
     public static boolean hasMirror(List<String> mirrors, Kind kind) {
         return mirrors.stream().anyMatch(url -> kindOf(url).filter(kind::equals).isPresent());
+    }
+
+    /**
+     * The addresses in order, each address once: two tasks may record the
+     * same mirror address ({@link #byMirror} keeps the first for the same
+     * reason), and a repeated address would paint a duplicate link and open
+     * a duplicate tab. Comparison is by {@link #normalize}, so two spellings
+     * of one page count as one address; the first spelling is kept.
+     */
+    public static List<String> uniqueByAddress(List<String> urls) {
+        Set<String> seen = new LinkedHashSet<>();
+        List<String> unique = new ArrayList<>();
+        for (String url : urls) {
+            if (seen.add(normalize(url))) {
+                unique.add(url);
+            }
+        }
+        return List.copyOf(unique);
     }
 
     /**

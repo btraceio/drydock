@@ -83,10 +83,17 @@ public final class NewTaskPlan {
      * appended to the prompt by {@link #initialPrompt(Choice)}; the tiers
      * themselves ride the launch chain so the launch records them, exactly
      * like the starting model.</p>
+     *
+     * <p>{@code onWorkspaceBox} is the dialog's per-launch remote offer (the
+     * workspace-box arm): true only when the user checked "Run on workspace
+     * box" while every gating condition held. The convenience constructor
+     * below keeps it false for every pre-existing construction site, so every
+     * launch that does not come from a gated New task dialog checkbox is a
+     * local launch byte-identical to before.</p>
      */
     public record Choice(String name, Optional<String> instructions, AgentKind agent, SessionMode mode, WorkIn workIn,
                          String branch, String start, Path folder, OpenIn openIn, Optional<String> model,
-                         Optional<ModelTiers> tiers, Optional<String> subagentModelRule) {
+                         Optional<ModelTiers> tiers, Optional<String> subagentModelRule, boolean onWorkspaceBox) {
         public Choice {
             Objects.requireNonNull(name, "name");
             Objects.requireNonNull(instructions, "instructions");
@@ -95,6 +102,15 @@ public final class NewTaskPlan {
             Objects.requireNonNull(model, "model");
             Objects.requireNonNull(tiers, "tiers");
             Objects.requireNonNull(subagentModelRule, "subagentModelRule");
+        }
+
+        /** Today's signature, delegating with {@code onWorkspaceBox = false}: a launch that
+         * never saw the checkbox is a local launch, exactly as before the component existed. */
+        public Choice(String name, Optional<String> instructions, AgentKind agent, SessionMode mode, WorkIn workIn,
+                      String branch, String start, Path folder, OpenIn openIn, Optional<String> model,
+                      Optional<ModelTiers> tiers, Optional<String> subagentModelRule) {
+            this(name, instructions, agent, mode, workIn, branch, start, folder, openIn, model, tiers,
+                    subagentModelRule, false);
         }
     }
 

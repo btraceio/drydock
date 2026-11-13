@@ -1,8 +1,13 @@
 package app.drydock.intellij.agent;
 
+import app.drydock.domain.ManagedAgentSession;
+import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.SessionActivity;
 
+import java.util.List;
 import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * Every decision and string of the quit confirmation ("Deactivate n
@@ -42,6 +47,27 @@ public final class StopAgentsPlan {
             case BUSY, UNKNOWN -> true;
             case IDLE, NEEDS_ATTENTION -> false;
         };
+    }
+
+    /**
+     * The running sessions a close or quit question counts: the local ones.
+     *
+     * <p>A session bound to a workspace box runs in the box-side tmux, which
+     * outlives the IDE: a window close — either answer — and a quit all end
+     * only its ssh client, and the agent keeps running on the box. Both
+     * questions ask the user to agree to deactivating agents, so each counts
+     * no agent it would not deactivate — a workspace-box session is absent
+     * from every count, and local rows count exactly as before.</p>
+     */
+    public static List<ManagedSessionId> countedOnClose(List<ManagedSessionId> running,
+                                                        List<ManagedAgentSession> sessions) {
+        Set<ManagedSessionId> onBox = sessions.stream()
+                .filter(session -> session.workspaceBox().isPresent())
+                .map(ManagedAgentSession::id)
+                .collect(Collectors.toUnmodifiableSet());
+        return running.stream()
+                .filter(id -> !onBox.contains(id))
+                .toList();
     }
 
     /** {@code Deactivate 1 working agent?} / {@code Deactivate 3 working agents?} */

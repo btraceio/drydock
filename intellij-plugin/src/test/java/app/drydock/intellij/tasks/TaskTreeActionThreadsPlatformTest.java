@@ -4,11 +4,16 @@ import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.AgentBinding;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.PrLink;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionMode;
+import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
+import app.drydock.intellij.DrydockPluginService;
+import app.drydock.intellij.IsolatedCatalog;
 import app.drydock.intellij.delayedtasks.DelayedTaskActions;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
+import app.drydock.projects.SharedProject;
 import app.drydock.tasks.TaskId;
 import app.drydock.tasks.TaskNode.DelayedTaskRow;
 import app.drydock.tasks.TaskNode.TasksSection;
@@ -26,13 +31,21 @@ import com.intellij.openapi.actionSystem.Separator;
 import com.intellij.openapi.actionSystem.impl.SimpleDataContext;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.project.DumbAwareAction;
+import com.intellij.openapi.util.Disposer;
+import com.intellij.testFramework.PlatformTestUtil;
 import com.intellij.testFramework.fixtures.BasePlatformTestCase;
+import com.intellij.util.TimeoutUtil;
 
 import org.jetbrains.annotations.NotNull;
 
+import javax.swing.JTree;
+
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -40,6 +53,8 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
+import java.util.stream.Stream;
 
 /**
  * The task tree's actions and its context-menu group update on a background
@@ -48,10 +63,13 @@ import java.util.concurrent.TimeUnit;
  * alone. A Swing read or an EDT assertion left in those paths would throw or
  * deadlock here (the test thread is the EDT, blocked on the pooled one).
  *
- * <p>No catalog writes and no {@code DrydockPluginService} reads: the task
- * actions read only the memory-only execution registry and transfer table,
- * the Jira predicate is a recording stub, and no Jira update here reaches a
- * project root. No agent is launched; nothing is rendered.</p>
+ * <p>Most of the suite reads no catalog and no {@code DrydockPluginService}:
+ * the task actions read only the memory-only execution registry and transfer
+ * table, the Jira predicate is a recording stub, and no Jira update here
+ * reaches a project root. The jump-action test is the exception: the jump
+ * actions are per-panel instances, so it boots the real panel over the
+ * plugin's services (sandboxed catalog, no second IDE boot) and seeds one
+ * session row. No agent is launched; nothing is rendered.</p>
  */
 public class TaskTreeActionThreadsPlatformTest extends BasePlatformTestCase {
 
@@ -100,17 +118,103 @@ public class TaskTreeActionThreadsPlatformTest extends BasePlatformTestCase {
         }
     }
 
+    /**
+     * The jump actions update off the EDT from the event's data keys alone.
+     * They are per-panel instances, so this boots the real panel over the
+     * plugin's services and seeds one session row. The inbox's live selection
+     * is left on the session row while the event names a delayed-task row:
+     * the two disagree, so an update() that read the live selection instead
+     * of the data keys would resolve a different lead and fail the session
+     * jump's enabled answer.
+     */
+    public void testTheJumpActionsUpdateOffTheEdtFromTheEventDataKeys() throws Exception {
+        IsolatedCatalog.assertSandboxed(); // before anything can touch the plugin (T14 discipline)
+        DrydockPluginService plugin = DrydockPluginService.getInstance();
+        try { plugin.initialization().get(60, TimeUnit.SECONDS); }
+        catch (Exception e) { fail("Drydock initialization did not complete within 60 s: " + e); }
+        Path repoRoot = Files.createTempDirectory("drydock-jump-threads-");
+        SharedProject registered = plugin.sharedProjects().register(repoRoot,
+                "jump-threads-" + System.nanoTime()).get(30, TimeUnit.SECONDS);
+        ManagedSessionId sessionId = ManagedSessionId.newId();
+        Instant anHourAgo = Instant.now().minusSeconds(3_600);
+        IsolatedCatalog.seed(new ManagedAgentSession(sessionId, RepositoryId.newId(),
+                "session the jump actions name", AgentBinding.unlaunched(AgentKind.CLAUDE),
+                new SessionWorkspace(repoRoot, Optional.empty(), false), SessionStatus.INACTIVE,
+                anHourAgo, anHourAgo, Optional.empty(), PrLink.none(), false, Optional.empty(), false));
+        // The light project is shared across cases: start every panel from no saved view.
+        InboxViewState.getInstance(getProject()).loadState(new InboxViewState.Stored());
+        TaskTreePanel panel = new TaskTreePanel(getProject());
+        JTree tree = panel.tree();
+        InboxList inbox = panel.inbox();
+        // The seeded session is stopped: its row is in the Idle group, collapsed by default.
+        inbox.toggleCollapsed(InboxModel.GroupKind.IDLE);
+        // Headless harness: nothing paints, so the tree keeps no UI (see
+        // DelayedTaskTreePlatformTest.setUp for the production path this avoids).
+        tree.setUI(null);
+        try {
+            awaitTree(() -> inbox.select(value -> value instanceof TaskNode.TaskRow row
+                    && row.session().id().equals(sessionId)), "the seeded session's inbox row, selected");
+
+            AnAction showSession = panel.showLinkedAction(TaskTreePanel.ShowKind.SESSION,
+                    "Show Session", "Reveal the session row this pull request belongs to");
+            AnAction showTask = panel.showLinkedAction(TaskTreePanel.ShowKind.TASK,
+                    "Show Task", "Reveal the task row this row is linked to");
+            AnAction showPullRequest = panel.showLinkedAction(TaskTreePanel.ShowKind.PULL_REQUEST,
+                    "Show Pull Request", "Reveal the pull request this row works");
+            for (AnAction action : List.of(showSession, showTask, showPullRequest)) {
+                assertEquals(ActionUpdateThread.BGT, action.getActionUpdateThread());
+            }
+
+            // A delayed-task row naming the displayed session, carried by the
+            // event's data key alone: the session jump resolves from it on a
+            // background thread while the EDT stays blocked. The selected
+            // session row is a different lead -- a Swing read would answer
+            // from it, and no session row links to a session.
+            DelayedTaskRow task = delayedTaskRow(sessionId);
+            AnActionEvent named = event(SimpleDataContext.builder()
+                    .add(CommonDataKeys.PROJECT, getProject())
+                    .add(DelayedTaskActions.SELECTED_TASK, task));
+            offEdt(() -> { showSession.update(named); return null; });
+            assertTrue("the session jump resolves from the event's SELECTED_TASK key, not the tree selection",
+                    named.getPresentation().isEnabled());
+            assertTrue(named.getPresentation().isVisible());
+            offEdt(() -> { showPullRequest.update(named); return null; });
+            assertFalse("no pull request is shown for this task's repository",
+                    named.getPresentation().isEnabled());
+            assertFalse(named.getPresentation().isVisible());
+
+            // No key names a lead: every jump disables even though the tree
+            // still shows a selected session row -- update() must not consult it.
+            for (AnAction action : List.of(showSession, showTask, showPullRequest)) {
+                AnActionEvent bare = event(SimpleDataContext.builder()
+                        .add(CommonDataKeys.PROJECT, getProject()));
+                offEdt(() -> { action.update(bare); return null; });
+                assertFalse("no lead named: the jump disables without reading the selection",
+                        bare.getPresentation().isEnabled());
+                assertFalse(bare.getPresentation().isVisible());
+            }
+        } finally {
+            try { Disposer.dispose(panel); } catch (RuntimeException e) { }
+            try { IsolatedCatalog.remove(sessionId); } catch (RuntimeException e) { }
+            try { plugin.sharedProjects().remove(registered.id()).get(30, TimeUnit.SECONDS); }
+            catch (Exception e) { }
+            delete(repoRoot);
+        }
+    }
+
     public void testTheContextMenuIsBuiltOffTheEdtFromTheEventData() throws Exception {
         Map<TaskMenu.Item, AnAction> actions = TaskActions.taskActions();
         AnAction[] delayed = { stub("Delayed") };
         AnAction newDelayed = stub("New Delayed");
         AnAction refreshTasks = stub("Refresh Tasks");
+        AnAction workspaceBox = stub("Workspace Box…");
         List<Path> jiraQueries = new ArrayList<>();
-        TaskTreePanel.TreeMenu menu = new TaskTreePanel.TreeMenu(actions, delayed, newDelayed, refreshTasks,
+        TaskTreePanel.TreeMenu menu = new TaskTreePanel.TreeMenu(actions, workspaceBox, delayed, newDelayed,
+                refreshTasks,
                 root -> {
             jiraQueries.add(root);
             return false;
-        });
+        }, () -> List.<TaskNode>of(), () -> TaskTreePanel.TaskLayer.EMPTY, () -> null);
         assertEquals(ActionUpdateThread.BGT, menu.getActionUpdateThread());
 
         // A delayed-task row carries its own layer's actions.
@@ -188,5 +292,31 @@ public class TaskTreeActionThreadsPlatformTest extends BasePlatformTestCase {
     private static DelayedTaskRow delayedRow() {
         return new DelayedTaskRow(new TaskView(TaskId.of("fix-alloc-k3f9"), TaskState.Presentation.values()[0],
                 List.of(), List.of()), "Fix allocation", RepositoryId.newId(), Optional.empty(), false, List.of());
+    }
+
+    /** A delayed-task row whose stored sessions name the given session. */
+    private static DelayedTaskRow delayedTaskRow(ManagedSessionId sessionId) {
+        return new DelayedTaskRow(new TaskView(TaskId.of("fix-alloc-k3f9"), TaskState.Presentation.values()[0],
+                List.of(), List.of()), "Fix allocation", RepositoryId.newId(), Optional.empty(), false,
+                List.of(sessionId.toString()));
+    }
+
+    /** Pumps the EDT until {@code state} holds or the deadline passes. */
+    private static void awaitTree(BooleanSupplier state, String what) {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+        while (!state.getAsBoolean()) {
+            assertTrue(what + " did not arrive within 20 s", System.nanoTime() < deadline);
+            for (int i = 0; i < 3; i++) {
+                PlatformTestUtil.dispatchAllEventsInIdeEventQueue();
+                TimeoutUtil.sleep(20);
+            }
+        }
+    }
+
+    private static void delete(Path directory) {
+        try (Stream<Path> entries = Files.walk(directory)) {
+            entries.sorted(Comparator.reverseOrder()).forEach(
+                    p -> { try { Files.deleteIfExists(p); } catch (IOException e) { } });
+        } catch (IOException ignored) { }
     }
 }

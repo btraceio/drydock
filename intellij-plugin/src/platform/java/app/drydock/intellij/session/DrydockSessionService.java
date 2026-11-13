@@ -8,6 +8,7 @@ import app.drydock.agent.api.CreateContext;
 import app.drydock.agent.api.LaunchPlan;
 import app.drydock.agent.api.LaunchResources;
 import app.drydock.agent.api.McpAccess;
+import app.drydock.agent.api.RemotePersistence;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdDiscovery;
 import app.drydock.agent.api.SessionIdStrategy;
@@ -28,6 +29,7 @@ import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionStatusFacet;
 import app.drydock.domain.SessionWorkspace;
+import app.drydock.domain.WorkspaceBoxBinding;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.DrydockSessionsListener;
 import app.drydock.intellij.agent.AgentConsoleHost;
@@ -37,6 +39,8 @@ import app.drydock.intellij.agent.LaunchClaims;
 import app.drydock.intellij.mcp.IdeMcpServer;
 import app.drydock.intellij.project.ProjectRepositoryService;
 import app.drydock.intellij.review.SessionMcpAccess;
+import app.drydock.intellij.workspace.RemoteSessionLiveness;
+import app.drydock.intellij.workspace.WorkspaceSettings;
 import app.drydock.mcp.McpSessionContext;
 import app.drydock.mcp.McpSessionContext.RenameKind;
 import app.drydock.mcp.McpSessionContext.RenameOutcome;
@@ -45,6 +49,13 @@ import app.drydock.mcp.PromptSafety;
 import app.drydock.process.ProcessResult;
 import app.drydock.process.ProcessRunner;
 import app.drydock.tasks.TaskGuidance;
+import app.drydock.workspace.BoxShell;
+import app.drydock.workspace.CommandRunner;
+import app.drydock.workspace.WorkspacesCli;
+
+import com.intellij.openapi.application.ApplicationManager;
+import com.intellij.openapi.application.ModalityState;
+import com.intellij.openapi.ui.Messages;
 
 import java.io.IOException;
 import java.lang.System.Logger;
@@ -54,6 +65,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -62,9 +74,13 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -76,7 +92,12 @@ import java.util.function.Supplier;
  * core SPI. Drydock MCP access is minted per launch through
  * {@link SessionMcpAccess} and released when the agent ends
  * ({@link SessionEnds}), when a launch fails before reaching a process, and
- * when the session is forgotten. Remote launches, diagnostic command
+ * when the session is forgotten. Remote launches run on workspace boxes
+ * ({@link WorkspaceBoxBinding}): create and resume attach to a box-side tmux
+ * session, and the explicit Stop ({@link #stopSession}) and the explicit
+ * Forget ({@link #deleteSession}) are the only paths that may issue
+ * {@code tmux kill-session} on it (D1) — Start, transfer and the Done flow
+ * refuse a remote row, each with a named reason. Diagnostic command
  * overrides, eval marking and the handoff paths are absent by design.
  *
  * <p>Threading (AC7/AC12): every blocking step — the pre-spawn id-store
@@ -136,6 +157,9 @@ public final class DrydockSessionService implements AgentExecutionListener {
     private static final String RESUME_PROMPT = "You are resuming this task in a fresh session. "
             + "Re-orient from the conversation history and continue the work where you left off.";
 
+    /** How long a remote Forget waits for the user's answer to its confirm dialog. */
+    private static final long CONFIRM_TIMEOUT_MINUTES = 30;
+
     private final CompletableFuture<Void> initialization;
     private final Supplier<ApplicationStateStore> stateStore;
     private final Supplier<AgentRegistry> registry;
@@ -168,11 +192,53 @@ public final class DrydockSessionService implements AgentExecutionListener {
      */
     private final TaskLaunchResources taskLaunchResources;
 
+    /** Whether workspace-box sessions are opted in (Settings › Tools › Drydock). */
+    private final BooleanSupplier workspaceSessionsEnabled;
+
+    /** The batch ssh seam a remote resume probes the box through. */
+    private final BoxShell boxShell;
+
+    /** The read-only `workspaces list` seam that classifies a failed probe. */
+    private final WorkspacesCli workspacesCli;
+
+    /**
+     * The requested-client-end coordination for remote rows: which end this
+     * IDE asked for — an explicit Stop or a close — so the end recorder
+     * settles by origin instead of by the bare stop-requested flag. Shared
+     * through the registry because the window that requests an end and the
+     * window whose recorder delivers it can differ.
+     */
+    private final AgentExecutionRegistry.RemoteClientEnds clientEnds;
+
+    /** The detached-remote liveness map a refused resume records its verdict in. */
+    private final RemoteSessionLiveness remoteLiveness;
+
+    /**
+     * Asks the user one Yes/No question about a remote row — the Forget
+     * confirm a kill-session could not settle. Production hops to the EDT
+     * and shows a {@code Messages} dialog; tests inject a fake through the
+     * full seam.
+     */
+    private final Function<String, CompletableFuture<Boolean>> remoteConfirm;
+
+    /**
+     * The one environment variable every box-side agent carries: all LLM
+     * traffic goes to the box-local gateway-only proxy (OQ8, the contract's
+     * `RemotePersistence(id, {ANTHROPIC_BASE_URL})`).
+     */
+    private static final String BOX_PROXY_BASE_URL = "http://127.0.0.1:4000";
+
+    /** The immutable agent environment every remote launch renders, in sorted key order. */
+    private static final Map<String, String> BOX_AGENT_ENV = Map.of("ANTHROPIC_BASE_URL", BOX_PROXY_BASE_URL);
+
     public DrydockSessionService(DrydockPluginService plugin, AgentConsoleHost consoles,
             ProjectRepositoryService repos, ExecutorService executor) {
         this(plugin.initialization(), plugin::stateStore, plugin::registry, plugin::watcher,
                 repos::repositoryIdFor, consoles, executor, IdeMcpServer::forWorktree, plugin.reviewAccess(),
-                AgentExecutionRegistry.getInstance().launchClaims(), taskLaunchResources(plugin));
+                AgentExecutionRegistry.getInstance().launchClaims(), taskLaunchResources(plugin),
+                WorkspaceSettings::enabled, new BoxShell(CommandRunner.PRODUCTION),
+                new WorkspacesCli(CommandRunner.PRODUCTION), plugin.remoteSessionLiveness(),
+                DrydockSessionService::askOnEdt, AgentExecutionRegistry.getInstance().remoteClientEnds());
     }
 
     /**
@@ -214,6 +280,34 @@ public final class DrydockSessionService implements AgentExecutionListener {
             AgentConsoleHost consoles, ExecutorService executor,
             Function<Path, List<StdioMcpServer>> stdioMcpServers, SessionMcpAccess mcpAccess,
             LaunchClaims claims, TaskLaunchResources taskLaunchResources) {
+        this(initialization, stateStore, registry, watcher, repositoryIdFor, consoles, executor,
+                stdioMcpServers, mcpAccess, claims, taskLaunchResources, () -> false,
+                new BoxShell(CommandRunner.PRODUCTION), new WorkspacesCli(CommandRunner.PRODUCTION),
+                new RemoteSessionLiveness(), DrydockSessionService::askOnEdt,
+                AgentExecutionRegistry.RemoteClientEnds.INERT);
+    }
+
+    /**
+     * The full seam, with the workspace-box components a remote row's create
+     * and resume need: the opt-in flag (a seam so plain unit tests answer it
+     * without the IDE's application; production wires {@code
+     * WorkspaceSettings::enabled}), the batch ssh and {@code workspaces list}
+     * seams, the detached-remote liveness map, the remote Forget's
+     * user-confirm seam, and the requested-client-end coordination the
+     * Stop and close paths mark and the end settle settles by. For a local
+     * row none of these is ever consulted, so every pre-workspace-box
+     * construction site is byte-identical to before (INV-1).
+     */
+    DrydockSessionService(CompletableFuture<Void> initialization, Supplier<ApplicationStateStore> stateStore,
+            Supplier<AgentRegistry> registry, Supplier<SessionActivityWatcher> watcher,
+            Function<Path, CompletableFuture<RepositoryId>> repositoryIdFor,
+            AgentConsoleHost consoles, ExecutorService executor,
+            Function<Path, List<StdioMcpServer>> stdioMcpServers, SessionMcpAccess mcpAccess,
+            LaunchClaims claims, TaskLaunchResources taskLaunchResources,
+            BooleanSupplier workspaceSessionsEnabled, BoxShell boxShell, WorkspacesCli workspacesCli,
+            RemoteSessionLiveness remoteLiveness,
+            Function<String, CompletableFuture<Boolean>> remoteConfirm,
+            AgentExecutionRegistry.RemoteClientEnds clientEnds) {
         this.initialization = Objects.requireNonNull(initialization, "initialization");
         this.stateStore = Objects.requireNonNull(stateStore, "stateStore");
         this.registry = Objects.requireNonNull(registry, "registry");
@@ -225,7 +319,14 @@ public final class DrydockSessionService implements AgentExecutionListener {
         this.mcpAccess = Objects.requireNonNull(mcpAccess, "mcpAccess");
         this.claims = Objects.requireNonNull(claims, "claims");
         this.taskLaunchResources = taskLaunchResources;
-        this.ends = new SessionEnds(stateStore, registry, executor, mcpAccess, claims);
+        this.workspaceSessionsEnabled = Objects.requireNonNull(workspaceSessionsEnabled, "workspaceSessionsEnabled");
+        this.boxShell = Objects.requireNonNull(boxShell, "boxShell");
+        this.workspacesCli = Objects.requireNonNull(workspacesCli, "workspacesCli");
+        this.remoteLiveness = Objects.requireNonNull(remoteLiveness, "remoteLiveness");
+        this.remoteConfirm = Objects.requireNonNull(remoteConfirm, "remoteConfirm");
+        this.clientEnds = Objects.requireNonNull(clientEnds, "clientEnds");
+        this.ends = new SessionEnds(stateStore, registry, executor, mcpAccess, claims, boxShell,
+                () -> remoteLiveness, clientEnds);
     }
 
     // ---- create flow ---------------------------------------------------------
@@ -257,15 +358,32 @@ public final class DrydockSessionService implements AgentExecutionListener {
      */
     public CompletableFuture<ManagedAgentSession> prepareSession(Path repoRoot, Path repositoryRoot, AgentKind kind,
             String displayName, SessionMode mode) {
+        return prepareSession(repoRoot, repositoryRoot, kind, displayName, mode, Optional.empty());
+    }
+
+    /**
+     * As above, but the session runs on the workspace box {@code workspaceBox}
+     * names: a <em>remote</em> row. The binding is the row's single source of
+     * remote truth -- it derives the working directory the row stores (the
+     * binding's deterministic placeholder root), the {@code SshRemote} every
+     * launch context carries, and the tmux session the agent lives in. An
+     * empty binding is every local launch, exactly as before (INV-1). The
+     * launch itself still happens through {@link #launchSession}, which keys
+     * on the row's binding the same way.
+     */
+    public CompletableFuture<ManagedAgentSession> prepareSession(Path repoRoot, Path repositoryRoot, AgentKind kind,
+            String displayName, SessionMode mode, Optional<WorkspaceBoxBinding> workspaceBox) {
         Objects.requireNonNull(repoRoot, "repoRoot");
         Objects.requireNonNull(repositoryRoot, "repositoryRoot");
         Objects.requireNonNull(kind, "kind");
         Objects.requireNonNull(displayName, "displayName");
         Objects.requireNonNull(mode, "mode");
+        Objects.requireNonNull(workspaceBox, "workspaceBox");
         Path workingDirectory = repoRoot.toAbsolutePath().normalize();
         return repositoryIdFor.apply(repositoryRoot.toAbsolutePath().normalize())
                 .thenApplyAsync(
-                        repositoryId -> newSessionMetadata(repositoryId, workingDirectory, kind, displayName, mode),
+                        repositoryId -> newSessionMetadata(repositoryId, workingDirectory, kind, displayName,
+                                mode, workspaceBox),
                         executor);
     }
 
@@ -360,6 +478,13 @@ public final class DrydockSessionService implements AgentExecutionListener {
     private CompletableFuture<ManagedAgentSession> transferClaimed(ManagedSessionId sessionId,
                                                                    AgentKind targetKind) {
         ManagedAgentSession source = requireSession(sessionId);
+        // A remote row's conversation lives on its box; a transfer would
+        // summarize it into a local agent that cannot see the box's files.
+        if (source.workspaceBox().isPresent()) {
+            throw new IllegalStateException("Session '" + source.displayName()
+                    + "' runs on workspace box '" + source.workspaceBox().orElseThrow().boxName()
+                    + "'; its conversation lives there and cannot be transferred to a local agent");
+        }
         if (source.agentKind() == AgentKind.TERMINAL || targetKind == AgentKind.TERMINAL) {
             throw new IllegalStateException("Terminal sessions cannot be transferred");
         }
@@ -581,9 +706,15 @@ public final class DrydockSessionService implements AgentExecutionListener {
             try {
                 started = startLaunch(prepared, provider, initialPrompt, model, tiers, rowMustExist);
             } catch (RuntimeException failure) {
-                // The session row exists from here on (persistNewSession ran),
-                // so the failure must be visible in the persisted state too.
-                persistFailedBestEffort(prepared);
+                // The session row exists from here on for a local launch
+                // (its persist ran first), so the failure must be visible in
+                // the persisted state too. A refused REMOTE launch threw
+                // before its row ever persisted (INV-16) -- its refusal type
+                // says so -- and persisting FAILED then would write the row
+                // the refusal refused to create.
+                if (!(failure instanceof RemoteLaunchRefusal)) {
+                    persistFailedBestEffort(prepared);
+                }
                 throw failure;
             }
             launched = started.openFuture().handleAsync((ignored, ex) -> finalizeCreate(started, ex), executor);
@@ -602,14 +733,33 @@ public final class DrydockSessionService implements AgentExecutionListener {
 
     /**
      * Ends {@code id}'s launch claim and releases its MCP access unless the
-     * session has a live execution; see {@link LaunchClaims#finish}.
+     * session has a live execution; see {@link LaunchClaims#finish}. With
+     * the claim gone, a remote settle the claim deferred — the early end of
+     * the launch's own ssh client — is re-applied: a completed launch must
+     * not leave RUNNING persisted when this IDE owns no live ssh execution
+     * (INV-4).
      */
     private void endClaim(ManagedSessionId id) {
         claims.finish(id, () -> releaseMcpAccess(id));
+        ends.settleDeferredRemoteEnd(id);
     }
 
     private static IllegalStateException launchRefused(ManagedSessionId id) {
         return new IllegalStateException("Session " + id + " already has a running agent or a launch in progress");
+    }
+
+    /**
+     * A remote launch's pre-persist refusal (INV-16): thrown at a point
+     * where the row was never persisted, so the launch's failure handling
+     * must not write the FAILED row the refusal refused to create. Carries
+     * IllegalStateException semantics like every other launch refusal; the
+     * type exists only to tell {@code launchPrepared}'s catch apart the
+     * paths that persisted nothing.
+     */
+    static final class RemoteLaunchRefusal extends IllegalStateException {
+        RemoteLaunchRefusal(String message) {
+            super(message);
+        }
     }
 
     /** Everything that must happen before the process spawns. */
@@ -617,6 +767,10 @@ public final class DrydockSessionService implements AgentExecutionListener {
                                       Optional<String> initialPrompt, Optional<String> model,
                                       Optional<ModelTiers> tiers,
                                       boolean rowMustExist) {
+        Optional<WorkspaceBoxBinding> box = prepared.workspaceBox();
+        if (box.isPresent()) {
+            return startRemoteLaunch(prepared, box.get(), provider, initialPrompt, model, tiers, rowMustExist);
+        }
         if (rowMustExist) {
             // A fresh start read the row before it claimed the session; a
             // delete that finished in between removed it, and an upsert here
@@ -668,6 +822,86 @@ public final class DrydockSessionService implements AgentExecutionListener {
         CompletableFuture<Void> open = consoles.startConsole(prepared.id(), cwd, plan);
         return new StartedLaunch(prepared, discovery, snapshot, launchedAt, generatedId, sessionIdUsed, model,
                 tiers, open);
+    }
+
+    /**
+     * The workspace-box create, keyed on the row's binding: everything a
+     * local {@link #startLaunch} does, reordered so that <em>every</em>
+     * refusal happens before the row is persisted, anything is minted, or
+     * anything is spawned (INV-16).
+     *
+     * <p>Only Claude runs on a box, and the refusal names the agent. The
+     * launch resources are resolved with an <em>empty</em> MCP access — no
+     * mint ever happens for a remote launch (INV-15) — and anything that
+     * resolves is a host path the box cannot see, so a resource-bound launch
+     * is refused, naming the agent, rather than silently dropping the
+     * session's task context. The context carries the binding-derived remote,
+     * the {@link RemotePersistence} with the box-local proxy base URL, an
+     * empty MCP access and no stdio MCP servers. Only after the provider
+     * accepts the context does the row persist and the console open; its cwd
+     * is a directory that exists on <em>this</em> Mac (the repository's local
+     * root, else the user's home), never the box placeholder the row stores
+     * (REJ-18). {@code finalizeCreate} is unchanged: the generated UUID rides
+     * the plan, so the row persists its {@code agentSessionId} on success.</p>
+     */
+    private StartedLaunch startRemoteLaunch(ManagedAgentSession prepared, WorkspaceBoxBinding box,
+                                             AgentProvider provider, Optional<String> initialPrompt,
+                                             Optional<String> model, Optional<ModelTiers> tiers,
+                                             boolean rowMustExist) {
+        if (prepared.agentKind() != AgentKind.CLAUDE) {
+            throw new RemoteLaunchRefusal(kindName(prepared.agentKind())
+                    + " cannot run on a workspace box; only Claude sessions can");
+        }
+        Optional<LaunchResources> resources = launchResourcesFor(prepared.id(), Optional.empty());
+        if (resources.isPresent()) {
+            throw new RemoteLaunchRefusal(kindName(prepared.agentKind())
+                    + " cannot take this session's task resources onto a workspace box");
+        }
+        String generatedId = UUID.randomUUID().toString();
+        CreateContext ctx = new CreateContext(prepared.displayName(), generatedId,
+                prepared.workingDirectory(), Optional.of(box.sshRemote()), Optional.empty(), model,
+                false, prepared.readOnly(), initialPrompt, List.of())
+                .withPersistence(new RemotePersistence(prepared.id(), BOX_AGENT_ENV));
+        LaunchPlan plan = provider.buildCreateCommand(ctx);
+        if (!plan.supported()) {
+            throw new RemoteLaunchRefusal(kindName(provider.kind())
+                    + " cannot launch this session (unsupported context)");
+        }
+        boolean sessionIdUsed = plan.sessionIdUsed() && plan.command().contains(generatedId);
+        if (rowMustExist) {
+            // The same forgotten-row guard as the local path: a delete that
+            // finished between the read and the claim must not resurrect.
+            if (!replaceExistingSession(prepared)) {
+                throw new IllegalStateException("Session " + prepared.id() + " was forgotten before it started");
+            }
+        } else {
+            persistSession(prepared);
+        }
+        Instant launchedAt = Instant.now();
+        ends.lastLaunchedAt().put(prepared.id(), launchedAt);
+        // A new client is about to exist: any requested-client-end mark still
+        // pending for the id belongs to an earlier client's end and must not
+        // steer this launch's.
+        clientEnds.clear(prepared.id());
+        CompletableFuture<Void> open = consoles.startConsole(prepared.id(), consoleCwdFor(prepared), plan);
+        return new StartedLaunch(prepared, Optional.empty(), null, launchedAt, generatedId, sessionIdUsed,
+                model, tiers, open);
+    }
+
+    /**
+     * The directory a remote row's console opens in: the session repository's
+     * local root when one is recorded and still exists on this Mac, else the
+     * user's home. The execution host needs a real local directory for the
+     * ssh client's PTY; the row's own working directory is the box-side
+     * placeholder, which does not exist here.
+     */
+    private Path consoleCwdFor(ManagedAgentSession session) {
+        return stateStore.get().state().repositories().stream()
+                .filter(repository -> repository.id().equals(session.repositoryId()))
+                .findFirst()
+                .map(Repository::root)
+                .filter(Files::isDirectory)
+                .orElseGet(() -> Path.of(System.getProperty("user.home", "/")));
     }
 
     private ManagedAgentSession finalizeCreate(StartedLaunch started, Throwable failure) {
@@ -850,13 +1084,28 @@ public final class DrydockSessionService implements AgentExecutionListener {
                 .thenApplyAsync(unused -> {
                     ends.seedClaimedIdsOnce();
                     ManagedAgentSession stored = requireSession(sessionId);
+                    // A remote row ALWAYS resumes (AC-11): its conversation
+                    // lives on the box, not in any local transcript store,
+                    // and its working directory is a placeholder this Mac
+                    // never had. The local-only probes below -- the late bind
+                    // and the transcript check -- must not decide anything
+                    // for it (INV-14), and a fresh create would strand the
+                    // box-side conversation the row names.
+                    if (stored.workspaceBox().isPresent()) {
+                        return stored;
+                    }
                     return stored.agentSessionId().isPresent()
                             ? stored
                             : Optional.ofNullable(ends.lateBindAgentSessionId(sessionId)).orElse(stored);
                 }, executor)
-                .thenComposeAsync(session -> session.agentSessionId().isPresent() && !nothingRecordedUnder(session)
-                        ? resumePrepared(session)
-                        : launchFreshOnExistingRow(session), executor);
+                .thenComposeAsync(session -> {
+                    if (session.workspaceBox().isPresent()) {
+                        return resumePrepared(session);
+                    }
+                    return session.agentSessionId().isPresent() && !nothingRecordedUnder(session)
+                            ? resumePrepared(session)
+                            : launchFreshOnExistingRow(session);
+                }, executor);
     }
 
     /**
@@ -892,7 +1141,16 @@ public final class DrydockSessionService implements AgentExecutionListener {
         return initialization
                 .thenApplyAsync(unused -> {
                     ends.seedClaimedIdsOnce();
-                    return prepareFreshOnExistingRow(requireSession(sessionId));
+                    ManagedAgentSession stored = requireSession(sessionId);
+                    // A remote row never starts fresh: its conversation lives
+                    // in the box's tmux session, and a fresh local conversation
+                    // would strand it. It always resumes (AC-11's other side).
+                    if (stored.workspaceBox().isPresent()) {
+                        throw new IllegalStateException("Session '" + stored.displayName()
+                                + "' runs on workspace box '" + stored.workspaceBox().orElseThrow().boxName()
+                                + "'; it can only be resumed there, never started fresh here");
+                    }
+                    return prepareFreshOnExistingRow(stored);
                 }, executor)
                 // No task: it was only ever the create dialog's input, and is
                 // not kept on the row.
@@ -949,6 +1207,12 @@ public final class DrydockSessionService implements AgentExecutionListener {
         // run the wrong agent (the app's checkResumeBlocked guard).
         if (prepared.status() == SessionStatus.UNSUPPORTED_AGENT) {
             return CompletableFuture.completedFuture(prepared);
+        }
+        // A remote row attaches to its box-side tmux session; the local
+        // resume below -- the working-directory probe, the late bind, the
+        // MCP mint -- never runs for it.
+        if (prepared.workspaceBox().isPresent()) {
+            return resumeRemotePrepared(prepared);
         }
         // Claimed before the late bind, the persist and the mint: a refused
         // resume must not touch the row, the token or the credential file of
@@ -1027,6 +1291,153 @@ public final class DrydockSessionService implements AgentExecutionListener {
         }
         return open
                 .handleAsync((ignored, ex) -> finalizeResume(session, ex), executor);
+    }
+
+    /**
+     * The remote resume's claim wrapper: the flag-off refusal (INV-31) happens
+     * before the claim -- it is a cheap local answer that must never open a
+     * box or fall through to a local launch -- and everything else mirrors
+     * {@link #resumePrepared}'s claim lifetime.
+     */
+    private CompletableFuture<ManagedAgentSession> resumeRemotePrepared(ManagedAgentSession prepared) {
+        if (!workspaceSessionsEnabled.getAsBoolean()) {
+            throw new IllegalStateException(
+                    "Workspace sessions are turned off in Settings › Tools › Drydock");
+        }
+        if (!claims.tryClaim(prepared.id())) {
+            throw launchRefused(prepared.id());
+        }
+        CompletableFuture<ManagedAgentSession> resumed;
+        try {
+            resumed = resumeRemoteClaimed(prepared);
+        } catch (RuntimeException | Error e) {
+            endClaim(prepared.id());
+            throw e;
+        }
+        return resumed.whenComplete((ignored, ex) -> endClaim(prepared.id()));
+    }
+
+    /**
+     * The workspace-box resume: attach to the row's box-side tmux session.
+     *
+     * <p>None of the local-only probes that guard a local resume runs here
+     * (INV-14): no {@code Files.notExists} on the placeholder working
+     * directory, no transcript look-up, no late bind, no MCP mint (INV-15),
+     * no stdio MCP servers, no launch-resources resolution. One batch ssh
+     * probe proves the box reachable first; a failed probe classifies the
+     * box through {@code workspaces list} and refuses <em>without persisting
+     * FAILED</em> (INV-24: the row's binding never changes, so the refusal
+     * names the stopped or gone box and records the liveness verdict):
+     * status 8 is stopped, an unlisted name is gone, and anything else --
+     * a listed running status, a failed or missing or unparseable listing --
+     * is a transient "try again" with UNKNOWN liveness. On success the
+     * provider's persistent resume plan opens the console in a local
+     * directory (as on create, never the placeholder), and {@code
+     * finalizeResume} persists RUNNING and {@code lastOpenedAt} only: RUNNING
+     * is legal because this IDE owns the live ssh execution (INV-4), and an
+     * attach re-runs no create side effect (INV-23).</p>
+     */
+    private CompletableFuture<ManagedAgentSession> resumeRemoteClaimed(ManagedAgentSession session) {
+        // The row was read before this claim was taken (the resume's first
+        // executor stage); a Forget that finished in between removed it, and
+        // attaching here would resurrect the forgotten row's box session
+        // under a row the catalog no longer has — the same deletion gap the
+        // create path's rowMustExist guard closes.
+        if (findIn(stateStore.get().state(), session.id()) == null) {
+            throw new IllegalStateException("Session " + session.id() + " was forgotten before it resumed");
+        }
+        WorkspaceBoxBinding box = session.workspaceBox().orElseThrow();
+        BoxShell.BoxResult probe;
+        try {
+            probe = boxShell.probe(box.sshRemote().host());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new CompletionException(
+                    new IllegalStateException("The resume of session " + session.id() + " was cancelled", e));
+        }
+        if (!(probe instanceof BoxShell.BoxResult.Ok)) {
+            throw remoteBoxRefusal(session, box);
+        }
+        AgentProvider provider = registry.get().provider(session.agentKind())
+                .orElseThrow(() -> new IllegalStateException("No " + session.agentKind() + " ("
+                        + session.agentKind().persistedName() + ") provider is registered; cannot resume session"));
+        LaunchPlan plan;
+        try {
+            ResumeContext ctx = new ResumeContext(session.agentSessionId(), session.agentSessionName(),
+                    session.workingDirectory(), Optional.of(box.sshRemote()), Optional.empty(), false,
+                    session.readOnly(), List.of(),
+                    session.startedWithTask() ? Optional.of(RESUME_PROMPT) : Optional.empty())
+                    .withPersistence(new RemotePersistence(session.id(), BOX_AGENT_ENV));
+            plan = provider.buildResumeCommand(ctx);
+        } catch (RuntimeException failure) {
+            persistFailedBestEffort(session);
+            throw failure;
+        }
+        if (!plan.supported()) {
+            // AC11: name the agent, open nothing.
+            persistFailedBestEffort(session);
+            throw new IllegalStateException(
+                    kindName(provider.kind()) + " cannot resume this session (unsupported context)");
+        }
+        CompletableFuture<Void> open;
+        try {
+            // A new client is about to exist: any requested-client-end mark
+            // still pending for the id belongs to an earlier client's end
+            // and must not steer this attach's.
+            clientEnds.clear(session.id());
+            open = consoles.startConsole(session.id(), consoleCwdFor(session), plan);
+        } catch (RuntimeException failure) {
+            persistFailedBestEffort(session);
+            throw failure;
+        }
+        return open
+                .handleAsync((ignored, ex) -> finalizeResume(session, ex), executor);
+    }
+
+    /**
+     * The refusal for a probe that could not reach the box, classified by
+     * {@code workspaces list}: stopped (status 8), gone (unlisted), or
+     * anything else -- a listed non-8 status, a failed, timed-out,
+     * too-large or unparseable listing, a missing CLI -- which is always a
+     * transient "try again", never a re-create (INV-24). The liveness
+     * verdict is recorded for the surfaces; no row is persisted.
+     */
+    private IllegalStateException remoteBoxRefusal(ManagedAgentSession session, WorkspaceBoxBinding box) {
+        String boxName = box.boxName();
+        RemoteSessionLiveness.State liveness;
+        String reason;
+        WorkspacesCli.BoxStatus status = boxStatusOf(boxName);
+        if (status == WorkspacesCli.BoxStatus.STOPPED) {
+            liveness = RemoteSessionLiveness.State.BOX_STOPPED;
+            reason = "Box " + boxName + " is stopped; its conversations are unreachable";
+        } else if (status == WorkspacesCli.BoxStatus.ABSENT) {
+            liveness = RemoteSessionLiveness.State.BOX_GONE;
+            reason = "Box " + boxName + " no longer exists";
+        } else {
+            liveness = RemoteSessionLiveness.State.UNKNOWN;
+            reason = "Box " + boxName + " is unreachable; try again";
+        }
+        remoteLiveness.set(session.id(), liveness);
+        return new IllegalStateException(reason);
+    }
+
+    /**
+     * The box's classified status, or {@code OTHER} whenever the listing
+     * itself could not be trusted: a failure mode of {@code workspaces
+     * list} is "no classification", which the caller's catch-all treats as
+     * transient (INV-13).
+     */
+    private WorkspacesCli.BoxStatus boxStatusOf(String boxName) {
+        WorkspacesCli.ListResult listing;
+        try {
+            listing = workspacesCli.list();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return WorkspacesCli.BoxStatus.OTHER;
+        }
+        return listing instanceof WorkspacesCli.Listed table
+                ? table.statusOf(boxName)
+                : WorkspacesCli.BoxStatus.OTHER;
     }
 
     private ManagedAgentSession finalizeResume(ManagedAgentSession session, Throwable failure) {
@@ -1125,6 +1536,16 @@ public final class DrydockSessionService implements AgentExecutionListener {
      * a closed window and an IDE restart all leave it. The future fails while
      * a launch of the session is in progress.
      *
+     * <p>For a remote row this is the explicit Forget (D1): the box-side agent
+     * is killed <em>first</em> — one of the two paths that may issue
+     * kill-session (INV-10) — and the row is removed once the kill confirms
+     * the agent gone (exit 0, or tmux's "can't find session"). When the kill
+     * cannot conclude — the box unreachable, stopped or gone, a refused or
+     * hung kill — the row is removed only after the user confirms "The agent
+     * may still be running on box &lt;name&gt;. Forget anyway?"; a declined
+     * confirm removes nothing and completes normally. The detached liveness
+     * entry leaves with the row.</p>
+     *
      * <p>The agent's own conversation history on disk is never touched. The
      * row is drydock's bookkeeping; the transcript is the user's record of
      * what the agent did, and deleting that is not something a session row's
@@ -1145,6 +1566,12 @@ public final class DrydockSessionService implements AgentExecutionListener {
                     }
                     CompletableFuture<Void> removed;
                     try {
+                        // A remote row's agent is killed before anything is
+                        // removed; an unconclusive kill asks first (D1).
+                        if (session.workspaceBox().isPresent() && !confirmForgetRemoteAgent(session)) {
+                            endClaim(sessionId);
+                            return CompletableFuture.completedFuture(null);
+                        }
                         consoles.forgetConsole(sessionId);
                         CompletableFuture<Void> forgotten = session.agentSessionId()
                                 .map(id -> watcher.get().forget(id))
@@ -1156,6 +1583,10 @@ public final class DrydockSessionService implements AgentExecutionListener {
                                     state.withSessions(state.sessions().stream()
                                             .filter(existing -> !existing.id().equals(sessionId))
                                             .toList()));
+                            // A remote row's liveness entry must not outlive
+                            // its row; remove() publishes only when one was
+                            // actually there.
+                            remoteLiveness.remove(sessionId);
                             DrydockSessionsListener.publishChanged();
                         }, executor);
                     } catch (RuntimeException | Error e) {
@@ -1166,6 +1597,46 @@ public final class DrydockSessionService implements AgentExecutionListener {
                     // claim releases the access.
                     return removed.whenComplete((ignored, ex) -> endClaim(sessionId));
                 }, executor);
+    }
+
+    /**
+     * A remote row's Forget kills its box-side agent and answers whether the
+     * row may be removed. A kill that confirms the agent gone — exit 0, or
+     * tmux's "can't find session" — answers yes outright; anything else (the
+     * box unreachable, stopped or gone, a refused or hung kill) asks the
+     * user "The agent may still be running on box &lt;name&gt;. Forget anyway?"
+     * and answers what the user answered. Blocking — it runs on the plugin
+     * executor (the ssh round trip and the wait for the dialog), never the
+     * EDT.
+     */
+    private boolean confirmForgetRemoteAgent(ManagedAgentSession session) {
+        WorkspaceBoxBinding box = session.workspaceBox().orElseThrow();
+        BoxShell.BoxResult kill;
+        try {
+            kill = boxShell.killSession(box.sshRemote().host(), session.id());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new CompletionException(new IllegalStateException(
+                    "Forgetting session '" + session.displayName() + "' on box " + box.boxName()
+                            + " was cancelled", e));
+        }
+        if (killSettled(kill)) {
+            return true;
+        }
+        LOG.log(Level.WARNING, () -> "kill-session for " + session.id() + " on box " + box.boxName()
+                + " did not conclude (" + kill.describe() + "); asking before forgetting");
+        String question = "The agent may still be running on box " + box.boxName() + ". Forget anyway?";
+        try {
+            return remoteConfirm.apply(question).get(CONFIRM_TIMEOUT_MINUTES, TimeUnit.MINUTES);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new CompletionException(new IllegalStateException(
+                    "Forgetting session '" + session.displayName() + "' on box " + box.boxName()
+                            + " was cancelled", e));
+        } catch (ExecutionException | TimeoutException e) {
+            throw new IllegalStateException("Could not ask whether to forget session '"
+                    + session.displayName() + "' on box " + box.boxName() + ": " + e, e);
+        }
     }
 
     /**
@@ -1328,15 +1799,279 @@ public final class DrydockSessionService implements AgentExecutionListener {
         return false;
     }
 
-    /** Stops a session's agent without touching its row (the strip's Stop). */
-    public void stopSession(ManagedSessionId sessionId) {
+    /**
+     * Stops a session's agent without removing its row. A local row ends its
+     * process here; a remote row ends its <em>box-side</em> agent — this is
+     * the explicit Stop, one of the two paths that may issue {@code tmux
+     * kill-session} (D1, INV-10).
+     *
+     * <p>The remote path is async on the plugin executor (INV-8): the busy
+     * state shows immediately — the row goes STOPPING, legal exactly while
+     * this IDE owns its live ssh execution (INV-4); a detached row (no
+     * execution here) keeps its status and relies on the caller's click
+     * surface — then the Stop is identified as such before the kill runs
+     * (so the ssh client's end, whenever it comes, settles by the kill's
+     * verdict and never probes against it), then the kill runs with a
+     * 10 s timeout through the box seam, then the ssh client ends. Exit 0
+     * or tmux's "can't find session" settles the row INACTIVE with
+     * liveness DEAD; any other outcome surfaces an error naming the box and
+     * settles the row IDLE with liveness UNKNOWN — never INACTIVE, so a
+     * failed Stop is never reported as a stopped agent. The returned future
+     * completes on every path, so the caller's progress clears on success,
+     * failure, timeout and cancel alike (AC-9).</p>
+     */
+    public CompletableFuture<Void> stopSession(ManagedSessionId sessionId) {
         Objects.requireNonNull(sessionId, "sessionId");
+        ManagedAgentSession row = findIn(stateStore.get().state(), sessionId);
+        if (row != null && row.workspaceBox().isPresent()) {
+            return stopRemoteSession(row);
+        }
         consoles.stopConsole(sessionId);
+        return CompletableFuture.completedFuture(null);
     }
 
     /**
-     * Window close and IDE quit: marks each session idle <strong>first</strong>,
-     * then stops its agent.
+     * The remote Stop, split across two executor tasks so the busy state is
+     * up before the blocking kill begins: the first task marks and schedules
+     * the second, which kills, ends the ssh client, and settles by the kill's
+     * outcome. Every completion path of the returned future clears the busy
+     * mark (INV-8): a cancellation between the stages keeps the queued kill
+     * from ever running, a rejected kill submission (shutdown raced it) and
+     * a failed mark stage complete the future without the kill stage — and
+     * in each of those no client was stopped, so no termination callback
+     * will ever repair the mark; this chain is the only thing that can clear
+     * it. When the kill stage did run, its own paths settle the row, and a
+     * settle already landed leaves nothing STOPPING for the cleanup to undo.
+     */
+    private CompletableFuture<Void> stopRemoteSession(ManagedAgentSession row) {
+        CompletableFuture<Void> stopped = new CompletableFuture<>();
+        AtomicBoolean killBegan = new AtomicBoolean();
+        stopped.whenComplete((ignored, failure) -> {
+            if (!killBegan.get()) {
+                clearRemoteStopping(row.id());
+            }
+        });
+        CompletableFuture<Void> marked = CompletableFuture.runAsync(() -> {
+            markRemoteStopping(row.id());
+            try {
+                executor.execute(() -> {
+                    if (stopped.isCancelled()) {
+                        return;   // a cancel arrived before the kill could begin
+                    }
+                    killBegan.set(true);
+                    try {
+                        stopMarkedRemoteSession(row);
+                        stopped.complete(null);
+                    } catch (RuntimeException | Error failure) {
+                        stopped.completeExceptionally(failure);
+                    }
+                });
+            } catch (RejectedExecutionException submissionRefused) {
+                // The executor refused the kill task (shutdown raced its
+                // submission); the chain ends without the kill stage of its
+                // own, so the every-path cleanup above runs instead.
+                stopped.completeExceptionally(submissionRefused);
+            }
+        }, executor);
+        marked.whenComplete((ignored, markFailure) -> {
+            if (markFailure != null) {
+                stopped.completeExceptionally(markFailure);
+            }
+        });
+        return stopped;
+    }
+
+    /**
+     * The kill, the client end, and the settle the kill dictates (D1's
+     * table): exit 0 or "can't find session" → INACTIVE with liveness DEAD;
+     * anything else → an error naming the box and an IDLE row with UNKNOWN
+     * liveness — the row is never reported stopped by a kill that did not
+     * conclude.
+     *
+     * <p>The Stop is identified <em>before</em> the kill, through the
+     * requested-client-end coordination: the ssh client can terminate
+     * during the kill round-trip — before {@code stopConsole} could mark
+     * the execution's own stop-requested flag — and its end must not run
+     * the ordinary client-end probe against the Stop's authoritative
+     * outcome. The mark also carries the kill's verdict for the end that
+     * arrives after this method's settle was suppressed by the still-dying
+     * client (the claim guard sees a live execution until the process
+     * actually terminates): that end settles the verdict itself.</p>
+     */
+    private void stopMarkedRemoteSession(ManagedAgentSession row) {
+        WorkspaceBoxBinding box = row.workspaceBox().orElseThrow();
+        boolean executionLive = clientEnds.hasLiveExecution(row.id());
+        clientEnds.beginExplicitStop(row.id());
+        BoxShell.BoxResult kill;
+        try {
+            kill = boxShell.killSession(box.sshRemote().host(), row.id());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            clearRemoteStopping(row.id());
+            // The Stop is over without a verdict; the client was never asked
+            // to end, so its later end — if any — is an ordinary one and must
+            // not settle as this Stop's.
+            clientEnds.endExplicitStop(row.id());
+            throw new CompletionException(new IllegalStateException(
+                    "Stopping session '" + row.displayName() + "' on box " + box.boxName()
+                            + " was cancelled", e));
+        }
+        boolean settled = killSettled(kill);
+        clientEnds.stopVerdict(row.id(), settled);
+        // Steps (2) and (4) in one call: stopConsole marks the execution
+        // stop-requested and ends this IDE's ssh client to the box.
+        consoles.stopConsole(row.id());
+        try {
+            if (settled) {
+                settleRemoteRow(row.id(), SessionStatus.INACTIVE, RemoteSessionLiveness.State.DEAD);
+            } else {
+                LOG.log(Level.WARNING, () -> "kill-session for " + row.id() + " on box " + box.boxName()
+                        + " did not conclude (" + kill.describe() + ")");
+                settleRemoteRow(row.id(), SessionStatus.IDLE, RemoteSessionLiveness.State.UNKNOWN);
+                throw new CompletionException(new IllegalStateException(
+                        "Could not stop the agent of session '" + row.displayName() + "' on box "
+                                + box.boxName() + ": " + kill.describe()));
+            }
+        } finally {
+            if (!executionLive) {
+                // No ssh client of this IDE exists (a detached row): no end
+                // will consume the mark — end it here, so it cannot steer a
+                // later end. When one was live, the dying client's end is
+                // imminent and settles by the verdict recorded above if this
+                // method's own settle could not land.
+                clientEnds.endExplicitStop(row.id());
+            }
+        }
+    }
+
+    /**
+     * tmux's own "the agent is gone" answers to a kill-session: exit 0, or
+     * exit 1 carrying the "can't find session" marker. Deliberately not the
+     * wider no-server forms {@code BoxShell} recognizes for probes — the
+     * contract's Stop and Forget tables name exactly this one, and an
+     * unrecognized form must fail safe (an error, a confirm), never silently
+     * read as a kill that succeeded.
+     */
+    private static boolean killSettled(BoxShell.BoxResult kill) {
+        if (kill instanceof BoxShell.BoxResult.Ok) {
+            return true;
+        }
+        return kill instanceof BoxShell.BoxResult.RemoteFailed(int exitCode, String excerpt)
+                && exitCode == 1 && excerpt.contains("can't find session");
+    }
+
+    /**
+     * Shows the remote Stop's busy state: the row goes STOPPING — legal only
+     * while this IDE owns its live ssh execution (INV-4), which is exactly
+     * what the row's RUNNING status records — so a detached row (IDLE in
+     * its row, ALIVE in the liveness map) is left alone; its Stop click's
+     * immediate feedback is the caller's surface. Publishing wakes the
+     * session surfaces, which render STOPPING as "Deactivating…".
+     */
+    private void markRemoteStopping(ManagedSessionId id) {
+        boolean[] marked = {false};
+        stateStore.get().update(state -> {
+            ManagedAgentSession existing = findIn(state, id);
+            if (existing == null || existing.workspaceBox().isEmpty()
+                    || existing.status() != SessionStatus.RUNNING) {
+                return state;
+            }
+            marked[0] = true;
+            return withReplacedSession(state, existing.withStatus(SessionStatus.STOPPING));
+        });
+        if (marked[0]) {
+            DrydockSessionsListener.publishChanged();
+        }
+    }
+
+    /** Clears the STOPPING busy state back to RUNNING — a Stop cancelled before anything ended. */
+    private void clearRemoteStopping(ManagedSessionId id) {
+        boolean[] cleared = {false};
+        stateStore.get().update(state -> {
+            ManagedAgentSession existing = findIn(state, id);
+            if (existing == null || existing.status() != SessionStatus.STOPPING) {
+                return state;
+            }
+            cleared[0] = true;
+            return withReplacedSession(state, existing.withStatus(SessionStatus.RUNNING));
+        });
+        if (cleared[0]) {
+            DrydockSessionsListener.publishChanged();
+        }
+    }
+
+    /**
+     * The remote Stop's settle, with the guard every settle through the
+     * single writer carries (INV-21): a no-op when the row is gone or when
+     * {@link LaunchClaims} shows a live execution or claim for it — a Resume
+     * that claimed while the kill was in flight owns the row now, and its
+     * RUNNING is never overwritten. A row that already carries the settle's
+     * status still settles: the liveness answer is recorded and the change
+     * published (an inconclusive Stop on a detached IDLE row must record
+     * UNKNOWN even though no status change is necessary), while the row-gone
+     * and claim guards still apply. The liveness answer is recorded after
+     * the transform, only when the settle landed.
+     */
+    private void settleRemoteRow(ManagedSessionId id, SessionStatus status,
+                                  RemoteSessionLiveness.State liveness) {
+        boolean[] settled = {false};
+        stateStore.get().update(state -> {
+            ManagedAgentSession existing = findIn(state, id);
+            if (existing == null || existing.workspaceBox().isEmpty()
+                    || !claims.releaseIfIdle(id, () -> { })) {
+                return state;
+            }
+            settled[0] = true;
+            if (existing.status() == status) {
+                return state;
+            }
+            return withReplacedSession(state, existing.withStatus(status).withLastOpenedAt(Instant.now()));
+        });
+        if (!settled[0]) {
+            return;
+        }
+        remoteLiveness.set(id, liveness);
+        DrydockSessionsListener.publishChanged();
+    }
+
+    /**
+     * The Done-with-task flow's gate (the strip's and the task tree's
+     * "Done…"): that flow — stop the agent, inspect the worktree, complete
+     * the tasks, remove the worktree, forget the row — is local-worktree
+     * semantics throughout, and a remote row has none of it: no worktree on
+     * this Mac, no local task store, no branch to remove. Such a row is
+     * refused with the returned named reason; the endings a remote row
+     * offers are the explicit {@link #stopSession Stop} and the explicit
+     * {@link #deleteSession Forget}, the only two paths that may issue
+     * kill-session (INV-10). Empty for a local row: the flow runs exactly as
+     * before.
+     *
+     * <p>The gate is a service method because that is where the invariant
+     * is enforceable: everything that could stop or remove a remote row
+     * passes through this class, whose remote branches are exactly Stop and
+     * Forget. The caller (on the EDT) shows the reason and returns without
+     * opening the flow.</p>
+     *
+     * @return the named refusal reason for a row bound to a workspace box;
+     *         empty when the Done flow may run
+     */
+    public Optional<String> doneFlowRefusal(ManagedSessionId sessionId) {
+        Objects.requireNonNull(sessionId, "sessionId");
+        ManagedAgentSession row = findIn(stateStore.get().state(), sessionId);
+        if (row == null || row.workspaceBox().isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of("Session '" + row.displayName() + "' runs on workspace box '"
+                + row.workspaceBox().orElseThrow().boxName() + "'; the Done flow is local-only — "
+                + "use Stop or Forget instead");
+    }
+
+    /**
+     * Window close and IDE quit: marks each local session idle
+     * <strong>first</strong>, then stops its agent. A remote row is never
+     * marked — its agent is box-side, and close paths must not touch it
+     * (INV-10) — only its ssh client ends (INV-4: its detached liveness is
+     * the probe settle's business, never a persisted close status).
      *
      * <p>The order is the point. Everywhere else the idle status comes from
      * {@link #executionTerminated}, once the process has ended — which can be
@@ -1356,15 +2091,38 @@ public final class DrydockSessionService implements AgentExecutionListener {
             return;
         }
         Set<ManagedSessionId> closing = Set.copyOf(sessionIds);
+        // The remote rows among them, whose ssh clients end below: the end
+        // settle must know the end is close-originated — a close settles the
+        // durable row IDLE, never EXITED/INACTIVE (AC-7) — before the client
+        // is asked to end. The local transform below already skipped them;
+        // without this mark their ends would reach the recorder as ordinary
+        // stops and persist INACTIVE (or EXITED) through the probe settle.
+        Set<ManagedSessionId> remoteClosing = new HashSet<>();
+        for (ManagedAgentSession session : stateStore.get().state().sessions()) {
+            if (closing.contains(session.id()) && session.workspaceBox().isPresent()) {
+                remoteClosing.add(session.id());
+            }
+        }
         stateStore.get().update(state -> state.withSessions(state.sessions().stream()
                 .map(session -> closing.contains(session.id())
+                        && session.workspaceBox().isEmpty()
                         && SessionStatusFacet.of(session.status()) == SessionStatusFacet.RUNNING
                         ? session.withStatus(SessionStatus.INACTIVE).withLastOpenedAt(Instant.now())
                         : session)
                 .toList()));
         DrydockSessionsListener.publishChanged();
         for (ManagedSessionId sessionId : sessionIds) {
+            boolean remote = remoteClosing.contains(sessionId);
+            if (remote) {
+                clientEnds.beginClose(sessionId);
+            }
             consoles.stopConsole(sessionId);
+            if (remote && !clientEnds.hasLiveExecution(sessionId)) {
+                // The client was already gone, so its end was delivered
+                // before the mark: nothing will consume it — end it here so
+                // it cannot steer a later end.
+                clientEnds.endClose(sessionId);
+            }
         }
     }
 
@@ -1462,13 +2220,39 @@ public final class DrydockSessionService implements AgentExecutionListener {
 
     private static ManagedAgentSession newSessionMetadata(RepositoryId repositoryId, Path workingDirectory,
             AgentKind kind, String displayName, SessionMode mode) {
+        return newSessionMetadata(repositoryId, workingDirectory, kind, displayName, mode, Optional.empty());
+    }
+
+    private static ManagedAgentSession newSessionMetadata(RepositoryId repositoryId, Path workingDirectory,
+            AgentKind kind, String displayName, SessionMode mode, Optional<WorkspaceBoxBinding> workspaceBox) {
         return new ManagedAgentSession.Builder(
                 ManagedSessionId.newId(), repositoryId, displayName,
                 AgentBinding.unlaunched(kind, mode),
                 SessionWorkspace.inRepository(workingDirectory),
                 Instant.now())
                 .status(SessionStatus.STARTING)
+                .workspaceBox(workspaceBox)
                 .build();
+    }
+
+    /**
+     * The production remote confirm: the question becomes a Yes/No dialog
+     * on the EDT ({@code ModalityState.anyModal()}, because the ask comes
+     * from a background flow that may itself sit under a modal), and the
+     * future completes with the answer from there. Never called by tests —
+     * they inject a fake through the full seam.
+     */
+    private static CompletableFuture<Boolean> askOnEdt(String question) {
+        CompletableFuture<Boolean> answer = new CompletableFuture<>();
+        ApplicationManager.getApplication().invokeLater(() -> {
+            try {
+                answer.complete(Messages.showYesNoDialog(question, "Drydock",
+                        Messages.getQuestionIcon()) == Messages.YES);
+            } catch (RuntimeException | Error e) {
+                answer.completeExceptionally(e);
+            }
+        }, ModalityState.any());
+        return answer;
     }
 
     private static String kindName(AgentKind kind) {

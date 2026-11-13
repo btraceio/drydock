@@ -45,7 +45,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
-import java.util.regex.Pattern;
 
 /**
  * The shape of the Drydock tool window's tree, decided in one pure place:
@@ -76,99 +75,6 @@ public final class TaskTreeModel {
 
     /** The one child of a listing that answered with nothing: the renderer's "answered" discriminator. */
     static final String NO_ISSUES = "No issues";
-
-    /**
-     * The search box's optional project scope: {@code /<glob>/<items>} limits
-     * the search to projects whose display name matches the glob, with
-     * {@code <items>} filtering the entries inside them exactly as plain
-     * search does. An unclosed {@code /<glob>} (search still being typed)
-     * already scopes, with no item filter. The glob matches case-insensitively
-     * anywhere in the name; {@code *} and {@code ?} are wildcards. An empty
-     * glob ({@code //} or a lone {@code /}) matches every project.
-     *
-     * <p>Plain (unscoped) search now also matches project names: a project
-     * whose name contains the filter is shown with all of its entries, not
-     * only the entries that themselves match.
-     */
-    record ProjectScope(String projectGlob, String itemFilter) {
-        static final ProjectScope NONE = new ProjectScope(null, "");
-
-        boolean scoped() {
-            return projectGlob != null;
-        }
-
-        boolean matchesProject(String displayName) {
-            return globMatches(projectGlob, displayName);
-        }
-    }
-
-    /** Splits the raw search text into its optional project scope and the item filter. */
-    static ProjectScope parseFilter(String filter) {
-        if (filter == null || !filter.startsWith("/")) {
-            return ProjectScope.NONE;
-        }
-        int end = filter.indexOf('/', 1);
-        if (end < 0) {
-            return new ProjectScope(filter.substring(1), "");
-        }
-        return new ProjectScope(filter.substring(1, end), filter.substring(end + 1));
-    }
-
-    /** Case-insensitive glob ({@code *}, {@code ?}) matching anywhere in {@code text}; an empty pattern matches all. */
-    private static boolean globMatches(String glob, String text) {
-        String pattern = glob == null ? "" : glob.strip();
-        if (pattern.isEmpty()) {
-            return true;
-        }
-        StringBuilder regex = new StringBuilder(".*");
-        String lower = pattern.toLowerCase(Locale.ROOT);
-        for (int i = 0; i < lower.length(); i++) {
-            char c = lower.charAt(i);
-            switch (c) {
-                case '*' -> regex.append(".*");
-                case '?' -> regex.append('.');
-                default -> regex.append(Pattern.quote(String.valueOf(c)));
-            }
-        }
-        return text.toLowerCase(Locale.ROOT)
-                .matches(regex + ".*");
-    }
-
-    /** Mutually exclusive quick views; text search is applied within the selected view. */
-    public enum ViewFilter {
-        ALL("All", "Show sessions, worktrees, and issues",
-                "No projects yet. Start a task with ＋ to add this one."),
-        ACTIVE("Active", "Show only sessions whose agent is running", "No active sessions."),
-        INACTIVE("Inactive", "Show only sessions whose agent is not running",
-                "No inactive sessions."),
-        NEEDS_YOU("Needs you", "Show only running sessions waiting for your answer",
-                "No sessions need you."),
-        FLAGGED("Flagged", "Show only sessions you flagged for follow-up", "No flagged sessions.");
-
-        private final String label;
-        private final String tooltip;
-        private final String emptyText;
-
-        ViewFilter(String label, String tooltip, String emptyText) {
-            this.label = label;
-            this.tooltip = tooltip;
-            this.emptyText = emptyText;
-        }
-
-        public String label() {
-            return label;
-        }
-
-        /** The view chip's hover text: what the view shows. */
-        public String tooltip() {
-            return tooltip;
-        }
-
-        /** What the tree says when this view is selected and nothing is in it. */
-        public String emptyText() {
-            return emptyText;
-        }
-    }
 
     private TaskTreeModel() {
     }
@@ -206,7 +112,7 @@ public final class TaskTreeModel {
                          Map<Path, PullRequestListing> pullRequestsByMainRoot,
                          Map<Path, List<Worktree>> pullRequestDedupWorktrees,
                          Optional<String> listProblem, String filter,
-                         ViewFilter viewFilter, Map<ManagedSessionId, Boolean> resumable,
+                         Map<ManagedSessionId, Boolean> resumable,
                          Map<ManagedSessionId, BranchPullRequest> pullRequestsBySession) {
         public Inputs {
             projects = List.copyOf(projects);
@@ -236,9 +142,17 @@ public final class TaskTreeModel {
             pullRequestDedupWorktrees = Map.copyOf(pullRequestDedupWorktrees);
             Objects.requireNonNull(listProblem, "listProblem");
             filter = filter == null ? "" : filter.strip();
-            Objects.requireNonNull(viewFilter, "viewFilter");
             resumable = Map.copyOf(resumable);
             pullRequestsBySession = Map.copyOf(pullRequestsBySession);
+        }
+
+        /** These inputs with {@code text} as the search filter; everything else unchanged. Pure. */
+        public Inputs withFilter(String text) {
+            return new Inputs(projects, sessions, worktreesByMainRoot, mainRootOf, currentMainRoot,
+                    currentWorkingRoot, activity, running, hosts, missingFolders, recordedRoots, worktreeContainers,
+                    pullRequestContainers, githubIssueRoots, githubGhostRoots, jiraRoots, jiraGhostRoots, openFolders,
+                    lastActivity, now, issuesByMainRoot, jiraGroupsByMainRoot, pullRequestsByMainRoot,
+                    pullRequestDedupWorktrees, listProblem, text, resumable, pullRequestsBySession);
         }
 
         /** The shape before sessions carried their branch's pull request: none known. */
@@ -257,19 +171,18 @@ public final class TaskTreeModel {
                       Map<Path, PullRequestListing> pullRequestsByMainRoot,
                       Map<Path, List<Worktree>> pullRequestDedupWorktrees,
                       Optional<String> listProblem, String filter,
-                      ViewFilter viewFilter, Map<ManagedSessionId, Boolean> resumable) {
+                      Map<ManagedSessionId, Boolean> resumable) {
             this(projects, sessions, worktreesByMainRoot, mainRootOf, currentMainRoot, currentWorkingRoot,
                     activity, running, hosts, missingFolders, recordedRoots, worktreeContainers,
                     pullRequestContainers, githubIssueRoots, githubGhostRoots, jiraRoots, jiraGhostRoots,
                     openFolders, lastActivity, now, issuesByMainRoot, jiraGroupsByMainRoot,
-                    pullRequestsByMainRoot, pullRequestDedupWorktrees, listProblem, filter, viewFilter,
+                    pullRequestsByMainRoot, pullRequestDedupWorktrees, listProblem, filter,
                     resumable, Map.of());
         }
     }
 
     public static List<TaskNode> build(Inputs in) {
         List<SharedProject> local = in.projects().stream().filter(project -> !project.isRemote()).toList();
-        ProjectScope scope = parseFilter(in.filter());
         Map<Path, List<TaskRow>> tasksByMain = new LinkedHashMap<>();
         for (ManagedAgentSession session : in.sessions()) {
             if (session.agentKind() == AgentKind.TERMINAL) {
@@ -285,20 +198,12 @@ public final class TaskTreeModel {
         if (current.isPresent() && local.stream().noneMatch(project -> project.root().equals(current.get()))) {
             Path root = current.get();
             String name = String.valueOf(root.getFileName());
-            boolean nameMatch = nameMatch(in.filter(), scope, name);
-            // A scope is a hard filter; unscoped, the current project keeps
-            // showing (with the plain filter applied to its tasks).
-            if (!scope.scoped() || nameMatch) {
-                String itemFilter = itemFilter(in.filter(), scope, nameMatch);
-                List<TaskRow> visible = sorted(tasksByMain.getOrDefault(root, List.of())).stream()
-                        .filter(task -> visibleIn(in.viewFilter(), task))
-                        .filter(task -> matches(itemFilter, task))
-                        .toList();
-                if (in.viewFilter() == ViewFilter.ALL || !visible.isEmpty()) {
-                    nodes.add(new AddCurrentProject(root, name));
-                    nodes.addAll(visible);
-                }
-            }
+            // The current project keeps showing, with the filter applied to its tasks.
+            String itemFilter = itemFilter(in.filter(), nameMatch(in.filter(), name));
+            nodes.add(new AddCurrentProject(root, name));
+            nodes.addAll(sorted(tasksByMain.getOrDefault(root, List.of())).stream()
+                    .filter(task -> matches(itemFilter, task))
+                    .toList());
         }
 
         List<SharedProject> ordered = new ArrayList<>(local);
@@ -306,15 +211,11 @@ public final class TaskTreeModel {
                 .thenComparing(project -> project.displayName().toLowerCase(Locale.ROOT)));
         for (SharedProject project : ordered) {
             boolean thisWindow = project.root().equals(current.orElse(null));
-            boolean nameMatch = nameMatch(in.filter(), scope, project.displayName());
-            if (scope.scoped() && !nameMatch) {
-                continue;
-            }
-            String itemFilter = itemFilter(in.filter(), scope, nameMatch);
+            boolean nameMatch = nameMatch(in.filter(), project.displayName());
+            String itemFilter = itemFilter(in.filter(), nameMatch);
             Children classified = children(in, project.root(),
                     tasksByMain.getOrDefault(project.root(), List.of()), itemFilter);
-            if (classified.visible().isEmpty() && (in.viewFilter() != ViewFilter.ALL
-                    || !in.filter().isEmpty() && !thisWindow && !nameMatch)) {
+            if (classified.visible().isEmpty() && !in.filter().isEmpty() && !thisWindow && !nameMatch) {
                 continue;
             }
             int running = (int) tasksByMain.getOrDefault(project.root(), List.of()).stream()
@@ -323,6 +224,33 @@ public final class TaskTreeModel {
                     classified.visible(), classified.inactive(), running));
         }
         return nodes;
+    }
+
+    /**
+     * The Projects view of built rows: the same rows without their sessions,
+     * which the inbox shows. A project row keeps its Worktrees, Issues and
+     * Pull Requests sections and loses its Sessions section; the loose
+     * session rows of this window's unregistered project go, its "add" row
+     * stays. Pure.
+     */
+    static List<TaskNode> projectsView(List<TaskNode> nodes) {
+        List<TaskNode> out = new ArrayList<>(nodes.size());
+        for (TaskNode node : nodes) {
+            switch (node) {
+                case TaskRow ignored -> {
+                }
+                case WorktreeGroup ignored -> {
+                }
+                case ProjectRow row -> out.add(new ProjectRow(row.project(), row.folderMissing(), row.isThisWindow(),
+                        row.children().stream()
+                                .filter(child -> !(child instanceof Section section
+                                        && section.kind() == SectionKind.SESSIONS))
+                                .toList(),
+                        row.inactiveWorktrees(), row.running()));
+                default -> out.add(node);
+            }
+        }
+        return out;
     }
 
     /**
@@ -353,22 +281,18 @@ public final class TaskTreeModel {
         };
     }
 
-    /** Whether the project matches by name: the scope's glob when scoped, else the plain filter. */
-    private static boolean nameMatch(String rawFilter, ProjectScope scope, String displayName) {
-        return scope.scoped() ? scope.matchesProject(displayName)
-                : !rawFilter.isEmpty() && contains(displayName, rawFilter);
+    /** Whether the project's name contains the search text. */
+    private static boolean nameMatch(String filter, String displayName) {
+        return !filter.isEmpty() && contains(displayName, filter);
     }
 
     /**
      * The filter the project's entries are narrowed by: none when the project
-     * itself matched by name (the whole project is the answer), otherwise the
-     * scope's item filter or, unscoped, the plain filter.
+     * itself matched by name (the whole project is the answer), otherwise
+     * the search text.
      */
-    private static String itemFilter(String rawFilter, ProjectScope scope, boolean nameMatch) {
-        if (scope.scoped()) {
-            return scope.itemFilter();
-        }
-        return nameMatch ? "" : rawFilter;
+    private static String itemFilter(String filter, boolean nameMatch) {
+        return nameMatch ? "" : filter;
     }
 
     /** The main checkout {@code workingDirectory} belongs to, if any registered or current project takes it. */
@@ -429,7 +353,6 @@ public final class TaskTreeModel {
     private static Children children(Inputs in, Path main, List<TaskRow> tasks, String itemFilter) {
         List<TaskNode> children = new ArrayList<>();
         List<TaskRow> visibleTasks = sorted(tasks).stream()
-                .filter(task -> visibleIn(in.viewFilter(), task))
                 .filter(task -> matches(itemFilter, task))
                 .toList();
         if (!visibleTasks.isEmpty()) {
@@ -458,7 +381,7 @@ public final class TaskTreeModel {
             boolean open = in.openFolders().contains(worktree.path());
             IdleWorktree idle = new IdleWorktree(worktree.path(), branch, lastActivity, worktree.locked(), open);
             inactive.add(idle);
-            if (in.viewFilter() == ViewFilter.ALL && (itemFilter.isEmpty() || contains(branch, itemFilter))) {
+            if (itemFilter.isEmpty() || contains(branch, itemFilter)) {
                 boolean isStale = !worktree.locked() && !open && lastActivity
                         .map(last -> last.isBefore(in.now().minus(STALE_AFTER)))
                         .orElse(false);
@@ -472,40 +395,26 @@ public final class TaskTreeModel {
         if (!stale.isEmpty()) {
             sessionlessWorktrees.add(new StaleWorktrees(stale));
         }
-        if (in.viewFilter() == ViewFilter.ALL && in.worktreeContainers().contains(main)
-                && !in.worktreesByMainRoot().containsKey(main)) {
+        if (in.worktreeContainers().contains(main) && !in.worktreesByMainRoot().containsKey(main)) {
             children.add(new Section(SectionKind.WORKTREES,
                     List.of(new TaskNode.Deferred("Loading worktrees…"))));
         } else if (!sessionlessWorktrees.isEmpty()) {
             children.add(new Section(SectionKind.WORKTREES, sessionlessWorktrees));
         }
-        if (in.viewFilter() == ViewFilter.ALL) {
-            issueChildren(in, main, itemFilter).ifPresent(issueChildren ->
-                    children.add(new Section(SectionKind.ISSUES, issueChildren)));
-        }
-        if (in.viewFilter() == ViewFilter.ALL) {
-            if (in.pullRequestContainers().contains(main) && !in.pullRequestsByMainRoot().containsKey(main)) {
-                children.add(new Section(SectionKind.PULL_REQUESTS,
-                        List.of(new TaskNode.Deferred("Loading pull requests…"))));
-            } else {
-                pullRequestChildren(in, main, itemFilter).ifPresent(pullRequestChildren ->
-                        children.add(new Section(SectionKind.PULL_REQUESTS, pullRequestChildren)));
-            }
+        // The Issues and Pull Requests sections render with only the search
+        // text narrowing the rows inside (a project whose name matches keeps
+        // all of them, as with its tasks). Only a section with nothing
+        // configured to show is absent.
+        issueChildren(in, main, itemFilter).ifPresent(issueChildren ->
+                children.add(new Section(SectionKind.ISSUES, issueChildren)));
+        if (in.pullRequestContainers().contains(main) && !in.pullRequestsByMainRoot().containsKey(main)) {
+            children.add(new Section(SectionKind.PULL_REQUESTS,
+                    List.of(new TaskNode.Deferred("Loading pull requests…"))));
+        } else {
+            pullRequestChildren(in, main, itemFilter).ifPresent(pullRequestChildren ->
+                    children.add(new Section(SectionKind.PULL_REQUESTS, pullRequestChildren)));
         }
         return new Children(List.copyOf(children), List.copyOf(inactive));
-    }
-
-    private static boolean visibleIn(ViewFilter filter, TaskRow task) {
-        return switch (filter) {
-            case ALL -> true;
-            case ACTIVE -> task.running();
-            case INACTIVE -> !task.running();
-            // Needs you is live process + unacknowledged attention: a
-            // stopped session's leftover activity never counts.
-            case NEEDS_YOU -> task.running()
-                    && task.activity().equals(Optional.of(SessionActivity.NEEDS_ATTENTION));
-            case FLAGGED -> task.session().flagged();
-        };
     }
 
     /**

@@ -3,6 +3,7 @@ package app.drydock.intellij.agent;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionStatusFacet;
+import app.drydock.intellij.workspace.RemoteSessionLiveness;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -44,6 +45,88 @@ public final class AgentStripText {
         return SessionStatusFacet.of(persisted) == SessionStatusFacet.RUNNING
                 ? SessionStatus.INACTIVE
                 : persisted;
+    }
+
+    /**
+     * The status a remote (workspace-box) row's dot paints: the same
+     * palette the local strip uses, fed by the two facts a remote row
+     * actually has. This IDE's own ssh execution is the live authority (the
+     * local rule unchanged); a detached remote row is decided by the
+     * liveness map — the box's {@code tmux ls} answer — and never by the
+     * local activity monitor, which cannot see a box-side agent (OQ10).
+     *
+     * <p>ALIVE keeps the live mark: the box says the tmux session is there,
+     * which is a probe fact, not a working/idle claim. Everything else the
+     * box can answer — DEAD, UNKNOWN, a stopped or gone box — paints the
+     * idle band, because from this Mac nothing runs; the liveness word that
+     * distinguishes them is {@link #remoteStatusText}, not the dot. An error
+     * facet (a failed or unsupported remote launch) survives the mapping:
+     * a refused row must not paint blue just because some probe once said
+     * the box had sessions.</p>
+     */
+    public static SessionStatus remoteDisplayStatus(SessionStatus persisted, boolean ownedHere,
+                                                    Optional<RemoteSessionLiveness.State> liveness) {
+        if (ownedHere) {
+            return persisted;
+        }
+        if (SessionStatusFacet.of(persisted) == SessionStatusFacet.ERROR) {
+            return persisted;
+        }
+        return liveness.orElse(RemoteSessionLiveness.State.UNKNOWN) == RemoteSessionLiveness.State.ALIVE
+                ? SessionStatus.RUNNING
+                : SessionStatus.IDLE;
+    }
+
+    /**
+     * The status line a remote row's strip shows: the liveness word plus the
+     * box name — {@code "Running · on box <name>"} — and never a
+     * working/idle word (OQ10). The local strip folds activity into its one
+     * status word; a remote row has no activity to fold, so the word comes
+     * from the liveness facts alone and the box name is the second half of
+     * the line, naming where the agent runs.
+     *
+     * <p>An unprobed row (empty liveness) reads {@code Unknown}: it has
+     * never been asked, and "Not running" would claim an answer this IDE
+     * does not have. {@code ownedHere} — this IDE owns the live ssh
+     * execution — outranks the map: the console is attached in this IDE, so
+     * the agent runs, whatever a stale probe once said.</p>
+     */
+    public static String remoteStatusText(boolean ownedHere,
+                                           Optional<RemoteSessionLiveness.State> liveness, String boxName) {
+        String where = "on box " + boxName;
+        if (ownedHere) {
+            return "Running · " + where;
+        }
+        return switch (liveness.orElse(RemoteSessionLiveness.State.UNKNOWN)) {
+            case ALIVE -> "Running · " + where;
+            case DEAD -> "Not running · " + where;
+            case UNKNOWN -> "Unknown · " + where;
+            case BOX_STOPPED -> "Box stopped · " + where;
+            case BOX_GONE -> "Box gone · " + where;
+        };
+    }
+
+    /**
+     * The strip/tab tooltip under a remote row's status: one sentence
+     * saying what the box knows and what the user can do about it. The
+     * stopped and gone box sentences are the resume refusal's own words —
+     * the surfaces and the refusal must not tell two different stories about
+     * the same box.
+     */
+    public static String remoteStatusTooltip(boolean ownedHere,
+                                              Optional<RemoteSessionLiveness.State> liveness, String boxName) {
+        if (ownedHere) {
+            return "The agent runs on workspace box " + boxName + "; this window shows its live ssh console";
+        }
+        return switch (liveness.orElse(RemoteSessionLiveness.State.UNKNOWN)) {
+            case ALIVE -> "The agent is running on workspace box " + boxName
+                    + "; Resume attaches to it";
+            case DEAD -> "The agent is not running on workspace box " + boxName;
+            case UNKNOWN -> "Workspace box " + boxName
+                    + " could not be reached, so whether the agent runs there is unknown";
+            case BOX_STOPPED -> "Box " + boxName + " is stopped; its conversations are unreachable";
+            case BOX_GONE -> "Box " + boxName + " no longer exists";
+        };
     }
 
     /**

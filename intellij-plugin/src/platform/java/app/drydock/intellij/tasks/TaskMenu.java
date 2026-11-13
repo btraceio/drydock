@@ -1,6 +1,10 @@
 package app.drydock.intellij.tasks;
 
+import app.drydock.delayedtasks.TaskStoreWatcher.WatchedSnapshot;
 import app.drydock.intellij.agent.SessionTransfer;
+import app.drydock.tasks.TaskDocument;
+import app.drydock.tasks.TaskMirror;
+import app.drydock.tasks.TaskNode.DelayedTaskRow;
 import app.drydock.intellij.tasks.TaskNode.Ghost;
 import app.drydock.intellij.tasks.TaskNode.GhostSource;
 import app.drydock.intellij.tasks.TaskNode.GitHubNode;
@@ -16,6 +20,7 @@ import app.drydock.intellij.tasks.TaskNode.SectionKind;
 import app.drydock.intellij.tasks.TaskNode.StaleWorktrees;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
+import app.drydock.intellij.workspace.WorkspaceSettings;
 
 import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.DefaultActionGroup;
@@ -24,6 +29,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Stream;
 
 /**
  * The Drydock tree's context menu, as pure layout: which actions apply to
@@ -75,9 +81,17 @@ final class TaskMenu {
         OPEN_IN_JIRA,
         /** Open the Drydock task an issue row is a mirror of; only a mirrored issue offers it. */
         OPEN_MIRRORED_TASK,
+        /** Reveal and select the linked row in the tree; only when the tree shows the target. */
+        SHOW_TASK,
+        /** Reveal and select the pull request a row works; only when the tree shows it. */
+        SHOW_PULL_REQUEST,
+        /** Reveal and select the session a row belongs to; only when the tree shows it. */
+        SHOW_SESSION,
         IMPLEMENT,
         TRIAGE,
         GITHUB_SETTINGS,
+        /** Per-project workspace-box configuration: box-name override and clone path; only while the opt-in flag is on. */
+        WORKSPACE_BOX,
         /** Per-project Jira configuration: site, credentials. */
         JIRA_SETTINGS,
         /** Add a user-defined Jira group (name + JQL) to the Issues section. */
@@ -87,6 +101,8 @@ final class TaskMenu {
         /** Delete a Jira group, after confirmation; only a group node offers it. */
         DELETE_JIRA_GROUP,
         REFRESH,
+        /** On the Sessions node: run Done on every done session of the project at once. */
+        CLEANUP_DONE_SESSIONS,
         /** Show only this project in the tree, or every project again when it is focused already. */
         FOCUS_PROJECT,
         NEW_TASK_IN_MAIN,
@@ -97,12 +113,61 @@ final class TaskMenu {
         REMOVE_WORKTREES
     }
 
-    /** The non-pure answers of one menu build, computed once by {@link #factsFor}. */
-    record MenuFacts(boolean transferAvailable, boolean jiraEnabled, boolean mirroredTask) {
+    /**
+     * The non-pure answers of one menu build, computed once by
+     * {@link #factsFor}. The session link flags say a session row leads to
+     * GitHub or Jira pages; the three target rows are the selection's
+     * resolved cross-row links (issues, sessions, pull requests, tasks).
+     * An empty target keeps its jump item out, so the menu never offers a
+     * reveal the tree cannot perform.
+     *
+     * <p>{@code workspaceBoxEnabled} is the workspace-box opt-in flag as of
+     * this menu build: the entry it gates is laid out for project rows only,
+     * and the panel registers its action for a build only while the flag is
+     * on, so a flag-off build has no workspace-box surface anywhere.</p>
+     *
+     * <p>{@code remoteStop} says the selected task row runs nowhere in this
+     * IDE but its box-bound agent is ALIVE in the box's tmux (the restart
+     * scenario), so the idle menu offers the Stop next to its Resume — the
+     * same lifecycle verdict every other surface's Stop follows. A row
+     * without a box answers false before any read, so every local menu is
+     * the pre-remote list.</p>
+     */
+    record MenuFacts(boolean transferAvailable, boolean jiraEnabled, boolean mirroredTask,
+                     boolean workspaceBoxEnabled, boolean remoteStop,
+                     boolean sessionGitHubLink, boolean sessionJiraLink,
+                     DelayedTaskRow showTask, PullRequestRow showPullRequest, TaskRow showSession) {
 
-        /** The facts before issue rows could mirror a task: no mirrored task. */
+        /** The facts before any cross-row link existed: nothing resolved. */
         MenuFacts(boolean transferAvailable, boolean jiraEnabled) {
             this(transferAvailable, jiraEnabled, false);
+        }
+
+        /** The facts before the workspace-box opt-in existed: the flag off. */
+        MenuFacts(boolean transferAvailable, boolean jiraEnabled, boolean mirroredTask) {
+            this(transferAvailable, jiraEnabled, mirroredTask, false, false);
+        }
+
+        /** The facts with the workspace-box opt-in stated by the caller (tests). */
+        MenuFacts(boolean transferAvailable, boolean jiraEnabled, boolean mirroredTask,
+                  boolean workspaceBoxEnabled) {
+            this(transferAvailable, jiraEnabled, mirroredTask, workspaceBoxEnabled, false,
+                    false, false, null, null, null);
+        }
+
+        /** The facts before any cross-row link existed: nothing resolved. */
+        MenuFacts(boolean transferAvailable, boolean jiraEnabled, boolean mirroredTask,
+                  boolean sessionGitHubLink, boolean sessionJiraLink,
+                  DelayedTaskRow showTask, PullRequestRow showPullRequest, TaskRow showSession) {
+            this(transferAvailable, jiraEnabled, mirroredTask, false, false, sessionGitHubLink,
+                    sessionJiraLink, showTask, showPullRequest, showSession);
+        }
+
+        /** The facts before session rows carried attached links: no session link. */
+        MenuFacts(boolean transferAvailable, boolean jiraEnabled, boolean mirroredTask,
+                  boolean sessionGitHubLink, boolean sessionJiraLink) {
+            this(transferAvailable, jiraEnabled, mirroredTask, false, false, sessionGitHubLink,
+                    sessionJiraLink, null, null, null);
         }
     }
 
@@ -126,17 +191,24 @@ final class TaskMenu {
         TaskNode node = selected.isEmpty() ? lead : selected.get(0);
         return switch (node) {
             case null -> List.of();
-            case TaskRow row -> row.running() ? running(row, facts) : idle(row);
+            case TaskRow row -> row.running() ? running(row, facts) : idle(row, facts);
             case PullRequestRow pullRequest -> nonEmpty(List.of(
+                    section(facts.showTask() != null ? Item.SHOW_TASK : null,
+                            facts.showSession() != null ? Item.SHOW_SESSION : null),
                     section(Item.OPEN_IN_WORKBENCH,
                             pullRequest.pullRequest().conflicting() ? Item.RESOLVE_CONFLICTS : null),
+                    // Start a task on the PR's branch: its checkout, then the
+                    // New task dialog fixed to that worktree.
+                    List.of(Item.NEW_TASK),
                     section(urlOf(node).isPresent() ? Item.OPEN_IN_GITHUB : null)));
             case IssueRow ignored -> nonEmpty(List.of(
-                    section(facts.mirroredTask() ? Item.OPEN_MIRRORED_TASK : null),
+                    section(facts.showTask() != null ? Item.SHOW_TASK : null,
+                            facts.mirroredTask() ? Item.OPEN_MIRRORED_TASK : null),
                     List.of(Item.IMPLEMENT, Item.TRIAGE),
                     section(urlOf(node).isPresent() ? Item.OPEN_IN_GITHUB : null, Item.GITHUB_SETTINGS)));
             case JiraIssueRow ignored -> nonEmpty(List.of(
-                    section(facts.mirroredTask() ? Item.OPEN_MIRRORED_TASK : null),
+                    section(facts.showTask() != null ? Item.SHOW_TASK : null,
+                            facts.mirroredTask() ? Item.OPEN_MIRRORED_TASK : null),
                     List.of(Item.IMPLEMENT, Item.TRIAGE),
                     List.of(Item.OPEN_IN_JIRA, Item.JIRA_SETTINGS)));
             case JiraGroupRow ignored -> nonEmpty(List.of(
@@ -155,6 +227,9 @@ final class TaskMenu {
                     section(TaskActions.removable(idleWorktree).isEmpty() ? null : Item.REMOVE_WORKTREE)));
             case StaleWorktrees ignored -> List.of(List.of(Item.REMOVE_STALE_WORKTREES));
             case WorktreeGroup ignored -> List.of(List.of(Item.NEW_TASK));
+            // The Sessions node is where the project's bulk cleanup lives.
+            case Section section when section.kind() == SectionKind.SESSIONS ->
+                    List.of(List.of(Item.CLEANUP_DONE_SESSIONS));
             case Section section when section.kind() == SectionKind.ISSUES
                     || section.kind() == SectionKind.PULL_REQUESTS ->
                     section.kind() == SectionKind.ISSUES
@@ -167,24 +242,39 @@ final class TaskMenu {
         };
     }
 
-    /** A running task: switch to it or pull it here, work on it, manage it, clean up last. */
+    /** A running task: its tree links, then switch or pull it here, work on it, manage it, clean up last. */
     private static List<List<Item>> running(TaskRow row, MenuFacts facts) {
         return nonEmpty(List.of(
+                section(facts.showPullRequest() != null ? Item.SHOW_PULL_REQUEST : null,
+                        facts.showTask() != null ? Item.SHOW_TASK : null),
                 section(Item.SWITCH_TO_TASK, shownElsewhere(row) ? Item.SHOW_HERE : null),
                 section(Item.DEACTIVATE,
                         TaskActions.reviewsChanges(row) ? Item.REVIEW_CHANGES : null,
                         facts.transferAvailable() ? Item.TRANSFER_TO : null),
                 List.of(Item.RENAME, Item.FLAG, Item.NEW_TASK),
+                section(facts.sessionGitHubLink() ? Item.OPEN_IN_GITHUB : null,
+                        facts.sessionJiraLink() ? Item.OPEN_IN_JIRA : null),
                 section(TaskActions.closesOwnWindow(row) ? Item.DEACTIVATE_AND_CLOSE : null,
                         Item.DONE_WITH_TASK)));
     }
 
-    /** An idle task: the honest lifecycle variants, then management, cleanup last. */
-    private static List<List<Item>> idle(TaskRow row) {
+    /**
+     * An idle task: the honest lifecycle variants — the remote Stop first
+     * when the facts say the row's box-bound agent is ALIVE somewhere no
+     * execution here runs, so a detached remote row never strands its
+     * live agent behind a Resume-only menu — then management, cleanup
+     * last.
+     */
+    private static List<List<Item>> idle(TaskRow row, MenuFacts facts) {
         return nonEmpty(List.of(
+                section(facts.showPullRequest() != null ? Item.SHOW_PULL_REQUEST : null,
+                        facts.showTask() != null ? Item.SHOW_TASK : null),
                 List.of(Item.SWITCH_TO_TASK),
-                section(Item.RESUME, TaskActions.resumesElsewhere(row) ? Item.RESUME_IN_OWN_WINDOW : null),
+                section(facts.remoteStop() ? Item.DEACTIVATE : null,
+                        Item.RESUME, TaskActions.resumesElsewhere(row) ? Item.RESUME_IN_OWN_WINDOW : null),
                 List.of(Item.RENAME, Item.FLAG, Item.NEW_TASK),
+                section(facts.sessionGitHubLink() ? Item.OPEN_IN_GITHUB : null,
+                        facts.sessionJiraLink() ? Item.OPEN_IN_JIRA : null),
                 List.of(Item.DONE_WITH_TASK)));
     }
 
@@ -193,7 +283,9 @@ final class TaskMenu {
         return nonEmpty(List.of(
                 List.of(Item.NEW_TASK, Item.NEW_TASK_IN_MAIN),
                 List.of(Item.FOCUS_PROJECT),
-                section(Item.REFRESH, Item.GITHUB_SETTINGS, Item.JIRA_SETTINGS,
+                section(Item.REFRESH, Item.GITHUB_SETTINGS,
+                        facts.workspaceBoxEnabled() ? Item.WORKSPACE_BOX : null,
+                        Item.JIRA_SETTINGS,
                         facts.jiraEnabled() ? Item.ADD_JIRA_GROUP : null),
                 section(TaskActions.removable(row).isEmpty() ? null : Item.REMOVE_INACTIVE_WORKTREES,
                         Item.REMOVE_FROM_DRYDOCK)));
@@ -247,20 +339,117 @@ final class TaskMenu {
      * adding a group hinges on it (the Jira settings entry is always offered).
      * {@code mirroredTask} asks the task service's cached snapshot whether a
      * task mirrors the selected issue row, memory only.
+     * {@code workspaceBoxEnabled} reads the workspace-box opt-in flag from
+     * the application properties as of this build, so toggling it in Settings
+     * takes effect on the next popup without a panel rebuild.
+     * {@code remoteStop} asks the shared lifecycle derivation
+     * ({@link TaskActions#remoteStopOffered}) whether the selected task row's
+     * box-bound agent is ALIVE with no execution here running it — a
+     * memory-only read of the registry and the liveness map, so the flag-off
+     * and local-row builds answer false before anything is read.
      */
     static MenuFacts factsFor(TaskNode lead, boolean jiraEnabled) {
-        return new MenuFacts(lead instanceof TaskRow row
-                && SessionTransfer.available(row.session(), row.activity()), jiraEnabled,
-                issueUrlOf(lead).flatMap(TaskMirroring::mirroredTask).isPresent());
+        return factsFor(lead, jiraEnabled, WorkspaceSettings.enabled());
     }
 
-    /** The page of a GitHub or Jira issue row, the address a task mirror records. Pure. */
-    static Optional<String> issueUrlOf(TaskNode node) {
+    /** Same, with the workspace-box opt-in stated by the caller (tests). */
+    static MenuFacts factsFor(TaskNode lead, boolean jiraEnabled, boolean workspaceBoxEnabled) {
+        return factsFor(lead, jiraEnabled, List.of(), TaskTreePanel.TaskLayer.EMPTY, null,
+                workspaceBoxEnabled);
+    }
+
+    /**
+     * Same, with the cross-row links resolved: {@code displayed} is the
+     * tree's current node list and {@code watched} the task service's
+     * cached snapshot, both memory-only. Every target resolves over the
+     * DISPLAYED nodes, so a link the current view or filter hides offers
+     * no jump rather than a jump that reveals nothing.
+     */
+    static MenuFacts factsFor(TaskNode lead, boolean jiraEnabled, List<TaskNode> displayed,
+                              TaskTreePanel.TaskLayer tasks, WatchedSnapshot watched) {
+        return factsFor(lead, jiraEnabled, displayed, tasks, watched, WorkspaceSettings.enabled());
+    }
+
+    static MenuFacts factsFor(TaskNode lead, boolean jiraEnabled, List<TaskNode> displayed,
+                              TaskTreePanel.TaskLayer tasks, WatchedSnapshot watched,
+                              boolean workspaceBoxEnabled) {
+        DelayedTaskRow showTask = null;
+        PullRequestRow showPullRequest = null;
+        TaskRow showSession = null;
+        switch (lead) {
+            case TaskRow row -> {
+                showPullRequest = TaskLinks.pullRequestOf(row, displayed).orElse(null);
+                showTask = TaskLinks.taskOfSession(row, displayed, tasks).orElse(null);
+            }
+            case PullRequestRow pullRequest -> {
+                showTask = TaskLinks.taskOfBranch(pullRequest.pullRequest().headRefName(), watched)
+                        .flatMap(document -> delayedRowOf(document, displayed, tasks)).orElse(null);
+                showSession = TaskLinks.sessionOf(pullRequest, displayed).orElse(null);
+            }
+            case IssueRow issue -> showTask = TaskLinks.taskOf(issue, displayed, tasks).orElse(null);
+            case JiraIssueRow jira -> showTask = TaskLinks.taskOf(jira, displayed, tasks).orElse(null);
+            default -> {
+            }
+        }
+        TaskRow taskRow = lead instanceof TaskRow row ? row : null;
+        return new MenuFacts(taskRow != null
+                && SessionTransfer.available(taskRow.session(), taskRow.activity()), jiraEnabled,
+                issueUrlOf(lead).flatMap(TaskMirroring::mirroredTask).isPresent(),
+                workspaceBoxEnabled,
+                taskRow != null && TaskActions.remoteStopOffered(taskRow),
+                taskRow != null && !githubUrlsOf(taskRow).isEmpty(),
+                taskRow != null && !jiraUrlsOf(taskRow).isEmpty(),
+                showTask, showPullRequest, showSession);
+    }
+
+    /** The displayed delayed-task row of a task document, by id; empty when the tree shows none. */
+    private static Optional<DelayedTaskRow> delayedRowOf(TaskDocument document,
+                                                         List<TaskNode> displayed,
+                                                         TaskTreePanel.TaskLayer tasks) {
+        return TaskLinks.taskOfId(document.id(), displayed, tasks);
+    }
+
+    /**
+     * Any thread: the GitHub pages the selected row leads to — an issue's or
+     * pull request's own page, or a session row's pull request plus every
+     * GitHub issue its tasks mirror. The Open in GitHub action opens all of
+     * them, the way Open Mirrors does.
+     */
+    static List<String> githubUrlsOf(TaskNode node) {
+        return githubUrlsOf(node, node instanceof TaskRow row
+                ? TaskMirroring.mirrorsOfSession(row.session().id().toString()) : List.of());
+    }
+
+    /** Pure over the given session mirrors: {@link #githubUrlsOf(TaskNode)} without the snapshot read. */
+    static List<String> githubUrlsOf(TaskNode node, List<String> sessionMirrors) {
         return switch (node) {
-            case IssueRow issue -> issue.issue().url();
-            case JiraIssueRow jira -> Optional.of(jira.issue().url());
-            case null, default -> Optional.empty();
+            case IssueRow issue -> issue.issue().url().stream().toList();
+            case PullRequestRow pullRequest -> pullRequest.pullRequest().url().stream().toList();
+            case TaskRow task -> Stream.concat(
+                    TaskTreeRenderer.pullRequestUrl(task).stream(),
+                    sessionMirrors.stream().filter(TaskMenu::isGitHub)).toList();
+            case null, default -> List.of();
         };
+    }
+
+    /** Any thread: the Jira pages the selected row leads to, as {@link #githubUrlsOf(TaskNode)} for Jira. */
+    static List<String> jiraUrlsOf(TaskNode node) {
+        return jiraUrlsOf(node, node instanceof TaskRow row
+                ? TaskMirroring.mirrorsOfSession(row.session().id().toString()) : List.of());
+    }
+
+    /** Pure over the given session mirrors: {@link #jiraUrlsOf(TaskNode)} without the snapshot read. */
+    static List<String> jiraUrlsOf(TaskNode node, List<String> sessionMirrors) {
+        return switch (node) {
+            case JiraIssueRow jira -> List.of(jira.issue().url());
+            case TaskRow task -> sessionMirrors.stream().filter(url ->
+                    TaskMirror.kindOf(url).filter(TaskMirror.Kind.JIRA::equals).isPresent()).toList();
+            case null, default -> List.of();
+        };
+    }
+
+    private static boolean isGitHub(String url) {
+        return TaskMirror.kindOf(url).filter(TaskMirror.Kind.GITHUB::equals).isPresent();
     }
 
     /**
@@ -272,9 +461,19 @@ final class TaskMenu {
      */
     static DefaultActionGroup group(TaskNode lead, List<TaskNode> selection, Map<Item, AnAction> actions,
                                     boolean jiraEnabled) {
+        return group(lead, selection, actions, jiraEnabled, List.of(), TaskTreePanel.TaskLayer.EMPTY, null,
+                WorkspaceSettings.enabled());
+    }
+
+    /** Same popup, with the cross-row links resolved over the tree's current nodes. */
+    static DefaultActionGroup group(TaskNode lead, List<TaskNode> selection, Map<Item, AnAction> actions,
+                                    boolean jiraEnabled, List<TaskNode> displayed,
+                                    TaskTreePanel.TaskLayer tasks, WatchedSnapshot watched,
+                                    boolean workspaceBoxEnabled) {
         DefaultActionGroup menu = new DefaultActionGroup();
         boolean separated = false;
-        for (List<Item> section : sections(lead, selection, factsFor(lead, jiraEnabled))) {
+        for (List<Item> section : sections(lead, selection,
+                factsFor(lead, jiraEnabled, displayed, tasks, watched, workspaceBoxEnabled))) {
             List<AnAction> present = new ArrayList<>();
             for (Item item : section) {
                 AnAction action = actions.get(item);
@@ -292,5 +491,14 @@ final class TaskMenu {
             separated = true;
         }
         return menu;
+    }
+
+    /** The page of a GitHub or Jira issue row, the address a task mirror records. Pure. */
+    static Optional<String> issueUrlOf(TaskNode node) {
+        return switch (node) {
+            case IssueRow issue -> issue.issue().url();
+            case JiraIssueRow jira -> Optional.of(jira.issue().url());
+            case null, default -> Optional.empty();
+        };
     }
 }

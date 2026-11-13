@@ -3,6 +3,7 @@ package app.drydock.intellij.agent;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.SessionActivity;
 import app.drydock.domain.SessionStatus;
+import app.drydock.domain.WorkspaceBoxBinding;
 import app.drydock.intellij.ui.SessionDots;
 
 import com.intellij.ui.JBColor;
@@ -293,7 +294,10 @@ final class AgentConsoleStrip extends JPanel {
     }
 
     /**
-     * Repaints the strip for {@code session}. EDT only.
+     * Repaints the strip for {@code session}. EDT only. A row bound to a
+     * workspace box paints the box name and the liveness verdict through the
+     * remote rules ({@link AgentStripText#remoteStatusText}), never a local
+     * activity claim; every local row keeps the presentation below unchanged.
      *
      * @param activity         the live process's current activity, when running
      * @param running          whether this window has a live process for it
@@ -330,18 +334,41 @@ final class AgentConsoleStrip extends JPanel {
         // qualifier says where it is not, instead of a hollow dot and "Not
         // running" implying the globally live agent stopped (A6).
         boolean detached = commands.detachedFromThisWindow();
-        SessionStatus shown = detached
-                ? SessionStatus.RUNNING
-                : AgentStripText.displayStatus(session.status(), running);
         titleText = session.displayName();
         title.setText(session.displayName());
         title.setToolTipText("Rename \"" + session.displayName() + "\"");
-        state.setIcon(SessionDots.dotIcon(shown, activity));
-        state.setText(SessionDots.statusWord(shown, activity)
-                + (detached ? " · not shown here" : ""));
-        state.setToolTipText(detached
-                ? "The agent is running — just not in this window. Show agent opens its live console"
-                : SessionDots.tooltip(shown, activity));
+        if (commands.box().isPresent()) {
+            // A remote row's strip line is the box's own verdict — the box
+            // name plus the liveness word (OQ10, contract component 9) —
+            // never this window's local rules: the local displayStatus
+            // would flatten every detached remote answer into "Not
+            // running", and the activity monitor cannot see a box-side
+            // agent, so its word would be a guess. `ownedHere` — this IDE
+            // owns the live ssh execution, in this window or another —
+            // outranks a stale liveness entry; the dot keeps the shared
+            // palette through the remote mapping, with no activity folded
+            // in.
+            String boxName = commands.box().map(WorkspaceBoxBinding::boxName).orElseThrow();
+            boolean ownedHere = running || detached;
+            SessionStatus remote = AgentStripText.remoteDisplayStatus(
+                    session.status(), ownedHere, commands.liveness());
+            state.setIcon(SessionDots.dotIcon(remote, Optional.empty()));
+            state.setText(AgentStripText.remoteStatusText(ownedHere, commands.liveness(), boxName)
+                    + (detached ? " · not shown here" : ""));
+            state.setToolTipText(detached
+                    ? "The agent is running — just not in this window. Show agent opens its live console"
+                    : AgentStripText.remoteStatusTooltip(ownedHere, commands.liveness(), boxName));
+        } else {
+            SessionStatus shown = detached
+                    ? SessionStatus.RUNNING
+                    : AgentStripText.displayStatus(session.status(), running);
+            state.setIcon(SessionDots.dotIcon(shown, activity));
+            state.setText(SessionDots.statusWord(shown, activity)
+                    + (detached ? " · not shown here" : ""));
+            state.setToolTipText(detached
+                    ? "The agent is running — just not in this window. Show agent opens its live console"
+                    : SessionDots.tooltip(shown, activity));
+        }
 
         Optional<String> chipText = AgentStripText.readOnlyChip(session, readOnlyEnforced);
         chip.setText(chipText.orElse(""));
@@ -382,11 +409,15 @@ final class AgentConsoleStrip extends JPanel {
         };
         // The shared busy label while an operation is in flight; otherwise
         // the lifecycle's own words, with the strip's resume-cost copy for a
-        // stopped session.
+        // stopped session. A Deactivate primary always keeps its own label:
+        // for a remote row the box says is ALIVE, nothing runs in this
+        // window, so the not-running branch would relabel the Stop as a
+        // Resume — every other not-running row keeps the resume/start copy.
         Optional<String> busy = SessionCommands.busyLabel(commands);
-        primary.setText(busy.orElseGet(() -> commands.running()
-                ? lifecycle.label()
-                : AgentStripText.primaryLabel(commands.resumable(), estimatedTokens)));
+        primary.setText(busy.orElseGet(() -> lifecycle == SessionCommands.Lifecycle.DEACTIVATE
+                || commands.running()
+                        ? lifecycle.label()
+                        : AgentStripText.primaryLabel(commands.resumable(), estimatedTokens)));
         primary.setIcon(lifecycle.icon());
         primary.setEnabled(SessionCommands.lifecycleEnabled(commands));
         done.setEnabled(SessionCommands.doneEnabled(commands));

@@ -76,6 +76,8 @@ final class ListingExpansionTracker implements TreeExpansionListener {
     /** Main roots whose lazy sections the user opened in this panel. */
     private final Set<Path> worktrees = ConcurrentHashMap.newKeySet();
     private final Set<Path> pullRequests = ConcurrentHashMap.newKeySet();
+    /** Main roots whose project row the user opened: restore state only (opening one records its listings). */
+    private final Set<Path> projects = ConcurrentHashMap.newKeySet();
     /** Main roots whose Issues section the user opened: restore state only, never a fetch. */
     private final Set<Path> issueSections = ConcurrentHashMap.newKeySet();
     /** Main roots whose GitHub node the user opened: the fetch trigger for that project's issue listing. */
@@ -133,6 +135,28 @@ final class ListingExpansionTracker implements TreeExpansionListener {
         return issueSections;
     }
 
+    /** The main roots whose project row the user opened here (restore state only). */
+    Set<Path> requestedProjects() {
+        return projects;
+    }
+
+    /**
+     * Opens {@code root}'s project as the user's own gesture: records the
+     * row, its Issues section, its GitHub node and its Pull Requests
+     * section, and asks for one rebuild when that is new, so a single
+     * expand loads both listings (the Projects view's one-click reach).
+     * EDT.
+     */
+    void openProject(Path root) {
+        boolean added = projects.add(root);
+        issueSections.add(root);
+        added |= githubIssues.add(root);
+        added |= pullRequests.add(root);
+        if (added) {
+            requester.requestRebuild(false);
+        }
+    }
+
     /** The main roots whose Jira node the user opened here (restore state only). */
     Set<Path> requestedJiraNodes() {
         return jiraNodes;
@@ -178,7 +202,11 @@ final class ListingExpansionTracker implements TreeExpansionListener {
             return;
         }
         Optional<Path> root = projectRootOf.apply(event.getPath());
-        if (node.getUserObject() instanceof TaskNode.GitHubNode) {
+        if (node.getUserObject() instanceof TaskNode.ProjectRow) {
+            if (!programmatic) {
+                root.ifPresent(this::openProject);
+            }
+        } else if (node.getUserObject() instanceof TaskNode.GitHubNode) {
             root.ifPresent(r -> {
                 if (!programmatic && githubIssues.add(r)) {
                     requester.requestRebuild(false);
@@ -228,12 +256,23 @@ final class ListingExpansionTracker implements TreeExpansionListener {
             return;
         }
         switch (node.getUserObject()) {
+            case TaskNode.ProjectRow ignored -> closeProject(root);
             case TaskNode.GitHubNode ignored -> githubIssues.remove(root);
             case TaskNode.JiraGroupRow group -> jiraGroups.remove(new GroupKey(root, group.group().id()));
             case TaskNode.JiraNode ignored -> closeJiraUnder(root);
             case TaskNode.Section section -> closeSection(section, root);
             default -> { }
         }
+    }
+
+    /** Forgets a closed project row's record and every listing record under it. */
+    private void closeProject(Path root) {
+        projects.remove(root);
+        issueSections.remove(root);
+        githubIssues.remove(root);
+        pullRequests.remove(root);
+        worktrees.remove(root);
+        closeJiraUnder(root);
     }
 
     /** Forgets the Jira node's open record and every group record under it. */

@@ -83,6 +83,16 @@ import java.util.Optional;
  * follow-up: it needs their attention later, whatever its agent is doing. Only
  * the human sets or clears it (the task tree's Flag for Follow-up toggle);
  * nothing clears it on its own.</p>
+ *
+ * <p>{@link #workspaceBox()} names the Datadog workspace box this session
+ * runs on, and is empty for every local session — a row is <em>remote</em>
+ * iff the binding is present. The binding is the row's only remote truth, so
+ * a remote row never carries a real local workspace: whatever workspace is
+ * supplied at construction is replaced by the box's deterministic
+ * placeholder root ({@code binding.sshRemote().placeholderRoot()}), an empty
+ * worktree root, and {@code branchCreatedHere = false} — the box-side
+ * worktree owns the branch, not this Mac. {@code withWorkingDirectory} and
+ * friends therefore cannot smuggle a local path onto a remote row.</p>
  */
 public record ManagedAgentSession(
         ManagedSessionId id,
@@ -100,7 +110,8 @@ public record ManagedAgentSession(
         boolean evalMode,
         Optional<WorkflowId> workflowId,
         boolean startedWithTask,
-        boolean flagged
+        boolean flagged,
+        Optional<WorkspaceBoxBinding> workspaceBox
 ) {
 
     public ManagedAgentSession {
@@ -116,15 +127,40 @@ public record ManagedAgentSession(
         Objects.requireNonNull(pr, "pr");
         Objects.requireNonNull(forkedFrom, "forkedFrom");
         Objects.requireNonNull(workflowId, "workflowId");
+        Objects.requireNonNull(workspaceBox, "workspaceBox");
 
         if (displayName.isBlank()) {
             throw new IllegalArgumentException("ManagedAgentSession displayName must not be blank");
         }
+        if (workspaceBox.isPresent()) {
+            // A remote row's workspace is derived from its binding, never
+            // stored alongside it: the placeholder root is unique per box,
+            // worktrees live on the box, and the branch belongs to the
+            // box-side worktree this Mac did not create.
+            workspace = new SessionWorkspace(
+                    workspaceBox.get().sshRemote().placeholderRoot(), Optional.empty(), false);
+        }
     }
 
     /**
-     * As the canonical constructor with {@code flagged = false}; for callers
-     * (and tests) that do not participate in follow-up flagging.
+     * As the canonical constructor with {@code workspaceBox} empty — the
+     * signature every pre-workspace-box construction site used. A session
+     * built this way is local by construction.
+     */
+    public ManagedAgentSession(ManagedSessionId id, RepositoryId repositoryId, String displayName,
+                               AgentBinding binding, SessionWorkspace workspace, SessionStatus status,
+                               Instant createdAt, Instant lastOpenedAt, Optional<Integer> lastExitCode,
+                               PrLink pr, boolean namePinned, Optional<ManagedSessionId> forkedFrom,
+                               boolean evalMode, Optional<WorkflowId> workflowId, boolean startedWithTask,
+                               boolean flagged) {
+        this(id, repositoryId, displayName, binding, workspace, status, createdAt, lastOpenedAt, lastExitCode,
+                pr, namePinned, forkedFrom, evalMode, workflowId, startedWithTask, flagged, Optional.empty());
+    }
+
+    /**
+     * As the canonical constructor with {@code flagged = false} and {@code
+     * workspaceBox} empty; for callers (and tests) that do not participate
+     * in follow-up flagging or workspace boxes.
      */
     public ManagedAgentSession(ManagedSessionId id, RepositoryId repositoryId, String displayName,
                                AgentBinding binding, SessionWorkspace workspace, SessionStatus status,
@@ -163,6 +199,11 @@ public record ManagedAgentSession(
     }
 
     // ---- leaf accessors, delegating into the groups --------------------------
+
+    /** Whether this session runs on a workspace box; a row is remote iff this is present. */
+    public Optional<WorkspaceBoxBinding> workspaceBox() {
+        return workspaceBox;
+    }
 
     public AgentKind agentKind() {
         return binding.kind();
@@ -317,6 +358,7 @@ public record ManagedAgentSession(
         private Optional<WorkflowId> workflowId;
         private boolean startedWithTask;
         private boolean flagged;
+        private Optional<WorkspaceBoxBinding> workspaceBox;
 
         private Builder(ManagedAgentSession from) {
             this.id = from.id;
@@ -335,6 +377,7 @@ public record ManagedAgentSession(
             this.workflowId = from.workflowId;
             this.startedWithTask = from.startedWithTask;
             this.flagged = from.flagged;
+            this.workspaceBox = from.workspaceBox;
         }
 
         /**
@@ -361,6 +404,7 @@ public record ManagedAgentSession(
             this.workflowId = Optional.empty();
             this.startedWithTask = false;
             this.flagged = false;
+            this.workspaceBox = Optional.empty();
         }
 
         public Builder id(ManagedSessionId value) {
@@ -443,10 +487,21 @@ public record ManagedAgentSession(
             return this;
         }
 
+        /**
+         * Binds this session to a workspace box (making the row remote), or
+         * clears the binding (making it local). Setting it rewrites the
+         * workspace to the box's placeholder root at {@code build()} — see
+         * the class doc.
+         */
+        public Builder workspaceBox(Optional<WorkspaceBoxBinding> value) {
+            this.workspaceBox = value;
+            return this;
+        }
+
         public ManagedAgentSession build() {
             return new ManagedAgentSession(id, repositoryId, displayName, binding, workspace, status,
                     createdAt, lastOpenedAt, lastExitCode, pr, namePinned, forkedFrom, evalMode, workflowId,
-                    startedWithTask, flagged);
+                    startedWithTask, flagged, workspaceBox);
         }
     }
 }

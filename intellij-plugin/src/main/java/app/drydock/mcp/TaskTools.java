@@ -36,8 +36,8 @@ import static app.drydock.mcp.TaskToolCodec.statusArg;
 import static app.drydock.mcp.TaskToolCodec.titleArg;
 
 /**
- * The task MCP tools (D14/P7): task_get, task_list, task_update and
- * task_create, dispatched apart from the main router (T11 routes them in)
+ * The task MCP tools (D14/P7): task_get, task_list, task_update,
+ * task_create and task_claim, dispatched apart from the main router (T11 routes them in)
  * over a {@link TaskToolContext}, in McpToolRouter's conventions: bounded
  * argument parsing whose failures are concrete refusals (McpToolException
  * is the visible failure channel; no unchecked exception escapes a call),
@@ -63,7 +63,7 @@ public final class TaskTools {
         this.context = Objects.requireNonNull(context, "context");
     }
 
-    /** The four tool descriptors, in the router's descriptor shape. */
+    /** The five tool descriptors, in the router's descriptor shape. */
     public List<JsonValue> toolDescriptors() {
         return List.of(
                 descriptor("task_get",
@@ -114,7 +114,24 @@ public final class TaskTools {
                                         + " unresolved one refuses the create."))
                                 .put("project", schemaString("Registered project to create in, by"
                                         + " display slug; omit for this session's own repository.")),
-                        "title"));
+                        "title"),
+                descriptor("task_claim",
+                        "Claims one claimable follow-up: Drydock launches the task as its OWN"
+                                + " stacked session on a worktree at its in-repository prerequisite's"
+                                + " dd/<id> branch tip (the follow-up's work stacks on that branch)."
+                                + " The claim launches immediately, with no human confirmation step."
+                                + " launching:true means validation passed and the stacked launch"
+                                + " attempt is under way; an asynchronous failure (preparation"
+                                + " refusal or launch failure) is logged, launches nothing, and"
+                                + " leaves the task open and claimable again -- verify the outcome"
+                                + " with task_get: the new session's id appears in the task's"
+                                + " sessions list once the launch succeeded."
+                                + " Refused when the task has no in-repository prerequisite, the"
+                                + " prerequisite's branch does not exist yet, a live session already"
+                                + " owns the task, or the dependency graph is unsound.",
+                        JsonObject.empty().put("id", schemaString("Follow-up task id to claim, as"
+                                + " task_list or task_create reports it; any registered repository.")),
+                        "id"));
     }
 
     /** Bounded dispatch; every refusal names what went wrong and what differs. */
@@ -126,6 +143,7 @@ public final class TaskTools {
             case "task_list" -> taskList(caller, args);
             case "task_update" -> taskUpdate(caller, args);
             case "task_create" -> taskCreate(caller, args);
+            case "task_claim" -> taskClaim(caller, args);
             default -> throw new McpToolException("Unknown tool: " + tool);
         };
     }
@@ -221,10 +239,12 @@ public final class TaskTools {
         if (project.isPresent()) {
             repository = resolveProject(project.get());
         } else {
-            repository = join(context.defaultRepository(caller), "resolving this session's repository")
-                    .orElseThrow(() -> new McpToolException("This session's working root maps to"
-                            + " no registered repository, so there is no default project to create"
-                            + " the task in; pass an explicit project."));
+            Optional<RepositoryId> resolved = join(context.defaultRepository(caller),
+                    "resolving this session's repository");
+            if (resolved.isEmpty()) {
+                throw new McpToolException(noDefaultProjectRefusal());
+            }
+            repository = resolved.get();
         }
         TaskToolContext.Outcome created = join(context.create(title, after, repository),
                 "creating the task");
@@ -243,12 +263,52 @@ public final class TaskTools {
         return JsonObject.empty().put("id", new JsonString(id.text()));
     }
 
+    /**
+     * Claims one follow-up (S4 of docs/StackedPrExecution.md): the context
+     * validates and launches; the answer is the task as it stood at claim
+     * time plus the launching marker. Every refusal is the context's
+     * concrete reason, verbatim. launching:true means validation passed and
+     * the stacked launch attempt is under way; an asynchronous failure
+     * (preparation refusal or launch failure) is logged, launches nothing,
+     * and leaves the task open and claimable again -- verify the outcome
+     * with task_get: the new session's id appears in the task's sessions
+     * list once the launch succeeded.
+     */
+    private JsonValue taskClaim(ManagedSessionId caller, JsonObject args) throws McpToolException {
+        TaskId id = idArg(args);
+        TaskToolContext.Outcome claimed = join(context.claim(caller, id), "claiming the task");
+        if (claimed.refused()) {
+            throw new McpToolException(claimed.refusal());
+        }
+        TaskDocument committed = claimed.document();
+        return JsonObject.empty()
+                .put("id", new JsonString(id.text()))
+                .put("status", new JsonString(committed.status().storedName()))
+                .put("launching", new JsonBoolean(true));
+    }
+
     /** A project argument, resolved by display slug; an unknown slug refuses. */
     private RepositoryId resolveProject(String slug) throws McpToolException {
         return join(context.repositoryBySlug(slug), "resolving the project")
                 .orElseThrow(() -> new McpToolException("No registered project '" + slug + "';"
                         + " pass a project exactly as the platform names it, or omit it to use"
                         + " this session's own repository."));
+    }
+
+    /**
+     * The refusal for a caller whose working root maps to no registered
+     * repository, naming the registered slugs so the call can still be
+     * retried with an explicit project.
+     */
+    private String noDefaultProjectRefusal() throws McpToolException {
+        List<String> slugs = join(context.registeredProjectSlugs(),
+                "listing the registered projects");
+        String offer = slugs.isEmpty()
+                ? "no projects are registered yet"
+                : "registered projects, by slug: " + String.join(", ", slugs);
+        return "This session's working root maps to no registered repository, so there is"
+                + " no default project to create the task in; pass an explicit project ("
+                + offer + ").";
     }
 
     /**

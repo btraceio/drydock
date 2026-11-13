@@ -123,7 +123,7 @@ class TaskTreeReviewPresentationTest {
         @Override public Optional<ActivityReporter> activity() { return Optional.empty(); }
         @Override public Optional<SessionIdDiscovery> idDiscovery() { return Optional.empty(); }
         @Override public Optional<SphinxReviewSupport> sphinxReview() {
-            return sphinx ? Optional.of(new SphinxReviewSupport(SphinxReviewSupport.Invocation.SLASH_COMMAND))
+            return sphinx ? Optional.of(new SphinxReviewSupport())
                     : Optional.empty();
         }
     }

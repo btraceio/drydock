@@ -19,6 +19,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
@@ -164,6 +165,55 @@ public class AgentExecutionRegistryPlatformTest extends BasePlatformTestCase {
         Thread.sleep(200);
         assertEquals(1, ended.size());
         assertTrue(ended.get(0).stopRequested());
+    }
+
+    /**
+     * The requested-client-end marks (review R1): an explicit Stop is
+     * identified before its kill — pending verdict first, the kill's verdict
+     * once it returned — and a close that overwrites the mark keeps its own
+     * origin, so the Stop's late verdict cannot relabel a close. Each end
+     * mark is scoped: ended by its own origin, cleared outright for a new
+     * launch.
+     */
+    public void testRequestedClientEndMarksCarryOriginAndVerdict() {
+        AgentExecutionRegistry.RemoteClientEnds ends = registry.remoteClientEnds();
+
+        ends.beginExplicitStop(id);
+        AgentExecutionRegistry.RemoteClientEnds.RequestedEnd pending = ends.requestedEnd(id).orElseThrow();
+        assertEquals(AgentExecutionRegistry.RemoteClientEnds.Origin.EXPLICIT_STOP, pending.origin());
+        assertTrue("the kill has not concluded yet", pending.killConfirmed().isEmpty());
+
+        ends.stopVerdict(id, true);
+        AgentExecutionRegistry.RemoteClientEnds.RequestedEnd verdict = ends.requestedEnd(id).orElseThrow();
+        assertEquals(Optional.of(true), verdict.killConfirmed());
+
+        ends.beginClose(id);   // a window close racing the Stop keeps its own origin
+        ends.stopVerdict(id, true);
+        assertEquals(AgentExecutionRegistry.RemoteClientEnds.Origin.CLOSE, ends.requestedEnd(id).orElseThrow().origin());
+
+        ends.endExplicitStop(id);
+        assertTrue("ending the explicit stop leaves the close mark", ends.requestedEnd(id).isPresent());
+        ends.endClose(id);
+        assertTrue(ends.requestedEnd(id).isEmpty());
+
+        ends.beginClose(id);
+        assertTrue(ends.hasLiveExecution(id) == registry.isRunning(id));
+        ends.clear(id);
+        assertTrue(ends.requestedEnd(id).isEmpty());
+    }
+
+    /** The end's delivery consumes its requested-end mark, so it can never steer a later end. */
+    public void testARequestedClientEndMarkIsConsumedByTheEndDelivery() throws Exception {
+        start(List.of("/bin/sh", "-c", "sleep 30"));
+
+        registry.remoteClientEnds().beginClose(id);
+        assertTrue(registry.remoteClientEnds().requestedEnd(id).isPresent());
+
+        registry.stop(id);
+
+        waitFor(() -> !ended.isEmpty());
+        assertTrue("the delivered end consumed its mark",
+                registry.remoteClientEnds().requestedEnd(id).isEmpty());
     }
 
     public void testReplacementStopKillsTheAgentChildBeforeTheWrapperReportsDone() throws Exception {

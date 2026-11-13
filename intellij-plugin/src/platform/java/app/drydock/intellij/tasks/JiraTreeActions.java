@@ -66,13 +66,16 @@ final class JiraTreeActions {
                 .orElse(false);
     }
 
-    /** {@code Open in Jira}: the selected Jira row's browse URL in the browser (spec AC22). */
+    /** {@code Open in Jira}: the selected row's Jira page in the browser — a Jira issue row's own, or a
+     *  session row's every mirrored Jira ticket (spec AC22). */
     static AnAction openInJira() {
         return new DumbAwareAction("Open in Jira", "Open this Jira issue in the browser",
                 TaskTreeRenderer.JIRA_ICON) {
             @Override
             public void update(@NotNull AnActionEvent e) {
-                TaskActions.present(e, e.getData(TaskTreePanel.SELECTED_NODE) instanceof JiraIssueRow);
+                TaskNode selected = e.getData(TaskTreePanel.SELECTED_NODE);
+                TaskActions.present(e, selected instanceof JiraIssueRow
+                        || !TaskMenu.jiraUrlsOf(selected).isEmpty());
             }
 
             @Override
@@ -82,8 +85,11 @@ final class JiraTreeActions {
 
             @Override
             public void actionPerformed(@NotNull AnActionEvent e) {
-                if (e.getData(TaskTreePanel.SELECTED_NODE) instanceof JiraIssueRow jira) {
+                TaskNode selected = e.getData(TaskTreePanel.SELECTED_NODE);
+                if (selected instanceof JiraIssueRow jira) {
                     BrowserUtil.browse(jira.issue().url());
+                } else {
+                    TaskMenu.jiraUrlsOf(selected).forEach(BrowserUtil::browse);
                 }
             }
         };

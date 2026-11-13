@@ -63,6 +63,15 @@ public interface TaskToolContext {
     CompletableFuture<Optional<RepositoryId>> defaultRepository(ManagedSessionId caller);
 
     /**
+     * The display slugs that resolve to exactly one registered repository,
+     * in registration order, for refusals that name what an explicit
+     * project can be. A slug two projects share is omitted: it would
+     * refuse in {@link #repositoryBySlug} anyway (never picks a winner),
+     * so advertising it would only offer a dead-end retry.
+     */
+    CompletableFuture<List<String>> registeredProjectSlugs();
+
+    /**
      * The ids of the tasks assigned to the calling session (their sessions
      * list carries this session's id). Status writes are scoped to these
      * (clarification 2); reads never are.
@@ -89,4 +98,25 @@ public interface TaskToolContext {
 
     /** Appends one session note under '## Session notes', touching no other body byte (P7). */
     CompletableFuture<Outcome> appendNote(TaskId task, String note);
+
+    /**
+     * Claims one claimable follow-up (S4 of docs/StackedPrExecution.md) for
+     * the calling session: Drydock validates the claim (a follow-up with an
+     * in-repository prerequisite branch, not owned by a live session, the
+     * graph sound) and launches the task as its OWN stacked session on a
+     * worktree at the prerequisite's {@code dd/<id>} branch tip -- the
+     * confirmed O3 policy: a claim launches immediately, with no human
+     * confirmation step. The committed document is the task as it stood at
+     * claim time; the launch binding adds the new session's id to its
+     * sessions list afterwards. For a tool claim the service records one
+     * audit log line naming the calling session and the claimed task
+     * immediately before the launch, and a refused tool-path claim logs one
+     * audit line (calling session, claimed task, reason). The launch itself
+     * is asynchronous: this future answers once validation passed and the
+     * launch attempt started; a preparation refusal or launch failure
+     * afterwards is logged and launches nothing -- the task stays open and
+     * claimable, and the claiming agent verifies the outcome with task_get
+     * (the new session's id appears in the sessions list on success).
+     */
+    CompletableFuture<Outcome> claim(ManagedSessionId caller, TaskId task);
 }
