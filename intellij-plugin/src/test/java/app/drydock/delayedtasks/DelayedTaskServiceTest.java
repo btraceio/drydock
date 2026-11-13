@@ -871,6 +871,63 @@ class DelayedTaskServiceTest {
         }
     }
 
+    // 1c. Shared-id match before root-match: with an unrelated shared entry BEFORE the
+    // entry whose id the caller passes -- and an install entry whose root matches the
+    // FIRST entry -- the id match still wins, at the second entry.
+    @Test
+    void createKeepsTheSecondSharedEntryIdWhenAnUnrelatedEntryComesFirst(@TempDir Path root)
+            throws Exception {
+        RepositoryId unrelatedId = RepositoryId.newId();
+        RepositoryId secondSharedId = RepositoryId.newId();
+        RepositoryId installId = RepositoryId.newId();
+        Path unrelatedCheckout = root.resolve("unrelated");
+        Path secondCheckout = root.resolve("second");
+        SharedProject unrelated = SharedProject.local(unrelatedId, unrelatedCheckout,
+                "unrelated", Instant.EPOCH);
+        SharedProject second = SharedProject.local(secondSharedId, secondCheckout,
+                "java-profiler", Instant.EPOCH);
+        Repository install = repository(installId, unrelatedCheckout, "unrelated");
+        try (DelayedTaskService service = new DelayedTaskService(root, executor, List::of,
+                () -> List.of(install), () -> List.of(unrelated, second))) {
+            await(service.initialize());
+            TaskToolContext.Outcome created = await(service.create("Follow up", List.of(),
+                    secondSharedId));
+            assertFalse(created.refused(), created.refusal());
+            assertEquals(secondSharedId, created.document().repository(),
+                    "the caller's shared id stays, even though an unrelated entry precedes it");
+            assertTrue(Files.exists(committedFile(root, secondSharedId, created.document().id())),
+                    "the task file lands under the second entry's id directory");
+        }
+    }
+
+    // 1d. Root-match fallback runs past an earlier unrelated shared entry: an
+    // install-catalog id whose root the SECOND shared entry carries resolves to that
+    // second entry's shared id, never an early id-mismatch short-circuit keeping the
+    // install id.
+    @Test
+    void createResolvesAnInstallIdThroughTheLaterSharedRoot(@TempDir Path root) throws Exception {
+        RepositoryId unrelatedId = RepositoryId.newId();
+        RepositoryId laterSharedId = RepositoryId.newId();
+        RepositoryId installId = RepositoryId.newId();
+        Path unrelatedCheckout = root.resolve("unrelated");
+        Path laterCheckout = root.resolve("later");
+        SharedProject unrelated = SharedProject.local(unrelatedId, unrelatedCheckout,
+                "unrelated", Instant.EPOCH);
+        SharedProject later = SharedProject.local(laterSharedId, laterCheckout,
+                "java-profiler", Instant.EPOCH);
+        Repository install = repository(installId, laterCheckout, "java-profiler");
+        try (DelayedTaskService service = new DelayedTaskService(root, executor, List::of,
+                () -> List.of(install), () -> List.of(unrelated, later))) {
+            await(service.initialize());
+            TaskToolContext.Outcome created = await(service.create("Follow up", List.of(), installId));
+            assertFalse(created.refused(), created.refusal());
+            assertEquals(laterSharedId, created.document().repository(),
+                    "the install id resolves to the later shared entry's id by root");
+            assertTrue(Files.exists(committedFile(root, laterSharedId, created.document().id())),
+                    "the task file lands under the shared id's directory");
+        }
+    }
+
     @Test
     void createKeepsTheCallerIdWhenNothingMaps(@TempDir Path root) throws Exception {
         RepositoryId installId = RepositoryId.newId();

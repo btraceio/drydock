@@ -1,6 +1,7 @@
 package app.drydock.intellij.tasks;
 
 import app.drydock.delayedtasks.DelayedTaskService;
+import app.drydock.delayedtasks.SharedProjectResolver;
 import app.drydock.delayedtasks.TaskStoreWatcher;
 import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
@@ -332,29 +333,16 @@ public final class TaskMirroring {
     }
 
     /**
-     * Pure: the shared-list project a task's repository id names. The id itself when the
-     * shared list carries it (tasks created through the IDE dialog store the shared id,
-     * {@code TaskLauncher.saveTask}); otherwise the install catalog's root for the id,
-     * matched against the shared list by root -- tasks created through the task MCP tools
-     * stamp the IDE install's own registry id, a distinct UUID for the same checkout
-     * ({@code DelayedTaskStart.rootOf} handles the same dual-registry reality at start
-     * time). The shared entry is what the flow needs: the Jira and GitHub settings are
-     * keyed by the shared registry's id. Both registries store canonical roots (each
-     * registers through {@code RepositoryCatalog.canonicalize}), so root equality is the
-     * match and this stays a memory-only read, safe on the EDT. Empty when neither
-     * registry maps the id -- the caller refuses.
+     * Pure: the shared-list project a task's repository id names. Delegates to
+     * {@link SharedProjectResolver#resolve}, the single copy of the dual-registry
+     * resolution this package shares with delayedtasks, so the mirror-time resolution
+     * and the create-time stamp cannot drift apart. The shared entry is what the flow
+     * needs: the Jira and GitHub settings are keyed by the shared registry's id. Empty
+     * when neither registry maps the id -- the caller refuses.
      */
     static Optional<SharedProject> resolveShared(List<SharedProject> shared, List<Repository> install,
                                                  RepositoryId repository) {
-        return shared.stream()
-                .filter(project -> project.id().equals(repository))
-                .findFirst()
-                .or(() -> install.stream()
-                        .filter(candidate -> candidate.id().equals(repository))
-                        .findFirst()
-                        .flatMap(entry -> shared.stream()
-                                .filter(project -> project.root().equals(entry.root()))
-                                .findFirst()));
+        return SharedProjectResolver.resolve(shared, install, repository);
     }
 
     /** Any thread: one visible refusal, shown on the EDT. */

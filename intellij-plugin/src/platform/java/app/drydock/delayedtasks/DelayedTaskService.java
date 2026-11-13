@@ -1233,30 +1233,21 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
       * from the shared registry's -- and every consumer that keys by repository id (the
       * tool window's project rows, the Jira and GitHub settings, the mirror flows) keys
       * the SHARED registry. Tasks created through the IDE dialog already store the shared
-      * id ({@code TaskLauncher.saveTask}); this makes the MCP-created ones agree, so the
-      * mirror resolution never needs the install-id fallback. Both registries store
-      * canonical roots (each registers through {@code RepositoryCatalog.canonicalize}),
+      * id ({@code TaskLauncher.saveTask}); the remap makes the MCP-created ones agree for
+      * tasks created after the registries publish the checkout. The root-matching
+      * fallback must stay: legacy (pre-change) tasks and creates inside the
+      * initialization window still rely on it, as do late registrations. Both registries
+      * store canonical roots (each registers through {@code RepositoryCatalog.canonicalize}),
       * so root equality is the match and this stays a memory-only read. An id neither
       * registry maps keeps the caller's id: creating a task for a project only the
-      * install knows must not fail, and the mirror flow still resolves it by root. */
+      * install knows must not fail, and the mirror flow still resolves it by root.
+      * Delegates to {@link SharedProjectResolver#resolve}, the single copy this package
+      * shares with intellij.tasks, so the create-time stamp and the mirror-time
+      * resolution cannot drift apart. */
     private RepositoryId stableRepository(RepositoryId repository) {
-        List<SharedProject> shared = sharedProjects.get();
-        for (SharedProject project : shared) {
-            if (project.id().equals(repository)) {
-                return repository;
-            }
-        }
-        for (Repository candidate : repositories.get()) {
-            if (!candidate.id().equals(repository)) {
-                continue;
-            }
-            for (SharedProject project : shared) {
-                if (project.root().equals(candidate.root())) {
-                    return project.id();
-                }
-            }
-        }
-        return repository;
+        return SharedProjectResolver.resolve(sharedProjects.get(), repositories.get(), repository)
+                .map(SharedProject::id)
+                .orElse(repository);
     }
 
     @Override
