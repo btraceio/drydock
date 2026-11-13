@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CompletionException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -54,5 +55,24 @@ class SessionCommandHandlersTest {
             assertEquals(SessionCommandHandlers.StopStep.NOTHING,
                     SessionCommandHandlers.stopStep(false, false, activity), "stopped, " + activity);
         }
+    }
+
+    /**
+     * The remote Stop's failure text, unwrapped from the service's future:
+     * the box-naming reason as written, whether the future wrapped it in a
+     * {@code CompletionException} (the service's executor stages do) or not.
+     */
+    @Test
+    void aRemoteStopFailureIsSurfacedAsTheServicesBoxNamingReason() {
+        String reason = "Could not stop the agent of session 'Box work' on box drydock-repo: ssh exited 255";
+        assertEquals(reason, SessionCommandHandlers.stopFailureMessage(
+                new CompletionException(new IllegalStateException(reason))));
+        assertEquals(reason, SessionCommandHandlers.stopFailureMessage(
+                new IllegalStateException(reason)));
+        // A reason with no text degrades to the exception itself, never
+        // to a null dialog message
+        IllegalStateException bare = new IllegalStateException();
+        assertEquals(bare.toString(), SessionCommandHandlers.stopFailureMessage(
+                new CompletionException(bare)));
     }
 }

@@ -6,6 +6,8 @@ import app.drydock.domain.SessionActivity;
 import app.drydock.domain.SessionStatus;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.review.ReviewTabOpener;
+import app.drydock.intellij.session.DrydockSessionService;
+import app.drydock.intellij.startup.DrydockStartupActivity;
 import app.drydock.intellij.ui.SessionDots;
 import app.drydock.ui.AgentLabels;
 
@@ -16,6 +18,8 @@ import com.intellij.openapi.project.ProjectManager;
 import com.intellij.openapi.ui.Messages;
 
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 
 /**
  * What a single session's commands do, once clicked: deactivate it, be done
@@ -43,6 +47,19 @@ import java.util.Optional;
  * question, {@link StopAgentsPlan#isWorking} in {@code AgentCloseConfirmation}
  * — that one still counts a waiting agent, because the user is not clicking
  * on <em>this</em> agent when they close a window.</p>
+ *
+ * <h2>The remote rows (workspace boxes)</h2>
+ *
+ * <p>A row bound to a workspace box runs its agent in the box-side tmux,
+ * which this IDE's registry cannot stop: Deactivate routes such a row to
+ * the session service's explicit Stop ({@link DrydockSessionService#
+ * stopSession}) — the one path beside Forget that may kill the box-side
+ * agent (D1) — skipping the local stop policy, whose activity monitor
+ * cannot see a box-side agent (OQ10) and whose already-ended rule would
+ * strand a detached remote row, which has no execution here. Done is
+ * refused for a remote row outright: that flow is local-worktree
+ * semantics throughout, so the service's gate names the box and the flow
+ * never opens. Local rows keep both paths exactly as before.</p>
  */
 public final class SessionCommandHandlers {
 
@@ -58,6 +75,21 @@ public final class SessionCommandHandlers {
 
     /** What stopping one session does: nothing, ask first, or just stop. */
     enum StopStep {NOTHING, ASK, STOP}
+
+    /**
+     * The remote Stop's service call — the seam the platform tests pin the
+     * routing and the failure surfacing through. Production routes through
+     * the window's session service ({@link DrydockStartupActivity#sessions}),
+     * whose {@code stopSession} is the explicit Stop: the box-side kill, the
+     * ssh client's end, and the settle — completing on every path, failing
+     * with the box-naming reason.
+     */
+    @FunctionalInterface
+    interface RemoteStop {
+
+        /** The session service's Stop for {@code id}. */
+        CompletableFuture<Void> stopSession(ManagedSessionId id);
+    }
 
     /**
      * The stop policy as one pure decision: a session being transferred or
@@ -76,10 +108,40 @@ public final class SessionCommandHandlers {
      * Stops {@code session}'s agent — asking first only when it is
      * mid-task — and with {@code closeWindow}, then closes the window it
      * ran in; {@code afterStop} runs when the stop is on its way. EDT.
+     *
+     * <p>A row bound to a workspace box never reaches the local policy: its
+     * agent is stopped on the box, through the session service's explicit
+     * Stop, with the failure surfaced ({@link RemoteStop} carries the call
+     * so a platform test can pin the wiring without a box).</p>
      */
     public static void deactivate(Project from, ManagedAgentSession session, boolean closeWindow,
                                   Runnable afterStop) {
+        deactivate(from, session, closeWindow, afterStop,
+                id -> DrydockStartupActivity.sessions(from).stopSession(id));
+    }
+
+    /**
+     * As the public {@link #deactivate(Project, ManagedAgentSession, boolean,
+     * Runnable)}, with the remote Stop's service call handed in — the seam
+     * the platform tests pin the routing and the failure surfacing through.
+     * It is consulted only for a row bound to a workspace box; every local
+     * row keeps today's path, stop policy and all.
+     */
+    static void deactivate(Project from, ManagedAgentSession session, boolean closeWindow,
+                           Runnable afterStop, RemoteStop remoteStop) {
         ManagedSessionId id = session.id();
+        if (session.workspaceBox().isPresent()) {
+            // The stop policy below is local on both ends: it asks from the
+            // activity monitor, which cannot see a box-side agent (OQ10) —
+            // its UNKNOWN would ask on every remote Stop — and its
+            // already-ended rule leaves a detached remote row alone, when a
+            // remote Stop must work exactly there too: the agent runs in
+            // the box's tmux, not in any execution this IDE owns. A remote
+            // row can also never be mid-transfer: the transfer itself
+            // refuses one. So the remote Stop goes straight to the service.
+            stopRemote(from, id, closeWindow, afterStop, remoteStop.stopSession(id));
+            return;
+        }
         AgentExecutionRegistry registry = AgentExecutionRegistry.getInstance();
         Optional<SessionActivity> activity = DrydockPluginService.getInstance().activityMonitor().current(id);
         switch (stopStep(SessionTransfer.inProgress(id), registry.isRunning(id), activity)) {
@@ -108,12 +170,66 @@ public final class SessionCommandHandlers {
     }
 
     /**
+     * A remote row's Stop: the session service's explicit Stop — the one
+     * path beside Forget that may kill the box-side agent (D1) — with the
+     * service's answer surfaced. The kill runs on the service's executor;
+     * the busy state is the row's STOPPING mark, which the service raises
+     * before the kill (INV-8), and {@code afterStop} — the clicked surface's
+     * repaint — runs now, so the click visibly lands before the kill
+     * concludes. The returned future completes on every path: success ends
+     * the ssh client before the settle, so the window may then close as
+     * asked; a failure is the service's box-naming reason, shown here — the
+     * row itself settles IDLE with UNKNOWN liveness, never INACTIVE, so
+     * this dialog is the failure's whole surfacing.
+     */
+    private static void stopRemote(Project from, ManagedSessionId id, boolean closeWindow,
+                                   Runnable afterStop, CompletableFuture<Void> stop) {
+        afterStop.run();
+        Optional<Project> window = AgentExecutionRegistry.getInstance().host(id)
+                .filter(project -> !project.isDisposed());
+        stop.whenComplete((ignored, failure) -> ApplicationManager.getApplication().invokeLater(() -> {
+            if (failure != null) {
+                Messages.showErrorDialog(from, stopFailureMessage(failure), "Drydock");
+                return;
+            }
+            if (closeWindow && window.isPresent() && !window.get().isDisposed()) {
+                ProjectManager.getInstance().closeAndDispose(window.get());
+            }
+        }, ModalityState.any()));
+    }
+
+    /**
+     * The dialog text for a remote Stop's failure: the service's reason —
+     * an {@code IllegalStateException} naming the box — unwrapped from the
+     * future's completion.
+     */
+    static String stopFailureMessage(Throwable failure) {
+        Throwable reason = failure instanceof CompletionException && failure.getCause() != null
+                ? failure.getCause() : failure;
+        return reason.getMessage() == null ? reason.toString() : reason.getMessage();
+    }
+
+    /**
      * "Done with this session…". A running agent is stopped first — asking,
      * as Deactivate does, when it is mid-task — so the dialog's check of the
      * worktree sees what the agent left, not what it is still writing. EDT.
+     *
+     * <p>A row bound to a workspace box is refused first, by the session
+     * service's gate: the Done flow is local-worktree semantics throughout
+     * — no worktree on this Mac, no local task store, no branch to remove —
+     * so the gate's named reason is shown and the flow never opens; the
+     * endings a remote row does have are the explicit Stop and the explicit
+     * Forget, the only two paths that may kill the box-side agent (D1).</p>
      */
     public static void done(Project from, ManagedAgentSession session) {
         ManagedSessionId id = session.id();
+        if (session.workspaceBox().isPresent()) {
+            Optional<String> refusal = DrydockStartupActivity.sessions(from).doneFlowRefusal(id);
+            if (refusal.isPresent()) {
+                Messages.showInfoMessage(from, refusal.get(), "Drydock");
+                return;
+            }
+        }
         if (SessionTransfer.inProgress(id)) {
             Messages.showInfoMessage(from, "This session is being transferred.", "Drydock");
             return;

@@ -5,6 +5,7 @@ import app.drydock.domain.SessionActivity;
 import app.drydock.domain.SessionStatus;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.ui.SessionDots;
+import app.drydock.intellij.workspace.RemoteSessionLiveness;
 
 import com.intellij.ide.FileIconProvider;
 import com.intellij.openapi.fileEditor.impl.EditorTabTitleProvider;
@@ -29,6 +30,12 @@ import java.util.Optional;
  * snapshot and nothing is probed; before the catalog has loaded there is no
  * session yet, and the file's own name (the session id) stands in for one
  * paint.</p>
+ *
+ * <p>A remote (workspace-box) row is labeled honestly: its title names its
+ * box, its tooltip carries the liveness sentence, and its mark paints the
+ * liveness verdict — never an activity word, which a box-side agent has
+ * none of (OQ10). The box is never probed from a paint; the verdict comes
+ * from the memory-only {@link RemoteSessionLiveness} map.</p>
  */
 public final class AgentConsoleTabPresentation implements EditorTabTitleProvider, FileIconProvider {
 
@@ -41,13 +48,28 @@ public final class AgentConsoleTabPresentation implements EditorTabTitleProvider
         if (session == null) {
             return null;   // not ours, or not loaded yet: platform default
         }
+        String title = tabTitle(session);
+        // A hosted tab carries the agent's repo before its title (F2).
+        return HostedTab.placeIn((AgentConsoleFile) file, project)
+                .map(place -> HostedTab.title(place.repository(), title))
+                .orElse(title);
+    }
+
+    /**
+     * The tab's own text for a session: its display name, the RO suffix a
+     * read-only session needs beside the writing one, and — for a remote
+     * (workspace-box) row — {@code " · on <box>"}: the tab is one line the
+     * user scans to tell sessions apart, and a row whose agent runs on a
+     * box must not pass as a local one (T21). A local row's title is the
+     * pre-remote text, unchanged.
+     */
+    static String tabTitle(ManagedAgentSession session) {
         // The RO suffix rather than a separate chip: a tab has one line of
         // text, and a read-only session must be distinguishable from the
         // writing one next to it in the same window.
         String title = session.readOnly() ? session.displayName() + " · RO" : session.displayName();
-        // A hosted tab carries the agent's repo before its title (F2).
-        return HostedTab.placeIn((AgentConsoleFile) file, project)
-                .map(place -> HostedTab.title(place.repository(), title))
+        return session.workspaceBox()
+                .map(box -> title + " · on " + box.boxName())
                 .orElse(title);
     }
 
@@ -55,6 +77,17 @@ public final class AgentConsoleTabPresentation implements EditorTabTitleProvider
     public String getEditorTabTooltipText(Project project, VirtualFile file) {
         if (!(file instanceof AgentConsoleFile console)) {
             return null;
+        }
+        ManagedAgentSession session = sessionOf(console);
+        if (session != null && session.workspaceBox().isPresent()) {
+            // A remote row's tooltip says where the agent runs and what the
+            // box's last answer was — the honest liveness sentence, never a
+            // working/idle claim (OQ10).
+            boolean ownedHere = project != null
+                    && AgentExecutionService.getInstance(project).isRunning(session.id());
+            return AgentStripText.remoteStatusTooltip(ownedHere,
+                    DrydockPluginService.getInstance().remoteSessionLiveness().state(session.id()),
+                    session.workspaceBox().orElseThrow().boxName());
         }
         return HostedTab.placeIn(console, project).map(HostedTab::tooltip).orElse(null);
     }
@@ -66,6 +99,17 @@ public final class AgentConsoleTabPresentation implements EditorTabTitleProvider
             return null;
         }
         boolean runningHere = AgentExecutionService.getInstance(project).isRunning(session.id());
+        if (session.workspaceBox().isPresent()) {
+            // A remote row paints liveness, never activity: the local
+            // monitor cannot see a box-side agent (OQ10), and the box is
+            // never probed from a paint — the detached verdict comes from
+            // the memory-only liveness map (no BoxShell here, ever).
+            Optional<RemoteSessionLiveness.State> liveness =
+                    DrydockPluginService.getInstance().remoteSessionLiveness().state(session.id());
+            boolean runningAnywhere = AgentExecutionRegistry.getInstance().isRunning(session.id());
+            TabIcon icon = remoteIconState(session.status(), runningHere, runningAnywhere, liveness);
+            return SessionDots.drydockIcon(icon.status(), Optional.empty());
+        }
         // The registry's live-anywhere fact joins the window's own: a
         // detached live session keeps the live mark (the strip beside it
         // says Running · not shown here), and only a session dead
@@ -115,6 +159,33 @@ public final class AgentConsoleTabPresentation implements EditorTabTitleProvider
         }
         return new TabIcon(AgentStripText.displayStatus(persisted, runningHere),
                 runningHere ? localActivity : Optional.empty());
+    }
+
+    /**
+     * The tab icon's decision for a remote (workspace-box) session: the
+     * same shape as {@link #iconState}, with the box's detached verdict in
+     * place of the local activity — and with no activity at all, because
+     * none exists for a box-side agent (OQ10). A detached row whose liveness
+     * says ALIVE paints the live mark even from a stale idle row, mirroring
+     * the local detached-live rule; a row this IDE is attached to paints
+     * its persisted status, which this IDE's own ssh execution keeps live;
+     * every other verdict paints through {@link
+     * AgentStripText#remoteDisplayStatus}, which keeps an error row red and
+     * flattens the rest to the idle band (the liveness <em>word</em>, not
+     * the dot, is what distinguishes them).
+     *
+     * <p>Takes no activity parameter on purpose: that absence is the OQ10
+     * decision, so no caller can smuggle a local working/idle claim onto a
+     * remote row.</p>
+     */
+    static TabIcon remoteIconState(SessionStatus persisted, boolean runningHere, boolean runningAnywhere,
+                                    Optional<RemoteSessionLiveness.State> liveness) {
+        if (runningAnywhere && !runningHere) {
+            return new TabIcon(SessionStatus.RUNNING, Optional.empty());
+        }
+        return new TabIcon(
+                AgentStripText.remoteDisplayStatus(persisted, runningHere, liveness),
+                Optional.empty());
     }
 
     /**

@@ -3,6 +3,9 @@ package app.drydock.intellij.agent;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.SessionStatus;
+import app.drydock.domain.WorkspaceBoxBinding;
+import app.drydock.intellij.DrydockPluginService;
+import app.drydock.intellij.workspace.RemoteSessionLiveness;
 
 import com.intellij.icons.AllIcons;
 
@@ -122,10 +125,29 @@ public final class SessionCommands {
      * @param unsupportedAgent     this build cannot run the session's agent kind
      * @param detachedFromThisWindow {@code running} but this window does not show it —
      *                             a window-scoped fact (A6); the global scope never sets it
+     * @param box                  the session's workspace-box binding, empty for a local
+     *                             row — a row is remote iff this is present
+     * @param liveness             the detached liveness this IDE last learned from the
+     *                             box (see {@link RemoteSessionLiveness}); empty when
+     *                             the row is local, or when nothing has probed the
+     *                             remote row yet
      */
     public record State(boolean running, boolean resumable, boolean starting, boolean stopping,
                         boolean moving, boolean transferring, boolean unsupportedAgent,
-                        boolean detachedFromThisWindow) {
+                        boolean detachedFromThisWindow,
+                        Optional<WorkspaceBoxBinding> box, Optional<RemoteSessionLiveness.State> liveness) {
+
+        /**
+         * As the canonical constructor with no remote facts: the state every
+         * pre-workspace-box call site built, and still the state of every
+         * local row.
+         */
+        public State(boolean running, boolean resumable, boolean starting, boolean stopping,
+                     boolean moving, boolean transferring, boolean unsupportedAgent,
+                     boolean detachedFromThisWindow) {
+            this(running, resumable, starting, stopping, moving, transferring, unsupportedAgent,
+                    detachedFromThisWindow, Optional.empty(), Optional.empty());
+        }
 
         /**
          * The globally scoped state: no window is attached to it, so a live
@@ -256,6 +278,40 @@ public final class SessionCommands {
                 registry.isMoving(id),
                 SessionTransfer.inProgress(id),
                 session.status() == SessionStatus.UNSUPPORTED_AGENT,
-                running && !shownHere);
+                running && !shownHere,
+                session.workspaceBox(),
+                remoteLivenessOf(session));
+    }
+
+    /**
+     * The detached liveness this IDE last learned for {@code session}'s box,
+     * straight from {@link RemoteSessionLiveness} — a memory read, never a
+     * probe: the surfaces must not call {@code BoxShell} (they paint on the
+     * EDT, and the box is asked at most once per revalidation pass). A
+     * local row never reads the map, so its state stays byte-identical to
+     * the pre-remote shape; a remote row with no verdict yet reads empty,
+     * which the display rules treat as {@code Unknown}.
+     */
+    private static Optional<RemoteSessionLiveness.State> remoteLivenessOf(ManagedAgentSession session) {
+        if (session.workspaceBox().isEmpty()) {
+            return Optional.empty();
+        }
+        DrydockPluginService plugin = DrydockPluginService.getInstance();
+        if (plugin == null) {
+            return Optional.empty();
+        }
+        return plugin.remoteSessionLiveness().state(session.id());
+    }
+
+    /**
+     * The status line a remote row's surfaces show: the box name and the
+     * liveness state (see {@link AgentStripText#remoteStatusText}), never a
+     * working/idle claim — the activity monitor cannot see a box-side agent
+     * (OQ10). Empty for a local row, so a caller that shows the line only
+     * when present keeps the local presentation untouched.
+     */
+    public static Optional<String> remoteStatusLine(State state) {
+        return state.box().map(box -> AgentStripText.remoteStatusText(
+                state.running(), state.liveness(), box.boxName()));
     }
 }
