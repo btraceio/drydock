@@ -182,7 +182,8 @@ public final class DrydockPluginService implements Disposable {
         // is closed -- flushing pending store writes -- as this service's
         // Disposable child, before this executor shuts down.
         this.taskService = new DelayedTaskService(DelayedTaskService.defaultRoot(), executor,
-                () -> catalogState().sessions(), () -> catalogState().repositories());
+                () -> catalogState().sessions(), () -> catalogState().repositories(),
+                () -> sharedProjects.projects());
         Disposer.register(this, taskService::close);
         this.initialization = CompletableFuture.runAsync(this::initialize, executor);
     }

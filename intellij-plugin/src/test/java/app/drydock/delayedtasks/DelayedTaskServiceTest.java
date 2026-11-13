@@ -4,6 +4,7 @@ import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.*;
 import app.drydock.intellij.tasks.NewTaskPlan;
 import app.drydock.mcp.*;
+import app.drydock.projects.SharedProject;
 import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonValue.JsonObject;
 import app.drydock.state.json.JsonValue.JsonString;
@@ -832,6 +833,56 @@ class DelayedTaskServiceTest {
         return new NewTaskPlan.Choice("Plan choice", Optional.of("Do the work."), AgentKind.CLAUDE,
                 SessionMode.WRITES, NewTaskPlan.WorkIn.NEW_WORKTREE, "dd/plan", "origin/main", folder,
                 NewTaskPlan.OpenIn.OWN_WINDOW, Optional.empty(), Optional.empty(), Optional.empty());
+    }
+
+    // 1b. The created task stores the SHARED registry's id: an install-catalog id whose
+    // root the shared list carries is remapped at create, an id the shared list carries
+    // stays, and an id neither registry maps stays too (the mirror resolves it by root).
+    @Test
+    void createStampsTheSharedIdForAnInstallCatalogRepository(@TempDir Path root) throws Exception {
+        RepositoryId sharedId = RepositoryId.newId();
+        RepositoryId installId = RepositoryId.newId();
+        Path checkout = root.resolve("checkout");
+        SharedProject shared = SharedProject.local(sharedId, checkout, "java-profiler", Instant.EPOCH);
+        Repository install = repository(installId, checkout, "java-profiler");
+        try (DelayedTaskService service = new DelayedTaskService(root, executor, List::of,
+                () -> List.of(install), () -> List.of(shared))) {
+            await(service.initialize());
+            TaskToolContext.Outcome created = await(service.create("Follow up", List.of(), installId));
+            assertFalse(created.refused(), created.refusal());
+            assertEquals(sharedId, created.document().repository(),
+                    "the task stores the shared registry's id for the same checkout");
+            assertTrue(Files.exists(committedFile(root, sharedId, created.document().id())),
+                    "the task file lands under the shared id's directory");
+        }
+    }
+
+    @Test
+    void createKeepsAnIdTheSharedListAlreadyCarries(@TempDir Path root) throws Exception {
+        RepositoryId sharedId = RepositoryId.newId();
+        Path checkout = root.resolve("checkout");
+        SharedProject shared = SharedProject.local(sharedId, checkout, "java-profiler", Instant.EPOCH);
+        try (DelayedTaskService service = new DelayedTaskService(root, executor, List::of,
+                List::of, () -> List.of(shared))) {
+            await(service.initialize());
+            TaskToolContext.Outcome created = await(service.create("Follow up", List.of(), sharedId));
+            assertFalse(created.refused(), created.refusal());
+            assertEquals(sharedId, created.document().repository());
+        }
+    }
+
+    @Test
+    void createKeepsTheCallerIdWhenNothingMaps(@TempDir Path root) throws Exception {
+        RepositoryId installId = RepositoryId.newId();
+        Repository install = repository(installId, root.resolve("checkout"), "java-profiler");
+        try (DelayedTaskService service = new DelayedTaskService(root, executor, List::of,
+                () -> List.of(install), List::of)) {
+            await(service.initialize());
+            TaskToolContext.Outcome created = await(service.create("Follow up", List.of(), installId));
+            assertFalse(created.refused(), created.refusal());
+            assertEquals(installId, created.document().repository(),
+                    "a project only the install knows is not remapped");
+        }
     }
 
     private static <T> T await(CompletableFuture<T> future) throws Exception {
