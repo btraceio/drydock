@@ -10,17 +10,20 @@ import app.drydock.domain.SessionActivity;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.git.GhCliService.OpenPullRequest;
+import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.IsolatedCatalog;
 import app.drydock.intellij.tasks.InboxList.Entry;
 import app.drydock.intellij.tasks.InboxList.Header;
 import app.drydock.intellij.tasks.InboxList.Hit;
 import app.drydock.intellij.tasks.InboxList.More;
 import app.drydock.intellij.tasks.InboxList.Row;
+import app.drydock.intellij.tasks.InboxModel.Group;
 import app.drydock.intellij.tasks.InboxModel.GroupKind;
 import app.drydock.intellij.tasks.InboxModel.Inbox;
 import app.drydock.intellij.tasks.InboxModel.Item;
 import app.drydock.intellij.tasks.InboxModel.ProjectRef;
 import app.drydock.intellij.tasks.InboxModel.Query;
+import app.drydock.intellij.tasks.InboxModel.TaskItem;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import app.drydock.projects.SharedProject;
@@ -33,6 +36,9 @@ import app.drydock.tasks.TaskState.TaskView;
 import app.drydock.tasks.TaskStatus;
 import com.intellij.testFramework.fixtures.BasePlatformTestCase;
 
+import javax.swing.JLabel;
+import java.awt.Component;
+import java.awt.Container;
 import java.awt.Point;
 import java.awt.Rectangle;
 import java.nio.file.Path;
@@ -44,6 +50,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 /**
  * {@link InboxList} in a booted IDE: the entries it lays out for an inbox,
@@ -116,7 +123,8 @@ public class InboxListPlatformTest extends BasePlatformTestCase {
         OpenPullRequest pr = new OpenPullRequest(943, "PR", "dd/ready-one", "main", false, Optional.empty(),
                 Optional.of("https://github.com/o/r/pull/943"), false);
         DelayedTaskRow ready = new DelayedTaskRow(new TaskView(readyId, Presentation.READY, List.of(), List.of()),
-                "Ready one", TASKS, Optional.empty(), false, List.of(), List.of(), Optional.of(pr));
+                "Ready one", TASKS, Optional.empty(), false, List.of(), List.of(), "alpha", Optional.empty())
+                .withPullRequest(pr);
         DelayedTaskRow done = new DelayedTaskRow(new TaskView(doneId, Presentation.TERMINAL, List.of(), List.of()),
                 "Done one", TASKS, List.of());
         Map<TaskId, TaskDocument> documents = new HashMap<>();
@@ -158,6 +166,60 @@ public class InboxListPlatformTest extends BasePlatformTestCase {
             }
         }
         return hits;
+    }
+
+    private List<String> renderedLabels(int index) {
+        Component rendered = list.getCellRenderer().getListCellRendererComponent(list, list.entries().get(index),
+                index, false, false);
+        List<String> labels = new ArrayList<>();
+        visibleLabels(rendered, labels);
+        return labels;
+    }
+
+    private static void visibleLabels(Component component, List<String> labels) {
+        if (!component.isVisible()) {
+            return;
+        }
+        if (component instanceof JLabel label && label.getText() != null) {
+            labels.add(label.getText());
+        }
+        if (component instanceof Container container) {
+            for (Component child : container.getComponents()) {
+                visibleLabels(child, labels);
+            }
+        }
+    }
+
+    public void testTaskProjectTagAndTooltipSurvivePullRequestLinkingAndFiltering() throws Exception {
+        DrydockPluginService.getInstance().initialization().get(60, TimeUnit.SECONDS);
+        list.show(inbox(Query.NONE), false);
+        int index = indexOf("Ready one");
+        TaskItem item = (TaskItem) ((Row) list.entries().get(index)).item();
+        assertEquals("alpha", item.row().project());
+        assertEquals(List.of("Ready one", "#943", "alpha"), renderedLabels(index));
+        String tooltip = "Task ready-one (ready) · project alpha · Pull request #943 from dd/ready-one: PR";
+        assertEquals(tooltip, InboxList.tooltip(item, NOW));
+
+        list.show(inbox(new Query(Optional.of(ALPHA), "")), true);
+        index = indexOf("Ready one");
+        assertEquals("a project filter hides the redundant tag, not the PR", List.of("Ready one", "#943"),
+                renderedLabels(index));
+        assertEquals("the tooltip still names the project", tooltip,
+                InboxList.tooltip(((Row) list.entries().get(index)).item(), NOW));
+    }
+
+    public void testAnUnknownTaskProjectPaintsNoMadeUpNameOrPreviousRowsTag() throws Exception {
+        DrydockPluginService.getInstance().initialization().get(60, TimeUnit.SECONDS);
+        list.show(inbox(Query.NONE), false);
+        assertEquals(List.of("Ready one", "#943", "alpha"), renderedLabels(indexOf("Ready one")));
+        DelayedTaskRow unnamed = new DelayedTaskRow(new TaskView(TaskId.of("unknown-project"), Presentation.READY,
+                List.of(), List.of()), "Unknown project", TASKS, Optional.empty(), false, List.of(), List.of(),
+                " ", Optional.empty());
+        TaskItem item = new TaskItem(unnamed, Optional.empty());
+        list.show(new Inbox(List.of(new Group(GroupKind.READY, "Ready to start", List.of(item))), List.of(), 0),
+                false);
+        assertEquals(List.of("Unknown project"), renderedLabels(indexOf("Unknown project")));
+        assertEquals("Task unknown-project (ready)", InboxList.tooltip(item, NOW));
     }
 
     public void testGroupsTruncateAndDoneStartsCollapsed() {

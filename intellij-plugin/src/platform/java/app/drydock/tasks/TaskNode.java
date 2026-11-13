@@ -37,10 +37,14 @@ public sealed interface TaskNode {
      * an INJECTED clock by {@link DelayedTaskRows}, never
      * {@code System.now} deep in row code. {@code mirrors} is the
      * document's stored mirror addresses (GitHub issues, Jira tickets).
+     * {@code project} is the repository's display slug from the caller's
+     * mapping, so a task's tooltip can name its project across the inbox's
+     * state groups. Null when the mapping supplies none: an unregistered
+     * repository must not render a made-up name.
      */
     record DelayedTaskRow(TaskState.TaskView view, String title, RepositoryId repository,
             Optional<Instant> created, boolean stale, List<String> storedSessions, List<String> mirrors,
-            Optional<OpenPullRequest> pullRequest)
+            String project, Optional<OpenPullRequest> pullRequest)
             implements TaskNode {
 
         public DelayedTaskRow {
@@ -50,13 +54,14 @@ public sealed interface TaskNode {
             Objects.requireNonNull(created, "created");
             storedSessions = List.copyOf(storedSessions);
             mirrors = List.copyOf(mirrors);
+            project = project != null && !project.isBlank() ? project : null;
             pullRequest = Objects.requireNonNullElse(pullRequest, Optional.empty());
         }
 
         /** The shape before tasks could be mirrored: no mirror. */
         public DelayedTaskRow(TaskState.TaskView view, String title, RepositoryId repository,
                 Optional<Instant> created, boolean stale, List<String> storedSessions) {
-            this(view, title, repository, created, stale, storedSessions, List.of(), Optional.empty());
+            this(view, title, repository, created, stale, storedSessions, List.of());
         }
 
         /**
@@ -69,9 +74,16 @@ public sealed interface TaskNode {
             this(view, title, repository, created, stale, storedSessions, mirrors, Optional.empty());
         }
 
+        /** The shape before rows carried their project slug: no project hint. */
+        public DelayedTaskRow(TaskState.TaskView view, String title, RepositoryId repository,
+                Optional<Instant> created, boolean stale, List<String> storedSessions, List<String> mirrors,
+                Optional<OpenPullRequest> pullRequest) {
+            this(view, title, repository, created, stale, storedSessions, mirrors, null, pullRequest);
+        }
+
         /** This row with {@code pullRequest} carried; everything else unchanged. Pure. */
         public DelayedTaskRow withPullRequest(OpenPullRequest pullRequest) {
-            return new DelayedTaskRow(view, title, repository, created, stale, storedSessions, mirrors,
+            return new DelayedTaskRow(view, title, repository, created, stale, storedSessions, mirrors, project,
                     Optional.of(pullRequest));
         }
 
