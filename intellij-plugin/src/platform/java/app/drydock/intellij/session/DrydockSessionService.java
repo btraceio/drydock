@@ -65,6 +65,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -200,6 +201,15 @@ public final class DrydockSessionService implements AgentExecutionListener {
     /** The read-only `workspaces list` seam that classifies a failed probe. */
     private final WorkspacesCli workspacesCli;
 
+    /**
+     * The requested-client-end coordination for remote rows: which end this
+     * IDE asked for — an explicit Stop or a close — so the end recorder
+     * settles by origin instead of by the bare stop-requested flag. Shared
+     * through the registry because the window that requests an end and the
+     * window whose recorder delivers it can differ.
+     */
+    private final AgentExecutionRegistry.RemoteClientEnds clientEnds;
+
     /** The detached-remote liveness map a refused resume records its verdict in. */
     private final RemoteSessionLiveness remoteLiveness;
 
@@ -228,7 +238,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
                 AgentExecutionRegistry.getInstance().launchClaims(), taskLaunchResources(plugin),
                 WorkspaceSettings::enabled, new BoxShell(CommandRunner.PRODUCTION),
                 new WorkspacesCli(CommandRunner.PRODUCTION), plugin.remoteSessionLiveness(),
-                DrydockSessionService::askOnEdt);
+                DrydockSessionService::askOnEdt, AgentExecutionRegistry.getInstance().remoteClientEnds());
     }
 
     /**
@@ -273,7 +283,8 @@ public final class DrydockSessionService implements AgentExecutionListener {
         this(initialization, stateStore, registry, watcher, repositoryIdFor, consoles, executor,
                 stdioMcpServers, mcpAccess, claims, taskLaunchResources, () -> false,
                 new BoxShell(CommandRunner.PRODUCTION), new WorkspacesCli(CommandRunner.PRODUCTION),
-                new RemoteSessionLiveness(), DrydockSessionService::askOnEdt);
+                new RemoteSessionLiveness(), DrydockSessionService::askOnEdt,
+                AgentExecutionRegistry.RemoteClientEnds.INERT);
     }
 
     /**
@@ -281,10 +292,11 @@ public final class DrydockSessionService implements AgentExecutionListener {
      * and resume need: the opt-in flag (a seam so plain unit tests answer it
      * without the IDE's application; production wires {@code
      * WorkspaceSettings::enabled}), the batch ssh and {@code workspaces list}
-     * seams, the detached-remote liveness map, and the remote Forget's
-     * user-confirm seam. For a local row none of
-     * these is ever consulted, so every pre-workspace-box construction site
-     * is byte-identical to before (INV-1).
+     * seams, the detached-remote liveness map, the remote Forget's
+     * user-confirm seam, and the requested-client-end coordination the
+     * Stop and close paths mark and the end settle settles by. For a local
+     * row none of these is ever consulted, so every pre-workspace-box
+     * construction site is byte-identical to before (INV-1).
      */
     DrydockSessionService(CompletableFuture<Void> initialization, Supplier<ApplicationStateStore> stateStore,
             Supplier<AgentRegistry> registry, Supplier<SessionActivityWatcher> watcher,
@@ -294,7 +306,8 @@ public final class DrydockSessionService implements AgentExecutionListener {
             LaunchClaims claims, TaskLaunchResources taskLaunchResources,
             BooleanSupplier workspaceSessionsEnabled, BoxShell boxShell, WorkspacesCli workspacesCli,
             RemoteSessionLiveness remoteLiveness,
-            Function<String, CompletableFuture<Boolean>> remoteConfirm) {
+            Function<String, CompletableFuture<Boolean>> remoteConfirm,
+            AgentExecutionRegistry.RemoteClientEnds clientEnds) {
         this.initialization = Objects.requireNonNull(initialization, "initialization");
         this.stateStore = Objects.requireNonNull(stateStore, "stateStore");
         this.registry = Objects.requireNonNull(registry, "registry");
@@ -311,7 +324,9 @@ public final class DrydockSessionService implements AgentExecutionListener {
         this.workspacesCli = Objects.requireNonNull(workspacesCli, "workspacesCli");
         this.remoteLiveness = Objects.requireNonNull(remoteLiveness, "remoteLiveness");
         this.remoteConfirm = Objects.requireNonNull(remoteConfirm, "remoteConfirm");
-        this.ends = new SessionEnds(stateStore, registry, executor, mcpAccess, claims);
+        this.clientEnds = Objects.requireNonNull(clientEnds, "clientEnds");
+        this.ends = new SessionEnds(stateStore, registry, executor, mcpAccess, claims, boxShell,
+                () -> remoteLiveness, clientEnds);
     }
 
     // ---- create flow ---------------------------------------------------------
@@ -718,10 +733,15 @@ public final class DrydockSessionService implements AgentExecutionListener {
 
     /**
      * Ends {@code id}'s launch claim and releases its MCP access unless the
-     * session has a live execution; see {@link LaunchClaims#finish}.
+     * session has a live execution; see {@link LaunchClaims#finish}. With
+     * the claim gone, a remote settle the claim deferred — the early end of
+     * the launch's own ssh client — is re-applied: a completed launch must
+     * not leave RUNNING persisted when this IDE owns no live ssh execution
+     * (INV-4).
      */
     private void endClaim(ManagedSessionId id) {
         claims.finish(id, () -> releaseMcpAccess(id));
+        ends.settleDeferredRemoteEnd(id);
     }
 
     private static IllegalStateException launchRefused(ManagedSessionId id) {
@@ -859,6 +879,10 @@ public final class DrydockSessionService implements AgentExecutionListener {
         }
         Instant launchedAt = Instant.now();
         ends.lastLaunchedAt().put(prepared.id(), launchedAt);
+        // A new client is about to exist: any requested-client-end mark still
+        // pending for the id belongs to an earlier client's end and must not
+        // steer this launch's.
+        clientEnds.clear(prepared.id());
         CompletableFuture<Void> open = consoles.startConsole(prepared.id(), consoleCwdFor(prepared), plan);
         return new StartedLaunch(prepared, Optional.empty(), null, launchedAt, generatedId, sessionIdUsed,
                 model, tiers, open);
@@ -1314,6 +1338,14 @@ public final class DrydockSessionService implements AgentExecutionListener {
      * attach re-runs no create side effect (INV-23).</p>
      */
     private CompletableFuture<ManagedAgentSession> resumeRemoteClaimed(ManagedAgentSession session) {
+        // The row was read before this claim was taken (the resume's first
+        // executor stage); a Forget that finished in between removed it, and
+        // attaching here would resurrect the forgotten row's box session
+        // under a row the catalog no longer has — the same deletion gap the
+        // create path's rowMustExist guard closes.
+        if (findIn(stateStore.get().state(), session.id()) == null) {
+            throw new IllegalStateException("Session " + session.id() + " was forgotten before it resumed");
+        }
         WorkspaceBoxBinding box = session.workspaceBox().orElseThrow();
         BoxShell.BoxResult probe;
         try {
@@ -1349,6 +1381,10 @@ public final class DrydockSessionService implements AgentExecutionListener {
         }
         CompletableFuture<Void> open;
         try {
+            // A new client is about to exist: any requested-client-end mark
+            // still pending for the id belongs to an earlier client's end
+            // and must not steer this attach's.
+            clientEnds.clear(session.id());
             open = consoles.startConsole(session.id(), consoleCwdFor(session), plan);
         } catch (RuntimeException failure) {
             persistFailedBestEffort(session);
@@ -1773,14 +1809,16 @@ public final class DrydockSessionService implements AgentExecutionListener {
      * state shows immediately — the row goes STOPPING, legal exactly while
      * this IDE owns its live ssh execution (INV-4); a detached row (no
      * execution here) keeps its status and relies on the caller's click
-     * surface — then the kill runs with a 10 s timeout through the box
-     * seam, then the ssh client ends. Exit 0 or tmux's "can't find session"
-     * settles the row INACTIVE with liveness DEAD; any other outcome
-     * surfaces an error naming the box and settles the row IDLE with
-     * liveness UNKNOWN — never INACTIVE, so a failed Stop is never reported
-     * as a stopped agent. The returned future completes on every path, so
-     * the caller's progress clears on success, failure, timeout and
-     * cancel alike (AC-9).</p>
+     * surface — then the Stop is identified as such before the kill runs
+     * (so the ssh client's end, whenever it comes, settles by the kill's
+     * verdict and never probes against it), then the kill runs with a
+     * 10 s timeout through the box seam, then the ssh client ends. Exit 0
+     * or tmux's "can't find session" settles the row INACTIVE with
+     * liveness DEAD; any other outcome surfaces an error naming the box and
+     * settles the row IDLE with liveness UNKNOWN — never INACTIVE, so a
+     * failed Stop is never reported as a stopped agent. The returned future
+     * completes on every path, so the caller's progress clears on success,
+     * failure, timeout and cancel alike (AC-9).</p>
      */
     public CompletableFuture<Void> stopSession(ManagedSessionId sessionId) {
         Objects.requireNonNull(sessionId, "sessionId");
@@ -1794,12 +1832,53 @@ public final class DrydockSessionService implements AgentExecutionListener {
 
     /**
      * The remote Stop, split across two executor tasks so the busy state is
-     * up before the blocking kill begins: the first task marks, the second
-     * kills, ends the ssh client, and settles by the kill's outcome.
+     * up before the blocking kill begins: the first task marks and schedules
+     * the second, which kills, ends the ssh client, and settles by the kill's
+     * outcome. Every completion path of the returned future clears the busy
+     * mark (INV-8): a cancellation between the stages keeps the queued kill
+     * from ever running, a rejected kill submission (shutdown raced it) and
+     * a failed mark stage complete the future without the kill stage — and
+     * in each of those no client was stopped, so no termination callback
+     * will ever repair the mark; this chain is the only thing that can clear
+     * it. When the kill stage did run, its own paths settle the row, and a
+     * settle already landed leaves nothing STOPPING for the cleanup to undo.
      */
     private CompletableFuture<Void> stopRemoteSession(ManagedAgentSession row) {
-        return CompletableFuture.runAsync(() -> markRemoteStopping(row.id()), executor)
-                .thenRunAsync(() -> stopMarkedRemoteSession(row), executor);
+        CompletableFuture<Void> stopped = new CompletableFuture<>();
+        AtomicBoolean killBegan = new AtomicBoolean();
+        stopped.whenComplete((ignored, failure) -> {
+            if (!killBegan.get()) {
+                clearRemoteStopping(row.id());
+            }
+        });
+        CompletableFuture<Void> marked = CompletableFuture.runAsync(() -> {
+            markRemoteStopping(row.id());
+            try {
+                executor.execute(() -> {
+                    if (stopped.isCancelled()) {
+                        return;   // a cancel arrived before the kill could begin
+                    }
+                    killBegan.set(true);
+                    try {
+                        stopMarkedRemoteSession(row);
+                        stopped.complete(null);
+                    } catch (RuntimeException | Error failure) {
+                        stopped.completeExceptionally(failure);
+                    }
+                });
+            } catch (RejectedExecutionException submissionRefused) {
+                // The executor refused the kill task (shutdown raced its
+                // submission); the chain ends without the kill stage of its
+                // own, so the every-path cleanup above runs instead.
+                stopped.completeExceptionally(submissionRefused);
+            }
+        }, executor);
+        marked.whenComplete((ignored, markFailure) -> {
+            if (markFailure != null) {
+                stopped.completeExceptionally(markFailure);
+            }
+        });
+        return stopped;
     }
 
     /**
@@ -1808,31 +1887,60 @@ public final class DrydockSessionService implements AgentExecutionListener {
      * anything else → an error naming the box and an IDLE row with UNKNOWN
      * liveness — the row is never reported stopped by a kill that did not
      * conclude.
+     *
+     * <p>The Stop is identified <em>before</em> the kill, through the
+     * requested-client-end coordination: the ssh client can terminate
+     * during the kill round-trip — before {@code stopConsole} could mark
+     * the execution's own stop-requested flag — and its end must not run
+     * the ordinary client-end probe against the Stop's authoritative
+     * outcome. The mark also carries the kill's verdict for the end that
+     * arrives after this method's settle was suppressed by the still-dying
+     * client (the claim guard sees a live execution until the process
+     * actually terminates): that end settles the verdict itself.</p>
      */
     private void stopMarkedRemoteSession(ManagedAgentSession row) {
         WorkspaceBoxBinding box = row.workspaceBox().orElseThrow();
+        boolean executionLive = clientEnds.hasLiveExecution(row.id());
+        clientEnds.beginExplicitStop(row.id());
         BoxShell.BoxResult kill;
         try {
             kill = boxShell.killSession(box.sshRemote().host(), row.id());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             clearRemoteStopping(row.id());
+            // The Stop is over without a verdict; the client was never asked
+            // to end, so its later end — if any — is an ordinary one and must
+            // not settle as this Stop's.
+            clientEnds.endExplicitStop(row.id());
             throw new CompletionException(new IllegalStateException(
                     "Stopping session '" + row.displayName() + "' on box " + box.boxName()
                             + " was cancelled", e));
         }
+        boolean settled = killSettled(kill);
+        clientEnds.stopVerdict(row.id(), settled);
         // Steps (2) and (4) in one call: stopConsole marks the execution
         // stop-requested and ends this IDE's ssh client to the box.
         consoles.stopConsole(row.id());
-        if (killSettled(kill)) {
-            settleRemoteRow(row.id(), SessionStatus.INACTIVE, RemoteSessionLiveness.State.DEAD);
-        } else {
-            LOG.log(Level.WARNING, () -> "kill-session for " + row.id() + " on box " + box.boxName()
-                    + " did not conclude (" + kill.describe() + ")");
-            settleRemoteRow(row.id(), SessionStatus.IDLE, RemoteSessionLiveness.State.UNKNOWN);
-            throw new CompletionException(new IllegalStateException(
-                    "Could not stop the agent of session '" + row.displayName() + "' on box "
-                            + box.boxName() + ": " + kill.describe()));
+        try {
+            if (settled) {
+                settleRemoteRow(row.id(), SessionStatus.INACTIVE, RemoteSessionLiveness.State.DEAD);
+            } else {
+                LOG.log(Level.WARNING, () -> "kill-session for " + row.id() + " on box " + box.boxName()
+                        + " did not conclude (" + kill.describe() + ")");
+                settleRemoteRow(row.id(), SessionStatus.IDLE, RemoteSessionLiveness.State.UNKNOWN);
+                throw new CompletionException(new IllegalStateException(
+                        "Could not stop the agent of session '" + row.displayName() + "' on box "
+                                + box.boxName() + ": " + kill.describe()));
+            }
+        } finally {
+            if (!executionLive) {
+                // No ssh client of this IDE exists (a detached row): no end
+                // will consume the mark — end it here, so it cannot steer a
+                // later end. When one was live, the dying client's end is
+                // imminent and settles by the verdict recorded above if this
+                // method's own settle could not land.
+                clientEnds.endExplicitStop(row.id());
+            }
         }
     }
 
@@ -1897,7 +2005,11 @@ public final class DrydockSessionService implements AgentExecutionListener {
      * single writer carries (INV-21): a no-op when the row is gone or when
      * {@link LaunchClaims} shows a live execution or claim for it — a Resume
      * that claimed while the kill was in flight owns the row now, and its
-     * RUNNING is never overwritten. The liveness answer is recorded after
+     * RUNNING is never overwritten. A row that already carries the settle's
+     * status still settles: the liveness answer is recorded and the change
+     * published (an inconclusive Stop on a detached IDLE row must record
+     * UNKNOWN even though no status change is necessary), while the row-gone
+     * and claim guards still apply. The liveness answer is recorded after
      * the transform, only when the settle landed.
      */
     private void settleRemoteRow(ManagedSessionId id, SessionStatus status,
@@ -1906,10 +2018,13 @@ public final class DrydockSessionService implements AgentExecutionListener {
         stateStore.get().update(state -> {
             ManagedAgentSession existing = findIn(state, id);
             if (existing == null || existing.workspaceBox().isEmpty()
-                    || !claims.releaseIfIdle(id, () -> { }) || existing.status() == status) {
+                    || !claims.releaseIfIdle(id, () -> { })) {
                 return state;
             }
             settled[0] = true;
+            if (existing.status() == status) {
+                return state;
+            }
             return withReplacedSession(state, existing.withStatus(status).withLastOpenedAt(Instant.now()));
         });
         if (!settled[0]) {
@@ -1976,6 +2091,18 @@ public final class DrydockSessionService implements AgentExecutionListener {
             return;
         }
         Set<ManagedSessionId> closing = Set.copyOf(sessionIds);
+        // The remote rows among them, whose ssh clients end below: the end
+        // settle must know the end is close-originated — a close settles the
+        // durable row IDLE, never EXITED/INACTIVE (AC-7) — before the client
+        // is asked to end. The local transform below already skipped them;
+        // without this mark their ends would reach the recorder as ordinary
+        // stops and persist INACTIVE (or EXITED) through the probe settle.
+        Set<ManagedSessionId> remoteClosing = new HashSet<>();
+        for (ManagedAgentSession session : stateStore.get().state().sessions()) {
+            if (closing.contains(session.id()) && session.workspaceBox().isPresent()) {
+                remoteClosing.add(session.id());
+            }
+        }
         stateStore.get().update(state -> state.withSessions(state.sessions().stream()
                 .map(session -> closing.contains(session.id())
                         && session.workspaceBox().isEmpty()
@@ -1985,7 +2112,17 @@ public final class DrydockSessionService implements AgentExecutionListener {
                 .toList()));
         DrydockSessionsListener.publishChanged();
         for (ManagedSessionId sessionId : sessionIds) {
+            boolean remote = remoteClosing.contains(sessionId);
+            if (remote) {
+                clientEnds.beginClose(sessionId);
+            }
             consoles.stopConsole(sessionId);
+            if (remote && !clientEnds.hasLiveExecution(sessionId)) {
+                // The client was already gone, so its end was delivered
+                // before the mark: nothing will consume it — end it here so
+                // it cannot steer a later end.
+                clientEnds.endClose(sessionId);
+            }
         }
     }
 

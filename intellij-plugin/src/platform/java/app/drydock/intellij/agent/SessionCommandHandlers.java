@@ -139,7 +139,30 @@ public final class SessionCommandHandlers {
             // the box's tmux, not in any execution this IDE owns. A remote
             // row can also never be mid-transfer: the transfer itself
             // refuses one. So the remote Stop goes straight to the service.
-            stopRemote(from, id, closeWindow, afterStop, remoteStop.stopSession(id));
+            //
+            // The busy fact before the blocking kill (component 6, INV-8):
+            // the claim is taken here, synchronously on the click, because
+            // the service's own facts land too late to guard a second
+            // click — its STOPPING mark is written on the service executor
+            // after the click returns, and the execution's stop-requested
+            // only after the kill concludes. A second click while the stop
+            // is in flight is ignored: it could only race the first kill,
+            // and its failure would surface a second error for one
+            // accepted stop.
+            if (!SessionCommands.claimRemoteStop(id)) {
+                return;
+            }
+            CompletableFuture<Void> stop;
+            try {
+                stop = remoteStop.stopSession(id);
+            } catch (RuntimeException failure) {
+                // The seam can throw before returning a future (resolving
+                // the window's service); the claim must not leak, and the
+                // error surfaces through the one standard path below.
+                stop = new CompletableFuture<>();
+                stop.completeExceptionally(failure);
+            }
+            stopRemote(from, id, closeWindow, afterStop, stop);
             return;
         }
         AgentExecutionRegistry registry = AgentExecutionRegistry.getInstance();
@@ -173,29 +196,38 @@ public final class SessionCommandHandlers {
      * A remote row's Stop: the session service's explicit Stop — the one
      * path beside Forget that may kill the box-side agent (D1) — with the
      * service's answer surfaced. The kill runs on the service's executor;
-     * the busy state is the row's STOPPING mark, which the service raises
-     * before the kill (INV-8), and {@code afterStop} — the clicked surface's
-     * repaint — runs now, so the click visibly lands before the kill
-     * concludes. The returned future completes on every path: success ends
-     * the ssh client before the settle, so the window may then close as
-     * asked; a failure is the service's box-naming reason, shown here — the
-     * row itself settles IDLE with UNKNOWN liveness, never INACTIVE, so
-     * this dialog is the failure's whole surfacing.
+     * the busy state is the click's synchronous claim plus the row's
+     * STOPPING mark, which the service raises before the kill (INV-8), and
+     * {@code afterStop} — the clicked surface's repaint — runs now, so the
+     * click visibly lands before the kill concludes. The returned future
+     * completes on every path — and every completion path releases the
+     * claim, so the busy fact never outlives the stop it guarded: success
+     * ends the ssh client before the settle, so the window may then close
+     * as asked; a failure is the service's box-naming reason, shown here —
+     * the row itself settles IDLE with UNKNOWN liveness, never INACTIVE,
+     * so this dialog is the failure's whole surfacing, exactly once per
+     * accepted stop (a click while one is in flight was ignored before it
+     * could register a second completion).
      */
     private static void stopRemote(Project from, ManagedSessionId id, boolean closeWindow,
                                    Runnable afterStop, CompletableFuture<Void> stop) {
         afterStop.run();
         Optional<Project> window = AgentExecutionRegistry.getInstance().host(id)
                 .filter(project -> !project.isDisposed());
-        stop.whenComplete((ignored, failure) -> ApplicationManager.getApplication().invokeLater(() -> {
-            if (failure != null) {
-                Messages.showErrorDialog(from, stopFailureMessage(failure), "Drydock");
-                return;
-            }
-            if (closeWindow && window.isPresent() && !window.get().isDisposed()) {
-                ProjectManager.getInstance().closeAndDispose(window.get());
-            }
-        }, ModalityState.any()));
+        stop.whenComplete((ignored, failure) -> {
+            // Every completion path clears the busy fact: success, failure
+            // and a synchronous seam throw alike.
+            SessionCommands.releaseRemoteStop(id);
+            ApplicationManager.getApplication().invokeLater(() -> {
+                if (failure != null) {
+                    Messages.showErrorDialog(from, stopFailureMessage(failure), "Drydock");
+                    return;
+                }
+                if (closeWindow && window.isPresent() && !window.get().isDisposed()) {
+                    ProjectManager.getInstance().closeAndDispose(window.get());
+                }
+            }, ModalityState.any());
+        });
     }
 
     /**

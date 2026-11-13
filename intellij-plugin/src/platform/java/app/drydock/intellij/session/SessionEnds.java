@@ -9,14 +9,13 @@ import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.WorkspaceBoxBinding;
-import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.DrydockSessionsListener;
 import app.drydock.intellij.agent.AgentExecutionListener;
+import app.drydock.intellij.agent.AgentExecutionRegistry;
 import app.drydock.intellij.agent.LaunchClaims;
 import app.drydock.intellij.review.SessionMcpAccess;
 import app.drydock.intellij.workspace.RemoteSessionLiveness;
 import app.drydock.workspace.BoxShell;
-import app.drydock.workspace.CommandRunner;
 
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
@@ -31,7 +30,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
-
 /**
  * The end-of-agent half of {@link DrydockSessionService}: an agent's end
  * persisted as its row going idle, the late binding of a DISCOVERED agent's
@@ -63,8 +61,10 @@ final class SessionEnds implements AgentExecutionListener {
     private final LaunchClaims claims;
     /** The ssh seam the remote settle's one has-session probe runs through. */
     private final BoxShell boxShell;
-    /** The detached-remote liveness map the settle writes; resolved lazily in production. */
+    /** The detached-remote liveness map the settle writes. */
     private final Supplier<RemoteSessionLiveness> liveness;
+    /** The requested-client-end coordination the end settle classifies an end by. */
+    private final AgentExecutionRegistry.RemoteClientEnds clientEnds;
 
     /**
      * Agent session ids already bound to a persisted session, or claimed by
@@ -86,42 +86,37 @@ final class SessionEnds implements AgentExecutionListener {
      */
     private final Map<ManagedSessionId, Instant> lastLaunchedAt = new ConcurrentHashMap<>();
 
-    SessionEnds(Supplier<ApplicationStateStore> stateStore, Supplier<AgentRegistry> registry,
-                ExecutorService executor, SessionMcpAccess mcpAccess,
-                LaunchClaims claims) {
-        this(stateStore, registry, executor, mcpAccess, claims,
-                CommandRunner.PRODUCTION, SessionEnds::pluginLiveness);
-    }
+    /**
+     * A remote settle that a launch's own claim suppressed while its ssh
+     * client was ending — deferred, not discarded, and re-applied when that
+     * claim ends (see {@link #settleDeferredRemoteEnd}).
+     */
+    private record DeferredRemoteSettle(SessionStatus status, RemoteSessionLiveness.State liveness) { }
+
+    /** The deferred remote settles, keyed by session; memory only. */
+    private final Map<ManagedSessionId, DeferredRemoteSettle> deferredRemoteSettles = new ConcurrentHashMap<>();
 
     /**
-     * As above, with the remote settle's two seams injected (T17): the box
-     * command runner behind the has-session probe, and the liveness map
-     * its answer is recorded in. The five-argument form keeps today's
-     * construction sites compiling, with the production runner and the
-     * plugin service's liveness map as its defaults; tests inject fakes
-     * here so no test ever spawns a child or needs an IDE.
+     * The full seam: the remote settle's three injected components — the box
+     * ssh shell behind the has-session probe, the liveness map its answer is
+     * recorded in, and the requested-client-end coordination an end settles
+     * by. The service hands its own injected shell and liveness map through,
+     * so a service test's fakes drive its end settles too; tests inject
+     * fakes here directly so no test ever spawns a child or needs an IDE.
      */
     SessionEnds(Supplier<ApplicationStateStore> stateStore, Supplier<AgentRegistry> registry,
                 ExecutorService executor, SessionMcpAccess mcpAccess,
-                LaunchClaims claims, CommandRunner runner,
-                Supplier<RemoteSessionLiveness> liveness) {
+                LaunchClaims claims, BoxShell boxShell,
+                Supplier<RemoteSessionLiveness> liveness,
+                AgentExecutionRegistry.RemoteClientEnds clientEnds) {
         this.stateStore = Objects.requireNonNull(stateStore, "stateStore");
         this.registry = Objects.requireNonNull(registry, "registry");
         this.executor = Objects.requireNonNull(executor, "executor");
         this.mcpAccess = Objects.requireNonNull(mcpAccess, "mcpAccess");
         this.claims = Objects.requireNonNull(claims, "claims");
-        this.boxShell = new BoxShell(Objects.requireNonNull(runner, "runner"));
+        this.boxShell = Objects.requireNonNull(boxShell, "boxShell");
         this.liveness = Objects.requireNonNull(liveness, "liveness");
-    }
-
-    /**
-     * The production liveness map, resolved lazily: this class is built
-     * before the plugin service's init completes, and a settle runs long
-     * after it, so the map is fetched when a probe's answer is ready, never
-     * at construction. Never called by tests (they inject their own map).
-     */
-    private static RemoteSessionLiveness pluginLiveness() {
-        return DrydockPluginService.getInstance().remoteSessionLiveness();
+        this.clientEnds = Objects.requireNonNull(clientEnds, "clientEnds");
     }
 
     Set<String> claimedAgentSessionIds() {
@@ -199,16 +194,24 @@ final class SessionEnds implements AgentExecutionListener {
     // ---- remote settle (ssh client ended without an explicit Stop) ----------
 
     /**
-     * Settles a remote row whose ssh client just ended. Nothing is released
-     * first — a remote launch never mints Drydock MCP access (INV-15), so
-     * unlike the local half there is no token to hand back — and the agent
-     * on the box is not touched in any way (INV-10): no kill-session, no
-     * input, only the one has-session probe that decides the settle. The
-     * probe is a blocking ssh round trip, so it rides the executor (INV-8),
-     * never the thread that delivered the process event.
+     * Settles a remote row whose ssh client just ended. First the end is
+     * classified: one this IDE requested — an explicit Stop or a close path,
+     * per the coordination mark — settles by its origin, with no probe; only
+     * an end nobody requested runs the AC-8 probe. Nothing is released first
+     * — a remote launch never mints Drydock MCP access (INV-15), so unlike
+     * the local half there is no token to hand back — and the agent on the
+     * box is not touched in any way (INV-10): no kill-session, no input,
+     * only the one has-session probe a spontaneous end runs. The probe is a
+     * blocking ssh round trip, so it rides the executor (INV-8), never the
+     * thread that delivered the process event.
      */
     private void settleRemoteWhenClientEnds(ManagedSessionId id, WorkspaceBoxBinding box,
                                              boolean stopRequested) {
+        Optional<AgentExecutionRegistry.RemoteClientEnds.RequestedEnd> requested = clientEnds.requestedEnd(id);
+        if (requested.isPresent()) {
+            settleRequestedRemoteEnd(id, requested.get());
+            return;
+        }
         try {
             CompletableFuture.runAsync(() -> probeAndSettleRemote(id, box, stopRequested), executor);
         } catch (RejectedExecutionException e) {
@@ -221,6 +224,41 @@ final class SessionEnds implements AgentExecutionListener {
                     "Settling {0} as IDLE without a liveness probe; the executor is shutting down", id);
             settleRemote(id, SessionStatus.IDLE, null);
         }
+    }
+
+    /**
+     * Settles an end this IDE requested, by its origin and — for an explicit
+     * Stop — by the kill's own verdict, never by a probe:
+     * <ul>
+     *   <li><strong>Close</strong> (tab-close/window-close/quit/`hostClosed`/
+     *   `dispose` ends of the client): the durable row settles IDLE, the
+     *   status of a session this IDE does not own, and neither EXITED nor
+     *   INACTIVE is persisted for it (AC-7). No liveness is recorded — no
+     *   probe ran, so the last known answer stands.</li>
+     *   <li><strong>Explicit Stop, kill concluded</strong>: the kill's verdict
+     *   settles — confirmed (exit 0, "can't find session") → INACTIVE with
+     *   liveness DEAD; anything else → IDLE with UNKNOWN. The Stop flow
+     *   settles the same verdict itself when it can; this is the path for
+     *   the end that overtook the flow's own settle (suppressed while the
+     *   dying client was still the live execution the claim guard sees).</li>
+     *   <li><strong>Explicit Stop, kill still in flight</strong>: nothing.
+     *   The ssh client ended during the kill round-trip, and the Stop flow
+     *   holds the settle — a probe racing the kill's reply is exactly the
+     *   competition that could overwrite a confirmed outcome (AC-9).</li>
+     * </ul>
+     */
+    private void settleRequestedRemoteEnd(ManagedSessionId id,
+                                           AgentExecutionRegistry.RemoteClientEnds.RequestedEnd requested) {
+        if (requested.origin() == AgentExecutionRegistry.RemoteClientEnds.Origin.CLOSE) {
+            settleRemote(id, SessionStatus.IDLE, null);
+            return;
+        }
+        if (requested.killConfirmed().isEmpty()) {
+            return;
+        }
+        boolean killConfirmed = requested.killConfirmed().get();
+        settleRemote(id, killConfirmed ? SessionStatus.INACTIVE : SessionStatus.IDLE,
+                killConfirmed ? RemoteSessionLiveness.State.DEAD : RemoteSessionLiveness.State.UNKNOWN);
     }
 
     /**
@@ -258,23 +296,46 @@ final class SessionEnds implements AgentExecutionListener {
         }
     }
 
+    /** How a remote settle ended: what, if anything, its transform did. */
+    private enum RemoteSettleOutcome {
+        /** The row's status was written (or already was the settle's). */
+        LANDED,
+        /** The row is gone or local: nothing to settle. */
+        ROW_GONE,
+        /** A live execution holds the session. */
+        LIVE_EXECUTION,
+        /** A launch claim holds the session — the settle is deferred. */
+        CLAIM
+    }
+
     /**
      * Persists the remote row's settle status and records its liveness. A
-     * null {@code livenessState} (the quit-time settle, which has no probe
-     * answer) leaves the liveness map untouched. Both halves are a no-op
-     * when the row is gone or when {@link LaunchClaims} shows a live
-     * execution or claim for the id (INV-21): a Resume that claimed the
-     * session while the probe was in flight owns the row now, and its
-     * RUNNING is never overwritten. The guard runs inside the transform,
-     * so it is atomic with the write against every other writer through
-     * the store's single lock.
+     * null {@code livenessState} (the quit-time settle and the close settle,
+     * which have no probe answer) leaves the liveness map untouched. The
+     * guard runs inside the transform, so it is atomic with the write against
+     * every other writer through the store's single lock: the settle is a
+     * no-op when the row is gone (INV-21), and it is <em>deferred</em> — not
+     * discarded — when a launch claim holds the session. A claim-held settle
+     * is the early end of the launch's own ssh client (a remote command that
+     * failed immediately, before the launch's finalization released its
+     * claim): deferring it means the claim's end re-applies it, so a
+     * completed launch never leaves RUNNING persisted when this IDE owns
+     * no live ssh execution (INV-4). A settle suppressed by a live
+     * execution — not a claim — is discarded as before: the execution's own
+     * end settles when it comes.
      */
     private void settleRemote(ManagedSessionId id, SessionStatus status, RemoteSessionLiveness.State livenessState) {
-        boolean[] suppressed = {false};
+        RemoteSettleOutcome[] outcome = {RemoteSettleOutcome.LANDED};
         stateStore.get().update(state -> {
             ManagedAgentSession existing = DrydockSessionService.findIn(state, id);
-            if (existing == null || existing.workspaceBox().isEmpty() || !sessionIdle(id)) {
-                suppressed[0] = true;
+            if (existing == null || existing.workspaceBox().isEmpty()) {
+                outcome[0] = RemoteSettleOutcome.ROW_GONE;
+                return state;
+            }
+            if (!sessionIdle(id)) {
+                outcome[0] = clientEnds.hasLiveExecution(id)
+                        ? RemoteSettleOutcome.LIVE_EXECUTION
+                        : RemoteSettleOutcome.CLAIM;
                 return state;
             }
             if (existing.status() == status) {
@@ -283,13 +344,35 @@ final class SessionEnds implements AgentExecutionListener {
             return DrydockSessionService.withReplacedSession(state,
                     existing.withStatus(status).withLastOpenedAt(Instant.now()));
         });
-        if (suppressed[0]) {
-            return;
+        switch (outcome[0]) {
+            case ROW_GONE, LIVE_EXECUTION -> {
+                // Nothing landed: no liveness is recorded and nothing is
+                // published — the row is gone, or a live execution owns it.
+            }
+            case CLAIM -> deferredRemoteSettles.put(id, new DeferredRemoteSettle(status, livenessState));
+            case LANDED -> {
+                if (livenessState != null) {
+                    recordLiveness(id, livenessState);
+                }
+                DrydockSessionsListener.publishChanged();
+            }
         }
-        if (livenessState != null) {
-            recordLiveness(id, livenessState);
+    }
+
+    /**
+     * Re-applies the remote settle a launch's own claim deferred, when that
+     * claim ends (the service's {@code endClaim}): the launch's
+     * finalization has run by then, so a settle it suppressed can no longer
+     * race it — and the settle's guards run again inside {@link #settleRemote},
+     * so a <em>new</em> Resume that claimed meanwhile is still never
+     * overwritten. One-shot: the deferred verdict is consumed whether or
+     * not it lands.
+     */
+    void settleDeferredRemoteEnd(ManagedSessionId id) {
+        DeferredRemoteSettle deferred = deferredRemoteSettles.remove(id);
+        if (deferred != null) {
+            settleRemote(id, deferred.status(), deferred.liveness());
         }
-        DrydockSessionsListener.publishChanged();
     }
 
     /**

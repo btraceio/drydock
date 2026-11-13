@@ -12,6 +12,8 @@ import com.intellij.icons.AllIcons;
 import javax.swing.Icon;
 
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * What the agent tab's commands are, in which states they appear, and which
@@ -53,6 +55,45 @@ import java.util.Optional;
 public final class SessionCommands {
 
     private SessionCommands() {
+    }
+
+    /**
+     * The remote Stops this IDE has accepted and not yet seen conclude: the
+     * synchronous busy fact the contract orders <em>before</em> the blocking
+     * kill (component 6, INV-8). The service's own STOPPING mark is written
+     * on its executor after the click returns, and the execution's
+     * stop-requested only after the kill concludes — neither can answer a
+     * second click that lands inside that window — so the command layer
+     * claims the stop on the click's own thread, before the service call.
+     * Memory-only and application-level, like the liveness map; cleared on
+     * every completion path of the accepted stop
+     * ({@link #releaseRemoteStop}).
+     */
+    private static final Set<ManagedSessionId> REMOTE_STOPS_IN_FLIGHT =
+            ConcurrentHashMap.newKeySet();
+
+    /**
+     * Claims {@code id}'s remote Stop — the synchronous in-flight guard,
+     * taken by the handler on the click before the service call. False
+     * means one is already in flight and the click is ignored: it could
+     * only race the first kill.
+     */
+    static boolean claimRemoteStop(ManagedSessionId id) {
+        return REMOTE_STOPS_IN_FLIGHT.add(id);
+    }
+
+    /**
+     * Releases {@code id}'s remote Stop: the accepted stop concluded — on
+     * success, failure or a synchronous seam throw alike — so the busy fact
+     * must not outlive the operation it guarded.
+     */
+    static void releaseRemoteStop(ManagedSessionId id) {
+        REMOTE_STOPS_IN_FLIGHT.remove(id);
+    }
+
+    /** Whether an accepted remote Stop of {@code id} has not concluded. */
+    static boolean remoteStopInFlight(ManagedSessionId id) {
+        return REMOTE_STOPS_IN_FLIGHT.contains(id);
     }
 
     /** The primary action of a session's tab, in the states a session can be seen in. */
@@ -166,12 +207,28 @@ public final class SessionCommands {
      * execution is shown or raised, never started or deactivated from a
      * detached view. Past that, running sessions deactivate, stopped ones
      * resume what they can.
+     *
+     * <p>One remote exception to that order: a row bound to a workspace box
+     * that no window here shows, which the box says is ALIVE, offers
+     * Deactivate — the explicit Stop — without requiring a Resume first
+     * (contract component 6). Its agent runs in the box's tmux, not in any
+     * execution this IDE owns, so the attach-first rule would strand the
+     * only agent nothing here can reach; the attach itself stays available
+     * (the task tree's Resume) once the row is no longer offered a Stop.
+     * Every other verdict — DEAD, UNKNOWN, a stopped or gone box, or a row
+     * not probed yet — keeps Resume or Start: the box has not said an agent
+     * is there, so a Stop would claim one.</p>
      */
     public static Lifecycle lifecycle(State state) {
         if (state.detachedFromThisWindow()) {
             return Lifecycle.SHOW_AGENT;
         }
         if (state.running()) {
+            return Lifecycle.DEACTIVATE;
+        }
+        if (state.box().isPresent()
+                && state.liveness().orElse(RemoteSessionLiveness.State.UNKNOWN)
+                        == RemoteSessionLiveness.State.ALIVE) {
             return Lifecycle.DEACTIVATE;
         }
         return state.resumable() ? Lifecycle.RESUME : Lifecycle.START;
@@ -269,7 +326,14 @@ public final class SessionCommands {
         boolean running = registry.isRunning(id);
         boolean stopping = registry.execution(id)
                 .map(execution -> execution.isRunning() && execution.stopRequested())
-                .orElse(false);
+                .orElse(false)
+                // An accepted remote Stop is in flight: the claim is the
+                // synchronous busy fact the handler takes on the click,
+                // before the blocking kill — the service's own marks land
+                // too late to guard a second click. Only a row bound to a
+                // box is ever claimed, so a local row's state stays
+                // byte-identical to the pre-remote shape.
+                || (session.workspaceBox().isPresent() && remoteStopInFlight(id));
         return new State(
                 running,
                 resumable(knownResumable, session.agentSessionId().isPresent()),

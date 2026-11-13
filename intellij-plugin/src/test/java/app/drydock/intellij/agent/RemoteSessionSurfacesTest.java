@@ -15,8 +15,11 @@ import app.drydock.intellij.ui.SessionDots;
 import app.drydock.intellij.workspace.RemoteSessionLiveness;
 
 import com.intellij.testFramework.fixtures.BasePlatformTestCase;
+import com.intellij.ui.components.JBLabel;
+import com.intellij.util.ui.UIUtil;
 
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Optional;
 
@@ -32,9 +35,12 @@ import java.util.Optional;
  * local half of each rule is re-pinned beside it, so the change can be seen
  * to touch only remote rows.</p>
  *
- * <p>Headless: these are the derivations, not rendered Swing. The one test
- * that needs the IDE's service registry ({@code stateOf}'s liveness read)
- * runs under the platform fixture; the rest are pure functions.</p>
+ * <p>Headless: the derivations run as pure functions, and the strip's
+ * wiring is pinned on a real {@code AgentConsoleStrip} whose components are
+ * read un-rendered — no paint, hover or theme is visual evidence. The tests
+ * that need the IDE's service registry ({@code stateOf}'s liveness read,
+ * the strip's construction) run under the platform fixture; the rest are
+ * pure functions.</p>
  */
 public class RemoteSessionSurfacesTest extends BasePlatformTestCase {
 
@@ -286,5 +292,236 @@ public class RemoteSessionSurfacesTest extends BasePlatformTestCase {
         // A local State built the pre-remote way has no line at all.
         assertEquals(Optional.empty(), SessionCommands.remoteStatusLine(
                 new SessionCommands.State(false, true, false, false, false, false, false)));
+    }
+
+    // ---- the detached remote Stop: the lifecycle choice ------------------------
+
+    public void testAnAliveDetachedRemoteRowOffersDeactivateWithoutAttachingFirst() {
+        // The restart scenario: the row is IDLE here, nothing runs in this
+        // IDE, and the box says the tmux session is there. The primary is
+        // the explicit Stop — the user must not have to attach first
+        // (contract component 6) — whether or not there is a conversation
+        // to resume into, because the agent that conversation belongs to
+        // is live.
+        for (boolean resumable : new boolean[]{false, true}) {
+            assertEquals("resumable=" + resumable, SessionCommands.Lifecycle.DEACTIVATE,
+                    SessionCommands.lifecycle(
+                            remoteState(resumable, liveness(RemoteSessionLiveness.State.ALIVE))));
+        }
+    }
+
+    public void testOnlyAnAliveVerdictOffersTheDetachedRemoteStop() {
+        // Every other verdict — and a row nothing has probed yet — keeps
+        // the honest attach (Resume) or fresh conversation (Start): the
+        // box has not said an agent is there, so a Stop would claim one.
+        for (RemoteSessionLiveness.State notAlive : new RemoteSessionLiveness.State[]{
+                RemoteSessionLiveness.State.DEAD, RemoteSessionLiveness.State.UNKNOWN,
+                RemoteSessionLiveness.State.BOX_STOPPED, RemoteSessionLiveness.State.BOX_GONE}) {
+            assertEquals(notAlive.name(), SessionCommands.Lifecycle.RESUME,
+                    SessionCommands.lifecycle(remoteState(true, liveness(notAlive))));
+        }
+        assertEquals(SessionCommands.Lifecycle.RESUME,
+                SessionCommands.lifecycle(remoteState(true, Optional.empty())));
+        assertEquals(SessionCommands.Lifecycle.START,
+                SessionCommands.lifecycle(remoteState(false, Optional.empty())));
+    }
+
+    public void testTheAttachedAndLocalLifecycleRulesStayUnchanged() {
+        // The new choice is scoped to the detached-ALIVE remote row: a
+        // remote row this window shows still deactivates, one another
+        // window of this IDE shows still offers Show agent, and a local
+        // row keeps exactly its pre-remote Resume/Start pair.
+        assertEquals(SessionCommands.Lifecycle.DEACTIVATE, SessionCommands.lifecycle(
+                new SessionCommands.State(true, true, false, false, false, false, false, false,
+                        Optional.of(box()), Optional.empty())));
+        assertEquals(SessionCommands.Lifecycle.SHOW_AGENT, SessionCommands.lifecycle(
+                new SessionCommands.State(true, true, false, false, false, false, false, true,
+                        Optional.of(box()), Optional.empty())));
+        assertEquals(SessionCommands.Lifecycle.RESUME, SessionCommands.lifecycle(
+                new SessionCommands.State(false, true, false, false, false, false, false, false)));
+        assertEquals(SessionCommands.Lifecycle.START, SessionCommands.lifecycle(
+                new SessionCommands.State(false, false, false, false, false, false, false, false)));
+    }
+
+    // ---- the real strip's remote wiring (AgentConsoleStrip.update) ------------
+
+    public void testTheStripPaintsTheBoxAndAnAliveVerdictNeverALocalActivity() {
+        AgentConsoleStrip strip = new AgentConsoleStrip(action -> { });
+        // A local-style BUSY activity is passed on purpose: the monitor
+        // cannot see a box-side agent (OQ10), so the strip must not render
+        // it — the line is the box's own verdict, or it would be a guess.
+        strip.update(remoteSession(SessionStatus.IDLE, "claude-conversation"),
+                Optional.of(SessionActivity.BUSY), false, false, "Claude",
+                Duration.ofMinutes(5), Optional.empty(), Optional.empty(), false, Optional.empty(),
+                false, false, remoteState(true, liveness(RemoteSessionLiveness.State.ALIVE)));
+
+        JBLabel status = label(strip, "Running · on box " + BOX);
+        assertNotNull("the ALIVE-detached row paints the box name and the liveness "
+                + "verdict, never the local \"Not running\"", status);
+        assertEquals(AgentStripText.remoteStatusTooltip(false, liveness(RemoteSessionLiveness.State.ALIVE), BOX),
+                status.getToolTipText());
+        assertEquals("the ALIVE-detached remote row's primary is the explicit Stop",
+                "Deactivate", strip.primaryButton().getText());
+        assertTrue(strip.primaryButton().isEnabled());
+        for (JBLabel candidate : UIUtil.findComponentsOfType(strip, JBLabel.class)) {
+            assertFalse("a remote row never renders a local activity word (OQ10): "
+                    + candidate.getText(), "Working".equals(candidate.getText()));
+        }
+    }
+
+    public void testTheStripPaintsEveryOtherRemoteVerdictAsItsOwnWord() {
+        AgentConsoleStrip strip = new AgentConsoleStrip(action -> { });
+        ManagedAgentSession remote = remoteSession(SessionStatus.IDLE, "claude-conversation");
+        for (RemoteSessionLiveness.State state : RemoteSessionLiveness.State.values()) {
+            strip.update(remote, Optional.empty(), false, false, "Claude", Duration.ZERO,
+                    Optional.empty(), Optional.empty(), false, Optional.empty(), false, false,
+                    remoteState(true, liveness(state)));
+            String line = AgentStripText.remoteStatusText(false, liveness(state), BOX);
+            JBLabel status = label(strip, line);
+            assertNotNull(state.name() + " paints its own word, not the local idle wording",
+                    status);
+            assertEquals(state.name(), AgentStripText.remoteStatusTooltip(false, liveness(state), BOX),
+                    status.getToolTipText());
+        }
+        // Only ALIVE changes the primary: a box that answered anything
+        // else — or nothing yet — keeps the attach (Resume).
+        strip.update(remote, Optional.empty(), false, false, "Claude", Duration.ZERO,
+                Optional.empty(), Optional.empty(), false, Optional.empty(), false, false,
+                remoteState(true, liveness(RemoteSessionLiveness.State.DEAD)));
+        assertTrue("a DEAD remote row keeps Resume: " + strip.primaryButton().getText(),
+                strip.primaryButton().getText().startsWith("Resume"));
+    }
+
+    public void testARemoteRowAttachedHerePaintsRunningOnTheBoxNotLocalActivity() {
+        AgentConsoleStrip strip = new AgentConsoleStrip(action -> { });
+        SessionCommands.State attached = new SessionCommands.State(true, true, false, false,
+                false, false, false, false, Optional.of(box()), Optional.empty());
+        strip.update(remoteSession(SessionStatus.RUNNING, "claude-conversation"),
+                Optional.of(SessionActivity.BUSY), true, false, "Claude", Duration.ZERO,
+                Optional.empty(), Optional.empty(), false, Optional.empty(), false, false, attached);
+
+        assertNotNull("an attached remote row names its box instead of folding the "
+                + "local monitor's activity into the status word",
+                label(strip, "Running · on box " + BOX));
+        for (JBLabel candidate : UIUtil.findComponentsOfType(strip, JBLabel.class)) {
+            assertFalse("no local activity word on a remote row (OQ10): " + candidate.getText(),
+                    "Working".equals(candidate.getText()));
+        }
+        assertEquals("an attached remote row's primary is unchanged: the Stop",
+                "Deactivate", strip.primaryButton().getText());
+    }
+
+    public void testARemoteRowShownByAnotherWindowHereKeepsShowAgentAndNamesTheBox() {
+        AgentConsoleStrip strip = new AgentConsoleStrip(action -> { });
+        SessionCommands.State elsewhere = new SessionCommands.State(true, true, false, false,
+                false, false, false, true, Optional.of(box()), Optional.empty());
+        strip.update(remoteSession(SessionStatus.RUNNING, "claude-conversation"),
+                Optional.empty(), false, false, "Claude", Duration.ZERO,
+                Optional.empty(), Optional.empty(), false, Optional.empty(), false, false, elsewhere);
+
+        assertNotNull("another window of this IDE owns the ssh console, so the row is "
+                + "live and says where it is not — naming the box",
+                label(strip, "Running · on box " + BOX + " · not shown here"));
+        assertEquals("the reconnect-first rule is unchanged for a remote row",
+                "Show agent", strip.primaryButton().getText());
+    }
+
+    public void testALocalRowKeepsTheLocalStripPresentation() {
+        AgentConsoleStrip strip = new AgentConsoleStrip(action -> { });
+        ManagedAgentSession local = new ManagedAgentSession.Builder(
+                ManagedSessionId.newId(), RepositoryId.newId(), "Local work",
+                AgentBinding.unlaunched(AgentKind.PI, SessionMode.WRITES),
+                SessionWorkspace.inRepository(Path.of("/wt/local")), Instant.EPOCH)
+                .status(SessionStatus.INACTIVE).build()
+                .withAgentSessionId(Optional.of("pi-conversation"));
+        strip.update(local, Optional.empty(), false, false, "Pi", Duration.ZERO,
+                Optional.empty(), Optional.of(12_345), false, Optional.empty(), false, false,
+                new SessionCommands.State(false, true, false, false, false, false, false, false));
+        assertNotNull("a local stopped row keeps the local status word",
+                label(strip, "Not running"));
+        assertEquals(AgentStripText.primaryLabel(true, Optional.of(12_345)),
+                strip.primaryButton().getText());
+        assertTrue(strip.primaryButton().isEnabled());
+    }
+
+    public void testAnInFlightRemoteStopGreysThePrimaryUnderTheBusyLabel() {
+        AgentConsoleStrip strip = new AgentConsoleStrip(action -> { });
+        strip.update(remoteSession(SessionStatus.RUNNING, "claude-conversation"),
+                Optional.empty(), true, false, "Claude", Duration.ZERO,
+                Optional.empty(), Optional.empty(), false, Optional.empty(), false, false,
+                new SessionCommands.State(true, true, false, true, false, false, false, false,
+                        Optional.of(box()), Optional.empty()));
+        assertEquals("the accepted Stop names itself while it runs (INV-8)",
+                "Deactivating…", strip.primaryButton().getText());
+        assertFalse("a second click could only race the first",
+                strip.primaryButton().isEnabled());
+    }
+
+    // ---- the remote Stop's synchronous busy fact -------------------------------
+
+    public void testAnAcceptedRemoteStopIsBusyUntilItConcludes() {
+        // The claim is what the handler takes on the click, before the
+        // blocking kill: the service's own STOPPING mark is written on its
+        // executor after the click returns, and the execution's
+        // stop-requested only after the kill — neither can answer a
+        // second click inside that window.
+        ManagedSessionId id = ManagedSessionId.newId();
+        ManagedAgentSession remote = new ManagedAgentSession.Builder(
+                id, RepositoryId.newId(), "Box work",
+                AgentBinding.unlaunched(AgentKind.CLAUDE, SessionMode.WRITES),
+                SessionWorkspace.inRepository(Path.of("/tmp/repo")), Instant.EPOCH)
+                .status(SessionStatus.IDLE)
+                .workspaceBox(Optional.of(box()))
+                .build();
+        try {
+            assertTrue(SessionCommands.claimRemoteStop(id));
+            SessionCommands.State claimed = SessionCommands.stateOf(remote, Optional.empty(), true);
+            assertTrue("the claim is the busy fact every surface reads", claimed.stopping());
+            assertTrue(SessionCommands.busy(claimed));
+            assertFalse("so no surface offers the lifecycle while the kill runs",
+                    SessionCommands.lifecycleEnabled(claimed));
+            assertFalse("a second click's claim is refused", SessionCommands.claimRemoteStop(id));
+        } finally {
+            SessionCommands.releaseRemoteStop(id);
+        }
+        SessionCommands.State released = SessionCommands.stateOf(remote, Optional.empty(), true);
+        assertFalse("completion clears the busy fact on every path", released.stopping());
+        assertTrue("and a later Stop is a new operation", SessionCommands.claimRemoteStop(id));
+        SessionCommands.releaseRemoteStop(id);
+    }
+
+    // ---- helpers ----------------------------------------------------------------
+
+    private static WorkspaceBoxBinding box() {
+        return new WorkspaceBoxBinding(BOX, "/Users/dev/clone");
+    }
+
+    /** A detached remote row's window-scoped state: nothing runs here. */
+    private static SessionCommands.State remoteState(boolean resumable,
+                                                     Optional<RemoteSessionLiveness.State> liveness) {
+        return new SessionCommands.State(false, resumable, false, false, false, false, false, false,
+                Optional.of(box()), liveness);
+    }
+
+    /** A remote row as a restart would have loaded it: box-bound, IDLE. */
+    private static ManagedAgentSession remoteSession(SessionStatus status, String agentSessionId) {
+        return new ManagedAgentSession.Builder(
+                ManagedSessionId.newId(), RepositoryId.newId(), "Box work",
+                AgentBinding.unlaunched(AgentKind.CLAUDE, SessionMode.WRITES),
+                SessionWorkspace.inRepository(Path.of("/tmp/repo")), Instant.EPOCH)
+                .status(status)
+                .workspaceBox(Optional.of(box()))
+                .build()
+                .withAgentSessionId(Optional.of(agentSessionId));
+    }
+
+    /** The strip's label with exactly {@code text}, or null when none shows it. */
+    private static JBLabel label(AgentConsoleStrip strip, String text) {
+        for (JBLabel candidate : UIUtil.findComponentsOfType(strip, JBLabel.class)) {
+            if (text.equals(candidate.getText())) {
+                return candidate;
+            }
+        }
+        return null;
     }
 }

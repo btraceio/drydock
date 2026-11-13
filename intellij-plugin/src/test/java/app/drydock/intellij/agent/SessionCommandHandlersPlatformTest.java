@@ -167,6 +167,73 @@ public class SessionCommandHandlersPlatformTest extends BasePlatformTestCase {
                 DrydockStartupActivity.sessions(getProject()).doneFlowRefusal(id));
     }
 
+    public void testASecondRemoteStopClickWhileTheKillIsInFlightIsIgnored() throws Exception {
+        // The double-click defect: the service's STOPPING mark lands on its
+        // executor only after the click returns, and the execution's
+        // stop-requested only after the blocking kill — so the busy fact
+        // must exist synchronously, at the click, before the kill. A second
+        // click inside that window is ignored: it could only race the
+        // first kill, and its failure would surface a second error for one
+        // accepted stop.
+        ManagedAgentSession row = remoteRow("Box work");
+        List<ManagedSessionId> stopped = new ArrayList<>();
+        List<String> dialogs = captureDialogs();
+        CompletableFuture<Void> first = new CompletableFuture<>();
+        boolean[] afterStop = {false};
+
+        SessionCommandHandlers.deactivate(getProject(), row, false, () -> afterStop[0] = true,
+                stoppedId -> {
+                    stopped.add(stoppedId);
+                    return first;
+                });
+        SessionCommandHandlers.deactivate(getProject(), row, false, () -> { },
+                stoppedId -> {
+                    stopped.add(stoppedId);
+                    return new CompletableFuture<>();
+                });
+
+        assertEquals("only the first click reaches the service's Stop",
+                List.of(id), stopped);
+        assertTrue("the first click still visibly lands", afterStop[0]);
+        assertTrue(dialogs.isEmpty());
+
+        // Completion clears the busy fact: a later Stop is accepted again
+        // as a new operation.
+        first.complete(null);
+        PlatformTestUtil.dispatchAllEventsInIdeEventQueue();
+        CompletableFuture<Void> second = new CompletableFuture<>();
+        SessionCommandHandlers.deactivate(getProject(), row, false, () -> { },
+                stoppedId -> {
+                    stopped.add(stoppedId);
+                    return second;
+                });
+        assertEquals("a Stop after the first concluded is a new operation",
+                List.of(id, id), stopped);
+        second.complete(null);
+        PlatformTestUtil.dispatchAllEventsInIdeEventQueue();
+        assertTrue("two concluded stops show nothing", dialogs.isEmpty());
+    }
+
+    public void testARemoteStopFailureSurfacesOnceEvenForADoubleClick() throws Exception {
+        // One accepted stop, one error: the ignored second click registers
+        // no second completion on the future, so a failed kill cannot
+        // queue one dialog per click.
+        ManagedAgentSession row = remoteRow("Box work");
+        List<String> dialogs = captureDialogs();
+        CompletableFuture<Void> serviceStop = new CompletableFuture<>();
+
+        SessionCommandHandlers.deactivate(getProject(), row, false, () -> { },
+                stoppedId -> serviceStop);
+        SessionCommandHandlers.deactivate(getProject(), row, false, () -> { },
+                stoppedId -> serviceStop);
+
+        String reason = "Could not stop the agent of session 'Box work' on box drydock-repo: ssh exited 255";
+        serviceStop.completeExceptionally(new CompletionException(new IllegalStateException(reason)));
+        waitFor(() -> !dialogs.isEmpty());
+        assertEquals("one accepted stop, one error — never one per click",
+                List.of(reason), dialogs);
+    }
+
     /** Captures every Messages dialog's text instead of showing it. */
     private List<String> captureDialogs() {
         List<String> shown = new ArrayList<>();

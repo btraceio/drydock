@@ -15,6 +15,7 @@ import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.domain.WorkspaceBoxBinding;
 import app.drydock.domain.WorkspaceUiState;
+import app.drydock.intellij.agent.AgentExecutionRegistry;
 import app.drydock.intellij.agent.LaunchClaims;
 import app.drydock.intellij.review.SessionMcpAccess;
 import app.drydock.intellij.workspace.RemoteSessionLiveness;
@@ -23,6 +24,7 @@ import app.drydock.process.ProcessRunner;
 import app.drydock.process.ProcessTimeoutException;
 import app.drydock.process.SshCommandBuilder;
 import app.drydock.state.ApplicationStateRepository;
+import app.drydock.workspace.BoxShell;
 import app.drydock.workspace.CommandRunner;
 
 import org.junit.jupiter.api.AfterEach;
@@ -35,12 +37,15 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.AbstractExecutorService;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 import java.util.logging.Handler;
 import java.util.logging.LogRecord;
@@ -51,7 +56,6 @@ import static app.drydock.intellij.workspace.RemoteSessionLiveness.State.DEAD;
 import static app.drydock.intellij.workspace.RemoteSessionLiveness.State.UNKNOWN;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-
 /**
  * The remote half of the end-of-agent settle (workspace persistent
  * sessions, T17/AC-8): one has-session probe per ssh-client end, the
@@ -177,11 +181,67 @@ class SessionEndsTest {
     }
 
     /**
+     * A fake of the requested-client-end coordination: the same mark
+     * semantics the registry implements, with the live-execution answer
+     * delegated to the harness's flag. Never consults the IDE.
+     */
+    private static final class FakeClientEnds implements AgentExecutionRegistry.RemoteClientEnds {
+
+        private final Map<ManagedSessionId, AgentExecutionRegistry.RemoteClientEnds.RequestedEnd> marks =
+                new ConcurrentHashMap<>();
+        private final BooleanSupplier liveExecution;
+
+        FakeClientEnds(BooleanSupplier liveExecution) {
+            this.liveExecution = liveExecution;
+        }
+
+        @Override public void beginExplicitStop(ManagedSessionId id) {
+            marks.put(id, AgentExecutionRegistry.RemoteClientEnds.RequestedEnd.explicitStopPending());
+        }
+
+        @Override public void stopVerdict(ManagedSessionId id, boolean killConfirmed) {
+            marks.compute(id, (session, existing) ->
+                    existing != null && existing.origin() == AgentExecutionRegistry.RemoteClientEnds.Origin.EXPLICIT_STOP
+                            ? AgentExecutionRegistry.RemoteClientEnds.RequestedEnd.explicitStopVerdict(killConfirmed)
+                            : existing);
+        }
+
+        @Override public void endExplicitStop(ManagedSessionId id) {
+            marks.compute(id, (session, existing) ->
+                    existing != null && existing.origin() == AgentExecutionRegistry.RemoteClientEnds.Origin.EXPLICIT_STOP
+                            ? null : existing);
+        }
+
+        @Override public void beginClose(ManagedSessionId id) {
+            marks.put(id, AgentExecutionRegistry.RemoteClientEnds.RequestedEnd.close());
+        }
+
+        @Override public void endClose(ManagedSessionId id) {
+            marks.compute(id, (session, existing) ->
+                    existing != null && existing.origin() == AgentExecutionRegistry.RemoteClientEnds.Origin.CLOSE
+                            ? null : existing);
+        }
+
+        @Override public void clear(ManagedSessionId id) {
+            marks.remove(id);
+        }
+
+        @Override public Optional<AgentExecutionRegistry.RemoteClientEnds.RequestedEnd> requestedEnd(ManagedSessionId id) {
+            return Optional.ofNullable(marks.get(id));
+        }
+
+        @Override public boolean hasLiveExecution(ManagedSessionId id) {
+            return liveExecution.getAsBoolean();
+        }
+    }
+
+    /**
      * The settle under test: the real single writer over an in-memory
-     * state file, the real liveness map, the fake runner, and claims whose
-     * live-execution answer the test flips. The registry supplier of the
-     * remote harness throws: the remote settle never consults the agent
-     * registry (no local transcript machinery for a remote row).
+     * state file, the real liveness map, the fake runner, claims whose
+     * live-execution answer the test flips, and the fake requested-end
+     * coordination. The registry supplier of the remote harness throws: the
+     * remote settle never consults the agent registry (no local transcript
+     * machinery for a remote row).
      */
     private static final class Harness {
 
@@ -193,6 +253,7 @@ class SessionEndsTest {
         final DirectExecutor executor = new DirectExecutor();
         final AtomicBoolean liveExecution = new AtomicBoolean();
         final LaunchClaims claims;
+        final FakeClientEnds clientEnds;
         final SessionEnds ends;
 
         private Harness(Supplier<AgentRegistry> registry, List<ManagedAgentSession> sessions) {
@@ -200,8 +261,9 @@ class SessionEndsTest {
                     WorkspaceUiState.empty(), List.of());
             this.store = ApplicationStateStore.forRepository(repository);
             this.claims = new LaunchClaims(id -> liveExecution.get());
+            this.clientEnds = new FakeClientEnds(liveExecution::get);
             this.ends = new SessionEnds(() -> store, registry, executor, mcpAccess, claims,
-                    runner, () -> liveness);
+                    new BoxShell(runner), () -> liveness, clientEnds);
         }
     }
 
@@ -425,6 +487,118 @@ class SessionEndsTest {
                 "no probe answer exists, so nothing is recorded");
         assertEquals(List.of(), harness.runner.calls, "no probe was ever issued");
         assertEquals(List.of(), harness.mcpAccess.released);
+    }
+
+    // ---- requested client ends: explicit Stop and close (review R1) ---------
+
+    /**
+     * A close-originated end settles the durable row IDLE — never EXITED,
+     * never INACTIVE (AC-7) — even though the stop flag the close's stop
+     * set reads as a requested stop: the mark, set before the client was
+     * asked to end, is what the end settles by. No probe runs (AC-8 is the
+     * story of an end nobody requested), so no liveness is recorded either.
+     */
+    @Test
+    void aCloseOriginatedClientEndSettlesTheRowIdleWithoutAProbe() {
+        ManagedSessionId id = ManagedSessionId.newId();
+        Harness harness = remoteHarness(remoteRow(id, SessionStatus.RUNNING));
+        harness.clientEnds.beginClose(id);
+
+        harness.ends.executionTerminated(id, true, 0);
+
+        assertEquals(SessionStatus.IDLE, row(harness, id).status(),
+                "AC-7: a close-originated end never persists EXITED or INACTIVE");
+        assertEquals(Optional.empty(), harness.liveness.state(id),
+                "no probe ran, so no liveness answer was earned");
+        assertEquals(List.of(), harness.runner.calls,
+                "no probe, no kill-session, no input — the close touches the box never (INV-10)");
+        assertEquals(List.of(), harness.mcpAccess.released);
+    }
+
+    /**
+     * An explicit Stop's client end settles by the kill's own verdict, with
+     * no probe — including the end that arrives before the Stop's stop
+     * flag could be set (the client terminated during the kill round-trip)
+     * and the end that arrives after the Stop's own settle was suppressed
+     * by the still-dying client: neither may be overwritten by a probe, and
+     * neither may overwrite the confirmed outcome (AC-9).
+     */
+    @Test
+    void anExplicitStopsClientEndSettlesByTheKillsVerdictWithoutAProbe() {
+        ManagedSessionId stopped = ManagedSessionId.newId();
+        Harness harness = remoteHarness(remoteRow(stopped, SessionStatus.STOPPING));
+        harness.clientEnds.beginExplicitStop(stopped);
+        harness.clientEnds.stopVerdict(stopped, true);
+
+        harness.ends.executionTerminated(stopped, false, 0);
+
+        assertEquals(SessionStatus.INACTIVE, row(harness, stopped).status(),
+                "a confirmed kill settles INACTIVE whatever a probe would have said");
+        assertEquals(Optional.of(DEAD), harness.liveness.state(stopped));
+        assertEquals(List.of(), harness.runner.calls, "no probe competes with the Stop's verdict");
+
+        ManagedSessionId inconclusive = ManagedSessionId.newId();
+        Harness failed = remoteHarness(remoteRow(inconclusive, SessionStatus.STOPPING));
+        failed.clientEnds.beginExplicitStop(inconclusive);
+        failed.clientEnds.stopVerdict(inconclusive, false);
+
+        failed.ends.executionTerminated(inconclusive, true, 0);
+
+        assertEquals(SessionStatus.IDLE, row(failed, inconclusive).status(),
+                "a kill that did not conclude settles IDLE, never INACTIVE");
+        assertEquals(Optional.of(UNKNOWN), failed.liveness.state(inconclusive));
+        assertEquals(List.of(), failed.runner.calls);
+    }
+
+    /**
+     * The end that arrives while the Stop's kill is still in flight settles
+     * nothing and probes nothing: the Stop flow owns the settle and will
+     * write its verdict when the kill replies — this is the ordering where a
+     * probe scheduled here used to persist EXITED over a later confirmed
+     * INACTIVE (review R1, defect 2's first ordering).
+     */
+    @Test
+    void anExplicitStopsClientEndWhileTheKillIsInFlightLeavesTheSettleToTheStop() {
+        ManagedSessionId id = ManagedSessionId.newId();
+        Harness harness = remoteHarness(remoteRow(id, SessionStatus.STOPPING));
+        harness.clientEnds.beginExplicitStop(id);
+
+        harness.ends.executionTerminated(id, false, 0);
+
+        assertEquals(SessionStatus.STOPPING, row(harness, id).status(),
+                "the Stop flow holds the settle until its kill replies");
+        assertEquals(Optional.empty(), harness.liveness.state(id));
+        assertEquals(List.of(), harness.runner.calls, "no probe is scheduled against the in-flight kill");
+    }
+
+    /**
+     * An early end under its own launch's claim is deferred, not discarded:
+     * the probe's verdict waits until the launch's claim ends (its
+     * finalization has run by then), and is re-applied — so a completed
+     * launch never leaves RUNNING persisted when this IDE owns no live ssh
+     * execution (INV-4, review R1 defect 4).
+     */
+    @Test
+    void anEarlyEndUnderItsOwnLaunchClaimIsDeferredAndReappliedWhenTheClaimEnds() {
+        ManagedSessionId id = ManagedSessionId.newId();
+        Harness harness = remoteHarness(remoteRow(id, SessionStatus.RUNNING));
+        harness.runner.reply = new ProcessResult(0, "", "");   // ALIVE — the settle would say IDLE
+        harness.runner.duringRun = () -> harness.claims.tryClaim(id);   // the launch still holds its claim
+
+        harness.ends.executionTerminated(id, false, 0);
+
+        assertEquals(SessionStatus.RUNNING, row(harness, id).status(),
+                "while the claim lives, the settle still waits");
+        assertEquals(Optional.empty(), harness.liveness.state(id));
+
+        // The launch's claim ends (the service's endClaim): the deferred
+        // settle is re-applied and now lands.
+        harness.claims.finish(id, () -> { });
+        harness.ends.settleDeferredRemoteEnd(id);
+
+        assertEquals(SessionStatus.IDLE, row(harness, id).status(),
+                "the deferred verdict lands once nothing owns the row");
+        assertEquals(Optional.of(ALIVE), harness.liveness.state(id));
     }
 
     // ---- regression oracle: the local half is unchanged ------------------------
