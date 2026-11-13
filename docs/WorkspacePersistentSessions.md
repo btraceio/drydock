@@ -6,8 +6,10 @@ sessions on workspace boxes (experimental)" (key
 `drydock.workspaceSessions.enabled`, default **false**) — plus a per-launch
 "Run on workspace box" checkbox in the New task dialog. Verification status:
 every component is covered by automated unit and platform tests (exact
-command argv, the lifecycle decision table, settle outcomes, refusal wiring,
-and a three-layer quoting integration test run under `/bin/sh` and `/bin/zsh`
+command argv, the lifecycle decision table, settle outcomes — including
+the stop-identity, close-origin and deferred-settle orderings — refusal
+wiring, provisioning serialization, and a three-layer quoting integration
+test run under `/bin/sh` and `/bin/zsh`
 with stub `ssh`/`tmux`/`claude`); **no live-box end-to-end check has been run**
 — the six checks M1–M6 below are all **NOT VERIFIED**. Runtime claims marked
 **proven** were measured on a live workspace box during the 2026-11-12
@@ -141,7 +143,8 @@ Measured on a live box (tmux 3.6b); the shipped arm follows it:
   `SessionStatus` wire value exists (an older plugin build must still read
   the file). The map is refreshed by one `tmux ls` per box at startup
   (below) and by one `has-session` probe when a row's ssh client ends
-  without an explicit Stop.
+  spontaneously — an end an explicit Stop or a close requested settles
+  by its own origin or the kill's verdict, without a probe.
 - **The tmux server is a single point of failure — accepted.** Killing the
   server SIGHUPs every agent within a second. This is shared by every
   PTY-owning approach including the status quo, and a box stop/restart has
@@ -182,8 +185,18 @@ Measured on a live box (tmux 3.6b); the shipped arm follows it:
 3. **Settings.** Application-level `PropertiesComponent` keys:
    `drydock.workspaceSessions.enabled` (default false; the Settings
    checkbox), `drydock.workspace.<RepositoryId>.box` (the current box name
-   — a user override or a re-created generation), and
-   `drydock.workspace.<RepositoryId>.clone` (the discovered box clone path).
+   — a user override or a re-created generation),
+   `drydock.workspace.<RepositoryId>.usedBoxes` (the used-names history:
+   every box name the repo's mapping has ever pointed at, current mapping
+   plus past generations — so a mapped name is never re-created even after
+   the box left `workspaces list` or the override was cleared; decoded
+   leniently, invalid entries skipped), and
+   `drydock.workspace.<RepositoryId>.clone` (the discovered box clone
+   path, trusted only while `drydock.workspace.<RepositoryId>.cloneBox`
+   names the same box generation — a cached path picked on one box never
+   carries into a fresh one, which discovers its own clone; a manual path
+   from the dialog is stamped with the box the mapping points at when it
+   is set).
    A per-project "Workspace box" dialog (project-row menu next to GitHub
    settings, visible only while the flag is on) edits the box-name
    override and the clone path — the manual escape hatch for a discovery
@@ -221,38 +234,73 @@ Measured on a live box (tmux 3.6b); the shipped arm follows it:
    - *Resume*: with the flag off, refuse ("Workspace sessions are turned
      off in Settings › Tools › Drydock") and never fall through to a local
      launch. Skip every local-only probe (no `Files.notExists`, no
-     transcript check, no late id bind, no MCP access); run one batch ssh
+     transcript check, no late id bind, no MCP access); after acquiring
+     its claim, re-check that the row still exists (a Forget that finished
+     in between refuses with "was forgotten before it resumed" — the same
+     deletion-gap guard the create path carries); run one batch ssh
      probe — on failure classify with `workspaces list` and refuse (see the
      lifecycle section for the stopped/gone texts), persisting no FAILED
      row; on success attach and persist only RUNNING + `lastOpenedAt` —
      no MCP mint, no `agentSessionId` rewrite, no last-used records, no
      box worktree. `resumeOrStartSession` always resumes a remote row, even
      with no local transcript and no local working directory.
-   - *Stop*: async — the row goes STOPPING (only when this IDE owns its
-     live execution), then `tmux kill-session -t drydock-<id>` (10 s
-     timeout), then the ssh client ends; exit 0 or "can't find session"
-     settles the row INACTIVE; anything else surfaces an error naming the
-     box and settles the row to IDLE with liveness UNKNOWN — never INACTIVE.
-     Stop is offered on ALIVE-detached rows.
+   - *Stop*: the click first takes a synchronous per-session in-flight
+     claim, before the service call — the busy fact every surface's guard
+     reads while the blocking kill runs ("Deactivating…", a disabled
+     primary; a second click while the stop is in flight is ignored — the
+     persisted STOPPING mark is written on the service executor after the
+     click returns, too late to close the double-click window; the claim
+     clears on every completion path). The stop itself is async — the row
+     goes STOPPING (only when this IDE owns its live execution), the Stop
+     is identified before the kill through a registry-level requested-end
+     mark, then `tmux kill-session -t drydock-<id>` (10 s timeout), then
+     the ssh client ends; exit 0 or "can't find session" settles the row
+     INACTIVE with liveness DEAD — by the kill's own verdict, never by
+     an end's probe, regardless of box reachability (the client's own
+     end settles the same verdict when the flow's settle was
+     suppressed); anything else surfaces an error naming the box and
+     settles the row to IDLE with liveness UNKNOWN — never INACTIVE. A
+     settle records its liveness answer even when the row already
+     carries the settle's status (only a row gone or a claim/live
+     execution suppresses it). One residual race remains, accepted: a
+     spontaneous client end whose probe was already in flight when the
+     Stop click landed is not cancelled, and its late answer can settle
+     over the Stop's verdict. Stop is offered on ALIVE-detached rows in
+     the strip, the tab header and the tab popup, and the task tree
+     (lifecycle DEACTIVATE without a Resume first, on the same lifecycle
+     derivation in all three surfaces).
    - *Forget*: kill-session first; on any kill outcome other than success
      or no-such-session, confirm "The agent may still be running on box
      <name>. Forget anyway?" — remove the row only on confirm.
    - *Close paths*: tab close, window close, `hostClosed`, `dispose`, and
-     quit end only the local ssh client — no kill-session, and neither
-     EXITED nor INACTIVE is persisted for a remote row; the quit and
+     quit end only the local ssh client — no kill-session — and the
+     close-originated end (identified before the client is asked to end)
+     settles the durable row IDLE, never EXITED or INACTIVE, records no
+     liveness (no probe ran) and issues no box command; the quit and
      close-window confirmation counts exclude remote sessions.
    - *Refused for remote rows*, each with a named reason: `startSession`
      (a remote row "can only be resumed there, never started fresh here"),
      `transferStoppedSession`, and the Done flow ("the Done flow is
      local-only — use Stop or Forget instead" — the Done action consults
      this gate before running the local flow).
-   - *Settle on client end*: when a remote row's ssh client ends without
-     an explicit Stop, one `has-session` probe (off the EDT) decides:
-     ALIVE → the row persists IDLE with liveness ALIVE; DEAD → today's
-     EXITED/INACTIVE settle, without `lastExitCode` (the ssh client's exit
-     code is not the agent's); anything else → IDLE with liveness UNKNOWN
-     and a WARNING carrying the excerpt. A Resume claimed during the
-     probe is never overwritten.
+   - *Settle on client end*: when a remote row's ssh client ends, the end
+     is classified by what requested it. An end an explicit Stop requested
+     never probes — it settles the kill's verdict itself (ordering 1: the
+     client died during the kill, verdict pending, the Stop flow owns the
+     settle; ordering 2: the flow's settle was suppressed by the
+     still-dying client, the decided verdict settles here); a
+     close-originated end settles IDLE with no probe (the close-path
+     bullet above). A spontaneous end — one nobody requested — runs one
+     `has-session` probe (off the EDT) which decides: ALIVE → the row
+     persists IDLE with liveness ALIVE; DEAD → today's EXITED/INACTIVE
+     settle, without `lastExitCode` (the ssh client's exit code is not the
+     agent's); anything else → IDLE with liveness UNKNOWN and a WARNING
+     carrying the excerpt. An early client end that arrives while the
+     launch that opened it still holds its claim is deferred in memory —
+     not discarded — and re-applied after the launch finalizes, so a
+     completed launch never leaves the row RUNNING when this IDE owns no
+     live ssh execution. A Resume claimed during the probe is never
+     overwritten.
 7. **UI.** The New task dialog's "Run on workspace box" checkbox (visible
    only while the flag is on, default off) is enabled only when the agent
    is Claude, the work target is a new worktree or the main checkout,
@@ -260,12 +308,21 @@ Measured on a live box (tmux 3.6b); the shipped arm follows it:
    not fish, and the project has no shared-project remote. The remote
    launch runs inside the existing background task with per-step progress
    (origin, probe, "Creating workspace box <name> (≈3 min)…", bootstrap,
-   box worktree), cleared on every exit; a non-GitHub origin or an owner
-   other than `DataDog`/`ddoghq` is refused before any `workspaces create`.
+   box worktree), cleared on every exit, holding a repo-scoped in-process
+   provisioning claim from the first mapping read through the create's
+   mapping write — one provisioning attempt per repository: a second
+   overlapping launch for the same repo refuses visibly (every exit —
+   success, refusal, cancel, interrupt — releases the claim); a non-GitHub
+   origin or an owner other than `DataDog`/`ddoghq` is refused before any
+   `workspaces create`.
    Session surfaces (tab title/tooltip/icon, the strip's status line, the
-   session commands) show the box name and the liveness state; a remote
-   row never shows a working/idle activity claim (the activity monitor
-   cannot see a box-side agent).
+   session commands) show the box name and the liveness state; the strip
+   paints a remote row through the remote presentation — box name plus
+   liveness verdict on the status line (a detached row another window of
+   this IDE shows keeps the "· not shown here" qualifier and Show agent),
+   never the local display rules that would flatten a detached remote
+   answer to "Not running"; a remote row never shows a working/idle
+   activity claim (the activity monitor cannot see a box-side agent).
 
 ## Lifecycle policy — the stopped-box problem, settled for v1
 
@@ -284,16 +341,29 @@ the launch path:**
 - The plugin never issues `workspaces restart`, `delete`, or any mutating
   subcommand other than `workspaces create`; a stopped or gone box is left
   in place.
-- When a new remote launch finds the mapped box stopped or gone, the user
+- A box the repo has used before is never a first-ever box: the launch
+  reads both the current mapping and the persisted used-names history
+  (`.usedBoxes`), so a cleared override whose box then vanished is a
+  re-create offer, never a silent same-name create. When a new remote
+  launch finds that box stopped or gone, the user
   is asked once, on the EDT, with a destructive confirmation that names
   the old box and states that its conversations are unreachable or gone
   and are not recovered by this action. Confirm provisions a fresh box
   under the next generation name (`<base>-2`, `-3`, … —
-  `WorkspaceBoxNames.nextGeneration`, excluding every name the repo
-  mapping has pointed at); a name is never reused, because a re-created
+  `WorkspaceBoxNames.nextGeneration`, excluding every name the repo has
+  ever used: the current mapping and its lineage root, the used-names
+  history, and every name the current `workspaces list` table answers
+  for — so a GC'd earlier generation, absent from the listing, is still
+  never handed back); a name is never reused, because a re-created
   same-name box would re-bind old rows to a fresh box where
-  `claude --resume <id>` cannot find their conversations. Cancel changes
-  nothing.
+  `claude --resume <id>` cannot find their conversations. A mapped name
+  too long to suffix (a valid 62/63-character override that leaves no
+  valid generation) refuses visibly before the confirmation is offered —
+  never an offer-then-submit of a name the CLI adapter would reject.
+  Cancel changes nothing. The used-names history is forward-looking: a
+  `.box` written by an earlier build carries no `.usedBoxes`, so the
+  first post-upgrade re-create of such a repo still relies on the
+  current listing plus the current name.
 - Stopped and gone are detected by one ssh probe plus one `workspaces
   list` classification (status 8 = stopped; unlisted = gone); any
   ambiguous input maps to a transient error, never to a re-create offer
@@ -323,6 +393,11 @@ Keep-alive and `workspaces connect` were not pursued.
   box-side agent, so the literal gate would ask on every Stop, and its
   not-running branch would silently do nothing for a detached row (which
   Stop must serve). The only gate is the click itself.
+- **The task tree offers no Stop for a detached remote row.** The strip,
+  the tab header and the tab popup offer Stop on an ALIVE-detached row
+  (lifecycle DEACTIVATE without a Resume first); the task tree's
+  Deactivate is gated on a live local execution, so a detached remote
+  row sees Resume there.
 - **No scrollback replay.** tmux's redraw covers the visible pane;
   scrollback from before attach is not replayed into the IDE console (the
   desktop spike has the same caveat).
