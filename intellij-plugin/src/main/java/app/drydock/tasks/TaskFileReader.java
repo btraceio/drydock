@@ -37,7 +37,7 @@ import java.util.Optional;
  * multi-document front matter, duplicate keys, aliases, unbounded
  * nesting/collections, and invalid values for known fields ({@code title},
  * {@code status}, {@code done_by}, {@code created}, {@code after},
- * {@code sessions}, {@code mirrors}). Unknown keys, comments and the body are never
+ * {@code sessions}, {@code mirrors}, {@code done_at}). Unknown keys, comments and the body are never
  * interpreted — they survive byte for byte in
  * {@link TaskDocument#rawFrontMatter()} and {@link TaskDocument#rawBody()}.
  *
@@ -113,7 +113,8 @@ public final class TaskFileReader {
         Optional<Instant> created = fields.created != null ? Optional.of(fields.created)
                 : Optional.ofNullable(createdFallback);
         TaskDocument document = new TaskDocument(id, repository, fields.title, fields.status, fields.doneBy,
-                created, fields.after, fields.sessions, fields.mirrors, envelope.frontMatter(), envelope.body());
+                created, fields.after, fields.sessions, fields.mirrors, Optional.ofNullable(fields.doneAt),
+                envelope.frontMatter(), envelope.body());
         return new Parsed(document, fields.spans,
                 new Span(envelope.frontStart(), envelope.frontStart() + envelope.frontMatter().length()));
     }
@@ -170,6 +171,7 @@ public final class TaskFileReader {
         List<String> after;
         List<String> sessions;
         List<String> mirrors;
+        Instant doneAt;
         final Map<String, Span> spans = new LinkedHashMap<>();
     }
 
@@ -200,7 +202,7 @@ public final class TaskFileReader {
                     fields.spans.put("done_by", entrySpan(source, envelope, key, value));
                 }
                 case "created" -> {
-                    fields.created = instantValue(value);
+                    fields.created = instantValue(value, "created");
                     fields.spans.put("created", entrySpan(source, envelope, key, value));
                 }
                 case "after" -> {
@@ -214,6 +216,10 @@ public final class TaskFileReader {
                 case "mirrors" -> {
                     fields.mirrors = stringList(value, "mirrors");
                     fields.spans.put("mirrors", entrySpan(source, envelope, key, value));
+                }
+                case "done_at" -> {
+                    fields.doneAt = instantValue(value, "done_at");
+                    fields.spans.put("done_at", entrySpan(source, envelope, key, value));
                 }
                 default -> {
                     // Unknown key: preserved only as raw text, never interpreted.
@@ -245,18 +251,19 @@ public final class TaskFileReader {
                 + (value instanceof ScalarNode ? ((ScalarNode) value).getTag().getValue() : value.getTag().getValue()));
     }
 
-    private static Instant instantValue(Node value) throws TaskFormatException {
+    private static Instant instantValue(Node value, String field) throws TaskFormatException {
         if (value instanceof ScalarNode scalar
                 && (Tag.STR.equals(scalar.getTag()) || Tag.TIMESTAMP.equals(scalar.getTag()))) {
             try {
                 return Instant.parse(scalar.getValue());
             } catch (DateTimeParseException e) {
                 throw new TaskFormatException(
-                        "Front-matter field 'created' is not an ISO-8601 instant: '" + scalar.getValue() + "'", e);
+                        "Front-matter field '" + field + "' is not an ISO-8601 instant: '" + scalar.getValue() + "'",
+                        e);
             }
         }
         throw new TaskFormatException(
-                "Front-matter field 'created' must be an ISO-8601 timestamp string");
+                "Front-matter field '" + field + "' must be an ISO-8601 timestamp string");
     }
 
     private static List<String> stringList(Node value, String field) throws TaskFormatException {

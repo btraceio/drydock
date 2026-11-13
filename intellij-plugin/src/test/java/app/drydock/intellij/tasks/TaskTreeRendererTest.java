@@ -112,44 +112,9 @@ class TaskTreeRendererTest {
     }
 
     @Test
-    void aNotShownRowOffersShowHere() {
-        TaskRow row = row(true, new TaskPlacement.NotShown());
-
-        assertEquals("fix/chunk_memory · not shown · Pi", TaskTreeRenderer.secondary(row, "Pi", Duration.ZERO));
-        assertEquals(Optional.of("Show here"), TaskTreeRenderer.link(row));
-    }
-
-    @Test
-    void anIdleRowFromAnotherWorktreeOffersResumeHereWhenResumable() {
-        assertEquals(Optional.of("Resume here"),
-                TaskTreeRenderer.link(row(false, new TaskPlacement.Idle(false), true)));
-    }
-
-    @Test
-    void anIdleRowFromAnotherWorktreeOffersStartHereWhenNotResumable() {
-        // "Resume" on a task with no conversation left to resume into is a
-        // broken promise: the click would start a fresh one, so say that.
-        assertEquals(Optional.of("Start here"),
-                TaskTreeRenderer.link(row(false, new TaskPlacement.Idle(false), false)));
-    }
-
-    @Test
-    void anIdleRowFromThisWorktreeKeepsItsMvpMeta() {
-        TaskRow row = row(false, new TaskPlacement.Idle(true));
-
-        assertEquals("fix/chunk_memory · this window · Pi", TaskTreeRenderer.secondary(row, "Pi", Duration.ZERO));
-        assertEquals(Optional.empty(), TaskTreeRenderer.link(row));
-    }
-
-    @Test
     void anIdleRowElsewhereKeepsItsMvpMeta() {
         assertEquals("⑂ fix/chunk_memory · Pi · 5m",
                 TaskTreeRenderer.secondary(row(false, new TaskPlacement.Idle(false)), "Pi", Duration.ofMinutes(5)));
-    }
-
-    @Test
-    void aRowShownElsewhereOffersNoInlineLink() {
-        assertEquals(Optional.empty(), TaskTreeRenderer.link(row(true, new TaskPlacement.OwnWindow())));
     }
 
     @Test
@@ -320,32 +285,6 @@ class TaskTreeRendererTest {
     }
 
     @Test
-    void aBranchPullRequestsStatePicksItsIcon() {
-        assertEquals(Optional.of(TaskTreeRenderer.PR_OPEN_ICON),
-                TaskTreeRenderer.pullRequestIcon(branchPr(PrLifecycle.OPEN, false)));
-        assertEquals(Optional.of(TaskTreeRenderer.PR_DRAFT_ICON),
-                TaskTreeRenderer.pullRequestIcon(branchPr(PrLifecycle.OPEN, true)));
-        assertEquals(Optional.of(TaskTreeRenderer.PR_MERGED_ICON),
-                TaskTreeRenderer.pullRequestIcon(branchPr(PrLifecycle.MERGED, false)));
-        assertEquals(Optional.of(TaskTreeRenderer.PR_CLOSED_ICON),
-                TaskTreeRenderer.pullRequestIcon(branchPr(PrLifecycle.CLOSED, false)));
-        assertEquals(Optional.empty(), TaskTreeRenderer.pullRequestIcon(branchPr(PrLifecycle.UNKNOWN, false)),
-                "no state from gh: no state icon");
-        assertEquals(TaskTreeRenderer.PullRequestBadgeKind.MERGED,
-                TaskTreeRenderer.badgeKind(branchPr(PrLifecycle.MERGED, true)), "a merged draft is merged");
-        assertEquals("Pull request #12 (draft) from feature/x: Fix it",
-                TaskTreeRenderer.pullRequestTooltip(branchPr(PrLifecycle.OPEN, true)));
-    }
-
-    @Test
-    void aDelayedTasksPullRequestBadgeReadsMarkNumberAndTitle() {
-        assertEquals(TaskTreeRenderer.MIRROR_MARK + " PR #40",
-                TaskTreeRenderer.pullRequestLinkBadge(openPr(40, "Speed up the flaky suite", "pr-40")));
-        assertEquals("Pull request #40 from pr-40: Speed up the flaky suite",
-                TaskTreeRenderer.pullRequestLinkTooltip(openPr(40, "Speed up the flaky suite", "pr-40")));
-    }
-
-    @Test
     void aPullRequestWithABlankTitleTooltipNamesOnlyNumberAndBranch() {
         assertEquals("Pull request #41 from pr-41",
                 TaskTreeRenderer.pullRequestLinkTooltip(openPr(41, "  ", "pr-41")));
@@ -387,22 +326,18 @@ class TaskTreeRendererTest {
                 "no pull request known: no link to offer");
     }
 
+
     @Test
-    void aSessionRowsMirrorsBecomeLinksInTheRecordedOrder() {
-        assertEquals(List.of(new TaskTreeRenderer.MirrorLink("https://github.com/o/r/issues/12"),
-                        new TaskTreeRenderer.MirrorLink("https://acme.atlassian.net/browse/PROJ-7")),
-                TaskTreeRenderer.mirrorLinks(List.of("https://github.com/o/r/issues/12",
-                        "https://acme.atlassian.net/browse/PROJ-7")));
-        assertEquals(List.of(), TaskTreeRenderer.mirrorLinks(List.of()));
+    void theSecondaryTextNamesTheBranchWhereItRunsAndTheAgent() {
+        assertEquals("fix/chunk_memory · this window · Pi",
+                TaskTreeRenderer.secondary(row(false, new TaskPlacement.Idle(true)), "Pi", Duration.ZERO));
+        assertEquals("fix/chunk_memory · not shown · Pi",
+                TaskTreeRenderer.secondary(row(true, new TaskPlacement.NotShown()), "Pi", Duration.ZERO));
     }
 
     @Test
-    void aSessionIconKeepsTheStateSlotSoNamesAlign() {
-        Icon dot = TaskTreeRenderer.PR_OPEN_ICON;
-        Icon withPr = TaskTreeRenderer.sessionIcon(dot, Optional.of(branchPr(PrLifecycle.MERGED, false)));
-        Icon withoutPr = TaskTreeRenderer.sessionIcon(dot, Optional.empty());
-        assertEquals(withPr.getIconWidth(), withoutPr.getIconWidth(), "a row without a PR keeps an empty slot");
-        assertSame(withPr, TaskTreeRenderer.sessionIcon(dot, Optional.of(branchPr(PrLifecycle.MERGED, false))),
-                "the composite is cached, not rebuilt per paint");
+    void aDelayedTasksPullRequestTooltipNamesNumberBranchAndTitle() {
+        assertEquals("Pull request #40 from pr-40: Speed up the flaky suite",
+                TaskTreeRenderer.pullRequestLinkTooltip(openPr(40, "Speed up the flaky suite", "pr-40")));
     }
 }

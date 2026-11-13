@@ -38,10 +38,7 @@ import com.intellij.util.TimeoutUtil;
 
 import org.jetbrains.annotations.NotNull;
 
-import javax.swing.JScrollPane;
 import javax.swing.JTree;
-import javax.swing.tree.DefaultMutableTreeNode;
-import javax.swing.tree.TreePath;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -57,7 +54,6 @@ import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
-import java.util.function.Predicate;
 import java.util.stream.Stream;
 
 /**
@@ -125,9 +121,9 @@ public class TaskTreeActionThreadsPlatformTest extends BasePlatformTestCase {
     /**
      * The jump actions update off the EDT from the event's data keys alone.
      * They are per-panel instances, so this boots the real panel over the
-     * plugin's services and seeds one session row. The tree's live selection
+     * plugin's services and seeds one session row. The inbox's live selection
      * is left on the session row while the event names a delayed-task row:
-     * the two disagree, so an update() that read the tree selection instead
+     * the two disagree, so an update() that read the live selection instead
      * of the data keys would resolve a different lead and fail the session
      * jump's enabled answer.
      */
@@ -145,14 +141,19 @@ public class TaskTreeActionThreadsPlatformTest extends BasePlatformTestCase {
                 "session the jump actions name", AgentBinding.unlaunched(AgentKind.CLAUDE),
                 new SessionWorkspace(repoRoot, Optional.empty(), false), SessionStatus.INACTIVE,
                 anHourAgo, anHourAgo, Optional.empty(), PrLink.none(), false, Optional.empty(), false));
+        // The light project is shared across cases: start every panel from no saved view.
+        InboxViewState.getInstance(getProject()).loadState(new InboxViewState.Stored());
         TaskTreePanel panel = new TaskTreePanel(getProject());
-        JTree tree = (JTree) ((JScrollPane) panel.getContent()).getViewport().getView();
+        JTree tree = panel.tree();
+        InboxList inbox = panel.inbox();
+        // The seeded session is stopped: its row is in the Idle group, collapsed by default.
+        inbox.toggleCollapsed(InboxModel.GroupKind.IDLE);
         // Headless harness: nothing paints, so the tree keeps no UI (see
         // DelayedTaskTreePlatformTest.setUp for the production path this avoids).
         tree.setUI(null);
         try {
-            awaitTree(() -> sessionRow(tree, sessionId) != null, "the seeded session's row");
-            tree.setSelectionPath(sessionRow(tree, sessionId));
+            awaitTree(() -> inbox.select(value -> value instanceof TaskNode.TaskRow row
+                    && row.session().id().equals(sessionId)), "the seeded session's inbox row, selected");
 
             AnAction showSession = panel.showLinkedAction(TaskTreePanel.ShowKind.SESSION,
                     "Show Session", "Reveal the session row this pull request belongs to");
@@ -298,26 +299,6 @@ public class TaskTreeActionThreadsPlatformTest extends BasePlatformTestCase {
         return new DelayedTaskRow(new TaskView(TaskId.of("fix-alloc-k3f9"), TaskState.Presentation.values()[0],
                 List.of(), List.of()), "Fix allocation", RepositoryId.newId(), Optional.empty(), false,
                 List.of(sessionId.toString()));
-    }
-
-    private static TreePath sessionRow(JTree tree, ManagedSessionId sessionId) {
-        return find(tree, o -> o instanceof TaskRow r && r.session().id().equals(sessionId));
-    }
-
-    /** First depth-first path whose node carries a matching row, or null. */
-    private static TreePath find(JTree tree, Predicate<Object> match) {
-        Object top = tree.getModel().getRoot();
-        return top instanceof DefaultMutableTreeNode node ? find(node, new TreePath(node), match) : null;
-    }
-
-    private static TreePath find(DefaultMutableTreeNode node, TreePath path, Predicate<Object> match) {
-        if (match.test(node.getUserObject())) return path;
-        for (int i = 0; i < node.getChildCount(); i++) {
-            DefaultMutableTreeNode child = (DefaultMutableTreeNode) node.getChildAt(i);
-            TreePath found = find(child, path.pathByAddingChild(child), match);
-            if (found != null) return found;
-        }
-        return null;
     }
 
     /** Pumps the EDT until {@code state} holds or the deadline passes. */

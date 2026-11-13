@@ -254,61 +254,12 @@ final class TaskTreeInputs implements AutoCloseable {
         return requested.contains(root);
     }
 
-    /**
-     * Whether {@code root}'s GitHub issue listing is requested by the next gather:
-     * the opened-node rule of {@link #githubIssuesWanted(Set, Path)}, with the search
-     * box's explicit {@code /<glob>/} project scope applied first — the same rule as
-     * {@link #pullRequestsWanted(Set, Path, TaskTreeModel.ProjectScope, String)}.
-     * A scoped-out project's row is not shown at all, so fetching its listing would
-     * be pure waste. Ordinary unscoped text is not a scope. Pure.
-     */
-    static boolean githubIssuesWanted(Set<Path> requested, Path root,
-                                      TaskTreeModel.ProjectScope scope, String displayName) {
-        if (scope.scoped() && !scope.matchesProject(displayName)) {
-            return false;
-        }
-        return githubIssuesWanted(requested, root);
-    }
-
-    /**
-     * Whether one Jira group's listing is fetched on the next gather: only
-     * when the user opened that group here, and — as for GitHub issues and
-     * pull requests — never for a project the search box's explicit
-     * {@code /<glob>/} scope hides. Ordinary unscoped text is not a scope.
-     * The group definitions travel regardless; this gates the fetch only. Pure.
-     */
-    static boolean jiraGroupWanted(Set<ListingExpansionTracker.GroupKey> requested,
-                                   ListingExpansionTracker.GroupKey group,
-                                   TaskTreeModel.ProjectScope scope, String displayName) {
-        if (scope.scoped() && !scope.matchesProject(displayName)) {
-            return false;
-        }
-        return requested.contains(group);
-    }
-
-    /**
-     * Whether {@code root}'s pull-request listing is requested by the next gather:
-     * only when the user opened its section here, with the search box's
-     * explicit {@code /<glob>/} project scope applied first. A scoped-out project's
-     * row is not shown at all, so fetching its listing — or the worktree list the
-     * pull-request dedup needs — would be pure waste. Ordinary unscoped text is
-     * not a scope: a plain search still spans projects. The one predicate gates
-     * the listing request and the dedup worktree read alike. Pure.
-     */
-    static boolean pullRequestsWanted(Set<Path> requested, Path root,
-                                      TaskTreeModel.ProjectScope scope, String displayName) {
-        if (scope.scoped() && !scope.matchesProject(displayName)) {
-            return false;
-        }
-        return requested.contains(root);
-    }
-
     /** Forgets {@code root}'s cached Jira listing, so the next gather re-queries it. */
     void invalidateJiraIssues(Path root) {
         jira.invalidate(root);
     }
 
-    TaskTreeModel.Inputs gather(Project here, String filter, TaskTreeModel.ViewFilter viewFilter,
+    TaskTreeModel.Inputs gather(Project here, String filter,
                                 Set<Path> requestedWorktrees, Set<Path> requestedGitHubIssues,
                                 Set<ListingExpansionTracker.GroupKey> requestedJiraGroups,
                                 Set<Path> requestedPullRequests) {
@@ -330,7 +281,6 @@ final class TaskTreeInputs implements AutoCloseable {
         Map<Path, List<Worktree>> pullRequestDedupWorktrees = new HashMap<>();
         Map<Path, BadgeSource> badgeSources = new HashMap<>();
         Set<Path> missing = new HashSet<>();
-        TaskTreeModel.ProjectScope scope = TaskTreeModel.parseFilter(filter);
         // Resolved once per pass, not once per project: remote detection reuses it.
         Optional<Path> git = gitLocator.locate();
         for (SharedProject project : plugin.sharedProjects().projects()) {
@@ -357,11 +307,10 @@ final class TaskTreeInputs implements AutoCloseable {
                 // the user's opening the node decides the fetch. An empty
                 // repository setting is not unconfigured — gh auto-detects
                 // from origin — but no origin to detect from is: that is the
-                // ghost, not a broken listing. An explicit /glob/ scope that
-                // hides the project skips the fetch, as for pull requests.
+                // ghost, not a broken listing.
                 if (githubSettings.repository().isPresent() || githubRemoteDetectable(root, git)) {
                     githubIssueRoots.add(root);
-                    if (githubIssuesWanted(requestedGitHubIssues, root, scope, project.displayName())) {
+                    if (githubIssuesWanted(requestedGitHubIssues, root)) {
                         issueRequests.put(root, issuesOf(root, githubSettings.repository()));
                     }
                 } else {
@@ -373,11 +322,9 @@ final class TaskTreeInputs implements AutoCloseable {
                 // Each group's listing is its own fetch trigger: only the
                 // groups the user opened here are queried, the definitions
                 // always travel so the tree can offer edit and delete before
-                // any fetch — and, like the other listings, none of a project
-                // an explicit /glob/ scope hides.
+                // any fetch.
                 for (JiraGroup group : jiraGroups) {
-                    if (jiraGroupWanted(requestedJiraGroups,
-                            new ListingExpansionTracker.GroupKey(root, group.id()), scope, project.displayName())) {
+                    if (requestedJiraGroups.contains(new ListingExpansionTracker.GroupKey(root, group.id()))) {
                         jiraRequests.put(new JiraRequestKey(root, group.id()),
                                 jira.issuesOf(root, jiraSettings, group));
                     }
@@ -397,11 +344,8 @@ final class TaskTreeInputs implements AutoCloseable {
                 // UUID space with the shared-projects file's ids, so an id
                 // join matches nothing (the badge-everywhere-missing bug).
                 badgeSources.put(root, new BadgeSource(root, githubSettings.repository()));
-                // A scoped-out project's row is not shown at all, so fetching
-                // its listing — or the worktree list the dedup needs — would
-                // be pure waste. Ordinary unscoped text is not a scope: a
-                // plain search still spans projects.
-                if (pullRequestsWanted(requestedPullRequests, root, scope, project.displayName())) {
+                // Only once the user opened the project's pull requests here.
+                if (requestedPullRequests.contains(root)) {
                     pullRequestRequests.put(root, pullRequestsOf(root, githubSettings.repository()));
                     // Dedup needs the worktree list even when the user has never
                     // opened the Worktrees section (byMain is filled lazily), but
@@ -529,7 +473,7 @@ final class TaskTreeInputs implements AutoCloseable {
                 pullRequestContainers, githubIssueRoots, githubGhostRoots, jiraRoots, jiraGhostRoots,
                 openFolders, freshActivity(), Instant.now(),
                 issues, jiraGroupListings, pullRequests, pullRequestDedupWorktrees, plugin.sharedProjects().problem(),
-                filter, viewFilter, resumable, sessionPullRequests);
+                filter, resumable, sessionPullRequests);
     }
 
     /** Where a project's pull-request badges come from: its main checkout and its configured repository. */

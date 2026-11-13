@@ -51,6 +51,11 @@
         <projectService
                 serviceImplementation="app.drydock.intellij.agent.AgentExecutionService"/>
 
+        <!-- The inbox's per-project view state (collapsed groups, the project
+             filter, the dismissed add offer), in the workspace file. -->
+        <projectService
+                serviceImplementation="app.drydock.intellij.tasks.InboxViewState"/>
+
         <!-- The agent console tab. The protocol exists so the IDE can restore
              a pinned console tab from the project's workspace file by URL; a
              LightVirtualFile has none, and drydock reopening tabs itself was

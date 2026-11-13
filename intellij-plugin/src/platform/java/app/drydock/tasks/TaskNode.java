@@ -105,7 +105,7 @@ public sealed interface TaskNode {
             return view.liveSessions();
         }
 
-        /** Done or dropped: hidden behind the filter ribbon (D9). */
+        /** Done or dropped: kept out of the Tasks section (D9); the inbox lists done ones under Done. */
         public boolean terminal() {
             return presentation() == TaskState.Presentation.TERMINAL;
         }

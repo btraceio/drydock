@@ -1,9 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="-2 -2 16 16" fill="none" stroke="#3FB950" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">
-  <!-- Pull request, open: the source branch, and the head flowing back into it. -->
-  <circle cx="3" cy="2.5" r="1.3"/>
-  <circle cx="3" cy="9.5" r="1.3"/>
-  <circle cx="9" cy="9.5" r="1.3"/>
-  <path d="M3 3.8V8.2"/>
-  <path d="M9 8.2V5a1.5 1.5 0 0 0-1.5-1.5H5.5"/>
-  <path d="M6.8 2.2 5.5 3.5 6.8 4.8"/>
-</svg>
