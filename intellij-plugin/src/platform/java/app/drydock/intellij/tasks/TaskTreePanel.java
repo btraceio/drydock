@@ -19,6 +19,7 @@ import app.drydock.intellij.agent.AgentConsoleFile;
 import app.drydock.intellij.agent.AgentConsoles;
 import app.drydock.intellij.agent.AgentExecutionListener;
 import app.drydock.intellij.agent.SessionActivityListener;
+import app.drydock.intellij.agent.SessionCommands;
 import app.drydock.projects.SharedProject;
 import app.drydock.intellij.tasks.TaskNode.AddCurrentProject;
 import app.drydock.intellij.tasks.TaskNode.Ghost;
@@ -527,6 +528,34 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 }
             }
         };
+        // Raises the project's main checkout in its own IDE window, opening
+        // one when no window shows it: the session jump's raise-or-open for
+        // a task's worktree, applied to the checkout itself. A remote
+        // project has placeholder roots only the standalone app opens; a
+        // folder gone since the tree's last pass is re-checked, and said,
+        // at the click.
+        AnAction openMainCheckout = new DumbAwareAction("Project Window",
+                "Open this project's main checkout in its own IDE window",
+                SessionCommands.Command.OWN_PROJECT.icon()) {
+            @Override
+            public void update(@NotNull AnActionEvent e) {
+                TaskActions.present(e, offersProjectWindow(e.getData(SELECTED_NODE),
+                        e.getData(SELECTED_PROJECT_ROOT)));
+            }
+
+            @Override
+            public @NotNull ActionUpdateThread getActionUpdateThread() {
+                return ActionUpdateThread.BGT;
+            }
+
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                if (e.getData(SELECTED_NODE) instanceof ProjectRow row
+                        && e.getData(SELECTED_PROJECT_ROOT) instanceof Path root) {
+                    TaskWindows.openCheckoutWindow(project, root, row.project().displayName());
+                }
+            }
+        };
         AnAction openInGitHub = new DumbAwareAction("Open in GitHub",
                 "Open the pull request or GitHub issue in the browser", AllIcons.Vcs.Vendors.Github) {
             @Override
@@ -813,6 +842,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         menuActions.put(TaskMenu.Item.SWITCH_TO_TASK, switchToTask);
         menuActions.put(TaskMenu.Item.NEW_TASK, newTask);
         menuActions.put(TaskMenu.Item.NEW_TASK_IN_MAIN, newTaskInMain);
+        menuActions.put(TaskMenu.Item.OPEN_MAIN_CHECKOUT, openMainCheckout);
         menuActions.put(TaskMenu.Item.OPEN_IN_GITHUB, openInGitHub);
         menuActions.put(TaskMenu.Item.OPEN_IN_WORKBENCH, openInWorkbench);
         menuActions.put(TaskMenu.Item.RESOLVE_CONFLICTS, resolveConflicts);
@@ -999,6 +1029,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
      */
     static Set<TaskMenu.Item> panelMenuItems() {
         return EnumSet.of(TaskMenu.Item.SWITCH_TO_TASK, TaskMenu.Item.NEW_TASK, TaskMenu.Item.NEW_TASK_IN_MAIN,
+                TaskMenu.Item.OPEN_MAIN_CHECKOUT,
                 TaskMenu.Item.OPEN_IN_GITHUB, TaskMenu.Item.OPEN_IN_JIRA, TaskMenu.Item.OPEN_MIRRORED_TASK,
                 TaskMenu.Item.SHOW_TASK, TaskMenu.Item.SHOW_PULL_REQUEST, TaskMenu.Item.SHOW_SESSION,
                 TaskMenu.Item.OPEN_IN_WORKBENCH, TaskMenu.Item.RESOLVE_CONFLICTS,
@@ -1321,6 +1352,20 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                     Optional.of(new NewTaskPlan.FixedWorktree(task.session().workingDirectory(), task.branch().get()));
             case null, default -> Optional.empty();
         };
+    }
+
+    /**
+     * The Project Window entry's row gate: a project row of a local project
+     * whose folder the tree's last pass found present, with its main root
+     * resolved. A remote project's root is a placeholder only the standalone
+     * app opens, and a folder-present answer is re-checked at the click.
+     * Pure, so the gate is testable without the action system.
+     */
+    static boolean offersProjectWindow(TaskNode node, Path mainRoot) {
+        return node instanceof ProjectRow row
+                && !row.project().isRemote()
+                && !row.folderMissing()
+                && mainRoot != null;
     }
 
     /**

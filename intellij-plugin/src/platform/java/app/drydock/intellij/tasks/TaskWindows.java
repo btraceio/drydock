@@ -1,6 +1,8 @@
 package app.drydock.intellij.tasks;
 
+import app.drydock.domain.RepositoryCatalog;
 import app.drydock.intellij.DrydockPluginService;
+import app.drydock.intellij.agent.JumpPlan;
 
 import com.intellij.ide.impl.OpenProjectTask;
 import com.intellij.ide.impl.ProjectUtil;
@@ -9,6 +11,7 @@ import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.project.ProjectManager;
+import com.intellij.openapi.ui.Messages;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -16,14 +19,16 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/** Opening a worktree as its own IDE window. */
+/** Opening a worktree, or a project's main checkout, as its own IDE window. */
 public final class TaskWindows {
 
     static final String OPEN_WINDOWS_KEY = "drydock.openTaskWindows";
     private static final AtomicBoolean RESTORE_STARTED = new AtomicBoolean();
+    private static final System.Logger LOG = System.getLogger(TaskWindows.class.getName());
 
     private TaskWindows() {
     }
@@ -58,7 +63,7 @@ public final class TaskWindows {
         return opened;
     }
 
-    /** Keeps a task window across an IDE quit; an ordinary close forgets it. EDT, memory/config only. */
+    /** Keeps an opened window (a task worktree's or a main checkout's) across an IDE quit; an ordinary close forgets it. EDT, memory/config only. */
     public static void windowClosing(Project project, boolean quitting) {
         if (quitting || project.getBasePath() == null) {
             return;
@@ -75,7 +80,7 @@ public final class TaskWindows {
         }
     }
 
-    /** Reopens the task windows remembered at the last IDE quit, without starting their agents. */
+    /** Reopens the windows remembered at the last IDE quit, without starting their agents. */
     public static void restoreRemembered() {
         if (!RESTORE_STARTED.compareAndSet(false, true)) {
             return;
@@ -106,6 +111,62 @@ public final class TaskWindows {
         if (!updated.equals(current)) {
             properties.setValues(OPEN_WINDOWS_KEY, updated.toArray(String[]::new));
         }
+    }
+
+    /**
+     * Raises an open window of {@code root} — a project's main checkout — or
+     * opens one when no window shows it. The session jump's rule
+     * ({@code AgentConsoles.jumpToOwnWindow}): a window already open on the
+     * checkout is focused, never a second copy of an already-open project;
+     * a folder gone since the click and a failed open each say so in
+     * {@code from} instead of doing nothing.
+     *
+     * <p>Called on the EDT; the folder and open-window scan run on the
+     * plugin's executor (the same shape as the jump), the raise or open
+     * hops back with {@code ModalityState.nonModal()}. {@code name} is the
+     * project's display name for the dialogs. Only a window this opens is
+     * remembered for the restore at the next IDE start: a window found
+     * already open keeps whatever restore memory opened it.</p>
+     */
+    public static void openCheckoutWindow(Project from, Path root, String name) {
+        DrydockPluginService.getInstance().executor().execute(() -> {
+            boolean folderExists;
+            Optional<Project> open;
+            try {
+                Path canonical = RepositoryCatalog.canonicalize(root);
+                folderExists = Files.isDirectory(canonical);
+                open = folderExists
+                        ? Arrays.stream(ProjectManager.getInstance().getOpenProjects())
+                                .filter(project -> !project.isDisposed() && project.getBasePath() != null)
+                                .filter(project -> RepositoryCatalog.canonicalize(
+                                        Path.of(project.getBasePath())).equals(canonical))
+                                .findFirst()
+                        : Optional.empty();
+            } catch (RuntimeException e) {
+                LOG.log(System.Logger.Level.WARNING, () -> "Could not look for a window of " + root + ": " + e);
+                folderExists = false;
+                open = Optional.empty();
+            }
+            boolean folder = folderExists;
+            Optional<Project> existing = open;
+            ApplicationManager.getApplication().invokeLater(() -> {
+                if (!folder) {
+                    if (!from.isDisposed()) {
+                        Messages.showErrorDialog(from, JumpPlan.folderGone(name, root), "Drydock");
+                    }
+                    return;
+                }
+                Project target = existing.filter(project -> !project.isDisposed())
+                        .orElseGet(() -> openAsProject(root));
+                if (target == null || target.isDisposed()) {
+                    if (!from.isDisposed()) {
+                        Messages.showErrorDialog(from, "The window for " + name + " did not open.", "Drydock");
+                    }
+                    return;
+                }
+                ProjectUtil.focusProjectWindow(target, true);
+            }, ModalityState.nonModal(), from.getDisposed());
+        });
     }
 
     private static List<String> values(PropertiesComponent properties) {
