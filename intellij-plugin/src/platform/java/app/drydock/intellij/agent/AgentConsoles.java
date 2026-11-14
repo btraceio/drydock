@@ -2,12 +2,11 @@ package app.drydock.intellij.agent;
 
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
-import app.drydock.domain.RepositoryCatalog;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.review.ReviewTabOpener;
 import app.drydock.intellij.session.DrydockSessionService;
 import app.drydock.intellij.startup.DrydockStartupActivity;
-import app.drydock.intellij.tasks.TaskWindows;
+import app.drydock.intellij.tasks.RaiseOrOpenWindow;
 
 import com.intellij.ide.impl.ProjectUtil;
 import com.intellij.notification.Notification;
@@ -25,7 +24,6 @@ import com.intellij.openapi.progress.ProgressIndicator;
 import com.intellij.openapi.progress.ProgressManager;
 import com.intellij.openapi.progress.Task;
 import com.intellij.openapi.project.Project;
-import com.intellij.openapi.project.ProjectManager;
 import com.intellij.openapi.ui.Messages;
 import com.intellij.openapi.util.text.StringUtil;
 import com.intellij.openapi.vfs.VirtualFile;
@@ -38,7 +36,6 @@ import javax.swing.JFrame;
 
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
@@ -394,44 +391,14 @@ public final class AgentConsoles {
                         .orElseGet(() -> new SessionPlace(directory.getFileName().toString(), Optional.empty())));
         registry.markMoving(sessionId, true);
         runOrUndo(DrydockPluginService.getInstance().executor(), () -> {
-            boolean folderExists;
-            Optional<Project> open;
-            try {
-                Path canonical = RepositoryCatalog.canonicalize(directory);
-                folderExists = Files.isDirectory(canonical);
-                open = folderExists
-                        ? Arrays.stream(ProjectManager.getInstance().getOpenProjects())
-                                .filter(project -> !project.isDisposed() && project != host
-                                        && project.getBasePath() != null)
-                                .filter(project -> RepositoryCatalog.canonicalize(Path.of(project.getBasePath()))
-                                        .equals(canonical))
-                                .findFirst()
-                        : Optional.empty();
-            } catch (RuntimeException e) {
-                LOG.log(Level.WARNING, () -> "Could not look for the window of " + directory + ": " + e);
-                folderExists = false;
-                open = Optional.empty();
-            }
-            boolean folder = folderExists;
-            Optional<Project> existing = open;
+            RaiseOrOpenWindow.Scan scan = RaiseOrOpenWindow.scan(directory);
             ApplicationManager.getApplication().invokeLater(() -> {
                 try {
-                    if (!folder) {
-                        if (!host.isDisposed()) {
-                            Messages.showErrorDialog(host, JumpPlan.folderGone(place.label(), directory),
-                                    "Drydock");
-                        }
+                    Optional<Project> opened = RaiseOrOpenWindow.raiseOrOpen(host, directory, place.label(), scan);
+                    if (opened.isEmpty()) {
                         return;
                     }
-                    Project target = existing.filter(project -> !project.isDisposed())
-                            .orElseGet(() -> TaskWindows.openAsProject(directory));
-                    if (target == null || target.isDisposed()) {
-                        if (!host.isDisposed()) {
-                            Messages.showErrorDialog(host, "The window for " + place.label() + " did not open.",
-                                    "Drydock");
-                        }
-                        return;
-                    }
+                    Project target = opened.get();
                     // The race rule: never the execution captured at the
                     // click. An agent that started or restarted while the
                     // window opened is live here and takes the unchanged
@@ -443,7 +410,6 @@ public final class AgentConsoles {
                     JumpPlan.Outcome outcome = JumpPlan.after(true, true, shownByRegistry);
                     switch (outcome) {
                         case MOVED_LIVE -> {
-                            ProjectUtil.focusProjectWindow(target, true);
                             show(target, sessionId);
                             focusConsole(target, sessionId);
                         }
@@ -458,7 +424,8 @@ public final class AgentConsoles {
                                 .findFirst()
                                 .ifPresent(found -> ReviewTabOpener.open(target, Optional.of(found)));
                     }
-                    if (announce && !host.isDisposed() && JumpPlan.announcesMove(outcome)) {
+                    if (announce && !host.isDisposed() && target != host
+                            && JumpPlan.announcesMove(outcome)) {
                         announceMove(host, target, sessionId, place);
                     }
                 } finally {
@@ -473,16 +440,14 @@ public final class AgentConsoles {
      * closes the hosting tab. Starts nothing — {@link #show} only — so a
      * stopped agent stays stopped, its transcript dimmed, exactly as a
      * reopened hosted tab. {@code host == target} (one window, or already
-     * there) keeps the tab: there is nowhere to move it from. EDT.
+     * there) keeps the tab: there is nowhere to move it from. The window
+     * was already raised by the caller. EDT.
      */
     static void showStopped(Project host, Project target, ManagedSessionId sessionId) {
         show(target, sessionId);
         if (JumpPlan.closesHostTab(host == target)) {
             FileEditorManager.getInstance(host)
                     .closeFile(AgentConsoleFileSystem.getInstance().fileFor(sessionId));
-        }
-        if (host != target) {
-            ProjectUtil.focusProjectWindow(target, true);
         }
         focusConsole(target, sessionId);
     }

@@ -43,9 +43,7 @@ public final class TaskNavigator {
         if (owner.isPresent()) {
             return owner;
         }
-        return windows.stream()
-                .filter(window -> canonicalBase.apply(window).map(canonicalWorkingDirectory::equals).orElse(false))
-                .findFirst();
+        return RaiseOrOpenWindow.findOpenWindow(windows, canonicalBase, canonicalWorkingDirectory);
     }
 
     /**
