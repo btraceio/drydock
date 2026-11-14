@@ -529,8 +529,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             }
         };
         // Raises the project's main checkout in its own IDE window, opening
-        // one when no window shows it: the session jump's raise-or-open for
-        // a task's worktree, applied to the checkout itself. A remote
+        // one when no window shows it: the shared raise-or-open (RaiseOrOpenWindow)
+        // for a task's worktree, applied to the checkout itself. A remote
         // project has placeholder roots only the standalone app opens; a
         // folder gone since the tree's last pass is re-checked, and said,
         // at the click.
