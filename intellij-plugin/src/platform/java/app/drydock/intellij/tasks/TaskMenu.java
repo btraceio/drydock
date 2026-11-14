@@ -105,6 +105,8 @@ final class TaskMenu {
         CLEANUP_DONE_SESSIONS,
         /** Show only this project in the tree, or every project again when it is focused already. */
         FOCUS_PROJECT,
+        /** Raise the project's main checkout in its own IDE window, opening one when none shows it. */
+        OPEN_MAIN_CHECKOUT,
         NEW_TASK_IN_MAIN,
         REMOVE_WORKTREE,
         REMOVE_STALE_WORKTREES,
@@ -278,11 +280,11 @@ final class TaskMenu {
                 List.of(Item.DONE_WITH_TASK)));
     }
 
-    /** A project: new tasks, the listings' refresh and settings, then cleanup. */
+    /** A project: new tasks, its main checkout's window, the listings' refresh and settings, then cleanup. */
     private static List<List<Item>> project(ProjectRow row, MenuFacts facts) {
         return nonEmpty(List.of(
                 List.of(Item.NEW_TASK, Item.NEW_TASK_IN_MAIN),
-                List.of(Item.FOCUS_PROJECT),
+                List.of(Item.OPEN_MAIN_CHECKOUT, Item.FOCUS_PROJECT),
                 section(Item.REFRESH, Item.GITHUB_SETTINGS,
                         facts.workspaceBoxEnabled() ? Item.WORKSPACE_BOX : null,
                         Item.JIRA_SETTINGS,

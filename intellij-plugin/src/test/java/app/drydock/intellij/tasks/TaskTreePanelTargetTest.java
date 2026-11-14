@@ -7,6 +7,7 @@ import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionWorkspace;
+import app.drydock.domain.SshRemote;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.JiraIssue;
 import app.drydock.git.JiraIssueListing;
@@ -70,6 +71,27 @@ class TaskTreePanelTargetTest {
 
         assertEquals(Optional.of(new TaskTreePanel.NewTaskTarget(REGISTERED_ROOT, Optional.empty())),
                 TaskTreePanel.newTaskTarget(row, REGISTERED_ROOT));
+    }
+
+    @Test
+    void projectWindowIsOfferedOnPresentLocalProjectRowsOnly() {
+        SharedProject registered = SharedProject.local(
+                RepositoryId.newId(), REGISTERED_ROOT, "profiling-backend", NOW);
+        ProjectRow row = new ProjectRow(registered, false, false, List.of(), List.of(), 0);
+        ProjectRow missing = new ProjectRow(registered, true, false, List.of(), List.of(), 0);
+        ProjectRow remote = new ProjectRow(new SharedProject(RepositoryId.newId(), REGISTERED_ROOT,
+                        "remote checkout", NOW, Optional.of(new SshRemote("acme.dev", "/srv/git/profiling-backend"))),
+                false, false, List.of(), List.of(), 0);
+
+        assertTrue(TaskTreePanel.offersProjectWindow(row, REGISTERED_ROOT));
+        assertFalse(TaskTreePanel.offersProjectWindow(row, null),
+                "an unresolved main root offers nothing");
+        assertFalse(TaskTreePanel.offersProjectWindow(missing, REGISTERED_ROOT),
+                "a folder the tree saw missing is not offered; the click still re-checks");
+        assertFalse(TaskTreePanel.offersProjectWindow(remote, REGISTERED_ROOT),
+                "a remote project's root is a placeholder only the standalone app opens");
+        assertFalse(TaskTreePanel.offersProjectWindow(new IdleWorktree(LINKED_WORKTREE,
+                "fix-allocation-profile", Optional.empty(), false, false), REGISTERED_ROOT));
     }
 
     @Test
