@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -19,7 +20,7 @@ class RaiseOrOpenWindowTest {
     }
 
     @Test
-    void findsTheWindowShowingTheCanonicalDirectory() {
+    void findsTheWindowWhoseBaseEqualsTheDirectory() {
         Window other = new Window("other", Path.of("/repos/other"));
         Window match = new Window("match", Path.of("/repos/worktree"));
 
@@ -43,6 +44,14 @@ class RaiseOrOpenWindowTest {
 
         assertTrue(RaiseOrOpenWindow.findOpenWindow(windows, RaiseOrOpenWindowTest::baseOf,
                 Path.of("/repos/worktree")).isEmpty());
+    }
+
+    @Test
+    void scanReportsFolderGoneForANonexistentPath() {
+        Path missing = Path.of(System.getProperty("java.io.tmpdir"),
+                "drydock-raise-or-open-missing-" + UUID.randomUUID());
+
+        assertEquals(new RaiseOrOpenWindow.Scan(false, Optional.empty()), RaiseOrOpenWindow.scan(missing));
     }
 
     @Test

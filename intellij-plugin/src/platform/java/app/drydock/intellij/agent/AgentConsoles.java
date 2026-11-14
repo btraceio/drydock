@@ -38,7 +38,6 @@ import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
 import java.util.Arrays;
-import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -445,7 +444,7 @@ public final class AgentConsoles {
      */
     static void showStopped(Project host, Project target, ManagedSessionId sessionId) {
         show(target, sessionId);
-        if (JumpPlan.closesHostTab(host == target)) {
+        if (JumpPlan.closesHostTab(host == target) && !host.isDisposed()) {
             FileEditorManager.getInstance(host)
                     .closeFile(AgentConsoleFileSystem.getInstance().fileFor(sessionId));
         }

@@ -55,9 +55,9 @@ public final class RaiseOrOpenWindow {
 
     /**
      * The background half: canonicalizes {@code directory}, checks it still
-     * exists, and looks for an open window on it. A scan failure is logged
-     * and reported as a missing folder, exactly as the callers did it inline
-     * before they shared this. Call off the EDT.
+     * exists, and looks for an open window on it. A window whose base path
+     * cannot be canonicalized is skipped; a failure to check the directory
+     * itself is reported to the caller as a folder-gone. Call off the EDT.
      */
     public static Scan scan(Path directory) {
         try {
@@ -69,13 +69,31 @@ public final class RaiseOrOpenWindow {
                     Arrays.stream(ProjectManager.getInstance().getOpenProjects())
                             .filter(project -> !project.isDisposed() && project.getBasePath() != null)
                             .toList(),
-                    project -> Optional.ofNullable(project.getBasePath())
-                            .map(base -> RepositoryCatalog.canonicalize(Path.of(base))),
+                    RaiseOrOpenWindow::canonicalBase,
                     canonical);
             return new Scan(true, open);
         } catch (RuntimeException e) {
             LOG.log(System.Logger.Level.WARNING, () -> "Could not look for a window of " + directory + ": " + e);
             return new Scan(false, Optional.empty());
+        }
+    }
+
+    /**
+     * A window's canonical project directory, empty for a window without one
+     * or one whose base path cannot be canonicalized; the window is then
+     * skipped instead of failing the whole scan.
+     */
+    private static Optional<Path> canonicalBase(Project project) {
+        String base = project.getBasePath();
+        if (base == null) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(RepositoryCatalog.canonicalize(Path.of(base)));
+        } catch (RuntimeException e) {
+            LOG.log(System.Logger.Level.WARNING,
+                    () -> "Skipping a window whose base path cannot be canonicalized: " + base + ": " + e);
+            return Optional.empty();
         }
     }
 
