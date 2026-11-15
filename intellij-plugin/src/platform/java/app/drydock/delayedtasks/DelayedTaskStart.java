@@ -53,7 +53,6 @@ import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -140,13 +139,15 @@ public final class DelayedTaskStart {
         try {
             plugin.initialization().get(WAIT_SECONDS, TimeUnit.SECONDS);
             DelayedTaskService service = plugin.taskService();
-            StartPlan plan = planOf(row.id(), snapshotOf(service), slugsOf(plugin), service.liveSessionIds());
+            TaskSlugs slugs = taskSlugsOf(plugin);
+            StartPlan plan = planOf(row.id(), snapshotOf(service), slugs::slug, slugs::canonicalId,
+                    service.liveSessionIds());
             Optional<String> refused = route(plan);
             if (refused.isPresent() && plan.startable() && plan.segments().size() != 1) {
                 // T38: the multi-segment confirmation flow. crossProject owns its
                 // own whole-plan claim (and its release); the visible refusal is its
                 // answer, already reported.
-                crossProject(from, service, slugsOf(plugin), repository -> rootOf(plugin, repository),
+                crossProject(from, service, slugs, repository -> rootOf(plugin, repository),
                         plan, productionConfirmer(from, plugin, service, plan, row.title()),
                         productionLaunchers(from, repository -> rootOf(plugin, repository), service),
                         planListener(from, titleOf(plan)));
@@ -179,7 +180,9 @@ public final class DelayedTaskStart {
                 return;
             }
             // Revalidation: the task may have moved between open and OK (T07/T10a rules).
-            StartPlan fresh = planOf(row.id(), snapshotOf(service), slugsOf(plugin), service.liveSessionIds());
+            TaskSlugs freshSlugs = taskSlugsOf(plugin);
+            StartPlan fresh = planOf(row.id(), snapshotOf(service), freshSlugs.slugger(),
+                    freshSlugs.canonicalizer(), service.liveSessionIds());
             Optional<String> stale = route(fresh);
             if (stale.isPresent()) {
                 refuse(from, "The plan changed while the dialog was open; nothing was started. " + stale.get());
@@ -208,10 +211,18 @@ public final class DelayedTaskStart {
         }
     }
 
-    /** The plan for {@code target} over one snapshot: the graph is built from that SAME snapshot (T08a). */
+    /** The plan for {@code target} over one snapshot: the graph is built from that SAME snapshot (T08a).
+     * Identity canonicalization: the reflection-driven fixture's seam. */
     static StartPlan planOf(TaskId target, TaskSnapshot snapshot, Function<RepositoryId, String> projectSlugs,
             Set<String> liveSessionIds) {
-        return StartPlanner.plan(target, snapshot, TaskGraph.of(snapshot, projectSlugs), projectSlugs,
+        return planOf(target, snapshot, projectSlugs, Function.identity(), liveSessionIds);
+    }
+
+    /** As above, with the dual-registry identity mapping: same checkout under two
+     * registry ids occupies one slug identity in the graph. */
+    static StartPlan planOf(TaskId target, TaskSnapshot snapshot, Function<RepositoryId, String> projectSlugs,
+            Function<RepositoryId, RepositoryId> canonical, Set<String> liveSessionIds) {
+        return StartPlanner.plan(target, snapshot, TaskGraph.of(snapshot, projectSlugs, canonical), projectSlugs,
                 liveSessionIds);
     }
 
@@ -283,13 +294,13 @@ public final class DelayedTaskStart {
         return service.snapshot().get(WAIT_SECONDS, TimeUnit.SECONDS);
     }
 
-    /** The live repository catalog as the graph's project-slug mapping (P2): read once from memory, no I/O. */
-    private static Function<RepositoryId, String> slugsOf(DrydockPluginService plugin) {
-        Map<RepositoryId, String> slugs = new HashMap<>();
-        for (Repository repository : plugin.stateStore().state().repositories()) {
-            slugs.put(repository.id(), slug(repository.displayName()));
-        }
-        return slugs::get;
+    /** The dual-registry slug/identity resolution (P2) over the live registries: read
+     * once from memory, no I/O. A task stamped with the shared registry's id resolves
+     * through the shared list; a checkout both registries know is one identity. */
+    private static TaskSlugs taskSlugsOf(DrydockPluginService plugin) {
+        List<Repository> repositories = plugin.stateStore() != null
+                ? plugin.stateStore().state().repositories() : List.of();
+        return TaskSlugs.of(plugin.sharedProjects().projects(), repositories);
     }
 
     /** The task's project main root as registered in the live catalog, or null when it is not registered. */
@@ -318,23 +329,6 @@ public final class DelayedTaskStart {
             }
         }
         return null;
-    }
-
-    /** The display-name slug (P2): lowercase letters, digits and inner hyphens, capped at 60. */
-    private static String slug(String name) {
-        StringBuilder out = new StringBuilder(61);
-        for (int i = 0; i < name.length() && out.length() < 60; i++) {
-            char c = Character.toLowerCase(name.charAt(i));
-            if (c >= 'a' && c <= 'z' || c >= '0' && c <= '9') {
-                out.append(c);
-            } else if (out.length() > 0 && out.charAt(out.length() - 1) != '-') {
-                out.append('-');
-            }
-        }
-        if (!out.isEmpty() && out.charAt(out.length() - 1) == '-') {
-            out.setLength(out.length() - 1);
-        }
-        return out.isEmpty() ? null : out.toString();
     }
 
     /** One visible refusal; nothing is left running (the flow already ended). EDT when
@@ -380,7 +374,7 @@ public final class DelayedTaskStart {
       * wiring; the whole-plan claim releases once that Continue has been fed. Answers
       * the visible refusal when the whole start was refused, or empty. */
     static Optional<String> crossProject(Project from, DelayedTaskService service,
-            Function<RepositoryId, String> slugs, Function<RepositoryId, Path> roots, StartPlan plan,
+            TaskSlugs slugs, Function<RepositoryId, Path> roots, StartPlan plan,
             PlanConfirmer confirmer, LauncherFactory launchers, Listener listener) {
         String title = titleOf(plan);
         List<TaskId> whole = claim(plan, plan.target());
@@ -396,7 +390,8 @@ public final class DelayedTaskStart {
         try {
             // Revalidation after close (T07/T10a rules): the graph the user confirmed
             // must still stand, or the WHOLE start refuses -- never a partial launch.
-            StartPlan fresh = planOf(plan.target(), snapshotOf(service), slugs, service.liveSessionIds());
+            StartPlan fresh = planOf(plan.target(), snapshotOf(service), slugs.slugger(),
+                    slugs.canonicalizer(), service.liveSessionIds());
             String stale = staleGraph(plan, fresh);
             if (stale != null) {
                 return visible(from, "The plan changed while its confirmation was open; nothing was"
@@ -592,7 +587,8 @@ public final class DelayedTaskStart {
                     return CompletableFuture.failedFuture(refused);
                 }
                 return service.snapshot().thenCompose(snapshot -> {
-                    TaskGraph graph = TaskGraph.of(snapshot, slugsOf(DrydockPluginService.getInstance()));
+                    TaskSlugs slugs = taskSlugsOf(DrydockPluginService.getInstance());
+                    TaskGraph graph = TaskGraph.of(snapshot, slugs.slugger(), slugs.canonicalizer());
                     List<TaskDocument> unitDocs = new ArrayList<>();
                     for (TaskId task : request.tasks()) {
                         TaskDocument document = snapshot.byId().get(task);
@@ -655,7 +651,8 @@ public final class DelayedTaskStart {
         }
         Segment segment = entry.segment();
         return service.snapshot().thenCompose(snapshot -> {
-            TaskGraph graph = TaskGraph.of(snapshot, slugsOf(plugin));
+            TaskSlugs taskSlugs = taskSlugsOf(plugin);
+            TaskGraph graph = TaskGraph.of(snapshot, taskSlugs.slugger(), taskSlugs.canonicalizer());
             List<StackUnits.Unit> units = StackLaunch.units(segment.tasks(), graph);
             Map<TaskId, TaskDocument> docs = new LinkedHashMap<>();
             for (TaskDocument task : segment.tasks()) {

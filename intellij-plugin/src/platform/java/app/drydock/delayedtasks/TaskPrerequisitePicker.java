@@ -94,12 +94,22 @@ public final class TaskPrerequisitePicker {
         private final TaskSnapshot snapshot;
         private final Map<RepositoryId, String> slugs;
         private final Map<String, Long> slugCounts;
+        private final Function<RepositoryId, RepositoryId> canonical;
 
-        private Index(TaskSnapshot snapshot, Map<RepositoryId, String> slugs) {
+        private Index(TaskSnapshot snapshot, Map<RepositoryId, String> slugs,
+                Function<RepositoryId, RepositoryId> canonical) {
             this.snapshot = snapshot;
             this.slugs = slugs;
+            this.canonical = canonical;
+            // Slug uniqueness is per CHECKOUT, not per stored id: a twin pair
+            // (install and shared id for one checkout) claims one slug, not two.
             Map<String, Long> counts = new LinkedHashMap<>();
-            for (String slug : slugs.values()) {
+            Set<RepositoryId> seen = new HashSet<>();
+            for (RepositoryId repository : slugs.keySet()) {
+                if (!seen.add(canonical.apply(repository))) {
+                    continue;
+                }
+                String slug = slugs.get(repository);
                 if (slug != null) {
                     counts.merge(slug, 1L, Long::sum);
                 }
@@ -109,14 +119,23 @@ public final class TaskPrerequisitePicker {
 
         /** Builds the index for one scan; the slug mapping is applied once per repository. */
         public static Index of(TaskSnapshot snapshot, Function<RepositoryId, String> projectSlugs) {
+            return of(snapshot, projectSlugs, Function.identity());
+        }
+
+        /** As above, with the dual-registry identity mapping: a checkout known to both
+         * registries (task stores stamp either id) counts as one slug claimant, and the
+         * synthetic refusal probe resolves across the two stamps. */
+        public static Index of(TaskSnapshot snapshot, Function<RepositoryId, String> projectSlugs,
+                Function<RepositoryId, RepositoryId> canonical) {
             Objects.requireNonNull(snapshot, "snapshot");
             Objects.requireNonNull(projectSlugs, "projectSlugs");
+            Objects.requireNonNull(canonical, "canonical");
             Map<RepositoryId, String> resolved = new LinkedHashMap<>();
             for (RepositoryId repository : snapshot.repositories()) {
                 String slug = projectSlugs.apply(repository);
                 resolved.put(repository, slug == null || slug.isBlank() ? null : slug);
             }
-            return new Index(snapshot, resolved);
+            return new Index(snapshot, resolved, canonical);
         }
 
         /** The snapshot this index was built from; the picker never rescans the store for it. */
@@ -187,7 +206,7 @@ public final class TaskPrerequisitePicker {
             documents.add(pending);
             TaskSnapshot extended = new TaskSnapshot(documents, snapshot.repositories(), byId,
                     snapshot.bySessionReference(), snapshot.failures(), snapshot.idCollisions());
-            return TaskGraph.of(extended, slugs::get).diagnosticsOf(probeId)
+            return TaskGraph.of(extended, slugs::get, canonical).diagnosticsOf(probeId)
                     .map(diagnostics -> diagnostics.broken().stream()
                             .map(broken -> "'" + broken.reference() + "': " + broken.reason())
                             .collect(Collectors.toList()))

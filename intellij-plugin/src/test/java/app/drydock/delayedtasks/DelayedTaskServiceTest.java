@@ -928,6 +928,73 @@ class DelayedTaskServiceTest {
         }
     }
 
+    // 1e. The slug surface spans both registries: the shared name wins for a
+    // checkout both know, each checkout contributes one identity, and the MCP
+    // enumeration neither offers nor resolves an ambiguous slug.
+    @Test
+    void slugResolutionPrefersTheSharedNameAcrossBothRegistries(@TempDir Path root) throws Exception {
+        RepositoryId sharedId = RepositoryId.newId();
+        RepositoryId installId = RepositoryId.newId();
+        RepositoryId installOnlyId = RepositoryId.newId();
+        Path checkout = root.resolve("checkout");
+        SharedProject shared = SharedProject.local(sharedId, checkout, "Java Profiler", Instant.EPOCH);
+        Repository twin = repository(installId, checkout, "old-name");
+        Repository installOnly = repository(installOnlyId, root.resolve("other"), "other");
+        try (DelayedTaskService service = new DelayedTaskService(root, executor, List::of,
+                () -> List.of(twin, installOnly), () -> List.of(shared))) {
+            await(service.initialize());
+            assertEquals(List.of("java-profiler", "other"), await(service.registeredProjectSlugs()),
+                    "the shared name wins for the twin; the install-only checkout keeps its own");
+            assertEquals(Optional.of(sharedId), await(service.repositoryBySlug("java-profiler")),
+                    "the twin resolves to the shared id, never the install id");
+            assertTrue(await(service.repositoryBySlug("old-name")).isEmpty(),
+                    "the install name of a twinned checkout is not a second identity");
+            assertEquals(Optional.of(installOnlyId), await(service.repositoryBySlug("other")),
+                    "an install-only checkout resolves to its install id");
+        }
+    }
+
+    @Test
+    void slugResolutionRefusesTwoCheckoutsSharingASlugAcrossRegistries(@TempDir Path root) throws Exception {
+        RepositoryId sharedId = RepositoryId.newId();
+        RepositoryId installId = RepositoryId.newId();
+        SharedProject shared = SharedProject.local(sharedId, root.resolve("one"), "same-name", Instant.EPOCH);
+        Repository install = repository(installId, root.resolve("two"), "same-name");
+        try (DelayedTaskService service = new DelayedTaskService(root, executor, List::of,
+                () -> List.of(install), () -> List.of(shared))) {
+            await(service.initialize());
+            assertEquals(List.of(), await(service.registeredProjectSlugs()),
+                    "two different checkouts sharing a slug are both refused");
+            assertTrue(await(service.repositoryBySlug("same-name")).isEmpty(),
+                    "an ambiguous cross-registry slug refuses, never picks a winner");
+        }
+    }
+
+    // 1f. Cross-era references: a legacy task stamped with the install-catalog id
+    // (pre-shared-registry) and a task stamped with the shared id name the same
+    // checkout; a <slug>:<id> prerequisite across the eras resolves.
+    @Test
+    void crossEraReferencesResolveAcrossTheRegistries(@TempDir Path root) throws Exception {
+        RepositoryId sharedId = RepositoryId.newId();
+        RepositoryId installId = RepositoryId.newId();
+        Path checkout = root.resolve("checkout");
+        SharedProject shared = SharedProject.local(sharedId, checkout, "checkout", Instant.EPOCH);
+        Repository install = repository(installId, checkout, "old-checkout");
+        Files.createDirectories(root.resolve(installId.toString()));
+        Files.writeString(committedFile(root, installId, TaskId.of("legacy-task-k3f9")),
+                "---\ntitle: \"Legacy task\"\nstatus: open\ndone_by: human\n"
+                        + "created: 2026-01-01T00:00:00Z\nafter: []\nsessions: []\n---\n\nLegacy body.\n");
+        try (DelayedTaskService service = new DelayedTaskService(root, executor, List::of,
+                () -> List.of(install), () -> List.of(shared))) {
+            await(service.initialize());
+            TaskToolContext.Outcome created = await(service.create("Follow up",
+                    List.of("checkout:legacy-task-k3f9"), sharedId));
+            assertFalse(created.refused(), created.refusal() == null ? "" : created.refusal());
+            assertEquals(sharedId, created.document().repository(),
+                    "the new task stores the shared id while resolving a legacy install-stamped prerequisite");
+        }
+    }
+
     @Test
     void createKeepsTheCallerIdWhenNothingMaps(@TempDir Path root) throws Exception {
         RepositoryId installId = RepositoryId.newId();

@@ -83,23 +83,33 @@ public final class TaskGraph {
 
     private final TaskSnapshot snapshot;
     private final Function<RepositoryId, String> projectSlugs;
+    private final Function<RepositoryId, RepositoryId> canonical;
     private final Map<String, List<RepositoryId>> bySlug;
     private final Map<TaskId, TaskSnapshot.IdCollision> collisions;
     private final Map<TaskId, List<TaskDocument>> dependents;
     private final Map<TaskId, TaskDiagnostics> diagnostics;
 
     /** Builds the graph for one snapshot; call via {@link #of}. */
-    private TaskGraph(TaskSnapshot snapshot, Function<RepositoryId, String> projectSlugs) {
+    private TaskGraph(TaskSnapshot snapshot, Function<RepositoryId, String> projectSlugs,
+            Function<RepositoryId, RepositoryId> canonical) {
         this.snapshot = snapshot;
         this.projectSlugs = projectSlugs;
+        this.canonical = canonical;
         Map<TaskId, TaskSnapshot.IdCollision> collisions = new HashMap<>();
         snapshot.idCollisions().forEach(collision -> collisions.put(collision.id(), collision));
         this.collisions = collisions;
         Map<String, List<RepositoryId>> bySlug = new LinkedHashMap<>();
         this.bySlug = bySlug;
         for (RepositoryId repository : snapshot.repositories()) {
-            String slug = slugOf(projectSlugs, repository);
-            if (slug != null) bySlug.computeIfAbsent(slug, any -> new ArrayList<>()).add(repository);
+            RepositoryId identity = canonical.apply(repository);
+            String slug = slugOf(projectSlugs, identity);
+            if (slug == null) {
+                continue;
+            }
+            List<RepositoryId> identities = bySlug.computeIfAbsent(slug, any -> new ArrayList<>());
+            if (!identities.contains(identity)) {
+                identities.add(identity);
+            }
         }
         Map<TaskId, List<TaskId>> prerequisites = new LinkedHashMap<>();
         Map<TaskId, List<TaskId>> dependentsById = new LinkedHashMap<>();
@@ -143,8 +153,22 @@ public final class TaskGraph {
 
     /** The graph of one snapshot; the mapping is applied once per repository and may return null. */
     public static TaskGraph of(TaskSnapshot snapshot, Function<RepositoryId, String> projectSlugs) {
+        return of(snapshot, projectSlugs, Function.identity());
+    }
+
+    /**
+     * As above, with the dual-registry identity mapping layered on: {@code canonical}
+     * maps a stored repository id to the identity for slug purposes, so a checkout
+     * known to both registries under two ids occupies ONE slot in the slug map and
+     * qualified references resolve across the two stamps. {@code projectSlugs} is
+     * consulted with the canonical identity. The default (the two-argument form) is
+     * the identity, which is one identity per stored id.
+     */
+    public static TaskGraph of(TaskSnapshot snapshot, Function<RepositoryId, String> projectSlugs,
+            Function<RepositoryId, RepositoryId> canonical) {
         Objects.requireNonNull(projectSlugs, "projectSlugs");
-        return new TaskGraph(Objects.requireNonNull(snapshot, "snapshot"), projectSlugs);
+        Objects.requireNonNull(canonical, "canonical");
+        return new TaskGraph(Objects.requireNonNull(snapshot, "snapshot"), projectSlugs, canonical);
     }
 
     /** Computed inverse follow-ups (D3): each task and its direct dependents, resolved edges only. */
@@ -209,10 +233,10 @@ public final class TaskGraph {
         if (document == null) {
             return Resolution.broken(unmatchedReason(idText, " in project '" + slug + "'", collisions));
         }
-        String other = slugOf(projectSlugs, document.repository());
+        String other = slugOf(projectSlugs, canonical.apply(document.repository()));
         String lives = other != null ? "in project '" + other + "'"
                 : "in a repository without a supplied project slug";
-        return document.repository().equals(named.get(0)) ? Resolution.resolved(document)
+        return canonical.apply(document.repository()).equals(named.get(0)) ? Resolution.resolved(document)
                 : Resolution.broken("no task with id '" + idText + "' in project '" + slug + "' (the id is "
                         + lives + ")");
     }

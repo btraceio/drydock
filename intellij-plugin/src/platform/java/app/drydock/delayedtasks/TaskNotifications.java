@@ -83,11 +83,20 @@ public final class TaskNotifications implements AutoCloseable {
       * deduplicated; OWNED plan tasks are skipped -- their driver starts them. */
     public void observe(TaskSnapshot snapshot, Set<String> liveSessions,
             Function<RepositoryId, String> slugs, Set<TaskId> ownedPlanTasks) {
+        observe(snapshot, liveSessions, slugs, ownedPlanTasks, Function.identity());
+    }
+
+    /** As above, with the dual-registry identity mapping the store's tasks were
+     * stamped with: a checkout both registries know occupies one slug slot in
+     * the graph the READY/REVIEW derivation walks. */
+    public void observe(TaskSnapshot snapshot, Set<String> liveSessions,
+            Function<RepositoryId, String> slugs, Set<TaskId> ownedPlanTasks,
+            Function<RepositoryId, RepositoryId> canonical) {
         synchronized (lock) {
             if (closed || snapshot == null) { return; }
             Set<TaskId> ready = new HashSet<>();
             Set<TaskId> review = new HashSet<>();
-            for (TaskView view : TaskState.of(snapshot, TaskGraph.of(snapshot, slugs),
+            for (TaskView view : TaskState.of(snapshot, TaskGraph.of(snapshot, slugs, canonical),
                     liveSessions).views()) {
                 if (view.presentation() == Presentation.READY) { ready.add(view.task()); }
                 else if (view.presentation() == Presentation.REVIEW) { review.add(view.task()); }
@@ -149,8 +158,13 @@ public final class TaskNotifications implements AutoCloseable {
     /** Pure: the LATEST view when its presentation is still READY, else null. */
     static TaskView readyView(TaskId task, TaskSnapshot latest, Set<String> liveSessions,
             Function<RepositoryId, String> slugs) {
+        return readyView(task, latest, liveSessions, slugs, Function.identity());
+    }
+
+    static TaskView readyView(TaskId task, TaskSnapshot latest, Set<String> liveSessions,
+            Function<RepositoryId, String> slugs, Function<RepositoryId, RepositoryId> canonical) {
         if (latest == null || latest.byId().get(task) == null) { return null; }
-        TaskView view = TaskState.of(latest, TaskGraph.of(latest, slugs), liveSessions)
+        TaskView view = TaskState.of(latest, TaskGraph.of(latest, slugs, canonical), liveSessions)
                 .viewOf(task).orElse(null);
         return view != null && view.presentation() == Presentation.READY ? view : null;
     }
@@ -241,7 +255,9 @@ public final class TaskNotifications implements AutoCloseable {
           * the existing Start flow (whose own revalidation rides DelayedTaskStart). */
         private void start(TaskId task) {
             TaskSnapshot latest = latest();
-            TaskView view = readyView(task, latest, service.liveSessionIds(), service.displaySlugs());
+            TaskSlugs slugs = service.taskSlugs();
+            TaskView view = readyView(task, latest, service.liveSessionIds(), slugs.slugger(),
+                    slugs.canonicalizer());
             Project project = focusedProject();
             if (view == null || project == null) {
                 refuse("Drydock cannot start '" + title(latest, task) + "': " + (view == null

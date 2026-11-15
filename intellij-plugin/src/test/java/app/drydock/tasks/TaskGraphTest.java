@@ -152,6 +152,29 @@ class TaskGraphTest {
                 reasonFor(dupGraph, id("dup-b"), "dup:dup-a"));
     }
 
+    // Matrix 2 (dual registries): one identity per checkout for slug purposes.
+
+    @Test
+    void canonicalIdentityCollapsesTheTwoRegistriesOfOneCheckout() {
+        RepositoryId legacy = RepositoryId.newId();
+        RepositoryId shared = RepositoryId.newId();
+        TaskDocument inLegacy = new TaskDocument(id("canon-a"), legacy, "Legacy task", null, null,
+                Optional.empty(), List.of("checkout:canon-b"), List.of(), "", "");
+        TaskDocument inShared = new TaskDocument(id("canon-b"), shared, "Shared task", null, null,
+                Optional.empty(), List.of(), List.of(), "", "");
+        TaskSnapshot snapshot = new TaskSnapshot(List.of(inLegacy, inShared), List.of(legacy, shared),
+                Map.of(inLegacy.id(), inLegacy, inShared.id(), inShared), Map.of(), List.of(), List.of());
+        Function<RepositoryId, String> slugs = repository -> "checkout";
+        Function<RepositoryId, RepositoryId> canonical = repository -> legacy.equals(repository) ? shared : repository;
+        TaskGraph graph = TaskGraph.of(snapshot, slugs, canonical);
+        assertTrue(resolvesTo(graph, id("canon-a"), "checkout:canon-b", id("canon-b")),
+                "the install-stamped reference reaches the shared-stamped task");
+        assertTrue(graph.brokenReferences().isEmpty(), "no false broken reference across the eras");
+        TaskGraph strict = TaskGraph.of(snapshot, slugs);
+        assertTrue(reasonFor(strict, id("canon-a"), "checkout:canon-b").contains("ambiguous"),
+                "without the canonicalizer the two ids collide on the slug, by design");
+    }
+
     // Matrix 2 (text forms) and Matrix 8: invalid after text never throws.
 
     @Test

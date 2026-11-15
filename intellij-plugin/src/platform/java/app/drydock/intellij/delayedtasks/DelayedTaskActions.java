@@ -2,6 +2,7 @@ package app.drydock.intellij.delayedtasks;
 
 import app.drydock.app.ApplicationStateStore;
 import app.drydock.delayedtasks.DelayedTaskService;
+import app.drydock.delayedtasks.TaskSlugs;
 import app.drydock.delayedtasks.TaskNotifications;
 import app.drydock.delayedtasks.TaskStoreWatcher;
 import app.drydock.domain.ManagedAgentSession;
@@ -51,7 +52,6 @@ import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
 import java.util.EnumSet;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -59,7 +59,6 @@ import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import java.util.function.Function;
 import java.util.stream.Collectors;
 
 /**
@@ -143,11 +142,12 @@ public final class DelayedTaskActions {
      * resolution the store and TaskState use -- never re-derived. Empty when the
      * task is absent or no blocker runs in a live session. */
     public static Optional<Blocker> blockerInSession(TaskId task, TaskSnapshot snapshot,
-            Set<String> liveSessions, Function<RepositoryId, String> slugs) {
+            Set<String> liveSessions, TaskSlugs slugs) {
         if (snapshot.byId().get(task) == null) {
             return Optional.empty();
         }
-        for (TaskGraph.ResolvedReference reference : TaskGraph.of(snapshot, slugs).diagnosticsOf(task)
+        for (TaskGraph.ResolvedReference reference : TaskGraph.of(snapshot, slugs.slugger(),
+                        slugs.canonicalizer()).diagnosticsOf(task)
                 .orElseThrow(() -> new IllegalArgumentException(
                         "the graph holds no diagnostics for task '" + task.text() + "'")).resolved()) {
             TaskDocument target = reference.target();
@@ -354,7 +354,7 @@ public final class DelayedTaskActions {
             return;
         }
         Optional<Blocker> blocker = blockerInSession(row.id(), watched.snapshot(),
-                service.liveSessionIds(), slugsOf(plugin));
+                service.liveSessionIds(), taskSlugs(plugin));
         if (blocker.isEmpty()) {
             refuse(from, "'" + row.title() + "' has no blocker that a live session is running.");
             return;
@@ -380,36 +380,13 @@ public final class DelayedTaskActions {
         return null;
     }
 
-    /** The live repository catalog as the graph's project-slug mapping (P2), the
-     * same projection the task service, the panel and the goto handler each
-     * apply privately: read once from memory, no I/O. */
-    private static Function<RepositoryId, String> slugsOf(DrydockPluginService plugin) {
+    /** The dual-registry slug/identity mapping (P2), the same projection the task
+     * service applies: the shared projects list plus the install catalog, shared
+     * name winning. Read once from memory, no I/O. */
+    private static TaskSlugs taskSlugs(DrydockPluginService plugin) {
         ApplicationStateStore store = plugin.stateStore();
-        Map<RepositoryId, String> slugs = new HashMap<>();
-        if (store != null) {
-            for (Repository repository : store.state().repositories()) {
-                slugs.put(repository.id(), slug(repository.displayName()));
-            }
-        }
-        return slugs::get;
-    }
-
-    /** The display-name slug (P2): lowercase letters, digits and inner hyphens, capped at 60. */
-    private static String slug(String name) {
-        StringBuilder out = new StringBuilder(61);
-        for (int i = 0; i < name.length() && out.length() < 60; i++) {
-            char c = Character.toLowerCase(name.charAt(i));
-            if (c >= 'a' && c <= 'z' || c >= '0' && c <= '9') {
-                out.append(c);
-            } else if (out.length() > 0 && out.charAt(out.length() - 1) != '-') {
-                out.append('-');
-            }
-        }
-        int length = out.length();
-        if (length > 0 && out.charAt(length - 1) == '-') {
-            out.setLength(length - 1);
-        }
-        return out.isEmpty() ? null : out.toString();
+        List<Repository> install = store != null ? store.state().repositories() : List.of();
+        return TaskSlugs.of(plugin.sharedProjects().projects(), install);
     }
 
     /** Shared base: one task-node action keyed on the selection data (T20a). The

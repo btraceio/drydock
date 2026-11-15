@@ -4,6 +4,7 @@ import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.AgentRegistry;
 import app.drydock.delayedtasks.DelayedTaskService;
 import app.drydock.delayedtasks.NewDelayedTaskDialog;
+import app.drydock.delayedtasks.TaskSlugs;
 import app.drydock.delayedtasks.TaskPrerequisitePicker;
 import app.drydock.delayedtasks.TaskStoreWatcher.WatchedSnapshot;
 import app.drydock.intellij.delayedtasks.DelayedTaskActions;
@@ -1536,11 +1537,16 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 .orElseGet(() -> String.valueOf(root.getFileName()));
     }
 
-    /** The live catalog as the picker's project-slug mapping (P2), the same
-     * projection the task layer applies (T17a): read once from memory. */
-    private static Function<RepositoryId, String> taskSlugs(DrydockPluginService plugin) {
-        Map<RepositoryId, String> displayNames = displayNamesByRepository(plugin);
-        return repository -> slugOf(displayNames.get(repository));
+    /** The dual-registry slug mapping (P2) the task layer applies (T17a): the
+     * shared projects list plus the install catalog, the shared name winning.
+     * Read once from memory. */
+    private static TaskSlugs taskSlugsOf(DrydockPluginService plugin) {
+        return TaskSlugs.of(plugin.sharedProjects().projects(), installRepositories(plugin));
+    }
+
+    /** The install catalog as it stands, or empty before the state store is up. */
+    private static List<Repository> installRepositories(DrydockPluginService plugin) {
+        return plugin.stateStore() != null ? plugin.stateStore().state().repositories() : List.of();
     }
 
     /**
@@ -1604,8 +1610,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                     TaskSnapshot snapshot = watched != null ? watched.snapshot()
                             : service.snapshot().get(60, TimeUnit.SECONDS);
                     indicator.setText("Indexing tasks");
+                    TaskSlugs taskSlugs = taskSlugsOf(plugin);
                     TaskPrerequisitePicker.Index index =
-                            TaskPrerequisitePicker.Index.of(snapshot, taskSlugs(plugin));
+                            TaskPrerequisitePicker.Index.of(snapshot, taskSlugs.slugger(), taskSlugs.canonicalizer());
                     Path root = Optional.ofNullable(from.getBasePath()).map(Path::of)
                             .map(RepositoryCatalog::canonicalize).orElse(null);
                     if (root == null) {
@@ -1888,11 +1895,11 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             Instant now = Instant.now();
             Optional<WatchedSnapshot> watched = inputs.watchedTasks();
             Set<String> liveSessionIds = plugin.taskService().liveSessionIds();
-            Map<RepositoryId, String> displayNames = displayNamesByRepository(plugin);
-            TaskLayer tasks = taskLayer(nodes, watched, liveSessionIds, displayNames, now);
+            TaskSlugs taskSlugs = taskSlugsOf(plugin);
+            TaskLayer tasks = taskLayer(nodes, watched, liveSessionIds, taskSlugs, now);
             Map<RepositoryId, Path> roots = repositoryRoots(plugin);
             InboxModel.Inbox builtInbox = InboxModel.build(new InboxModel.Inputs(nodes, gathered.projects(),
-                    watched.map(snapshot -> linkedTaskRows(nodes, snapshot, liveSessionIds, displayNames, now))
+                    watched.map(snapshot -> linkedTaskRows(nodes, snapshot, liveSessionIds, taskSlugs, now))
                             .orElse(List.of()),
                     watched.map(snapshot -> snapshot.snapshot().byId()).orElse(Map.of()),
                     taskProjectRoots(roots, gathered.mainRootOf()), now, ZoneId.systemDefault()),
@@ -2195,14 +2202,14 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
      * session rows themselves pass through unchanged.
      */
     static TaskLayer taskLayer(List<TaskNode> nodes, Optional<WatchedSnapshot> tasks, Set<String> liveSessionIds,
-                               Map<RepositoryId, String> displayNames, Instant now) {
+                               TaskSlugs slugs, Instant now) {
         if (tasks.isEmpty()) {
             return TaskLayer.EMPTY;
         }
         Set<String> shown = sessionRowsOf(nodes).keySet();
         Map<String, List<DelayedTaskRow>> attached = new LinkedHashMap<>();
         List<DelayedTaskRow> unattached = new ArrayList<>();
-        for (DelayedTaskRow linked : linkedTaskRows(nodes, tasks.get(), liveSessionIds, displayNames, now)) {
+        for (DelayedTaskRow linked : linkedTaskRows(nodes, tasks.get(), liveSessionIds, slugs, now)) {
             DelayedTaskRows.attachedSession(linked, shown).ifPresentOrElse(
                     session -> attached.computeIfAbsent(session, any -> new ArrayList<>()).add(linked),
                     () -> unattached.add(linked));
@@ -2232,13 +2239,14 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
      * no state is fabricated. Pure.
      */
     static List<DelayedTaskRow> linkedTaskRows(List<TaskNode> nodes,
-            WatchedSnapshot tasks, Set<String> liveSessionIds, Map<RepositoryId, String> displayNames, Instant now) {
-        Function<RepositoryId, String> slugs = repository -> slugOf(displayNames.get(repository));
+            WatchedSnapshot tasks, Set<String> liveSessionIds, TaskSlugs slugs, Instant now) {
+        Function<RepositoryId, String> projectSlugs = slugs::slug;
         // The PR index over the tree's own rows, built once for the whole
         // layer: one walk of the displayed nodes, however many task rows
         // name a pull request.
         TaskLinks.PrIndex prIndex = TaskLinks.PrIndex.of(nodes);
-        return DelayedTaskRows.sorted(DelayedTaskRows.rows(tasks, liveSessionIds, slugs, now)).stream()
+        return DelayedTaskRows.sorted(DelayedTaskRows.rows(tasks, liveSessionIds, projectSlugs,
+                        slugs.canonicalizer(), now)).stream()
                 .map(row -> TaskLinks.pullRequestOf(row, prIndex)
                         .map(pr -> row.withPullRequest(pr.pullRequest()))
                         .orElse(row))
@@ -2268,44 +2276,6 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 }
             }
         }
-    }
-
-    /**
-     * The live repository catalog as the task layer sees it (T17a): each
-     * repository's display name, from the in-memory state, once per
-     * background pass. No I/O.
-     */
-    static Map<RepositoryId, String> displayNamesByRepository(DrydockPluginService plugin) {
-        Map<RepositoryId, String> names = new LinkedHashMap<>();
-        for (Repository repository : plugin.stateStore().state().repositories()) {
-            names.putIfAbsent(repository.id(), repository.displayName());
-        }
-        return names;
-    }
-
-    /**
-     * The display-name slug (P2, T17a): the same projection the task
-     * service and the goto-declaration handler apply (both private);
-     * lowercase letters, digits and inner hyphens, capped at 60. Pure.
-     */
-    static String slugOf(String name) {
-        if (name == null || name.isBlank()) {
-            return null;
-        }
-        StringBuilder out = new StringBuilder(61);
-        for (int i = 0; i < name.length() && out.length() < 60; i++) {
-            char c = Character.toLowerCase(name.charAt(i));
-            if (c >= 'a' && c <= 'z' || c >= '0' && c <= '9') {
-                out.append(c);
-            } else if (out.length() > 0 && out.charAt(out.length() - 1) != '-') {
-                out.append('-');
-            }
-        }
-        int length = out.length();
-        if (length > 0 && out.charAt(length - 1) == '-') {
-            out.setLength(length - 1);
-        }
-        return out.isEmpty() ? null : out.toString();
     }
 
     /** Case-insensitive containment, the tree's existing search rule. */
@@ -2545,11 +2515,17 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         selectSessionRow(sessionId);
     }
 
-    /** Background only: each recorded repository's canonical root (filesystem IO). */
+    /** The task repositories' main roots, for attributing a task row to its
+     * project: both registries are read (a task may be stamped with either
+     * id), install first so a shared id never loses to an install id for the
+     * same checkout. Canonical paths, matching the inbox projects' roots. */
     private static Map<RepositoryId, Path> repositoryRoots(DrydockPluginService plugin) {
         Map<RepositoryId, Path> roots = new LinkedHashMap<>();
-        for (Repository repository : plugin.stateStore().state().repositories()) {
+        for (Repository repository : installRepositories(plugin)) {
             roots.putIfAbsent(repository.id(), RepositoryCatalog.canonicalize(repository.root()));
+        }
+        for (SharedProject project : plugin.sharedProjects().projects()) {
+            roots.putIfAbsent(project.id(), RepositoryCatalog.canonicalize(project.root()));
         }
         return roots;
     }

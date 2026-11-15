@@ -212,8 +212,16 @@ public final class DelayedTaskRows {
     /** Every row of the service's watched snapshot composition (T12a/T13a input). */
     public static List<TaskNode.DelayedTaskRow> rows(WatchedSnapshot watched, Set<String> liveSessionIds,
             Function<RepositoryId, String> projectSlugs, Instant now) {
+        return rows(watched, liveSessionIds, projectSlugs, Function.identity(), now);
+    }
+
+    /** As above, with the dual-registry identity mapping for stores stamped
+     * with either registry's id for one checkout. */
+    public static List<TaskNode.DelayedTaskRow> rows(WatchedSnapshot watched, Set<String> liveSessionIds,
+            Function<RepositoryId, String> projectSlugs,
+            Function<RepositoryId, RepositoryId> canonical, Instant now) {
         Objects.requireNonNull(watched, "watched");
-        return rows(watched.snapshot(), liveSessionIds, projectSlugs, now);
+        return rows(watched.snapshot(), liveSessionIds, projectSlugs, canonical, now);
     }
 
     /**
@@ -226,11 +234,20 @@ public final class DelayedTaskRows {
      */
     public static List<TaskNode.DelayedTaskRow> rows(TaskSnapshot snapshot, Set<String> liveSessionIds,
             Function<RepositoryId, String> projectSlugs, Instant now) {
+        return rows(snapshot, liveSessionIds, projectSlugs, Function.identity(), now);
+    }
+
+    /** As above, with the dual-registry identity mapping for stores stamped
+     * with either registry's id for one checkout. */
+    public static List<TaskNode.DelayedTaskRow> rows(TaskSnapshot snapshot, Set<String> liveSessionIds,
+            Function<RepositoryId, String> projectSlugs,
+            Function<RepositoryId, RepositoryId> canonical, Instant now) {
         Objects.requireNonNull(snapshot, "snapshot");
         Objects.requireNonNull(liveSessionIds, "liveSessionIds");
         Objects.requireNonNull(projectSlugs, "projectSlugs");
+        Objects.requireNonNull(canonical, "canonical");
         Objects.requireNonNull(now, "now");
-        TaskState state = TaskState.of(snapshot, TaskGraph.of(snapshot, projectSlugs), liveSessionIds);
+        TaskState state = TaskState.of(snapshot, TaskGraph.of(snapshot, projectSlugs, canonical), liveSessionIds);
         List<TaskNode.DelayedTaskRow> out = new ArrayList<>();
         for (TaskDocument document : snapshot.documents()) {
             TaskState.TaskView view = state.viewOf(document.id()).orElseThrow();

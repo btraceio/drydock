@@ -1,6 +1,5 @@
 package app.drydock.delayedtasks;
 
-import app.drydock.app.ApplicationStateStore;
 import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
 import app.drydock.intellij.DrydockPluginService;
@@ -27,13 +26,11 @@ import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.function.Function;
 
 /**
  * The {@code [[id]]} / {@code [[project:id]]} editor navigation of the
@@ -70,10 +67,8 @@ import java.util.function.Function;
  * <root>/<repository-id>/<task-id>.md}, the store's own layout); the
  * snapshot carries no per-file offsets, so no line location is offered.
  * The project-slug mapping is read from the plugin service's live
- * in-memory repository catalog (the same catalogs the task service itself
- * slugs through) and mirrored through this file's package-private
- * {@link #slug} until the graph's caller-supplied mapping gets a shared
- * platform seam.</p>
+ * in-memory registries -- the same dual-registry resolution the task
+ * service itself applies ({@link TaskSlugs}), shared projects winning.</p>
  */
 public final class TaskGotoDeclarationHandler implements GotoDeclarationHandler {
 
@@ -82,9 +77,6 @@ public final class TaskGotoDeclarationHandler implements GotoDeclarationHandler 
     /** The matched-character budget on each side of the caret; the window
      * bounds every scan, whatever the line or file length. */
     static final int WINDOW_CHARS = 512;
-
-    /** Cap of a project display slug, the same length the core caps slugs at. */
-    private static final int SLUG_CAP = 60;
 
     /** The reserved store metadata directories (P4, by exact name): their
      * documents are store metadata, never task documents. */
@@ -142,7 +134,7 @@ public final class TaskGotoDeclarationHandler implements GotoDeclarationHandler 
      * in-memory data only.
      */
     static Resolution resolve(String reference, TaskSnapshot snapshot,
-            Function<RepositoryId, String> projectSlugs) {
+            TaskSlugs slugs) {
         String ref = reference == null ? "" : reference;
         if (ref.isBlank()) {
             return Resolution.refused("the reference text is empty");
@@ -156,7 +148,7 @@ public final class TaskGotoDeclarationHandler implements GotoDeclarationHandler 
         documents.add(probe);
         TaskSnapshot extended = new TaskSnapshot(documents, snapshot.repositories(), byId,
                 snapshot.bySessionReference(), snapshot.failures(), snapshot.idCollisions());
-        return TaskGraph.of(extended, projectSlugs).diagnosticsOf(probe.id()).map(diagnostics -> {
+        return TaskGraph.of(extended, slugs.slugger(), slugs.canonicalizer()).diagnosticsOf(probe.id()).map(diagnostics -> {
             if (!diagnostics.resolved().isEmpty()) {
                 return Resolution.resolved(diagnostics.resolved().get(0).target());
             }
@@ -213,7 +205,7 @@ public final class TaskGotoDeclarationHandler implements GotoDeclarationHandler 
         if (reference == null) {
             return null;
         }
-        Resolution resolution = resolve(reference, watched.snapshot(), slugsOf(service));
+        Resolution resolution = resolve(reference, watched.snapshot(), taskSlugs(service));
         if (resolution.target() == null) {
             LOG.log(Level.DEBUG, "No task target for reference " + reference + ": " + resolution.reason());
             return null; // missing, ambiguous or broken: no navigation offered
@@ -239,38 +231,13 @@ public final class TaskGotoDeclarationHandler implements GotoDeclarationHandler 
         return !RESERVED_DIRECTORIES.contains(relative.getName(0).toString());
     }
 
-    /** The live repository catalog as the graph's project-slug mapping: the
-     * same in-memory state the task service itself slugs through, read once
-     * here, no I/O. */
-    private static Function<RepositoryId, String> slugsOf(DrydockPluginService service) {
-        ApplicationStateStore stateStore = service.stateStore();
-        Map<RepositoryId, String> slugs = new HashMap<>();
-        if (stateStore != null) {
-            for (Repository repository : stateStore.state().repositories()) {
-                slugs.put(repository.id(), slug(repository.displayName()));
-            }
-        }
-        return slugs::get;
-    }
-
-    /** The display-name slug (P2): the same projection the task service
-     * applies to this catalog's names -- lowercase letters, digits and inner
-     * hyphens, capped. */
-    static String slug(String name) {
-        StringBuilder out = new StringBuilder(SLUG_CAP + 1);
-        for (int i = 0; i < name.length() && out.length() < SLUG_CAP; i++) {
-            char c = Character.toLowerCase(name.charAt(i));
-            if (c >= 'a' && c <= 'z' || c >= '0' && c <= '9') {
-                out.append(c);
-            } else if (out.length() > 0 && out.charAt(out.length() - 1) != '-') {
-                out.append('-');
-            }
-        }
-        int length = out.length();
-        if (length > 0 && out.charAt(length - 1) == '-') {
-            out.setLength(length - 1);
-        }
-        return out.isEmpty() ? null : out.toString();
+    /** The dual-registry mapping (P2) as the task graph consumes it: the
+     * shared projects list plus the install catalog, shared name winning.
+     * Read once from memory, no I/O. */
+    private static TaskSlugs taskSlugs(DrydockPluginService service) {
+        List<Repository> install = service.stateStore() != null
+                ? service.stateStore().state().repositories() : List.of();
+        return TaskSlugs.of(service.sharedProjects().projects(), install);
     }
 
     /** An id nothing can name: not stored, not collided, and never the

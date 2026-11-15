@@ -100,8 +100,6 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
      * and its environment fallback. */
     public static final String OVERRIDE_PROPERTY = "drydock.tasksDirectory";
     public static final String OVERRIDE_ENVIRONMENT = "DRYDOCK_TASKS_DIRECTORY";
-    /** Cap of a project display slug, the same length the core caps task title slugs at. */
-    private static final int SLUG_CAP = 60;
     private final Path root;
     private final Executor executor;
     private final Supplier<List<ManagedAgentSession>> sessions;
@@ -346,7 +344,7 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
         if (taskNotifications != null) {
             try { // the T39a balloons over this snapshot's ready/review transitions
                 taskNotifications.observe(snapshot.snapshot(), liveSessionIds(), this::slugOf,
-                        ownedPlanTasks());
+                        ownedPlanTasks(), this::canonicalId);
             } catch (RuntimeException e) {
                 LOG.log(Level.WARNING, "The task notifications on " + root + " could not observe"
                         + " the store", e);
@@ -355,7 +353,7 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
         StackPrService stackPulls = stackPrs;
         if (stackPulls != null) {
             try { // the stacked pull requests (S3) ride the same snapshots
-                stackPulls.observe(snapshot.snapshot(), this::slugOf);
+                stackPulls.observe(snapshot.snapshot(), this::slugOf, this::canonicalId);
             } catch (RuntimeException e) {
                 LOG.log(Level.WARNING, "The stacked pull requests on " + root + " could not observe"
                         + " the store", e);
@@ -407,7 +405,7 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
         }
         TaskGraph graph;
         try {
-            graph = TaskGraph.of(snapshot, this::slugOf);
+            graph = TaskGraph.of(snapshot, this::slugOf, this::canonicalId);
         } catch (RuntimeException e) {
             LOG.log(Level.WARNING, "The follow-up auto-start on " + root
                     + " could not resolve the task graph", e);
@@ -939,12 +937,6 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
         return Set.copyOf(owned);
     }
 
-    /** The repository display-slug projection (P2) the T39a notifications resolve latest
-     * state through: the same private projection this service itself applies. */
-    Function<RepositoryId, String> displaySlugs() {
-        return this::slugOf;
-    }
-
     /** Persists one freshly confirmed cross-project plan (T38, D8/D16/P4.5): the
       * approved done_by policy changes land in the task store and the plan itself in
       * the plan store, ALL BEFORE any launch effect -- either write failing refuses
@@ -1180,15 +1172,12 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
         return supply(store -> {
             // Only slugs that resolve uniquely are offered: a slug two projects share
             // refuses in repositoryBySlug (never picks a winner), so advertising it in a
-            // refusal would send the caller into a dead-end retry. Duplicate names also
-            // collapse here, and a name with no slug characters contributes nothing.
+            // refusal would send the caller into a dead-end retry. The union of both
+            // registries is one entry per checkout (a twin pair collapses to the shared
+            // entry); two genuinely different checkouts with the same slug both lose it,
+            // and a name with no slug characters contributes nothing.
             Map<String, Long> occurrences = new LinkedHashMap<>();
-            repositories.get().forEach(repository -> {
-                String slug = slugOf(repository.id());
-                if (slug != null) {
-                    occurrences.merge(slug, 1L, Long::sum);
-                }
-            });
+            taskSlugs().entries().forEach(entry -> occurrences.merge(entry.slug(), 1L, Long::sum));
             return occurrences.entrySet().stream()
                     .filter(entry -> entry.getValue() == 1)
                     .map(Map.Entry::getKey)
@@ -1204,7 +1193,7 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
                 // Checked before anything is written: MCP cannot edit relations later, so an
                 // unresolved reference stored here would block the task until a human edits it.
                 if (!prerequisites.isEmpty()) {
-                    TaskGraph graph = TaskGraph.of(scanFresh(), this::slugOf);
+                    TaskGraph graph = TaskGraph.of(scanFresh(), this::slugOf, this::canonicalId);
                     for (String reference : prerequisites) {
                         Optional<String> broken = graph.brokenReason(reference);
                         if (broken.isPresent()) {
@@ -1254,7 +1243,7 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
     public CompletableFuture<Outcome> updateStatus(TaskId task, Actor actor, TaskStatus status) {
         return supply(store -> {
             TaskSnapshot snapshot = scanFresh();
-            TaskState state = TaskState.of(snapshot, TaskGraph.of(snapshot, this::slugOf), liveSessions);
+            TaskState state = TaskState.of(snapshot, TaskGraph.of(snapshot, this::slugOf, this::canonicalId), liveSessions);
             TaskState.Transition transition = state.validateUpdate(task, actor, status);
             if (!transition.permitted()) {
                 return Outcome.refused(transition.refusalReason());
@@ -1300,7 +1289,7 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
         Objects.requireNonNull(task, "task");
         return supply(store -> {
             TaskSnapshot snapshot = scanFresh();
-            TaskGraph graph = TaskGraph.of(snapshot, this::slugOf);
+            TaskGraph graph = TaskGraph.of(snapshot, this::slugOf, this::canonicalId);
             FollowUpLaunch launched = launchFollowUp(task, snapshot, graph, null, caller);
             if (launched.refusal() != null) {
                 // The tool path's audit trail: a refused claim leaves one trace
@@ -1326,7 +1315,7 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
         Objects.requireNonNull(task, "task");
         return supply(store -> {
             TaskSnapshot snapshot = scanFresh();
-            TaskGraph graph = TaskGraph.of(snapshot, this::slugOf);
+            TaskGraph graph = TaskGraph.of(snapshot, this::slugOf, this::canonicalId);
             return Optional.ofNullable(launchFollowUp(task, snapshot, graph, null, null).refusal());
         });
     }
@@ -1669,45 +1658,37 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
     }
 
     /** The repository a display slug names (P2); an unknown OR ambiguous slug answers
-     * empty -- two projects sharing a slug refuse, as P2 breaks their references. */
+     * empty -- two projects sharing a slug refuse, as P2 breaks their references.
+     * The union of both registries, one entry per checkout: a twin pair resolves to
+     * the shared registry's id, two different checkouts with the same slug refuse. */
     private Optional<RepositoryId> repositoryBySlugNow(String slug) {
         if (slug == null || slug.isBlank()) {
             return Optional.empty();
         }
-        List<RepositoryId> matches = repositories.get().stream()
-                .filter(repository -> slug.equals(slugOf(repository.id())))
-                .map(Repository::id)
+        List<TaskSlugs.Entry> matches = taskSlugs().entries().stream()
+                .filter(entry -> entry.slug().equals(slug))
                 .toList();
-        return matches.size() == 1 ? Optional.of(matches.get(0)) : Optional.empty();
+        return matches.size() == 1 ? Optional.of(matches.get(0).id()) : Optional.empty();
     }
 
-    /** The registered repository's display slug, or null when unregistered or unnameable. */
+    /** The repository's dual-registry slug (P2): shared-registry name wins, a checkout
+     * both registries name resolves to one identity, an unknown id or an unsluggable
+     * name to null. Reads the cached registries once per call. */
     private String slugOf(RepositoryId repository) {
-        return repositories.get().stream()
-                .filter(candidate -> candidate.id().equals(repository))
-                .map(candidate -> slugOf(candidate.displayName()))
-                // A name with no slug characters maps to null; findFirst would wrap that
-                // in Optional.of and throw, so unnameable repositories skip the search
-                // and answer null like an unregistered one.
-                .filter(Objects::nonNull)
-                .findFirst().orElse(null);
+        return taskSlugs().slug(repository);
     }
-    /** The display-name slug (P2): lowercase letters, digits and inner hyphens, capped. */
-    private static String slugOf(String name) {
-        StringBuilder out = new StringBuilder(SLUG_CAP + 1);
-        for (int i = 0; i < name.length() && out.length() < SLUG_CAP; i++) {
-            char c = Character.toLowerCase(name.charAt(i));
-            if (c >= 'a' && c <= 'z' || c >= '0' && c <= '9') {
-                out.append(c);
-            } else if (out.length() > 0 && out.charAt(out.length() - 1) != '-') {
-                out.append('-');
-            }
-        }
-        int length = out.length();
-        if (length > 0 && out.charAt(length - 1) == '-') {
-            out.setLength(length - 1);
-        }
-        return out.isEmpty() ? null : out.toString();
+
+    /** The dual-registry identity of a stored id: the shared id when one names the same
+     * checkout, the id itself otherwise. What the graph groups slugs by, so a checkout
+     * stamped both ways occupies one slug slot. */
+    private RepositoryId canonicalId(RepositoryId repository) {
+        return taskSlugs().canonicalId(repository);
+    }
+
+    /** The dual-registry slug resolution (P2), shared with the notification and
+     * stack-PR reporters: the same projection this service itself applies. */
+    TaskSlugs taskSlugs() {
+        return TaskSlugs.of(sharedProjects.get(), repositories.get());
     }
 
     /** One context operation off the calling thread: a pre-init, failed-init or disposed

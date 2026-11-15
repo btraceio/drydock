@@ -173,6 +173,14 @@ final class StackPrService implements AutoCloseable {
      * never blocks on a subprocess, never builds the task graph.
      */
     void observe(TaskSnapshot snapshot, Function<RepositoryId, String> slugs) {
+        observe(snapshot, slugs, Function.identity());
+    }
+
+    /** As above, with the dual-registry identity mapping the store's tasks
+     * were stamped with: a checkout known to both registries occupies one
+     * slug slot in the graph the base resolution walks. */
+    void observe(TaskSnapshot snapshot, Function<RepositoryId, String> slugs,
+            Function<RepositoryId, RepositoryId> canonical) {
         if (closed || snapshot == null) {
             return;
         }
@@ -187,14 +195,15 @@ final class StackPrService implements AutoCloseable {
             if (!attempted.add(document.id())) {
                 continue;
             }
-            attempt(document, snapshot, slugs);
+            attempt(document, snapshot, slugs, canonical);
         }
     }
 
     /** One task's PR attempt, dispatched off the caller's thread. */
-    private void attempt(TaskDocument task, TaskSnapshot snapshot, Function<RepositoryId, String> slugs) {
+    private void attempt(TaskDocument task, TaskSnapshot snapshot, Function<RepositoryId, String> slugs,
+            Function<RepositoryId, RepositoryId> canonical) {
         try {
-            CompletableFuture.runAsync(() -> attemptBody(task, snapshot, slugs), executor);
+            CompletableFuture.runAsync(() -> attemptBody(task, snapshot, slugs, canonical), executor);
         } catch (RejectedExecutionException e) {
             attempted.remove(task.id()); // the task stays reconsiderable by a later service
             LOG.log(Level.WARNING, "The stacked pull request attempt of task '" + task.title()
@@ -203,7 +212,8 @@ final class StackPrService implements AutoCloseable {
     }
 
     /** The whole attempt body: root resolution, probes, graph, base, POST. */
-    private void attemptBody(TaskDocument task, TaskSnapshot snapshot, Function<RepositoryId, String> slugs) {
+    private void attemptBody(TaskDocument task, TaskSnapshot snapshot, Function<RepositoryId, String> slugs,
+            Function<RepositoryId, RepositoryId> canonical) {
         OptionalRoot resolved = roots.apply(task.repository());
         if (resolved.root() == null) {
             attempted.remove(task.id()); // an unregistered repository may register later
@@ -225,7 +235,7 @@ final class StackPrService implements AutoCloseable {
                 retryAfter.remove(task.id()); // a prior reconsideration already succeeded
                 return; // attempted stays: never open a second PR for one task
             }
-            TaskGraph graph = TaskGraph.of(snapshot, slugs);
+            TaskGraph graph = TaskGraph.of(snapshot, slugs, canonical);
             Optional<String> prerequisiteBase = prerequisiteBaseOf(task, graph);
             String base;
             if (prerequisiteBase.isPresent()) {

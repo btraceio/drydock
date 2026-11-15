@@ -109,17 +109,27 @@ abstract class CrossProjectStartFixture extends BasePlatformTestCase
         super.tearDown();
     }
 
+    /** The fixture's registries in the production shape: one install catalog whose entries
+     * carry the fixture's display names; no shared registry (as in the sandboxes). */
+    TaskSlugs slugs() {
+        List<Repository> catalog = new ArrayList<>();
+        for (Map.Entry<RepositoryId, Path> entry : roots.entrySet()) {
+            catalog.add(new Repository(entry.getKey(), entry.getValue(), slugs.get(entry.getKey()),
+                    Instant.EPOCH, Instant.EPOCH, new RepositorySettings(Optional.empty())));
+        }
+        return TaskSlugs.of(List.of(), catalog);
+    }
+
     /** crossProject itself has no public seam; the two package-private lambda
       * interfaces are driven through Proxy (the T22b/T28b precedent). */
     Optional<String> cross(Supplier<Optional<PlanLaunchChoices>> confirm) throws Exception {
         Method flow = DelayedTaskStart.class.getDeclaredMethod("crossProject", Project.class,
-                DelayedTaskService.class, Function.class, Function.class, StartPlan.class,
+                DelayedTaskService.class, TaskSlugs.class, Function.class, StartPlan.class,
                 CONFIRMER, FACTORY, PlanDriver.Listener.class);
         flow.setAccessible(true);
-        Function<RepositoryId, String> names = slugs::get;
         Function<RepositoryId, Path> paths = roots::get;
         Supplier<Object> self = () -> this;
-        return (Optional<String>) flow.invoke(null, new Object[] {getProject(), service, names,
+        return (Optional<String>) flow.invoke(null, new Object[] {getProject(), service, slugs(),
                 paths, plan, proxy(CONFIRMER, confirm), proxy(FACTORY, self), this});
     }
 
