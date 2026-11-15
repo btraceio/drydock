@@ -7,11 +7,13 @@ import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryCatalog;
 import app.drydock.domain.RepositoryId;
 import app.drydock.git.GitStatusService;
+import app.drydock.git.WorktreeService;
 import app.drydock.mcp.TaskTools;
 import app.drydock.mcp.TaskToolContext;
 import app.drydock.intellij.tasks.NewTaskPlan.Choice;
 import app.drydock.intellij.tasks.TaskLauncher;
 import app.drydock.projects.SharedProject;
+import app.drydock.projects.SharedProjectsSeed;
 import com.intellij.openapi.project.Project;
 import app.drydock.tasks.PlanLaunch;
 import app.drydock.tasks.PlanLaunch.Origin;
@@ -107,6 +109,8 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
     private final Supplier<List<ManagedAgentSession>> sessions;
     private final Supplier<List<Repository>> repositories;
     private final Supplier<List<SharedProject>> sharedProjects;
+    /** Main-checkout resolution for a session's directory (git, bounded); never throws — empty when git cannot tell. */
+    private final Function<Path, Optional<Path>> mainCheckoutOf;
 
     private volatile TaskStore store;
     private volatile String initFailure;
@@ -198,16 +202,33 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
         this(root, executor, sessions, repositories, List::of);
     }
 
-    /** The full constructor: {@code sharedProjects} is what {@link #stableRepository}
-      * maps an install-catalog id through, so created tasks store the shared registry's
-      * id when it names the same checkout. */
+    /** The production constructor: the shared projects list, wiring the default (git-backed)
+     * main-checkout resolver. {@code sharedProjects} is what {@link #stableRepository}
+     * maps an install-catalog id through, so created tasks store the shared registry's
+     * id when it names the same checkout. */
     public DelayedTaskService(Path root, Executor executor, Supplier<List<ManagedAgentSession>> sessions,
             Supplier<List<Repository>> repositories, Supplier<List<SharedProject>> sharedProjects) {
+        this(root, executor, sessions, repositories, sharedProjects, directory -> {
+            try (WorktreeService worktrees = new WorktreeService()) {
+                return SharedProjectsSeed.mainCheckoutVia(worktrees).apply(directory);
+            }
+        });
+    }
+
+    /** The full constructor with an explicit main-checkout resolver (production code passes
+      * the git-backed default; tests inject a stub): {@code mainCheckoutOf} maps a session's
+      * directory to the MAIN CHECKOUT of its repository -- {@code git worktree list}, bounded,
+      * empty when git cannot tell, never throwing. A session in a linked worktree belongs to
+      * the worktree's repository, the project, never to the worktree itself. */
+    public DelayedTaskService(Path root, Executor executor, Supplier<List<ManagedAgentSession>> sessions,
+            Supplier<List<Repository>> repositories, Supplier<List<SharedProject>> sharedProjects,
+            Function<Path, Optional<Path>> mainCheckoutOf) {
         this.root = Objects.requireNonNull(root, "root").toAbsolutePath().normalize();
         this.executor = Objects.requireNonNull(executor, "executor");
         this.sessions = Objects.requireNonNull(sessions, "sessions");
         this.repositories = Objects.requireNonNull(repositories, "repositories");
         this.sharedProjects = Objects.requireNonNull(sharedProjects, "sharedProjects");
+        this.mainCheckoutOf = Objects.requireNonNull(mainCheckoutOf, "mainCheckoutOf");
         initialize();
     }
 
@@ -1229,7 +1250,7 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
       * list already carries it, else the shared id of the same checkout when the id names
       * an install-catalog repository the shared list knows by root. The task MCP tools
       * resolve the caller's repository from the IDE install's own catalog
-      * ({@code defaultRepository}, {@code repositoryBySlug}), whose UUIDs are distinct
+      * ({@code repositoryBySlug}), whose UUIDs are distinct
       * from the shared registry's -- and every consumer that keys by repository id (the
       * tool window's project rows, the Jira and GitHub settings, the mirror flows) keys
       * the SHARED registry. Tasks created through the IDE dialog already store the shared
@@ -1372,19 +1393,13 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
             return FollowUpLaunch.retryable("A claim or start of '" + task.text()
                     + "' is already in flight; the task never launches twice.");
         }
-        Repository registered = null;
-        for (Repository candidate : repositories.get()) {
-            if (candidate.id().equals(document.repository())) {
-                registered = candidate;
-                break;
-            }
-        }
-        if (registered == null) {
+        ProjectHandle project = resolveProject(document.repository()).orElse(null);
+        if (project == null) {
             DelayedTaskStart.IN_FLIGHT.remove(task);
             return FollowUpLaunch.retryable("The repository of '" + task.text()
-                    + "' is not registered; open it in Drydock first.");
+                    + "' is not registered in Drydock; open its project first.");
         }
-        final Repository repository = registered;
+        final ProjectHandle repository = project;
         // The immediate branch probe (S4): a claim REFUSES when the
         // prerequisite has no branch yet -- it never waits for one (that is
         // a confirmed stack unit's luxury, inside its own bounded future).
@@ -1445,7 +1460,7 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
         }
         AgentKind agent = resolveAgent(attempt.shape(), snapshot, stackAgent);
         String projectName = slugOf(document.repository());
-        String name = projectName != null ? projectName : repository.displayName();
+        String name = projectName != null ? projectName : repository.name();
         if (caller != null) {
             LOG.log(Level.INFO, "The follow-up '" + task.text() + "' was claimed by session "
                     + caller + "; the stacked launch is starting");
@@ -1643,29 +1658,69 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
         return snapshot;
     }
 
-    /** The caller's repository: its session's working root (the worktree the session runs
-     * in), mapped to the registered repository that owns that root. Empty when it resolves to none.
+    /** The caller's repository: the MAIN CHECKOUT of the session's directory, mapped to
+     * its registered repository. A session that runs in a linked worktree belongs to the
+     * project (the main checkout), never to the worktree: a task created there must be
+     * filed under the project, so that starting it follows the ordinary flow -- a fresh
+     * branch and worktree off the main checkout -- even after the worktree itself is
+     * gone. Order of resolution:
      *
-     * <p>The path matches only hit a working root that IS a registered root; a session
-     * living in a worktree of a registered repository (a detached {@code .worktrees/}
-     * checkout is the common case) matches none of them, yet the session still names its
-     * owning repository. The {@code repositoryId} fallback answers that case, and only
-     * when the owning repository is still registered -- an unregistered owner is not a
-     * default project, whatever the paths say.</p> */
+     * <ol>
+     * <li>the main checkout git reports for the working directory, in the install catalog,
+     *     else in the shared projects list (the caller's id passes through {@code stableRepository}
+     *     at create time, which maps an install id to the shared id of the same checkout);</li>
+     * <li>the pre-existing fallback chain -- the directory's own root, the session's recorded
+     *     worktree root, the session's recorded repository id (either registry) -- runs only
+     *     when git cannot answer (a vanished or non-repository directory); when git answers
+     *     but neither registry knows the main checkout, the session's recorded repository id
+     *     (either registry) is the answer, never the directory match.</li>
+     * </ol>
+     *
+     * Empty when nothing resolves -- an unregistered owning repository is not a default
+     * project, whatever the paths say. */
     private Optional<RepositoryId> resolveDefaultRepository(ManagedSessionId caller) {
         Objects.requireNonNull(caller, "caller");
         List<Repository> catalog = repositories.get();
+        List<SharedProject> shared = sharedProjects.get();
         return sessions.get().stream()
                 .filter(candidate -> candidate.id().equals(caller)).findFirst()
-                .flatMap(session -> RepositoryCatalog
-                        .findByCanonicalRoot(catalog, session.workingDirectory()).map(Repository::id)
-                        .or(() -> session.worktreeRoot().flatMap(
-                                root -> RepositoryCatalog.findByCanonicalRoot(catalog, root)
-                                        .map(Repository::id)))
-                        .or(() -> catalog.stream()
-                                .filter(repository -> repository.id().equals(session.repositoryId()))
+                .flatMap(session -> {
+                    Optional<Path> main = mainCheckoutOf.apply(session.workingDirectory())
+                            .map(RepositoryCatalog::canonicalize);
+                    if (main.isPresent()) {
+                        Optional<RepositoryId> known = RepositoryCatalog.findByCanonicalRoot(catalog, main.get())
                                 .map(Repository::id)
-                                .findFirst()));
+                                .or(() -> sharedByRoot(shared, main.get()).map(SharedProject::id));
+                        if (known.isPresent()) {
+                            return known;
+                        }
+                        // git knows the project but neither registry does: the session's own
+                        // record is the last identity left; the worktree root itself never is.
+                        return registeredId(catalog, shared, session.repositoryId());
+                    }
+                    return RepositoryCatalog.findByCanonicalRoot(catalog, session.workingDirectory())
+                            .map(Repository::id)
+                            .or(() -> session.worktreeRoot().flatMap(root ->
+                                    RepositoryCatalog.findByCanonicalRoot(catalog, root)
+                                            .map(Repository::id)))
+                            .or(() -> registeredId(catalog, shared, session.repositoryId()));
+                });
+    }
+
+    /** The shared project whose root is {@code root}, roots compared as canonical paths. */
+    private static Optional<SharedProject> sharedByRoot(List<SharedProject> shared, Path root) {
+        return shared.stream()
+                .filter(project -> RepositoryCatalog.canonicalize(project.root()).equals(root))
+                .findFirst();
+    }
+
+    /** The id under which {@code id} is registered, in either registry. */
+    private static Optional<RepositoryId> registeredId(List<Repository> catalog, List<SharedProject> shared,
+            RepositoryId id) {
+        return catalog.stream()
+                .filter(repository -> repository.id().equals(id)).findFirst().map(Repository::id)
+                .or(() -> shared.stream().filter(project -> project.id().equals(id))
+                        .findFirst().map(SharedProject::id));
     }
 
     /** The repository a display slug names (P2); an unknown OR ambiguous slug answers
@@ -1679,6 +1734,33 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
                 .map(Repository::id)
                 .toList();
         return matches.size() == 1 ? Optional.of(matches.get(0)) : Optional.empty();
+    }
+
+    /** A task's repository resolved to a checkout. */
+    private record ProjectHandle(Path root, String name) { }
+
+    /** A task's repository resolved to a checkout: root for git, name for display. Tasks
+     * created through any path may carry either registry's id (the UI and the MCP tools
+     * stamp the shared project's id; an install-catalog id appears for tasks created
+     * before either registry learned the checkout). Remote projects never resolve —
+     * there is no local checkout to probe or launch in. */
+    private Optional<ProjectHandle> resolveProject(RepositoryId id) {
+        List<SharedProject> shared = sharedProjects.get();
+        List<Repository> catalog = repositories.get();
+        Optional<ProjectHandle> resolved = SharedProjectResolver.resolve(shared, catalog, id)
+                .filter(project -> !project.isRemote())
+                .map(project -> new ProjectHandle(project.root(), project.displayName()));
+        if (resolved.isPresent()) {
+            return resolved;
+        }
+        // An install-catalog id whose checkout no shared entry knows (not even by root):
+        // usable for the launch, remote entries refused like anywhere else.
+        for (Repository candidate : catalog) {
+            if (candidate.id().equals(id) && !candidate.isRemote()) {
+                return Optional.of(new ProjectHandle(candidate.root(), candidate.displayName()));
+            }
+        }
+        return Optional.empty();
     }
 
     /** The registered repository's display slug, or null when unregistered or unnameable. */

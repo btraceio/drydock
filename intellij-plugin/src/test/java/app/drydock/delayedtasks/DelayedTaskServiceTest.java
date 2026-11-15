@@ -2,6 +2,7 @@ package app.drydock.delayedtasks;
 
 import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.*;
+import app.drydock.domain.SshRemote;
 import app.drydock.intellij.tasks.NewTaskPlan;
 import app.drydock.mcp.*;
 import app.drydock.projects.SharedProject;
@@ -195,6 +196,230 @@ class DelayedTaskServiceTest {
         } finally {
             if (original == null) System.clearProperty(DelayedTaskService.OVERRIDE_PROPERTY);
             else System.setProperty(DelayedTaskService.OVERRIDE_PROPERTY, original);
+        }
+    }
+
+    // 6a. A session in a linked worktree files its task under the MAIN CHECKOUT of that
+    // worktree (a worktree is never a task's repository): the main checkout resolves
+    // through the install catalog, and the create remaps it to the shared registry's id
+    // for the same checkout, exactly as the IDE's saved tasks do.
+    @Test
+    void aWorktreeSessionResolvesTheMainCheckout(@TempDir Path dir) throws Exception {
+        Path store = dir.resolve("store");
+        Path main = Files.createDirectories(dir.resolve("main"));
+        Path worktree = Files.createDirectories(dir.resolve("wt"));
+        Path mainOf = main.toAbsolutePath().normalize();
+        Path worktreeOf = worktree.toAbsolutePath().normalize();
+        RepositoryId installMainId = RepositoryId.newId();
+        RepositoryId sharedMainId = RepositoryId.newId();
+        RepositoryId worktreeId = RepositoryId.newId();
+        ManagedSessionId caller = ManagedSessionId.newId();
+        ManagedAgentSession session = session(caller, worktreeId, worktreeOf, Optional.empty());
+        List<Repository> catalog = List.of(
+                repository(installMainId, main, "Main Checkout"),
+                repository(worktreeId, worktree, "the-worktree"));
+        List<SharedProject> shared = List.of(
+                SharedProject.local(sharedMainId, mainOf, "Main Checkout", Instant.EPOCH));
+        try (DelayedTaskService service = new DelayedTaskService(store, executor,
+                () -> List.of(session), () -> catalog, () -> shared, ignored -> Optional.of(mainOf))) {
+            await(service.initialize());
+            assertEquals(Optional.of(installMainId), await(service.defaultRepository(caller)),
+                    "the main checkout in the install catalog wins over the worktree's own entry");
+            // The exact path the agent hit: task_create from a session in the worktree.
+            String created = textOf(service.taskTools().call(caller, "task_create",
+                    args("title", "Worktree follow-up")), "id");
+            assertTrue(Files.exists(committedFile(store, sharedMainId, TaskId.of(created))),
+                    "the task file lands under the shared project's directory");
+            assertFalse(Files.exists(store.resolve(worktreeId.toString())),
+                    "nothing is filed under the worktree's own repository id");
+        }
+    }
+
+    // 6b. A main checkout only the shared list knows (its install catalog never saw it)
+    // resolves directly to the shared id.
+    @Test
+    void aMainCheckoutKnownOnlyToTheSharedListResolvesThere(@TempDir Path dir) throws Exception {
+        Path store = dir.resolve("store");
+        Path main = Files.createDirectories(dir.resolve("main"));
+        Path worktree = Files.createDirectories(dir.resolve("wt"));
+        Path mainOf = main.toAbsolutePath().normalize();
+        Path worktreeOf = worktree.toAbsolutePath().normalize();
+        RepositoryId sharedMainId = RepositoryId.newId();
+        RepositoryId worktreeId = RepositoryId.newId();
+        ManagedSessionId caller = ManagedSessionId.newId();
+        ManagedAgentSession session = session(caller, worktreeId, worktreeOf, Optional.empty());
+        List<Repository> catalog =
+                List.of(repository(worktreeId, worktree, "the-worktree"));
+        List<SharedProject> shared = List.of(
+                SharedProject.local(sharedMainId, mainOf, "Main Checkout", Instant.EPOCH));
+        try (DelayedTaskService service = new DelayedTaskService(store, executor,
+                () -> List.of(session), () -> catalog, () -> shared, ignored -> Optional.of(mainOf))) {
+            await(service.initialize());
+            assertEquals(Optional.of(sharedMainId), await(service.defaultRepository(caller)),
+                    "the shared list answers for a main checkout the install catalog never saw");
+        }
+    }
+
+    // 6c. When git cannot resolve the directory (a vanished folder), the recorded-context
+    // chain answers exactly as before the main-checkout resolution existed.
+    @Test
+    void anUnresolvableDirectoryFallsBackToTheRecordedContext(@TempDir Path dir) throws Exception {
+        Path store = dir.resolve("store");
+        Path gone = dir.resolve("gone").toAbsolutePath().normalize();
+        RepositoryId recordedId = RepositoryId.newId();
+        ManagedSessionId caller = ManagedSessionId.newId();
+        ManagedAgentSession session = session(caller, recordedId, gone, Optional.empty());
+        List<Repository> catalog = List.of(repository(recordedId, dir.resolve("home"), "Project"));
+        try (DelayedTaskService service = new DelayedTaskService(store, executor,
+                () -> List.of(session), () -> catalog, List::of, ignored -> Optional.empty())) {
+            await(service.initialize());
+            assertEquals(Optional.of(recordedId), await(service.defaultRepository(caller)),
+                    "an unresolvable directory falls back to the session's recorded repository");
+        }
+    }
+
+    // 6d. A claim on a task filed under the shared registry's id (every task created by any
+    // of the create paths) resolves the repository through the shared list, not only the
+    // install catalog -- the claim proceeds to the branch probe instead of refusing with
+    // "not registered".
+    @Test
+    void aClaimResolvesTheSharedRegistryId(@TempDir Path dir) throws Exception {
+        Path store = dir.resolve("store");
+        Path root = Files.createDirectories(dir.resolve("project"));
+        Path rootOf = root.toAbsolutePath().normalize();
+        RepositoryId sharedId = RepositoryId.newId();
+        ManagedSessionId caller = ManagedSessionId.newId();
+        List<SharedProject> shared =
+                List.of(SharedProject.local(sharedId, rootOf, "Project Alpha", Instant.EPOCH));
+        try (DelayedTaskService service = new DelayedTaskService(store, executor,
+                List::of, List::of, () -> shared)) {
+            await(service.initialize());
+            TaskDocument prerequisite = await(service.create("Prerequisite", List.of(), sharedId)).document();
+            TaskDocument followUp = await(
+                    service.create("Follow up", List.of(prerequisite.id().text()), sharedId)).document();
+            TaskToolContext.Outcome claimed = await(service.claim(caller, followUp.id()));
+            assertTrue(claimed.refused(), "the branch probe must refuse (no branch exists yet)");
+            assertTrue(claimed.refusal().contains("does not exist in the repository"),
+                    "the claim reached the branch probe, so the shared-id repository resolved; refusal was: "
+                            + claimed.refusal());
+        }
+    }
+
+    // 6e. "git answered but neither registry knows the main checkout": the legacy chain
+    // runs only when git CANNOT answer -- here the session's recorded repository id is
+    // the answer, never the directory match (the registered worktree entry the session's
+    // directory matches would re-file the task under the worktree).
+    @Test
+    void anUnregisteredMainCheckoutAnswersTheRecordedIdNeverTheDirectoryMatch(@TempDir Path dir)
+            throws Exception {
+        Path store = dir.resolve("store");
+        Path worktree = Files.createDirectories(dir.resolve("wt"));
+        Path main = Files.createDirectories(dir.resolve("main"));
+        Path worktreeOf = worktree.toAbsolutePath().normalize();
+        Path mainOf = main.toAbsolutePath().normalize();
+        RepositoryId worktreeId = RepositoryId.newId();
+        RepositoryId recordedId = RepositoryId.newId();
+        ManagedSessionId caller = ManagedSessionId.newId();
+        ManagedAgentSession session = session(caller, recordedId, worktreeOf, Optional.of(worktreeOf));
+        List<Repository> catalog = List.of(
+                repository(worktreeId, worktree, "the-worktree"),
+                repository(recordedId, dir.resolve("home"), "Project"));
+        try (DelayedTaskService service = new DelayedTaskService(store, executor,
+                () -> List.of(session), () -> catalog, List::of, ignored -> Optional.of(mainOf))) {
+            await(service.initialize());
+            RepositoryId resolved = await(service.defaultRepository(caller)).orElseThrow();
+            assertEquals(recordedId, resolved,
+                    "git answered with a main checkout neither registry knows: the session's"
+                            + " recorded repository id is the answer");
+            assertNotEquals(worktreeId, resolved,
+                    "the registered worktree entry the directory matches is never the answer:"
+                            + " that would re-file the task under the worktree");
+        }
+    }
+
+    // 6f. A task filed under an install-catalog id whose root a shared entry also carries
+    // (a task created before either registry learned the checkout) resolves at claim time
+    // through the shared-root borrow and reaches the branch probe -- it never refuses
+    // with "not registered".
+    @Test
+    void aClaimOnAnInstallIdBorrowsTheSharedEntryRoot(@TempDir Path dir) throws Exception {
+        Path store = dir.resolve("store");
+        Path root = Files.createDirectories(dir.resolve("project"));
+        Path rootOf = root.toAbsolutePath().normalize();
+        RepositoryId installId = RepositoryId.newId();
+        RepositoryId sharedId = RepositoryId.newId();
+        ManagedSessionId caller = ManagedSessionId.newId();
+        List<SharedProject> shared =
+                List.of(SharedProject.local(sharedId, rootOf, "Project Alpha", Instant.EPOCH));
+        try (DelayedTaskService service = new DelayedTaskService(store, executor, List::of,
+                () -> List.of(repository(installId, rootOf, "Project Alpha")), () -> shared)) {
+            await(service.initialize());
+            // A legacy task file: written under the install id, before the create remap.
+            TaskId prerequisite;
+            TaskId followUp;
+            try (TaskStore direct = new TaskStore(store)) {
+                prerequisite = direct.create(installId, "Prerequisite", List.of()).id();
+                followUp = direct.create(installId, "Follow up", List.of()).id();
+                direct.update(followUp, new TaskFilePatch.Updates(null, null, null, null,
+                        List.of(prerequisite.text()), null));
+            }
+            TaskToolContext.Outcome claimed = await(service.claim(caller, followUp));
+            assertTrue(claimed.refused(), "the branch probe must refuse (no branch exists yet)");
+            assertTrue(claimed.refusal().contains("does not exist in the repository"),
+                    "the install id borrowed the shared entry's root and reached the branch"
+                            + " probe; refusal was: " + claimed.refusal());
+            assertFalse(claimed.refusal().contains("not registered"),
+                    "the claim resolved the repository; refusal was: " + claimed.refusal());
+        }
+    }
+
+    // 6g. A task filed under a REMOTE shared project's id never resolves: there is no
+    // local checkout to probe or launch in, so the claim refuses as unregistered before
+    // any branch probe.
+    @Test
+    void aClaimOnARemoteSharedProjectRefusesAsUnregistered(@TempDir Path dir) throws Exception {
+        Path store = dir.resolve("store");
+        RepositoryId remoteId = RepositoryId.newId();
+        ManagedSessionId caller = ManagedSessionId.newId();
+        SshRemote ssh = new SshRemote("box", "/srv/repo");
+        List<SharedProject> shared = List.of(new SharedProject(remoteId,
+                ssh.placeholderRoot(), "remote", Instant.EPOCH, Optional.of(ssh)));
+        try (DelayedTaskService service = new DelayedTaskService(store, executor,
+                List::of, List::of, () -> shared)) {
+            await(service.initialize());
+            TaskDocument prerequisite = await(service.create("Prerequisite", List.of(), remoteId)).document();
+            TaskDocument followUp = await(
+                    service.create("Follow up", List.of(prerequisite.id().text()), remoteId)).document();
+            TaskToolContext.Outcome claimed = await(service.claim(caller, followUp.id()));
+            assertTrue(claimed.refused(), "a remote project can never host a local claim");
+            assertTrue(claimed.refusal().contains("not registered"),
+                    "the remote shared id refuses as unregistered; refusal was: " + claimed.refusal());
+            assertFalse(claimed.refusal().contains("does not exist in the repository"),
+                    "the refusal comes before any branch probe; refusal was: " + claimed.refusal());
+        }
+    }
+
+    // 6h. The production default resolver over real git (no stub): a session in a linked
+    // worktree resolves to the registered MAIN CHECKOUT through git worktree list.
+    @Test
+    void theDefaultResolverMapsAWorktreeSessionToItsMainCheckout(@TempDir Path dir) throws Exception {
+        Path store = dir.resolve("store");
+        Path repo = Files.createDirectories(dir.resolve("repo"));
+        git(repo, "init");
+        git(repo, "-c", "user.email=test@example.com", "-c", "user.name=test",
+                "commit", "--allow-empty", "-m", "seed");
+        git(repo, "branch", "-m", "main");
+        Path worktree = dir.resolve("wt");
+        git(repo, "worktree", "add", worktree.toString(), "-b", "dd/probe");
+        RepositoryId mainId = RepositoryId.newId();
+        ManagedSessionId caller = ManagedSessionId.newId();
+        ManagedAgentSession session = session(caller, RepositoryId.newId(), worktree, Optional.empty());
+        try (DelayedTaskService service = new DelayedTaskService(store, executor,
+                () -> List.of(session), () -> List.of(repository(mainId, repo, "Main Checkout")),
+                List::of)) {
+            await(service.initialize());
+            assertEquals(Optional.of(mainId), await(service.defaultRepository(caller)),
+                    "git worktree list resolves the linked worktree to the registered main checkout");
         }
     }
 
@@ -967,6 +1192,18 @@ class DelayedTaskServiceTest {
 
     private static Repository repository(RepositoryId id, Path root, String displayName) {
         return new Repository(id, root, displayName, Instant.now(), Instant.now(), RepositorySettings.DEFAULT);
+    }
+
+    /** Runs one git command in {@code cwd}; a non-zero exit fails the test. */
+    private static void git(Path cwd, String... args) throws IOException, InterruptedException {
+        List<String> command = new ArrayList<>();
+        command.add("git");
+        command.addAll(List.of(args));
+        Process process = new ProcessBuilder(command).directory(cwd.toFile()).start();
+        process.getInputStream().readAllBytes();
+        if (!process.waitFor(30, TimeUnit.SECONDS) || process.exitValue() != 0) {
+            throw new IllegalStateException("git " + List.of(args) + " failed in " + cwd);
+        }
     }
 
     /** The committed file path of one task: <root>/<repository-id>/<id>.md. */
