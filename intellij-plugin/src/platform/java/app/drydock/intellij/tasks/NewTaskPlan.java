@@ -5,6 +5,7 @@ import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.CreateContext;
 import app.drydock.domain.ModelTiers;
 import app.drydock.domain.SessionMode;
+import app.drydock.domain.PullRequestTarget;
 import app.drydock.git.BranchNameRules;
 import app.drydock.git.WorktreeNaming;
 import app.drydock.projects.SharedProject;
@@ -93,7 +94,8 @@ public final class NewTaskPlan {
      */
     public record Choice(String name, Optional<String> instructions, AgentKind agent, SessionMode mode, WorkIn workIn,
                          String branch, String start, Path folder, OpenIn openIn, Optional<String> model,
-                         Optional<ModelTiers> tiers, Optional<String> subagentModelRule, boolean onWorkspaceBox) {
+                         Optional<ModelTiers> tiers, Optional<String> subagentModelRule, boolean onWorkspaceBox,
+                         Optional<PullRequestTarget> targetPullRequest) {
         public Choice {
             Objects.requireNonNull(name, "name");
             Objects.requireNonNull(instructions, "instructions");
@@ -102,6 +104,14 @@ public final class NewTaskPlan {
             Objects.requireNonNull(model, "model");
             Objects.requireNonNull(tiers, "tiers");
             Objects.requireNonNull(subagentModelRule, "subagentModelRule");
+            Objects.requireNonNull(targetPullRequest, "targetPullRequest");
+        }
+
+        public Choice(String name, Optional<String> instructions, AgentKind agent, SessionMode mode, WorkIn workIn,
+                      String branch, String start, Path folder, OpenIn openIn, Optional<String> model,
+                      Optional<ModelTiers> tiers, Optional<String> subagentModelRule, boolean onWorkspaceBox) {
+            this(name, instructions, agent, mode, workIn, branch, start, folder, openIn, model, tiers,
+                    subagentModelRule, onWorkspaceBox, Optional.empty());
         }
 
         /** Today's signature, delegating with {@code onWorkspaceBox = false}: a launch that

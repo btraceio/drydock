@@ -111,6 +111,10 @@ final class TaskTreeInputs implements AutoCloseable {
     /** The last completed badge join's answer, served by gathers while the next join runs. */
     private volatile Map<ManagedSessionId, BranchPullRequest> publishedSessionPullRequests = Map.of();
     private final GhCliService github = new GhCliService();
+    private final TargetPullRequests targets = new TargetPullRequests(
+            target -> github.pullRequest(Path.of(System.getProperty("user.home")),
+                    Optional.of(target.repository()), target.number()),
+            System::nanoTime, () -> this.lateData.run());
     private final JiraIssueSource jira = new JiraIssueSource();
     private final GitExecutableLocator gitLocator = new GitExecutableLocator();
     private final Map<Path, CachedWorktrees> worktreeCache = new ConcurrentHashMap<>();
@@ -217,6 +221,7 @@ final class TaskTreeInputs implements AutoCloseable {
         issueCache.clear();
         pullRequestCache.clear();
         branchPullRequestCache.clear();
+        targets.clear();
         remoteCache.clear();
     }
 
@@ -401,7 +406,8 @@ final class TaskTreeInputs implements AutoCloseable {
         // catalog) by ResumabilityCache so a gather does not re-ask for it.
         Map<ManagedSessionId, Boolean> resumable =
                 resumability.refresh(sessions, running, AgentConsoles::hasConversation);
-        Map<ManagedSessionId, BranchPullRequest> sessionPullRequests = publishedSessionPullRequests;
+        Map<ManagedSessionId, BranchPullRequest> sessionPullRequests =
+                targets.resolve(sessions, publishedSessionPullRequests);
         // The badge join itself runs off this pass: per-session worktree
         // listings here made the initial gather cost one "git worktree
         // list" plus an activity probe per listed worktree, per session
@@ -482,8 +488,9 @@ final class TaskTreeInputs implements AutoCloseable {
     /**
      * Schedules the session-to-badge join off the gather's thread.
      *
-     * <p>Each session's pull request is matched by its current branch against
-     * the head branches of its project's PRs. A session joins its project
+     * <p>Sessions with explicit targets use {@link TargetPullRequests}, not
+     * this branch join. Each remaining session's pull request is matched
+     * by its current branch against the head branches of its project's PRs. A session joins its project
      * through paths, never through ids: the live worktree list of its
      * working directory names the main checkout, whose canonical path is
      * the badge source's key (a session's {@code repositoryId} is a
@@ -555,7 +562,7 @@ final class TaskTreeInputs implements AutoCloseable {
         Map<Path, Map<String, BranchPullRequest>> byRoot = new HashMap<>();
         Map<ManagedSessionId, BranchPullRequest> matched = new HashMap<>();
         for (ManagedAgentSession session : sessions) {
-            if (!Files.isDirectory(session.workingDirectory())) {
+            if (session.targetPullRequest().isPresent() || !Files.isDirectory(session.workingDirectory())) {
                 continue;
             }
             List<Worktree> listed = listingsOf.apply(session.workingDirectory());

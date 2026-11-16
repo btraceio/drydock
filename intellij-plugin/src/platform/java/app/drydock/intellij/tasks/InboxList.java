@@ -389,22 +389,33 @@ final class InboxList extends JBList<InboxList.Entry> {
     }
 
     /** The PR number a row shows, and whether it is a link (its page is known). */
-    record PullRequestLabel(int number, boolean link) {
+    record PullRequestLabel(int number, boolean link, TaskTreeRenderer.PullRequestBadgeKind kind) {
+        PullRequestLabel(int number, boolean link) {
+            this(number, link, TaskTreeRenderer.PullRequestBadgeKind.UNKNOWN);
+        }
     }
 
     static Optional<PullRequestLabel> pullRequestLabel(Item item) {
         return switch (item) {
             case SessionItem session -> {
                 TaskRow task = session.row();
-                Optional<PullRequestLabel> linked = task.branchPullRequest()
-                        .filter(pr -> TaskTreeRenderer.pullRequestUrl(task).isPresent())
-                        .map(pr -> new PullRequestLabel(pr.number(), true));
-                yield linked.or(() -> task.branchPullRequest().map(pr -> pr.number())
-                        .or(() -> TaskTreeRenderer.pullRequestOf(task))
-                        .map(number -> new PullRequestLabel(number, false)));
+                if (task.session().targetPullRequest().isPresent()) {
+                    var target = task.session().targetPullRequest().get();
+                    var kind = task.branchPullRequest()
+                            .filter(pr -> pr.number() == target.number()
+                                    && pr.url().filter(target.url()::equals).isPresent())
+                            .map(TaskTreeRenderer::badgeKind)
+                            .orElse(TaskTreeRenderer.PullRequestBadgeKind.UNKNOWN);
+                    yield Optional.of(new PullRequestLabel(target.number(), true, kind));
+                }
+                yield task.branchPullRequest()
+                        .map(pr -> new PullRequestLabel(pr.number(), pr.url().isPresent(), TaskTreeRenderer.badgeKind(pr)))
+                        .or(() -> TaskTreeRenderer.pullRequestOf(task)
+                                .map(number -> new PullRequestLabel(number, false)));
             }
             case TaskItem task -> task.row().pullRequest()
-                    .map(pr -> new PullRequestLabel(pr.number(), pr.url().isPresent()));
+                    .map(pr -> new PullRequestLabel(pr.number(), pr.url().isPresent(), pr.draft()
+                            ? TaskTreeRenderer.PullRequestBadgeKind.DRAFT : TaskTreeRenderer.PullRequestBadgeKind.OPEN));
         };
     }
 
@@ -512,6 +523,7 @@ final class InboxList extends JBList<InboxList.Entry> {
                     pr.ifPresent(label -> {
                         pullRequestLink = label.link();
                         pullRequest.setText("#" + label.number());
+                        pullRequest.setIcon(TaskTreeRenderer.pullRequestIcon(label.kind()).orElse(null));
                         pullRequest.setForeground(selected ? foreground : label.link()
                                 ? JBUI.CurrentTheme.Link.Foreground.ENABLED : NamedColorUtil.getInactiveTextColor());
                     });

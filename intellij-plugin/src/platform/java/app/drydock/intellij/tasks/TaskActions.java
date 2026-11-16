@@ -186,6 +186,10 @@ final class TaskActions {
         AnAction removeWorktrees = removeWorktrees();
         AnAction removeProject = removeProject();
         Map<TaskMenu.Item, AnAction> actions = new EnumMap<>(TaskMenu.Item.class);
+        actions.put(TaskMenu.Item.ASSOCIATE_PR, task("Associate with PR…",
+                "Set or clear the pull request this session targets", AllIcons.Vcs.Vendors.Github,
+                row -> true, row -> notBusy(row) && AssociatePullRequest.available(row.session().id()),
+                (project, row) -> AssociatePullRequest.show(project, row.session())));
         actions.put(TaskMenu.Item.DEACTIVATE, deactivate);
         actions.put(TaskMenu.Item.REVIEW_CHANGES, askReview);
         actions.put(TaskMenu.Item.DEACTIVATE_AND_CLOSE, deactivateAndClose);

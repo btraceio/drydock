@@ -59,6 +59,7 @@ final class TaskMenu {
         REVIEW_CHANGES,
         TRANSFER_TO,
         RENAME,
+        ASSOCIATE_PR,
         /** Set or clear the human's follow-up flag; the label follows the session's current flag. */
         FLAG,
         NEW_TASK,
@@ -253,7 +254,7 @@ final class TaskMenu {
                 section(Item.DEACTIVATE,
                         TaskActions.reviewsChanges(row) ? Item.REVIEW_CHANGES : null,
                         facts.transferAvailable() ? Item.TRANSFER_TO : null),
-                List.of(Item.RENAME, Item.FLAG, Item.NEW_TASK),
+                List.of(Item.RENAME, Item.ASSOCIATE_PR, Item.FLAG, Item.NEW_TASK),
                 section(facts.sessionGitHubLink() ? Item.OPEN_IN_GITHUB : null,
                         facts.sessionJiraLink() ? Item.OPEN_IN_JIRA : null),
                 section(TaskActions.closesOwnWindow(row) ? Item.DEACTIVATE_AND_CLOSE : null,
@@ -274,7 +275,7 @@ final class TaskMenu {
                 List.of(Item.SWITCH_TO_TASK),
                 section(facts.remoteStop() ? Item.DEACTIVATE : null,
                         Item.RESUME, TaskActions.resumesElsewhere(row) ? Item.RESUME_IN_OWN_WINDOW : null),
-                List.of(Item.RENAME, Item.FLAG, Item.NEW_TASK),
+                List.of(Item.RENAME, Item.ASSOCIATE_PR, Item.FLAG, Item.NEW_TASK),
                 section(facts.sessionGitHubLink() ? Item.OPEN_IN_GITHUB : null,
                         facts.sessionJiraLink() ? Item.OPEN_IN_JIRA : null),
                 List.of(Item.DONE_WITH_TASK)));

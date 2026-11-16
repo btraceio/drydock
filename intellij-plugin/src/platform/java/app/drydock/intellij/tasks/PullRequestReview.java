@@ -237,7 +237,7 @@ public final class PullRequestReview {
                                 if (!from.isDisposed()) {
                                     TaskLauncher.open(from, Optional.of(mainRoot),
                                             Optional.of(new NewTaskPlan.FixedWorktree(worktree, branch)),
-                                            preset);
+                                            preset.withPullRequest(pullRequest));
                                 }
                             }, ModalityState.nonModal()));
                 } finally {
