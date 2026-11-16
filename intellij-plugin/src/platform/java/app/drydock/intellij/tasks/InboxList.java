@@ -61,9 +61,10 @@ import java.util.function.Predicate;
  * rows, and a "+N more" / "Show less" toggle where the group truncates.
  * Clicking a header (or Enter on it) collapses or expands the group; the
  * collapsed and show-all sets live here, seeded from each group's default.
- * A row is {@code [icon] title … [#PR] [project]}: the PR number opens the
- * pull request, the project tag reports the project to the owner, and a
- * double-click or Enter activates the row. EDT only.
+ * A row is {@code [icon] title … [#PR] [project] [window]}: the PR number
+ * opens the pull request, the project tag reports the project to the owner,
+ * the window tag names a running session's other window, and a double-click
+ * or Enter activates the row. EDT only.
  */
 final class InboxList extends JBList<InboxList.Entry> {
 
@@ -388,6 +389,24 @@ final class InboxList extends JBList<InboxList.Entry> {
         return text.toString();
     }
 
+    /**
+     * A running session's window chip: where its console is shown, when that
+     * is not this window — "in its own window" or "in {@code <repo>}" +
+     * " window" ({@link TaskPlacement} is the vocabulary; the words are its
+     * own). Empty for a session shown here and for one no window shows —
+     * neither runs in a different window — and for task rows.
+     */
+    static Optional<String> windowTag(Item item) {
+        if (item instanceof SessionItem session) {
+            TaskPlacement placement = session.row().placement();
+            if (placement instanceof TaskPlacement.OwnWindow
+                    || placement instanceof TaskPlacement.OtherWindow) {
+                return Optional.of(placement.meta());
+            }
+        }
+        return Optional.empty();
+    }
+
     /** The PR number a row shows, and whether it is a link (its page is known). */
     record PullRequestLabel(int number, boolean link, TaskTreeRenderer.PullRequestBadgeKind kind) {
         PullRequestLabel(int number, boolean link) {
@@ -455,10 +474,11 @@ final class InboxList extends JBList<InboxList.Entry> {
         /** A row's title: a label, so a title wider than the cell ends in an ellipsis. */
         private final JBLabel rowTitle = new JBLabel();
         private final JPanel center = new JPanel(new BorderLayout());
-        /** GridBag centres the PR number and the tag vertically on the title's line. */
+        /** GridBag centres the PR number and the tags vertically on the title's line. */
         private final JPanel trailing = new JPanel(new GridBagLayout());
         private final JBLabel pullRequest = new JBLabel();
         private final JBLabel tag = new JBLabel();
+        private final JBLabel windowTag = new JBLabel();
         private boolean pullRequestLink;
 
         Renderer() {
@@ -471,7 +491,9 @@ final class InboxList extends JBList<InboxList.Entry> {
             spaced.insets = JBUI.insetsLeft(6);
             trailing.add(pullRequest, spaced);
             trailing.add(tag, spaced);
+            trailing.add(windowTag, spaced);
             tag.setFont(JBUI.Fonts.smallFont());
+            windowTag.setFont(JBUI.Fonts.smallFont());
             panel.add(center, BorderLayout.CENTER);
             panel.add(trailing, BorderLayout.EAST);
         }
@@ -536,7 +558,16 @@ final class InboxList extends JBList<InboxList.Entry> {
                                 JBUI.Borders.customLine(needs ? NEEDS_TAG_BORDER : TAG_BORDER, 1),
                                 JBUI.Borders.empty(0, 4)));
                     });
-                    trailing.setVisible(pr.isPresent() || project.isPresent());
+                    Optional<String> window = windowTag(item);
+                    windowTag.setVisible(window.isPresent());
+                    window.ifPresent(text -> {
+                        windowTag.setText(text);
+                        windowTag.setForeground(selected ? foreground : NamedColorUtil.getInactiveTextColor());
+                        windowTag.setBorder(BorderFactory.createCompoundBorder(
+                                JBUI.Borders.customLine(needs ? NEEDS_TAG_BORDER : TAG_BORDER, 1),
+                                JBUI.Borders.empty(0, 4)));
+                    });
+                    trailing.setVisible(pr.isPresent() || project.isPresent() || window.isPresent());
                     panel.setBorder(JBUI.Borders.empty(0, 30, 0, 12));
                 }
             }
