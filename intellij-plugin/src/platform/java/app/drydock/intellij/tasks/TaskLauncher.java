@@ -18,6 +18,7 @@ import app.drydock.git.WorktreeService;
 import app.drydock.github.GitHubLinkService;
 import app.drydock.delayedtasks.DelayedTaskService;
 import app.drydock.delayedtasks.TaskLaunchBinding;
+import app.drydock.delayedtasks.TaskNotifications;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.actions.SessionDialogs;
 import app.drydock.intellij.projects.SharedProjectsService;
@@ -46,6 +47,10 @@ import app.drydock.workspace.WorkspaceBoxNames;
 import app.drydock.workspace.WorkspacesCli;
 
 import com.intellij.ide.impl.ProjectUtil;
+import com.intellij.notification.Notification;
+import com.intellij.notification.NotificationGroupManager;
+import com.intellij.notification.NotificationType;
+import com.intellij.openapi.application.Application;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.progress.ProgressIndicator;
@@ -67,6 +72,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -130,15 +136,145 @@ public final class TaskLauncher {
                 !here && windowOpenOnTarget, here && !targetIsThisWindow);
     }
 
-    /** Pure: the remote's default branch ({@code origin/main}) when it exists, else the local default. */
+    /** Pure: the remote's default branch ({@code origin/main}) when it exists, else the local default.
+      * Origin is preferred over every other remote, whatever order {@code git remote} lists them in. */
     static String defaultStart(String defaultBranch, List<String> startPoints, List<String> remotes) {
-        for (String remote : remotes) {
+        List<String> originFirst = new ArrayList<>(remotes);
+        originFirst.sort(Comparator.comparingInt(remote -> "origin".equals(remote) ? 0 : 1));
+        for (String remote : originFirst) {
             String candidate = remote + "/" + defaultBranch;
             if (startPoints.contains(candidate)) {
                 return candidate;
             }
         }
         return defaultBranch;
+    }
+
+    /**
+     * The fork ref a task branch is cut from at {@code git worktree add} time.
+     * When {@code start} names the repository's default branch -- however
+     * spelled, bare or {@code origin/}-qualified -- the ref is resolved
+     * FRESH: {@code git fetch origin <name>} runs first and the fork comes
+     * from {@code origin/<name>}, so a task branch never forks from a stale
+     * (or ahead-of-origin, or merely local) default branch. Any other start
+     * point -- a {@code dd/<id>} stack base, a topic branch the user picked
+     * -- passes through untouched and no fetch runs.
+     *
+     * <p>Best-effort by contract: a failed fetch never blocks the launch.
+     * The fork proceeds from the last-known ref (the last probe the launcher
+     * could complete — the fresh probe's ref when it succeeded, its
+     * pre-fetch resolution when it did not) and {@link #notifyStaleBase}
+     * tells the user their base may be old. Resolution failures (no git, an
+     * unreadable repository) return {@code start} unchanged and let
+     * {@code createWorktree} surface its own error.</p>
+     *
+     * <p>Throws {@link InterruptedException} when the calling thread is
+     * interrupted while git is being consulted (the launch was cancelled);
+     * the interrupt flag is restored and the worktree is never created.</p>
+     */
+    static String forkPointForLaunch(GitStatusService git, Path mainRoot, String start,
+                                     Project from, ProgressIndicator indicator) throws InterruptedException {
+        if (start == null || start.isBlank()) {
+            return start;
+        }
+        GitStatusService.DefaultBranchFork probe = resolveFork(git, mainRoot, false);
+        if (probe == null || !isDefaultBranchStart(start, probe)) {
+            return start;
+        }
+        if (indicator != null) {
+            indicator.setText("Fetching " + probeName(probe) + "…");
+        }
+        GitStatusService.DefaultBranchFork fresh = resolveFork(git, mainRoot, true);
+        if (fresh == null) {
+            // The fetch-time resolution blew up after the probe succeeded;
+            // fall back to the probe's answer (a usable ref, just not proven
+            // fresh) rather than the raw start, which may not even name a ref.
+            return probe.ref();
+        }
+        if (fresh.fetchFailed()) {
+            notifyStaleBase(from, fresh);
+        }
+        return fresh.ref();
+    }
+
+    /**
+     * The fork-and-create step of a task launch: resolve the launch's fork
+     * point (see {@link #forkPointForLaunch}) and create the worktree.
+     * Package-private so tests can pin the wiring end to end.
+     */
+    static void createWorktreeFresh(GitStatusService git, Path mainRoot, Choice choice, Path workingDirectory,
+                                    Project from, ProgressIndicator indicator)
+            throws InterruptedException, ExecutionException, TimeoutException {
+        String start = forkPointForLaunch(git, mainRoot, choice.start(), from, indicator);
+        if (indicator != null) {
+            indicator.setText("Creating worktree " + choice.branch() + "…");
+        }
+        git.createWorktree(mainRoot, workingDirectory, choice.branch(),
+                        Optional.ofNullable(start).filter(s -> !s.isBlank()))
+                .get(WORKTREE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+    }
+
+    /** True when {@code start} spells the repository's default branch, in either of the accepted spellings. */
+    static boolean isDefaultBranchStart(String start, GitStatusService.DefaultBranchFork fork) {
+        if (start == null || start.isBlank()) {
+            return false;
+        }
+        if (fork.name().isEmpty()) {
+            // Nothing resolved anywhere; matches defaultBranchFork's "main" fallback.
+            return start.equals("main");
+        }
+        String name = fork.name().get();
+        // The two spellings a human (or the dialog) can produce for the
+        // default branch. ref() is one of these two whenever the resolver
+        // could see the ref at all; when nothing resolves it answers the
+        // "main" fallback instead, which is no worse a match than pretending
+        // to recognize it here.
+        return start.equals(name) || start.equals("origin/" + name);
+    }
+
+    /** One fork resolution pass; null when git itself could not answer (best-effort callers). */
+    private static GitStatusService.DefaultBranchFork resolveFork(GitStatusService git, Path mainRoot,
+                                                                  boolean fetch) throws InterruptedException {
+        try {
+            return git.defaultBranchFork(mainRoot, fetch).get();
+        } catch (InterruptedException e) {
+            // The launch was cancelled while git ran: unwind, don't unwind into a stale fork.
+            Thread.currentThread().interrupt();
+            throw e;
+        } catch (ExecutionException | RuntimeException e) {
+            LOG.log(Level.WARNING, "Could not resolve the default-branch fork point of " + mainRoot, e);
+            return null;
+        }
+    }
+
+    /** What to name in the progress line while fetching: {@code origin/<name>}, or "the default branch". */
+    private static String probeName(GitStatusService.DefaultBranchFork fork) {
+        return fork.name().map(n -> "origin/" + n).orElse("the default branch");
+    }
+
+    /** A non-blocking warning that the branch is forking from a possibly stale default branch. */
+    private static void notifyStaleBase(Project from, GitStatusService.DefaultBranchFork fork) {
+        Application app = ApplicationManager.getApplication();
+        if (app == null || from == null) {
+            // Headless (tests, smoke runs): the log carries the failure; no balloon exists.
+            LOG.log(Level.WARNING, "Could not fetch " + probeName(fork)
+                            + "; forking from the last-known " + fork.ref() + ". "
+                            + fork.fetchError().orElse("unknown error"));
+            return;
+        }
+        String detail = fork.fetchError().map(TaskLauncher::firstLine).orElse("fetch failed");
+        Notification notification = NotificationGroupManager.getInstance()
+                .getNotificationGroup(TaskNotifications.NOTIFICATION_GROUP)
+                .createNotification("Couldn't update the default branch",
+                        "Branching from the last-known " + fork.ref() + " — the task's base may be behind. "
+                                + detail,
+                        NotificationType.WARNING);
+        app.invokeLater(() -> notification.notify(from), ModalityState.nonModal(), from.getDisposed());
+    }
+
+    private static String firstLine(String text) {
+        int newline = text.indexOf('\n');
+        return newline < 0 ? text : text.substring(0, newline);
     }
 
     // ---- the workspace-box remote branch (T20) ---------------------------------
@@ -1271,9 +1407,7 @@ public final class TaskLauncher {
                                 .get(PREPARE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
                     }
                     if (steps.createWorktree()) {
-                        indicator.setText("Creating worktree " + choice.branch() + "…");
-                        git.createWorktree(mainRoot, steps.workingDirectory(), choice.branch(),
-                                Optional.of(choice.start())).get(WORKTREE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                        createWorktreeFresh(git, mainRoot, choice, steps.workingDirectory(), from, indicator);
                     }
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();

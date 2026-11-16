@@ -5,6 +5,7 @@ import app.drydock.agent.providers.HostBinaryLocator;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionMode;
 import app.drydock.domain.WorkspaceBoxBinding;
+import app.drydock.git.GitStatusService;
 import app.drydock.intellij.tasks.NewTaskPlan.Choice;
 import app.drydock.intellij.tasks.NewTaskPlan.OpenIn;
 import app.drydock.intellij.tasks.NewTaskPlan.WorkIn;
@@ -976,6 +977,57 @@ class TaskLauncherTest {
                         .anyMatch(call -> String.join(" ", call.argv()).contains("find")),
                 "the fresh box ran its own discovery scan");
         assertTrue(harness.mapping.storedClones.contains("/home/dev/profiling-plugins"));
+    }
+
+    // ---- the default-branch fork point (task branches fork from a fresh origin/<default>) ----
+
+    private static GitStatusService.DefaultBranchFork fork(String ref, String name) {
+        return new GitStatusService.DefaultBranchFork(
+                ref, Optional.ofNullable(name), false, false, Optional.empty());
+    }
+
+    @Test
+    void theDefaultBranchIsRecognizedInBothSpellings() {
+        GitStatusService.DefaultBranchFork fork = fork("origin/main", "main");
+        assertTrue(TaskLauncher.isDefaultBranchStart("main", fork));
+        assertTrue(TaskLauncher.isDefaultBranchStart("origin/main", fork));
+        assertTrue(TaskLauncher.isDefaultBranchStart("origin/main", fork("origin/main", "main")));
+    }
+
+    @Test
+    void aNonDefaultStartPointIsNeverRewritten() {
+        GitStatusService.DefaultBranchFork fork = fork("origin/main", "main");
+        assertFalse(TaskLauncher.isDefaultBranchStart("dd/some-task", fork));
+        assertFalse(TaskLauncher.isDefaultBranchStart("feature/x", fork));
+        assertFalse(TaskLauncher.isDefaultBranchStart("dd/main-extended", fork));
+        assertFalse(TaskLauncher.isDefaultBranchStart("", fork));
+        assertFalse(TaskLauncher.isDefaultBranchStart(null, fork));
+    }
+
+    @Test
+    void anUnresolvableRepositoryStillRecognizesTheMainFallback() {
+        // Nothing resolves anywhere: the service reports name=absent, ref="main".
+        GitStatusService.DefaultBranchFork fork = fork("main", null);
+        assertTrue(TaskLauncher.isDefaultBranchStart("main", fork));
+        assertFalse(TaskLauncher.isDefaultBranchStart("origin/main", fork));
+    }
+
+    @Test
+    void theDefaultStartPrefersOriginOverOtherRemotesRegardlessOfOrder() {
+        // "github" sorts before "origin"; origin must still win.
+        assertEquals("origin/main",
+                TaskLauncher.defaultStart("main", List.of("origin/main", "github/main"),
+                        List.of("github", "origin")));
+        assertEquals("origin/main",
+                TaskLauncher.defaultStart("main", List.of("github/main", "origin/main"),
+                        List.of("github", "origin")));
+        // No origin carrying the default: the other remote is used.
+        assertEquals("upstream/main",
+                TaskLauncher.defaultStart("main", List.of("upstream/main", "upstream/dev"),
+                        List.of("upstream")));
+        // Neither remote carries it: the local default name is used.
+        assertEquals("main",
+                TaskLauncher.defaultStart("main", List.of("origin/dev"), List.of("origin")));
     }
 
     @Test

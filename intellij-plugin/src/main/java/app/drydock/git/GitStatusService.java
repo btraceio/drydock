@@ -17,7 +17,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -429,13 +431,168 @@ public final class GitStatusService implements AutoCloseable {
     }
 
     /**
-     * Lists every branch -- local and remote-tracking -- plus the
-     * repository's remote names, for the create-worktree modal's branch
-     * picker, on this service's background executor. Occupancy
-     * ({@link BranchRef#checkedOutAt()}) is filled in separately by
-     * {@link BranchCatalog#merge}, which composes this with
-     * {@link WorktreeService#list}.
+     * Where a branch that forks the repository's DEFAULT branch should
+     * start from — the fork point for a task branch cut from the default.
+     *
+     * <p>{@link #ref()} is the ref to hand to {@code git worktree add
+     * -- <ref>}: {@code origin/<name>} once a fetch has refreshed it (or
+     * whenever it already exists and no fetch was asked for), the local
+     * {@code <name>} only in a repository with no such remote-tracking
+     * ref, and {@code "main"} when nothing resolves at all (the historical
+     * fallback; the worktree add then fails visibly, which is better than
+     * silently picking an arbitrary ref). {@link #name()} is the bare
+     * default-branch name the resolution worked from, empty when nothing
+     * resolved; callers use it to recognize a default-branch fork point
+     * however the user spelled it (bare or {@code origin/}-qualified).</p>
+     *
+     * <p>{@link #fetched()} reports whether this call refreshed
+     * {@code origin/<name>} ({@code git fetch origin <name>}, terminal
+     * prompts disabled, bounded by {@link #FETCH_TIMEOUT});
+     * {@link #fetchFailed()} reports that the fetch ran and failed, in
+     * which case {@code ref()} is the best-known ref — a stale
+     * {@code origin/<name>}, or the local branch — and {@link #fetchError()}
+     * carries git's excerpt for the caller to surface as a warning. A
+     * repository without an {@code origin} remote is not an error: the
+     * fetch is simply skipped and {@link #fetched()} stays false.</p>
      */
+    public record DefaultBranchFork(String ref, Optional<String> name, boolean fetched,
+                                    boolean fetchFailed, Optional<String> fetchError) {
+        public DefaultBranchFork {
+            Objects.requireNonNull(ref, "ref");
+            Objects.requireNonNull(name, "name");
+            Objects.requireNonNull(fetchError, "fetchError");
+        }
+    }
+
+    /**
+     * Resolves where a branch that forks the repository's DEFAULT branch
+     * should start from. {@code fetch} controls whether {@code origin/<name>}
+     * is refreshed first; pass false for a local probe (the prompt) and true
+     * at the point the fork is actually made. Best-effort: a failed fetch
+     * never fails the future — it is reported on the result ({@link
+     * DefaultBranchFork#fetchFailed()}) so the caller can fork from the
+     * last-known ref and say so.
+     */
+    public CompletableFuture<DefaultBranchFork> defaultBranchFork(Path repositoryRoot, boolean fetch) {
+        return CompletableFuture.supplyAsync(() -> defaultBranchForkBlocking(repositoryRoot, fetch), executor);
+    }
+
+    /**
+     * Serializes {@code git fetch origin <default>} per repository. Two
+     * task launches starting in the same repository at the same moment
+     * would otherwise race the same remote-tracking ref and one fetch
+     * would lose with "cannot lock ref" -- spurious, and the loser is the
+     * launch whose fork would then warn about a stale base it actually
+     * got from its sibling's fetch. Unbounded on purpose: one small entry
+     * per distinct repository the app has forked in, a handful on any real
+     * desktop; a bounded map would evict a lock while its holder is
+     * mid-fetch, which is worse than the memory it saves.
+     */
+    private static final ConcurrentHashMap<String, Object> FETCH_LOCKS = new ConcurrentHashMap<>();
+
+    /** The repository identity the per-repo fetch lock is keyed on. */
+    private static String fetchLockKey(Path repositoryRoot) {
+        return repositoryRoot.toAbsolutePath().normalize().toString();
+    }
+
+    /** Synchronous form of {@link #defaultBranchFork(Path, boolean)}, package-private for tests. */
+    DefaultBranchFork defaultBranchForkBlocking(Path repositoryRoot, boolean fetch) {
+        Path git = locator.locate()
+                .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
+        Optional<String> name = defaultBranchName(git, repositoryRoot);
+        boolean hasOrigin = !runLinesAllowingFailure(git, repositoryRoot,
+                List.of("remote", "get-url", "origin")).isEmpty();
+        boolean fetched = false;
+        boolean fetchFailed = false;
+        Optional<String> fetchError = Optional.empty();
+        if (fetch && hasOrigin && name.isPresent()) {
+            // One branch only: a task fork needs origin/<default> and
+            // nothing else; a whole --all fetch would drag every stale
+            // branch in the remote into every launch. The explicit refspec
+            // pins the destination regardless of the remote's configured
+            // refspecs (single-branch clones, hand-edited fetch refspecs)
+            // instead of relying on opportunistic updates. Credentials must
+            // never be prompted for, exactly as in fetchAll.
+            List<String> command = List.of(
+                    git.toString(), "-C", repositoryRoot.toString(), "fetch", "origin",
+                    "+" + name.get() + ":refs/remotes/origin/" + name.get());
+            synchronized (FETCH_LOCKS.computeIfAbsent(fetchLockKey(repositoryRoot), k -> new Object())) {
+                try {
+                    ProcessResult result = run(command, new ProcessRunner.Options(
+                            null, FETCH_TIMEOUT, true, Map.of("GIT_TERMINAL_PROMPT", "0")));
+                    if (result.exitCode() != 0) {
+                        fetchFailed = true;
+                        fetchError = Optional.of(ProcessRunner.excerpt(result.stderr()));
+                    } else {
+                        fetched = true;
+                    }
+                } catch (GitException e) {
+                    // Timeout or spawn failure: same treatment as a non-zero exit.
+                    fetchFailed = true;
+                    fetchError = Optional.of(e.getMessage() == null ? e.toString() : e.getMessage());
+                }
+            }
+        }
+        String ref;
+        if (name.isEmpty()) {
+            ref = "main"; // nothing resolvable anywhere: the historical fallback
+        } else if (resolves(git, repositoryRoot, "refs/remotes/origin/" + name.get())) {
+            ref = "origin/" + name.get();
+        } else if (resolves(git, repositoryRoot, "refs/heads/" + name.get())) {
+            ref = name.get();
+        } else {
+            ref = hasOrigin ? "origin/" + name.get() : "main";
+        }
+        return new DefaultBranchFork(ref, name, fetched, fetchFailed, fetchError);
+    }
+
+    /**
+     * The default branch's bare name. Resolution mirrors {@link
+     * #defaultBranchBlocking} with two deliberate differences: a candidate
+     * counts as existing when EITHER the local or the remote-tracking ref
+     * does (the fork must see a remote-only default, e.g. a fresh clone
+     * whose HEAD sits on a local branch the remote deleted), and the
+     * {@code origin/HEAD} guess is gated by {@link #isRefComponent}. It
+     * never looks at the checkout's current branch, like {@link
+     * #defaultBranchBlocking}.
+     */
+    private Optional<String> defaultBranchName(Path git, Path repositoryRoot) {
+        for (String line : runLinesAllowingFailure(git, repositoryRoot, List.of(
+                "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"))) {
+            String head = line.strip();
+            if (!head.startsWith("origin/")) {
+                continue;
+            }
+            String name = head.substring("origin/".length());
+            if (isRefComponent(name)) {
+                return Optional.of(name);
+            }
+        }
+        for (String candidate : DEFAULT_BRANCH_CANDIDATES) {
+            if (resolves(git, repositoryRoot, "refs/heads/" + candidate)
+                    || resolves(git, repositoryRoot, "refs/remotes/origin/" + candidate)) {
+                return Optional.of(candidate);
+            }
+        }
+        return Optional.empty();
+    }
+
+    /** A branch-name-shaped string: no leading dash, no refspec tricks, no {@code ..}. */
+    private static boolean isRefComponent(String name) {
+        if (name.isEmpty() || name.length() > 200 || name.startsWith("-") || name.startsWith(".")
+                || name.contains("..") || name.endsWith("/") || name.endsWith(".") || name.contains("//")) {
+            return false;
+        }
+        for (int i = 0; i < name.length(); i++) {
+            char c = name.charAt(i);
+            boolean ok = Character.isLetterOrDigit(c) || c == '/' || c == '-' || c == '_' || c == '.';
+            if (!ok) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     /**
      * The repository's default branch -- what a review diffs against.
      *
@@ -478,13 +635,16 @@ public final class GitStatusService implements AutoCloseable {
         }
         // No origin/HEAD (a local-only repository, or one never cloned): fall
         // back to the conventional names, and only to ones that exist.
-        for (String candidate : List.of("main", "master", "trunk", "develop")) {
+        for (String candidate : DEFAULT_BRANCH_CANDIDATES) {
             if (resolves(git, repositoryRoot, "refs/heads/" + candidate)) {
                 return Optional.of(candidate);
             }
         }
         return Optional.empty();
     }
+
+    /** The well-known default-branch names, in preference order, shared by the fork-point and review-base resolution. */
+    private static final List<String> DEFAULT_BRANCH_CANDIDATES = List.of("main", "master", "trunk", "develop");
 
     /**
      * The branches a review base is looked for among when no pull request
@@ -622,6 +782,14 @@ public final class GitStatusService implements AutoCloseable {
                 "for-each-ref", "--format=%(refname:short)", ref)).isEmpty();
     }
 
+    /**
+     * Lists every branch -- local and remote-tracking -- plus the
+     * repository's remote names, for the create-worktree modal's branch
+     * picker, on this service's background executor. Occupancy
+     * ({@link BranchRef#checkedOutAt()}) is filled in separately by
+     * {@link BranchCatalog#merge}, which composes this with
+     * {@link WorktreeService#list}.
+     */
     public CompletableFuture<BranchListing> listBranches(Path repositoryRoot) {
         return CompletableFuture.supplyAsync(() -> listBranchesBlocking(repositoryRoot), executor);
     }
