@@ -141,11 +141,13 @@ final class ListingExpansionTracker implements TreeExpansionListener {
     }
 
     /**
-     * Opens {@code root}'s project as the user's own gesture: records the
-     * row, its Issues section, its GitHub node and its Pull Requests
-     * section, and asks for one rebuild when that is new, so a single
-     * expand loads both listings (the Projects view's one-click reach).
-     * EDT.
+     * Opens {@code root}'s project as the user's own gesture (the project
+     * row's expansion): records the row, its Issues section, its GitHub
+     * node and its Pull Requests section, and asks for one rebuild when
+     * that is new, so a single expand loads both listings (the project
+     * row's one-click reach). Entering the Projects view or registering a
+     * project opens nothing: listings fetch only on the gesture that names
+     * them. EDT.
      */
     void openProject(Path root) {
         boolean added = projects.add(root);
