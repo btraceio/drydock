@@ -94,6 +94,11 @@ on their prerequisite's branch, and ready follow-ups start by themselves.
 - `StackLaunch` (platform): launches a unit's session on a fresh worktree
   whose branch is `dd/<first-task-id>`; a stacked unit's launch waits for
   its wait branches, polling every 10 s with a 4 h bounded timeout (S2).
+  A root unit forks from the repository's default branch resolved fresh at
+  fork time: `git fetch origin <default>` runs just before the worktree is
+  created and the branch starts at `origin/<default>` (a repository with no
+  origin remote uses the local default; a failed fetch proceeds from the
+  last-known ref with a visible warning, never silently).
 - Both start flows launch stacks: the single-segment flow via
   `launchStacked`, the cross-project driver via the per-unit production
   launcher.

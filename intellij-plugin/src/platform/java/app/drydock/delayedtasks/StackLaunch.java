@@ -185,7 +185,9 @@ final class StackLaunch {
             // A root unit's branch is cut from the repository's default
             // branch -- the same branch its draft pull request opens against
             // -- never from the confirmed dialog start point; a stacked unit
-            // starts at its stack base branch.
+            // starts at its stack base branch. The fork itself happens from a
+            // freshly fetched origin/<default> (TaskLauncher re-resolves and
+            // fetches just before `git worktree add`).
             CompletableFuture<String> startPoint = unit.isRoot()
                     ? defaultBranch(mainRoot)
                     : CompletableFuture.completedFuture(baseBranch);
@@ -223,16 +225,19 @@ final class StackLaunch {
                 .thenApply(nothing -> launches.stream().map(CompletableFuture::join).toList());
     }
 
-    /** The repository's default branch, resolved exactly like the root
-      * unit's pull-request base ({@code origin/HEAD}, then the well-known
-      * names, then {@code main}): the start point of a root unit's branch.
-      * Composed, never blocking the caller's thread; an empty resolution
-      * falls back to {@code main} -- a wrong name fails visibly later, at
-      * the worktree's creation. Package-private for tests. */
+    /** The repository's default branch as the fork point of a root unit's branch
+      * (S1/S3): {@code origin/<name>} whenever a remote-tracking ref exists,
+      * else the local {@code <name>}, else {@code main} -- never the main
+      * checkout's current branch. Resolution is local-only; the fetch that
+      * makes the fork point FRESH happens at worktree-creation time in
+      * {@code TaskLauncher} (see {@code GitStatusService#defaultBranchFork}). The prompt this
+      * feeds names the resolved fork ref -- good enough; the fork itself is
+      * best-effort fresh: fetched when {@code origin} is reachable, otherwise
+      * the last-known ref, exactly what a fork can hope for offline. */
     static CompletableFuture<String> defaultBranch(Path mainRoot) {
         GitStatusService git = new GitStatusService();
-        return git.defaultBranch(mainRoot)
-                .thenApply(branch -> branch.orElse("main"))
+        return git.defaultBranchFork(mainRoot, false)
+                .thenApply(GitStatusService.DefaultBranchFork::ref)
                 .whenComplete((nothing, failure) -> git.close());
     }
 
