@@ -52,6 +52,7 @@ public final class NewTaskPlan {
     public record Inputs(SharedProject project, String repoName, Optional<FixedWorktree> fixedWorktree,
                          List<Agent> agents, AgentKind preselected, String defaultStart, List<String> startPoints,
                          List<String> remoteNames, Set<String> takenBranches, Path worktreeBase,
+                         String branchAttribution,
                          boolean writerActiveInMain, Function<AgentKind, Optional<String>> lastUsedModel,
                          Function<AgentKind, List<String>> modelSuggestions,
                          Function<AgentKind, ModelTiers> lastUsedTiers,
@@ -63,10 +64,25 @@ public final class NewTaskPlan {
             startPoints = List.copyOf(startPoints);
             remoteNames = List.copyOf(remoteNames);
             takenBranches = Set.copyOf(takenBranches);
+            Objects.requireNonNull(branchAttribution, "branchAttribution");
             Objects.requireNonNull(lastUsedModel, "lastUsedModel");
             Objects.requireNonNull(modelSuggestions, "modelSuggestions");
             Objects.requireNonNull(lastUsedTiers, "lastUsedTiers");
             Objects.requireNonNull(supportsSubagents, "supportsSubagents");
+        }
+
+        /** Today's signature, delegating with {@code branchAttribution = ""}: a dialog whose
+         * inputs were resolved before attribution existed generates unprefixed-token names. */
+        public Inputs(SharedProject project, String repoName, Optional<FixedWorktree> fixedWorktree,
+                      List<Agent> agents, AgentKind preselected, String defaultStart, List<String> startPoints,
+                      List<String> remoteNames, Set<String> takenBranches, Path worktreeBase,
+                      boolean writerActiveInMain, Function<AgentKind, Optional<String>> lastUsedModel,
+                      Function<AgentKind, List<String>> modelSuggestions,
+                      Function<AgentKind, ModelTiers> lastUsedTiers,
+                      Predicate<AgentKind> supportsSubagents) {
+            this(project, repoName, fixedWorktree, agents, preselected, defaultStart, startPoints,
+                    remoteNames, takenBranches, worktreeBase, "", writerActiveInMain, lastUsedModel,
+                    modelSuggestions, lastUsedTiers, supportsSubagents);
         }
     }
 

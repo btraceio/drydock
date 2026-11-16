@@ -8,6 +8,7 @@ import app.drydock.domain.SessionMode;
 import app.drydock.domain.SshRemote;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.GhCliService.OpenPullRequest;
+import app.drydock.git.WorktreeNaming;
 import app.drydock.intellij.workspace.WorkspaceSettings;
 import app.drydock.projects.SharedProject;
 import app.drydock.tasks.StartPlan;
@@ -186,9 +187,10 @@ public class NewTaskDialogPlatformTest extends BasePlatformTestCase {
             try {
                 dialog.diagSetInstructions("Fix the parser");
                 NewTaskPlan.Choice original = dialog.choice();
-                assertTrue(original.branch(), original.branch().matches("[a-z]+-[a-z]+-[a-z]+"));
+                assertTrue(original.branch(), original.branch().matches("drydock/[a-z]+-[a-z]+-[a-z]+"));
                 assertFalse(original.branch().contains("parser"));
-                assertEquals(Path.of("/tmp/profiler-" + original.branch()), original.folder());
+                assertEquals(Path.of("/tmp/profiler-" + WorktreeNaming.slug(original.branch())),
+                        original.folder());
 
                 dialog.diagSetInstructions("Investigate a completely different task");
                 assertEquals(original.branch(), dialog.choice().branch());
@@ -248,8 +250,8 @@ public class NewTaskDialogPlatformTest extends BasePlatformTestCase {
             try {
                 NewTaskPlan.Choice choice = dialog.choice();
                 assertEquals(NewTaskPlan.WorkIn.NEW_WORKTREE, choice.workIn());
-                assertTrue(choice.branch(), choice.branch().matches("[a-z]+-[a-z]+-[a-z]+"));
-                assertEquals(Path.of("/tmp/profiler-" + choice.branch()), choice.folder());
+                assertTrue(choice.branch(), choice.branch().matches("drydock/[a-z]+-[a-z]+-[a-z]+"));
+                assertEquals(Path.of("/tmp/profiler-" + WorktreeNaming.slug(choice.branch())), choice.folder());
                 assertEquals("#42 Fix allocation accounting", choice.name());
                 String prompt = NewTaskPlan.initialPrompt(choice).orElseThrow();
                 assertTrue(prompt, prompt.contains("call session_rename"));

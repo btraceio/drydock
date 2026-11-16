@@ -736,6 +736,28 @@ class GitStatusServiceTest {
         assertTrue(service.commitForRefBlocking(repo, "--git-dir").isEmpty());
     }
 
+    /**
+     * The repository's own {@code user.name}, which is what a generated
+     * branch's attribution token must reflect: repo config overrides any
+     * global setting, and the value read here is the one git itself would
+     * stamp commits with.
+     */
+    @Test
+    void userNameReadsTheEffectiveValue(@TempDir Path repo) throws Exception {
+        initRepo(repo, "main");
+        runGit(repo, "config", "user.name", "Jaroslav Bachorik");
+
+        assertEquals(Optional.of("Jaroslav Bachorik"), service.userNameBlocking(repo));
+    }
+
+    @Test
+    void userNameCompletesOnTheServiceExecutor(@TempDir Path repo) throws Exception {
+        initRepo(repo, "main");
+        runGit(repo, "config", "user.name", "Test User");
+
+        assertEquals(Optional.of("Test User"), service.userName(repo).get());
+    }
+
     private GitStatus getStatus(Path repo) throws ExecutionException, InterruptedException {
         CompletableFuture<GitStatus> future = service.getStatus(repo);
         return future.get();
