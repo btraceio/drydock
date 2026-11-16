@@ -1727,15 +1727,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         }
     }
 
-    /**
-     * EDT: shows the projects tree ({@code true}) or the inbox. The project
-     * the inbox is filtered to opens in the list, loading its listings.
-     */
+    /** EDT: shows the projects tree ({@code true}) or the inbox. */
     void showProjects(boolean projects) {
         browsing = projects;
-        if (projects && focus != null) {
-            expansions.openProject(focus.root());
-        }
         cardLayout.show(cards, projects ? "projects" : "inbox");
         (projects ? tree : inbox).requestFocusInWindow();
     }
@@ -2566,10 +2560,10 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 .whenComplete((registered, failure) -> {
                     if (failure == null) {
                         ApplicationManager.getApplication().invokeLater(() -> {
-                            // Listed first (this window's project) and opened, so its
-                            // issues and pull requests start loading.
+                            // Listed first (this window's project); its listings stay
+                            // strictly lazy -- only the user's opening the GitHub node,
+                            // a Jira group or a section fetches them.
                             justAdded = Optional.of(new AddProjectBanner.Added(add.mainRoot(), add.repoName()));
-                            expansions.openProject(add.mainRoot());
                             updateBanner();
                         }, ModalityState.nonModal(), project.getDisposed());
                     } else {
