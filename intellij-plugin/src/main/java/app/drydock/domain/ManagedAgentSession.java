@@ -111,7 +111,8 @@ public record ManagedAgentSession(
         Optional<WorkflowId> workflowId,
         boolean startedWithTask,
         boolean flagged,
-        Optional<WorkspaceBoxBinding> workspaceBox
+        Optional<WorkspaceBoxBinding> workspaceBox,
+        Optional<PullRequestTarget> targetPullRequest
 ) {
 
     public ManagedAgentSession {
@@ -128,6 +129,7 @@ public record ManagedAgentSession(
         Objects.requireNonNull(forkedFrom, "forkedFrom");
         Objects.requireNonNull(workflowId, "workflowId");
         Objects.requireNonNull(workspaceBox, "workspaceBox");
+        Objects.requireNonNull(targetPullRequest, "targetPullRequest");
 
         if (displayName.isBlank()) {
             throw new IllegalArgumentException("ManagedAgentSession displayName must not be blank");
@@ -140,6 +142,21 @@ public record ManagedAgentSession(
             workspace = new SessionWorkspace(
                     workspaceBox.get().sshRemote().placeholderRoot(), Optional.empty(), false);
         }
+    }
+
+    /**
+     * Older sessions have no explicit target; their branch PR remains discoverable.
+     * Keep that separate from pr, which records the working branch's lifecycle.
+     */
+    public ManagedAgentSession(ManagedSessionId id, RepositoryId repositoryId, String displayName,
+                               AgentBinding binding, SessionWorkspace workspace, SessionStatus status,
+                               Instant createdAt, Instant lastOpenedAt, Optional<Integer> lastExitCode,
+                               PrLink pr, boolean namePinned, Optional<ManagedSessionId> forkedFrom,
+                               boolean evalMode, Optional<WorkflowId> workflowId, boolean startedWithTask,
+                               boolean flagged, Optional<WorkspaceBoxBinding> workspaceBox) {
+        this(id, repositoryId, displayName, binding, workspace, status, createdAt, lastOpenedAt, lastExitCode,
+                pr, namePinned, forkedFrom, evalMode, workflowId, startedWithTask, flagged, workspaceBox,
+                Optional.empty());
     }
 
     /**
@@ -359,6 +376,7 @@ public record ManagedAgentSession(
         private boolean startedWithTask;
         private boolean flagged;
         private Optional<WorkspaceBoxBinding> workspaceBox;
+        private Optional<PullRequestTarget> targetPullRequest;
 
         private Builder(ManagedAgentSession from) {
             this.id = from.id;
@@ -378,6 +396,7 @@ public record ManagedAgentSession(
             this.startedWithTask = from.startedWithTask;
             this.flagged = from.flagged;
             this.workspaceBox = from.workspaceBox;
+            this.targetPullRequest = from.targetPullRequest;
         }
 
         /**
@@ -405,6 +424,7 @@ public record ManagedAgentSession(
             this.startedWithTask = false;
             this.flagged = false;
             this.workspaceBox = Optional.empty();
+            this.targetPullRequest = Optional.empty();
         }
 
         public Builder id(ManagedSessionId value) {
@@ -498,10 +518,15 @@ public record ManagedAgentSession(
             return this;
         }
 
+        public Builder targetPullRequest(Optional<PullRequestTarget> value) {
+            this.targetPullRequest = value;
+            return this;
+        }
+
         public ManagedAgentSession build() {
             return new ManagedAgentSession(id, repositoryId, displayName, binding, workspace, status,
                     createdAt, lastOpenedAt, lastExitCode, pr, namePinned, forkedFrom, evalMode, workflowId,
-                    startedWithTask, flagged, workspaceBox);
+                    startedWithTask, flagged, workspaceBox, targetPullRequest);
         }
     }
 }
