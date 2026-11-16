@@ -540,13 +540,16 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
 
     /**
      * Pure. The row's accessible one-line summary (the tooltip of a Jira
-     * row's shape): id, hint word, age and stale flag, the carried blocker
-     * texts (D9/D11), and the session hint - live sessions for a started
-     * task, the last session for an interrupted one (D10).
+     * row's shape): id, hint word, project when known, age and stale flag,
+     * the carried blocker texts (D9/D11), and the session hint - live
+     * sessions for a started task, the last session for an interrupted one (D10).
      */
     static String delayedTooltip(app.drydock.tasks.TaskNode.DelayedTaskRow task, Instant now) {
         StringBuilder tip = new StringBuilder("Task ").append(task.id().text())
                 .append(" (").append(delayedHint(task)).append(')');
+        if (task.project() != null) {
+            tip.append(" · project ").append(task.project());
+        }
         task.created().ifPresent(created -> tip.append(" · created ")
                 .append(AgentStripText.relativeAge(Duration.between(created, now))).append(" ago"));
         if (task.stale()) {
