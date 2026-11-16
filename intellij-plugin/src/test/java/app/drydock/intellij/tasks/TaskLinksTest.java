@@ -4,6 +4,7 @@ import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.AgentBinding;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.PullRequestTarget;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionWorkspace;
@@ -75,6 +76,11 @@ class TaskLinksTest {
                 head, "main", false, Optional.of("reviewer"), Optional.of("https://github.com/x/y/pull/" + number)));
     }
 
+    private static PullRequestRow pullRequestWithoutUrl(Path root, String head, int number) {
+        return new PullRequestRow(root, new OpenPullRequest(number, "Speed up the flaky suite",
+                head, "main", false, Optional.of("reviewer"), Optional.empty()));
+    }
+
     private static BranchPullRequest branchPr(int number, String head) {
         return new BranchPullRequest(number, PrInfo.PrLifecycle.OPEN, false, head, "Speed up",
                 Optional.empty());
@@ -137,6 +143,67 @@ class TaskLinksTest {
         assertTrue(TaskLinks.taskOfBranch("dd/no-such-task-k9x9", watched(document(TASK_ID))).isEmpty());
         assertTrue(TaskLinks.taskOfBranch("fix-allocation-profile", watched(document(TASK_ID))).isEmpty());
         assertTrue(TaskLinks.taskOfBranch(StackBranches.name(TASK_ID), null).isEmpty());
+    }
+
+    private static TaskRow targeting(TaskRow row, String url) {
+        return new TaskRow(row.session().toBuilder().targetPullRequest(Optional.of(
+                PullRequestTarget.fromUrl(url))).build(), row.activity(), row.running(), row.branch(),
+                row.placement(), row.readOnly(), row.folderMissing(), row.resumable(), row.branchPullRequest());
+    }
+
+    @Test
+    void explicitTargetsWinInBothDirectionsEvenWhenAnotherSessionsBranchMatches() {
+        PullRequestRow pr898 = pullRequest(ROOT_A, "upstream-head", 898);
+        PullRequestRow pr943 = pullRequest(ROOT_A, "brave-dewy-alpaca", 943);
+        TaskRow unbound = session("brave-dewy-alpaca");
+        TaskRow about898 = targeting(session("brave-dewy-alpaca", Optional.of(branchPr(943, "brave-dewy-alpaca"))),
+                pr898.pullRequest().url().orElseThrow());
+        TaskRow about943 = targeting(session("gleeful-copper-bobcat"), pr943.pullRequest().url().orElseThrow());
+        List<TaskNode> nodes = List.of(project(REPO_A, ROOT_A,
+                pullRequests(pr898, pr943), unbound, about898, about943));
+        assertEquals(Optional.of(about898), TaskLinks.sessionOf(pr898, nodes));
+        assertEquals(Optional.of(about943), TaskLinks.sessionOf(pr943, nodes));
+        assertEquals(Optional.of(pr898), TaskLinks.pullRequestOf(about898, nodes));
+        assertEquals(Optional.of(pr943), TaskLinks.pullRequestOf(about943, nodes));
+        List<TaskNode> without943 = List.of(project(REPO_A, ROOT_A, pullRequests(pr943), about898));
+        assertTrue(TaskLinks.sessionOf(pr943, without943).isEmpty(), "a target suppresses unrelated branch matching");
+    }
+
+    @Test
+    void urlLessPullRequestRowsMatchExplicitTargetsByNumberWithinTheirProject() {
+        PullRequestRow prInA = pullRequestWithoutUrl(ROOT_A, "head-in-a", 898);
+        PullRequestRow prInB = pullRequestWithoutUrl(ROOT_B, "head-in-b", 898);
+        TaskRow targeted = targeting(session("different-session-branch"),
+                "https://github.com/x/y/pull/898");
+        List<TaskNode> nodes = List.of(
+                project(REPO_A, ROOT_A, pullRequests(prInA), targeted),
+                project(REPO_B, ROOT_B, pullRequests(prInB)));
+
+        assertEquals(Optional.of(targeted), TaskLinks.sessionOf(prInA, nodes));
+        assertEquals(Optional.of(prInA), TaskLinks.pullRequestOf(targeted, nodes));
+        assertTrue(TaskLinks.sessionOf(prInB, nodes).isEmpty(),
+                "a URL-less PR row in another project must not link to the targeted session");
+    }
+
+    @Test
+    void aUrlLessPullRequestDoesNotMatchAnExplicitTargetWithAnotherNumberByBranch() {
+        PullRequestRow pr = pullRequestWithoutUrl(ROOT_A, "shared-head", 898);
+        TaskRow targetingAnotherNumber = targeting(session("shared-head"),
+                "https://github.com/x/y/pull/899");
+        List<TaskNode> nodes = List.of(project(REPO_A, ROOT_A, pullRequests(pr), targetingAnotherNumber));
+
+        assertTrue(TaskLinks.sessionOf(pr, nodes).isEmpty(),
+                "an explicit target with a different number must not fall through to branch matching");
+        assertTrue(TaskLinks.pullRequestOf(targetingAnotherNumber, nodes).isEmpty());
+    }
+
+    @Test
+    void theSamePrNumberInAnotherRepositoryIsNotTheTarget() {
+        TaskRow row = targeting(session("same-head"), "https://github.com/different/repo/pull/898");
+        PullRequestRow other = pullRequest(ROOT_A, "same-head", 898);
+        List<TaskNode> nodes = List.of(project(REPO_A, ROOT_A, row, pullRequests(other)));
+        assertTrue(TaskLinks.pullRequestOf(row, nodes).isEmpty());
+        assertTrue(TaskLinks.sessionOf(other, nodes).isEmpty());
     }
 
     @Test

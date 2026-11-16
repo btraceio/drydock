@@ -636,7 +636,7 @@ final class NewTaskDialog extends DialogWrapper {
                 startPoint(), chosenFolder,
                 ownWindow.isSelected() ? OpenIn.OWN_WINDOW : OpenIn.THIS_WINDOW,
                 modelField.selected(), tiers, tiers.flatMap(this::subagentModelRule),
-                workspaceBox.isSelected());
+                workspaceBox.isSelected(), preset.targetPullRequest());
     }
 
     /**

@@ -20,6 +20,7 @@ import app.drydock.delayedtasks.TaskLaunchResources;
 import app.drydock.domain.AgentBinding;
 import app.drydock.domain.ApplicationState;
 import app.drydock.domain.ManagedAgentSession;
+import app.drydock.domain.PullRequestTarget;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.ModelTiers;
 import app.drydock.domain.Repository;
@@ -1711,6 +1712,31 @@ public final class DrydockSessionService implements AgentExecutionListener {
                         .findFirst()
                         .orElseThrow(() -> new IllegalStateException("The session no longer exists"))
                         .withFlagged(flagged);
+                return state.withSessions(state.sessions().stream()
+                        .map(existing -> existing.id().equals(sessionId) ? updated[0] : existing)
+                        .toList());
+            });
+            DrydockSessionsListener.publishChanged();
+            return updated[0];
+        }, executor);
+    }
+
+    /**
+     * Sets or clears the explicit target through the state store's single writer.
+     * Do not update the working branch's PR lifecycle when changing this association.
+     */
+    public CompletableFuture<ManagedAgentSession> associatePullRequest(ManagedSessionId sessionId,
+                                                                       Optional<PullRequestTarget> target) {
+        Objects.requireNonNull(sessionId, "sessionId");
+        Objects.requireNonNull(target, "target");
+        return initialization.thenApplyAsync(unused -> {
+            ManagedAgentSession[] updated = new ManagedAgentSession[1];
+            stateStore.get().update(state -> {
+                updated[0] = state.sessions().stream()
+                        .filter(existing -> existing.id().equals(sessionId))
+                        .findFirst()
+                        .orElseThrow(() -> new IllegalStateException("The session no longer exists"))
+                        .toBuilder().targetPullRequest(target).build();
                 return state.withSessions(state.sessions().stream()
                         .map(existing -> existing.id().equals(sessionId) ? updated[0] : existing)
                         .toList());

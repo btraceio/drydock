@@ -8,6 +8,7 @@ import app.drydock.tasks.TaskId;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -75,26 +76,28 @@ final class TaskLinks {
     }
 
     /**
-     * The first session row working a PR row's head branch, in the display
-     * order of the PR row's own project -- the answer never crosses a
-     * project boundary, even when another shown project has a session on a
-     * same-named branch. Empty when no shown session of the PR's project is
-     * on the PR's branch.
+     * An explicit target wins over a session merely working the PR's head branch.
+     * Match by full URL when the PR row has one, or by number within the PR's
+     * own project when its URL is absent; a session targeting another PR must
+     * never be returned just because its branch matches.
      */
     static Optional<TaskRow> sessionOf(PullRequestRow pullRequest, List<TaskNode> nodes) {
         String head = pullRequest.pullRequest().headRefName();
         return PrIndex.of(nodes).sessionsByRoot()
                 .getOrDefault(pullRequest.mainRoot(), Map.of())
                 .values().stream()
-                .filter(row -> row.branch().map(head::equals).orElse(false))
-                .findFirst();
+                .filter(row -> row.session().targetPullRequest()
+                        .map(target -> pullRequest.pullRequest().url()
+                                .map(target.url()::equals)
+                                .orElseGet(() -> target.number() == pullRequest.pullRequest().number()))
+                        .orElseGet(() -> row.branch().map(head::equals).orElse(false)))
+                .min(Comparator.comparing(row -> row.session().targetPullRequest().isEmpty()));
     }
 
     /**
-     * The PR row a task row's branch pull request is, matched by number
-     * within the task row's own project (the number a PR listing's rows
-     * carry). Empty when the branch has no known PR, the tree shows none in
-     * that project, or the row sits outside any shown project.
+     * The session's explicit target, else its discovered branch PR, within
+     * its own shown project. Explicit targets match by full URL when the row
+     * has one, or by number only when the row URL is absent.
      */
     static Optional<PullRequestRow> pullRequestOf(TaskRow task, List<TaskNode> nodes) {
         return pullRequestOf(task, PrIndex.of(nodes));
@@ -103,11 +106,18 @@ final class TaskLinks {
     /** The number-matched PR of {@code task}'s own project, over a built index. */
     static Optional<PullRequestRow> pullRequestOf(TaskRow task, PrIndex index) {
         Path root = index.rootOfTaskRow().get(task);
-        if (root == null || task.branchPullRequest().isEmpty()) {
+        Optional<Integer> number = task.session().targetPullRequest().map(target -> target.number())
+                .or(() -> task.branchPullRequest().map(pr -> pr.number()));
+        if (root == null || number.isEmpty()) {
             return Optional.empty();
         }
         Map<Integer, PullRequestRow> byNumber = index.prByNumber().getOrDefault(root, Map.of());
-        return Optional.ofNullable(byNumber.get(task.branchPullRequest().get().number()));
+        return Optional.ofNullable(byNumber.get(number.get()))
+                .filter(row -> task.session().targetPullRequest()
+                        .map(target -> row.pullRequest().url()
+                                .map(target.url()::equals)
+                                .orElseGet(() -> target.number() == row.pullRequest().number()))
+                        .orElse(true));
     }
 
     /**

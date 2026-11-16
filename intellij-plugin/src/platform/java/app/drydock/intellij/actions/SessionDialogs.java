@@ -4,6 +4,7 @@ import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.AgentRegistry;
 import app.drydock.delayedtasks.TaskLaunchBinding;
 import app.drydock.domain.ManagedAgentSession;
+import app.drydock.domain.PullRequestTarget;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.ModelTiers;
 import app.drydock.domain.SessionMode;
@@ -163,11 +164,21 @@ public final class SessionDialogs {
             Optional<String> model, Optional<ModelTiers> tiers, boolean freshWindow,
             PreparedSessionCallback preparedSession, List<TaskLaunchBinding> bindings,
             Optional<WorkspaceBoxBinding> workspaceBox) {
+        return launchNewSession(project, workingDirectory, repositoryRoot, kind, displayName, mode, task, model,
+                tiers, freshWindow, preparedSession, bindings, workspaceBox, Optional.empty());
+    }
+
+    /** A PR launch carries its explicit target before any callback, task binding or spawn. */
+    public static CompletableFuture<ManagedAgentSession> launchNewSession(Project project, Path workingDirectory,
+            Path repositoryRoot, AgentKind kind, String displayName, SessionMode mode, Optional<String> task,
+            Optional<String> model, Optional<ModelTiers> tiers, boolean freshWindow,
+            PreparedSessionCallback preparedSession, List<TaskLaunchBinding> bindings,
+            Optional<WorkspaceBoxBinding> workspaceBox, Optional<PullRequestTarget> targetPullRequest) {
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         String agentName = AgentLabels.displayName(plugin.registry(), kind);
         CompletableFuture<ManagedAgentSession> launch = launchSession(project, workingDirectory, repositoryRoot,
                 kind, displayName, mode, session -> CompletableFuture.completedFuture(task), freshWindow, model,
-                tiers, preparedSession, bindings, workspaceBox);
+                tiers, preparedSession, bindings, workspaceBox, targetPullRequest);
         ProgressManager.getInstance().run(new Task.Backgroundable(project,
                 "Starting " + agentName + " session…", true) {
             @Override
@@ -372,10 +383,23 @@ public final class SessionDialogs {
             Function<ManagedAgentSession, CompletableFuture<Optional<String>>> prompt, boolean freshWindow,
             Optional<String> model, Optional<ModelTiers> tiers, PreparedSessionCallback preparedSession,
             List<TaskLaunchBinding> bindings, Optional<WorkspaceBoxBinding> workspaceBox) {
+        return launchSession(project, workingDirectory, repositoryRoot, kind, displayName, mode, prompt, freshWindow,
+                model, tiers, preparedSession, bindings, workspaceBox, Optional.empty());
+    }
+
+    /** The explicit target is part of the prepared metadata that the launch persists, not a late state edit. */
+    public static CompletableFuture<ManagedAgentSession> launchSession(Project project, Path workingDirectory,
+            Path repositoryRoot, AgentKind kind, String displayName, SessionMode mode,
+            Function<ManagedAgentSession, CompletableFuture<Optional<String>>> prompt, boolean freshWindow,
+            Optional<String> model, Optional<ModelTiers> tiers, PreparedSessionCallback preparedSession,
+            List<TaskLaunchBinding> bindings, Optional<WorkspaceBoxBinding> workspaceBox,
+            Optional<PullRequestTarget> targetPullRequest) {
+        Objects.requireNonNull(targetPullRequest, "targetPullRequest");
         Objects.requireNonNull(bindings, "bindings");
         Objects.requireNonNull(workspaceBox, "workspaceBox");
         CompletableFuture<ManagedAgentSession> chain = DrydockStartupActivity.sessions(project)
                 .prepareSession(workingDirectory, repositoryRoot, kind, displayName, mode, workspaceBox)
+                .thenApply(session -> session.toBuilder().targetPullRequest(targetPullRequest).build())
                 .thenApply(session -> preparedSessionNotified(preparedSession, session));
         for (TaskLaunchBinding binding : bindings) {
             chain = chain.thenCompose(session -> bindingBound(binding, session));

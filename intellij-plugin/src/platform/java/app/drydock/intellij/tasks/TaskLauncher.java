@@ -1448,15 +1448,10 @@ public final class TaskLauncher {
                         // adds no outcome of its own. The bindings compose
                         // the pre-spawn bind step (T31a); an empty list is
                         // the byte-identical no-binding chain.
-                        tracked.launched(bindings.isEmpty()
-                                ? SessionDialogs.launchNewSession(target, steps.workingDirectory(), mainRoot,
-                                        choice.agent(), choice.name(), choice.mode(),
-                                        NewTaskPlan.initialPrompt(choice), choice.model(), choice.tiers(), fresh,
-                                        preparedSession)
-                                : SessionDialogs.launchNewSession(target, steps.workingDirectory(), mainRoot,
-                                        choice.agent(), choice.name(), choice.mode(),
-                                        NewTaskPlan.initialPrompt(choice), choice.model(), choice.tiers(), fresh,
-                                        preparedSession, bindings));
+                        tracked.launched(SessionDialogs.launchNewSession(target, steps.workingDirectory(), mainRoot,
+                                choice.agent(), choice.name(), choice.mode(),
+                                NewTaskPlan.initialPrompt(choice), choice.model(), choice.tiers(), fresh,
+                                preparedSession, bindings, Optional.empty(), choice.targetPullRequest()));
                     } catch (RuntimeException e) {
                         LOG.log(Level.WARNING, "Could not open the task's window", e);
                         report(from, "Could not start \"" + choice.name() + "\": " + WorktreeErrors.visibleMessage(e));
@@ -1552,7 +1547,8 @@ public final class TaskLauncher {
                                                 binding.sshRemote().placeholderRoot(), mainRoot,
                                                 choice.agent(), choice.name(), choice.mode(),
                                                 NewTaskPlan.initialPrompt(choice), choice.model(), choice.tiers(),
-                                                false, preparedSession, bindings, Optional.of(binding))),
+                                                false, preparedSession, bindings, Optional.of(binding),
+                                                choice.targetPullRequest())),
                                         ModalityState.nonModal());
                     }
                 } catch (InterruptedException e) {

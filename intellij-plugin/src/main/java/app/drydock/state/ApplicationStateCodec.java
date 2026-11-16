@@ -8,6 +8,7 @@ import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.ModelTiers;
 import app.drydock.domain.PrLink;
+import app.drydock.domain.PullRequestTarget;
 import app.drydock.domain.PrState;
 import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
@@ -316,6 +317,8 @@ public final class ApplicationStateCodec {
         obj.put("prNumber", session.prNumber()
                 .<JsonValue>map(number -> JsonNumber.of((long) number))
                 .orElse(JsonValue.JsonNull.INSTANCE));
+        session.targetPullRequest().ifPresent(target ->
+                obj.put("targetPullRequest", new JsonString(target.url())));
         obj.put("branchCreatedHere", new JsonBoolean(session.branchCreatedHere()));
         obj.put("namePinned", new JsonBoolean(session.namePinned()));
         obj.put("forkedFrom", session.forkedFrom()
@@ -685,7 +688,8 @@ public final class ApplicationStateCodec {
                     new SessionWorkspace(workingDirectory, worktreeRoot, branchCreatedHere),
                     status, createdAt, lastOpenedAt, lastExitCode,
                     PrLink.fromPersisted(prState, prNumber), namePinned, forkedFrom, evalMode, workflowId,
-                    startedWithTask, flagged, workspaceBox);
+                    startedWithTask, flagged, workspaceBox,
+                    optionalString(obj, "targetPullRequest").map(PullRequestTarget::fromUrl));
         } catch (IllegalArgumentException | DateTimeException e) {
             throw new StateDecodeException("Malformed session entry: " + e.getMessage());
         }

@@ -387,6 +387,33 @@ public final class GhCliService implements AutoCloseable {
         }
     }
 
+    /** Looks up one PR by number, including older and fork PRs absent from the branch listing. */
+    public CompletableFuture<Optional<BranchPullRequest>> pullRequest(Path root, Optional<String> repository,
+                                                                     int number) {
+        return CompletableFuture.supplyAsync(
+                () -> locate().flatMap(gh -> pullRequestWith(gh, root, repository, number)), executor);
+    }
+
+    static Optional<BranchPullRequest> pullRequestWith(Path gh, Path root, Optional<String> repository, int number) {
+        if (number <= 0 || repository.filter(value -> !validRepository(value)).isPresent()) {
+            throw new IllegalArgumentException("Use a positive PR number and a valid repository");
+        }
+        List<String> command = new ArrayList<>(List.of(gh.toString(), "pr", "view", String.valueOf(number),
+                "--json", "number,state,isDraft,headRefName,title,url"));
+        repository.ifPresent(value -> {
+            command.add("--repo");
+            command.add(value);
+        });
+        ProcessResult result = runIn(root, command);
+        if (result == null || result.exitCode() != 0) {
+            LOG.log(Level.WARNING, "Could not read PR #" + number + repository.map(r -> " in " + r).orElse("")
+                    + (result == null ? " (command did not complete)" : ": " + ProcessRunner.excerpt(result.stderr())));
+            return Optional.empty();
+        }
+        return parseBranchPullRequests("[" + result.stdout() + "]").stream()
+                .filter(pr -> pr.number() == number).findFirst();
+    }
+
     /**
      * The repository's recent pull requests of every state, keyed by head
      * branch (see {@link #byHeadBranch}). Empty when {@code gh} is not

@@ -4,6 +4,9 @@ import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.SphinxReviewSupport;
 import app.drydock.config.UserConfig;
 import app.drydock.domain.ManagedAgentSession;
+import app.drydock.domain.PullRequestTarget;
+import app.drydock.git.GhCliService;
+import app.drydock.git.PrCheckoutService;
 import app.drydock.domain.ModelTiers;
 import app.drydock.domain.Repository;
 import app.drydock.domain.SessionMode;
@@ -32,6 +35,7 @@ import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -88,6 +92,27 @@ public final class WorktreeReview {
      * materialize one worktree.
      */
     private static final Set<String> inFlight = ConcurrentHashMap.newKeySet();
+
+    static Optional<PullRequestTarget> resolveTarget(
+            CompletableFuture<Optional<GhCliService.BranchPullRequest>> lookup,
+            int number, long timeout, TimeUnit unit) throws InterruptedException {
+        try {
+            Optional<PullRequestTarget> target = lookup.get(timeout, unit)
+                    .flatMap(pr -> pr.url()).map(PullRequestTarget::fromUrl);
+            if (target.isEmpty()) {
+                LOG.log(Level.WARNING, "Could not identify PR #" + number
+                        + "; starting review without a PR association.");
+            }
+            return target;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw e;
+        } catch (ExecutionException | TimeoutException | RuntimeException e) {
+            LOG.log(Level.WARNING, "Could not identify the review's PR target; starting review without a PR association",
+                    e);
+            return Optional.empty();
+        }
+    }
 
     public WorktreeReview() { }
 
@@ -262,11 +287,28 @@ public final class WorktreeReview {
             return;
         }
 
+        Optional<PullRequestTarget> target = Optional.empty();
+        Optional<Integer> number = PrCheckoutService.pullRequestNumberOf(branch);
+        if (number.isPresent()) {
+            try (GhCliService github = new GhCliService()) {
+                Optional<String> repository = plugin.sharedProjects().byRoot(mainRoot)
+                        .map(shared -> GitHubProjectSettings.load(shared.id()).repository()).orElse(Optional.empty());
+                target = resolveTarget(github.pullRequest(mainRoot, repository, number.get()),
+                        number.get(), 20, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                return;
+            } catch (RuntimeException e) {
+                LOG.log(Level.WARNING, "Could not identify the review's PR target; starting review without a PR association",
+                        e);
+                target = Optional.empty();
+            }
+        }
+        Optional<PullRequestTarget> targetPullRequest = target;
         Path reused = worktree;
         ApplicationManager.getApplication().invokeLater(() ->
                 openAndLaunch(from, mainRoot, reused, branch, picked, model, promptTiers, recordedTiers,
                         sphinx ? Optional.of(sphinxSupport.get().reviewLocalChangesPrompt()) : Optional.empty(),
-                        tourKind),
+                        tourKind, targetPullRequest),
                 ModalityState.nonModal());
     }
 
@@ -327,7 +369,7 @@ public final class WorktreeReview {
     private void openAndLaunch(Project from, Path mainRoot, Path worktree, String branch,
                                AgentKind agent, Optional<String> model, ModelTiers promptTiers,
                                Optional<ModelTiers> recordedTiers, Optional<String> sphinxPrompt,
-                               ReviewTour.Kind kind) {
+                               ReviewTour.Kind kind, Optional<PullRequestTarget> targetPullRequest) {
         if (from.isDisposed()) {
             LOG.log(Level.INFO, "The window was closed while the review of {0} was starting; {1} is untouched",
                     branch, worktree);
@@ -342,7 +384,8 @@ public final class WorktreeReview {
                 .orElseGet(() -> PullRequestReview.ReviewPrompt.drydockReview(agent, promptTiers, model)
                         .asking(kind));
         var launch = SessionDialogs.launchSession(from, worktree, mainRoot, agent, displayName,
-                SessionMode.WRITES, prompt::resolve, false, model, recordedTiers);
+                SessionMode.WRITES, prompt::resolve, false, model, recordedTiers,
+                new SessionDialogs.PreparedSessionCallback() { }, List.of(), Optional.empty(), targetPullRequest);
         ProgressManager.getInstance().run(new Task.Backgroundable(from,
                 "Starting review of " + branch + "…", false) {
             @Override

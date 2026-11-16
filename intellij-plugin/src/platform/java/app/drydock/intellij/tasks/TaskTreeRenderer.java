@@ -396,18 +396,20 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
     }
 
     /**
-     * The pull request a session row belongs to (pure): the session's own PR
-     * link when it carries a number, else the {@code pr-<n>} branch a PR
-     * checkout gives its worktree. From the row alone, never a gh call.
+     * The explicit target first, then the session's working-branch PR link,
+     * else the {@code pr-<n>} branch a PR checkout gives its worktree.
+     * Read the carried row only; never look up a target while painting.
      */
     static Optional<Integer> pullRequestOf(TaskRow task) {
-        Optional<Integer> linked = task.session().pr().number();
+        Optional<Integer> linked = task.session().targetPullRequest().map(target -> target.number())
+                .or(() -> task.session().pr().number());
         return linked.isPresent() ? linked : task.branch().flatMap(PrCheckoutService::pullRequestNumberOf);
     }
 
-    /** Pure. The pull request's page address a session row offers as its link, when gh reported it. */
+    /** Pure. A stored target's page wins over the working branch's reported PR address. */
     static Optional<String> pullRequestUrl(TaskRow task) {
-        return task.branchPullRequest().flatMap(BranchPullRequest::url);
+        return task.session().targetPullRequest().map(target -> target.url())
+                .or(() -> task.branchPullRequest().flatMap(BranchPullRequest::url));
     }
 
     /** What a branch's pull request badge reads as, which also picks its colour. */
@@ -432,8 +434,9 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
             case CLOSED -> "closed";
             case UNKNOWN -> "state unknown";
         };
-        return "Pull request #" + pullRequest.number() + " (" + state + ") from "
-                + pullRequest.headRefName() + (pullRequest.title().isBlank() ? "" : ": " + pullRequest.title());
+        return "Pull request #" + pullRequest.number() + " (" + state + ")"
+                + (pullRequest.headRefName().isBlank() ? "" : " from " + pullRequest.headRefName())
+                + (pullRequest.title().isBlank() ? "" : ": " + pullRequest.title());
     }
 
     /**
@@ -461,6 +464,21 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
     static String linkedTaskTooltip(TaskDocument document) {
         return "Task '" + document.title() + "' (" + document.id() + ") works this branch";
     }
+
+    static Optional<Icon> pullRequestIcon(PullRequestBadgeKind kind) {
+        return switch (kind) {
+            case OPEN -> Optional.of(PR_OPEN_ICON);
+            case DRAFT -> Optional.of(PR_DRAFT_ICON);
+            case MERGED -> Optional.of(PR_MERGED_ICON);
+            case CLOSED -> Optional.of(PR_CLOSED_ICON);
+            case UNKNOWN -> Optional.empty();
+        };
+    }
+
+    static final Icon PR_OPEN_ICON = IconLoader.getIcon("/icons/prOpen.svg", TaskTreeRenderer.class);
+    static final Icon PR_DRAFT_ICON = IconLoader.getIcon("/icons/prDraft.svg", TaskTreeRenderer.class);
+    static final Icon PR_MERGED_ICON = IconLoader.getIcon("/icons/prMerged.svg", TaskTreeRenderer.class);
+    static final Icon PR_CLOSED_ICON = IconLoader.getIcon("/icons/prClosed.svg", TaskTreeRenderer.class);
 
     /** A pull request row's leading icon: GitHub's mark, followed by the conflict icon while it conflicts. */
     static Icon pullRequestRowIcon(boolean conflicting) {

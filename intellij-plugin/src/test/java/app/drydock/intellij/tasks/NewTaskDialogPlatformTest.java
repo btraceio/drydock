@@ -7,6 +7,7 @@ import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionMode;
 import app.drydock.domain.SshRemote;
 import app.drydock.git.GhCliService.OpenIssue;
+import app.drydock.git.GhCliService.OpenPullRequest;
 import app.drydock.intellij.workspace.WorkspaceSettings;
 import app.drydock.projects.SharedProject;
 import app.drydock.tasks.StartPlan;
@@ -36,6 +37,23 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /** Platform-backed checks for values that must survive {@code DialogWrapper.init()}. */
 public class NewTaskDialogPlatformTest extends BasePlatformTestCase {
+
+    public void testPullRequestEntryPreservesTheExplicitTargetInTheAcceptedChoice() {
+        var pr = new OpenPullRequest(898, "Target", "upstream-head", "main", false,
+                Optional.empty(), Optional.of("https://github.com/DataDog/java-profiler/pull/898"));
+        NewTaskPreset preset = NewTaskPreset.empty().withPullRequest(pr);
+        AtomicReference<NewTaskPlan.Choice> choice = new AtomicReference<>();
+        ApplicationManager.getApplication().invokeAndWait(() -> {
+            NewTaskDialog dialog = new NewTaskDialog(getProject(), inputs(), Optional.empty(), preset);
+            try {
+                choice.set(dialog.choice());
+            } finally {
+                Disposer.dispose(dialog.getDisposable());
+            }
+        });
+        assertEquals(preset.targetPullRequest(), choice.get().targetPullRequest());
+        assertEquals(898, choice.get().targetPullRequest().orElseThrow().number());
+    }
 
     public void testImplementationInstructionsSurviveDialogInitialization() {
         OpenIssue issue = new OpenIssue(42, "Fix allocation accounting",
