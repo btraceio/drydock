@@ -222,6 +222,49 @@ public class InboxListPlatformTest extends BasePlatformTestCase {
         assertEquals("Task unknown-project (ready)", InboxList.tooltip(item, NOW));
     }
 
+    public void testARunningSessionInAnotherWindowWearsTheWindowChip() throws Exception {
+        DrydockPluginService.getInstance().initialization().get(60, TimeUnit.SECONDS);
+        ManagedAgentSession session = new ManagedAgentSession(ManagedSessionId.newId(), RepositoryId.newId(),
+                "Windowed", AgentBinding.unlaunched(AgentKind.CLAUDE),
+                new SessionWorkspace(Path.of("/tmp/inbox-list-windowed").toAbsolutePath(), Optional.empty(), false),
+                SessionStatus.RUNNING, NOW, NOW, Optional.empty(), PrLink.none(), false, Optional.empty(), false);
+        TaskPlacement here = TaskPlacement.of(true, Optional.of(ALPHA), Optional.of("alpha"),
+                session.workingDirectory(), Optional.of(ALPHA));
+        TaskPlacement own = TaskPlacement.of(true, Optional.of(session.workingDirectory()),
+                Optional.of("beta"), session.workingDirectory(), Optional.of(ALPHA));
+        TaskPlacement other = TaskPlacement.of(true, Optional.of(Path.of("/repos/gamma").toAbsolutePath()),
+                Optional.of("gamma"), session.workingDirectory(), Optional.of(ALPHA));
+        assertEquals("the placements the chip is about", new TaskPlacement.OwnWindow(), own);
+        assertEquals("in gamma window", new TaskPlacement.OtherWindow("gamma").meta(), other.meta());
+        TaskRow placed = null;
+        for (TaskPlacement placement : List.of(here, own, other)) {
+            placed = new TaskRow(session, Optional.of(SessionActivity.BUSY), true, Optional.empty(), placement,
+                    false, false);
+            list.show(inboxOf(placed), false);
+            List<String> labels = renderedLabels(indexOf("Windowed"));
+            if (placement == here) {
+                assertEquals("shown here is not running in a different window",
+                        List.of("Windowed", "alpha"), labels);
+            } else if (placement == own) {
+                assertEquals(List.of("Windowed", "alpha", "in its own window"), labels);
+            } else {
+                assertEquals(List.of("Windowed", "alpha", "in gamma window"), labels);
+            }
+        }
+        // A running session no window shows (NotShown) does not run in a window either.
+        placed = new TaskRow(placed.session(), Optional.of(SessionActivity.BUSY), true, Optional.empty(),
+                TaskPlacement.of(true, Optional.empty(), Optional.empty(), session.workingDirectory(),
+                        Optional.of(ALPHA)), false, false);
+        list.show(inboxOf(placed), false);
+        assertEquals(List.of("Windowed", "alpha"), renderedLabels(indexOf("Windowed")));
+    }
+
+    private Inbox inboxOf(TaskRow session) {
+        return InboxModel.build(new InboxModel.Inputs(
+                List.of(new ProjectRow(ALPHA_PROJECT, false, false, List.<TaskNode>of(session), List.of(), 1)),
+                List.of(ALPHA_PROJECT), List.of(), Map.of(), Map.of(TASKS, ALPHA), NOW, ZoneOffset.UTC), Query.NONE);
+    }
+
     public void testGroupsTruncateAndDoneStartsCollapsed() {
         list.show(inbox(Query.NONE), false);
         assertEquals(List.of("v Running", "  Run 5", "  Run 4", "  Run 3", "  Run 2", "  + 2 more",
