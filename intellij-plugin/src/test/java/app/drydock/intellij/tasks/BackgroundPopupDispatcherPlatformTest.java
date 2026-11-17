@@ -40,6 +40,7 @@ import java.awt.Point;
 import java.awt.Rectangle;
 import java.awt.event.MouseEvent;
 import java.awt.event.MouseListener;
+import java.util.Arrays;
 import java.lang.reflect.Proxy;
 import java.nio.file.Path;
 import java.time.Instant;
@@ -274,12 +275,28 @@ public class BackgroundPopupDispatcherPlatformTest extends BasePlatformTestCase 
     }
 
     public void testLeftAndMiddleClicksShowNothing() {
-        dispatcher(owning);
+        BackgroundPopupDispatcher dispatcher = dispatcher(owning);
+        // The events go straight to the dispatcher's listeners: this contract
+        // is the dispatcher's button/phase filtering alone, and the list's LAF
+        // handler cannot run headless (getMenuShortcutKeyMaskEx throws with no
+        // display) before our listener would even see the event.
+        List<MouseListener> dispatcherListeners = Arrays.stream(list.getMouseListeners())
+                .filter(l -> l.getClass().getName().contains("BackgroundPopupDispatcher"))
+                .toList();
+        assertFalse("the dispatcher registered its listeners", dispatcherListeners.isEmpty());
         for (int button : new int[]{MouseEvent.BUTTON1, MouseEvent.BUTTON2}) {
             int down = button == MouseEvent.BUTTON1 ? MouseEvent.BUTTON1_DOWN_MASK : MouseEvent.BUTTON2_DOWN_MASK;
             for (int id : new int[]{MouseEvent.MOUSE_PRESSED, MouseEvent.MOUSE_RELEASED, MouseEvent.MOUSE_CLICKED}) {
-                list.dispatchEvent(mouse(list, id, 10, 200, false, button, id == MouseEvent.MOUSE_PRESSED ? down : 0));
-                tree.dispatchEvent(mouse(tree, id, 10, 200, false, button, id == MouseEvent.MOUSE_PRESSED ? down : 0));
+                MouseEvent event = mouse(list, id, 10, 200, false, button, id == MouseEvent.MOUSE_PRESSED ? down : 0);
+                for (MouseListener listener : dispatcherListeners) {
+                    if (id == MouseEvent.MOUSE_PRESSED) {
+                        listener.mousePressed(event);
+                    } else if (id == MouseEvent.MOUSE_RELEASED) {
+                        listener.mouseReleased(event);
+                    } else {
+                        listener.mouseClicked(event);
+                    }
+                }
             }
         }
         assertEquals(List.of(), shown);

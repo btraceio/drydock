@@ -44,6 +44,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.awt.GraphicsEnvironment;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -467,8 +468,12 @@ class TaskTreeRendererTest {
         assertNotEquals(light, dark, "the dark theme gets its own colour");
         assertNotEquals(resource("/icons/prConflict.svg").replaceAll("#\\w+", ""), light.replaceAll("#\\w+", ""),
                 "conflict and CI glyphs differ in shape, not just colour");
-        assertEquals(16, TaskTreeRenderer.PR_CI_FAILURE_ICON.getIconWidth());
-        assertEquals(16, TaskTreeRenderer.PR_CI_FAILURE_ICON.getIconHeight());
+        // IconLoader's SVG rasterization has no headless path — it hands back
+        // its 1x1 placeholder — so the rendered-size assertions hold only headful.
+        if (!GraphicsEnvironment.isHeadless()) {
+            assertEquals(16, TaskTreeRenderer.PR_CI_FAILURE_ICON.getIconWidth());
+            assertEquals(16, TaskTreeRenderer.PR_CI_FAILURE_ICON.getIconHeight());
+        }
     }
 
     private static String resource(String path) throws IOException {
