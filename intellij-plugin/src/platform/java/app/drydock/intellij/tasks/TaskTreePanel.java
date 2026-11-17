@@ -4,6 +4,7 @@ import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.AgentRegistry;
 import app.drydock.delayedtasks.DelayedTaskService;
 import app.drydock.delayedtasks.NewDelayedTaskDialog;
+import app.drydock.delayedtasks.SharedProjectResolver;
 import app.drydock.delayedtasks.TaskPrerequisitePicker;
 import app.drydock.delayedtasks.TaskStoreWatcher.WatchedSnapshot;
 import app.drydock.intellij.delayedtasks.DelayedTaskActions;
@@ -2316,14 +2317,14 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     /**
      * The live repository catalog as the task layer sees it (T17a): each
      * repository's display name, from the in-memory state, once per
-     * background pass. No I/O.
+     * background pass. No I/O. The mapping is the dual-registry one
+     * ({@link SharedProjectResolver#displayNames}): the task tools stamp
+     * created tasks with the SHARED registry's id, so a mapping of the
+     * install catalog alone leaves every MCP-created task unnamed.
      */
     static Map<RepositoryId, String> displayNamesByRepository(DrydockPluginService plugin) {
-        Map<RepositoryId, String> names = new LinkedHashMap<>();
-        for (Repository repository : plugin.stateStore().state().repositories()) {
-            names.putIfAbsent(repository.id(), repository.displayName());
-        }
-        return names;
+        return SharedProjectResolver.displayNames(plugin.sharedProjects().projects(),
+                plugin.stateStore().state().repositories());
     }
 
     /**
@@ -2662,6 +2663,14 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         Map<RepositoryId, Path> roots = new LinkedHashMap<>();
         for (Repository repository : plugin.stateStore().state().repositories()) {
             roots.putIfAbsent(repository.id(), RepositoryCatalog.canonicalize(repository.root()));
+        }
+        // Tasks are filed under the SHARED registry's id (the id the task tools stamp at
+        // creation), so the task-to-project mapping needs both registries' ids for the
+        // same checkout, or the MCP-created tasks associate with no project and no dir.
+        for (SharedProject project : plugin.sharedProjects().projects()) {
+            if (!project.isRemote()) {
+                roots.putIfAbsent(project.id(), RepositoryCatalog.canonicalize(project.root()));
+            }
         }
         return roots;
     }

@@ -373,6 +373,68 @@ class DelayedTaskServiceTest {
         }
     }
 
+    // 6i. The project a task is filed under, as the task tools report it: a shared-id
+    // repository resolves to its project's slug and root, an install-only id to its own
+    // entry, and a REMOTE project answers empty -- there is no local checkout to name.
+    @Test
+    void projectOfResolvesBothRegistriesAndRefusesRemote(@TempDir Path dir) throws Exception {
+        Path store = dir.resolve("store");
+        Path root = Files.createDirectories(dir.resolve("project"));
+        Path rootOf = root.toAbsolutePath().normalize();
+        RepositoryId sharedId = RepositoryId.newId();
+        RepositoryId installId = RepositoryId.newId();
+        RepositoryId remoteId = RepositoryId.newId();
+        SshRemote ssh = new SshRemote("box", "/srv/repo");
+        List<SharedProject> shared = List.of(
+                SharedProject.local(sharedId, rootOf, "Project Alpha", Instant.EPOCH),
+                new SharedProject(remoteId, ssh.placeholderRoot(), "remote", Instant.EPOCH,
+                        Optional.of(ssh)));
+        List<Repository> catalog = List.of(repository(installId, rootOf, "Project Alpha"));
+        try (DelayedTaskService service = new DelayedTaskService(store, executor,
+                List::of, () -> catalog, () -> shared)) {
+            await(service.initialize());
+            TaskToolContext.ProjectInfo filed = await(service.projectOf(sharedId)).orElseThrow();
+            assertEquals("project-alpha", filed.slug(), "the shared id names its project");
+            assertEquals(RepositoryCatalog.canonicalize(rootOf), filed.root(),
+                    "the root is the checkout a start would launch in");
+            TaskToolContext.ProjectInfo installOnly = await(service.projectOf(installId)).orElseThrow();
+            assertEquals("project-alpha", installOnly.slug(),
+                    "an install id the shared list knows by root borrows the project's name");
+            assertEquals(RepositoryCatalog.canonicalize(rootOf), installOnly.root());
+            assertTrue(await(service.projectOf(remoteId)).isEmpty(),
+                    "a remote project never resolves: there is no local checkout");
+            assertTrue(await(service.projectOf(RepositoryId.newId())).isEmpty(),
+                    "an id neither registry knows names no project");
+        }
+    }
+
+    // 6j. The graph's slug mapping is the dual-registry one: a '<slug>:<id>' reference
+    // to a task filed under the SHARED registry's id resolves, although the install
+    // catalog knows no repository at all -- the mapping the create validation runs on.
+    @Test
+    void aSlugQualifiedReferenceResolvesThroughTheSharedRegistryId(@TempDir Path dir)
+            throws Exception {
+        Path store = dir.resolve("store");
+        Path root = Files.createDirectories(dir.resolve("project"));
+        Path rootOf = root.toAbsolutePath().normalize();
+        RepositoryId sharedId = RepositoryId.newId();
+        List<SharedProject> shared =
+                List.of(SharedProject.local(sharedId, rootOf, "Project Alpha", Instant.EPOCH));
+        try (DelayedTaskService service = new DelayedTaskService(store, executor,
+                List::of, List::of, () -> shared)) {
+            await(service.initialize());
+            TaskDocument prerequisite = await(service.create("Prerequisite", List.of(), sharedId))
+                    .document();
+            TaskToolContext.Outcome created = await(service.create("Follow up",
+                    List.of("project-alpha:" + prerequisite.id().text()), sharedId));
+            assertFalse(created.refused(),
+                    "the qualified reference resolves through the shared id; refusal was: "
+                            + created.refusal());
+            assertEquals(List.of("project-alpha:" + prerequisite.id().text()),
+                    created.document().after());
+        }
+    }
+
     // 6g. A task filed under a REMOTE shared project's id never resolves: there is no
     // local checkout to probe or launch in, so the claim refuses as unregistered before
     // any branch probe.

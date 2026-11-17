@@ -1197,6 +1197,15 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
     }
 
     @Override
+    public CompletableFuture<Optional<TaskToolContext.ProjectInfo>> projectOf(RepositoryId repository) {
+        return supply(store -> resolveProject(repository)
+                // The same canonical root every registry comparison uses; the handle's
+                // root is already canonical, so this restates, never re-resolves.
+                .map(handle -> new TaskToolContext.ProjectInfo(slugOf(repository),
+                        RepositoryCatalog.canonicalize(handle.root()))));
+    }
+
+    @Override
     public CompletableFuture<List<String>> registeredProjectSlugs() {
         return supply(store -> {
             // Only slugs that resolve uniquely are offered: a slug two projects share
@@ -1763,16 +1772,21 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
         return Optional.empty();
     }
 
-    /** The registered repository's display slug, or null when unregistered or unnameable. */
+    /** The registered repository's display slug, or null when unregistered or unnameable.
+      * The resolution is the dual-registry one ({@link SharedProjectResolver#resolve}):
+      * a task carries either registry's id -- the task tools stamp the SHARED registry's
+      * id at creation -- and every consumer that names a task's project from its id (the
+      * graph's slug mapping, the notifications, the stacked launch name) must see both,
+      * or the MCP-created tasks lose their project association. An install id the shared
+      * list does not know keeps the install entry's own name. */
     private String slugOf(RepositoryId repository) {
-        return repositories.get().stream()
-                .filter(candidate -> candidate.id().equals(repository))
-                .map(candidate -> slugOf(candidate.displayName()))
-                // A name with no slug characters maps to null; findFirst would wrap that
-                // in Optional.of and throw, so unnameable repositories skip the search
-                // and answer null like an unregistered one.
-                .filter(Objects::nonNull)
-                .findFirst().orElse(null);
+        String name = SharedProjectResolver.resolve(sharedProjects.get(), repositories.get(), repository)
+                .map(SharedProject::displayName)
+                .orElseGet(() -> repositories.get().stream()
+                        .filter(candidate -> candidate.id().equals(repository))
+                        .map(Repository::displayName)
+                        .findFirst().orElse(null));
+        return name == null ? null : slugOf(name);
     }
     /** The display-name slug (P2): lowercase letters, digits and inner hyphens, capped. */
     private static String slugOf(String name) {
