@@ -32,6 +32,7 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -925,7 +926,7 @@ class ApplicationStateCodecTest {
                 SessionWorkspace.inRepository(TestPaths.abs("/tmp/repo")),
                 SessionStatus.INACTIVE, Instant.parse("2026-08-28T10:00:00Z"),
                 Instant.parse("2026-08-28T10:00:00Z"), java.util.Optional.empty(),
-                PrLink.none(), false, java.util.Optional.empty(), false,
+                PrLink.none(), java.util.List.of(), false, java.util.Optional.empty(), false,
                 java.util.Optional.of(workflowId), false);
 
         ApplicationState state = new ApplicationState(List.of(), List.of(session), List.of(),
@@ -945,7 +946,7 @@ class ApplicationStateCodecTest {
                 SessionWorkspace.inRepository(TestPaths.abs("/tmp/repo")),
                 SessionStatus.INACTIVE, Instant.parse("2026-08-28T10:00:00Z"),
                 Instant.parse("2026-08-28T10:00:00Z"), java.util.Optional.empty(),
-                PrLink.none(), false, java.util.Optional.empty(), false,
+                PrLink.none(), java.util.List.of(), false, java.util.Optional.empty(), false,
                 java.util.Optional.empty(), true);
 
         ApplicationState state = new ApplicationState(List.of(), List.of(session), List.of(),
@@ -1001,5 +1002,125 @@ class ApplicationStateCodecTest {
         ApplicationState decoded = ApplicationStateCodec.fromJson(json);
         assertEquals(1, decoded.sessions().size());
         assertTrue(decoded.sessions().get(0).workflowId().isEmpty());
+    }
+
+    private static String sessionWithLinks(String prLinksJson, String prState, String prNumber) {
+        String links = prLinksJson == null ? "" : "," + prLinksJson;
+        return """
+                {"schemaVersion":2,"repositories":[],
+                 "sessions":[{"id":"%s","repositoryId":"%s","displayName":"s",
+                  "agentKind":"claude","agentSessionId":null,"agentSessionName":null,
+                  "workingDirectory":"%s","worktreeRoot":null,"status":"INACTIVE",
+                  "createdAt":"2026-01-01T00:00:00Z","lastOpenedAt":"2026-01-01T00:00:00Z",
+                  "lastExitCode":null,"prState":"%s","prNumber":%s%s,
+                  "branchCreatedHere":false,"namePinned":false,"forkedFrom":null,
+                  "evalMode":false,"workflowId":null,"startedWithTask":false}],
+                 "ui":{"selectedRepositoryId":null,"sidebarWidth":288.0,
+                        "expandedRepositoryIds":[],"theme":"DARK"}}
+                """.formatted(SESSION_ID, REPO_ID, REPO_ROOT, prState, prNumber, links);
+    }
+
+    @Test
+    void aSessionWithoutPrLinksDecodesWithoutSecondaryLinks() {
+        // The member was added leniently: a document written before secondary
+        // PR links existed must decode to an empty list, not fail.
+        ApplicationState decoded = ApplicationStateCodec.fromJson(
+                JsonParser.parse(sessionWithLinks(null, "OPEN", "7")));
+
+        assertEquals(1, decoded.sessions().size());
+        assertTrue(decoded.sessions().get(0).additionalPrs().isEmpty());
+        assertEquals(Optional.of(7), decoded.sessions().get(0).prNumber());
+    }
+
+    @Test
+    void secondaryPrLinksRoundTrip() {
+        ApplicationState decoded = ApplicationStateCodec.fromJson(JsonParser.parse(
+                sessionWithLinks("\"prLinks\":[{\"state\":\"OPEN\",\"number\":9}]", "OPEN", "7")));
+        assertEquals(1, decoded.sessions().size());
+        assertEquals(List.of(PrLink.of(PrState.OPEN, Optional.of(9))),
+                decoded.sessions().get(0).additionalPrs());
+
+        ApplicationState roundTripped = ApplicationStateCodec.fromJson(
+                ApplicationStateCodec.toJson(decoded));
+
+        assertEquals(List.of(PrLink.of(PrState.OPEN, Optional.of(9))),
+                roundTripped.sessions().get(0).additionalPrs());
+        assertEquals(Optional.of(7), roundTripped.sessions().get(0).prNumber());
+    }
+
+    @Test
+    void aSessionWithoutSecondaryLinksPersistsWithoutThePrLinksMember() {
+        // Written only when non-empty, so a session without secondary links
+        // keeps its persisted shape byte-identical to the pre-prLinks form.
+        ManagedAgentSession session = new ManagedAgentSession(
+                ManagedSessionId.of(SESSION_ID), RepositoryId.of(REPO_ID), "s",
+                new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
+                new SessionWorkspace(TestPaths.abs("/tmp"), Optional.empty(), true),
+                SessionStatus.INACTIVE, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
+                PrLink.of(PrState.OPEN, Optional.of(7)), List.of(), false, Optional.empty(),
+                false, Optional.empty(), false);
+        ApplicationState state = ApplicationState.empty().withSessions(List.of(session));
+
+        JsonValue json = ApplicationStateCodec.toJson(state);
+        JsonObject sessionObj = (JsonObject) ((JsonArray) ((JsonObject) json).get("sessions"))
+                .elements().get(0);
+
+        assertFalse(sessionObj.has("prLinks"));
+    }
+
+    @Test
+    void malformedPrLinkEntriesAreSkippedOneAtATime() {
+        // Numberless (unidentifiable), stateless (decodes to NONE, so the
+        // number is dropped), unrecognized-state, and duplicate (primary and
+        // earlier link) entries each cost only themselves.
+        ApplicationState decoded = ApplicationStateCodec.fromJson(JsonParser.parse(sessionWithLinks(
+                "\"prLinks\":[{\"state\":\"OPEN\"},{\"number\":9},"
+                        + "{\"state\":\"WEIRD\",\"number\":9},"
+                        + "{\"state\":\"OPEN\",\"number\":9},"
+                        + "{\"state\":\"OPEN\",\"number\":7}]", "OPEN", "7")));
+
+        assertEquals(1, decoded.sessions().size());
+        assertEquals(List.of(PrLink.of(PrState.OPEN, Optional.of(9))),
+                decoded.sessions().get(0).additionalPrs());
+    }
+
+    @Test
+    void overLimitPrLinksDecodeLenientlyAndKeepTheFirstValidEntries() {
+        List<String> encodedLinks = new ArrayList<>(List.of(
+                "{\"state\":\"OPEN\"}",
+                "{\"state\":\"WEIRD\",\"number\":98}",
+                "{\"state\":\"OPEN\",\"number\":7}",
+                "{\"state\":\"OPEN\",\"number\":100}",
+                "{\"state\":\"MERGED\",\"number\":100}"));
+        List<PrLink> expected = new ArrayList<>();
+        expected.add(PrLink.of(PrState.OPEN, Optional.of(100)));
+        for (int number = 101; number <= 100 + ManagedAgentSession.MAX_ADDITIONAL_PR_LINKS; number++) {
+            encodedLinks.add("{\"state\":\"OPEN\",\"number\":" + number + "}");
+            if (expected.size() < ManagedAgentSession.MAX_ADDITIONAL_PR_LINKS) {
+                expected.add(PrLink.of(PrState.OPEN, Optional.of(number)));
+            }
+        }
+
+        ApplicationState decoded = ApplicationStateCodec.fromJson(JsonParser.parse(sessionWithLinks(
+                "\"prLinks\":[" + String.join(",", encodedLinks) + "]", "OPEN", "7")));
+
+        assertEquals(1, decoded.sessions().size());
+        ManagedAgentSession session = decoded.sessions().getFirst();
+        assertEquals(Optional.of(7), session.prNumber());
+        assertEquals(ManagedAgentSession.MAX_ADDITIONAL_PR_LINKS, session.additionalPrs().size());
+        assertEquals(expected, session.additionalPrs());
+    }
+
+    @Test
+    void prLinksWithoutAPrimaryPrAreDropped() {
+        // The domain invariant: the first PR a session learns of is the
+        // primary one, so secondary links without a primary behind them are
+        // dropped at decode rather than breaking the session.
+        ApplicationState decoded = ApplicationStateCodec.fromJson(JsonParser.parse(
+                sessionWithLinks("\"prLinks\":[{\"state\":\"OPEN\",\"number\":9}]", "NONE", "null")));
+
+        assertEquals(1, decoded.sessions().size());
+        assertTrue(decoded.sessions().get(0).additionalPrs().isEmpty());
+        assertEquals(PrState.NONE, decoded.sessions().get(0).prState());
     }
 }

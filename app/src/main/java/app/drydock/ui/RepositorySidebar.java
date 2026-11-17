@@ -8,6 +8,7 @@ import app.drydock.app.RepositoryManager;
 import app.drydock.app.SessionManager;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.PrLink;
 import app.drydock.domain.PrState;
 import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
@@ -2024,6 +2025,12 @@ public final class RepositorySidebar extends VBox {
                         text.append(' ').append(UiFormats.branchText(status));
                     }
                 });
+                // Every linked PR's number, so a filter query like "1234" or
+                // "#1234" finds the session stacked on it, not just the
+                // primary one.
+                for (PrLink link : sessionNode.session().prLinks()) {
+                    link.number().ifPresent(number -> text.append(" #").append(number));
+                }
                 yield queryMatcher.matches(text.toString());
             }
             case SidebarNode.UnopenedWorktreeNode worktreeNode -> {
@@ -3028,7 +3035,10 @@ public final class RepositorySidebar extends VBox {
             branchTag.setTextOverrun(OverrunStyle.LEADING_ELLIPSIS);
             HBox.setHgrow(branchTag, Priority.NEVER);
 
-            // Right-aligned PR chip: `PR #n` while open, `merged` after.
+            // Right-aligned PR chips: primary first (`PR #n` while open,
+            // `merged` after), then one chip per secondary link. Secondary
+            // chips are labels only -- the Review ▸ scope machinery resolves
+            // the primary PR, so a secondary chip has nothing to open yet.
             Label prChip = switch (session.prState()) {
                 case OPEN -> new Label(session.prNumber().map(n -> "PR #" + n).orElse("PR"));
                 case MERGED -> new Label("merged");
@@ -3051,6 +3061,18 @@ public final class RepositorySidebar extends VBox {
                     }
                 });
             }
+            List<Label> secondaryChips = session.additionalPrs().stream()
+                    .map(link -> switch (link.state()) {
+                        case OPEN -> new Label("PR #" + link.number().orElseThrow());
+                        case MERGED -> new Label("merged");
+                        case NONE -> null;
+                    })
+                    .filter(Objects::nonNull)
+                    .peek(chip -> {
+                        chip.getStyleClass().addAll("pr-chip", "pr-chip-secondary");
+                        chip.setMouseTransparent(true);
+                    })
+                    .toList();
 
             Button open = quickAction("↗", "Open", false, () -> navigator.resumeSession(session));
             Button stop = quickAction("■", "Stop process", true, () -> navigator.closeSession(session.id()));
@@ -3075,6 +3097,7 @@ public final class RepositorySidebar extends VBox {
             if (prChip != null) {
                 row.getChildren().add(prChip);
             }
+            row.getChildren().addAll(secondaryChips);
             session.worktreeRoot().ifPresent(root ->
                     findingsBadge(root, () -> navigator.showReviewForSession(session.id(),
                             SessionReviewScopes.Choice.LOCAL))

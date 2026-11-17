@@ -10,9 +10,12 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -173,5 +176,185 @@ class ManagedAgentSessionTest {
                 PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty());
         assertEquals(AgentKind.CODEX, session.withAgentKind(AgentKind.CODEX).agentKind());
         assertEquals(Optional.of("x"), session.withAgentSessionId(Optional.of("x")).agentSessionId());
+    }
+
+    @Test
+    void firstObservedPrTakesThePrimarySlot() {
+        ManagedAgentSession session = sessionAt(tempDir);
+
+        ManagedAgentSession observed = session.withObservedPr(PrState.OPEN, 42);
+
+        assertEquals(Optional.of(42), observed.prNumber());
+        assertEquals(PrState.OPEN, observed.prState());
+        assertTrue(observed.additionalPrs().isEmpty());
+        assertEquals(List.of(PrLink.of(PrState.OPEN, Optional.of(42))), observed.prLinks());
+    }
+
+    @Test
+    void observedPrimaryNumberUpdatesThePrimaryLink() {
+        ManagedAgentSession session = sessionAt(tempDir).withPr(PrState.OPEN, Optional.of(42));
+
+        ManagedAgentSession observed = session.withObservedPr(PrState.MERGED, 42);
+
+        assertEquals(PrState.MERGED, observed.prState());
+        assertEquals(Optional.of(42), observed.prNumber());
+        assertTrue(observed.additionalPrs().isEmpty());
+    }
+
+    @Test
+    void observedNewNumberWithAKnownPrimaryAppendsASecondaryLink() {
+        // The first PR stays primary: a session checked out from PR #7 that
+        // later opens PR #9 from the same worktree must not lose #7.
+        ManagedAgentSession session = sessionAt(tempDir).withPr(PrState.OPEN, Optional.of(7));
+
+        ManagedAgentSession observed = session.withObservedPr(PrState.OPEN, 9);
+
+        assertEquals(Optional.of(7), observed.prNumber());
+        assertEquals(List.of(PrLink.of(PrState.OPEN, Optional.of(9))), observed.additionalPrs());
+        assertEquals(List.of(
+                PrLink.of(PrState.OPEN, Optional.of(7)),
+                PrLink.of(PrState.OPEN, Optional.of(9))), observed.prLinks());
+    }
+
+    @Test
+    void novelObservationAppendsWithoutRewritingNonMatchingSecondaryLinks() {
+        ManagedAgentSession session = sessionAt(tempDir)
+                .withPr(PrState.OPEN, Optional.of(7))
+                .withObservedPr(PrState.MERGED, 9)
+                .withObservedPr(PrState.OPEN, 11);
+
+        ManagedAgentSession observed = session.withObservedPr(PrState.OPEN, 13);
+
+        assertEquals(Optional.of(7), observed.prNumber());
+        assertEquals(List.of(
+                PrLink.of(PrState.MERGED, Optional.of(9)),
+                PrLink.of(PrState.OPEN, Optional.of(11)),
+                PrLink.of(PrState.OPEN, Optional.of(13))), observed.additionalPrs());
+    }
+
+    @Test
+    void observedSecondaryNumberUpdatesThatLink() {
+        ManagedAgentSession session = sessionAt(tempDir)
+                .withPr(PrState.OPEN, Optional.of(7))
+                .withObservedPr(PrState.OPEN, 9);
+
+        ManagedAgentSession observed = session.withObservedPr(PrState.MERGED, 9);
+
+        assertEquals(PrState.OPEN, observed.prState());
+        assertEquals(List.of(PrLink.of(PrState.MERGED, Optional.of(9))), observed.additionalPrs());
+    }
+
+    @Test
+    void unchangedObservationReturnsTheSameInstance() {
+        ManagedAgentSession session = sessionAt(tempDir)
+                .withPr(PrState.OPEN, Optional.of(7))
+                .withObservedPr(PrState.OPEN, 9);
+
+        assertSame(session, session.withObservedPr(PrState.OPEN, 9));
+        assertSame(session, session.withObservedPr(PrState.OPEN, 7));
+    }
+
+    @Test
+    void secondaryLinksEvictTheOldestMergedLinkAtCapacity() {
+        List<PrLink> links = new ArrayList<>();
+        links.add(PrLink.of(PrState.MERGED, Optional.of(9)));
+        links.add(PrLink.of(PrState.OPEN, Optional.of(10)));
+        links.add(PrLink.of(PrState.MERGED, Optional.of(11)));
+        for (int number = 12; links.size() < ManagedAgentSession.MAX_ADDITIONAL_PR_LINKS; number++) {
+            links.add(PrLink.of(PrState.OPEN, Optional.of(number)));
+        }
+        ManagedAgentSession session = sessionAt(tempDir).withPr(PrState.OPEN, Optional.of(7))
+                .toBuilder().additionalPrs(links).build();
+
+        ManagedAgentSession primaryUpdated = session.withObservedPr(PrState.MERGED, 7);
+        assertEquals(PrState.MERGED, primaryUpdated.prState());
+        assertEquals(links, primaryUpdated.additionalPrs());
+        ManagedAgentSession secondaryUpdated = session.withObservedPr(PrState.MERGED, 10);
+        // In-place update keeps the link at its original index; only a novel
+        // observation at capacity evicts (asserted below).
+        assertEquals(PrState.MERGED, secondaryUpdated.additionalPrs().get(1).state());
+        assertEquals(Optional.of(10), secondaryUpdated.additionalPrs().get(1).number());
+        assertSame(session, session.withObservedPr(PrState.OPEN, 10));
+
+        ManagedAgentSession observed = session.withObservedPr(PrState.OPEN, 200);
+        List<PrLink> expected = new ArrayList<>(links);
+        expected.removeFirst();
+        expected.add(PrLink.of(PrState.OPEN, Optional.of(200)));
+        assertEquals(ManagedAgentSession.MAX_ADDITIONAL_PR_LINKS, observed.additionalPrs().size());
+        assertEquals(expected, observed.additionalPrs());
+    }
+
+    @Test
+    void fullListWithoutMergedSecondariesDoesNotRecordANovelObservation() {
+        List<PrLink> links = new ArrayList<>();
+        for (int number = 9; links.size() < ManagedAgentSession.MAX_ADDITIONAL_PR_LINKS; number++) {
+            links.add(PrLink.of(PrState.OPEN, Optional.of(number)));
+        }
+        ManagedAgentSession session = sessionAt(tempDir).withPr(PrState.OPEN, Optional.of(7))
+                .toBuilder().additionalPrs(links).build();
+
+        assertSame(session, session.withObservedPr(PrState.OPEN, 200));
+        assertEquals(links, session.additionalPrs());
+    }
+
+    @Test
+    void constructorRejectsMoreThanTheSecondaryLinkLimit() {
+        List<PrLink> overLimit = new ArrayList<>();
+        for (int number = 9; overLimit.size() <= ManagedAgentSession.MAX_ADDITIONAL_PR_LINKS; number++) {
+            overLimit.add(PrLink.of(PrState.OPEN, Optional.of(number)));
+        }
+
+        assertThrows(IllegalArgumentException.class, () -> sessionAt(tempDir).withPr(PrState.OPEN, Optional.of(7))
+                .toBuilder().additionalPrs(overLimit).build());
+    }
+
+    @Test
+    void secondaryLinkWithoutAPrimaryIsRejected() {
+        assertThrows(IllegalArgumentException.class, () -> new ManagedAgentSession(
+                ManagedSessionId.newId(), RepositoryId.newId(), "example session",
+                new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
+                new SessionWorkspace(tempDir, Optional.empty(), true),
+                SessionStatus.INACTIVE, Instant.now(), Instant.now(), Optional.empty(),
+                PrLink.none(),
+                List.of(PrLink.of(PrState.OPEN, Optional.of(42))),
+                false, Optional.empty(), false, Optional.empty(), false));
+    }
+
+    @Test
+    void secondaryLinkWithoutANumberIsRejected() {
+        assertThrows(IllegalArgumentException.class, () -> new ManagedAgentSession(
+                ManagedSessionId.newId(), RepositoryId.newId(), "example session",
+                new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
+                new SessionWorkspace(tempDir, Optional.empty(), true),
+                SessionStatus.INACTIVE, Instant.now(), Instant.now(), Optional.empty(),
+                PrLink.of(PrState.OPEN, Optional.empty()),
+                List.of(PrLink.of(PrState.OPEN, Optional.empty())),
+                false, Optional.empty(), false, Optional.empty(), false));
+    }
+
+    @Test
+    void secondaryLinkDuplicatingThePrimaryNumberIsRejected() {
+        assertThrows(IllegalArgumentException.class, () -> new ManagedAgentSession(
+                ManagedSessionId.newId(), RepositoryId.newId(), "example session",
+                new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
+                new SessionWorkspace(tempDir, Optional.empty(), true),
+                SessionStatus.INACTIVE, Instant.now(), Instant.now(), Optional.empty(),
+                PrLink.of(PrState.OPEN, Optional.of(42)),
+                List.of(PrLink.of(PrState.OPEN, Optional.of(42))),
+                false, Optional.empty(), false, Optional.empty(), false));
+    }
+
+    @Test
+    void duplicateSecondaryLinksAreRejected() {
+        assertThrows(IllegalArgumentException.class, () -> new ManagedAgentSession(
+                ManagedSessionId.newId(), RepositoryId.newId(), "example session",
+                new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
+                new SessionWorkspace(tempDir, Optional.empty(), true),
+                SessionStatus.INACTIVE, Instant.now(), Instant.now(), Optional.empty(),
+                PrLink.of(PrState.OPEN, Optional.of(42)),
+                List.of(
+                        PrLink.of(PrState.OPEN, Optional.of(43)),
+                        PrLink.of(PrState.OPEN, Optional.of(43))),
+                false, Optional.empty(), false, Optional.empty(), false));
     }
 }

@@ -1146,6 +1146,32 @@ public final class SessionManager implements AutoCloseable {
     }
 
     /**
+     * Applies an unnumbered PR-state observation only if the session still has
+     * no primary PR number. The check runs inside the same atomic transform as
+     * the update so a stale caller snapshot cannot overwrite an intervening
+     * numbered observation.
+     */
+    public ManagedAgentSession updatePrStateIfPrimaryEmpty(ManagedSessionId sessionId, PrState prState) {
+        return updateSession(sessionId, session -> session.prNumber().isEmpty()
+                ? session.withPr(prState, Optional.empty())
+                : session);
+    }
+
+    /**
+     * Folds one PR observation (a lifecycle state and the number it was
+     * observed for) into the session's link set: updates whichever link
+     * carries that number, takes the primary slot only while no primary PR
+     * is known, and appends a secondary link otherwise (see {@link
+     * ManagedAgentSession#withObservedPr}). Returns the session unchanged
+     * (same instance) when the observation changes nothing, so callers can
+     * skip the tab/sidebar refresh and the store write by identity.
+     */
+    public ManagedAgentSession reconcileObservedPr(ManagedSessionId sessionId, PrState prState,
+                                                    int prNumber) {
+        return updateSession(sessionId, session -> session.withObservedPr(prState, prNumber));
+    }
+
+    /**
      * Registers an existing on-disk Claude conversation (discovered by the
      * resume picker in {@code ~/.claude/projects}) as a managed session, so
      * the normal {@link #resumeSession} path can reopen that exact

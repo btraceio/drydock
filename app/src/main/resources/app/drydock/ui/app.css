@@ -1589,6 +1589,12 @@
     -fx-background-color: -drydock-merged-soft;
     -fx-text-fill: -drydock-merged;
 }
+.pr-chip-secondary {
+    -fx-background-color: transparent;
+    -fx-border-color: -drydock-pr-soft;
+    -fx-border-radius: 100px;
+    -fx-text-fill: -drydock-pr;
+}
 
 /* ---- Worktree lifecycle: create modal ------------------------------------ */
 

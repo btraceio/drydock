@@ -74,6 +74,7 @@ import java.util.Set;
  *       "lastExitCode": <int> | null,
  *       "prState": "NONE" | "OPEN" | "MERGED",
  *       "prNumber": <int> | null,
+ *       "prLinks": [{"state": "OPEN", "number": 9}, ...] (optional; omitted when empty),
  *       "branchCreatedHere": <boolean>,
  *       "namePinned": <boolean>,
  *       "forkedFrom": "<uuid>" | null,
@@ -121,7 +122,15 @@ import java.util.Set;
  * further per-field migration is needed. The {@code prState}/{@code
  * prNumber} members (worktree lifecycle) were added later within version 2:
  * both decode leniently -- a document without them yields {@code NONE} /
- * empty, so no version bump was needed. The {@code remote} member (SSH
+ * empty, so no version bump was needed. The session {@code prLinks} member
+ * (secondary PR links, see {@link ManagedAgentSession#additionalPrs()}) was
+ * likewise added leniently within version 2: an absent member decodes to an
+ * empty list, malformed or invariant-violating entries are skipped (see
+ * {@link #prLinksFromJson}), and only the first
+ * {@link ManagedAgentSession#MAX_ADDITIONAL_PR_LINKS} valid links are retained.
+ * It is written only when non-empty so a session without secondary links keeps
+ * its persisted shape byte-identical.
+ * The {@code remote} member (SSH
  * remote repositories) was added leniently within version 2, like
  * {@code prState}: absent or malformed decodes to null (local repo), so no
  * version bump was needed and downgrades stay non-destructive. The
@@ -274,6 +283,18 @@ public final class ApplicationStateCodec {
         obj.put("prNumber", session.prNumber()
                 .<JsonValue>map(number -> JsonNumber.of((long) number))
                 .orElse(JsonValue.JsonNull.INSTANCE));
+        // Written only when non-empty, so a session without secondary PR
+        // links round-trips byte-identically to the pre-prLinks shape.
+        if (!session.additionalPrs().isEmpty()) {
+            List<JsonValue> links = new ArrayList<>();
+            for (PrLink link : session.additionalPrs()) {
+                JsonObject linkObj = JsonObject.empty();
+                linkObj.put("state", new JsonString(link.state().name()));
+                link.number().ifPresent(number -> linkObj.put("number", JsonNumber.of((long) number)));
+                links.add(linkObj);
+            }
+            obj.put("prLinks", new JsonArray(links));
+        }
         obj.put("branchCreatedHere", new JsonBoolean(session.branchCreatedHere()));
         obj.put("namePinned", new JsonBoolean(session.namePinned()));
         obj.put("forkedFrom", session.forkedFrom()
@@ -558,6 +579,13 @@ public final class ApplicationStateCodec {
             Optional<Integer> prNumber = obj.get("prNumber") instanceof JsonNumber pn
                     ? Optional.of(pn.asInt())
                     : Optional.empty();
+            // Lenient, like prState: sessions persisted before secondary PR
+            // links existed have no prLinks member and decode to an empty
+            // list. Malformed entries are skipped one at a time, never
+            // failing the session; entries are additionally dropped when they
+            // would violate the domain invariant (a numberless or duplicate
+            // link, or any link without a primary PR behind it). No schema bump.
+            List<PrLink> additionalPrs = prLinksFromJson(obj, prNumber);
             // Lenient, like prState/remote: every session persisted before
             // this member existed did create its own branch, so an absent or
             // malformed value decodes to true. No schema bump.
@@ -592,11 +620,49 @@ public final class ApplicationStateCodec {
                     new AgentBinding(agentKind, agentSessionId, agentSessionName),
                     new SessionWorkspace(workingDirectory, worktreeRoot, branchCreatedHere),
                     status, createdAt, lastOpenedAt, lastExitCode,
-                    PrLink.fromPersisted(prState, prNumber), namePinned, forkedFrom, evalMode, workflowId,
-                    startedWithTask);
+                    PrLink.fromPersisted(prState, prNumber), additionalPrs, namePinned, forkedFrom,
+                    evalMode, workflowId, startedWithTask);
         } catch (IllegalArgumentException | DateTimeException e) {
             throw new StateDecodeException("Malformed session entry: " + e.getMessage());
         }
+    }
+
+    /**
+     * Decodes the session's secondary PR links (the {@code "prLinks"} member,
+     * added leniently within schemaVersion 2 — see class doc). Absent member
+     * yields an empty list. Lenient like {@code prState}, plus the domain
+     * invariant enforced on top: a link with no number (unidentifiable), an
+     * unrecognized state, or a number already claimed (by the primary PR or
+     * an earlier link) is skipped rather than failing the decode, and the
+     * whole member is dropped when there is no primary PR behind it.
+     */
+    private static List<PrLink> prLinksFromJson(JsonObject obj, Optional<Integer> primaryNumber) {
+        if (!(obj.get("prLinks") instanceof JsonArray array) || primaryNumber.isEmpty()) {
+            return List.of();
+        }
+        List<PrLink> links = new ArrayList<>();
+        Set<Integer> seen = new LinkedHashSet<>();
+        seen.add(primaryNumber.get());
+        for (JsonValue element : array.elements()) {
+            if (links.size() >= ManagedAgentSession.MAX_ADDITIONAL_PR_LINKS) {
+                break;
+            }
+            if (!(element instanceof JsonObject linkObj)) {
+                continue;
+            }
+            PrState state = linkObj.get("state") instanceof JsonString s
+                    ? PrState.fromPersisted(s.value())
+                    : PrState.NONE;
+            Optional<Integer> number = linkObj.get("number") instanceof JsonNumber n
+                    ? Optional.of(n.asInt())
+                    : Optional.empty();
+            PrLink link = PrLink.fromPersisted(state, number);
+            if (link.number().isEmpty() || !seen.add(link.number().get())) {
+                continue;
+            }
+            links.add(link);
+        }
+        return List.copyOf(links);
     }
 
     private static Optional<ManagedSessionId> parseSessionId(String value) {
