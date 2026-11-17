@@ -115,6 +115,51 @@ class StackLaunchTest {
     // ---- the root start point (T4) --------------------------------------
 
     @Test
+    void theRootStartPrefersTheRemoteTrackingDefaultOverTheLocalOne(@TempDir Path dir) throws Exception {
+        // A remote exists and knows 'trunk'; the local checkout is on 'trunk'
+        // too, but the fork must name origin/trunk -- the launch fetches it
+        // before the worktree is created.
+        Path seed = dir.resolve("seed");
+        Files.createDirectories(seed);
+        git(seed, "init", "-b", "trunk");
+        git(seed, "-c", "user.name=Test", "-c", "user.email=test@example.com",
+                "commit", "--allow-empty", "-m", "seed");
+        Path remote = dir.resolve("remote.git");
+        git(dir, "clone", "--bare", seed.toString(), remote.toString());
+        Path work = dir.resolve("work");
+        git(dir, "clone", remote.toString(), work.toString());
+
+        assertEquals("origin/trunk", StackLaunch.defaultBranch(work).get(30, TimeUnit.SECONDS));
+    }
+
+    @Test
+    void theRootPromptNamesTheRemoteTrackingDefaultWhenOneExists(@TempDir Path dir) throws Exception {
+        Path seed = dir.resolve("seed");
+        Files.createDirectories(seed);
+        git(seed, "init", "-b", "trunk");
+        git(seed, "-c", "user.name=Test", "-c", "user.email=test@example.com",
+                "commit", "--allow-empty", "-m", "seed");
+        Path remote = dir.resolve("remote.git");
+        git(dir, "clone", "--bare", seed.toString(), remote.toString());
+        Path work = dir.resolve("work");
+        git(dir, "clone", remote.toString(), work.toString());
+
+        List<TaskDocument> docs = List.of(
+                doc("chain-a", "Task chain-a", DoneBy.HUMAN));
+        TaskGraph graph = graphOf(docs);
+        StackUnits.Unit root = StackLaunch.units(docs, graph).get(0);
+        StackLaunch.PromptInputs inputs = StackLaunch.PromptInputs.of(TaskId.of("chain-a"), 1, 1,
+                "demo-project", REPO, docs, graph);
+        String start = StackLaunch.defaultBranch(work).get(30, TimeUnit.SECONDS);
+
+        String prompt = StackLaunch.prompt(TaskPrompt.Kind.PI, inputs, root, null, start);
+
+        assertEquals("origin/trunk", start);
+        assertTrue(prompt.contains("First branch starts at: origin/trunk\n"));
+        assertTrue(prompt.contains("START FROM origin/trunk\n"));
+    }
+
+    @Test
     void theRootStartResolvesTheRepositoryDefaultBranchFromOriginHead(@TempDir Path dir) throws Exception {
         Path repo = freshRepo(dir, "trunk");
         git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk");

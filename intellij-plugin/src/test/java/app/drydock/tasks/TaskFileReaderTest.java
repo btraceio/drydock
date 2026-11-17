@@ -250,6 +250,8 @@ class TaskFileReaderTest {
                 {"unknown done_by", "---\ntitle: a\ndone_by: team\n---\n"},
                 {"non-instant created", "---\ntitle: a\ncreated: yesterday\n---\n"},
                 {"numeric created", "---\ntitle: a\ncreated: 123456\n---\n"},
+                {"non-instant done_at", "---\ntitle: a\ndone_at: today\n---\n"},
+                {"list done_at", "---\ntitle: a\ndone_at: [x]\n---\n"},
                 {"scalar after", "---\ntitle: a\nafter: x\n---\n"},
                 {"non-string list entry", "---\ntitle: a\nafter: [x, [y]]\n---\n"},
                 {"mapping as title", "---\ntitle:\n  a: 1\n---\n"},

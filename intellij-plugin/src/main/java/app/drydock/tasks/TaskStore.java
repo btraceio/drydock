@@ -167,16 +167,33 @@ public final class TaskStore implements AutoCloseable {
      * the file untouched; a successful one re-scans under the same lock
      * and hands the committed snapshot to every listener exactly as
      * create does.
+     *
+     * <p>An update that moves the task to {@link TaskStatus#DONE} from any
+     * other status, as read from the file inside the lock, also writes
+     * {@code done_at} as the current instant, unless the caller set
+     * {@code doneAt} itself. An update that leaves the status as it is
+     * does not touch {@code done_at}.</p>
      */
     public TaskDocument update(TaskId id, TaskFilePatch.Updates updates) throws TaskStoreException {
         Objects.requireNonNull(id, "id");
         Objects.requireNonNull(updates, "updates");
         Committed committed = write(
-                () -> mutate(id, (parsed, source) -> TaskFilePatch.patch(parsed, source, updates)));
+                () -> mutate(id, (parsed, source) -> TaskFilePatch.patch(parsed, source,
+                        stampDone(parsed.document(), updates, Instant.now()))));
         if (committed.snapshot() != null) {
             publish(committed.snapshot());
         }
         return committed.document();
+    }
+
+    /**
+     * {@code updates}, with {@code done_at} set to {@code now} when they move
+     * {@code current} to {@link TaskStatus#DONE} and name no {@code doneAt}
+     * of their own. Pure.
+     */
+    static TaskFilePatch.Updates stampDone(TaskDocument current, TaskFilePatch.Updates updates, Instant now) {
+        boolean becomesDone = updates.status() == TaskStatus.DONE && current.status() != TaskStatus.DONE;
+        return becomesDone && updates.doneAt() == null ? updates.withDoneAt(now) : updates;
     }
 
     /**

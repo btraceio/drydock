@@ -10,9 +10,12 @@ import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.domain.SshRemote;
+import app.drydock.git.GhCliService.BranchPullRequest;
+import app.drydock.git.GhCliService.CiFailure;
 import app.drydock.git.GhCliService.IssueListing;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.GhCliService.OpenPullRequest;
+import app.drydock.git.GhCliService.PrInfo.PrLifecycle;
 import app.drydock.git.GhCliService.PullRequestListing;
 import app.drydock.git.JiraIssue;
 import app.drydock.git.JiraIssueListing;
@@ -33,7 +36,6 @@ import app.drydock.intellij.tasks.TaskNode.SectionKind;
 import app.drydock.intellij.tasks.TaskNode.StaleWorktrees;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
-import app.drydock.intellij.tasks.TaskTreeModel.ViewFilter;
 import app.drydock.projects.SharedProject;
 
 import org.junit.jupiter.api.Test;
@@ -90,9 +92,9 @@ class TaskTreeModelTest {
         final Map<Path, PullRequestListing> pullRequests = new HashMap<>();
         final Map<Path, List<Worktree>> pullRequestDedupWorktrees = new HashMap<>();
         Map<ManagedSessionId, Boolean> resumable = Map.of();
+        final Map<ManagedSessionId, BranchPullRequest> pullRequestsBySession = new HashMap<>();
         Optional<String> problem = Optional.empty();
         String filter = "";
-        ViewFilter viewFilter = ViewFilter.ALL;
         final Set<Path> pendingIssueRoots = new HashSet<>();
         final Set<ListingExpansionTracker.GroupKey> pendingJiraGroups = new HashSet<>();
 
@@ -145,8 +147,10 @@ class TaskTreeModelTest {
                     activity, running, hosts, missing, recordedRoots, worktreeContainers,
                     pullRequestContainers, githubIssueRoots, githubGhostRoots, jiraRoots, jiraGhostRoots,
                     openFolders, lastActivity, T,
-                    issues, jiraGroups, pullRequests, pullRequestDedupWorktrees, problem, filter, viewFilter,
-                    resumable, Map.of(), pendingIssueRoots, pendingJiraGroups);
+                    issues, jiraGroups, pullRequests, pullRequestDedupWorktrees, problem, filter,
+                    List.of(), List.of(), Optional.empty(),
+                    resumable, pullRequestsBySession, Map.of(), Map.of(),
+                    pendingIssueRoots, pendingJiraGroups);
         }
     }
 
@@ -578,19 +582,6 @@ class TaskTreeModelTest {
     }
 
     @Test
-    void withViewFilterChangesOnlyTheView() {
-        In in = new In().project(BTRACE).githubIssues(BTRACE);
-        in.pendingIssueRoots.add(BTRACE);
-        TaskTreeModel.Inputs gathered = in.build();
-
-        TaskTreeModel.Inputs active = gathered.withViewFilter(ViewFilter.ACTIVE);
-
-        assertEquals(ViewFilter.ACTIVE, active.viewFilter());
-        in.viewFilter = ViewFilter.ACTIVE;
-        assertEquals(in.build(), active, "every other input is carried over unchanged");
-    }
-
-    @Test
     void neitherSourceConfiguredGivesNoIssuesSection() {
         In in = new In().project(BTRACE);
 
@@ -695,18 +686,11 @@ class TaskTreeModelTest {
         withGitHub.filter = "nothing-matches-this";
         ProjectRow row = projectRow(TaskTreeModel.build(withGitHub.build()), BTRACE);
         assertTrue(issueNodes(row).stream().noneMatch(JiraNode.class::isInstance));
-
-        // A scope that names the project with an item part left still drops it.
-        in.filter = "/btr*/foo";
-        ProjectRow scoped = projectRow(TaskTreeModel.build(in.build()), BTRACE);
-        assertTrue(section(scoped, SectionKind.ISSUES)
-                .map(issues -> issues.children().stream().noneMatch(JiraNode.class::isInstance))
-                .orElse(true));
     }
 
     @Test
     void aGrouplessJiraNodeStaysWhenTheItemFilterIsEmptyOrNamesJira() {
-        for (String filter : List.of("", "btr", "/btr*/", "jir")) {
+        for (String filter : List.of("", "btr", "jir")) {
             In in = new In().project(BTRACE).jira(BTRACE);
             in.filter = filter;
             JiraNode jira = jiraNode(projectRow(TaskTreeModel.build(in.build()), BTRACE));
@@ -780,124 +764,6 @@ class TaskTreeModelTest {
 
 
     @Test
-    void activeViewContainsOnlyRunningSessions() {
-        Path idle = Path.of("/wt/btrace-idle");
-        In in = new In().project(BTRACE).worktree(BTRACE, idle, "unused-worktree");
-        ManagedAgentSession active = session("Running task", BTRACE);
-        in.sessions.addAll(List.of(active, session("Stopped task", BTRACE.resolve("stopped"))));
-        in.running.add(active.id());
-        in.issues.put(BTRACE, new IssueListing.Listed(List.of(
-                new OpenIssue(9, "Allocation regression", Optional.empty(), List.of(), List.of(), Optional.of(T)))));
-        in.viewFilter = ViewFilter.ACTIVE;
-
-        ProjectRow row = projectRow(TaskTreeModel.build(in.build()), BTRACE);
-
-        assertEquals(List.of("Running task"), sessionNodes(row).stream()
-                .map(TaskRow.class::cast).map(task -> task.session().displayName()).toList());
-        assertTrue(section(row, SectionKind.WORKTREES).isEmpty());
-        assertTrue(section(row, SectionKind.ISSUES).isEmpty());
-    }
-
-    @Test
-    void inactiveViewContainsOnlyStoppedSessionsAndHidesEmptyProjects() {
-        In in = new In().project(BTRACE).project(ALPHA).current(BTRACE, BTRACE);
-        ManagedAgentSession active = session("Running task", BTRACE);
-        in.sessions.addAll(List.of(active, session("Stopped task", ALPHA)));
-        in.running.add(active.id());
-        in.viewFilter = ViewFilter.INACTIVE;
-
-        List<TaskNode> nodes = TaskTreeModel.build(in.build());
-
-        assertEquals(List.of(ALPHA), projectRoots(nodes));
-        assertEquals(List.of("Stopped task"), sessionNodes(projectRow(nodes, ALPHA)).stream()
-                .map(TaskRow.class::cast).map(task -> task.session().displayName()).toList());
-    }
-
-    @Test
-    void viewFilterOrderMatchesTheRibbon() {
-        assertEquals(List.of("All", "Active", "Inactive", "Needs you", "Flagged"),
-                Arrays.stream(ViewFilter.values()).map(ViewFilter::label).toList());
-    }
-
-    @Test
-    void needsYouViewContainsOnlyRunningSessionsNeedingAttention() {
-        In in = new In().project(ALPHA).project(BTRACE);
-        ManagedAgentSession waiting = session("Waiting for you", ALPHA.resolve("a"));
-        ManagedAgentSession idle = session("Acknowledged idle", ALPHA.resolve("b"));
-        ManagedAgentSession busy = session("Busy", ALPHA.resolve("c"));
-        ManagedAgentSession unknown = session("Unknown", ALPHA.resolve("d"));
-        ManagedAgentSession stopped = session("Stopped, attention left over", ALPHA.resolve("e"));
-        in.sessions.addAll(List.of(waiting, idle, busy, unknown, stopped));
-        in.running.addAll(Set.of(waiting.id(), idle.id(), busy.id(), unknown.id()));
-        in.activity.put(waiting.id(), Optional.of(SessionActivity.NEEDS_ATTENTION));
-        in.activity.put(idle.id(), Optional.of(SessionActivity.IDLE));
-        in.activity.put(busy.id(), Optional.of(SessionActivity.BUSY));
-        in.activity.put(unknown.id(), Optional.of(SessionActivity.UNKNOWN));
-        in.activity.put(stopped.id(), Optional.of(SessionActivity.NEEDS_ATTENTION));
-        in.viewFilter = ViewFilter.NEEDS_YOU;
-
-        List<TaskNode> nodes = TaskTreeModel.build(in.build());
-
-        // BTRACE has no needs-you session, so it is hidden entirely.
-        assertEquals(List.of(ALPHA), projectRoots(nodes));
-        assertEquals(List.of("Waiting for you"), sessionNames(nodes, ALPHA));
-        assertTrue(section(projectRow(nodes, ALPHA), SectionKind.WORKTREES).isEmpty());
-    }
-
-    @Test
-    void flaggedViewContainsOnlyFlaggedSessionsRunningOrNot() {
-        In in = new In().project(ALPHA).project(BTRACE);
-        ManagedAgentSession flaggedRunning = session("Flagged running", ALPHA.resolve("a")).withFlagged(true);
-        ManagedAgentSession flaggedStopped = session("Flagged stopped", ALPHA.resolve("b")).withFlagged(true);
-        ManagedAgentSession plain = session("Not flagged", ALPHA.resolve("c"));
-        in.sessions.addAll(List.of(flaggedRunning, flaggedStopped, plain, session("Elsewhere", BTRACE)));
-        in.running.add(flaggedRunning.id());
-        in.viewFilter = ViewFilter.FLAGGED;
-
-        List<TaskNode> nodes = TaskTreeModel.build(in.build());
-
-        // BTRACE has no flagged session, so it is hidden entirely.
-        assertEquals(List.of(ALPHA), projectRoots(nodes));
-        assertEquals(Set.of("Flagged running", "Flagged stopped"), Set.copyOf(sessionNames(nodes, ALPHA)));
-        assertTrue(section(projectRow(nodes, ALPHA), SectionKind.WORKTREES).isEmpty());
-    }
-
-    @Test
-    void searchNarrowsInsideTheNeedsYouView() {
-        In in = new In().project(ALPHA);
-        ManagedAgentSession allocation = session("Allocation waiting", ALPHA.resolve("a"));
-        ManagedAgentSession sampling = session("Sampling waiting", ALPHA.resolve("b"));
-        in.sessions.addAll(List.of(allocation, sampling));
-        in.running.addAll(Set.of(allocation.id(), sampling.id()));
-        in.activity.put(allocation.id(), Optional.of(SessionActivity.NEEDS_ATTENTION));
-        in.activity.put(sampling.id(), Optional.of(SessionActivity.NEEDS_ATTENTION));
-        in.viewFilter = ViewFilter.NEEDS_YOU;
-        in.filter = "alloc";
-
-        List<TaskNode> nodes = TaskTreeModel.build(in.build());
-
-        assertEquals(List.of("Allocation waiting"), sessionNames(nodes, ALPHA));
-    }
-
-    @Test
-    void projectScopeAppliesInsideTheNeedsYouView() {
-        In in = new In().project(BTRACE).project(ALPHA);
-        ManagedAgentSession btraceWaiting = session("Waiting here", BTRACE);
-        ManagedAgentSession alphaWaiting = session("Waiting there", ALPHA);
-        in.sessions.addAll(List.of(btraceWaiting, alphaWaiting));
-        in.running.addAll(Set.of(btraceWaiting.id(), alphaWaiting.id()));
-        in.activity.put(btraceWaiting.id(), Optional.of(SessionActivity.NEEDS_ATTENTION));
-        in.activity.put(alphaWaiting.id(), Optional.of(SessionActivity.NEEDS_ATTENTION));
-        in.viewFilter = ViewFilter.NEEDS_YOU;
-        in.filter = "/btr/";
-
-        List<TaskNode> nodes = TaskTreeModel.build(in.build());
-
-        assertEquals(List.of(BTRACE), projectRoots(nodes));
-        assertEquals(List.of("Waiting here"), sessionNames(nodes, BTRACE));
-    }
-
-    @Test
     void aRunningTaskFromAnotherWorktreeShownInThisWindowIsHere() {
         Path feature = Path.of("/wt/btrace-feature");
         In in = new In().project(BTRACE).worktree(BTRACE, feature, "feature").current(BTRACE, BTRACE);
@@ -938,110 +804,6 @@ class TaskTreeModelTest {
     }
 
     @Test
-    void scopedSearchShowsOnlyGlobMatchingProjectsWhole() {
-        In in = new In().project(BTRACE).project(ALPHA);
-        in.sessions.add(session("Sampling events", BTRACE));
-        in.sessions.add(session("Sampling in alpha", ALPHA));
-        in.filter = "/btr/";
-
-        List<TaskNode> nodes = TaskTreeModel.build(in.build());
-
-        assertEquals(List.of(BTRACE), projectRoots(nodes));
-        // The item filter is empty inside the matched project: everything shows.
-        assertEquals(List.of("Sampling events"), sessionNames(nodes, BTRACE));
-    }
-
-    @Test
-    void scopedSearchWithItemFilterFiltersInsideTheMatchingProjectsOnly() {
-        In in = new In().project(BTRACE).project(ALPHA);
-        in.sessions.add(session("Sampling events", BTRACE));
-        in.sessions.add(session("Sampling in alpha", ALPHA));
-        in.filter = "/btr/sampling";
-
-        List<TaskNode> nodes = TaskTreeModel.build(in.build());
-
-        // Alpha's task matches the item text but its project is out of scope.
-        assertEquals(List.of(BTRACE), projectRoots(nodes));
-        assertEquals(List.of("Sampling events"), sessionNames(nodes, BTRACE));
-    }
-
-    @Test
-    void unclosedScopeFiltersProjectsOnly() {
-        In in = new In().project(BTRACE).project(ALPHA);
-        in.sessions.add(session("Sampling events", BTRACE));
-        in.filter = "/btr";
-
-        List<TaskNode> nodes = TaskTreeModel.build(in.build());
-
-        assertEquals(List.of(BTRACE), projectRoots(nodes));
-        assertEquals(List.of("Sampling events"), sessionNames(nodes, BTRACE));
-    }
-
-    @Test
-    void globWildcardsMatchProjectNames() {
-        In in = new In().project(BTRACE).project(ALPHA);
-        in.filter = "/b*ce/";
-
-        assertEquals(List.of(BTRACE), projectRoots(TaskTreeModel.build(in.build())));
-    }
-
-    @Test
-    void questionMarkGlobMatchesExactlyOneCharacter() {
-        In in = new In().project(BTRACE).project(ALPHA);
-        in.filter = "/b?race/";
-
-        assertEquals(List.of(BTRACE), projectRoots(TaskTreeModel.build(in.build())));
-    }
-
-    @Test
-    void aLoneSlashIsAnEmptyGlobMatchingEveryProject() {
-        In in = new In().project(BTRACE).project(ALPHA);
-        in.sessions.add(session("Sampling events", BTRACE));
-        in.sessions.add(session("Sampling in alpha", ALPHA));
-        in.filter = "/";
-
-        List<TaskNode> nodes = TaskTreeModel.build(in.build());
-
-        assertEquals(Set.of(BTRACE, ALPHA), Set.copyOf(projectRoots(nodes)));
-        assertEquals(List.of("Sampling events"), sessionNames(nodes, BTRACE));
-        assertEquals(List.of("Sampling in alpha"), sessionNames(nodes, ALPHA));
-    }
-
-    @Test
-    void anEmptyGlobWithAnItemFilterFiltersItemsInEveryProject() {
-        In in = new In().project(BTRACE).project(ALPHA);
-        in.sessions.add(session("Allocation events", BTRACE));
-        in.sessions.add(session("Sampling events", BTRACE));
-        in.sessions.add(session("Allocation in alpha", ALPHA));
-        in.sessions.add(session("Sampling in alpha", ALPHA));
-        in.filter = "//alloc";
-
-        List<TaskNode> nodes = TaskTreeModel.build(in.build());
-
-        assertEquals(Set.of(BTRACE, ALPHA), Set.copyOf(projectRoots(nodes)));
-        assertEquals(List.of("Allocation events"), sessionNames(nodes, BTRACE));
-        assertEquals(List.of("Allocation in alpha"), sessionNames(nodes, ALPHA));
-    }
-
-    @Test
-    void scopedSearchComposesWithTheActiveView() {
-        In in = new In().project(BTRACE).project(ALPHA);
-        ManagedAgentSession runningBtrace = session("Running btrace", BTRACE);
-        ManagedAgentSession runningAlpha = session("Running alpha", ALPHA);
-        in.sessions.addAll(List.of(runningBtrace, session("Stopped btrace", BTRACE.resolve("stopped")),
-                runningAlpha));
-        in.running.addAll(List.of(runningBtrace.id(), runningAlpha.id()));
-        in.viewFilter = ViewFilter.ACTIVE;
-        in.filter = "/btr/";
-
-        List<TaskNode> nodes = TaskTreeModel.build(in.build());
-
-        // Alpha has a running session but is out of scope; btrace's stopped one is out of view.
-        assertEquals(List.of(BTRACE), projectRoots(nodes));
-        assertEquals(List.of("Running btrace"), sessionNames(nodes, BTRACE));
-    }
-
-    @Test
     void plainSearchMatchingAProjectNameShowsTheWholeProject() {
         Path other = Path.of("/wt/btrace-other");
         In in = new In().project(BTRACE).project(ALPHA).worktree(BTRACE, other, "other");
@@ -1055,14 +817,6 @@ class TaskTreeModelTest {
         assertEquals(List.of(BTRACE), projectRoots(nodes));
         // Both sessions show: the project name matched, so the whole project is the answer.
         assertEquals(List.of("Sampling events", "Unrelated"), sessionNames(nodes, BTRACE));
-    }
-
-    @Test
-    void scopeMatchingIsCaseInsensitive() {
-        In in = new In().project(BTRACE);
-        in.filter = "/BTR/";
-
-        assertEquals(List.of(BTRACE), projectRoots(TaskTreeModel.build(in.build())));
     }
 
     private static List<String> sessionNames(List<TaskNode> nodes, Path root) {
@@ -1290,5 +1044,283 @@ class TaskTreeModelTest {
 
         assertTrue(section(projectRow(TaskTreeModel.build(in.build()), DRYDOCK),
                 SectionKind.PULL_REQUESTS).isEmpty());
+    }
+
+    // --- Carried PR health: rows carry what the inputs hold, root-scoped ---
+
+    private static OpenPullRequest failingPullRequest(int number, String headBranch, boolean draft) {
+        return new OpenPullRequest(number, "Failing " + number, headBranch, "main", draft, Optional.empty(),
+                Optional.empty(), true, Set.of(CiFailure.FAILURE));
+    }
+
+    private static BranchPullRequest branchPullRequest(int number, String head, boolean conflicting,
+                                                       Set<CiFailure> failures) {
+        return new BranchPullRequest(number, PrLifecycle.OPEN, false, head, "PR " + number, Optional.empty(),
+                conflicting, failures);
+    }
+
+    private static TaskRow sessionRow(List<TaskNode> nodes, Path root, ManagedSessionId id) {
+        return sessionNodes(projectRow(nodes, root)).stream().map(TaskRow.class::cast)
+                .filter(row -> row.session().id().equals(id)).findFirst().orElseThrow();
+    }
+
+    @Test
+    void twoRootsListingTheSameNumberOnTheSameBranchKeepTheirOwnHealth() {
+        OpenPullRequest failingInBtrace = failingPullRequest(12, "feature/shared", false);
+        OpenPullRequest healthyInAlpha = pullRequest(12, "Healthy 12", "feature/shared", false);
+        In in = new In().project(BTRACE).project(ALPHA);
+        in.pullRequestContainers.addAll(List.of(BTRACE, ALPHA));
+        in.pullRequests.put(BTRACE, new PullRequestListing.Listed(List.of(failingInBtrace)));
+        in.pullRequests.put(ALPHA, new PullRequestListing.Listed(List.of(healthyInAlpha)));
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build());
+
+        PullRequestRow btrace = (PullRequestRow) pullRequestNodes(projectRow(nodes, BTRACE)).get(0);
+        PullRequestRow alpha = (PullRequestRow) pullRequestNodes(projectRow(nodes, ALPHA)).get(0);
+        assertEquals(new PullRequestRow(BTRACE, failingInBtrace), btrace, "the listing's record, verbatim");
+        assertEquals(new PullRequestRow(ALPHA, healthyInAlpha), alpha);
+        assertFalse(alpha.pullRequest().conflicting());
+        assertEquals(Set.of(), alpha.pullRequest().ciFailures(), "no health leaks across roots");
+    }
+
+    @Test
+    void healthNeverChangesPullRequestRowMembershipOrSearch() {
+        // A failing draft and a failing checked-out PR stay excluded; a
+        // failing open PR is kept, and the search narrows on the same text.
+        In in = new In().project(DRYDOCK);
+        in.pullRequestContainers.add(DRYDOCK);
+        in.pullRequests.put(DRYDOCK, new PullRequestListing.Listed(List.of(
+                failingPullRequest(40, "feature/open", false),
+                failingPullRequest(41, "feature/draft", true),
+                failingPullRequest(42, "feature/taken", false),
+                pullRequest(43, "Healthy", "feature/healthy", false))));
+        in.pullRequestDedupWorktrees.put(DRYDOCK, List.of(linked(Path.of("/wt/drydock-taken"), "feature/taken")));
+
+        List<TaskNode> rows = pullRequestNodes(projectRow(TaskTreeModel.build(in.build()), DRYDOCK));
+        assertEquals(List.of(43, 40), rows.stream().map(PullRequestRow.class::cast)
+                .map(row -> row.pullRequest().number()).toList());
+
+        in.filter = "feature/open";
+        List<TaskNode> searched = pullRequestNodes(projectRow(TaskTreeModel.build(in.build()), DRYDOCK));
+        assertEquals(List.of(new PullRequestRow(DRYDOCK, failingPullRequest(40, "feature/open", false))), searched,
+                "the searched row still carries its health");
+    }
+
+    @Test
+    void sessionRowsCarryTheirOwnJoinedPullRequestHealthPerRoot() {
+        Path btraceWt = Path.of("/wt/btrace-shared");
+        Path alphaWt = Path.of("/wt/alpha-shared");
+        In in = new In().project(BTRACE).project(ALPHA)
+                .worktree(BTRACE, btraceWt, "feature/shared").worktree(ALPHA, alphaWt, "feature/shared");
+        ManagedAgentSession inBtrace = session("Btrace work", btraceWt);
+        ManagedAgentSession inAlpha = session("Alpha work", alphaWt);
+        ManagedAgentSession unjoined = session("No PR", BTRACE);
+        in.sessions.addAll(List.of(inBtrace, inAlpha, unjoined));
+        BranchPullRequest failing = branchPullRequest(12, "feature/shared", true, Set.of(CiFailure.ERROR));
+        BranchPullRequest healthy = branchPullRequest(12, "feature/shared", false, Set.of());
+        in.pullRequestsBySession.put(inBtrace.id(), failing);
+        in.pullRequestsBySession.put(inAlpha.id(), healthy);
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build());
+
+        assertEquals(Optional.of(failing), sessionRow(nodes, BTRACE, inBtrace.id()).branchPullRequest());
+        assertEquals(Optional.of(healthy), sessionRow(nodes, ALPHA, inAlpha.id()).branchPullRequest(),
+                "same branch and number in another root: its own answer, no contamination");
+        assertEquals(Optional.empty(), sessionRow(nodes, BTRACE, unjoined.id()).branchPullRequest(),
+                "a session the join did not match carries nothing");
+    }
+
+    @Test
+    void aHostedSessionKeepsItsOwnRootBranchAndPullRequestNotTheHostWindows() {
+        // Running in another window whose base is ALPHA: the row still sits
+        // under its own main checkout with its worktree's branch and the
+        // join's answer for that session id.
+        Path feature = Path.of("/wt/btrace-feature");
+        In in = new In().project(BTRACE).project(ALPHA).worktree(BTRACE, feature, "feature/hosted")
+                .current(ALPHA, ALPHA);
+        ManagedAgentSession hosted = session("Hosted elsewhere", feature.resolve("sub/dir"));
+        // A subdirectory git does not list: placed by its recorded main checkout.
+        in.recordedRoots.put(hosted.repositoryId(), BTRACE);
+        in.sessions.add(hosted);
+        in.running.add(hosted.id());
+        in.hosts.put(hosted.id(), new TaskTreeModel.Host(Path.of("/wt/other-window"), "alpha"));
+        BranchPullRequest failing = branchPullRequest(7, "feature/hosted", false, Set.of(CiFailure.FAILURE));
+        in.pullRequestsBySession.put(hosted.id(), failing);
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build());
+
+        TaskRow row = sessionRow(nodes, BTRACE, hosted.id());
+        assertEquals(Optional.of("feature/hosted"), row.branch(), "the deepest listed worktree's branch");
+        assertEquals(Optional.of(failing), row.branchPullRequest());
+        assertTrue(projectRow(nodes, ALPHA).children().isEmpty(), "never placed under the window's root");
+    }
+
+    // -- the tree's scope: the project: chip, pr: and issue: terms ---------
+
+    @Test
+    void aFocusedProjectHidesEveryOtherProjectRow() {
+        In in = new In().project(DRYDOCK).project(BTRACE);
+        in.sessions.add(session("A task", DRYDOCK));
+        in.sessions.add(session("Another task", BTRACE));
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build().withScope("", List.of(), List.of(),
+                Optional.of(DRYDOCK)));
+
+        assertEquals(List.of(DRYDOCK), projectRoots(nodes));
+    }
+
+    @Test
+    void aFocusOnAnUnregisteredRootShowsNothingNotEvenTheAddRow() {
+        In in = new In().project(BTRACE).current(ALPHA, ALPHA);
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build().withScope("", List.of(), List.of(),
+                Optional.of(ALPHA)));
+
+        assertTrue(nodes.isEmpty(), "the panel clears such a focus on the next apply; the tree shows nothing");
+    }
+
+    @Test
+    void aPrTermFiltersPullRequestRowsAndHidesProjectsWithoutHits() {
+        In in = new In().project(DRYDOCK).project(BTRACE);
+        in.pullRequestContainers.add(DRYDOCK);
+        in.pullRequestContainers.add(BTRACE);
+        in.pullRequests.put(DRYDOCK, new PullRequestListing.Listed(List.of(
+                pullRequest(12, "The one", "feature/one", false))));
+        in.pullRequests.put(BTRACE, new PullRequestListing.Listed(List.of(
+                pullRequest(40, "Another", "feature/another", false))));
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build().withScope("", List.of("12"), List.of(),
+                Optional.empty()));
+
+        assertEquals(List.of(DRYDOCK), projectRoots(nodes));
+        assertEquals(List.of(12), pullRequestNodes(projectRow(nodes, DRYDOCK)).stream()
+                .map(PullRequestRow.class::cast).map(row -> row.pullRequest().number()).toList());
+    }
+
+    @Test
+    void anIssueTermFiltersGithubAndJiraRows() {
+        In in = new In().project(BTRACE).githubIssues(BTRACE).jira(BTRACE);
+        in.issues.put(BTRACE, new IssueListing.Listed(List.of(
+                new OpenIssue(4, "Allocation regression", Optional.empty(), List.of(), List.of(), Optional.of(T)))));
+        in.jiraGroups.put(BTRACE, List.of(listedGroup("Sprint", List.of(
+                jiraIssue("PROJ-1", "Jira first", List.of(), Optional.of(T)),
+                jiraIssue("PROJ-2", "Jira second", List.of(), Optional.of(T))))));
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build().withScope("", List.of(), List.of("2"),
+                Optional.empty()));
+
+        // Only PROJ-2's group row survives; the GitHub node, whose issue
+        // matches no term, is omitted rather than saying "No issues".
+        ProjectRow row = projectRow(nodes, BTRACE);
+        assertEquals(List.of("PROJ-2"), jiraRowIds(row, "Sprint"));
+        List<TaskNode> issueChildren = issueNodes(row);
+        assertTrue(issueChildren.stream().noneMatch(GitHubNode.class::isInstance),
+                "a term-filtered GitHub node with nothing left is hidden");
+    }
+
+    @Test
+    void prAndIssueTermsConstrainTheirRowsEvenUnderANameMatch() {
+        In in = new In().project(DRYDOCK);
+        in.pullRequestContainers.add(DRYDOCK);
+        in.pullRequests.put(DRYDOCK, new PullRequestListing.Listed(List.of(
+                pullRequest(9, "Number-only row", "feature/number-only", false))));
+
+        // The project's name matches the plain text, which keeps the whole
+        // project — but the pr: term still narrows its pull requests.
+        List<TaskNode> nodes = TaskTreeModel.build(in.build().withScope("drydock", List.of("40"), List.of(),
+                Optional.empty()));
+
+        assertEquals(List.of(DRYDOCK), projectRoots(nodes));
+        assertTrue(section(projectRow(nodes, DRYDOCK), SectionKind.PULL_REQUESTS).isEmpty(),
+                "no pull request matches the term, so the section is absent");
+    }
+
+    private static SearchRefs.ItemRefs refs(boolean pr, boolean issue) {
+        return new SearchRefs.ItemRefs(pr ? List.of(SearchTerms.PrRef.of(12, "Fix", "feature/fix")) : List.of(),
+                issue ? List.of(new SearchTerms.IssueRef("PROJ-5", Optional.empty())) : List.of());
+    }
+
+    @Test
+    void combinedTermsMustBeSatisfiedByTheSameVisibleSession() {
+        In in = new In().project(DRYDOCK);
+        ManagedAgentSession prOnly = session("PR only", DRYDOCK);
+        ManagedAgentSession issueOnly = session("Issue only", DRYDOCK);
+        in.sessions.add(prOnly);
+        in.sessions.add(issueOnly);
+        Map<ManagedSessionId, SearchRefs.ItemRefs> split = Map.of(
+                prOnly.id(), refs(true, false), issueOnly.id(), refs(false, true));
+
+        List<TaskNode> splitNodes = TaskTreeModel.build(in.build()
+                .withScope("", List.of("12"), List.of("5"), Optional.empty())
+                .withMatchRefs(split, Map.of()));
+        List<TaskNode> sameItemNodes = TaskTreeModel.build(in.build()
+                .withScope("", List.of("12"), List.of("5"), Optional.empty())
+                .withMatchRefs(Map.of(prOnly.id(), refs(true, true)), Map.of()));
+
+        assertTrue(splitNodes.stream().noneMatch(ProjectRow.class::isInstance),
+                "separate sessions cannot satisfy the two reference categories together");
+        assertEquals(List.of(DRYDOCK), projectRoots(sameItemNodes));
+    }
+
+    @Test
+    void aMatchingLooseTaskCanKeepAnOtherwiseEmptyProjectVisible() {
+        In in = new In().project(DRYDOCK).project(BTRACE);
+        Map<Path, List<SearchRefs.LooseTaskRefs>> looseRefs = Map.of(DRYDOCK,
+                List.of(new SearchRefs.LooseTaskRefs("Standalone task", refs(true, false))));
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build()
+                .withScope("", List.of("12"), List.of(), Optional.empty())
+                .withMatchRefs(Map.of(), looseRefs));
+
+        assertEquals(List.of(DRYDOCK), projectRoots(nodes));
+        assertTrue(projectRow(nodes, DRYDOCK).children().isEmpty(),
+                "a loose task match need not fabricate a visible tree child");
+    }
+
+    @Test
+    void sessionAndLooseTaskReferencesMustPassThePlainTextItemFilter() {
+        In in = new In().project(DRYDOCK);
+        ManagedAgentSession session = session("PR session", DRYDOCK);
+        in.sessions.add(session);
+
+        List<TaskNode> hiddenSession = TaskTreeModel.build(in.build()
+                .withScope("no such title", List.of("12"), List.of(), Optional.empty())
+                .withMatchRefs(Map.of(session.id(), refs(true, false)), Map.of()));
+        List<TaskNode> hiddenLooseTask = TaskTreeModel.build(new In().project(DRYDOCK).build()
+                .withScope("no such title", List.of("12"), List.of(), Optional.empty())
+                .withMatchRefs(Map.of(), Map.of(DRYDOCK,
+                        List.of(new SearchRefs.LooseTaskRefs("other title", refs(true, false))))));
+
+        assertTrue(hiddenSession.isEmpty());
+        assertTrue(hiddenLooseTask.isEmpty());
+    }
+
+    @Test
+    void listingAndSessionReferencesDoNotCombineAcrossItems() {
+        In in = new In().project(DRYDOCK);
+        in.pullRequestContainers.add(DRYDOCK);
+        in.pullRequests.put(DRYDOCK, new PullRequestListing.Listed(List.of(
+                pullRequest(12, "PR listing", "feature/one", false))));
+        ManagedAgentSession session = session("Issue only", DRYDOCK);
+        in.sessions.add(session);
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build()
+                .withScope("", List.of("12"), List.of("5"), Optional.empty())
+                .withMatchRefs(Map.of(session.id(), refs(false, true)), Map.of()));
+
+        assertTrue(nodes.isEmpty(), "a PR listing hit cannot combine with an issue on a different item");
+    }
+
+    @Test
+    void scopePreservesReferenceMaps() {
+        ManagedAgentSession session = session("A", DRYDOCK);
+        Map<ManagedSessionId, SearchRefs.ItemRefs> sessions = Map.of(session.id(), refs(true, false));
+        Map<Path, List<SearchRefs.LooseTaskRefs>> loose = Map.of(DRYDOCK,
+                List.of(new SearchRefs.LooseTaskRefs("task", refs(false, true))));
+        TaskTreeModel.Inputs scoped = new In().project(DRYDOCK).build()
+                .withMatchRefs(sessions, loose).withScope("title", List.of("12"), List.of(), Optional.empty());
+
+        assertEquals(sessions, scoped.sessionRefs());
+        assertEquals(loose, scoped.looseTaskRefsByMainRoot());
     }
 }

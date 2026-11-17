@@ -288,6 +288,12 @@ class RepositorySidebarEmptyStateFxTest extends FxTest {
         }
 
         @Override
+        public void beginSessionDelete(ManagedSessionId sessionId) { }
+
+        @Override
+        public void cancelSessionDelete(ManagedSessionId sessionId, Throwable failure) { }
+
+        @Override
         public void noteSessionDeleted(ManagedSessionId sessionId) { }
 
         @Override

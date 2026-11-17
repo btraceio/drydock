@@ -3,12 +3,17 @@ package app.drydock.intellij.agent;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.SessionStatus;
+import app.drydock.domain.WorkspaceBoxBinding;
+import app.drydock.intellij.DrydockPluginService;
+import app.drydock.intellij.workspace.RemoteSessionLiveness;
 
 import com.intellij.icons.AllIcons;
 
 import javax.swing.Icon;
 
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * What the agent tab's commands are, in which states they appear, and which
@@ -50,6 +55,45 @@ import java.util.Optional;
 public final class SessionCommands {
 
     private SessionCommands() {
+    }
+
+    /**
+     * The remote Stops this IDE has accepted and not yet seen conclude: the
+     * synchronous busy fact the contract orders <em>before</em> the blocking
+     * kill (component 6, INV-8). The service's own STOPPING mark is written
+     * on its executor after the click returns, and the execution's
+     * stop-requested only after the kill concludes — neither can answer a
+     * second click that lands inside that window — so the command layer
+     * claims the stop on the click's own thread, before the service call.
+     * Memory-only and application-level, like the liveness map; cleared on
+     * every completion path of the accepted stop
+     * ({@link #releaseRemoteStop}).
+     */
+    private static final Set<ManagedSessionId> REMOTE_STOPS_IN_FLIGHT =
+            ConcurrentHashMap.newKeySet();
+
+    /**
+     * Claims {@code id}'s remote Stop — the synchronous in-flight guard,
+     * taken by the handler on the click before the service call. False
+     * means one is already in flight and the click is ignored: it could
+     * only race the first kill.
+     */
+    static boolean claimRemoteStop(ManagedSessionId id) {
+        return REMOTE_STOPS_IN_FLIGHT.add(id);
+    }
+
+    /**
+     * Releases {@code id}'s remote Stop: the accepted stop concluded — on
+     * success, failure or a synchronous seam throw alike — so the busy fact
+     * must not outlive the operation it guarded.
+     */
+    static void releaseRemoteStop(ManagedSessionId id) {
+        REMOTE_STOPS_IN_FLIGHT.remove(id);
+    }
+
+    /** Whether an accepted remote Stop of {@code id} has not concluded. */
+    static boolean remoteStopInFlight(ManagedSessionId id) {
+        return REMOTE_STOPS_IN_FLIGHT.contains(id);
     }
 
     /** The primary action of a session's tab, in the states a session can be seen in. */
@@ -122,10 +166,29 @@ public final class SessionCommands {
      * @param unsupportedAgent     this build cannot run the session's agent kind
      * @param detachedFromThisWindow {@code running} but this window does not show it —
      *                             a window-scoped fact (A6); the global scope never sets it
+     * @param box                  the session's workspace-box binding, empty for a local
+     *                             row — a row is remote iff this is present
+     * @param liveness             the detached liveness this IDE last learned from the
+     *                             box (see {@link RemoteSessionLiveness}); empty when
+     *                             the row is local, or when nothing has probed the
+     *                             remote row yet
      */
     public record State(boolean running, boolean resumable, boolean starting, boolean stopping,
                         boolean moving, boolean transferring, boolean unsupportedAgent,
-                        boolean detachedFromThisWindow) {
+                        boolean detachedFromThisWindow,
+                        Optional<WorkspaceBoxBinding> box, Optional<RemoteSessionLiveness.State> liveness) {
+
+        /**
+         * As the canonical constructor with no remote facts: the state every
+         * pre-workspace-box call site built, and still the state of every
+         * local row.
+         */
+        public State(boolean running, boolean resumable, boolean starting, boolean stopping,
+                     boolean moving, boolean transferring, boolean unsupportedAgent,
+                     boolean detachedFromThisWindow) {
+            this(running, resumable, starting, stopping, moving, transferring, unsupportedAgent,
+                    detachedFromThisWindow, Optional.empty(), Optional.empty());
+        }
 
         /**
          * The globally scoped state: no window is attached to it, so a live
@@ -144,12 +207,28 @@ public final class SessionCommands {
      * execution is shown or raised, never started or deactivated from a
      * detached view. Past that, running sessions deactivate, stopped ones
      * resume what they can.
+     *
+     * <p>One remote exception to that order: a row bound to a workspace box
+     * that no window here shows, which the box says is ALIVE, offers
+     * Deactivate — the explicit Stop — without requiring a Resume first
+     * (contract component 6). Its agent runs in the box's tmux, not in any
+     * execution this IDE owns, so the attach-first rule would strand the
+     * only agent nothing here can reach; the attach itself stays available
+     * (the task tree's Resume) once the row is no longer offered a Stop.
+     * Every other verdict — DEAD, UNKNOWN, a stopped or gone box, or a row
+     * not probed yet — keeps Resume or Start: the box has not said an agent
+     * is there, so a Stop would claim one.</p>
      */
     public static Lifecycle lifecycle(State state) {
         if (state.detachedFromThisWindow()) {
             return Lifecycle.SHOW_AGENT;
         }
         if (state.running()) {
+            return Lifecycle.DEACTIVATE;
+        }
+        if (state.box().isPresent()
+                && state.liveness().orElse(RemoteSessionLiveness.State.UNKNOWN)
+                        == RemoteSessionLiveness.State.ALIVE) {
             return Lifecycle.DEACTIVATE;
         }
         return state.resumable() ? Lifecycle.RESUME : Lifecycle.START;
@@ -247,7 +326,14 @@ public final class SessionCommands {
         boolean running = registry.isRunning(id);
         boolean stopping = registry.execution(id)
                 .map(execution -> execution.isRunning() && execution.stopRequested())
-                .orElse(false);
+                .orElse(false)
+                // An accepted remote Stop is in flight: the claim is the
+                // synchronous busy fact the handler takes on the click,
+                // before the blocking kill — the service's own marks land
+                // too late to guard a second click. Only a row bound to a
+                // box is ever claimed, so a local row's state stays
+                // byte-identical to the pre-remote shape.
+                || (session.workspaceBox().isPresent() && remoteStopInFlight(id));
         return new State(
                 running,
                 resumable(knownResumable, session.agentSessionId().isPresent()),
@@ -256,6 +342,40 @@ public final class SessionCommands {
                 registry.isMoving(id),
                 SessionTransfer.inProgress(id),
                 session.status() == SessionStatus.UNSUPPORTED_AGENT,
-                running && !shownHere);
+                running && !shownHere,
+                session.workspaceBox(),
+                remoteLivenessOf(session));
+    }
+
+    /**
+     * The detached liveness this IDE last learned for {@code session}'s box,
+     * straight from {@link RemoteSessionLiveness} — a memory read, never a
+     * probe: the surfaces must not call {@code BoxShell} (they paint on the
+     * EDT, and the box is asked at most once per revalidation pass). A
+     * local row never reads the map, so its state stays byte-identical to
+     * the pre-remote shape; a remote row with no verdict yet reads empty,
+     * which the display rules treat as {@code Unknown}.
+     */
+    private static Optional<RemoteSessionLiveness.State> remoteLivenessOf(ManagedAgentSession session) {
+        if (session.workspaceBox().isEmpty()) {
+            return Optional.empty();
+        }
+        DrydockPluginService plugin = DrydockPluginService.getInstance();
+        if (plugin == null) {
+            return Optional.empty();
+        }
+        return plugin.remoteSessionLiveness().state(session.id());
+    }
+
+    /**
+     * The status line a remote row's surfaces show: the box name and the
+     * liveness state (see {@link AgentStripText#remoteStatusText}), never a
+     * working/idle claim — the activity monitor cannot see a box-side agent
+     * (OQ10). Empty for a local row, so a caller that shows the line only
+     * when present keeps the local presentation untouched.
+     */
+    public static Optional<String> remoteStatusLine(State state) {
+        return state.box().map(box -> AgentStripText.remoteStatusText(
+                state.running(), state.liveness(), box.boxName()));
     }
 }

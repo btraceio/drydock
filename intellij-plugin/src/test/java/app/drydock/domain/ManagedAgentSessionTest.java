@@ -173,4 +173,71 @@ class ManagedAgentSessionTest {
         assertEquals(AgentKind.CODEX, session.withAgentKind(AgentKind.CODEX).agentKind());
         assertEquals(Optional.of("x"), session.withAgentSessionId(Optional.of("x")).agentSessionId());
     }
+
+    // ---- the workspace box binding -------------------------------------------
+
+    @Test
+    void builderSetsAndClearsTheWorkspaceBox() {
+        Path dir = tempDir.toAbsolutePath().normalize();
+        WorkspaceBoxBinding binding = new WorkspaceBoxBinding(
+                "drydock-profiling-rt-ai-plugins", "/home/user/profiling-rt-ai-plugins");
+
+        ManagedAgentSession remote = sessionAt(dir).toBuilder()
+                .workspaceBox(Optional.of(binding)).build();
+        assertEquals(Optional.of(binding), remote.workspaceBox());
+
+        ManagedAgentSession cleared = remote.toBuilder().workspaceBox(Optional.empty()).build();
+        assertEquals(Optional.empty(), cleared.workspaceBox());
+    }
+
+    @Test
+    void aRemoteRowCarriesThePlaceholderWorkspaceWhateverWasSupplied() {
+        // A row is remote iff the binding is present, and its workspace is
+        // derived from the binding: the box's placeholder root, no local
+        // worktree, and no branch this Mac created. A caller that supplies
+        // a real local workspace alongside a binding cannot smuggle it in.
+        Path dir = tempDir.toAbsolutePath().normalize();
+        WorkspaceBoxBinding binding = new WorkspaceBoxBinding("drydock-box", "/home/user/clone");
+        ManagedAgentSession remote = sessionAt(dir).toBuilder()
+                .workspaceBox(Optional.of(binding))
+                .workspace(new SessionWorkspace(dir, Optional.of(dir), true))
+                .build();
+
+        assertEquals(binding.sshRemote().placeholderRoot(), remote.workingDirectory());
+        assertTrue(remote.worktreeRoot().isEmpty());
+        assertFalse(remote.branchCreatedHere());
+        assertEquals(Optional.of(binding), remote.workspaceBox());
+    }
+
+    @Test
+    void delegatingConstructorsPassAnEmptyWorkspaceBox() {
+        Path dir = tempDir.toAbsolutePath().normalize();
+        // Today's canonical signature (sixteen arguments) — every existing
+        // construction site — still compiles and yields a local row.
+        ManagedAgentSession full = new ManagedAgentSession(
+                ManagedSessionId.newId(), RepositoryId.newId(), "full session",
+                new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
+                new SessionWorkspace(dir, Optional.empty(), true),
+                SessionStatus.INACTIVE, Instant.now(), Instant.now(), Optional.empty(),
+                PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty(),
+                false, Optional.empty(), false, false);
+        assertEquals(Optional.empty(), full.workspaceBox());
+
+        // And the shorter delegating forms.
+        assertEquals(Optional.empty(), sessionAt(dir).workspaceBox());
+    }
+
+    @Test
+    void aBindingIsRejectedUnlessTheNameValidatesAndThePathIsAbsolute() {
+        assertThrows(IllegalArgumentException.class,
+                () -> new WorkspaceBoxBinding("Not_A_Box_Name", "/home/user/clone"));
+        assertThrows(IllegalArgumentException.class,
+                () -> new WorkspaceBoxBinding("drydock-box", "relative/clone"));
+        assertThrows(IllegalArgumentException.class,
+                () -> new WorkspaceBoxBinding("drydock-box", ""));
+
+        // The box's ssh alias is workspace-<name>, with the box path.
+        WorkspaceBoxBinding binding = new WorkspaceBoxBinding("drydock-box", "/home/user/clone");
+        assertEquals(new SshRemote("workspace-drydock-box", "/home/user/clone"), binding.sshRemote());
+    }
 }

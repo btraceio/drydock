@@ -20,9 +20,9 @@ import java.util.Optional;
  * path, absolute or relative to the agent directory).
  *
  * <p>Pi has no {@code /sphinx} prompt template (the package ships skills,
- * not prompts), so a positive probe reports {@link
- * SphinxReviewSupport.Invocation#SKILL_REQUEST}: the invocation is a prose
- * request the harness routes to the skill.</p>
+ * not prompts), but the invocation does not need one: pi's prompt-template
+ * expansion leaves an unmatched slash line unchanged, so the prompt line
+ * reaches the model verbatim and the model routes to the skill.</p>
  *
  * <p>Lenient by contract, like {@link PiModelCatalog}: an unreadable or
  * malformed settings file yields empty -- a broken config must cost the
@@ -105,6 +105,6 @@ public final class PiSphinxProbe {
     }
 
     private static SphinxReviewSupport skillSupport() {
-        return new SphinxReviewSupport(SphinxReviewSupport.Invocation.SKILL_REQUEST);
+        return new SphinxReviewSupport();
     }
 }

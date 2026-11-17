@@ -27,6 +27,11 @@ import java.util.Optional;
  * tickets this task was mirrored into, in the order they were created; a
  * missing key is no mirror. The remote side names the task back (see
  * {@link TaskMirror}), so the link runs both ways.</p>
+ *
+ * <p>{@code doneAt} is the stored {@code done_at} instant: when the task
+ * store last moved the task to {@link TaskStatus#DONE}. A missing key is
+ * empty. The value is not cleared when the task is reopened, so it is
+ * meaningful only while the status is {@code done}.</p>
  */
 public record TaskDocument(
         TaskId id,
@@ -38,6 +43,7 @@ public record TaskDocument(
         List<String> after,
         List<String> sessions,
         List<String> mirrors,
+        Optional<Instant> doneAt,
         String rawFrontMatter,
         String rawBody
 ) {
@@ -57,13 +63,23 @@ public record TaskDocument(
         after = after != null ? List.copyOf(after) : List.of();
         sessions = sessions != null ? List.copyOf(sessions) : List.of();
         mirrors = mirrors != null ? List.copyOf(mirrors) : List.of();
+        doneAt = doneAt != null ? doneAt : Optional.empty();
+    }
+
+    /** The shape before tasks recorded when they were done: no {@code done_at}. */
+    public TaskDocument(TaskId id, RepositoryId repository, String title, TaskStatus status, DoneBy doneBy,
+                        Optional<Instant> created, List<String> after, List<String> sessions,
+                        List<String> mirrors, String rawFrontMatter, String rawBody) {
+        this(id, repository, title, status, doneBy, created, after, sessions, mirrors, Optional.empty(),
+                rawFrontMatter, rawBody);
     }
 
     /** The shape before tasks could be mirrored: no mirror. */
     public TaskDocument(TaskId id, RepositoryId repository, String title, TaskStatus status, DoneBy doneBy,
                         Optional<Instant> created, List<String> after, List<String> sessions,
                         String rawFrontMatter, String rawBody) {
-        this(id, repository, title, status, doneBy, created, after, sessions, List.of(), rawFrontMatter, rawBody);
+        this(id, repository, title, status, doneBy, created, after, sessions, List.of(), Optional.empty(),
+                rawFrontMatter, rawBody);
     }
 
     /**
@@ -73,6 +89,6 @@ public record TaskDocument(
      */
     public TaskDocument withTitle(String newTitle) {
         return new TaskDocument(id, repository, newTitle, status, doneBy, created, after, sessions, mirrors,
-                rawFrontMatter, rawBody);
+                doneAt, rawFrontMatter, rawBody);
     }
 }

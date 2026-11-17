@@ -236,8 +236,12 @@ public final class DelayedTaskRows {
             TaskState.TaskView view = state.viewOf(document.id()).orElseThrow();
             boolean stale = document.created().map(created -> created.isBefore(now.minus(STALE_AFTER)))
                     .orElse(false);
+            // The row's project hint (P2): the same slug mapping the graph
+            // resolves references with; null when it names no repository, so
+            // the renderer stays silent instead of inventing a name.
+            String project = projectSlugs.apply(document.repository());
             out.add(new TaskNode.DelayedTaskRow(view, document.title(), document.repository(),
-                    document.created(), stale, document.sessions(), document.mirrors()));
+                    document.created(), stale, document.sessions(), document.mirrors(), project, Optional.empty()));
         }
         return out;
     }
@@ -302,17 +306,30 @@ public final class DelayedTaskRows {
     }
 
     /**
-     * D10/D11 Needs-you for one session row: the existing rule (a running
-     * session waiting for the user's answer) OR an assigned task in
-     * review -- an agent's done on a human-validated task awaits the
-     * human's confirmation, which makes an IDLE or stopped parent session
-     * eligible even though nothing is running.
+     * D10's Needs-you rule, dot-only: a running session waiting for the
+     * user's answer. The inbox's group placement uses exactly this -- a
+     * session whose dot is back to blue belongs in Running or Idle even
+     * when an assigned task awaits the human's confirmation; that task
+     * shows as its own row under In review.
+     */
+    public static boolean needsYou(TaskRow session) {
+        Objects.requireNonNull(session, "session");
+        return session.running() && session.activity().equals(Optional.of(SessionActivity.NEEDS_ATTENTION));
+    }
+
+    /**
+     * D10/D11 Needs-you for the delayed-tasks tree's Needs-you view: the
+     * dot rule OR an assigned task in review -- an agent's done on a
+     * human-validated task awaits the human's confirmation, which makes an
+     * IDLE or stopped parent session eligible even though nothing is
+     * running, because the review task is only reachable under its
+     * wrapper. NOT the inbox's group rule; see {@link #needsYou(TaskRow)}.
      */
     public static boolean needsYou(TaskRow session,
             Collection<TaskNode.DelayedTaskRow> assignedChildren) {
         Objects.requireNonNull(session, "session");
         Objects.requireNonNull(assignedChildren, "assignedChildren");
-        if (session.running() && session.activity().equals(Optional.of(SessionActivity.NEEDS_ATTENTION))) {
+        if (needsYou(session)) {
             return true;
         }
         return assignedChildren.stream().anyMatch(row -> row.presentation() == TaskState.Presentation.REVIEW);

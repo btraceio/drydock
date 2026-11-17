@@ -44,6 +44,13 @@ import java.util.stream.Collectors;
  * The agreement expires after {@link #QUIT_APPROVAL_TTL}, so it cannot leak
  * into a later close of a session that was resumed since.</p>
  *
+ * <p>Neither question counts a session on a workspace box: its agent runs
+ * in the box-side tmux, which outlives the IDE, so a window close (either
+ * answer) and a quit all end only its ssh client — the close and quit
+ * paths destroy that client process and write it no input — and the user is
+ * asked about nothing that keeps running. {@link StopAgentsPlan#countedOnClose}
+ * is that rule.</p>
+ *
  * <p>"An exit is under way" comes from {@link QuitSignal}, an
  * {@code AppLifecycleListener.appClosing()} subscriber: the application
  * publishes that before it asks any project whether it may close (read off
@@ -194,9 +201,14 @@ public final class AgentCloseConfirmation implements ProjectCloseHandler {
             return List.of();
         }
         AgentExecutionRegistry registry = AgentExecutionRegistry.getInstance();
+        List<ManagedAgentSession> sessions = plugin.stateStore().state().sessions();
+        // The question counts only agents it would deactivate: a workspace-
+        // box session keeps running in its box-side tmux when the IDE ends
+        // its ssh client, so it is absent from both counts.
+        List<ManagedSessionId> counted = StopAgentsPlan.countedOnClose(running, sessions);
         List<Working> working = new ArrayList<>();
-        for (ManagedAgentSession session : plugin.stateStore().state().sessions()) {
-            if (!running.contains(session.id())) {
+        for (ManagedAgentSession session : sessions) {
+            if (!counted.contains(session.id())) {
                 continue;
             }
             Optional<SessionActivity> activity = plugin.activityMonitor().current(session.id());

@@ -28,6 +28,22 @@ public interface WorkspaceNavigator {
     /** Closes the session's tab/surface (a no-op future if it is not open). */
     CompletableFuture<Void> closeSession(ManagedSessionId sessionId);
 
+    /**
+     * Starts an optimistic delete: the sidebar row and the session's tab
+     * disappear immediately, while the surface's graceful close and the
+     * metadata removal run in the background. The session's real state is
+     * untouched until {@code SessionManager#deleteSession} completes; if it
+     * fails, {@link #cancelSessionDelete} puts the row and tab back.
+     */
+    void beginSessionDelete(ManagedSessionId sessionId);
+
+    /**
+     * Rolls an optimistic delete back after {@code SessionManager#deleteSession}
+     * failed: the tombstoned row and any detached tab return, and the failure
+     * is surfaced.
+     */
+    void cancelSessionDelete(ManagedSessionId sessionId, Throwable failure);
+
     /** Called after a session's metadata was deleted so any open tab disappears too. */
     void noteSessionDeleted(ManagedSessionId sessionId);
 

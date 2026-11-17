@@ -217,7 +217,16 @@ class TaskActionsTest {
     private static Set<TaskMenu.Item> usedByTaskMenu() {
         // Jira enabled and the issue rows mirrored, so the group items and
         // Open Mirrored Task a menu can offer are all reachable.
-        TaskMenu.MenuFacts transfer = new TaskMenu.MenuFacts(true, true, true);
+        // Jira enabled, mirrored, and every jump target resolved, so the
+        // SHOW_* items a menu can offer are all reachable too.
+        TaskMenu.MenuFacts transfer = new TaskMenu.MenuFacts(true, true, true, false, false,
+                new app.drydock.tasks.TaskNode.DelayedTaskRow(
+                        new app.drydock.tasks.TaskState.TaskView(app.drydock.tasks.TaskId.of("fix-alloc-k3f9"),
+                                app.drydock.tasks.TaskState.Presentation.READY, List.of(), List.of()),
+                        "Fix the thing", RepositoryId.newId(), Optional.empty(), false, List.of()),
+                new PullRequestRow(Path.of("/repo"), new OpenPullRequest(7, "Fix the thing", "pr-7", "main",
+                        false, Optional.empty(), Optional.empty())),
+                row(true, new TaskPlacement.Here()));
         IdleWorktree worktree = new IdleWorktree(Path.of("/wt/fix"), "fix", Optional.empty(), false, false);
         List<TaskNode> shapes = List.of(
                 row(true, new TaskPlacement.OwnWindow()),

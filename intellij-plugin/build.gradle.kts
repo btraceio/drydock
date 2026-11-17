@@ -146,9 +146,11 @@ dependencies {
     "testRuntimeOnly"("org.junit.platform:junit-platform-launcher")
 
     intellijPlatform {
-        // 2026.3 EAP: its terminal renders agent TUIs (Claude, Codex, Pi)
+        // 2026.3: its terminal renders agent TUIs (Claude, Codex, Pi)
         // correctly, where 2025.3's did not. since-build follows, so 263.
-        intellijIdeaUltimate("263.7031.23")
+        // The release build, not an EAP: an EAP build expires and the sandbox
+        // IDE then closes itself on start.
+        intellijIdeaUltimate("263.7307.200")
         bundledPlugin("org.jetbrains.plugins.terminal")
         // The New task dialog's start-point picker is Git's own (GitRefDialog).
         bundledPlugin("Git4Idea")

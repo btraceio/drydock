@@ -459,27 +459,61 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
     /** Sessions whose self-exit has already been recorded, so the watcher fires once per exit. */
     private final Set<ManagedSessionId> exitRecorded = new HashSet<>();
+
+    /**
+     * Sessions the sidebar is already showing as deleted while their surface
+     * close and metadata removal run in the background (optimistic delete).
+     * {@link #publishSessions} filters them out of the snapshot it pushes to
+     * the view model, so the row vanishes in the same FX pulse as the user's
+     * OK on the confirm dialog instead of after the up-to-3s grace period.
+     * The persisted state stays authoritative: a failed delete clears the
+     * tombstone and the row returns from the unmodified manager state.
+     * FX-thread only.
+     */
+    private final Set<ManagedSessionId> optimisticDeletes = new HashSet<>();
+
+    /**
+     * Tabs detached from the {@link #tabPane} by an optimistic delete whose
+     * surface close is still in flight. The tab node disappears at once, but
+     * its {@code TerminalSurface} must stay alive until
+     * {@code SessionManager#closeSession}'s closeGracefully confirms the
+     * child exited -- freeing it under a live child is the documented
+     * uncatchable-JVM-abort scenario -- so {@link #removeTab}'s dispose step
+     * is deferred to delete completion (or rollback re-attaches the tab).
+     * The entry in {@link #openTabs} is kept until then so shutdown and the
+     * close paths still find it. FX-thread only.
+     */
+    private final Map<ManagedSessionId, DetachedTab> detachedTabs = new HashMap<>();
+
+    /** A tab removed from the tab strip while its session's surface close is still in flight. */
+    private record DetachedTab(OpenSessionTab tab, int previousIndex) { }
+
     private final Set<ManagedSessionId> resumeCostScansInFlight = new HashSet<>();
     private final Map<ManagedSessionId, Long> resumeCostLastScanned = new HashMap<>();
     private int resumeCostTick;
 
     /**
-     * The workspace's one-second tick, driving two jobs.
+     * The workspace's fast tick, driving three jobs at their own cadences.
      *
-     * <p>Polls every open tab for a self-exited child process (the user typed
-     * {@code exit} / {@code claude} finished on its own -- nothing else in
-     * the app observes that). Without this, a session whose process died
-     * stays {@code RUNNING} in the sidebar indefinitely.</p>
-     *
-     * <p>Also refreshes session activity badges ({@link #pollSessionActivity}),
-     * which reuses this tick rather than adding a second timer or a
-     * {@code WatchService}.</p>
+     * <p>Every 250ms it polls every open tab for a self-exited child process
+     * (the user typed {@code exit} / {@code claude} finished on its own --
+     * nothing else in the app observes that). Without this, a session whose
+     * process died stays {@code RUNNING} in the sidebar indefinitely; the
+     * poll itself is a boolean {@code processExited()} read per open tab, so
+     * the 250ms cadence exists purely to hold that status flip inside the
+     * 250ms responsiveness budget instead of the former 1s tick's worst
+     * case. Every fourth tick (1s) it also refreshes session activity badges
+     * ({@link #pollSessionActivity}, filesystem reads on the watcher's own
+     * executor, guarded against overlap -- kept at 1s rather than paying per
+     * tick) and every fortieth (10s) the resume-cost estimates.
      */
     private final Timeline exitWatcher = new Timeline(
-            new KeyFrame(Duration.seconds(1), e -> {
+            new KeyFrame(Duration.millis(250), e -> {
                 pollForExitedProcesses();
-                pollSessionActivity();
-                if (++resumeCostTick % 10 == 0) {
+                if (++resumeCostTick % 4 == 0) {
+                    pollSessionActivity();
+                }
+                if (resumeCostTick % 40 == 0) {
                     refreshResumeCostEstimates();
                 }
             }));
@@ -718,7 +752,16 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
     /** Pushes the manager's current session snapshot into the view model (FX thread; no-op if unchanged). */
     private void publishSessions() {
-        viewModel.setSessions(sessionManager.sessions());
+        List<ManagedAgentSession> sessions = sessionManager.sessions();
+        if (!optimisticDeletes.isEmpty()) {
+            // Optimistic delete: the tombstoned session is still in the
+            // manager's state (its metadata is only removed after the
+            // surface close settles), but the sidebar must not show it.
+            sessions = sessions.stream()
+                    .filter(session -> !optimisticDeletes.contains(session.id()))
+                    .toList();
+        }
+        viewModel.setSessions(sessions);
         refreshResumeCostEstimates();
         // Only open tabs: staleness shells out to git, and a workspace-wide
         // republish must not fan out one git call per session the human
@@ -5244,7 +5287,22 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         if (open != null) {
             return closeTab(open);
         }
-        return sessionManager.closeSession(sessionId);
+        return closeSessionWithClosingRow(sessionId, sessionManager.closeSession(sessionId));
+    }
+
+    /**
+     * Wraps a surface-close future with the view model's closing overlay so
+     * the sidebar row reflects "stopping" in the same pulse the close starts
+     * instead of only after the up-to-3s grace period lands the real status.
+     * The overlay must be cleared explicitly on completion -- a tmux-backed
+     * session deliberately stays RUNNING after its surface detaches, so a
+     * status-driven clear would never fire.
+     */
+    private CompletableFuture<Void> closeSessionWithClosingRow(ManagedSessionId sessionId,
+                                                                CompletableFuture<Void> close) {
+        viewModel.setSessionClosing(sessionId, true);
+        return close.whenCompleteAsync((unused, failure) ->
+                viewModel.setSessionClosing(sessionId, false), Platform::runLater);
     }
 
     /**
@@ -5257,7 +5315,8 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      */
     private CompletableFuture<Void> closeTab(OpenSessionTab open) {
         open.showClosingState();
-        return sessionManager.closeSession(open.sessionId()).thenComposeAsync(unused -> {
+        return closeSessionWithClosingRow(open.sessionId(), sessionManager.closeSession(open.sessionId()))
+                .thenComposeAsync(unused -> {
             // The SessionEnd hook cannot be relied on to clear this: a claude
             // sitting at a permission prompt ignores Ctrl+D and is force-killed
             // after the grace period, so it never runs its hooks. Without this,
@@ -5345,9 +5404,109 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         }
     }
 
+    /**
+     * Starts an optimistic delete: the tombstone makes the sidebar row
+     * vanish in this FX pulse, and an open tab is detached from the strip
+     * while its surface close runs in the background (see {@link
+     * #detachedTabs}). The caller then runs {@code
+     * SessionManager#deleteSession} and settles with {@link
+     * #noteSessionDeleted} on success or {@link #cancelSessionDelete} on
+     * failure.
+     */
+    @Override
+    public void beginSessionDelete(ManagedSessionId sessionId) {
+        optimisticDeletes.add(sessionId);
+        viewModel.setSessionClosing(sessionId, false);
+        publishSessions();
+        OpenSessionTab open = openTabs.get(sessionId);
+        if (open == null) {
+            open = pendingTabs.get(sessionId);
+        }
+        if (open != null) {
+            detachTabForDeferredClose(open);
+        }
+    }
+
+    /**
+     * Rolls an optimistic delete back: the tombstone goes, the row returns
+     * from the manager's untouched state, and the detached tab is re-inserted
+     * at its old strip position. Neither the surface nor the tab's Explorer
+     * was freed during the delete, so the re-attached tab is fully live
+     * again.
+     */
+    @Override
+    public void cancelSessionDelete(ManagedSessionId sessionId, Throwable failure) {
+        optimisticDeletes.remove(sessionId);
+        DetachedTab detached = detachedTabs.remove(sessionId);
+        if (detached != null && !tabPane.getTabs().contains(detached.tab().tab)) {
+            int index = Math.min(detached.previousIndex(), tabPane.getTabs().size());
+            tabPane.getTabs().add(index, detached.tab().tab);
+        }
+        publishSessions();
+        UiErrors.show("Could not delete session", failure);
+    }
+
+    /**
+     * Removes a tab from the strip at once but defers its teardown: the
+     * native surface stays alive because the session's graceful close has
+     * not confirmed the child exited yet, and the Explorer stays registered
+     * and live too -- its dispose is deferred to {@link #finishDetachedTab}
+     * alongside the native surface, so {@link #cancelSessionDelete} can
+     * re-attach a tab whose Explorer was never torn down. {@link
+     * #finishDetachedTab} completes the teardown once the exit is confirmed.
+     */
+    private void detachTabForDeferredClose(OpenSessionTab openTab) {
+        int index = tabPane.getTabs().indexOf(openTab.tab);
+        detachedTabs.put(openTab.sessionId(), new DetachedTab(openTab, index));
+        // No markSurfaceClosing(): the surface is still live here, and the
+        // flag is one-way -- a rollback must be able to re-attach a working
+        // tab. Geometry updates against a live, detached surface are harmless;
+        // the guard exists for updateGeometry against a CLOSED one.
+        tabPane.getTabs().remove(openTab.tab);
+    }
+
+    /**
+     * Completes a {@link #detachTabForDeferredClose} teardown after the
+     * session's surface close confirmed the child exited: now (and only now)
+     * the surface may be freed. Same bookkeeping as {@link #removeTab}, minus
+     * the node removal the detach already did -- the Explorer dispose that
+     * {@link #removeTab} performs up front is deferred to here instead, so a
+     * rollback could have re-attached the tab with its Explorer still live.
+     */
+    private void finishDetachedTab(ManagedSessionId sessionId) {
+        DetachedTab detached = detachedTabs.remove(sessionId);
+        if (detached == null) {
+            return;
+        }
+        OpenSessionTab openTab = detached.tab();
+        // The detach left the Explorer registered and live; the delete
+        // succeeded, so this deferred point is where it goes away -- a null
+        // just means the tab never built its Explorer (lazy sub-tab).
+        SessionExplorerView explorer = openExplorers.remove(openTab);
+        if (explorer != null) {
+            explorer.dispose();
+        }
+        openTab.markSurfaceClosing();
+        boolean wasTracked = openTabs.remove(openTab.sessionId(), openTab)
+                | pendingTabs.remove(openTab.sessionId(), openTab);
+        exitRecorded.remove(openTab.sessionId());
+        if (wasTracked) {
+            openTab.repository().ifPresent(projectTabGroup::releaseBadgeStyle);
+        }
+        if (!shuttingDown && restoringSessionIds.remove(openTab.sessionId())) {
+            persistOpenSessionIds();
+        }
+        openTab.worktreeRoot().ifPresent(languageServers::closeForAsync);
+        openTab.disposeNativeResources();
+    }
+
     /** Called by the sidebar after {@link SessionManager#deleteSession} so any open tab disappears too. */
     @Override
     public void noteSessionDeleted(ManagedSessionId sessionId) {
+        // Reached without a begin (no tab was ever open) or as the success
+        // settle of an optimistic delete; either way the tombstone's job is
+        // done once the real snapshot lands.
+        optimisticDeletes.remove(sessionId);
         // Findings are keyed by scope handle now, so a deleted session's
         // review data is reached through the scopes that were bound to it.
         for (ReviewScope scope : reviewScopeRegistry.scopes()) {
@@ -5358,12 +5517,16 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         // A deleted session is never coming back, so its activity file would
         // otherwise linger until the next startup purge.
         forgetActivity(sessionId);
-        OpenSessionTab open = openTabs.get(sessionId);
-        if (open == null) {
-            open = pendingTabs.get(sessionId);
-        }
-        if (open != null) {
-            removeTab(open);
+        if (detachedTabs.containsKey(sessionId)) {
+            finishDetachedTab(sessionId);
+        } else {
+            OpenSessionTab open = openTabs.get(sessionId);
+            if (open == null) {
+                open = pendingTabs.get(sessionId);
+            }
+            if (open != null) {
+                removeTab(open);
+            }
         }
         // Publish even with no open tab: the deletion changed the snapshot,
         // and the sidebar renders from the model, not from its caller.

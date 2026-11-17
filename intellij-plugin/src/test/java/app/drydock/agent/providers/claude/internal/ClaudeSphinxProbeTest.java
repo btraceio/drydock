@@ -67,7 +67,7 @@ class ClaudeSphinxProbeTest {
                 """);
         Optional<SphinxReviewSupport> probed = ClaudeSphinxProbe.probe(file);
         assertTrue(probed.isPresent());
-        assertEquals(SphinxReviewSupport.Invocation.SLASH_COMMAND, probed.get().invocation());
+        assertEquals("/sphinx review", probed.get().reviewLocalChangesPrompt());
     }
 
     @Test

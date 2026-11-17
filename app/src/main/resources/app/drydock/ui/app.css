@@ -420,6 +420,16 @@
     -fx-border-width: 1.5;
     -fx-border-radius: 100;
 }
+/* Optimistic closing overlay: the surface close is in flight but the real
+   status has not landed yet. The dot dims (and renders non-pulsing -- the
+   row passes filled=false while closing) so a RUNNING dot is never shown
+   for a session the row knows is stopping. */
+.status-dot.closing {
+    -fx-opacity: 0.4;
+}
+.session-row.closing .session-name {
+    -fx-text-fill: -drydock-text-faint;
+}
 
 .sidebar-footer {
     -fx-min-height: 36px; -fx-max-height: 36px;
@@ -1951,6 +1961,17 @@
     -fx-font-size: 10.5px;
     -fx-font-weight: bold;
     -fx-padding: 1 8 1 8;
+}
+/* Session parked in a background-wait tool (bg_wait / TaskOutput). Ghost
+   treatment, deliberately unlike the attention badge above: the run resumes
+   on its own, so this is a hint, not a call to action. */
+.bg-badge {
+    -fx-background-color: -drydock-hover;
+    -fx-background-radius: 100px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 10px;
+    -fx-font-weight: bold;
+    -fx-padding: 1 7 1 7;
 }
 .eval-badge {
     -fx-background-color: -drydock-merged-soft;

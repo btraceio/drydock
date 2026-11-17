@@ -9,6 +9,7 @@ import app.drydock.state.json.JsonParser;
 import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonValue.JsonArray;
 import app.drydock.state.json.JsonValue.JsonBoolean;
+import app.drydock.state.json.JsonValue.JsonNull;
 import app.drydock.state.json.JsonValue.JsonNumber;
 import app.drydock.state.json.JsonValue.JsonObject;
 import app.drydock.state.json.JsonValue.JsonString;
@@ -21,6 +22,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -28,6 +30,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -55,6 +58,22 @@ public final class GhCliService implements AutoCloseable {
     /** A network query, but bounded: a hung gh must not park the PR-chip future forever. */
     private static final Duration PROCESS_TIMEOUT = Duration.ofSeconds(15);
 
+    /**
+     * Per-stream output cap of the two batched PR listings. Their
+     * {@code statusCheckRollup} grows with every check of up to
+     * {@link #PR_LIST_LIMIT} PRs; a deliberate bound, not the runner's
+     * unbounded default.
+     */
+    static final int PR_LIST_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
+
+    /**
+     * A positive CI-failure signal from a PR's {@code statusCheckRollup}:
+     * a legacy status context's {@code state}, or a completed check run's
+     * {@code conclusion}. An empty set means no such signal -- never that
+     * CI passed.
+     */
+    public enum CiFailure { FAILURE, ERROR }
+
     /** The bits of {@code gh pr view --json number,state,url} the app cares about. */
     public record PrInfo(int number, PrLifecycle state, Optional<String> url) {
         public enum PrLifecycle { OPEN, MERGED, CLOSED, UNKNOWN }
@@ -71,19 +90,27 @@ public final class GhCliService implements AutoCloseable {
      */
     public record OpenPullRequest(int number, String title, String headRefName, String baseRefName,
                                   boolean draft, Optional<String> author, Optional<String> url,
-                                  boolean conflicting) {
+                                  boolean conflicting, Set<CiFailure> ciFailures) {
         public OpenPullRequest {
             Objects.requireNonNull(title, "title");
             Objects.requireNonNull(headRefName, "headRefName");
             Objects.requireNonNull(baseRefName, "baseRefName");
             Objects.requireNonNull(author, "author");
             Objects.requireNonNull(url, "url");
+            ciFailures = Set.copyOf(ciFailures);
+        }
+
+        /** The shape before the listing carried CI results: no failure signal. */
+        public OpenPullRequest(int number, String title, String headRefName, String baseRefName,
+                               boolean draft, Optional<String> author, Optional<String> url,
+                               boolean conflicting) {
+            this(number, title, headRefName, baseRefName, draft, author, url, conflicting, Set.of());
         }
 
         /** The shape before the listing carried mergeability: not known to conflict. */
         public OpenPullRequest(int number, String title, String headRefName, String baseRefName,
                                boolean draft, Optional<String> author, Optional<String> url) {
-            this(number, title, headRefName, baseRefName, draft, author, url, false);
+            this(number, title, headRefName, baseRefName, draft, author, url, false, Set.of());
         }
     }
 
@@ -120,12 +147,20 @@ public final class GhCliService implements AutoCloseable {
      * must not badge a local {@code main}.
      */
     public record BranchPullRequest(int number, PrInfo.PrLifecycle state, boolean draft, String headRefName,
-                                    String title, Optional<String> url) {
+                                    String title, Optional<String> url,
+                                    boolean conflicting, Set<CiFailure> ciFailures) {
         public BranchPullRequest {
             Objects.requireNonNull(state, "state");
             Objects.requireNonNull(headRefName, "headRefName");
             Objects.requireNonNull(title, "title");
             Objects.requireNonNull(url, "url");
+            ciFailures = Set.copyOf(ciFailures);
+        }
+
+        /** The shape before the listing carried mergeability and CI: neither signal. */
+        public BranchPullRequest(int number, PrInfo.PrLifecycle state, boolean draft, String headRefName,
+                                 String title, Optional<String> url) {
+            this(number, state, draft, headRefName, title, url, false, Set.of());
         }
     }
 
@@ -323,7 +358,18 @@ public final class GhCliService implements AutoCloseable {
     }
 
     PullRequestListing openPullRequestsBlocking(Path root, Optional<String> repository) {
-        Path gh = locate().orElse(null);
+        return openPullRequestsWith(locate(), root, repository, PROCESS_TIMEOUT);
+    }
+
+    /**
+     * The open-PR listing with {@code gh} already looked up (empty: not
+     * installed); static so argv, bounds and failure logging are testable
+     * with a scripted gh. {@code timeout} is {@link #PROCESS_TIMEOUT} in
+     * production.
+     */
+    static PullRequestListing openPullRequestsWith(Optional<Path> located, Path root,
+                                                   Optional<String> repository, Duration timeout) {
+        Path gh = located.orElse(null);
         if (gh == null) {
             return new PullRequestListing.Unsupported();
         }
@@ -333,12 +379,12 @@ public final class GhCliService implements AutoCloseable {
         List<String> command = new ArrayList<>(List.of(gh.toString(), "pr", "list",
                 "--state", "open",
                 "--limit", String.valueOf(PR_LIST_LIMIT),
-                "--json", "number,title,headRefName,baseRefName,isDraft,author,url,mergeable"));
+                "--json", "number,title,headRefName,baseRefName,isDraft,author,url,mergeable,statusCheckRollup"));
         repository.ifPresent(value -> {
             command.add("--repo");
             command.add(value);
         });
-        ProcessResult result = runIn(root, command);
+        ProcessResult result = runListing(root, command, timeout);
         if (result == null) {
             return new PullRequestListing.Failed("gh did not run to completion");
         }
@@ -372,12 +418,9 @@ public final class GhCliService implements AutoCloseable {
                             ? Optional.of(login.value()) : Optional.empty();
                     Optional<String> url = obj.get("url") instanceof JsonString u
                             ? Optional.of(u.value()) : Optional.empty();
-                    // GitHub computes mergeability lazily: UNKNOWN until it
-                    // has, so only an explicit CONFLICTING counts.
-                    boolean conflicting = obj.get("mergeable") instanceof JsonString m
-                            && "CONFLICTING".equals(m.value());
                     pullRequests.add(new OpenPullRequest(number.asInt(), title.value(),
-                            head.value(), base.value(), draft, author, url, conflicting));
+                            head.value(), base.value(), draft, author, url,
+                            conflictingOf(obj.get("mergeable")), ciFailuresOf(obj.get("statusCheckRollup"))));
                 }
             }
             return new PullRequestListing.Listed(pullRequests);
@@ -385,6 +428,33 @@ public final class GhCliService implements AutoCloseable {
             LOG.log(Level.DEBUG, "Unparseable gh pr list output", e);
             return new PullRequestListing.Failed("gh pr list returned output that could not be parsed");
         }
+    }
+
+    /** Looks up one PR by number, including older and fork PRs absent from the branch listing. */
+    public CompletableFuture<Optional<BranchPullRequest>> pullRequest(Path root, Optional<String> repository,
+                                                                     int number) {
+        return CompletableFuture.supplyAsync(
+                () -> locate().flatMap(gh -> pullRequestWith(gh, root, repository, number)), executor);
+    }
+
+    static Optional<BranchPullRequest> pullRequestWith(Path gh, Path root, Optional<String> repository, int number) {
+        if (number <= 0 || repository.filter(value -> !validRepository(value)).isPresent()) {
+            throw new IllegalArgumentException("Use a positive PR number and a valid repository");
+        }
+        List<String> command = new ArrayList<>(List.of(gh.toString(), "pr", "view", String.valueOf(number),
+                "--json", "number,state,isDraft,headRefName,title,url"));
+        repository.ifPresent(value -> {
+            command.add("--repo");
+            command.add(value);
+        });
+        ProcessResult result = runIn(root, command);
+        if (result == null || result.exitCode() != 0) {
+            LOG.log(Level.WARNING, "Could not read PR #" + number + repository.map(r -> " in " + r).orElse("")
+                    + (result == null ? " (command did not complete)" : ": " + ProcessRunner.excerpt(result.stderr())));
+            return Optional.empty();
+        }
+        return parseBranchPullRequests("[" + result.stdout() + "]").stream()
+                .filter(pr -> pr.number() == number).findFirst();
     }
 
     /**
@@ -400,7 +470,13 @@ public final class GhCliService implements AutoCloseable {
     }
 
     Map<String, BranchPullRequest> branchPullRequestsBlocking(Path root, Optional<String> repository) {
-        Path gh = locate().orElse(null);
+        return branchPullRequestsWith(locate(), root, repository, PROCESS_TIMEOUT);
+    }
+
+    /** The badge listing with {@code gh} already looked up; static for the same reason as {@link #openPullRequestsWith}. */
+    static Map<String, BranchPullRequest> branchPullRequestsWith(Optional<Path> located, Path root,
+                                                                 Optional<String> repository, Duration timeout) {
+        Path gh = located.orElse(null);
         if (gh == null) {
             LOG.log(Level.DEBUG, "gh is not installed; no pull-request badges for " + root);
             return Map.of();
@@ -413,12 +489,12 @@ public final class GhCliService implements AutoCloseable {
         List<String> command = new ArrayList<>(List.of(gh.toString(), "pr", "list",
                 "--state", "all",
                 "--limit", String.valueOf(PR_LIST_LIMIT),
-                "--json", "number,state,isDraft,headRefName,title,url,isCrossRepository"));
+                "--json", "number,state,isDraft,headRefName,title,url,isCrossRepository,mergeable,statusCheckRollup"));
         repository.ifPresent(value -> {
             command.add("--repo");
             command.add(value);
         });
-        ProcessResult result = runIn(root, command);
+        ProcessResult result = runListing(root, command, timeout);
         if (result == null) {
             LOG.log(Level.WARNING, "gh pr list --state all in " + root + " did not run to completion");
             return Map.of();
@@ -456,7 +532,8 @@ public final class GhCliService implements AutoCloseable {
                     String title = obj.get("title") instanceof JsonString t ? t.value() : "";
                     Optional<String> url = obj.get("url") instanceof JsonString u
                             ? Optional.of(u.value()) : Optional.empty();
-                    pullRequests.add(new BranchPullRequest(number.asInt(), state, draft, head.value(), title, url));
+                    pullRequests.add(new BranchPullRequest(number.asInt(), state, draft, head.value(), title, url,
+                            conflictingOf(obj.get("mergeable")), ciFailuresOf(obj.get("statusCheckRollup"))));
                 }
             }
             return pullRequests;
@@ -464,6 +541,66 @@ public final class GhCliService implements AutoCloseable {
             LOG.log(Level.WARNING, "gh pr list --state all returned output that could not be parsed", e);
             return List.of();
         }
+    }
+
+    /**
+     * Pure. GitHub computes mergeability lazily -- {@code UNKNOWN} until it
+     * has -- so only an explicit {@code CONFLICTING} is a conflict.
+     */
+    static boolean conflictingOf(JsonValue mergeable) {
+        return mergeable instanceof JsonString m && "CONFLICTING".equals(m.value());
+    }
+
+    /**
+     * Pure. The positive CI failures in a PR's {@code statusCheckRollup}, a
+     * heterogeneous array: a legacy {@code StatusContext} reports a
+     * {@code state}, a {@code CheckRun} an execution {@code status} plus,
+     * once completed, a {@code conclusion}. Only {@code FAILURE} and
+     * {@code ERROR} count; one failing entry is not hidden by passing or
+     * pending ones. A check run that is not yet completed, any other
+     * result (success, pending, cancelled, skipped, neutral, action
+     * required, timed out), an unknown entry type, and a missing or
+     * malformed rollup contribute nothing.
+     */
+    static Set<CiFailure> ciFailuresOf(JsonValue rollup) {
+        if (!(rollup instanceof JsonArray entries)) {
+            return Set.of();
+        }
+        EnumSet<CiFailure> failures = EnumSet.noneOf(CiFailure.class);
+        for (JsonValue entry : entries.elements()) {
+            if (!(entry instanceof JsonObject check)) {
+                continue;
+            }
+            JsonValue type = check.get("__typename");
+            JsonValue result;
+            if (type instanceof JsonString t && "StatusContext".equals(t.value())) {
+                result = check.get("state");
+            } else if (type instanceof JsonString t && "CheckRun".equals(t.value())) {
+                result = completedConclusion(check);
+            } else if (type == null || type instanceof JsonNull) {
+                // No type name: go by shape, a conclusion being the CheckRun's.
+                result = check.get("conclusion") != null ? completedConclusion(check) : check.get("state");
+            } else {
+                continue;
+            }
+            if (result instanceof JsonString value) {
+                switch (value.value()) {
+                    case "FAILURE" -> failures.add(CiFailure.FAILURE);
+                    case "ERROR" -> failures.add(CiFailure.ERROR);
+                    default -> { }
+                }
+            }
+        }
+        return Set.copyOf(failures);
+    }
+
+    /** A check run's conclusion, or null while it is explicitly still queued or running. */
+    private static JsonValue completedConclusion(JsonObject checkRun) {
+        JsonValue status = checkRun.get("status");
+        if (!(status instanceof JsonString s && "COMPLETED".equals(s.value()))) {
+            return null;
+        }
+        return checkRun.get("conclusion");
     }
 
     /**
@@ -665,6 +802,82 @@ public final class GhCliService implements AutoCloseable {
             Thread.currentThread().interrupt();
             return null;
         }
+    }
+
+    /**
+     * A batched PR listing's run: bounded to {@link #PR_LIST_MAX_OUTPUT_BYTES}
+     * per stream, and every way it can fail to produce a result -- launch
+     * failure, output overflow, timeout, interrupt -- is logged at WARNING
+     * with its reason (the badge or listing it feeds silently goes
+     * missing otherwise). Null when it did not run to completion.
+     */
+    private static ProcessResult runListing(Path workingDirectory, List<String> command, Duration timeout) {
+        String what = String.join(" ", command.subList(1, Math.min(command.size(), 5)));
+        try {
+            return ProcessRunner.run(command, listingOptions(workingDirectory, timeout), PR_LIST_MAX_OUTPUT_BYTES);
+        } catch (IOException e) {
+            if (isOutputLimitExceeded(e)) {
+                List<String> fallbackCommand = withoutOptionalListingFields(command);
+                if (!fallbackCommand.equals(command)) {
+                    LOG.log(Level.WARNING, "gh " + what + " in " + workingDirectory
+                            + " exceeded the output cap; retrying without mergeability and CI badges");
+                    try {
+                        return ProcessRunner.run(fallbackCommand, listingOptions(workingDirectory, timeout),
+                                PR_LIST_MAX_OUTPUT_BYTES);
+                    } catch (IOException retryException) {
+                        LOG.log(Level.WARNING, "gh " + what + " in " + workingDirectory
+                                + " did not run to completion after the reduced listing retry: "
+                                + String.valueOf(retryException.getMessage()));
+                    } catch (ProcessTimeoutException retryException) {
+                        LOG.log(Level.WARNING, "gh " + what + " in " + workingDirectory
+                                + " timed out after " + timeout.toSeconds() + "s during the reduced listing retry");
+                    } catch (InterruptedException retryException) {
+                        Thread.currentThread().interrupt();
+                        LOG.log(Level.WARNING, "gh " + what + " in " + workingDirectory
+                                + " was interrupted during the reduced listing retry");
+                    }
+                    return null;
+                }
+            }
+            LOG.log(Level.WARNING, "gh " + what + " in " + workingDirectory + " did not run to completion: "
+                    + String.valueOf(e.getMessage()));
+            return null;
+        } catch (ProcessTimeoutException e) {
+            LOG.log(Level.WARNING, "gh " + what + " in " + workingDirectory + " timed out after "
+                    + timeout.toSeconds() + "s and was killed");
+            return null;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            LOG.log(Level.WARNING, "gh " + what + " in " + workingDirectory + " was interrupted");
+            return null;
+        }
+    }
+
+    private static boolean isOutputLimitExceeded(IOException exception) {
+        return exception.getMessage() != null && exception.getMessage().startsWith("Process output exceeded");
+    }
+
+    /** Remove only the optional badge fields when a batched listing exceeds its output cap. */
+    private static List<String> withoutOptionalListingFields(List<String> command) {
+        int jsonIndex = command.indexOf("--json");
+        if (jsonIndex < 0 || jsonIndex + 1 >= command.size()) {
+            return command;
+        }
+        List<String> fields = new ArrayList<>(List.of(command.get(jsonIndex + 1).split(",", -1)));
+        boolean removed = fields.removeIf(field -> "mergeable".equals(field) || "statusCheckRollup".equals(field));
+        if (!removed) {
+            return command;
+        }
+        List<String> fallbackCommand = new ArrayList<>(command);
+        fallbackCommand.set(jsonIndex + 1, String.join(",", fields));
+        return List.copyOf(fallbackCommand);
+    }
+
+    /** {@link #runIn}'s environment handling, as options for the bounded overload. */
+    private static ProcessRunner.Options listingOptions(Path workingDirectory, Duration timeout) {
+        String rawPath = LoginShellEnvironment.currentRealPath();
+        Map<String, String> environment = rawPath == null ? Map.of() : Map.of("PATH", pathWithFallbacks(rawPath));
+        return new ProcessRunner.Options(workingDirectory, timeout, false, environment);
     }
 
     /**

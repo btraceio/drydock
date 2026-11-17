@@ -740,6 +740,25 @@ class GitStatusServiceTest {
         assertTrue(service.commitForRefBlocking(repo, "--git-dir").isEmpty());
     }
 
+    /**
+     * The effective {@code user.name} is what a generated branch's
+     * attribution token must reflect. The test fixture injects a command-scope
+     * value ({@code Drydock Fixture}), so that is the value the probe must return.
+     */
+    @Test
+    void userNameReadsTheEffectiveValue(@TempDir Path repo) throws Exception {
+        initRepo(repo, "main");
+
+        assertEquals(Optional.of("Drydock Fixture"), service.userNameBlocking(repo));
+    }
+
+    @Test
+    void userNameCompletesOnTheServiceExecutor(@TempDir Path repo) throws Exception {
+        initRepo(repo, "main");
+
+        assertEquals(Optional.of("Drydock Fixture"), service.userName(repo).get());
+    }
+
     private GitStatus getStatus(Path repo) throws ExecutionException, InterruptedException {
         CompletableFuture<GitStatus> future = service.getStatus(repo);
         return future.get();

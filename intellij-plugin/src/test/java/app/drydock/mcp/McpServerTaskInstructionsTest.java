@@ -183,7 +183,7 @@ class McpServerTaskInstructionsTest {
         Set<String> served = new TaskTools(tasks).toolDescriptors().stream()
                 .map(d -> str(d, "name")).collect(Collectors.toCollection(TreeSet::new));
         assertEquals(McpToolRouter.TASK_TOOLS, served,
-                "the delegate serves exactly the four task tools");
+                "the delegate serves exactly the task tools");
         for (String referenced : toolNamesIn(McpServer.TASK_INSTRUCTIONS)) {
             assertTrue(served.contains(referenced),
                     "the paragraph names a tool the delegate does not serve: " + referenced);

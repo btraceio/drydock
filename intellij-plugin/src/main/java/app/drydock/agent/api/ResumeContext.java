@@ -41,11 +41,19 @@ import java.util.Optional;
  * with the conversation: this resume carries exactly what it is given, so
  * a task-tool-capable resumed session re-receives its resources here
  * rather than via any global configuration.</p>
+ *
+ * <p>{@code persistence}, when present, means this resume re-attaches to a
+ * session living on a workspace box inside the tmux session named after
+ * its {@link RemotePersistence#managedSessionId()} — a persistent remote
+ * session rather than a plain SSH launch. It is present only together
+ * with {@code remote}; the constructor rejects persistence without a
+ * remote. Empty means exactly the resumes of today.</p>
  */
 public record ResumeContext(Optional<String> agentSessionId, Optional<String> agentSessionName,
                             Path workingDirectory, Optional<SshRemote> remote, Optional<McpAccess> mcp,
                             boolean evalMode, boolean readOnly, List<StdioMcpServer> stdioMcpServers,
-                            Optional<String> resumePrompt, Optional<LaunchResources> launchResources) {
+                            Optional<String> resumePrompt, Optional<LaunchResources> launchResources,
+                            Optional<RemotePersistence> persistence) {
     public ResumeContext {
         Objects.requireNonNull(agentSessionId, "agentSessionId");
         Objects.requireNonNull(agentSessionName, "agentSessionName");
@@ -55,9 +63,24 @@ public record ResumeContext(Optional<String> agentSessionId, Optional<String> ag
         stdioMcpServers = List.copyOf(Objects.requireNonNull(stdioMcpServers, "stdioMcpServers"));
         Objects.requireNonNull(resumePrompt, "resumePrompt");
         Objects.requireNonNull(launchResources, "launchResources");
+        Objects.requireNonNull(persistence, "persistence");
+        // A persistent session lives on a remote box; persistence without
+        // a remote is a wiring mistake, never a launch mode.
+        if (persistence.isPresent() && remote.isEmpty()) {
+            throw new IllegalArgumentException("persistence requires a remote");
+        }
         // A blank prompt is no prompt: rendering it would submit an empty
         // first message to the resumed conversation.
         resumePrompt = resumePrompt.filter(prompt -> !prompt.isBlank());
+    }
+
+    /** As the canonical constructor with no persistence. */
+    public ResumeContext(Optional<String> agentSessionId, Optional<String> agentSessionName,
+                         Path workingDirectory, Optional<SshRemote> remote, Optional<McpAccess> mcp,
+                         boolean evalMode, boolean readOnly, List<StdioMcpServer> stdioMcpServers,
+                         Optional<String> resumePrompt, Optional<LaunchResources> launchResources) {
+        this(agentSessionId, agentSessionName, workingDirectory, remote, mcp, evalMode, readOnly,
+                stdioMcpServers, resumePrompt, launchResources, Optional.empty());
     }
 
     /** As the canonical constructor with no launch resources. */
@@ -85,14 +108,21 @@ public record ResumeContext(Optional<String> agentSessionId, Optional<String> ag
     /** This context, with {@code servers} as the stdio MCP servers the agent starts. */
     public ResumeContext withStdioMcpServers(List<StdioMcpServer> servers) {
         return new ResumeContext(agentSessionId, agentSessionName, workingDirectory, remote, mcp, evalMode,
-                readOnly, servers, resumePrompt, launchResources);
+                readOnly, servers, resumePrompt, launchResources, persistence);
     }
 
     /** This context, with {@code resources} as the launch resources. */
     public ResumeContext withLaunchResources(LaunchResources resources) {
         return new ResumeContext(agentSessionId, agentSessionName, workingDirectory, remote, mcp, evalMode,
                 readOnly, stdioMcpServers, resumePrompt,
-                Optional.of(Objects.requireNonNull(resources, "resources")));
+                Optional.of(Objects.requireNonNull(resources, "resources")), persistence);
+    }
+
+    /** This context, with {@code persistence} as the remote box persistence. */
+    public ResumeContext withPersistence(RemotePersistence persistence) {
+        return new ResumeContext(agentSessionId, agentSessionName, workingDirectory, remote, mcp, evalMode,
+                readOnly, stdioMcpServers, resumePrompt, launchResources,
+                Optional.of(Objects.requireNonNull(persistence, "persistence")));
     }
 
     /** As the canonical constructor with {@code readOnly = false} (a writing resume). */

@@ -99,8 +99,7 @@ import java.util.stream.Stream;
  * flag per registration) is the designed-in next step if that ever matters
  * in practice.</p>
  *
- * <p>The task tools ({@code task_get}/{@code task_list}/{@code task_update}/
- * {@code task_create}) are the one surface this router does not itself
+ * <p>The task tools are the one surface this router does not itself
  * implement: they ride an optional {@link TaskTools} delegate, and the
  * router's part is routing only -- the allowed set alone decides both their
  * listing and their call, a router without the delegate treats a task name
@@ -153,7 +152,7 @@ public final class McpToolRouter {
             "session_reclaim", "session_handoff", "repos_list", "sessions_list");
 
     /**
-     * The four task tools (D14/P7), served only by a router built with BOTH a
+     * The task tools (D14/P7), served only by a router built with BOTH a
      * {@link TaskTools} delegate and these names in its allowed set. A null
      * delegate keeps a task name outside the router entirely -- not listed,
      * not callable, refused on the wire exactly like any other name the
@@ -163,7 +162,7 @@ public final class McpToolRouter {
      * worktree_create} included, is made from the same set as before.
      */
     public static final Set<String> TASK_TOOLS = Set.of(
-            "task_get", "task_list", "task_update", "task_create");
+            "task_get", "task_list", "task_update", "task_create", "task_claim");
 
     /**
      * One scope's change graph and out-of-diff caller scan, keyed by the diff
@@ -227,7 +226,7 @@ public final class McpToolRouter {
     }
 
     /**
-     * Builds a full router that also serves the four task tools through
+     * Builds a full router that also serves the task tools through
      * {@code taskTools}: they are advertised and callable, and nothing else
      * changes -- every other tool sits behind the same allowlist decision a
      * delegate-less router makes (P7).
@@ -283,7 +282,7 @@ public final class McpToolRouter {
         return taskTools == null ? ALL_TOOLS : allToolsAndTasks();
     }
 
-    /** The full shared set plus the four task tools, for a task-enabled router. */
+    /** The full shared set plus the task tools, for a task-enabled router. */
     private static Set<String> allToolsAndTasks() {
         return Stream.concat(ALL_TOOLS.stream(), TASK_TOOLS.stream())
                 .collect(Collectors.toUnmodifiableSet());
@@ -578,7 +577,8 @@ public final class McpToolRouter {
             case "session_handoff" -> sessionHandoff(caller, arguments);
             case "repos_list" -> reposList(caller);
             case "sessions_list" -> sessionsList(caller);
-            case "task_get", "task_list", "task_update", "task_create" -> taskCall(caller, tool, arguments);
+            case "task_get", "task_list", "task_update", "task_create", "task_claim" ->
+                    taskCall(caller, tool, arguments);
             default -> throw new McpToolException("Unknown tool: " + tool);
         };
     }
@@ -1886,7 +1886,7 @@ public final class McpToolRouter {
     // ---- the task surface (T11: routed here, owned by TaskTools) --------
 
     /**
-     * The four task tools, dispatched to the delegate this router was built
+     * The task tools, dispatched to the delegate this router was built
      * with. The router owns no task logic (that is {@link TaskTools} over its
      * {@link TaskToolContext}); it owns the allowlist decision that already
      * ran at the top of {@link #call}, which is what keeps a task-enabled

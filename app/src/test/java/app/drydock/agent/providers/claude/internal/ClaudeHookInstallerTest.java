@@ -111,6 +111,48 @@ class ClaudeHookInstallerTest {
     }
 
     @Test
+    void preToolUseBackgroundWaitMarksTheSessionWaitingOnBackgroundWork(@TempDir Path base) throws Exception {
+        ClaudeHookInstaller installer = new ClaudeHookInstaller(base);
+        installer.install();
+
+        assertEquals(0, runHook(installer, base, "bg",
+                payload("PreToolUse", ",\"tool_name\":\"TaskOutput\",\"tool_input\":{\"task_id\":\"t1\"}")));
+
+        assertEquals(SessionActivity.WAITING_BACKGROUND, observedActivity(base));
+    }
+
+    /** When the wait tool returns, the PostToolUse hook hands the word back to busy. */
+    @Test
+    void postToolUseBackgroundWaitReturnsTheSessionToBusy(@TempDir Path base) throws Exception {
+        ClaudeHookInstaller installer = new ClaudeHookInstaller(base);
+        installer.install();
+        runHook(installer, base, "bg",
+                payload("PreToolUse", ",\"tool_name\":\"BashOutput\",\"tool_input\":{\"bash_id\":\"b1\"}"));
+        assertEquals(SessionActivity.WAITING_BACKGROUND, observedActivity(base));
+
+        assertEquals(0, runHook(installer, base, "busy",
+                payload("PostToolUse", ",\"tool_name\":\"BashOutput\",\"tool_response\":{\"output\":\"done\"}")));
+
+        assertEquals(SessionActivity.BUSY, observedActivity(base));
+    }
+
+    /** The generated settings must scope the bg hooks to the wait tools, not every tool call. */
+    @Test
+    void backgroundWaitHooksAreMatcherScopedToTheWaitTools(@TempDir Path base) throws IOException {
+        ClaudeHookInstaller installer = new ClaudeHookInstaller(base);
+        installer.install();
+
+        String settings = Files.readString(installer.settingsFile(), StandardCharsets.UTF_8);
+        String script = base.resolve("hooks").resolve("drydock-activity.sh").toString();
+
+        assertTrue(settings.contains("\"PreToolUse\""));
+        assertTrue(settings.contains("\"PostToolUse\""));
+        assertEquals(2, settings.split("TaskOutput\\|BashOutput", -1).length - 1,
+                "the matcher must scope exactly the Pre/PostToolUse pair");
+        assertTrue(settings.contains("sh '" + script + "' bg"));
+    }
+
+    @Test
     void stopMarksTheSessionIdle(@TempDir Path base) throws Exception {
         ClaudeHookInstaller installer = new ClaudeHookInstaller(base);
         installer.install();
@@ -144,23 +186,51 @@ class ClaudeHookInstallerTest {
         assertEquals(SessionActivity.NEEDS_ATTENTION, observedActivity(base));
     }
 
-    /** Notifications that are not about a blocked human keep the session merely busy. */
     @Test
-    void unrelatedNotificationDoesNotRaiseAttention(@TempDir Path base) throws Exception {
+    void agentNeedsInputNotificationRaisesAttention(@TempDir Path base) throws Exception {
+        ClaudeHookInstaller installer = new ClaudeHookInstaller(base);
+        installer.install();
+
+        assertEquals(0, runHook(installer, base, "notify",
+                payload("Notification", ",\"notification_type\":\"agent_needs_input\"")));
+
+        assertEquals(SessionActivity.NEEDS_ATTENTION, observedActivity(base));
+    }
+
+    /** Routine notifications without an existing state do not create one. */
+    @Test
+    void routineNotificationDoesNotCreateActivityState(@TempDir Path base) throws Exception {
         ClaudeHookInstaller installer = new ClaudeHookInstaller(base);
         installer.install();
 
         assertEquals(0, runHook(installer, base, "notify",
                 payload("Notification", ",\"notification_type\":\"auth_success\"")));
 
-        assertEquals(SessionActivity.BUSY, observedActivity(base));
+        assertEquals(SessionActivity.UNKNOWN, observedActivity(base));
+    }
+
+    /** A routine notification must not overwrite the state written by an in-flight background wait. */
+    @Test
+    void routineNotificationPreservesBackgroundWaitState(@TempDir Path base) throws Exception {
+        ClaudeHookInstaller installer = new ClaudeHookInstaller(base);
+        installer.install();
+        runHook(installer, base, "bg",
+                payload("PreToolUse", ",\"tool_name\":\"TaskOutput\",\"tool_input\":{\"task_id\":\"t1\"}"));
+        assertEquals(SessionActivity.WAITING_BACKGROUND, observedActivity(base));
+
+        assertEquals(0, runHook(installer, base, "notify",
+                payload("Notification", ",\"notification_type\":\"auth_success\"")));
+
+        assertEquals(SessionActivity.WAITING_BACKGROUND, observedActivity(base));
     }
 
     /**
      * Regression: the classifier used to glob for the bare keyword anywhere in
      * the payload, so an unrelated notification whose human-readable text
      * merely mentioned "permission_prompt" would badge a session that was not
-     * blocked. Only the notification_type VALUE may decide this.
+     * blocked. Only the notification_type VALUE may decide this. A routine
+     * type writes nothing at all -- a state word must never be downgraded by a
+     * notification, whether the current word is busy, bg, or attention.
      */
     @Test
     void keywordInFreeTextDoesNotRaiseAttention(@TempDir Path base) throws Exception {
@@ -172,7 +242,7 @@ class ClaudeHookInstallerTest {
                         + ",\"title\":\"idle_prompt mentioned here too\""
                         + ",\"notification_type\":\"auth_success\"")));
 
-        assertEquals(SessionActivity.BUSY, observedActivity(base));
+        assertEquals(SessionActivity.UNKNOWN, observedActivity(base));
     }
 
     /** The value is what counts, wherever the field sits in the payload. */

@@ -15,6 +15,8 @@ import org.jetbrains.annotations.NotNull;
  */
 public final class DrydockToolWindowFactory implements ToolWindowFactory, DumbAware {
 
+    static final String TOOL_WINDOW_ID = "Drydock";
+
     @Override
     public void createToolWindowContent(@NotNull Project project, @NotNull ToolWindow toolWindow) {
         TaskTreePanel panel = new TaskTreePanel(project);

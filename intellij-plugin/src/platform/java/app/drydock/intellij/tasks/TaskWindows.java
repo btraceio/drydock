@@ -19,7 +19,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/** Opening a worktree as its own IDE window. */
+/** Opening a worktree, or a project's main checkout, as its own IDE window. */
 public final class TaskWindows {
 
     static final String OPEN_WINDOWS_KEY = "drydock.openTaskWindows";
@@ -58,7 +58,7 @@ public final class TaskWindows {
         return opened;
     }
 
-    /** Keeps a task window across an IDE quit; an ordinary close forgets it. EDT, memory/config only. */
+    /** Keeps an opened window (a task worktree's or a main checkout's) across an IDE quit; an ordinary close forgets it. EDT, memory/config only. */
     public static void windowClosing(Project project, boolean quitting) {
         if (quitting || project.getBasePath() == null) {
             return;
@@ -75,7 +75,7 @@ public final class TaskWindows {
         }
     }
 
-    /** Reopens the task windows remembered at the last IDE quit, without starting their agents. */
+    /** Reopens the windows remembered at the last IDE quit, without starting their agents. */
     public static void restoreRemembered() {
         if (!RESTORE_STARTED.compareAndSet(false, true)) {
             return;
@@ -106,6 +106,31 @@ public final class TaskWindows {
         if (!updated.equals(current)) {
             properties.setValues(OPEN_WINDOWS_KEY, updated.toArray(String[]::new));
         }
+    }
+
+    /**
+     * Raises an open window of {@code root} — a project's main checkout — or
+     * opens one when no window shows it. The session jump's rule
+     * ({@code AgentConsoles.jumpToOwnWindow}): a window already open on the
+     * checkout is focused, never a second copy of an already-open project;
+     * a folder gone since the click and a failed open each say so in
+     * {@code from} instead of doing nothing.
+     *
+     * <p>Called on the EDT; the folder and open-window scan runs on the
+     * plugin's executor, the raise or open hops back with
+     * {@code ModalityState.nonModal()} — the same shape as the jump, via
+     * {@link RaiseOrOpenWindow}. {@code name} is the project's display name
+     * for the dialogs. Only a window this opens is remembered for the
+     * restore at the next IDE start: a window found already open keeps
+     * whatever restore memory opened it.</p>
+     */
+    public static void openCheckoutWindow(Project from, Path root, String name) {
+        DrydockPluginService.getInstance().executor().execute(() -> {
+            RaiseOrOpenWindow.Scan scan = RaiseOrOpenWindow.scan(root);
+            ApplicationManager.getApplication().invokeLater(
+                    () -> RaiseOrOpenWindow.raiseOrOpen(from, root, name, scan),
+                    ModalityState.nonModal());
+        });
     }
 
     private static List<String> values(PropertiesComponent properties) {

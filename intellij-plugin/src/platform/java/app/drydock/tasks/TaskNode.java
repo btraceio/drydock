@@ -1,6 +1,7 @@
 package app.drydock.tasks;
 
 import app.drydock.domain.RepositoryId;
+import app.drydock.git.GhCliService.OpenPullRequest;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
 
 import java.time.Instant;
@@ -36,9 +37,14 @@ public sealed interface TaskNode {
      * an INJECTED clock by {@link DelayedTaskRows}, never
      * {@code System.now} deep in row code. {@code mirrors} is the
      * document's stored mirror addresses (GitHub issues, Jira tickets).
+     * {@code project} is the repository's display slug from the caller's
+     * mapping, so a task's tooltip can name its project across the inbox's
+     * state groups. Null when the mapping supplies none: an unregistered
+     * repository must not render a made-up name.
      */
     record DelayedTaskRow(TaskState.TaskView view, String title, RepositoryId repository,
-            Optional<Instant> created, boolean stale, List<String> storedSessions, List<String> mirrors)
+            Optional<Instant> created, boolean stale, List<String> storedSessions, List<String> mirrors,
+            String project, Optional<OpenPullRequest> pullRequest)
             implements TaskNode {
 
         public DelayedTaskRow {
@@ -48,12 +54,37 @@ public sealed interface TaskNode {
             Objects.requireNonNull(created, "created");
             storedSessions = List.copyOf(storedSessions);
             mirrors = List.copyOf(mirrors);
+            project = project != null && !project.isBlank() ? project : null;
+            pullRequest = Objects.requireNonNullElse(pullRequest, Optional.empty());
         }
 
         /** The shape before tasks could be mirrored: no mirror. */
         public DelayedTaskRow(TaskState.TaskView view, String title, RepositoryId repository,
                 Optional<Instant> created, boolean stale, List<String> storedSessions) {
             this(view, title, repository, created, stale, storedSessions, List.of());
+        }
+
+        /**
+         * The shape before the tree resolved a task's pull request: none
+         * known. The canonical constructor carries it when the tree's PR
+         * listing answers.
+         */
+        public DelayedTaskRow(TaskState.TaskView view, String title, RepositoryId repository,
+                Optional<Instant> created, boolean stale, List<String> storedSessions, List<String> mirrors) {
+            this(view, title, repository, created, stale, storedSessions, mirrors, Optional.empty());
+        }
+
+        /** The shape before rows carried their project slug: no project hint. */
+        public DelayedTaskRow(TaskState.TaskView view, String title, RepositoryId repository,
+                Optional<Instant> created, boolean stale, List<String> storedSessions, List<String> mirrors,
+                Optional<OpenPullRequest> pullRequest) {
+            this(view, title, repository, created, stale, storedSessions, mirrors, null, pullRequest);
+        }
+
+        /** This row with {@code pullRequest} carried; everything else unchanged. Pure. */
+        public DelayedTaskRow withPullRequest(OpenPullRequest pullRequest) {
+            return new DelayedTaskRow(view, title, repository, created, stale, storedSessions, mirrors, project,
+                    Optional.of(pullRequest));
         }
 
         /**
@@ -86,7 +117,7 @@ public sealed interface TaskNode {
             return view.liveSessions();
         }
 
-        /** Done or dropped: hidden behind the filter ribbon (D9). */
+        /** Done or dropped: kept out of the Tasks section (D9); the inbox lists done ones under Done. */
         public boolean terminal() {
             return presentation() == TaskState.Presentation.TERMINAL;
         }

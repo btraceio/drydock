@@ -59,12 +59,23 @@ public final class TaskFilePatch {
      * caller mutations cannot change what a patch writes.
      */
     public record Updates(String title, TaskStatus status, DoneBy doneBy, Instant created,
-            List<String> after, List<String> sessions, List<String> mirrors) {
+            List<String> after, List<String> sessions, List<String> mirrors, Instant doneAt) {
 
         public Updates {
             after = snapshotEntries(after, "after");
             sessions = snapshotEntries(sessions, "sessions");
             mirrors = snapshotEntries(mirrors, "mirrors");
+        }
+
+        /** The updates before tasks recorded when they were done: {@code done_at} left unchanged. */
+        public Updates(String title, TaskStatus status, DoneBy doneBy, Instant created,
+                List<String> after, List<String> sessions, List<String> mirrors) {
+            this(title, status, doneBy, created, after, sessions, mirrors, null);
+        }
+
+        /** This update with {@code done_at} set to {@code doneAt}; every other field unchanged. */
+        public Updates withDoneAt(Instant doneAt) {
+            return new Updates(title, status, doneBy, created, after, sessions, mirrors, doneAt);
         }
 
         /** The updates before tasks could be mirrored: {@code mirrors} left unchanged. */
@@ -119,6 +130,9 @@ public final class TaskFilePatch {
         if (updates.mirrors() != null && !updates.mirrors().equals(doc.mirrors())) {
             spanEdit(spans.get("mirrors"), edits, inserted, "mirrors: " + list(updates.mirrors()));
         }
+        if (updates.doneAt() != null && !Optional.of(updates.doneAt()).equals(doc.doneAt())) {
+            spanEdit(spans.get("done_at"), edits, inserted, "done_at: " + updates.doneAt());
+        }
         if (!inserted.isEmpty()) {
             edits.add(insertion(parsed, inserted));
         }
@@ -140,7 +154,7 @@ public final class TaskFilePatch {
     /**
      * Renders a new task file: canonical known front matter (P1 order:
      * title, status, done_by, created only when present, after, sessions,
-     * mirrors only when there is one; lists always flow style, scalars
+     * mirrors only when there is one, done_at only when present; lists always flow style, scalars
      * through the shared {@link #quoted}) followed by the document's raw
      * body verbatim. Only the known fields are written -- unknown keys have nowhere to come from in a new
      * file -- so this is not a general YAML serializer, and it reuses
@@ -162,6 +176,7 @@ public final class TaskFilePatch {
         if (!document.mirrors().isEmpty()) {
             out.append("mirrors: ").append(list(document.mirrors())).append('\n');
         }
+        document.doneAt().ifPresent(doneAt -> out.append("done_at: ").append(doneAt).append('\n'));
         out.append("---\n").append(document.rawBody());
         String result = out.toString();
         checkNewFile(document, result);
@@ -179,7 +194,8 @@ public final class TaskFilePatch {
                 || !document.created().equals(reparsed.created())
                 || !reparsed.after().equals(document.after())
                 || !reparsed.sessions().equals(document.sessions())
-                || !reparsed.mirrors().equals(document.mirrors())) {
+                || !reparsed.mirrors().equals(document.mirrors())
+                || !reparsed.doneAt().equals(document.doneAt())) {
             throw new TaskFormatException("New-file front matter does not round-trip");
         }
     }
@@ -499,7 +515,8 @@ public final class TaskFilePatch {
                 || updates.created() != null && !Optional.of(updates.created()).equals(reparsed.created())
                 || updates.after() != null && !updates.after().equals(reparsed.after())
                 || updates.sessions() != null && !updates.sessions().equals(reparsed.sessions())
-                || updates.mirrors() != null && !updates.mirrors().equals(reparsed.mirrors())) {
+                || updates.mirrors() != null && !updates.mirrors().equals(reparsed.mirrors())
+                || updates.doneAt() != null && !Optional.of(updates.doneAt()).equals(reparsed.doneAt())) {
             throw new TaskFormatException("Patched front matter does not round-trip");
         }
     }

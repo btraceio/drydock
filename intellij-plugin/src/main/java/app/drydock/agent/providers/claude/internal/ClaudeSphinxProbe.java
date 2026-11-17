@@ -75,7 +75,7 @@ public final class ClaudeSphinxProbe {
             boolean installed = plugins.members().keySet().stream()
                     .anyMatch(key -> key.equals(PLUGIN_NAME)
                             || key.startsWith(PLUGIN_NAME + NAME_MARKETPLACE_SEPARATOR));
-            return installed ? Optional.of(new SphinxReviewSupport(SphinxReviewSupport.Invocation.SLASH_COMMAND))
+            return installed ? Optional.of(new SphinxReviewSupport())
                     : Optional.empty();
         } catch (Exception e) {
             LOG.log(Level.WARNING, "Could not parse " + installedPluginsJson, e);

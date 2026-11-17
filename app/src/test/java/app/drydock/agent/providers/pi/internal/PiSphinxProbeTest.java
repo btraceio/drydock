@@ -37,7 +37,7 @@ class PiSphinxProbeTest {
         Files.writeString(agentDir.resolve(Path.of("skills", "sphinx", "SKILL.md")), "---\nname: sphinx\n---\n");
         Optional<SphinxReviewSupport> probed = PiSphinxProbe.probe(agentDir);
         assertTrue(probed.isPresent());
-        assertEquals(SphinxReviewSupport.Invocation.SKILL_REQUEST, probed.get().invocation());
+        assertEquals("/sphinx review pr 42", probed.get().reviewPullRequestPrompt(42));
     }
 
     @Test
@@ -57,7 +57,6 @@ class PiSphinxProbeTest {
                 """);
         Optional<SphinxReviewSupport> probed = PiSphinxProbe.probe(agentDir);
         assertTrue(probed.isPresent());
-        assertEquals(SphinxReviewSupport.Invocation.SKILL_REQUEST, probed.get().invocation());
     }
 
     @Test

@@ -117,6 +117,28 @@ class TaskMirrorTest {
                 "scheme and host fold, the path keeps its case");
     }
 
+    @Test
+    void theSessionMirrorsKeepFirstSpellingAndDropAddressRepeats() {
+        // Two tasks naming one session may both record the same mirror: a
+        // repeat would paint a duplicate link and open a duplicate tab.
+        assertEquals(
+                List.of("https://github.com/o/r/issues/12",
+                        "https://acme.atlassian.net/browse/PROJ-7",
+                        "https://github.com/o/r/pull/9"),
+                TaskMirror.uniqueByAddress(List.of(
+                        "https://github.com/o/r/issues/12",
+                        "https://github.com/o/r/issues/12",
+                        "https://acme.atlassian.net/browse/PROJ-7",
+                        "https://github.com/o/r/pull/9")),
+                "an exact repeat is dropped");
+        assertEquals(List.of("https://GitHub.com/o/r/issues/12/"),
+                TaskMirror.uniqueByAddress(List.of(
+                        "https://GitHub.com/o/r/issues/12/",
+                        "https://github.com/o/r/issues/12")),
+                "two spellings of one page are one address; the first spelling is kept");
+        assertEquals(List.of(), TaskMirror.uniqueByAddress(List.of()));
+    }
+
     private static String string(JsonObject object, String key) {
         return ((JsonString) object.get(key)).value();
     }

@@ -4,7 +4,9 @@ import app.drydock.agent.api.AgentRegistry;
 import app.drydock.delayedtasks.DelayedTaskService;
 import app.drydock.delayedtasks.TaskStoreWatcher;
 import app.drydock.domain.SessionStatus;
+import app.drydock.git.GhCliService;
 import app.drydock.git.GhCliService.BranchPullRequest;
+import app.drydock.git.GhCliService.CiFailure;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.JiraIssue;
 import app.drydock.git.PrCheckoutService;
@@ -27,6 +29,7 @@ import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
 import app.drydock.intellij.ui.SessionDots;
 import app.drydock.tasks.DelayedTaskRows;
+import app.drydock.tasks.TaskDocument;
 import app.drydock.tasks.TaskId;
 import app.drydock.tasks.TaskMirror;
 import app.drydock.tasks.TaskState;
@@ -49,9 +52,14 @@ import javax.swing.tree.DefaultMutableTreeNode;
 import java.awt.Color;
 import java.time.Duration;
 import java.time.Instant;
+import java.nio.file.Path;
+import java.util.Objects;
+import java.util.function.ToIntFunction;
+import java.util.function.Function;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -67,10 +75,13 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
     /** The tag on a row's link text ("Add", "Start ▸"): what a single click may act on. */
     static final Object LINK = new Object();
 
-    /** The tag on a session row's {@code Done…} link, shown while its pull request is merged or closed. */
-    static final Object DONE_LINK = new Object();
+    /** The tag of a project row's "K in inbox" link: filters the inbox to that project. */
+    static final Object INBOX_LINK = new Object();
 
-    static final String DONE_LINK_TEXT = "Done\u2026";
+    /** A project's last answered "N issues · M PRs", by main root; nothing until the panel says. */
+    private Function<Path, Optional<String>> projectMeta = root -> Optional.empty();
+    /** How many inbox items a project has, by main root; 0 until the panel says. */
+    private ToIntFunction<Path> inboxCount = root -> 0;
 
     /** The tag on a conflicting pull request row's {@code Resolve Conflicts…} link. */
     static final Object RESOLVE_CONFLICTS_LINK = new Object();
@@ -93,6 +104,12 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
         return primaryButton && (clickCount == 2 || (onLink && clickCount == 1));
     }
 
+    /** Where project rows read their "N issues · M PRs" and their inbox count. EDT. */
+    void projectFacts(Function<Path, Optional<String>> meta, ToIntFunction<Path> inbox) {
+        projectMeta = Objects.requireNonNull(meta, "meta");
+        inboxCount = Objects.requireNonNull(inbox, "inbox");
+    }
+
     @Override
     public void customizeCellRenderer(@NotNull JTree tree, Object value, boolean selected, boolean expanded,
                                       boolean leaf, int row, boolean hasFocus) {
@@ -108,15 +125,25 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
                 append(problem.message(), SimpleTextAttributes.ERROR_ATTRIBUTES);
             }
             case AddCurrentProject add -> {
-                setIcon(AllIcons.General.Add);
-                append(add.repoName() + " isn't in Drydock · ", SimpleTextAttributes.GRAYED_ATTRIBUTES);
-                append("Add", SimpleTextAttributes.LINK_ATTRIBUTES, LINK);
+                setIcon(AllIcons.Actions.NewFolder);
+                append("Add open project ", SimpleTextAttributes.LINK_ATTRIBUTES, LINK);
+                append(add.repoName(), new SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD,
+                        SimpleTextAttributes.LINK_ATTRIBUTES.getFgColor()), LINK);
+                append(" — from IDE", SimpleTextAttributes.GRAYED_ATTRIBUTES);
             }
             case ProjectRow project -> {
                 setIcon(AllIcons.Nodes.Folder);
                 append(project.project().displayName(), SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES);
                 if (project.folderMissing()) {
                     append("  folder missing", SimpleTextAttributes.ERROR_ATTRIBUTES);
+                }
+                Path root = project.project().root();
+                projectMeta.apply(root).ifPresent(meta ->
+                        append("  " + meta, SimpleTextAttributes.GRAYED_ATTRIBUTES));
+                int active = inboxCount.applyAsInt(root);
+                if (active > 0) {
+                    append("   ");
+                    append(active + " in inbox", SimpleTextAttributes.LINK_ATTRIBUTES, INBOX_LINK);
                 }
             }
             case Section section -> {
@@ -153,10 +180,6 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
                         ? "GitHub not configured · " : "Jira not configured · ",
                         SimpleTextAttributes.GRAYED_ATTRIBUTES);
                 append("Set up", SimpleTextAttributes.LINK_ATTRIBUTES, LINK);
-            }
-            case WorktreeGroup group -> {
-                append("⑂ " + group.branch(), SimpleTextAttributes.GRAYED_ATTRIBUTES);
-                append("  " + group.tasks().size() + " tasks", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
             }
             case StaleWorktrees stale -> {
                 setIcon(AllIcons.Nodes.Folder);
@@ -199,32 +222,8 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
                 setToolTipText("Jira issue " + jira.issue().key());
                 paintMirroredTask(jira.issue().url());
             }
-            case PullRequestRow pullRequest -> {
-                setIcon(pullRequestRowIcon(pullRequest.pullRequest().conflicting()));
-                append("#" + pullRequest.pullRequest().number() + " " + pullRequest.pullRequest().title());
-                pullRequest.pullRequest().author().ifPresent(author ->
-                        append("  @" + author, SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES));
-                if (pullRequest.pullRequest().conflicting()) {
-                    setToolTipText("#" + pullRequest.pullRequest().number()
-                            + " cannot merge into " + pullRequest.pullRequest().baseRefName() + ": it has conflicts");
-                }
-                append(" · ", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
-                append("Review ▸", SimpleTextAttributes.LINK_ATTRIBUTES, LINK);
-                if (pullRequest.pullRequest().conflicting()) {
-                    append(" · ", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
-                    append(RESOLVE_CONFLICTS_LINK_TEXT, SimpleTextAttributes.LINK_ATTRIBUTES, RESOLVE_CONFLICTS_LINK);
-                }
-            }
-            case TaskRow task -> paintTask(task);
-            // Fully-qualified on purpose: the delayed-task layer reuses the
-            // simple name TaskNode in app.drydock.tasks; this class's own
-            // TaskNode (app.drydock.intellij.tasks) stays unqualified above.
-            case app.drydock.tasks.TaskNode.DelayedTaskRow task -> paintDelayedTask(task);
-            case app.drydock.tasks.TaskNode.SessionTasks session ->
-                    // A session row plus task children: the session row itself
-                    // renders exactly as it always did (below), unchanged.
-                    paintTask(session.session());
-            case app.drydock.tasks.TaskNode.TasksSection section -> paintTasksSection(section);
+            case PullRequestRow pullRequest -> paintPullRequest(pullRequest.pullRequest(),
+                    linkedTaskOf(pullRequest.pullRequest().headRefName()));
             default -> append(String.valueOf(node.getUserObject()));
         }
     }
@@ -383,48 +382,21 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
         }).sum();
     }
 
-    private void paintTask(TaskRow task) {
-        SessionStatus status = task.running() ? SessionStatus.RUNNING : task.session().status();
-        setIcon(sessionIcon(SessionDots.dotIcon(status, task.activity()), task.branchPullRequest()));
-        append(task.session().displayName());
-        if (task.session().flagged()) {
-            append("  " + FLAG_TAG, FLAG_ATTRIBUTES);
-        }
-        if (task.readOnly()) {
-            append("  RO", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
-        }
-        // The state is the leading icon; the tooltip names the PR. Without a
-        // known state the number stays as grey text.
-        task.branchPullRequest().ifPresent(pullRequest -> setToolTipText(pullRequestTooltip(pullRequest)));
-        if (task.branchPullRequest().flatMap(TaskTreeRenderer::pullRequestIcon).isEmpty()) {
-            task.branchPullRequest().map(BranchPullRequest::number).or(() -> pullRequestOf(task)).ifPresent(number ->
-                    append("  PR #" + number, SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES));
-        }
-        String agent = AgentLabels.displayName(DrydockPluginService.getInstance().registry(),
-                task.session().agentKind());
-        append("   " + secondary(task, agent, Duration.between(task.session().lastOpenedAt(), Instant.now())),
-                SimpleTextAttributes.GRAYED_ATTRIBUTES);
-        if (task.folderMissing()) {
-            append("  folder missing", SimpleTextAttributes.ERROR_ATTRIBUTES);
-        }
-        link(task).ifPresent(text -> {
-            append(" · ", SimpleTextAttributes.GRAYED_ATTRIBUTES);
-            append(text, SimpleTextAttributes.LINK_ATTRIBUTES, LINK);
-        });
-        if (PullRequestDoneOffers.offerOf(task).isPresent()) {
-            append(" · ", SimpleTextAttributes.GRAYED_ATTRIBUTES);
-            append(DONE_LINK_TEXT, SimpleTextAttributes.LINK_ATTRIBUTES, DONE_LINK);
-        }
-    }
-
     /**
-     * The pull request a session row belongs to (pure): the session's own PR
-     * link when it carries a number, else the {@code pr-<n>} branch a PR
-     * checkout gives its worktree. From the row alone, never a gh call.
+     * The explicit target first, then the session's working-branch PR link,
+     * else the {@code pr-<n>} branch a PR checkout gives its worktree.
+     * Read the carried row only; never look up a target while painting.
      */
     static Optional<Integer> pullRequestOf(TaskRow task) {
-        Optional<Integer> linked = task.session().pr().number();
+        Optional<Integer> linked = task.session().targetPullRequest().map(target -> target.number())
+                .or(() -> task.session().pr().number());
         return linked.isPresent() ? linked : task.branch().flatMap(PrCheckoutService::pullRequestNumberOf);
+    }
+
+    /** Pure. A stored target's page wins over the working branch's reported PR address. */
+    static Optional<String> pullRequestUrl(TaskRow task) {
+        return task.session().targetPullRequest().map(target -> target.url())
+                .or(() -> task.branchPullRequest().flatMap(BranchPullRequest::url));
     }
 
     /** What a branch's pull request badge reads as, which also picks its colour. */
@@ -449,17 +421,64 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
             case CLOSED -> "closed";
             case UNKNOWN -> "state unknown";
         };
-        return "Pull request #" + pullRequest.number() + " (" + state + ") from "
-                + pullRequest.headRefName() + (pullRequest.title().isBlank() ? "" : ": " + pullRequest.title());
+        return "Pull request #" + pullRequest.number() + " (" + state + ")"
+                + (pullRequest.headRefName().isBlank() ? "" : " from " + pullRequest.headRefName())
+                + (pullRequest.title().isBlank() ? "" : ": " + pullRequest.title());
     }
 
     /**
-     * Pure. The state icon of a branch's pull request: GitHub's green, grey,
-     * purple and red glyphs for open, draft, merged and closed (each with a
-     * dark-theme variant); none when gh reported no state.
+     * The task whose stacked branch is a PR's head branch, looked up in the
+     * task service's cached snapshot (memory only, like the mirror badge).
      */
-    static Optional<Icon> pullRequestIcon(BranchPullRequest pullRequest) {
-        return switch (badgeKind(pullRequest)) {
+    private static Optional<TaskDocument> linkedTaskOf(String headRefName) {
+        TaskStoreWatcher.WatchedSnapshot watched = DrydockPluginService.getInstance().taskService().watchedSnapshot();
+        return TaskLinks.taskOfBranch(headRefName, watched);
+    }
+
+    /**
+     * Paints a PR row from carried data only: the GitHub mark composed with
+     * the conflict and then the CI-failure icon, number, title and author,
+     * the linked task's badge (the twin of the task row's pull-request
+     * badge), and the links. Icon and tooltip are set outright, so a reused
+     * renderer keeps nothing of the previous row.
+     */
+    void paintPullRequest(GhCliService.OpenPullRequest pullRequest, Optional<TaskDocument> linkedTask) {
+        setIcon(pullRequestRowIcon(pullRequest.conflicting(), pullRequest.ciFailures()));
+        setToolTipText(healthTooltip(pullRequest.number(), Optional.of(pullRequest.baseRefName()),
+                pullRequest.conflicting(), pullRequest.ciFailures()).orElse(null));
+        append("#" + pullRequest.number() + " " + pullRequest.title());
+        pullRequest.author().ifPresent(author ->
+                append("  @" + author, SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES));
+        linkedTask.ifPresent(document -> {
+            append("  " + mirroredTaskBadge(document.title()), MIRROR_ATTRIBUTES);
+            setToolTipText(joinTooltip(getToolTipText(), linkedTaskTooltip(document)));
+        });
+        append(" · ", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
+        append("Review ▸", SimpleTextAttributes.LINK_ATTRIBUTES, LINK);
+        if (pullRequest.conflicting()) {
+            append(" · ", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
+            append(RESOLVE_CONFLICTS_LINK_TEXT, SimpleTextAttributes.LINK_ATTRIBUTES, RESOLVE_CONFLICTS_LINK);
+        }
+    }
+
+    /** Pure. A tooltip with {@code detail} added after any existing text. */
+    static String joinTooltip(String existing, String detail) {
+        return existing == null || existing.isEmpty() ? detail : existing + " · " + detail;
+    }
+
+    /** Pure. A task row's pull-request badge tooltip: the PR, its branch and its title. */
+    static String pullRequestLinkTooltip(GhCliService.OpenPullRequest pullRequest) {
+        return "Pull request #" + pullRequest.number() + " from " + pullRequest.headRefName()
+                + (pullRequest.title().isBlank() ? "" : ": " + pullRequest.title());
+    }
+
+    /** Pure. A PR row's linked-task badge tooltip: the task working the PR's head branch. */
+    static String linkedTaskTooltip(TaskDocument document) {
+        return "Task '" + document.title() + "' (" + document.id() + ") works this branch";
+    }
+
+    static Optional<Icon> pullRequestIcon(PullRequestBadgeKind kind) {
+        return switch (kind) {
             case OPEN -> Optional.of(PR_OPEN_ICON);
             case DRAFT -> Optional.of(PR_DRAFT_ICON);
             case MERGED -> Optional.of(PR_MERGED_ICON);
@@ -468,48 +487,73 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
         };
     }
 
-    /**
-     * A session row's leading icon: its status dot, then its pull request's
-     * state icon -- on the left, so it stays visible while the long row is
-     * scrolled -- or an empty slot of the same width, so every session's
-     * name starts in the same column. Cached per pair: both halves are
-     * shared instances, so the cache stays as small as their product.
-     */
-    static Icon sessionIcon(Icon dot, Optional<BranchPullRequest> pullRequest) {
-        Icon state = pullRequest.flatMap(TaskTreeRenderer::pullRequestIcon).orElse(PR_ICON_SLOT);
-        return ROW_ICONS.computeIfAbsent(new IconPair(dot, state),
-                pair -> IconManager.getInstance().createRowIcon(pair.first(), pair.second()));
-    }
+    static final Icon PR_OPEN_ICON = IconLoader.getIcon("/icons/prOpen.svg", TaskTreeRenderer.class);
+    static final Icon PR_DRAFT_ICON = IconLoader.getIcon("/icons/prDraft.svg", TaskTreeRenderer.class);
+    static final Icon PR_MERGED_ICON = IconLoader.getIcon("/icons/prMerged.svg", TaskTreeRenderer.class);
+    static final Icon PR_CLOSED_ICON = IconLoader.getIcon("/icons/prClosed.svg", TaskTreeRenderer.class);
 
     /** A pull request row's leading icon: GitHub's mark, followed by the conflict icon while it conflicts. */
     static Icon pullRequestRowIcon(boolean conflicting) {
-        if (!conflicting) {
-            return AllIcons.Vcs.Vendors.Github;
-        }
-        return ROW_ICONS.computeIfAbsent(new IconPair(AllIcons.Vcs.Vendors.Github, PR_CONFLICT_ICON),
+        return pullRequestRowIcon(conflicting, Set.of());
+    }
+
+    /** A pull request row's leading icon: GitHub's mark, then the conflict icon, then the CI-failure icon. */
+    static Icon pullRequestRowIcon(boolean conflicting, Set<CiFailure> ciFailures) {
+        return healthIcon(AllIcons.Vcs.Vendors.Github, conflicting, !ciFailures.isEmpty());
+    }
+
+    /**
+     * Pure over the static glyphs. {@code base} followed by the conflict
+     * icon while the PR conflicts, then the CI-failure icon while its CI
+     * positively fails; {@code base} itself when neither. Each pairwise
+     * composite is cached, so repaints of unchanged state get the same icon.
+     */
+    static Icon healthIcon(Icon base, boolean conflicting, boolean ciFailing) {
+        Icon icon = conflicting ? rowIcon(base, PR_CONFLICT_ICON) : base;
+        return ciFailing ? rowIcon(icon, PR_CI_FAILURE_ICON) : icon;
+    }
+
+    private static Icon rowIcon(Icon first, Icon second) {
+        return ROW_ICONS.computeIfAbsent(new IconPair(first, second),
                 pair -> IconManager.getInstance().createRowIcon(pair.first(), pair.second()));
+    }
+
+    /**
+     * Pure. The PR-specific hover details: its conflict (naming the base
+     * branch when known) and its failing CI. Empty when neither is
+     * positively known -- unknown data says nothing.
+     */
+    static Optional<String> healthTooltip(int number, Optional<String> baseRefName, boolean conflicting,
+                                          Set<CiFailure> ciFailures) {
+        String conflict = conflicting ? baseRefName
+                .map(base -> "#" + number + " cannot merge into " + base + ": it has conflicts")
+                .orElse("#" + number + " has merge conflicts") : null;
+        String ci = ciFailures.isEmpty() ? null : "#" + number + " has failing CI checks"
+                + (ciFailures.contains(CiFailure.ERROR) && !ciFailures.contains(CiFailure.FAILURE)
+                        ? " (errored)" : "");
+        if (conflict == null) {
+            return Optional.ofNullable(ci);
+        }
+        return Optional.of(ci == null ? conflict : joinTooltip(conflict, ci));
+    }
+
+    /** Pure. {@link #healthTooltip} for a session's branch pull request, whose base is not carried. */
+    static Optional<String> healthTooltip(BranchPullRequest pullRequest) {
+        return healthTooltip(pullRequest.number(), Optional.empty(), pullRequest.conflicting(),
+                pullRequest.ciFailures());
     }
 
     private record IconPair(Icon first, Icon second) { }
 
     private static final Map<IconPair, Icon> ROW_ICONS = new ConcurrentHashMap<>();
 
-    static final Icon PR_OPEN_ICON = IconLoader.getIcon("/icons/prOpen.svg", TaskTreeRenderer.class);
-    static final Icon PR_DRAFT_ICON = IconLoader.getIcon("/icons/prDraft.svg", TaskTreeRenderer.class);
-    static final Icon PR_MERGED_ICON = IconLoader.getIcon("/icons/prMerged.svg", TaskTreeRenderer.class);
-    static final Icon PR_CLOSED_ICON = IconLoader.getIcon("/icons/prClosed.svg", TaskTreeRenderer.class);
     static final Icon PR_CONFLICT_ICON = IconLoader.getIcon("/icons/prConflict.svg", TaskTreeRenderer.class);
 
-    /** The empty slot a session without a pull request keeps, as wide as a state icon. */
-    private static final Icon PR_ICON_SLOT = EmptyIcon.create(PR_OPEN_ICON);
+    /** Failing CI: a crossed-out circle in the error colour. Dark variant: {@code prCiFailure_dark.svg}. */
+    static final Icon PR_CI_FAILURE_ICON = IconLoader.getIcon("/icons/prCiFailure.svg", TaskTreeRenderer.class);
 
     /** Marks either end of a task mirror: the task's row and the mirrored issue's row. */
     static final String MIRROR_MARK = "\u21c4";
-
-    /** Pure. A task row's mirror badge: the mark and each mirror's short name, e.g. {@code #12, PROJ-7}. */
-    static String mirrorsBadge(List<String> mirrors) {
-        return MIRROR_MARK + " " + String.join(", ", mirrors.stream().map(TaskMirror::label).toList());
-    }
 
     /** Pure. An issue row's mirror badge: the mark and the title of the task it mirrors. */
     static String mirroredTaskBadge(String taskTitle) {
@@ -532,62 +576,6 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
     private static final SimpleTextAttributes MIRROR_ATTRIBUTES = new SimpleTextAttributes(
             SimpleTextAttributes.STYLE_SMALLER, JBUI.CurrentTheme.Link.Foreground.ENABLED);
 
-    /** The follow-up flag's tag on a session row. */
-    static final String FLAG_TAG = "\u2691 follow up";
-
-    /** The follow-up tag: bold in the stale flag's orange, so it reads as the human's own mark. */
-    private static final SimpleTextAttributes FLAG_ATTRIBUTES = new SimpleTextAttributes(
-            SimpleTextAttributes.STYLE_BOLD, new JBColor(new Color(0xB5, 0x4A, 0x0E), new Color(0xD9, 0x8A, 0x5A)));
-
-    /** Review's hint word: bold, so "in review" reads as waiting on YOU, not as just another state (D16). */
-    private static final SimpleTextAttributes REVIEW_HINT_ATTRIBUTES =
-            new SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, JBColor.GRAY);
-
-    /** Interrupted's hint word: italic, so a lost session reads different from a fresh ready one (D10). */
-    private static final SimpleTextAttributes INTERRUPTED_HINT_ATTRIBUTES =
-            new SimpleTextAttributes(SimpleTextAttributes.STYLE_ITALIC, JBColor.GRAY);
-
-    /** The stale flag's colour: the review tree's open-findings orange, dark- and light-theme aware. */
-    private static final SimpleTextAttributes STALE_ATTRIBUTES = new SimpleTextAttributes(
-            SimpleTextAttributes.STYLE_PLAIN, new JBColor(new Color(0xB5, 0x4A, 0x0E), new Color(0xD9, 0x8A, 0x5A)));
-
-    /**
-     * Paints one delayed task (D9-D11) from the CARRIED row only: the
-     * presentation's icon and hint word, the age and stale flag against one
-     * clock read for this paint, and the carried blocker texts - never a
-     * recomputation, a disk lookup or a per-row timer. The plan's stage/phase
-     * annotation (T40, P4.12) rides the same discipline: it is read from the
-     * service's CACHED publications only (published plan records, watched
-     * snapshot, live-session view), so the progress stays visible wherever
-     * the row sits -- in the section or under its session row (D10) -- and no
-     * plan file is ever read at paint time.
-     */
-    private void paintDelayedTask(app.drydock.tasks.TaskNode.DelayedTaskRow task) {
-        Instant now = Instant.now();
-        setIcon(delayedIcon(task));
-        append(task.title());
-        append("  " + delayedHint(task), delayedHintAttributes(task.presentation()));
-        Optional<DelayedTaskRows.PlanProgress> progress = planProgressOf(task.id());
-        progress.ifPresent(annotation -> append("  " + annotation.text(),
-                SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES));
-        if (!task.mirrors().isEmpty()) {
-            append("  " + mirrorsBadge(task.mirrors()), MIRROR_ATTRIBUTES);
-        }
-        String age = delayedAge(task, now);
-        if (!age.isEmpty()) {
-            append(" · " + age, SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
-        }
-        if (task.stale()) {
-            append(" · stale", STALE_ATTRIBUTES);
-        }
-        for (String blocker : task.blockers()) {
-            append(" · " + blocker, SimpleTextAttributes.GRAYED_ATTRIBUTES);
-        }
-        setToolTipText(delayedTooltip(task, now) + progress.map(annotation ->
-                " · plan " + annotation.text()).orElse("")
-                + (task.mirrors().isEmpty() ? "" : " · mirrored to " + String.join(", ", task.mirrors())));
-    }
-
     /**
      * The plan annotation of one delayed task (T40, P4.12), read from the
      * service's IN-MEMORY publications only -- the published plan records,
@@ -609,36 +597,6 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
     }
 
     /**
-     * Paints the task layer's section header (D9) in the existing section
-     * shape: folder icon, bold label, greyed count badge.
-     */
-    private void paintTasksSection(app.drydock.tasks.TaskNode.TasksSection section) {
-        setIcon(AllIcons.Nodes.Folder);
-        append(section.label(), SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES);
-        int count = section.children().size();
-        if (count > 0) {
-            append("  " + count + (count == 1 ? " task" : " tasks"), SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
-        }
-        setToolTipText("Delayed tasks · " + section.label());
-    }
-
-    /**
-     * Pure. The presentation's icon: every presentation reads at a glance,
-     * and review (an eye) and interrupted (a warning) are visibly not the
-     * ready one (D9, D16).
-     */
-    static Icon delayedIcon(app.drydock.tasks.TaskNode.DelayedTaskRow task) {
-        return switch (task.presentation()) {
-            case READY -> AllIcons.Actions.Execute;
-            case BLOCKED -> AllIcons.General.Information;
-            case REVIEW -> AllIcons.Actions.Preview;
-            case STARTED -> AllIcons.Actions.Forward;
-            case INTERRUPTED -> AllIcons.General.Warning;
-            case TERMINAL -> AllIcons.Actions.Checked;
-        };
-    }
-
-    /**
      * Pure. The presentation's hint word, carried from the row's view - the
      * distinct status text of D9/D10/D16. TERMINAL covers done and dropped
      * and the row carries only the presentation, so the word says both
@@ -656,37 +614,17 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
     }
 
     /**
-     * Pure. The hint word's style: review and interrupted get their own look
-     * (bold / italic); every other presentation keeps the greyed small
-     * badge style of the rows around it.
-     */
-    static SimpleTextAttributes delayedHintAttributes(TaskState.Presentation presentation) {
-        return switch (presentation) {
-            case REVIEW -> REVIEW_HINT_ATTRIBUTES;
-            case INTERRUPTED -> INTERRUPTED_HINT_ATTRIBUTES;
-            default -> SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES;
-        };
-    }
-
-    /**
-     * Pure. D9's age text against the GIVEN clock (never read here), empty
-     * when the creation time is unknown - unknown is not zero.
-     */
-    static String delayedAge(app.drydock.tasks.TaskNode.DelayedTaskRow task, Instant now) {
-        return task.created()
-                .map(created -> AgentStripText.relativeAge(Duration.between(created, now)) + " old")
-                .orElse("");
-    }
-
-    /**
      * Pure. The row's accessible one-line summary (the tooltip of a Jira
-     * row's shape): id, hint word, age and stale flag, the carried blocker
-     * texts (D9/D11), and the session hint - live sessions for a started
-     * task, the last session for an interrupted one (D10).
+     * row's shape): id, hint word, project when known, age and stale flag,
+     * the carried blocker texts (D9/D11), and the session hint - live
+     * sessions for a started task, the last session for an interrupted one (D10).
      */
     static String delayedTooltip(app.drydock.tasks.TaskNode.DelayedTaskRow task, Instant now) {
         StringBuilder tip = new StringBuilder("Task ").append(task.id().text())
                 .append(" (").append(delayedHint(task)).append(')');
+        if (task.project() != null) {
+            tip.append(" · project ").append(task.project());
+        }
         task.created().ifPresent(created -> tip.append(" · created ")
                 .append(AgentStripText.relativeAge(Duration.between(created, now))).append(" ago"));
         if (task.stale()) {
@@ -721,19 +659,4 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
                 + AgentStripText.relativeAge(age);
     }
 
-    /**
-     * Pure: the row's inline link. {@code Show here} for an agent no window
-     * shows; for an idle task from another worktree (its own worktree's Resume
-     * is the toolbar's) {@code Resume here} while it still has a conversation
-     * to resume into, and {@code Start here} once it does not — the honest
-     * word for what a click would actually do.
-     */
-    static Optional<String> link(TaskRow task) {
-        return switch (task.placement()) {
-            case TaskPlacement.NotShown notShown -> Optional.of("Show here");
-            case TaskPlacement.Idle idle when !idle.thisWindow() ->
-                    Optional.of(task.resumable() ? "Resume here" : "Start here");
-            default -> Optional.empty();
-        };
-    }
 }

@@ -10,6 +10,7 @@ import app.drydock.agent.api.LaunchPlan;
 import app.drydock.agent.api.LaunchResources;
 import app.drydock.agent.api.McpAccess;
 import app.drydock.agent.api.McpDelivery;
+import app.drydock.agent.api.RemotePersistence;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdDiscovery;
 import app.drydock.agent.api.SessionIdStrategy;
@@ -27,6 +28,7 @@ import app.drydock.agent.providers.claude.internal.ClaudeHookInstaller;
 import app.drydock.agent.providers.claude.internal.ClaudeSphinxProbe;
 import app.drydock.agent.providers.claude.internal.ConversationCatalog;
 import app.drydock.app.LoginShellEnvironment;
+import app.drydock.domain.SshRemote;
 import app.drydock.process.SshCommandBuilder;
 import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonWriter;
@@ -37,6 +39,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.TreeMap;
 
 /**
  * Claude Code as an {@link AgentProvider}. Command strings are identical to the
@@ -295,6 +298,9 @@ public final class ClaudeAgentProvider implements AgentProvider {
             if (requestsHostPathResource(c.launchResources())) {
                 return LaunchPlan.unsupported();
             }
+            if (c.persistence().isPresent()) {
+                return persistentCreateCommand(c);
+            }
             return LaunchPlan.of(
                     SshCommandBuilder.interactiveSessionCommand(c.remote().get(),
                             REMOTE_COMMAND_PREFIX + modelFlag(c.model())), false);
@@ -351,6 +357,9 @@ public final class ClaudeAgentProvider implements AgentProvider {
             // them is refused rather than silently launching without them.
             if (requestsHostPathResource(r.launchResources())) {
                 return LaunchPlan.unsupported();
+            }
+            if (r.persistence().isPresent()) {
+                return persistentResumeCommand(r);
             }
             String exec = REMOTE_COMMAND_PREFIX + " --resume";
             if (r.agentSessionId().isPresent()) {
@@ -477,6 +486,94 @@ public final class ClaudeAgentProvider implements AgentProvider {
             // support (matches NO_CAPABILITIES semantics).
             return new ClaudeCapabilities(false, true, false, false, false, false, false, "unknown");
         }
+    }
+
+    /**
+     * The persistent-remote create (a {@code CreateContext} whose {@code
+     * persistence} is present): the agent command that runs inside the
+     * box-side tmux session, wrapped by {@link
+     * SshCommandBuilder#persistentSessionCommand} so {@code new-session -A}
+     * creates the session named after the managed id or re-attaches to it.
+     *
+     * <p>The agent exec is {@code exec <ENV_CLEANUP_PREFIX> <K='V'…> claude
+     * [--model m] -n <displayName> --session-id <sessionId>
+     * [--permission-mode plan] [-- <prompt>]}: the same env cleanup and
+     * stable-renderer forcing as a local launch, plus the box's agent
+     * environment (the gateway-only proxy base URL). Unlike the local path,
+     * no capability probe decides anything here — the flags describe the
+     * <em>Mac's</em> claude, not the box's — so {@code -n} and {@code
+     * --session-id} are always rendered and read-only always gets plan mode.
+     * No local-only surface is emitted: no settings file, no mcp-config,
+     * no PATH injection, no add-dirs (the host-path refusal above already
+     * covers the directories), no plugin-dir. {@code --session-id} is the
+     * generated UUID, so it appears literally in the plan and the launch
+     * persists {@code agentSessionId}.</p>
+     */
+    private LaunchPlan persistentCreateCommand(CreateContext c) {
+        StringBuilder agentExec = new StringBuilder("exec ").append(ENV_CLEANUP_PREFIX)
+                .append(persistentEnvEntries(c.persistence().get()))
+                .append("claude").append(modelFlag(c.model()))
+                .append(" -n ").append(AgentCommands.shellQuote(c.displayName()))
+                .append(" --session-id ").append(AgentCommands.shellQuote(c.sessionId()));
+        if (c.readOnly()) {
+            agentExec.append(" --permission-mode plan");
+        }
+        c.initialPrompt().ifPresent(prompt -> agentExec
+                .append(" -- ").append(AgentCommands.shellQuote(prompt)));
+        return LaunchPlan.of(persistentSessionCommand(c.remote().get(), c.persistence().get(),
+                agentExec.toString()), true);
+    }
+
+    /**
+     * The persistent-remote resume: the same prefix as the persistent
+     * create, then {@code claude --resume <agentSessionId> [--permission-mode
+     * plan] [-- <resumePrompt>]}. The conversation id is the only resume
+     * key: an empty one is refused outright ({@code LaunchPlan.unsupported()}),
+     * never the picker and never a fallback to the session name, because a
+     * picker on the box would open a different conversation than the row the
+     * user resumed. Same no-probe, no-local-flags stance as the create.
+     */
+    private LaunchPlan persistentResumeCommand(ResumeContext r) {
+        if (r.agentSessionId().isEmpty() || r.agentSessionId().get().isBlank()) {
+            return LaunchPlan.unsupported();
+        }
+        StringBuilder agentExec = new StringBuilder("exec ").append(ENV_CLEANUP_PREFIX)
+                .append(persistentEnvEntries(r.persistence().get()))
+                .append("claude --resume ").append(AgentCommands.shellQuote(r.agentSessionId().get()));
+        if (r.readOnly()) {
+            agentExec.append(" --permission-mode plan");
+        }
+        r.resumePrompt().ifPresent(prompt -> agentExec
+                .append(" -- ").append(AgentCommands.shellQuote(prompt)));
+        return LaunchPlan.of(persistentSessionCommand(r.remote().get(), r.persistence().get(),
+                agentExec.toString()), false);
+    }
+
+    /**
+     * The agent environment as {@code K='V'} assignments, in sorted key
+     * order, one trailing space each: the same rendering shape {@code env}
+     * takes from the literals in {@link #ENV_CLEANUP_PREFIX}, so the whole
+     * prefix is deterministic regardless of the caller's map iteration order
+     * ({@link RemotePersistence#toString()} sorts for the same reason).
+     */
+    private static String persistentEnvEntries(RemotePersistence persistence) {
+        StringBuilder entries = new StringBuilder();
+        new TreeMap<>(persistence.agentEnvironment()).forEach((key, value) ->
+                entries.append(key).append('=').append(AgentCommands.shellQuote(value)).append(' '));
+        return entries.toString();
+    }
+
+    /**
+     * Wraps the agent exec in the interactive ssh that starts or re-attaches
+     * the box-side tmux session named after the managed session id. The
+     * remote is the binding-derived one the context carries (the row's
+     * {@code workspaceBox.sshRemote()}); the session name is formed only in
+     * {@link SshCommandBuilder#tmuxSessionName}.
+     */
+    private static String persistentSessionCommand(SshRemote remote,
+                                                    RemotePersistence persistence, String agentExec) {
+        return SshCommandBuilder.persistentSessionCommand(remote,
+                SshCommandBuilder.tmuxSessionName(persistence.managedSessionId()), agentExec);
     }
 
     /**

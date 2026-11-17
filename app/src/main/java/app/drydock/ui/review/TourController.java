@@ -1479,6 +1479,7 @@ final class TourController {
         String base = "elapsed " + clock(progress.elapsedSeconds()) + " · agent "
                 + switch (progress.activity()) {
                     case BUSY -> "busy";
+                    case WAITING_BACKGROUND -> "waiting on bg";
                     case IDLE -> "idle";
                     case NEEDS_ATTENTION -> "needs attention";
                     case UNKNOWN -> "unknown";

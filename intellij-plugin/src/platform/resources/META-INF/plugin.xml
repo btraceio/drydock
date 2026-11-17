@@ -51,6 +51,11 @@
         <projectService
                 serviceImplementation="app.drydock.intellij.agent.AgentExecutionService"/>
 
+        <!-- The inbox's per-project view state (collapsed groups, the project
+             filter, the dismissed add offer), in the workspace file. -->
+        <projectService
+                serviceImplementation="app.drydock.intellij.tasks.InboxViewState"/>
+
         <!-- The agent console tab. The protocol exists so the IDE can restore
              a pinned console tab from the project's workspace file by URL; a
              LightVirtualFile has none, and drydock reopening tabs itself was
@@ -217,6 +222,14 @@
                 description="Start an agent on a new task from this branch">
             <add-to-group group-id="Git.Branch" anchor="first"/>
         </action>
+        <!-- The tool window's scope gesture, keymap-assignable: focus this
+             window's project (registering it first when needed). The
+             toolbar button inside the window shares the same panel logic;
+             this registration exists so Keymap settings can bind it. -->
+        <action id="Drydock.FocusProject"
+                class="app.drydock.intellij.tasks.FocusProjectAction"
+                text="Focus Drydock on This Project"
+                description="Show only this window's project in the Drydock tool window"/>
         <!-- The delayed-task layer's tree actions (T20a): the Drydock tree's
              task-node context menu. Status writes ride the task service's
              actor-aware seam (an agent may never drop, T07), Go to blocker
@@ -227,6 +240,10 @@
                 class="app.drydock.intellij.delayedtasks.DelayedTaskActions$Start"
                 text="Start Session…"
                 description="Start one session for this task and its same-project plan"/>
+        <action id="Drydock.DelayedTask.Claim"
+                class="app.drydock.intellij.delayedtasks.DelayedTaskActions$Claim"
+                text="Claim Stacked Session…"
+                description="Launch this follow-up as its own session, stacked on its prerequisite's dd/&lt;id&gt; branch"/>
         <action id="Drydock.DelayedTask.Cancel"
                 class="app.drydock.intellij.delayedtasks.DelayedTaskActions$Cancel"
                 text="Cancel Plan"

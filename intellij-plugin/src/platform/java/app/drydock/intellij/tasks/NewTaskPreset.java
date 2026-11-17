@@ -2,6 +2,7 @@ package app.drydock.intellij.tasks;
 
 import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.SessionMode;
+import app.drydock.domain.PullRequestTarget;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.GhCliService.OpenPullRequest;
 import app.drydock.git.JiraIssue;
@@ -34,7 +35,8 @@ import java.util.Optional;
  */
 public record NewTaskPreset(String name, Optional<String> instructions, Optional<SessionMode> fixedMode,
                             Optional<WorkIn> fixedWorkIn, boolean instructionsRequired, OpenIn openIn,
-                            Optional<String> tierRoles, Optional<Composed> composed) {
+                            Optional<String> tierRoles, Optional<Composed> composed,
+                            Optional<PullRequestTarget> targetPullRequest) {
 
     /** The single-project start's plan seed (T31a): the plan and its one segment the dialog composes from. */
     public record Composed(StartPlan plan, StartPlan.Segment segment) {
@@ -52,6 +54,19 @@ public record NewTaskPreset(String name, Optional<String> instructions, Optional
         Objects.requireNonNull(openIn, "openIn");
         Objects.requireNonNull(tierRoles, "tierRoles");
         Objects.requireNonNull(composed, "composed");
+        Objects.requireNonNull(targetPullRequest, "targetPullRequest");
+    }
+
+    public NewTaskPreset(String name, Optional<String> instructions, Optional<SessionMode> fixedMode,
+                         Optional<WorkIn> fixedWorkIn, boolean instructionsRequired, OpenIn openIn,
+                         Optional<String> tierRoles, Optional<Composed> composed) {
+        this(name, instructions, fixedMode, fixedWorkIn, instructionsRequired, openIn, tierRoles, composed,
+                Optional.empty());
+    }
+
+    NewTaskPreset withPullRequest(OpenPullRequest pr) {
+        return new NewTaskPreset(name, instructions, fixedMode, fixedWorkIn, instructionsRequired, openIn,
+                tierRoles, composed, pr.url().map(PullRequestTarget::fromUrl));
     }
 
     NewTaskPreset(String name, Optional<String> instructions, Optional<SessionMode> fixedMode,

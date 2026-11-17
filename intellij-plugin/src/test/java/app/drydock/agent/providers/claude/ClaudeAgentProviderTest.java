@@ -6,6 +6,8 @@ import app.drydock.agent.api.CreateContext;
 import app.drydock.agent.api.EvalTokenResolver;
 import app.drydock.agent.api.LaunchPlan;
 import app.drydock.agent.api.LaunchResources;
+import app.drydock.agent.api.McpAccess;
+import app.drydock.agent.api.RemotePersistence;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdStrategy;
 import app.drydock.agent.providers.AgentCommands;
@@ -13,13 +15,16 @@ import app.drydock.agent.providers.HostBinaryLocator;
 import app.drydock.agent.providers.claude.internal.ClaudeEvalContainer;
 import app.drydock.agent.providers.claude.internal.ClaudeEvalContainer.EvalSetup;
 import app.drydock.agent.providers.claude.internal.ClaudeExecutableLocator;
+import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.SshRemote;
+import app.drydock.process.SshCommandBuilder;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.Executors;
 
@@ -526,5 +531,392 @@ class ClaudeAgentProviderTest {
                         Optional.empty(), Optional.empty(), true, false, List.of(), Optional.empty())
                         .withLaunchResources(ONE_DIR));
         assertFalse(plan.supported());
+    }
+
+    // ---- characterization: today's exact plan strings (the INV-1 oracle) ------
+
+    /**
+     * The ssh {@code -t} shell today's remote branches wrap their claude in
+     * (SshCommandBuilder's interactive form): keep-alive options, {@code --}
+     * before the host, then the remote command with its inner {@code cd}
+     * double-quoted through both ssh layers.
+     */
+    private static final String REMOTE_SSH_PREFIX =
+            "ssh -t -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -- 'build-box'"
+                    + " 'export TERM=xterm-256color; cd '\\''/srv/repo'\\'' && ";
+
+    /**
+     * A stub {@code claude} whose {@code --help} advertises every flag the
+     * local launch path renders, so the full-capability create and resume
+     * shapes can be pinned byte for byte. Real subprocesses for the
+     * {@code --version}/{@code --help} probes (the no-mocks rule for
+     * capability detection); the ddtool locator is forced to "not found"
+     * so no host ddtool can splice a {@code PATH=} override into the pinned
+     * string.
+     */
+    private ClaudeAgentProvider fullCapsProvider(Path dir) throws Exception {
+        Path stub = dir.resolve("claude");
+        Files.writeString(stub, """
+                #!/bin/sh
+                if [ "$1" = "--version" ]; then
+                  echo "1.2.3 (Claude Code)"
+                  exit 0
+                fi
+                if [ "$1" = "--help" ]; then
+                  echo "Usage: claude [options]"
+                  echo "  -n, --name <name>"
+                  echo "  --resume [sessionId]"
+                  echo "  --session-id <id>"
+                  echo "  --settings <file>"
+                  echo "  --mcp-config <file>"
+                  echo '  --permission-mode <mode> ("plan" or "acceptEdits")'
+                  exit 0
+                fi
+                exit 1
+                """);
+        assertTrue(stub.toFile().setExecutable(true));
+        ClaudeAgentProvider provider = new ClaudeAgentProvider(
+                new ClaudeExecutableLocator(stub), null, noDdtool());
+        provider.init(new AgentContext(dir, dir.resolve("activity"),
+                Executors.newVirtualThreadPerTaskExecutor()));
+        // The plugin installs the activity hooks at startup; the settings
+        // file the launch renders is only minted after install(), so the
+        // pinned string must be the shape production launches see.
+        provider.activity().orElseThrow().install();
+        return provider;
+    }
+
+    /**
+     * INV-1 oracle, provider half: a local create with every capability
+     * present renders exactly this string — env cleanup prefix, the resolved
+     * binary, the picked model, the display name, the preset session id, the
+     * activity settings file, plan mode for a read-only session, and the
+     * positional prompt after {@code --}. Every later task must keep this
+     * byte-identical for a context with no persistence, whatever the flag.
+     */
+    @Test
+    void localCreateWithEveryCapabilityRendersTodayExactString(@org.junit.jupiter.api.io.TempDir Path dir)
+            throws Exception {
+        ClaudeAgentProvider provider = fullCapsProvider(dir);
+
+        LaunchPlan plan = provider.buildCreateCommand(new CreateContext("My session", "gen-42",
+                Path.of("/wt/repo"), Optional.empty(), Optional.empty(), Optional.of("sonnet"), false, true,
+                Optional.of("Fix the 'parser' today"), List.of()));
+
+        assertEquals(ENV + AgentCommands.shellQuote(dir.resolve("claude").toString())
+                        + " --model 'sonnet' -n 'My session' --session-id 'gen-42'"
+                        + " --settings '" + dir.resolve("hooks").resolve("settings.json") + "'"
+                        + " --permission-mode plan"
+                        + " -- " + AgentCommands.shellQuote("Fix the 'parser' today"),
+                plan.command());
+        assertTrue(plan.sessionIdUsed(), "a probed --session-id makes the launch carry the id");
+    }
+
+    /**
+     * The bare-capability counterpart: no model, no prompt, not read-only —
+     * today's exact string is the name, the id and the settings file and
+     * nothing else.
+     */
+    @Test
+    void localCreateWithoutModelPromptOrReadOnlyRendersTodayExactString(@org.junit.jupiter.api.io.TempDir Path dir)
+            throws Exception {
+        ClaudeAgentProvider provider = fullCapsProvider(dir);
+
+        LaunchPlan plan = provider.buildCreateCommand(new CreateContext("My session", "gen-42",
+                Path.of("/wt/repo"), Optional.empty(), Optional.empty()));
+
+        assertEquals(ENV + AgentCommands.shellQuote(dir.resolve("claude").toString())
+                        + " -n 'My session' --session-id 'gen-42'"
+                        + " --settings '" + dir.resolve("hooks").resolve("settings.json") + "'",
+                plan.command());
+    }
+
+    /**
+     * INV-1 oracle on resume, provider half: by id (settings, plan mode for
+     * a read-only resume, and the re-orientation prompt after {@code --})
+     * and by name (no prompt — nothing has been picked to re-orient).
+     */
+    @Test
+    void localResumeRendersTodayExactStringsByIdAndByName(@org.junit.jupiter.api.io.TempDir Path dir)
+            throws Exception {
+        ClaudeAgentProvider provider = fullCapsProvider(dir);
+        String settings = " --settings '" + dir.resolve("hooks").resolve("settings.json") + "'";
+        String binary = AgentCommands.shellQuote(dir.resolve("claude").toString());
+
+        String byId = provider.buildResumeCommand(new ResumeContext(Optional.of("conv-7"), Optional.empty(),
+                Path.of("/wt/repo"), Optional.empty(), Optional.empty(), false, true, List.of(),
+                Optional.of("pick up"))).command();
+        assertEquals(ENV + binary + " --resume 'conv-7'" + settings
+                + " --permission-mode plan -- " + AgentCommands.shellQuote("pick up"), byId);
+
+        String byName = provider.buildResumeCommand(new ResumeContext(Optional.empty(), Optional.of("my-name"),
+                Path.of("/wt/repo"), Optional.empty(), Optional.empty())).command();
+        assertEquals(ENV + binary + " --resume 'my-name'" + settings, byName);
+    }
+
+    /**
+     * INV-1 oracle on the remote-without-persistence branches, provider
+     * half: today's remote create is a bare {@code exec env LANG=…
+     * CLAUDE_CODE_NO_FLICKER=1 claude} inside the interactive ssh shell —
+     * no name, no session id, no plan mode, no prompt, no env cleanup -u
+     * list — and it does not claim to have used the session id.
+     */
+    @Test
+    void remoteCreateWithoutPersistenceRendersTodayExactString() {
+        LaunchPlan plan = newProviderNoExecutable().buildCreateCommand(new CreateContext("My session", "gen-42",
+                Path.of("/tmp"), Optional.of(new SshRemote("build-box", "/srv/repo")), Optional.empty()));
+
+        assertEquals(REMOTE_SSH_PREFIX + "exec env LANG=en_US.UTF-8 CLAUDE_CODE_NO_FLICKER=1 claude'",
+                plan.command());
+        assertTrue(plan.supported());
+        assertFalse(plan.sessionIdUsed());
+    }
+
+    /** The picked model is shell-quoted here and then re-quoted by the ssh layer. */
+    @Test
+    void remoteCreateWithAModelRendersTodayExactString() {
+        LaunchPlan plan = newProviderNoExecutable().buildCreateCommand(new CreateContext("My session", "gen-42",
+                Path.of("/tmp"), Optional.of(new SshRemote("build-box", "/srv/repo")), Optional.empty(),
+                Optional.of("opus"), false, false, Optional.empty(), List.of()));
+
+        assertEquals(REMOTE_SSH_PREFIX
+                + "exec env LANG=en_US.UTF-8 CLAUDE_CODE_NO_FLICKER=1 claude --model '\\''opus'\\'''",
+                plan.command());
+    }
+
+    /**
+     * INV-1 oracle on the remote-without-persistence resume: by id, by
+     * name, and bare (the picker) — each id/name posix-quoted for the ssh
+     * layer, no read-only rendering, no prompt.
+     */
+    @Test
+    void remoteResumeWithoutPersistenceRendersTodayExactStrings() {
+        ClaudeAgentProvider provider = newProviderNoExecutable();
+        Optional<SshRemote> remote = Optional.of(new SshRemote("build-box", "/srv/repo"));
+        String prefix = REMOTE_SSH_PREFIX + "exec env LANG=en_US.UTF-8 CLAUDE_CODE_NO_FLICKER=1 claude --resume ";
+
+        String byId = provider.buildResumeCommand(new ResumeContext(Optional.of("conv-7"), Optional.empty(),
+                Path.of("/tmp"), remote, Optional.empty())).command();
+        assertEquals(prefix + "'\\''conv-7'\\'''", byId);
+
+        String byName = provider.buildResumeCommand(new ResumeContext(Optional.empty(), Optional.of("my-name"),
+                Path.of("/tmp"), remote, Optional.empty())).command();
+        assertEquals(prefix + "'\\''my-name'\\'''", byName);
+
+        String bare = provider.buildResumeCommand(new ResumeContext(Optional.empty(), Optional.empty(),
+                Path.of("/tmp"), remote, Optional.empty())).command();
+        assertEquals(REMOTE_SSH_PREFIX + "exec env LANG=en_US.UTF-8 CLAUDE_CODE_NO_FLICKER=1 claude --resume'",
+                bare);
+    }
+
+    // ---- persistence: the workspace-box tmux branch ---------------------------
+
+    /** A fixed managed id, so the tmux session name is a known literal. */
+    private static final ManagedSessionId MANAGED_ID =
+            ManagedSessionId.of("3f1a2b3c-1234-4d5e-9f0a-bcdef0123456");
+
+    /** The binding-derived remote of a workspace box (host alias, clone path). */
+    private static final SshRemote BOX = new SshRemote("workspace-box", "/home/dev/repo");
+
+    /** The box agent environment: all LLM traffic goes to the box-local proxy. */
+    private static final Map<String, String> BOX_ENV =
+            Map.of("ANTHROPIC_BASE_URL", "http://127.0.0.1:4000");
+
+    /** That environment rendered as the {@code env} literal the branch emits. */
+    private static final String BOX_ENV_ENTRY = "ANTHROPIC_BASE_URL='http://127.0.0.1:4000'";
+
+    private static RemotePersistence persistence() {
+        return new RemotePersistence(MANAGED_ID, BOX_ENV);
+    }
+
+    /** The agent exec the tests pin, spelled independently of the provider's builder. */
+    private static String boxExec(String claudeArguments) {
+        return "exec " + ENV + BOX_ENV_ENTRY + " " + claudeArguments;
+    }
+
+    /** The full plan the provider must produce for the given agent exec. */
+    private static String boxPlan(String agentExec) {
+        return SshCommandBuilder.persistentSessionCommand(BOX,
+                "drydock-" + MANAGED_ID, agentExec);
+    }
+
+    /**
+     * AC-3/AC-6, provider half: a persistent create is the attach-or-create
+     * tmux plan — the ssh keep-alive prefix, TERM forcing, the two global
+     * options before {@code new-session -A -s drydock-<managed id>}, the box
+     * clone path as the pane cwd — carrying the full env-cleanup prefix plus
+     * {@code ANTHROPIC_BASE_URL}, the display name as {@code -n}, the
+     * generated UUID as {@code --session-id} (so it appears literally and
+     * the launch persists {@code agentSessionId}), plan mode for a read-only
+     * session, and the initial prompt after {@code --}.
+     *
+     * <p>The provider here is {@code newProviderNoExecutable()} — whose
+     * {@code detectCaps()} yields the conservative all-false caps — so the
+     * presence of {@code -n}, {@code --session-id} and {@code
+     * --permission-mode plan} also proves the branch consults no capability
+     * probe: with caps consulted, all three would be absent.</p>
+     */
+    @Test
+    void persistentCreateRendersTheAttachOrCreateTmuxPlan() {
+        LaunchPlan plan = newProviderNoExecutable().buildCreateCommand(new CreateContext("My session",
+                "gen-42", Path.of("/tmp"), Optional.of(BOX), Optional.empty(), Optional.of("sonnet"),
+                false, true, Optional.of("Fix the parser today"), List.of())
+                .withPersistence(persistence()));
+
+        assertEquals(boxPlan(boxExec("claude --model 'sonnet' -n 'My session' --session-id 'gen-42'"
+                + " --permission-mode plan -- 'Fix the parser today'")), plan.command());
+        assertTrue(plan.supported());
+        assertTrue(plan.sessionIdUsed(), "the generated --session-id must be reported as used");
+        assertTrue(plan.command().contains("new-session -A -s drydock-" + MANAGED_ID),
+                "AC-3: the tmux session is named after the managed id: " + plan.command());
+        assertTrue(plan.command().contains("gen-42"),
+                "the generated UUID appears literally so the service's contains-check passes");
+    }
+
+    /** With nothing optional picked: no model, not read-only, no prompt. */
+    @Test
+    void persistentCreateWithoutModelReadOnlyOrPrompt() {
+        LaunchPlan plan = newProviderNoExecutable().buildCreateCommand(new CreateContext("S", "gen-42",
+                Path.of("/tmp"), Optional.of(BOX), Optional.empty())
+                .withPersistence(persistence()));
+
+        assertEquals(boxPlan(boxExec("claude -n 'S' --session-id 'gen-42'")), plan.command());
+        assertTrue(plan.supported());
+        assertTrue(plan.sessionIdUsed());
+    }
+
+    /**
+     * AC-3/AC-6, provider half: a persistent resume attaches with the same
+     * {@code new-session -A -s drydock-<managed id>} plan, resumes the exact
+     * conversation id, adds plan mode for a read-only resume, and delivers
+     * the re-orientation prompt after {@code --}. It does not claim a
+     * session id was minted (nothing is persisted on attach).
+     */
+    @Test
+    void persistentResumeRendersTheAttachPlanById() {
+        LaunchPlan plan = newProviderNoExecutable().buildResumeCommand(
+                new ResumeContext(Optional.of("conv-7"), Optional.empty(), Path.of("/tmp"),
+                        Optional.of(BOX), Optional.empty(), false, true, List.of(),
+                        Optional.of("pick up"))
+                        .withPersistence(persistence()));
+
+        assertEquals(boxPlan(boxExec("claude --resume 'conv-7' --permission-mode plan -- 'pick up'")),
+                plan.command());
+        assertTrue(plan.supported());
+        assertFalse(plan.sessionIdUsed(), "an attach never mints or rewrites a session id");
+        assertTrue(plan.command().contains("new-session -A -s drydock-" + MANAGED_ID),
+                "AC-3: create and resume run the identical attach-or-create command");
+    }
+
+    /** A resume without read-only or prompt is just the id. */
+    @Test
+    void persistentResumeWithoutReadOnlyOrPrompt() {
+        LaunchPlan plan = newProviderNoExecutable().buildResumeCommand(
+                new ResumeContext(Optional.of("conv-7"), Optional.empty(), Path.of("/tmp"),
+                        Optional.of(BOX), Optional.empty())
+                        .withPersistence(persistence()));
+
+        assertEquals(boxPlan(boxExec("claude --resume 'conv-7'")), plan.command());
+        assertTrue(plan.supported());
+    }
+
+    /**
+     * A persistent resume keys on the conversation id only. An absent or
+     * blank one is refused outright — never the interactive picker and
+     * never a fallback to the session name: a picker on the box would open
+     * some other conversation than the row the user resumed.
+     */
+    @Test
+    void persistentResumeRefusesAnEmptyAgentSessionId() {
+        ClaudeAgentProvider provider = newProviderNoExecutable();
+        Optional<SshRemote> box = Optional.of(BOX);
+
+        LaunchPlan noId = provider.buildResumeCommand(new ResumeContext(Optional.empty(),
+                Optional.of("my-name"), Path.of("/tmp"), box, Optional.empty())
+                .withPersistence(persistence()));
+        LaunchPlan blankId = provider.buildResumeCommand(new ResumeContext(Optional.of("  "),
+                Optional.empty(), Path.of("/tmp"), box, Optional.empty())
+                .withPersistence(persistence()));
+        LaunchPlan bare = provider.buildResumeCommand(new ResumeContext(Optional.empty(),
+                Optional.empty(), Path.of("/tmp"), box, Optional.empty())
+                .withPersistence(persistence()));
+
+        assertFalse(noId.supported(), "a name must not stand in for the conversation id on a box");
+        assertFalse(blankId.supported());
+        assertFalse(bare.supported());
+        assertEquals("", noId.command());
+        assertEquals("", blankId.command());
+        assertEquals("", bare.command());
+    }
+
+    /**
+     * INV-15: host-path launch resources are refused for a persistent launch
+     * exactly as for a plain remote one — the box cannot see this machine's
+     * extra directories or guidance location.
+     */
+    @Test
+    void persistentCreateAndResumeRefuseHostPathLaunchResources() {
+        ClaudeAgentProvider provider = newProviderNoExecutable();
+
+        LaunchPlan refusedCreate = provider.buildCreateCommand(new CreateContext("S", "gen-42",
+                Path.of("/tmp"), Optional.of(BOX), Optional.empty())
+                .withPersistence(persistence()).withLaunchResources(ONE_DIR));
+        LaunchPlan refusedResume = provider.buildResumeCommand(
+                new ResumeContext(Optional.of("conv-7"), Optional.empty(), Path.of("/tmp"),
+                        Optional.of(BOX), Optional.empty())
+                        .withPersistence(persistence()).withLaunchResources(ONE_DIR));
+
+        assertFalse(refusedCreate.supported());
+        assertFalse(refusedResume.supported());
+    }
+
+    /**
+     * INV-15, provider half: even a launch that carries MCP access and every
+     * capability renders none of the local-only surfaces — no settings file,
+     * no {@code --mcp-config}, no PATH injection, no {@code --add-dir}, no
+     * {@code --plugin-dir} — because none of them can cross the ssh hop. The
+     * capability half of the proof is {@code
+     * persistentCreateRendersTheAttachOrCreateTmuxPlan}: the provider whose
+     * probe yields all-false caps still emits every flag.
+     */
+    @Test
+    void persistentPlansCarryNoLocalFlags() {
+        ClaudeAgentProvider provider = newProviderNoExecutable();
+        McpAccess mcp = new McpAccess("http://127.0.0.1:0/mcp", "token", Optional.of(Path.of("/tmp/mcp.json")));
+
+        String created = provider.buildCreateCommand(new CreateContext("S", "gen-42", Path.of("/tmp"),
+                Optional.of(BOX), Optional.of(mcp)).withPersistence(persistence())).command();
+        String resumed = provider.buildResumeCommand(new ResumeContext(Optional.of("conv-7"),
+                Optional.empty(), Path.of("/tmp"), Optional.of(BOX), Optional.of(mcp))
+                .withPersistence(persistence())).command();
+
+        for (String command : List.of(created, resumed)) {
+            assertFalse(command.contains("--settings"), command);
+            assertFalse(command.contains("--mcp-config"), command);
+            assertFalse(command.contains("PATH="), command);
+            assertFalse(command.contains("--add-dir"), command);
+            assertFalse(command.contains("--plugin-dir"), command);
+        }
+    }
+
+    /**
+     * The agent environment renders in sorted key order, so the same map
+     * always yields the same command regardless of the caller's iteration
+     * order — the same determinism {@code RemotePersistence} keeps in its
+     * own rendering.
+     */
+    @Test
+    void persistentEnvRendersInSortedKeyOrder() {
+        RemotePersistence unsorted = new RemotePersistence(MANAGED_ID,
+                Map.of("CLAUDE_CODE_EXTRA", "on", "ANTHROPIC_BASE_URL", "http://127.0.0.1:4000"));
+
+        LaunchPlan plan = newProviderNoExecutable().buildCreateCommand(new CreateContext("S", "gen-42",
+                Path.of("/tmp"), Optional.of(BOX), Optional.empty())
+                .withPersistence(unsorted));
+
+        assertEquals(boxPlan("exec " + ENV
+                + "ANTHROPIC_BASE_URL='http://127.0.0.1:4000' CLAUDE_CODE_EXTRA='on'"
+                + " claude -n 'S' --session-id 'gen-42'"), plan.command());
+        assertTrue(plan.supported());
     }
 }

@@ -39,12 +39,14 @@ class SessionActivityWatcherTest {
     void readsStateWordsKeyedByClaudeSessionId(@TempDir Path dir) throws IOException {
         Path activity = dir.resolve("activity");
         writeState(activity, "sess-busy", "busy");
+        writeState(activity, "sess-bg", "bg");
         writeState(activity, "sess-idle", "idle");
         writeState(activity, "sess-waiting", "attention");
 
         Map<String, SessionActivity> states = watcherOn(activity).readBlocking();
 
         assertEquals(SessionActivity.BUSY, states.get("sess-busy"));
+        assertEquals(SessionActivity.WAITING_BACKGROUND, states.get("sess-bg"));
         assertEquals(SessionActivity.IDLE, states.get("sess-idle"));
         assertEquals(SessionActivity.NEEDS_ATTENTION, states.get("sess-waiting"));
     }

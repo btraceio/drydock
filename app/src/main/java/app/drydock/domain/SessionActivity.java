@@ -28,6 +28,15 @@ public enum SessionActivity {
     BUSY,
 
     /**
+     * The run is alive but blocked inside a background-wait tool (pi's
+     * {@code bg_wait}, Claude's {@code TaskOutput}/{@code BashOutput}): the
+     * agent has parked itself waiting for async work to land. Progress
+     * resumes on its own -- this is informational, unlike {@link
+     * #NEEDS_ATTENTION}, which blocks on a human.
+     */
+    WAITING_BACKGROUND,
+
+    /**
      * Claude is blocked on a human: a permission prompt, or an idle
      * notification. This is the state worth a badge, since it is the only
      * one where the session makes no further progress until the user
@@ -42,6 +51,7 @@ public enum SessionActivity {
         }
         return switch (word.strip()) {
             case "busy" -> BUSY;
+            case "bg" -> WAITING_BACKGROUND;
             case "idle" -> IDLE;
             case "attention" -> NEEDS_ATTENTION;
             default -> UNKNOWN;

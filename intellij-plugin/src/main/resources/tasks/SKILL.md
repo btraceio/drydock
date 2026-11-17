@@ -1,17 +1,17 @@
 ---
 name: drydock-tasks
-description: "Working with drydock's delayed tasks: the four task tools, dependency-aware decomposition, human validation with the review pause, and bounded follow-up creation instead of scope creep."
+description: "Working with drydock's delayed tasks: the five task tools, dependency-aware decomposition, human validation with the review pause, and bounded follow-up creation instead of scope creep."
 ---
 
 # Drydock tasks
 
 Drydock stores tasks as Markdown files a human owns and hands them to agent
-sessions through four MCP tools. This skill covers what the tools really do,
+sessions through five MCP tools. This skill covers what the tools really do,
 how to decompose work along dependencies, and when to stop for human
 validation. Every behavioral statement here matches the tools' own
 descriptions and refusals; there are no flags or behaviors beyond them.
 
-## The four task tools
+## The five task tools
 
 - `task_get(id)` reads one task by id, from any registered repository: the
   committed title, status, done_by, created date, after references and
@@ -33,6 +33,14 @@ descriptions and refusals; there are no flags or behaviors beyond them.
   slug. The title is at most 200 characters; the body and any note are
   one paragraph, at most 4000 characters; after names at most 32
   prerequisite references, each a bare task id or '<project>:<id>'.
+- `task_claim(id)` claims one claimable follow-up: Drydock launches the task
+  as its OWN stacked session on a worktree at its in-repository
+  prerequisite's `dd/<id>` branch tip, and the claim launches immediately --
+  there is no human confirmation step. The task must be open, unowned by a
+  live session, and carry an in-repository prerequisite (done ones count);
+  the prerequisite's branch must already exist. Use it when the human or
+  your harness asks you to pick up a follow-up of a running or finished
+  stack; never claim a task you have not read with task_get first.
 
 ## You are the agent actor
 
@@ -119,4 +127,4 @@ themselves are Drydock's business, not yours.
   itself. Follow-ups are records for the human to accept or drop, not
   work you assign yourself, and never an excuse to widen this task.
 - Finish the task as it is defined, report discoveries as follow-ups, and
-  never invent tools, flags or behaviors beyond the four described here.
+  never invent tools, flags or behaviors beyond the five described here.

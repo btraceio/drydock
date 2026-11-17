@@ -7,6 +7,7 @@ import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionWorkspace;
+import app.drydock.domain.SshRemote;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.JiraIssue;
 import app.drydock.git.JiraIssueListing;
@@ -26,7 +27,6 @@ import app.drydock.intellij.tasks.TaskNode.SectionKind;
 import app.drydock.intellij.tasks.TaskNode.StaleWorktrees;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
-import app.drydock.intellij.tasks.TaskTreeModel.ViewFilter;
 import app.drydock.projects.SharedProject;
 import org.junit.jupiter.api.Test;
 
@@ -74,6 +74,27 @@ class TaskTreePanelTargetTest {
     }
 
     @Test
+    void projectWindowIsOfferedOnPresentLocalProjectRowsOnly() {
+        SharedProject registered = SharedProject.local(
+                RepositoryId.newId(), REGISTERED_ROOT, "profiling-backend", NOW);
+        ProjectRow row = new ProjectRow(registered, false, false, List.of(), List.of(), 0);
+        ProjectRow missing = new ProjectRow(registered, true, false, List.of(), List.of(), 0);
+        ProjectRow remote = new ProjectRow(new SharedProject(RepositoryId.newId(), REGISTERED_ROOT,
+                        "remote checkout", NOW, Optional.of(new SshRemote("acme.dev", "/srv/git/profiling-backend"))),
+                false, false, List.of(), List.of(), 0);
+
+        assertTrue(TaskTreePanel.offersProjectWindow(row, REGISTERED_ROOT));
+        assertFalse(TaskTreePanel.offersProjectWindow(row, null),
+                "an unresolved main root offers nothing");
+        assertFalse(TaskTreePanel.offersProjectWindow(missing, REGISTERED_ROOT),
+                "a folder the tree saw missing is not offered; the click still re-checks");
+        assertFalse(TaskTreePanel.offersProjectWindow(remote, REGISTERED_ROOT),
+                "a remote project's root is a placeholder only the standalone app opens");
+        assertFalse(TaskTreePanel.offersProjectWindow(new IdleWorktree(LINKED_WORKTREE,
+                "fix-allocation-profile", Optional.empty(), false, false), REGISTERED_ROOT));
+    }
+
+    @Test
     void idleWorktreeTargetsThatExactWorktree() {
         IdleWorktree row = new IdleWorktree(LINKED_WORKTREE, "fix-allocation-profile",
                 Optional.empty(), false, false);
@@ -98,26 +119,6 @@ class TaskTreePanelTargetTest {
 
         assertEquals(Optional.of(new TaskTreePanel.NewTaskTarget(REGISTERED_ROOT, Optional.of(fixed))),
                 TaskTreePanel.newTaskTarget(row, REGISTERED_ROOT));
-    }
-
-    @Test
-    void sessionPathFindsTheRowOfTheSelectedAgentTabsSession() {
-        TaskRow wanted = sessionRow("Wanted");
-        TaskRow other = sessionRow("Other");
-        DefaultMutableTreeNode root = new DefaultMutableTreeNode();
-        DefaultMutableTreeNode project = new DefaultMutableTreeNode(projectRow(REGISTERED_ROOT, List.of()));
-        DefaultMutableTreeNode sessions = new DefaultMutableTreeNode(new Section(SectionKind.SESSIONS,
-                List.of(other, wanted)));
-        DefaultMutableTreeNode otherNode = new DefaultMutableTreeNode(other);
-        DefaultMutableTreeNode wantedNode = new DefaultMutableTreeNode(wanted);
-        sessions.add(otherNode);
-        sessions.add(wantedNode);
-        project.add(sessions);
-        root.add(project);
-
-        assertEquals(Optional.of(new TreePath(wantedNode.getPath())),
-                TaskTreePanel.sessionPath(root, wanted.session().id()));
-        assertEquals(Optional.empty(), TaskTreePanel.sessionPath(root, ManagedSessionId.newId()));
     }
 
     private static TaskRow sessionRow(String name) {
@@ -145,6 +146,14 @@ class TaskTreePanelTargetTest {
     }
 
     @Test
+    void noRowHasNoRowTargetSoBlankSpaceAndTheToolbarKeepTheirOwnRoutes() {
+        assertEquals(Optional.empty(), TaskTreePanel.newTaskTarget(null, REGISTERED_ROOT));
+        assertEquals(Optional.empty(), TaskTreePanel.newTaskTarget(sessionRow("Session"), null));
+        assertEquals(Optional.of(new TaskTreePanel.NewTaskTarget(REGISTERED_ROOT, Optional.empty())),
+                TaskTreePanel.newTaskTarget(sessionRow("Session"), REGISTERED_ROOT));
+    }
+
+    @Test
     void issueRowDoesNotOfferTheGenericNewTaskAction() {
         IssueRow row = new IssueRow(REGISTERED_ROOT, new OpenIssue(42, "Fix allocation profile",
                 Optional.of("https://github.com/DataDog/profiling-backend/issues/42"), List.of(), List.of(),
@@ -154,13 +163,10 @@ class TaskTreePanelTargetTest {
     }
 
     @Test
-    void anIssuesContainerNodeFollowsTheRequestAloneInEveryView() {
-        for (ViewFilter view : ViewFilter.values()) {
-            assertFalse(TaskTreePanel.expandsIssuesNode(false),
-                    view + " must not open a GitHub node, a Jira node or a Jira group on its own");
-            assertTrue(TaskTreePanel.expandsIssuesNode(true),
-                    view + " keeps the user's expansion");
-        }
+    void anIssuesContainerNodeFollowsTheRequestAlone() {
+        assertFalse(TaskTreePanel.expandsIssuesNode(false),
+                "a GitHub node, a Jira node or a Jira group never opens on its own");
+        assertTrue(TaskTreePanel.expandsIssuesNode(true), "the user's expansion is kept");
     }
 
     /**
@@ -174,8 +180,7 @@ class TaskTreePanelTargetTest {
                 List.of(new JiraIssueRow(REGISTERED_ROOT, jiraIssue("DRY-1", "Fix the profiler")),
                         new JiraIssueRow(REGISTERED_ROOT, jiraIssue("DRY-2", "Ship the fix"))));
 
-        DefaultMutableTreeNode node = TaskTreePanel.treeNode(group, Optional.empty(),
-                Optional.empty(), null, new DefaultMutableTreeNode[1]);
+        DefaultMutableTreeNode node = TaskTreePanel.treeNode(group);
 
         assertFalse(node.isLeaf(), "a group with issues must not be a Swing leaf");
         assertEquals(2, node.getChildCount());
@@ -228,10 +233,12 @@ class TaskTreePanelTargetTest {
                 sections.put(((ProjectRow) project.getUserObject()).project().displayName() + ":"
                         + ((Section) section.getUserObject()).kind(), new TreePath(section.getPath()));
             }
-            // As the panel does: project rows expand before their sections, so a
-            // section's expandPath is "viewable". Project rows are not listing
-            // sections, so these expansions record nothing.
-            tree.expandPath(new TreePath(project.getPath()));
+            // As the panel's restoration does: project rows expand before their
+            // sections, so a section's expandPath is "viewable". Programmatic, so
+            // these expansions record nothing (a user's project expand records
+            // its listings; see the project-row cases).
+            TreePath projectPath = new TreePath(project.getPath());
+            tracker.runProgrammatic(() -> tree.expandPath(projectPath));
         }
         return tree;
     }
@@ -699,7 +706,7 @@ class TaskTreePanelTargetTest {
     private static DefaultMutableTreeNode modelTree(TaskNode... nodes) {
         DefaultMutableTreeNode root = new DefaultMutableTreeNode();
         for (TaskNode node : nodes) {
-            root.add(TaskTreePanel.treeNode(node, Optional.empty(), Optional.empty(), null, new DefaultMutableTreeNode[1]));
+            root.add(TaskTreePanel.treeNode(node));
         }
         return root;
     }
@@ -729,7 +736,7 @@ class TaskTreePanelTargetTest {
         List<TreePath> expanded = walk(root, tracker);
 
         assertTrue(expanded.contains(pathAt(root, 0, 0, 0)), "the recorded group is restored");
-        assertTrue(expanded.contains(pathAt(root, 0)), "project rows stay eager");
+        assertFalse(expanded.contains(pathAt(root, 0)), "a project row the user never opened is not walked open");
         // A group request is not a section request: the unrequested Issues
         // section stays collapsed outside the Issues view.
         assertFalse(expanded.contains(pathAt(root, 0, 0)));
@@ -790,14 +797,14 @@ class TaskTreePanelTargetTest {
         DefaultMutableTreeNode root = modelTree(issuesProject(REGISTERED_ROOT, REGISTERED_ROOT, "g-sprint"));
         ListingExpansionTracker tracker = tracker();
 
-        List<TreePath> expanded = walk(root, tracker);
-
-        // Strictly lazy: nothing under Issues opens on its own — not the
-        // section, not a group. Only the always-eager project row expands.
-        // The walk only expands; it never records.
-        assertEquals(List.of(pathAt(root, 0)), expanded);
+        // Strictly lazy: nothing opens on its own — not the project row, not
+        // the section, not a group. The walk only expands; it never records.
+        assertEquals(List.of(), walk(root, tracker));
         assertTrue(tracker.requestedIssueSections().isEmpty());
         assertTrue(tracker.requestedJiraGroups().isEmpty());
+        // A project row the user opened is walked open again.
+        tracker.requestedProjects().add(REGISTERED_ROOT);
+        assertEquals(List.of(pathAt(root, 0)), walk(root, tracker));
     }
 
     // --- Collapse: a closed lazy node stays closed across rebuilds -------------------
@@ -907,9 +914,7 @@ class TaskTreePanelTargetTest {
         assertTrue(tracker.requestedGitHubIssues().isEmpty());
         assertTrue(tracker.requestedJiraNodes().isEmpty());
         assertTrue(tracker.requestedJiraGroups().isEmpty());
-        assertTrue(walk(root, tracker).contains(pathAt(root, 0)),
-                "the eager project row is unaffected");
-        assertEquals(List.of(pathAt(root, 0)), walk(root, tracker));
+        assertEquals(List.of(), walk(root, tracker), "nothing under the closed section is walked open");
     }
 
     @Test
@@ -1043,16 +1048,55 @@ class TaskTreePanelTargetTest {
     }
 
     @Test
-    void collapsingAProjectRowOrAnUnlistedSectionForgetsNothing() {
+    void collapsingAnUnlistedSectionForgetsNothing() {
         DefaultMutableTreeNode root = modelTree(everyCollapsibleKind(REGISTERED_ROOT));
         ListingExpansionTracker tracker = tracker();
         recordEverything(tracker, REGISTERED_ROOT);
         List<Set<?>> before = records(tracker);
 
-        collapse(tracker, pathAt(root, 0));     // the ProjectRow: treeCollapsed's default
         collapse(tracker, pathAt(root, 0, 3));  // Section(SESSIONS): closeSection's default
 
         assertEquals(before, records(tracker));
+    }
+
+    @Test
+    void collapsingAProjectRowForgetsItAndEveryListingUnderIt() {
+        DefaultMutableTreeNode root = modelTree(everyCollapsibleKind(REGISTERED_ROOT),
+                everyCollapsibleKind(OTHER_ROOT));
+        ListingExpansionTracker tracker = tracker();
+        recordEverything(tracker, REGISTERED_ROOT);
+        recordEverything(tracker, OTHER_ROOT);
+        tracker.requestedProjects().add(REGISTERED_ROOT);
+        tracker.requestedProjects().add(OTHER_ROOT);
+
+        collapse(tracker, pathAt(root, 0));
+
+        assertEquals(Set.of(OTHER_ROOT), tracker.requestedProjects());
+        assertEquals(List.of(Set.of(OTHER_ROOT), Set.of(OTHER_ROOT), Set.of(OTHER_ROOT), Set.of(OTHER_ROOT),
+                        Set.of(OTHER_ROOT), Set.of(new ListingExpansionTracker.GroupKey(OTHER_ROOT, "g-sprint"))),
+                records(tracker), "the other project's records stay");
+    }
+
+    @Test
+    void openingAProjectRowRecordsItsListingsWithOneRebuild() {
+        DefaultMutableTreeNode root = modelTree(everyCollapsibleKind(REGISTERED_ROOT));
+        List<Boolean> rebuilds = new ArrayList<>();
+        ListingExpansionTracker tracker = new ListingExpansionTracker(rebuilds::add, TaskTreePanel::projectRootOf);
+
+        tracker.runProgrammatic(() -> expand(tracker, pathAt(root, 0)));
+        assertTrue(tracker.requestedProjects().isEmpty(), "the panel's restoration records nothing");
+        assertTrue(rebuilds.isEmpty());
+
+        expand(tracker, pathAt(root, 0));
+        assertEquals(Set.of(REGISTERED_ROOT), tracker.requestedProjects());
+        assertEquals(Set.of(REGISTERED_ROOT), tracker.requestedIssueSections());
+        assertEquals(Set.of(REGISTERED_ROOT), tracker.requestedGitHubIssues());
+        assertEquals(Set.of(REGISTERED_ROOT), tracker.requested(SectionKind.PULL_REQUESTS));
+        assertTrue(tracker.requested(SectionKind.WORKTREES).isEmpty(), "worktrees stay opened by hand");
+        assertEquals(List.of(false), rebuilds, "one rebuild fetches both listings");
+
+        expand(tracker, pathAt(root, 0));
+        assertEquals(List.of(false), rebuilds, "re-opening asks for nothing new");
     }
 
     @Test
@@ -1109,11 +1153,53 @@ class TaskTreePanelTargetTest {
                 new StaleWorktrees(List.of(new IdleWorktree(LINKED_WORKTREE, "fix", Optional.empty(),
                         false, false))))));
         ListingExpansionTracker tracker = tracker();
+        tracker.requestedProjects().add(REGISTERED_ROOT);
         tracker.requested(SectionKind.WORKTREES).add(REGISTERED_ROOT);
 
         assertEquals(List.of(pathAt(root, 0), pathAt(root, 0, 0), pathAt(root, 0, 1),
                         pathAt(root, 0, 4), pathAt(root, 0, 5)),
                 walk(root, tracker));
+    }
+
+    @Test
+    void theProjectsViewDropsSessionsAndKeepsListingsAndTheAddRow() {
+        TaskRow loose = sessionRow("loose session");
+        Section sessions = new Section(SectionKind.SESSIONS, List.of(sessionRow("project session")));
+        Section issues = new Section(SectionKind.ISSUES, List.of(new Deferred("Reading…")));
+        Section worktrees = new Section(SectionKind.WORKTREES, List.of(new Deferred("Reading…")));
+        TaskNode.AddCurrentProject add = new TaskNode.AddCurrentProject(OTHER_ROOT, "drydock");
+        ProjectRow project = projectRow(REGISTERED_ROOT, List.of(sessions, worktrees, issues));
+
+        List<TaskNode> view = TaskTreeModel.projectsView(List.of(add, loose, project));
+
+        assertEquals(2, view.size());
+        assertEquals(add, view.get(0), "the add row stays; the loose session row goes");
+        assertEquals(List.of(worktrees, issues), ((ProjectRow) view.get(1)).children());
+    }
+
+    @Test
+    void aProjectsMetaSaysOnlyWhatItsListingsAnswered() {
+        Section loadedIssues = new Section(SectionKind.ISSUES, List.of(new GitHubNode(REGISTERED_ROOT, List.of(
+                new IssueRow(REGISTERED_ROOT, new OpenIssue(1, "One", Optional.empty(), List.of(), List.of(),
+                        Optional.empty())),
+                new IssueRow(REGISTERED_ROOT, new OpenIssue(2, "Two", Optional.empty(), List.of(), List.of(),
+                        Optional.empty()))))));
+        Section unloadedPullRequests = new Section(SectionKind.PULL_REQUESTS, List.of(new Deferred("Reading…")));
+        Section noPullRequests = new Section(SectionKind.PULL_REQUESTS,
+                List.of(new Placeholder("No open pull requests")));
+
+        assertEquals(Optional.of("2 issues"),
+                TaskTreePanel.projectMeta(projectRow(REGISTERED_ROOT, List.of(loadedIssues, unloadedPullRequests))));
+        assertEquals(Optional.of("2 issues · 0 PRs"),
+                TaskTreePanel.projectMeta(projectRow(REGISTERED_ROOT, List.of(loadedIssues, noPullRequests))));
+        assertEquals(Optional.empty(),
+                TaskTreePanel.projectMeta(projectRow(REGISTERED_ROOT, List.of(unloadedPullRequests))));
+        Section notSetUp = new Section(SectionKind.ISSUES, List.of(
+                new TaskNode.Ghost(REGISTERED_ROOT, TaskNode.GhostSource.GITHUB),
+                new TaskNode.Ghost(REGISTERED_ROOT, TaskNode.GhostSource.JIRA)));
+        assertEquals(Optional.of("0 PRs"),
+                TaskTreePanel.projectMeta(projectRow(REGISTERED_ROOT, List.of(notSetUp, noPullRequests))),
+                "sources not set up are no answer");
     }
 
     @Test

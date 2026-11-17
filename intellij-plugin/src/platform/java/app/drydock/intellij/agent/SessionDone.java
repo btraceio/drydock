@@ -101,8 +101,9 @@ public final class SessionDone {
     }
 
     /** The pre-dialog task snapshot (T30a), captured once off the EDT with the live catalog
-     * ids; a store that cannot be read degrades to no tasks, never to a broken flow. */
-    private static SessionTaskCompletion captureTasks(ManagedAgentSession session) {
+     * ids; a store that cannot be read degrades to no tasks, never to a broken flow. Also
+     * the bulk cleanup's capture ({@link SessionDoneBulk}), one per session. */
+    static SessionTaskCompletion captureTasks(ManagedAgentSession session) {
         try {
             DrydockPluginService plugin = DrydockPluginService.getInstance();
             Set<String> live = plugin.stateStore().state().sessions().stream()
@@ -204,8 +205,9 @@ public final class SessionDone {
                 Optional.empty());
     }
 
-    /** The live catalog session ids (T07: a session id is live while the catalog holds its row). */
-    private static Set<String> liveSessionIds() {
+    /** The live catalog session ids (T07: a session id is live while the catalog holds its row).
+     * Also the bulk cleanup's membership check for its post-deletion worktree guards. */
+    static Set<String> liveSessionIds() {
         return DrydockPluginService.getInstance().stateStore().state().sessions().stream()
                 .map(row -> row.id().toString())
                 .collect(Collectors.toUnmodifiableSet());
@@ -257,15 +259,17 @@ public final class SessionDone {
     }
 
     /** One line per failure of the completions commit (T30a). */
-    private static String reasons(SessionTaskCompletion.Result committed) {
+    /** One line per failure of the completions commit (T30a); also the bulk cleanup's report. */
+    static String reasons(SessionTaskCompletion.Result committed) {
         return committed.failures().stream()
                 .map(failure -> (failure.task() == null ? "" : "task '" + failure.task().text() + "': ")
                         + failure.reason())
                 .collect(Collectors.joining("; "));
     }
 
-    /** The forgotten session no longer has a useful editor, wherever it was hosted. EDT only. */
-    private static void closeConsoleTabs(ManagedAgentSession session) {
+    /** The forgotten session no longer has a useful editor, wherever it was hosted. EDT only.
+     * Also the bulk cleanup's tab close, once for every session it forgot. */
+    static void closeConsoleTabs(ManagedAgentSession session) {
         AgentConsoleFile file = AgentConsoleFileSystem.getInstance().fileFor(session.id());
         for (Project open : ProjectManager.getInstance().getOpenProjects()) {
             if (!open.isDisposed()) {

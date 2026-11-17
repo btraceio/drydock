@@ -2,8 +2,10 @@ package app.drydock.delayedtasks;
 
 import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.*;
+import app.drydock.domain.SshRemote;
 import app.drydock.intellij.tasks.NewTaskPlan;
 import app.drydock.mcp.*;
+import app.drydock.projects.SharedProject;
 import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonValue.JsonObject;
 import app.drydock.state.json.JsonValue.JsonString;
@@ -197,6 +199,230 @@ class DelayedTaskServiceTest {
         }
     }
 
+    // 6a. A session in a linked worktree files its task under the MAIN CHECKOUT of that
+    // worktree (a worktree is never a task's repository): the main checkout resolves
+    // through the install catalog, and the create remaps it to the shared registry's id
+    // for the same checkout, exactly as the IDE's saved tasks do.
+    @Test
+    void aWorktreeSessionResolvesTheMainCheckout(@TempDir Path dir) throws Exception {
+        Path store = dir.resolve("store");
+        Path main = Files.createDirectories(dir.resolve("main"));
+        Path worktree = Files.createDirectories(dir.resolve("wt"));
+        Path mainOf = main.toAbsolutePath().normalize();
+        Path worktreeOf = worktree.toAbsolutePath().normalize();
+        RepositoryId installMainId = RepositoryId.newId();
+        RepositoryId sharedMainId = RepositoryId.newId();
+        RepositoryId worktreeId = RepositoryId.newId();
+        ManagedSessionId caller = ManagedSessionId.newId();
+        ManagedAgentSession session = session(caller, worktreeId, worktreeOf, Optional.empty());
+        List<Repository> catalog = List.of(
+                repository(installMainId, main, "Main Checkout"),
+                repository(worktreeId, worktree, "the-worktree"));
+        List<SharedProject> shared = List.of(
+                SharedProject.local(sharedMainId, mainOf, "Main Checkout", Instant.EPOCH));
+        try (DelayedTaskService service = new DelayedTaskService(store, executor,
+                () -> List.of(session), () -> catalog, () -> shared, ignored -> Optional.of(mainOf))) {
+            await(service.initialize());
+            assertEquals(Optional.of(installMainId), await(service.defaultRepository(caller)),
+                    "the main checkout in the install catalog wins over the worktree's own entry");
+            // The exact path the agent hit: task_create from a session in the worktree.
+            String created = textOf(service.taskTools().call(caller, "task_create",
+                    args("title", "Worktree follow-up")), "id");
+            assertTrue(Files.exists(committedFile(store, sharedMainId, TaskId.of(created))),
+                    "the task file lands under the shared project's directory");
+            assertFalse(Files.exists(store.resolve(worktreeId.toString())),
+                    "nothing is filed under the worktree's own repository id");
+        }
+    }
+
+    // 6b. A main checkout only the shared list knows (its install catalog never saw it)
+    // resolves directly to the shared id.
+    @Test
+    void aMainCheckoutKnownOnlyToTheSharedListResolvesThere(@TempDir Path dir) throws Exception {
+        Path store = dir.resolve("store");
+        Path main = Files.createDirectories(dir.resolve("main"));
+        Path worktree = Files.createDirectories(dir.resolve("wt"));
+        Path mainOf = main.toAbsolutePath().normalize();
+        Path worktreeOf = worktree.toAbsolutePath().normalize();
+        RepositoryId sharedMainId = RepositoryId.newId();
+        RepositoryId worktreeId = RepositoryId.newId();
+        ManagedSessionId caller = ManagedSessionId.newId();
+        ManagedAgentSession session = session(caller, worktreeId, worktreeOf, Optional.empty());
+        List<Repository> catalog =
+                List.of(repository(worktreeId, worktree, "the-worktree"));
+        List<SharedProject> shared = List.of(
+                SharedProject.local(sharedMainId, mainOf, "Main Checkout", Instant.EPOCH));
+        try (DelayedTaskService service = new DelayedTaskService(store, executor,
+                () -> List.of(session), () -> catalog, () -> shared, ignored -> Optional.of(mainOf))) {
+            await(service.initialize());
+            assertEquals(Optional.of(sharedMainId), await(service.defaultRepository(caller)),
+                    "the shared list answers for a main checkout the install catalog never saw");
+        }
+    }
+
+    // 6c. When git cannot resolve the directory (a vanished folder), the recorded-context
+    // chain answers exactly as before the main-checkout resolution existed.
+    @Test
+    void anUnresolvableDirectoryFallsBackToTheRecordedContext(@TempDir Path dir) throws Exception {
+        Path store = dir.resolve("store");
+        Path gone = dir.resolve("gone").toAbsolutePath().normalize();
+        RepositoryId recordedId = RepositoryId.newId();
+        ManagedSessionId caller = ManagedSessionId.newId();
+        ManagedAgentSession session = session(caller, recordedId, gone, Optional.empty());
+        List<Repository> catalog = List.of(repository(recordedId, dir.resolve("home"), "Project"));
+        try (DelayedTaskService service = new DelayedTaskService(store, executor,
+                () -> List.of(session), () -> catalog, List::of, ignored -> Optional.empty())) {
+            await(service.initialize());
+            assertEquals(Optional.of(recordedId), await(service.defaultRepository(caller)),
+                    "an unresolvable directory falls back to the session's recorded repository");
+        }
+    }
+
+    // 6d. A claim on a task filed under the shared registry's id (every task created by any
+    // of the create paths) resolves the repository through the shared list, not only the
+    // install catalog -- the claim proceeds to the branch probe instead of refusing with
+    // "not registered".
+    @Test
+    void aClaimResolvesTheSharedRegistryId(@TempDir Path dir) throws Exception {
+        Path store = dir.resolve("store");
+        Path root = Files.createDirectories(dir.resolve("project"));
+        Path rootOf = root.toAbsolutePath().normalize();
+        RepositoryId sharedId = RepositoryId.newId();
+        ManagedSessionId caller = ManagedSessionId.newId();
+        List<SharedProject> shared =
+                List.of(SharedProject.local(sharedId, rootOf, "Project Alpha", Instant.EPOCH));
+        try (DelayedTaskService service = new DelayedTaskService(store, executor,
+                List::of, List::of, () -> shared)) {
+            await(service.initialize());
+            TaskDocument prerequisite = await(service.create("Prerequisite", List.of(), sharedId)).document();
+            TaskDocument followUp = await(
+                    service.create("Follow up", List.of(prerequisite.id().text()), sharedId)).document();
+            TaskToolContext.Outcome claimed = await(service.claim(caller, followUp.id()));
+            assertTrue(claimed.refused(), "the branch probe must refuse (no branch exists yet)");
+            assertTrue(claimed.refusal().contains("does not exist in the repository"),
+                    "the claim reached the branch probe, so the shared-id repository resolved; refusal was: "
+                            + claimed.refusal());
+        }
+    }
+
+    // 6e. "git answered but neither registry knows the main checkout": the legacy chain
+    // runs only when git CANNOT answer -- here the session's recorded repository id is
+    // the answer, never the directory match (the registered worktree entry the session's
+    // directory matches would re-file the task under the worktree).
+    @Test
+    void anUnregisteredMainCheckoutAnswersTheRecordedIdNeverTheDirectoryMatch(@TempDir Path dir)
+            throws Exception {
+        Path store = dir.resolve("store");
+        Path worktree = Files.createDirectories(dir.resolve("wt"));
+        Path main = Files.createDirectories(dir.resolve("main"));
+        Path worktreeOf = worktree.toAbsolutePath().normalize();
+        Path mainOf = main.toAbsolutePath().normalize();
+        RepositoryId worktreeId = RepositoryId.newId();
+        RepositoryId recordedId = RepositoryId.newId();
+        ManagedSessionId caller = ManagedSessionId.newId();
+        ManagedAgentSession session = session(caller, recordedId, worktreeOf, Optional.of(worktreeOf));
+        List<Repository> catalog = List.of(
+                repository(worktreeId, worktree, "the-worktree"),
+                repository(recordedId, dir.resolve("home"), "Project"));
+        try (DelayedTaskService service = new DelayedTaskService(store, executor,
+                () -> List.of(session), () -> catalog, List::of, ignored -> Optional.of(mainOf))) {
+            await(service.initialize());
+            RepositoryId resolved = await(service.defaultRepository(caller)).orElseThrow();
+            assertEquals(recordedId, resolved,
+                    "git answered with a main checkout neither registry knows: the session's"
+                            + " recorded repository id is the answer");
+            assertNotEquals(worktreeId, resolved,
+                    "the registered worktree entry the directory matches is never the answer:"
+                            + " that would re-file the task under the worktree");
+        }
+    }
+
+    // 6f. A task filed under an install-catalog id whose root a shared entry also carries
+    // (a task created before either registry learned the checkout) resolves at claim time
+    // through the shared-root borrow and reaches the branch probe -- it never refuses
+    // with "not registered".
+    @Test
+    void aClaimOnAnInstallIdBorrowsTheSharedEntryRoot(@TempDir Path dir) throws Exception {
+        Path store = dir.resolve("store");
+        Path root = Files.createDirectories(dir.resolve("project"));
+        Path rootOf = root.toAbsolutePath().normalize();
+        RepositoryId installId = RepositoryId.newId();
+        RepositoryId sharedId = RepositoryId.newId();
+        ManagedSessionId caller = ManagedSessionId.newId();
+        List<SharedProject> shared =
+                List.of(SharedProject.local(sharedId, rootOf, "Project Alpha", Instant.EPOCH));
+        try (DelayedTaskService service = new DelayedTaskService(store, executor, List::of,
+                () -> List.of(repository(installId, rootOf, "Project Alpha")), () -> shared)) {
+            await(service.initialize());
+            // A legacy task file: written under the install id, before the create remap.
+            TaskId prerequisite;
+            TaskId followUp;
+            try (TaskStore direct = new TaskStore(store)) {
+                prerequisite = direct.create(installId, "Prerequisite", List.of()).id();
+                followUp = direct.create(installId, "Follow up", List.of()).id();
+                direct.update(followUp, new TaskFilePatch.Updates(null, null, null, null,
+                        List.of(prerequisite.text()), null));
+            }
+            TaskToolContext.Outcome claimed = await(service.claim(caller, followUp));
+            assertTrue(claimed.refused(), "the branch probe must refuse (no branch exists yet)");
+            assertTrue(claimed.refusal().contains("does not exist in the repository"),
+                    "the install id borrowed the shared entry's root and reached the branch"
+                            + " probe; refusal was: " + claimed.refusal());
+            assertFalse(claimed.refusal().contains("not registered"),
+                    "the claim resolved the repository; refusal was: " + claimed.refusal());
+        }
+    }
+
+    // 6g. A task filed under a REMOTE shared project's id never resolves: there is no
+    // local checkout to probe or launch in, so the claim refuses as unregistered before
+    // any branch probe.
+    @Test
+    void aClaimOnARemoteSharedProjectRefusesAsUnregistered(@TempDir Path dir) throws Exception {
+        Path store = dir.resolve("store");
+        RepositoryId remoteId = RepositoryId.newId();
+        ManagedSessionId caller = ManagedSessionId.newId();
+        SshRemote ssh = new SshRemote("box", "/srv/repo");
+        List<SharedProject> shared = List.of(new SharedProject(remoteId,
+                ssh.placeholderRoot(), "remote", Instant.EPOCH, Optional.of(ssh)));
+        try (DelayedTaskService service = new DelayedTaskService(store, executor,
+                List::of, List::of, () -> shared)) {
+            await(service.initialize());
+            TaskDocument prerequisite = await(service.create("Prerequisite", List.of(), remoteId)).document();
+            TaskDocument followUp = await(
+                    service.create("Follow up", List.of(prerequisite.id().text()), remoteId)).document();
+            TaskToolContext.Outcome claimed = await(service.claim(caller, followUp.id()));
+            assertTrue(claimed.refused(), "a remote project can never host a local claim");
+            assertTrue(claimed.refusal().contains("not registered"),
+                    "the remote shared id refuses as unregistered; refusal was: " + claimed.refusal());
+            assertFalse(claimed.refusal().contains("does not exist in the repository"),
+                    "the refusal comes before any branch probe; refusal was: " + claimed.refusal());
+        }
+    }
+
+    // 6h. The production default resolver over real git (no stub): a session in a linked
+    // worktree resolves to the registered MAIN CHECKOUT through git worktree list.
+    @Test
+    void theDefaultResolverMapsAWorktreeSessionToItsMainCheckout(@TempDir Path dir) throws Exception {
+        Path store = dir.resolve("store");
+        Path repo = Files.createDirectories(dir.resolve("repo"));
+        git(repo, "init");
+        git(repo, "-c", "user.email=test@example.com", "-c", "user.name=test",
+                "commit", "--allow-empty", "-m", "seed");
+        git(repo, "branch", "-m", "main");
+        Path worktree = dir.resolve("wt");
+        git(repo, "worktree", "add", worktree.toString(), "-b", "dd/probe");
+        RepositoryId mainId = RepositoryId.newId();
+        ManagedSessionId caller = ManagedSessionId.newId();
+        ManagedAgentSession session = session(caller, RepositoryId.newId(), worktree, Optional.empty());
+        try (DelayedTaskService service = new DelayedTaskService(store, executor,
+                () -> List.of(session), () -> List.of(repository(mainId, repo, "Main Checkout")),
+                List::of)) {
+            await(service.initialize());
+            assertEquals(Optional.of(mainId), await(service.defaultRepository(caller)),
+                    "git worktree list resolves the linked worktree to the registered main checkout");
+        }
+    }
+
     // 6. Caller repo resolution: registered roots resolve (worktree fallback included),
     // unresolvable roots yield empty, and the create defaults and refusal paths follow.
     @Test
@@ -209,13 +435,17 @@ class DelayedTaskServiceTest {
         ManagedSessionId resident = ManagedSessionId.newId();
         ManagedSessionId visitor = ManagedSessionId.newId();
         ManagedSessionId nested = ManagedSessionId.newId();
+        ManagedSessionId worktreeSession = ManagedSessionId.newId();
+        RepositoryId unregisteredId = RepositoryId.newId();
         List<ManagedAgentSession> sessions = List.of(
                 session(resident, alphaId, worktree, Optional.empty()),
-                session(visitor, alphaId, elsewhere, Optional.empty()),
-                session(nested, alphaId, worktree.resolve("nested"), Optional.of(worktree)));
+                session(visitor, unregisteredId, elsewhere, Optional.empty()),
+                session(nested, alphaId, worktree.resolve("nested"), Optional.of(worktree)),
+                session(worktreeSession, alphaId, elsewhere, Optional.empty()));
         List<Repository> repositories = List.of(repository(alphaId, worktree, "Project Alpha"),
                 repository(betaId, dir.resolve("beta"), "Beta Project"),
-                repository(RepositoryId.newId(), dir.resolve("duplicate"), "Project Alpha!"));
+                repository(RepositoryId.newId(), dir.resolve("duplicate"), "Project Alpha!"),
+                repository(RepositoryId.newId(), dir.resolve("nonslug"), "---"));
         try (DelayedTaskService service = new DelayedTaskService(store, executor,
                 () -> sessions, () -> repositories)) {
             await(service.initialize());
@@ -223,17 +453,28 @@ class DelayedTaskServiceTest {
                     "a working root that is a registered repository resolves its id");
             assertEquals(Optional.of(alphaId), await(service.defaultRepository(nested)),
                     "an unregistered working root falls back to its registered worktree root");
+            assertEquals(Optional.of(alphaId), await(service.defaultRepository(worktreeSession)),
+                    "an unregistered working root with a registered owning repository resolves"
+                            + " through the session's repositoryId (a detached worktree session)");
             assertTrue(await(service.defaultRepository(visitor)).isEmpty(),
-                    "an unresolvable working root yields empty");
+                    "an unresolvable working root with an unregistered owning repository yields empty");
             assertTrue(await(service.repositoryBySlug("project-alpha")).isEmpty(),
                     "an ambiguous slug yields empty (accepted deviation)");
             String created = textOf(service.taskTools().call(resident, "task_create",
                     args("title", "Resident default")), "id");
             assertTrue(Files.exists(committedFile(store, alphaId, TaskId.of(created))),
                     "a create without a project lands in the caller's resolved repository");
-            assertTrue(assertThrows(McpToolException.class, () -> service.taskTools().call(visitor,
-                    "task_create", args("title", "Visitor task"))).getMessage()
-                    .contains("no default project"), "an unresolvable caller has no create default");
+            assertTrue(await(service.registeredProjectSlugs()).equals(List.of("beta-project")),
+                    "the offer names only slugs that resolve uniquely: the ambiguous"
+                            + " project-alpha pair is omitted, and a name with no slug"
+                            + " characters (---) contributes nothing rather than null");
+            String refusal = assertThrows(McpToolException.class, () -> service.taskTools().call(visitor,
+                    "task_create", args("title", "Visitor task"))).getMessage();
+            assertTrue(refusal.contains("no default project"),
+                    "an unresolvable caller with an unregistered owning repository has no create default");
+            assertTrue(refusal.contains("beta-project") && !refusal.contains("project-alpha"),
+                    "the no-default refusal offers only a slug that, when passed, resolves: "
+                            + "the ambiguous pair would dead-end in the second refusal");
             assertTrue(assertThrows(McpToolException.class, () -> service.taskTools().call(resident,
                     "task_create", args("title", "Ambiguous", "project", "project-alpha")))
                     .getMessage().contains("No registered project 'project-alpha'"),
@@ -321,12 +562,609 @@ class DelayedTaskServiceTest {
         }
     }
 
+    // S4 claim surface: a DONE prerequisite whose dd/<id> branch is gone (never pushed
+    // here, so the probe finds nothing) refuses terminally and accurately, releases the
+    // in-flight guard, never registers the terminal gate (a manual claim refusal must
+    // not gate auto-start), and the claim surfaces bypass the gate.
+    @Test
+    void aDonePrerequisiteMissingBranchRefusesTerminallyAndReleasesTheGuard(@TempDir Path dir)
+            throws Exception {
+        Path store = dir.resolve("store");
+        Path worktree = Files.createDirectories(dir.resolve("worktree"));
+        RepositoryId repositoryId = RepositoryId.newId();
+        try (DelayedTaskService service = new DelayedTaskService(store, executor, List::of,
+                () -> List.of(repository(repositoryId, worktree, "Project Alpha")))) {
+            await(service.initialize());
+            TaskDocument done = await(service.create("Finished prerequisite",
+                    List.of(), repositoryId)).document();
+            await(service.updateStatus(done.id(), TaskState.Actor.HUMAN, TaskStatus.DONE));
+            TaskDocument followUp = await(service.create("Follow up work",
+                    List.of(done.id().text()), repositoryId)).document();
+
+            TaskToolContext.Outcome refused =
+                    await(service.claim(ManagedSessionId.newId(), followUp.id()));
+            assertTrue(refused.refused(), refused.refusal());
+            assertTrue(refused.refusal().contains("no longer exists"), refused.refusal());
+            assertTrue(refused.refusal().contains("Tasks tree"), refused.refusal());
+            assertFalse(refused.refusal().contains("\n"), "a refusal is a single-line value");
+            assertFalse(DelayedTaskStart.IN_FLIGHT.contains(followUp.id()),
+                    "every refusal exit releases the in-flight guard");
+            assertFalse(service.terminallyRefused(followUp.id()),
+                    "a manual claim never registers the terminal gate; a human-repaired"
+                            + " condition unblocks auto-start without a restart");
+
+            TaskToolContext.Outcome again =
+                    await(service.claim(ManagedSessionId.newId(), followUp.id()));
+            assertTrue(again.refused(), again.refusal());
+            assertEquals(refused.refusal(), again.refusal(),
+                    "the claim surfaces bypass the refusal gate and probe again immediately");
+        }
+    }
+
+    // S4 claim surface: a non-DONE prerequisite's missing branch keeps the existing
+    // retryable wording verbatim and never registers the candidate terminally.
+    @Test
+    void aNonDonePrerequisiteMissingBranchKeepsTheRetryableWording(@TempDir Path dir)
+            throws Exception {
+        Path store = dir.resolve("store");
+        Path worktree = Files.createDirectories(dir.resolve("worktree"));
+        RepositoryId repositoryId = RepositoryId.newId();
+        try (DelayedTaskService service = new DelayedTaskService(store, executor, List::of,
+                () -> List.of(repository(repositoryId, worktree, "Project Alpha")))) {
+            await(service.initialize());
+            TaskDocument review = await(service.create("Unfinished prerequisite",
+                    List.of(), repositoryId)).document();
+            await(service.updateStatus(review.id(), TaskState.Actor.HUMAN, TaskStatus.REVIEW));
+            TaskDocument followUp = await(service.create("Follow up work",
+                    List.of(review.id().text()), repositoryId)).document();
+
+            TaskToolContext.Outcome refused =
+                    await(service.claim(ManagedSessionId.newId(), followUp.id()));
+            assertTrue(refused.refused(), refused.refusal());
+            assertTrue(refused.refusal().contains("does not exist in the repository"),
+                    refused.refusal());
+            assertTrue(refused.refusal().contains(
+                            "claim again once the prerequisite's session has pushed it"),
+                    refused.refusal());
+            assertFalse(service.terminallyRefused(followUp.id()),
+                    "a non-DONE missing branch is retryable, never terminal");
+            assertFalse(DelayedTaskStart.IN_FLIGHT.contains(followUp.id()),
+                    "every refusal exit releases the in-flight guard");
+        }
+    }
+
+    /** A snapshot under construction for the pure gate tests (the ClaimLaunchTest
+      * Store pattern): plain documents, no git, no IDE. */
+    private static final class SnapshotStore {
+        final List<TaskDocument> documents = new ArrayList<>();
+
+        void open(RepositoryId repository, String id, TaskStatus status, List<String> sessions,
+                String... after) {
+            documents.add(new TaskDocument(TaskId.of(id), repository, "Task " + id, status,
+                    DoneBy.HUMAN, Optional.of(Instant.parse("2026-11-11T00:00:00Z")),
+                    List.of(after), sessions, List.of(), "", ""));
+        }
+
+        TaskSnapshot snapshot() {
+            Map<TaskId, TaskDocument> byId = new LinkedHashMap<>();
+            documents.forEach(document -> byId.put(document.id(), document));
+            List<RepositoryId> repositories = documents.stream().map(TaskDocument::repository)
+                    .distinct().toList();
+            return new TaskSnapshot(documents, repositories, byId, Map.of(), List.of(), List.of());
+        }
+
+        TaskGraph graph() {
+            return TaskGraph.of(snapshot(), repository -> "repo");
+        }
+    }
+
+    // S4 auto-start gate, pure: terminal beats everything, transient conditions skip
+    // silently, validate refusals are classified by healability (the S5 cross-repo
+    // refusal is retryable, everything else terminal), nothing is cached.
+    @Test
+    void theAutoStartGateClassifiesEveryCandidateBeforeAnyProbe() {
+        RepositoryId repository = RepositoryId.newId();
+        RepositoryId elsewhere = RepositoryId.newId();
+        Map<TaskId, TaskDocument> terminal = new ConcurrentHashMap<>();
+
+        // 1. Terminal beats everything, even a changed document.
+        SnapshotStore store = new SnapshotStore();
+        store.open(repository, "a", TaskStatus.DONE, List.of());
+        store.open(repository, "b", TaskStatus.OPEN, List.of(), "a");
+        TaskDocument candidate = store.snapshot().byId().get(TaskId.of("b"));
+        terminal.put(TaskId.of("b"), candidate);
+        DelayedTaskService.Gate gate = DelayedTaskService.autoStartGate(TaskId.of("b"),
+                candidate.withTitle("Changed title"), store.graph(),
+                Set.of(), Set.of(), terminal);
+        assertEquals(DelayedTaskService.GateKind.TERMINAL_CACHED, gate.kind(),
+                "a terminally refused candidate never re-fires, even on a document change");
+        assertTrue(terminal.containsKey(TaskId.of("b")), "the terminal entry survives");
+
+        // 2. Transient in-flight: silent skip.
+        terminal.clear();
+        gate = DelayedTaskService.autoStartGate(TaskId.of("b"), candidate, store.graph(),
+                Set.of(), Set.of(TaskId.of("b")), terminal);
+        assertEquals(DelayedTaskService.GateKind.TRANSIENT_SKIP, gate.kind());
+        assertTrue(terminal.isEmpty(), "transient conditions write no entry");
+
+        // 3. Transient live-session ownership: silent skip.
+        SnapshotStore owned = new SnapshotStore();
+        owned.open(repository, "a", TaskStatus.DONE, List.of());
+        owned.open(repository, "b", TaskStatus.OPEN, List.of("session-1"), "a");
+        TaskDocument ownedCandidate = owned.snapshot().byId().get(TaskId.of("b"));
+        gate = DelayedTaskService.autoStartGate(TaskId.of("b"), ownedCandidate,
+                owned.graph(), Set.of("session-1"), Set.of(), terminal);
+        assertEquals(DelayedTaskService.GateKind.TRANSIENT_SKIP, gate.kind());
+        assertTrue(terminal.isEmpty(), "transient conditions write no entry");
+
+        // 4. An unhealable validate refusal (not open) is terminal, not healable.
+        SnapshotStore closed = new SnapshotStore();
+        closed.open(repository, "a", TaskStatus.DONE, List.of());
+        closed.open(repository, "b", TaskStatus.REVIEW, List.of(), "a");
+        TaskDocument closedCandidate = closed.snapshot().byId().get(TaskId.of("b"));
+        gate = DelayedTaskService.autoStartGate(TaskId.of("b"), closedCandidate,
+                closed.graph(), Set.of(), Set.of(), terminal);
+        assertEquals(DelayedTaskService.GateKind.VALIDATE_REFUSED, gate.kind());
+        assertNotNull(gate.refusal());
+        assertFalse(gate.refusal().contains("\n"), "a refusal is a single-line value");
+        assertFalse(gate.healable(), "a not-open candidate's refusal is structural");
+
+        // 4b. An unhealable validate refusal (no in-repository prerequisite).
+        SnapshotStore orphan = new SnapshotStore();
+        orphan.open(repository, "b", TaskStatus.OPEN, List.of());
+        TaskDocument orphanCandidate = orphan.snapshot().byId().get(TaskId.of("b"));
+        gate = DelayedTaskService.autoStartGate(TaskId.of("b"), orphanCandidate,
+                orphan.graph(), Set.of(), Set.of(), terminal);
+        assertEquals(DelayedTaskService.GateKind.VALIDATE_REFUSED, gate.kind());
+        assertFalse(gate.healable(), "no in-repository prerequisite never heals on its own");
+
+        // 4c. The S5 cross-repo refusal is healable: it re-probes on every
+        //     publication and heals when the cross-repo prerequisite reaches DONE.
+        SnapshotStore crossRepo = new SnapshotStore();
+        crossRepo.open(elsewhere, "x", TaskStatus.REVIEW, List.of());
+        crossRepo.open(repository, "b", TaskStatus.OPEN, List.of(), "x");
+        TaskDocument crossCandidate = crossRepo.snapshot().byId().get(TaskId.of("b"));
+        gate = DelayedTaskService.autoStartGate(TaskId.of("b"), crossCandidate,
+                crossRepo.graph(), Set.of(), Set.of(), terminal);
+        assertEquals(DelayedTaskService.GateKind.VALIDATE_REFUSED, gate.kind());
+        assertTrue(gate.healable(), "the S5 cross-repo refusal heals when the cross-repo"
+                + " prerequisite reaches DONE");
+        assertNotNull(gate.refusal());
+
+        // 5. Anything else proceeds to the launch.
+        SnapshotStore chain = new SnapshotStore();
+        chain.open(repository, "a", TaskStatus.DONE, List.of());
+        chain.open(repository, "b", TaskStatus.OPEN, List.of(), "a");
+        TaskSnapshot snapshot = chain.snapshot();
+        TaskDocument b = snapshot.byId().get(TaskId.of("b"));
+        gate = DelayedTaskService.autoStartGate(TaskId.of("b"), b, chain.graph(),
+                Set.of(), Set.of(), terminal);
+        assertEquals(DelayedTaskService.GateKind.PROCEED, gate.kind());
+        assertFalse(gate.healable());
+    }
+
+    // S4 post-outcome handling: nothing is ever cached -- a refusal reports the
+    // distinguishable terminal wording when an entry exists, the plain wording
+    // otherwise; success logs nothing.
+    @Test
+    void applyLaunchOutcomeRefusesWithoutCaching() {
+        RepositoryId repository = RepositoryId.newId();
+        Map<TaskId, TaskDocument> terminal = new ConcurrentHashMap<>();
+        SnapshotStore store = new SnapshotStore();
+        store.open(repository, "a", TaskStatus.DONE, List.of());
+        store.open(repository, "b", TaskStatus.OPEN, List.of(), "a");
+        TaskSnapshot snapshot = store.snapshot();
+        TaskDocument b = snapshot.byId().get(TaskId.of("b"));
+
+        // Success logs nothing and mutates nothing.
+        terminal.put(TaskId.of("b"), b);
+        assertNull(DelayedTaskService.applyLaunchOutcome(terminal, TaskId.of("b"), null));
+        assertTrue(terminal.containsKey(TaskId.of("b")), "the terminal map is never cleared");
+
+        // Refusal with a terminal entry: the distinguishable wording.
+        String logged = DelayedTaskService.applyLaunchOutcome(terminal, TaskId.of("b"),
+                "the prerequisite branch is gone");
+        assertTrue(logged.contains("will not auto-start"), logged);
+
+        // Refusal without a terminal entry: the plain wording, byte-stable, and
+        // nothing written anywhere (there is no cache left to write to).
+        terminal.clear();
+        logged = DelayedTaskService.applyLaunchOutcome(terminal, TaskId.of("b"),
+                "the prerequisite branch is gone");
+        assertEquals("The follow-up 'b' did not auto-start: the prerequisite branch is gone",
+                logged);
+        assertTrue(terminal.isEmpty(), "a plain refusal is never cached");
+    }
+
+    /** The JUL handler the log-asserting tests attach: every record the service
+      * logs lands here while the fixture is attached. Thread-safe: service logs
+      * can land on executor threads while the test awaits the future. */
+    private static final class LogRecorder extends java.util.logging.Handler {
+        private final List<java.util.logging.LogRecord> records =
+                Collections.synchronizedList(new ArrayList<>());
+
+        LogRecorder attach() {
+            java.util.logging.Logger logger = java.util.logging.Logger.getLogger(
+                    "app.drydock.delayedtasks.DelayedTaskService");
+            logger.setLevel(java.util.logging.Level.ALL);
+            logger.addHandler(this);
+            return this;
+        }
+
+        void detach() {
+            java.util.logging.Logger.getLogger(
+                    "app.drydock.delayedtasks.DelayedTaskService").removeHandler(this);
+        }
+
+        @Override
+        public void publish(java.util.logging.LogRecord record) {
+            records.add(record);
+        }
+
+        @Override
+        public void flush() {
+        }
+
+        @Override
+        public void close() {
+        }
+
+        long count(String messagePart, java.util.logging.Level level) {
+            synchronized (records) {
+                return records.stream().filter(record -> record.getLevel() == level
+                        && record.getMessage().contains(messagePart)).count();
+            }
+        }
+    }
+
+    // S4 terminal contract: one pass over 257 unhealably refused candidates registers
+    // ALL of them -- the terminal map has no overflow valve; entries live until restart.
+    @Test
+    void aSinglePassRegistersEveryTerminallyRefusedCandidateWithoutEviction(@TempDir Path dir)
+            throws Exception {
+        Path store = dir.resolve("store");
+        Path worktree = Files.createDirectories(dir.resolve("worktree"));
+        RepositoryId repositoryId = RepositoryId.newId();
+        try (DelayedTaskService service = new DelayedTaskService(store, executor, List::of,
+                () -> List.of(repository(repositoryId, worktree, "Project Alpha")))) {
+            await(service.initialize());
+            TaskDocument done = await(service.create("Finished prerequisite", List.of(),
+                    repositoryId)).document();
+            await(service.updateStatus(done.id(), TaskState.Actor.HUMAN, TaskStatus.DONE));
+            List<TaskId> candidates = new ArrayList<>();
+            for (int i = 0; i < 257; i++) {
+                candidates.add(await(service.create("Follow up " + i,
+                        List.of(done.id().text()), repositoryId)).document().id());
+            }
+            TaskSnapshot snapshot = await(service.snapshot());
+            service.autoStartFollowUps(snapshot, done.id(), Set.of(done.id()));
+            for (TaskId candidate : candidates) {
+                assertTrue(service.terminallyRefused(candidate),
+                        "candidate " + candidate.text() + " is registered: the terminal map"
+                                + " never evicts within a pass");
+            }
+        }
+    }
+
+    // S4 classification: terminal-vs-retryable must not depend on the waits' order --
+    // a candidate with a missing DONE wait classifies terminal whichever order the
+    // waits come in, and the auto-start pass registers the marker terminally.
+    @Test
+    void terminalClassificationDoesNotDependOnTheWaitsOrder(@TempDir Path dir) throws Exception {
+        Path store = dir.resolve("store");
+        Path worktree = Files.createDirectories(dir.resolve("worktree"));
+        RepositoryId repositoryId = RepositoryId.newId();
+        LogRecorder recorder = new LogRecorder().attach();
+        try (DelayedTaskService service = new DelayedTaskService(store, executor, List::of,
+                () -> List.of(repository(repositoryId, worktree, "Project Alpha")))) {
+            await(service.initialize());
+            TaskDocument done = await(service.create("Finished prerequisite",
+                    List.of(), repositoryId)).document();
+            await(service.updateStatus(done.id(), TaskState.Actor.HUMAN, TaskStatus.DONE));
+            TaskDocument review = await(service.create("Unfinished prerequisite",
+                    List.of(), repositoryId)).document();
+            await(service.updateStatus(review.id(), TaskState.Actor.HUMAN, TaskStatus.REVIEW));
+            TaskDocument nonDoneFirst = await(service.create("Follow up A",
+                    List.of(review.id().text(), done.id().text()), repositoryId)).document();
+            TaskDocument doneFirst = await(service.create("Follow up B",
+                    List.of(done.id().text(), review.id().text()), repositoryId)).document();
+            TaskSnapshot snapshot = await(service.snapshot());
+            service.autoStartFollowUps(snapshot, done.id(), Set.of(done.id(), review.id()));
+            assertTrue(service.terminallyRefused(nonDoneFirst.id()),
+                    "a missing DONE wait is terminal even when a non-DONE wait precedes it");
+            assertTrue(service.terminallyRefused(doneFirst.id()),
+                    "the same classification when the DONE wait comes first");
+            assertEquals(2, recorder.count("no longer exists", java.util.logging.Level.INFO),
+                    "both candidates report the terminal DONE-branch wording");
+            assertEquals(0, recorder.count("does not exist in the repository",
+                    java.util.logging.Level.INFO),
+                    "neither candidate is classified retryable");
+        } finally {
+            recorder.detach();
+        }
+    }
+
+    // S4 healing: the S5 cross-repo refusal is never cached -- every publication
+    // re-probes validate (an unrelated snapshot change re-fires it), and once the
+    // cross-repo prerequisite reaches DONE the refusal stops and the candidate
+    // registers terminally for its fresh, unhealable reason.
+    @Test
+    void aHealableValidateRefusalReprobesOnEveryPublication(@TempDir Path dir) throws Exception {
+        RepositoryId here = RepositoryId.newId();
+        RepositoryId there = RepositoryId.newId();
+        LogRecorder recorder = new LogRecorder().attach();
+        try (DelayedTaskService service = new DelayedTaskService(dir.resolve("store"), executor,
+                List::of, () -> List.of(repository(here, dir.resolve("worktree"), "Here")))) {
+            await(service.initialize());
+            TaskDocument cross = await(service.create("Cross-repo prerequisite",
+                    List.of(), there)).document();
+            await(service.updateStatus(cross.id(), TaskState.Actor.HUMAN, TaskStatus.REVIEW));
+            TaskDocument followUp = await(service.create("Follow up work",
+                    List.of(cross.id().text()), here)).document();
+            TaskId planId = cross.id();
+            service.autoStartFollowUps(await(service.snapshot()), planId, Set.of(cross.id()));
+            assertEquals(1, recorder.count("waits only on unfinished",
+                    java.util.logging.Level.INFO), "the healable S5 refusal is logged once");
+            assertFalse(service.terminallyRefused(followUp.id()),
+                    "a healable refusal is never registered terminally");
+
+            // An unrelated snapshot change (no document change for the candidate or
+            // its waits) must re-probe: the INFO fires again.
+            await(service.create("Unrelated task", List.of(), here));
+            service.autoStartFollowUps(await(service.snapshot()), planId, Set.of(cross.id()));
+            assertEquals(2, recorder.count("waits only on unfinished",
+                    java.util.logging.Level.INFO),
+                    "the healable refusal re-probes on the next publication");
+
+            // Once the cross-repo prerequisite reaches DONE the S5 refusal stops
+            // firing; the fresh reason (no in-repository prerequisite) is unhealable.
+            await(service.updateStatus(cross.id(), TaskState.Actor.HUMAN, TaskStatus.DONE));
+            service.autoStartFollowUps(await(service.snapshot()), planId, Set.of(cross.id()));
+            assertEquals(2, recorder.count("waits only on unfinished",
+                    java.util.logging.Level.INFO), "the healed refusal never fires again");
+            assertTrue(service.terminallyRefused(followUp.id()),
+                    "the fresh refusal (no in-repository prerequisite) is terminal");
+        } finally {
+            recorder.detach();
+        }
+    }
+
+    // The confirmed trigger (F-b6def7eed8e1's class): a missing-branch refusal is
+    // never cached -- the next pass re-probes and re-logs it even though NO task
+    // document changed. (A branch appearing changes no document either, so the
+    // re-probe is what lets a pushed branch unblock auto-start.)
+    @Test
+    void aMissingBranchRefusalIsNeverCachedAndReprobesOnTheNextPass(@TempDir Path dir)
+            throws Exception {
+        Path store = dir.resolve("store");
+        Path worktree = Files.createDirectories(dir.resolve("worktree"));
+        RepositoryId repositoryId = RepositoryId.newId();
+        LogRecorder recorder = new LogRecorder().attach();
+        try (DelayedTaskService service = new DelayedTaskService(store, executor, List::of,
+                () -> List.of(repository(repositoryId, worktree, "Project Alpha")))) {
+            await(service.initialize());
+            TaskDocument review = await(service.create("Unfinished prerequisite",
+                    List.of(), repositoryId)).document();
+            await(service.updateStatus(review.id(), TaskState.Actor.HUMAN, TaskStatus.REVIEW));
+            TaskDocument followUp = await(service.create("Follow up work",
+                    List.of(review.id().text()), repositoryId)).document();
+            TaskSnapshot snapshot = await(service.snapshot());
+            service.autoStartFollowUps(snapshot, review.id(), Set.of(review.id()));
+            assertEquals(1, recorder.count("does not exist in the repository",
+                    java.util.logging.Level.INFO), "the missing-branch refusal is logged once");
+            // The SAME snapshot, no document change anywhere: the probe re-fires.
+            service.autoStartFollowUps(snapshot, review.id(), Set.of(review.id()));
+            assertEquals(2, recorder.count("does not exist in the repository",
+                    java.util.logging.Level.INFO),
+                    "the second pass re-probes: no cache blocks the confirmed trigger");
+            assertFalse(service.terminallyRefused(followUp.id()),
+                    "a retryable missing-branch refusal is never registered terminally");
+        } finally {
+            recorder.detach();
+        }
+    }
+
+    // S4 lazy inheritance: the plan's agents are read only when a pass reaches a
+    // PROCEED candidate -- never for a pass whose candidates are all gate-skipped,
+    // and at most once per plan per passing pass. The observable load signal is the
+    // WARNING stackAgentsOf logs for an unreadable plan (one per load).
+    @Test
+    void thePlanAgentsAreLoadedLazilyOnlyWhenACandidateProceeds(@TempDir Path dir) throws Exception {
+        Path store = dir.resolve("store");
+        Path worktree = Files.createDirectories(dir.resolve("worktree"));
+        RepositoryId repositoryId = RepositoryId.newId();
+        LogRecorder recorder = new LogRecorder().attach();
+        try (DelayedTaskService service = new DelayedTaskService(store, executor, List::of,
+                () -> List.of(repository(repositoryId, worktree, "Project Alpha")))) {
+            await(service.initialize());
+            TaskDocument done = await(service.create("Finished prerequisite",
+                    List.of(), repositoryId)).document();
+            await(service.updateStatus(done.id(), TaskState.Actor.HUMAN, TaskStatus.DONE));
+            TaskDocument followUp = await(service.create("Follow up work",
+                    List.of(done.id().text()), repositoryId)).document();
+            TaskSnapshot snapshot = await(service.snapshot());
+
+            // Pass 1 reaches PROCEED (the DONE-missing-branch terminal marker):
+            // exactly one agent-inheritance load.
+            service.autoStartFollowUps(snapshot, done.id(), Set.of(done.id()));
+            long afterProceed = recorder.count("The agent inheritance of plan",
+                    java.util.logging.Level.WARNING);
+            assertEquals(1, afterProceed, "a passing pass loads the plan's agents once");
+
+            // Pass 2 over the same snapshot: the candidate is TERMINAL_CACHED --
+            // zero loads (the eager pre-fix code loaded before the gate loop).
+            service.autoStartFollowUps(snapshot, done.id(), Set.of(done.id()));
+            assertEquals(afterProceed, recorder.count("The agent inheritance of plan",
+                    java.util.logging.Level.WARNING),
+                    "a fully gate-skipped pass loads the plan's agents never");
+
+            // A pass with two PROCEED candidates still loads once (memoized).
+            TaskDocument review = await(service.create("Unfinished prerequisite",
+                    List.of(), repositoryId)).document();
+            await(service.updateStatus(review.id(), TaskState.Actor.HUMAN, TaskStatus.REVIEW));
+            await(service.create("Follow up one", List.of(review.id().text()), repositoryId));
+            await(service.create("Follow up two", List.of(review.id().text()), repositoryId));
+            service.autoStartFollowUps(await(service.snapshot()), review.id(), Set.of(review.id()));
+            assertEquals(afterProceed + 1, recorder.count("The agent inheritance of plan",
+                    java.util.logging.Level.WARNING),
+                    "two PROCEED candidates in one pass share one memoized load");
+        } finally {
+            recorder.detach();
+        }
+    }
+
+    // S4 audit trail: a refused tool-path claim logs one INFO line naming the
+    // calling session, the claimed task and the reason; the tree's Claim action
+    // (claimFromUi) stays unattributed.
+    @Test
+    void aRefusedToolPathClaimLogsAnAuditLineAndClaimFromUiDoesNot(@TempDir Path dir)
+            throws Exception {
+        Path store = dir.resolve("store");
+        Path worktree = Files.createDirectories(dir.resolve("worktree"));
+        RepositoryId repositoryId = RepositoryId.newId();
+        LogRecorder recorder = new LogRecorder().attach();
+        try (DelayedTaskService service = new DelayedTaskService(store, executor, List::of,
+                () -> List.of(repository(repositoryId, worktree, "Project Alpha")))) {
+            await(service.initialize());
+            TaskDocument review = await(service.create("Unfinished prerequisite",
+                    List.of(), repositoryId)).document();
+            await(service.updateStatus(review.id(), TaskState.Actor.HUMAN, TaskStatus.REVIEW));
+            TaskDocument followUp = await(service.create("Follow up work",
+                    List.of(review.id().text()), repositoryId)).document();
+            ManagedSessionId caller = ManagedSessionId.newId();
+            TaskToolContext.Outcome refused = await(service.claim(caller, followUp.id()));
+            assertTrue(refused.refused(), refused.refusal());
+            long auditLines = recorder.count("was refused:", java.util.logging.Level.INFO);
+            assertEquals(1, auditLines, "a refused tool-path claim leaves exactly one trace");
+            boolean namedCaller = recorder.records.stream()
+                    .filter(record -> record.getLevel() == java.util.logging.Level.INFO
+                            && record.getMessage().contains("was refused:"))
+                    .anyMatch(record -> record.getMessage().contains(caller.toString())
+                            && record.getMessage().contains(followUp.id().text())
+                            && record.getMessage().contains(refused.refusal()));
+            assertTrue(namedCaller, "the audit line names the caller, the task and the reason");
+
+            await(service.claimFromUi(followUp.id()));
+            assertEquals(auditLines, recorder.count("was refused:", java.util.logging.Level.INFO),
+                    "the unattributed claim surface logs no audit line");
+        } finally {
+            recorder.detach();
+        }
+    }
+
     /** The launch choice a confirmation freezes for one segment: a plain value, as the
       * New Session dialog's Configure action returns. */
     private static NewTaskPlan.Choice choice(Path folder) {
         return new NewTaskPlan.Choice("Plan choice", Optional.of("Do the work."), AgentKind.CLAUDE,
                 SessionMode.WRITES, NewTaskPlan.WorkIn.NEW_WORKTREE, "dd/plan", "origin/main", folder,
                 NewTaskPlan.OpenIn.OWN_WINDOW, Optional.empty(), Optional.empty(), Optional.empty());
+    }
+
+    // 1b. The created task stores the SHARED registry's id: an install-catalog id whose
+    // root the shared list carries is remapped at create, an id the shared list carries
+    // stays, and an id neither registry maps stays too (the mirror resolves it by root).
+    @Test
+    void createStampsTheSharedIdForAnInstallCatalogRepository(@TempDir Path root) throws Exception {
+        RepositoryId sharedId = RepositoryId.newId();
+        RepositoryId installId = RepositoryId.newId();
+        Path checkout = root.resolve("checkout");
+        SharedProject shared = SharedProject.local(sharedId, checkout, "java-profiler", Instant.EPOCH);
+        Repository install = repository(installId, checkout, "java-profiler");
+        try (DelayedTaskService service = new DelayedTaskService(root, executor, List::of,
+                () -> List.of(install), () -> List.of(shared))) {
+            await(service.initialize());
+            TaskToolContext.Outcome created = await(service.create("Follow up", List.of(), installId));
+            assertFalse(created.refused(), created.refusal());
+            assertEquals(sharedId, created.document().repository(),
+                    "the task stores the shared registry's id for the same checkout");
+            assertTrue(Files.exists(committedFile(root, sharedId, created.document().id())),
+                    "the task file lands under the shared id's directory");
+        }
+    }
+
+    @Test
+    void createKeepsAnIdTheSharedListAlreadyCarries(@TempDir Path root) throws Exception {
+        RepositoryId sharedId = RepositoryId.newId();
+        Path checkout = root.resolve("checkout");
+        SharedProject shared = SharedProject.local(sharedId, checkout, "java-profiler", Instant.EPOCH);
+        try (DelayedTaskService service = new DelayedTaskService(root, executor, List::of,
+                List::of, () -> List.of(shared))) {
+            await(service.initialize());
+            TaskToolContext.Outcome created = await(service.create("Follow up", List.of(), sharedId));
+            assertFalse(created.refused(), created.refusal());
+            assertEquals(sharedId, created.document().repository());
+        }
+    }
+
+    // 1c. Shared-id match before root-match: with an unrelated shared entry BEFORE the
+    // entry whose id the caller passes -- and an install entry whose root matches the
+    // FIRST entry -- the id match still wins, at the second entry.
+    @Test
+    void createKeepsTheSecondSharedEntryIdWhenAnUnrelatedEntryComesFirst(@TempDir Path root)
+            throws Exception {
+        RepositoryId unrelatedId = RepositoryId.newId();
+        RepositoryId secondSharedId = RepositoryId.newId();
+        RepositoryId installId = RepositoryId.newId();
+        Path unrelatedCheckout = root.resolve("unrelated");
+        Path secondCheckout = root.resolve("second");
+        SharedProject unrelated = SharedProject.local(unrelatedId, unrelatedCheckout,
+                "unrelated", Instant.EPOCH);
+        SharedProject second = SharedProject.local(secondSharedId, secondCheckout,
+                "java-profiler", Instant.EPOCH);
+        Repository install = repository(installId, unrelatedCheckout, "unrelated");
+        try (DelayedTaskService service = new DelayedTaskService(root, executor, List::of,
+                () -> List.of(install), () -> List.of(unrelated, second))) {
+            await(service.initialize());
+            TaskToolContext.Outcome created = await(service.create("Follow up", List.of(),
+                    secondSharedId));
+            assertFalse(created.refused(), created.refusal());
+            assertEquals(secondSharedId, created.document().repository(),
+                    "the caller's shared id stays, even though an unrelated entry precedes it");
+            assertTrue(Files.exists(committedFile(root, secondSharedId, created.document().id())),
+                    "the task file lands under the second entry's id directory");
+        }
+    }
+
+    // 1d. Root-match fallback runs past an earlier unrelated shared entry: an
+    // install-catalog id whose root the SECOND shared entry carries resolves to that
+    // second entry's shared id, never an early id-mismatch short-circuit keeping the
+    // install id.
+    @Test
+    void createResolvesAnInstallIdThroughTheLaterSharedRoot(@TempDir Path root) throws Exception {
+        RepositoryId unrelatedId = RepositoryId.newId();
+        RepositoryId laterSharedId = RepositoryId.newId();
+        RepositoryId installId = RepositoryId.newId();
+        Path unrelatedCheckout = root.resolve("unrelated");
+        Path laterCheckout = root.resolve("later");
+        SharedProject unrelated = SharedProject.local(unrelatedId, unrelatedCheckout,
+                "unrelated", Instant.EPOCH);
+        SharedProject later = SharedProject.local(laterSharedId, laterCheckout,
+                "java-profiler", Instant.EPOCH);
+        Repository install = repository(installId, laterCheckout, "java-profiler");
+        try (DelayedTaskService service = new DelayedTaskService(root, executor, List::of,
+                () -> List.of(install), () -> List.of(unrelated, later))) {
+            await(service.initialize());
+            TaskToolContext.Outcome created = await(service.create("Follow up", List.of(), installId));
+            assertFalse(created.refused(), created.refusal());
+            assertEquals(laterSharedId, created.document().repository(),
+                    "the install id resolves to the later shared entry's id by root");
+            assertTrue(Files.exists(committedFile(root, laterSharedId, created.document().id())),
+                    "the task file lands under the shared id's directory");
+        }
+    }
+
+    @Test
+    void createKeepsTheCallerIdWhenNothingMaps(@TempDir Path root) throws Exception {
+        RepositoryId installId = RepositoryId.newId();
+        Repository install = repository(installId, root.resolve("checkout"), "java-profiler");
+        try (DelayedTaskService service = new DelayedTaskService(root, executor, List::of,
+                () -> List.of(install), List::of)) {
+            await(service.initialize());
+            TaskToolContext.Outcome created = await(service.create("Follow up", List.of(), installId));
+            assertFalse(created.refused(), created.refusal());
+            assertEquals(installId, created.document().repository(),
+                    "a project only the install knows is not remapped");
+        }
     }
 
     private static <T> T await(CompletableFuture<T> future) throws Exception {
@@ -354,6 +1192,18 @@ class DelayedTaskServiceTest {
 
     private static Repository repository(RepositoryId id, Path root, String displayName) {
         return new Repository(id, root, displayName, Instant.now(), Instant.now(), RepositorySettings.DEFAULT);
+    }
+
+    /** Runs one git command in {@code cwd}; a non-zero exit fails the test. */
+    private static void git(Path cwd, String... args) throws IOException, InterruptedException {
+        List<String> command = new ArrayList<>();
+        command.add("git");
+        command.addAll(List.of(args));
+        Process process = new ProcessBuilder(command).directory(cwd.toFile()).start();
+        process.getInputStream().readAllBytes();
+        if (!process.waitFor(30, TimeUnit.SECONDS) || process.exitValue() != 0) {
+            throw new IllegalStateException("git " + List.of(args) + " failed in " + cwd);
+        }
     }
 
     /** The committed file path of one task: <root>/<repository-id>/<id>.md. */

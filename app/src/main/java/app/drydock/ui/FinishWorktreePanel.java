@@ -123,7 +123,9 @@ final class FinishWorktreePanel extends VBox {
         Label branchLine = new Label("◫ " + context.branch() + "  →  ⎇ " + context.base());
         branchLine.getStyleClass().add("worktree-context-line");
 
-        getChildren().addAll(header, branchLine, buildSummary(context));
+        getChildren().addAll(header, branchLine, context.prState() == PrState.MERGED
+                ? buildMergedSummary(context)
+                : buildSummary(context));
 
         switch (context.prState()) {
             case NONE -> {
@@ -154,7 +156,13 @@ final class FinishWorktreePanel extends VBox {
             }
             case MERGED -> getChildren().add(action(context.branchWillBeDeleted()
                             ? "Delete merged worktree & branch" : "Delete merged worktree",
-                    "The branch is merged; removes the worktree directly",
+                    // Gate on worktreeClean, never dirty(): the delete's confirmation
+                    // behavior is exactly isWorktreeClean, which ignores dirty
+                    // submodule content -- a caption keyed on dirty() would promise a
+                    // confirmation that never comes for a submodule-dirty-only worktree.
+                    !context.worktreeClean()
+                            ? "The branch is merged; deleting asks before discarding uncommitted changes"
+                            : "The branch is merged; removes the worktree directly",
                     "finish-action-destructive", () -> runAndClose(actions::deleteWorktree, onClose)));
         }
     }
@@ -162,6 +170,37 @@ final class FinishWorktreePanel extends VBox {
     private static void runAndClose(Runnable action, Runnable onClose) {
         onClose.run();
         action.run();
+    }
+
+    /**
+     * The MERGED state's summary. The ordinary summary's "N commits ahead"
+     * is measured against the LOCAL base branch (see {@code
+     * GitStatusService.getChangeSummary}), so after a squash or rebase merge
+     * it still reports the PR's commits as ahead of the base -- read next to
+     * the delete action, that says "these N commits are unmerged and you are
+     * about to lose them", which is exactly wrong. The merged summary states
+     * where the work went instead, and names the only thing a delete can
+     * still discard.
+     */
+    private static VBox buildMergedSummary(Context context) {
+        VBox summaryBox = new VBox(6);
+        summaryBox.getStyleClass().add("finish-summary");
+
+        String pr = context.prNumber().map(n -> "#" + n).orElse("");
+        Label headline = new Label(pr.isEmpty()
+                ? "Merged via pull request"
+                : "Merged via pull request " + pr);
+        headline.getStyleClass().add("finish-summary-headline");
+        summaryBox.getChildren().add(headline);
+
+        Label caption = new Label(!context.worktreeClean()
+                ? "The branch's changes are in the merged pull request. The worktree has uncommitted"
+                    + " changes -- deleting it asks before discarding those."
+                : "The branch's changes are in the merged pull request; nothing is left to lose.");
+        caption.getStyleClass().add("finish-action-caption");
+        caption.setWrapText(true);
+        summaryBox.getChildren().add(caption);
+        return summaryBox;
     }
 
     private VBox buildSummary(Context context) {

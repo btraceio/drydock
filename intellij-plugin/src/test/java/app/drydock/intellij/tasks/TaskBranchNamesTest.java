@@ -17,11 +17,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class TaskBranchNamesTest {
 
+    private static final String PREFIX = "drydock/";
+
     @Test
-    void generatedNameIsThreeLowercaseWordsAndAValidBranch() {
+    void generatedNameIsPrefixedThreeLowercaseWordsAndAValidBranch() {
         String branch = TaskBranchNames.generate(Set.of());
 
-        assertTrue(branch.matches("[a-z]+-[a-z]+-[a-z]+"), branch);
+        assertTrue(branch.matches(PREFIX + "[a-z]+-[a-z]+-[a-z]+"), branch);
         assertTrue(BranchNameRules.check(branch, List.of("origin")).isEmpty(), branch);
     }
 
@@ -44,11 +46,11 @@ class TaskBranchNamesTest {
             }
         };
 
-        String firstName = TaskBranchNames.generate(Set.of(), first);
-        String lastName = TaskBranchNames.generate(Set.of(), last);
+        String firstName = TaskBranchNames.generate(Set.of(), "", first);
+        String lastName = TaskBranchNames.generate(Set.of(), "", last);
 
-        assertEquals("bouncy-amber-alpaca", firstName);
-        assertEquals("zippy-velvet-wren", lastName);
+        assertEquals(PREFIX + "bouncy-amber-alpaca", firstName);
+        assertEquals(PREFIX + "zippy-velvet-wren", lastName);
         assertNotEquals(firstName, lastName);
         assertEquals(2, draws.get());
     }
@@ -58,8 +60,8 @@ class TaskBranchNamesTest {
         Set<String> taken = new HashSet<>();
         for (int i = 0; i < 128; i++) {
             // Restarting the same random source forces every prior name on this walk to collide.
-            String branch = TaskBranchNames.generate(taken, new Random(42));
-            assertTrue(branch.matches("[a-z]+-[a-z]+-[a-z]+"), branch);
+            String branch = TaskBranchNames.generate(taken, "", new Random(42));
+            assertTrue(branch.matches(PREFIX + "[a-z]+-[a-z]+-[a-z]+"), branch);
             assertTrue(taken.add(branch), "Reused a taken branch: " + branch);
         }
         assertEquals(128, taken.size());
@@ -75,24 +77,55 @@ class TaskBranchNamesTest {
                 return 0;
             }
         };
-        String first = TaskBranchNames.generate(Set.of(), zeros);
+        String first = TaskBranchNames.generate(Set.of(), "", zeros);
         Set<String> taken = Set.of(first);
         draws.set(0);
 
         // A zero stride draw must still yield an odd (non-zero) stride, or the walk never leaves the taken start.
-        String next = TaskBranchNames.generate(taken, zeros);
+        String next = TaskBranchNames.generate(taken, "", zeros);
 
         assertNotEquals(first, next);
         assertFalse(taken.contains(next), next);
-        assertTrue(next.matches("[a-z]+-[a-z]+-[a-z]+"), next);
+        assertTrue(next.matches(PREFIX + "[a-z]+-[a-z]+-[a-z]+"), next);
         assertTrue(BranchNameRules.check(next, List.of("origin")).isEmpty(), next);
         assertEquals(2, draws.get());
     }
 
     @Test
     void unrelatedTakenBranchesDoNotChangeTheDraw() {
-        String available = TaskBranchNames.generate(Set.of(), new Random(42));
+        String available = TaskBranchNames.generate(Set.of(), "", new Random(42));
 
-        assertEquals(available, TaskBranchNames.generate(Set.of("main", "fix-parser", "task-2"), new Random(42)));
+        assertEquals(available,
+                TaskBranchNames.generate(Set.of("main", "fix-parser", "task-2"), "", new Random(42)));
+    }
+
+    @Test
+    void attributionIsSplicedBetweenPrefixAndWords() {
+        Set<String> taken = Set.of("main");
+        String branch = TaskBranchNames.generate(taken, "jb", new Random(42));
+
+        assertEquals(TaskBranchNames.prefixed(TaskBranchNames.generate(Set.of(), "", new Random(42))
+                .substring(PREFIX.length()), "jb"), branch);
+        assertTrue(branch.matches(PREFIX + "jb-[a-z]+-[a-z]+-[a-z]+"), branch);
+        assertTrue(BranchNameRules.check(branch, List.of("origin")).isEmpty(), branch);
+    }
+
+    @Test
+    void collidingAttributedNamesSkipToAFreeOne() {
+        Set<String> taken = new HashSet<>();
+        for (int i = 0; i < 64; i++) {
+            String branch = TaskBranchNames.generate(taken, "jb", new Random(42));
+            assertTrue(taken.add(branch), "Reused a taken branch: " + branch);
+        }
+        assertEquals(64, taken.size());
+    }
+
+    @Test
+    void blankAttributionCarriesNoToken() {
+        String withNull = TaskBranchNames.prefixed("bouncy-amber-alpaca", null);
+        String withBlank = TaskBranchNames.prefixed("bouncy-amber-alpaca", "  ");
+
+        assertEquals(PREFIX + "bouncy-amber-alpaca", withNull);
+        assertEquals(withNull, withBlank);
     }
 }
