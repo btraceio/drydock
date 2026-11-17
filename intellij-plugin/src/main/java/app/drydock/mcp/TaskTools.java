@@ -14,13 +14,14 @@ import app.drydock.state.json.JsonValue.JsonNull;
 import app.drydock.state.json.JsonValue.JsonObject;
 import app.drydock.state.json.JsonValue.JsonString;
 
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
-import java.util.stream.Stream;
 
 import static app.drydock.mcp.TaskToolCodec.MAX_AFTER_REFS;
 import static app.drydock.mcp.TaskToolCodec.MAX_PARAGRAPH_CHARS;
@@ -70,7 +71,10 @@ public final class TaskTools {
                         "Reads one task by id, from any registered repository: committed title,"+
                                 " body (the full description and session notes -- a title is one"
                                 + " bounded line and may be a truncation), status, done_by, created,"
-                                + " after references and sessions. review"
+                                + " after references and sessions, plus the task's project"
+                                + " association: 'project' (the display slug) and 'dir' (the"
+                                + " checkout root a start would launch in), both null when the"
+                                + " repository no longer resolves. review"
                                 + " means an agent reported done on a human-validated task and a"
                                 + " human must confirm; done is final.",
                         JsonObject.empty().put("id", schemaString("Task id, as task_list or"
@@ -78,7 +82,10 @@ public final class TaskTools {
                         "id"),
                 descriptor("task_list",
                         "Lists tasks across every registered repository, or one project's when"
-                                + " project is given. Reads are never scoped to this session.",
+                                + " project is given. Reads are never scoped to this session. Each"
+                                + " task carries its project association: 'project' (the display"
+                                + " slug) and 'dir' (the checkout root a start would launch in),"
+                                + " both null when the repository no longer resolves.",
                         JsonObject.empty().put("project", schemaString("Show only this project's"
                                 + " tasks; omit for every registered repository's."))),
                 descriptor("task_update",
@@ -160,24 +167,42 @@ public final class TaskTools {
         }
         // The body rides task_get only: task_list stays lean over every task,
         // and a session needing the full description reads the one task.
-        return taskJson(document).put("body", new JsonString(document.rawBody()));
+        return taskJson(document, projectOf(document)).put("body", new JsonString(document.rawBody()));
+    }
+
+    /** The registered project the task's repository names, or empty when none answers. */
+    private Optional<TaskToolContext.ProjectInfo> projectOf(TaskDocument document) throws McpToolException {
+        return join(context.projectOf(document.repository()), "resolving the project");
     }
 
     private JsonValue taskList(ManagedSessionId caller, JsonObject args) throws McpToolException {
         Optional<String> project = projectArg(args);
-        Stream<TaskDocument> documents = join(context.snapshot(), "reading the task store")
-                .documents().stream();
+        List<TaskDocument> documents = join(context.snapshot(), "reading the task store").documents();
         if (project.isPresent()) {
             RepositoryId filter = resolveProject(project.get());
-            documents = documents.filter(d -> d.repository().equals(filter));
+            documents = documents.stream().filter(d -> d.repository().equals(filter)).toList();
+        }
+        // One memory-only project resolution per repository id, not per task: the listing
+        // spans every repository, and tasks share few of them.
+        Map<RepositoryId, Optional<TaskToolContext.ProjectInfo>> projects = new LinkedHashMap<>();
+        for (TaskDocument document : documents) {
+            if (!projects.containsKey(document.repository())) {
+                projects.put(document.repository(),
+                        join(context.projectOf(document.repository()), "resolving the project"));
+            }
         }
         return JsonObject.empty()
-                .put("tasks", new JsonArray(
-                        documents.map(document -> (JsonValue) taskJson(document)).toList()));
+                .put("tasks", new JsonArray(documents.stream()
+                        .map(document -> (JsonValue) taskJson(document, projects.get(document.repository())))
+                        .toList()));
     }
 
-    /** The committed fields of one task, with the review-vs-done distinction. */
-    private static JsonObject taskJson(TaskDocument document) {
+    /** The committed fields of one task, with the review-vs-done distinction, and the
+      * project association: the display slug and the checkout root a start would launch
+      * in, resolved through the dual-registry mapping. Both null when no registered
+      * project answers -- a task filed under an id neither registry knows is still
+      * listed, it just names no project. */
+    private static JsonObject taskJson(TaskDocument document, Optional<TaskToolContext.ProjectInfo> project) {
         return JsonObject.empty()
                 .put("id", new JsonString(document.id().text()))
                 .put("title", new JsonString(document.title()))
@@ -191,7 +216,13 @@ public final class TaskTools {
                 .put("sessions", new JsonArray(document.sessions().stream()
                         .map(text -> (JsonValue) new JsonString(text)).toList()))
                 .put("awaitingHumanConfirmation",
-                        new JsonBoolean(document.status() == TaskStatus.REVIEW));
+                        new JsonBoolean(document.status() == TaskStatus.REVIEW))
+                .put("project", project
+                        .map(p -> p.slug() == null ? JsonNull.INSTANCE
+                                : (JsonValue) new JsonString(p.slug()))
+                        .orElse(JsonNull.INSTANCE))
+                .put("dir", project.map(p -> (JsonValue) new JsonString(p.root().toString()))
+                        .orElse(JsonNull.INSTANCE));
     }
 
     // ---- status writes only on this session's tasks (clarification 2) ---

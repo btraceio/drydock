@@ -283,12 +283,15 @@ public final class DelayedTaskStart {
         return service.snapshot().get(WAIT_SECONDS, TimeUnit.SECONDS);
     }
 
-    /** The live repository catalog as the graph's project-slug mapping (P2): read once from memory, no I/O. */
+    /** The live repositories as the graph's project-slug mapping (P2): read once from memory,
+     * no I/O. The mapping is the dual-registry one ({@code SharedProjectResolver#displayNames})
+     * -- the task tools stamp created tasks with the SHARED registry's id, so an
+     * install-catalog-only mapping leaves every MCP-created task unnamed in the plan. */
     private static Function<RepositoryId, String> slugsOf(DrydockPluginService plugin) {
         Map<RepositoryId, String> slugs = new HashMap<>();
-        for (Repository repository : plugin.stateStore().state().repositories()) {
-            slugs.put(repository.id(), slug(repository.displayName()));
-        }
+        SharedProjectResolver.displayNames(plugin.sharedProjects().projects(),
+                plugin.stateStore().state().repositories())
+                .forEach((id, name) -> slugs.put(id, slug(name)));
         return slugs::get;
     }
 

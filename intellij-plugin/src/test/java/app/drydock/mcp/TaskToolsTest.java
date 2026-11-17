@@ -5,6 +5,7 @@ import app.drydock.domain.RepositoryId;
 import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonValue.JsonArray;
 import app.drydock.state.json.JsonValue.JsonBoolean;
+import app.drydock.state.json.JsonValue.JsonNull;
 import app.drydock.state.json.JsonValue.JsonObject;
 import app.drydock.state.json.JsonValue.JsonString;
 import app.drydock.tasks.*;
@@ -35,6 +36,7 @@ class TaskToolsTest {
         final TaskStore store;
         final Path root;
         final Map<String, RepositoryId> slugs = new LinkedHashMap<>();
+        final Map<String, RepositoryId> unnameable = new LinkedHashMap<>();
         final Map<ManagedSessionId, RepositoryId> home = new LinkedHashMap<>();
         final ExecutorService executor = Executors.newSingleThreadExecutor();
 
@@ -80,6 +82,20 @@ class TaskToolsTest {
         @Override
         public CompletableFuture<Optional<RepositoryId>> repositoryBySlug(String slug) {
             return CompletableFuture.completedFuture(Optional.ofNullable(slugs.get(slug)));
+        }
+        @Override
+        public CompletableFuture<Optional<TaskToolContext.ProjectInfo>> projectOf(RepositoryId repository) {
+            String slug = slugs.entrySet().stream()
+                    .filter(entry -> entry.getValue().equals(repository))
+                    .map(Map.Entry::getKey).findFirst().orElse(null);
+            if (slug != null) {
+                return CompletableFuture.completedFuture(
+                        Optional.of(new TaskToolContext.ProjectInfo(slug, root)));
+            }
+            // A display name with no slug characters resolves the project but names no slug.
+            boolean unnameable = this.unnameable.containsValue(repository);
+            return CompletableFuture.completedFuture(unnameable
+                    ? Optional.of(new TaskToolContext.ProjectInfo(null, root)) : Optional.empty());
         }
         @Override
         public CompletableFuture<Outcome> create(String title, List<String> after,
@@ -219,6 +235,39 @@ class TaskToolsTest {
         for (JsonValue task : ((JsonArray) listed.get("tasks")).elements()) {
             assertTrue(!((JsonObject) task).has("body"), "task_list carries no body");
         }
+    }
+
+    /** The project association rides both reads: the display slug and the checkout root
+      * a start would launch in, null when the repository resolves to no project. */
+    @Test
+    void taskReadsCarryTheProjectAssociation() throws Exception {
+        TaskDocument filed = seed(alpha, "Filed under alpha", List.of(), caller.toString());
+        JsonValue got = tools.call(caller, "task_get", args("id", filed.id().text()));
+        assertEquals("alpha", textOf(got, "project"), "the slug of the task's repository");
+        assertEquals(context.root.toString(), textOf(got, "dir"),
+                "the checkout root the project resolves to");
+        TaskDocument unfiled = seed(RepositoryId.newId(), "Filed under an unknown id", List.of());
+        JsonValue unknown = tools.call(caller, "task_get", args("id", unfiled.id().text()));
+        assertTrue(unknown instanceof JsonObject object && object.get("project") instanceof JsonNull
+                        && object.get("dir") instanceof JsonNull,
+                "a repository no project answers for names no project and no dir");
+        RepositoryId unnameableId = RepositoryId.newId();
+        context.unnameable.put("punct-only", unnameableId);
+        TaskDocument slugless = seed(unnameableId, "Filed under an unnameable project", List.of());
+        JsonValue sluglessRead = tools.call(caller, "task_get", args("id", slugless.id().text()));
+        assertTrue(sluglessRead instanceof JsonObject object
+                        && object.get("project") instanceof JsonNull,
+                "a resolved project whose name has no slug characters emits project null,"
+                        + " never a serialization failure");
+        assertEquals(context.root.toString(), textOf(sluglessRead, "dir"),
+                "the dir still resolves for an unnameable project");
+        JsonValue listing = tools.call(caller, "task_list", JsonObject.empty());
+        List<String> listedProjects = ((JsonArray) ((JsonObject) listing).get("tasks"))
+                .elements().stream()
+                .map(task -> ((JsonObject) task).get("project"))
+                .map(project -> project instanceof JsonString s ? s.value() : null).toList();
+        assertTrue(listedProjects.contains("alpha"),
+                "task_list resolves the project per task, not once globally: " + listedProjects);
     }
 
     // 2. task_list spans repositories; 6. create defaults, slugs, after refs, title.

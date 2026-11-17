@@ -2,10 +2,10 @@ package app.drydock.intellij.delayedtasks;
 
 import app.drydock.app.ApplicationStateStore;
 import app.drydock.delayedtasks.DelayedTaskService;
+import app.drydock.delayedtasks.SharedProjectResolver;
 import app.drydock.delayedtasks.TaskNotifications;
 import app.drydock.delayedtasks.TaskStoreWatcher;
 import app.drydock.domain.ManagedAgentSession;
-import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.tasks.TaskMirroring;
@@ -380,17 +380,20 @@ public final class DelayedTaskActions {
         return null;
     }
 
-    /** The live repository catalog as the graph's project-slug mapping (P2), the
+    /** The live repositories as the graph's project-slug mapping (P2), the
      * same projection the task service, the panel and the goto handler each
-     * apply privately: read once from memory, no I/O. */
+     * apply: read once from memory, no I/O. The mapping is the dual-registry
+     * one ({@code SharedProjectResolver#displayNames}) -- the task tools stamp
+     * created tasks with the SHARED registry's id, so an install-catalog-only
+     * mapping leaves every MCP-created task's references and names unnamed. */
     private static Function<RepositoryId, String> slugsOf(DrydockPluginService plugin) {
         ApplicationStateStore store = plugin.stateStore();
-        Map<RepositoryId, String> slugs = new HashMap<>();
-        if (store != null) {
-            for (Repository repository : store.state().repositories()) {
-                slugs.put(repository.id(), slug(repository.displayName()));
-            }
+        if (store == null) {
+            return repository -> null;
         }
+        Map<RepositoryId, String> slugs = new HashMap<>();
+        SharedProjectResolver.displayNames(plugin.sharedProjects().projects(), store.state().repositories())
+                .forEach((id, name) -> slugs.put(id, slug(name)));
         return slugs::get;
     }
 

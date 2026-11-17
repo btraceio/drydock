@@ -9,8 +9,10 @@ import app.drydock.tasks.TaskState.Actor;
 import app.drydock.tasks.TaskStatus;
 
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.nio.file.Path;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -80,6 +82,26 @@ public interface TaskToolContext {
 
     /** The registered repository a display slug names (D14); empty when none answers. */
     CompletableFuture<Optional<RepositoryId>> repositoryBySlug(String slug);
+
+    /**
+     * The registered project a task's repository id names, as the platform resolves it:
+     * the dual-registry resolution ({@code SharedProjectResolver}) a task's id needs,
+     * because the task tools stamp created tasks with the shared registry's id while an
+     * IDE-dialog task may carry the install catalog's. The slug is the display-name slug
+     * the graph and the tree show (null when the name has no slug characters); the root
+     * is the checkout's main directory. Remote projects answer empty -- there is no
+     * local checkout to name. Memory-only; never I/O.
+     */
+    CompletableFuture<Optional<ProjectInfo>> projectOf(RepositoryId repository);
+
+    /** The project a task is filed under: its display slug (nullable when unnameable)
+     *  and the checkout root a start launches in. */
+    record ProjectInfo(String slug, Path root) {
+
+        public ProjectInfo {
+            Objects.requireNonNull(root, "root");
+        }
+    }
 
     /**
      * Creates one task: done_by always human (an agent cannot grant itself

@@ -85,6 +85,9 @@ class McpToolRouterTaskTest {
         @Override public CompletableFuture<Optional<RepositoryId>> repositoryBySlug(String slug) {
             return CompletableFuture.completedFuture(Optional.empty());
         }
+        @Override public CompletableFuture<Optional<TaskToolContext.ProjectInfo>> projectOf(RepositoryId repo) {
+            return CompletableFuture.completedFuture(Optional.empty());
+        }
         @Override public CompletableFuture<Outcome> create(String title, List<String> after, RepositoryId repo) {
             return CompletableFuture.completedFuture(
                     mutate(() -> Outcome.committed(store.create(repo, title, List.of()))));

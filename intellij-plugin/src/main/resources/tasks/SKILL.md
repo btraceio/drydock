@@ -15,11 +15,14 @@ descriptions and refusals; there are no flags or behaviors beyond them.
 
 - `task_get(id)` reads one task by id, from any registered repository: the
   committed title, status, done_by, created date, after references and
-  sessions. A status of review means an agent reported done on a
-  human-validated task and a human must confirm; done is final.
+  sessions, plus the project association -- 'project' (the display slug)
+  and 'dir' (the checkout root a start would launch in), both null when
+  the repository no longer resolves. A status of review means an agent
+  reported done on a human-validated task and a human must confirm; done
+  is final.
 - `task_list(project?)` lists tasks across every registered repository, or
   one project's when project is given. Reads are never scoped to this
-  session.
+  session. Each task carries the same project association.
 - `task_update(id, status, note?)` updates one task assigned to this
   session: its status, and optionally a session note. Only status changes
   through this tool -- done_by, relations and other body bytes never
