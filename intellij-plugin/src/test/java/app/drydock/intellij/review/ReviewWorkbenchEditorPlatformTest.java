@@ -10,13 +10,7 @@ import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.Severity;
 import app.drydock.review.Triage;
 import app.drydock.review.tour.ReviewTour;
-import com.intellij.diff.DiffContentFactory;
 import com.intellij.diff.FrameDiffTool;
-import com.intellij.diff.requests.DiffRequest;
-import com.intellij.diff.requests.SimpleDiffRequest;
-import com.intellij.diff.tools.util.base.TextDiffSettingsHolder;
-import com.intellij.diff.util.Side;
-import com.intellij.diff.fragments.LineFragment;
 import com.intellij.ide.util.PropertiesComponent;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.actionSystem.AnAction;
@@ -155,51 +149,6 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
             assertTrue(flow.finishing());
         } finally {
             Disposer.dispose(editor);
-        }
-    }
-
-    public void testAViewIsTheDiffPlacesCollapseSetting() {
-        TextDiffSettingsHolder.TextDiffSettings settings =
-                TextDiffSettingsHolder.TextDiffSettings.getSettings(ReviewDiffEditor.PLACE);
-        boolean saved = settings.isExpandByDefault();
-        try {
-            ReviewDiffEditor.applyView(settings, WorkbenchState.View.CHANGES_ONLY);
-            assertFalse(settings.isExpandByDefault());
-            assertEquals(WorkbenchState.View.CHANGES_ONLY, ReviewDiffEditor.storedView());
-            ReviewDiffEditor.applyView(settings, WorkbenchState.View.FULL_FILE);
-            assertTrue(settings.isExpandByDefault());
-            assertEquals(WorkbenchState.View.FULL_FILE, ReviewDiffEditor.storedView());
-        } finally {
-            settings.setExpandByDefault(saved);
-        }
-    }
-
-    public void testShowingAViewReappliesTheCurrentRequest() {
-        TextDiffSettingsHolder.TextDiffSettings settings =
-                TextDiffSettingsHolder.TextDiffSettings.getSettings(ReviewDiffEditor.PLACE);
-        boolean saved = settings.isExpandByDefault();
-        List<String> applied = new ArrayList<>();
-        ReviewDiffEditor diff = new ReviewDiffEditor(() -> { }, context ->
-                new SimpleDiffRequest(context.path(), DiffContentFactory.getInstance().createEmpty(),
-                        DiffContentFactory.getInstance().createEmpty(), null, null), viewer -> { });
-        try {
-            diff.show(context("src/A.java"));
-            diff.processorReady(new ReviewDiffEditor.ProcessorHandle() {
-                @Override
-                public void apply(DiffRequest request) {
-                    applied.add(request.getTitle());
-                }
-
-                @Override
-                public boolean isDisposed() {
-                    return false;
-                }
-            });
-            diff.showView(WorkbenchState.View.CHANGES_ONLY);
-            assertFalse(settings.isExpandByDefault());
-            assertEquals(List.of("src/A.java"), applied);
-        } finally {
-            settings.setExpandByDefault(saved);
         }
     }
 
@@ -499,9 +448,4 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
     }
 
     private static final ReviewWorkbenchEditor.Host NO_REVIEW = (project, parent) -> Optional.empty();
-
-    private static ReviewDiffRequests.RequestContext context(String path) {
-        return new ReviewDiffRequests.RequestContext(path,
-                new ReviewDiffRequests.Plan("left\n", "right\n", List.<LineFragment>of(), Side.RIGHT, 0));
-    }
 }

@@ -8,6 +8,7 @@ import app.drydock.intellij.review.workbench.model.WorkbenchState;
 import app.drydock.review.DiffSelection;
 import app.drydock.review.HunkDigest;
 import app.drydock.review.HunkIds;
+import com.intellij.diff.tools.fragmented.UnifiedDiffTool;
 import com.intellij.ide.util.PropertiesComponent;
 import com.intellij.openapi.util.Disposer;
 import com.intellij.testFramework.fixtures.BasePlatformTestCase;
@@ -237,6 +238,13 @@ public class ReviewWorkbenchFlowPlatformTest extends BasePlatformTestCase {
         } finally {
             Disposer.dispose(view);
         }
+    }
+
+    public void testTheUnifiedViewerGoesFirstAndNothingElseMoves() {
+        String unified = UnifiedDiffTool.class.getCanonicalName();
+        assertEquals(List.of(unified), ReviewWorkbenchFlowView.unifiedFirst(List.of()));
+        assertEquals(List.of(unified, "a.Simple", "b.Other"),
+                ReviewWorkbenchFlowView.unifiedFirst(List.of("a.Simple", unified, "b.Other")));
     }
 
     public void testFirstNewLineIsTheScrollKeysOrTheLowestNewRow() {

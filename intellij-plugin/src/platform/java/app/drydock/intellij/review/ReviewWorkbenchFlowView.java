@@ -6,12 +6,15 @@ import app.drydock.intellij.review.workbench.model.WorkbenchState;
 import com.intellij.diff.FrameDiffTool;
 import com.intellij.diff.impl.DiffRequestProcessor;
 import com.intellij.diff.impl.DiffRequestProcessorListener;
+import com.intellij.diff.impl.DiffSettingsHolder;
 import com.intellij.diff.requests.DiffRequest;
 import com.intellij.diff.requests.SimpleDiffRequest;
+import com.intellij.diff.tools.fragmented.UnifiedDiffTool;
 import com.intellij.diff.tools.util.base.TextDiffSettingsHolder;
 import com.intellij.diff.util.DiffUserDataKeysEx;
 import com.intellij.icons.AllIcons;
 import com.intellij.ide.ui.laf.darcula.ui.DarculaButtonUI;
+import com.intellij.ide.util.PropertiesComponent;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.actionSystem.ActionManager;
 import com.intellij.openapi.actionSystem.ActionToolbar;
@@ -57,6 +60,8 @@ import java.awt.KeyboardFocusManager;
 import java.awt.event.ActionListener;
 import java.awt.event.KeyEvent;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -164,7 +169,7 @@ final class ReviewWorkbenchFlowView extends JPanel implements Disposable {
         this.project = Objects.requireNonNull(project, "project");
         this.flow = Objects.requireNonNull(flow, "flow");
         this.actions = Objects.requireNonNull(actions, "actions");
-        ReviewDiffEditor.preferUnifiedOnce(FLOW_PLACE);
+        preferUnifiedOnce(FLOW_PLACE);
         TextDiffSettingsHolder.TextDiffSettings settings = TextDiffSettingsHolder.TextDiffSettings.getSettings(FLOW_PLACE);
         settings.setExpandByDefault(false);
         settings.setContextRange(CONTEXT_RANGE);
@@ -622,6 +627,33 @@ final class ReviewWorkbenchFlowView extends JPanel implements Disposable {
     public void dispose() {
         endPanel();
         shownHunk = null;
+    }
+
+    /**
+     * Makes the unified viewer {@code place}'s first choice, once per place:
+     * side by side, each half of the centre is too narrow for a finding
+     * card, which the platform clamps to the editor's viewport. Once only,
+     * so the viewer's own Side-by-side toggle, which stores the same order,
+     * keeps the reviewer's choice afterwards. EDT.
+     */
+    static void preferUnifiedOnce(String place) {
+        PropertiesComponent properties = PropertiesComponent.getInstance();
+        String applied = "drydock.review.unifiedDefault." + place;
+        if (properties.getBoolean(applied)) {
+            return;
+        }
+        DiffSettingsHolder.DiffSettings settings = DiffSettingsHolder.DiffSettings.getSettings(place);
+        settings.setDiffToolsOrder(unifiedFirst(settings.getDiffToolsOrder()));
+        properties.setValue(applied, true);
+    }
+
+    /** {@code order} with the unified viewer first and nothing else moved (pure). */
+    static List<String> unifiedFirst(List<String> order) {
+        String unified = UnifiedDiffTool.class.getCanonicalName();
+        List<String> result = new ArrayList<>();
+        result.add(unified);
+        order.stream().filter(tool -> !tool.equals(unified)).forEach(result::add);
+        return List.copyOf(result);
     }
 
     /** The platform's EDT hop: a diff panel builds editors, which needs the platform's write-intent lock. */
