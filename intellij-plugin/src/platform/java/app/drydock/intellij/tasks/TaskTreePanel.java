@@ -70,9 +70,9 @@ import com.intellij.openapi.progress.ProgressManager;
 import com.intellij.openapi.progress.Task;
 import com.intellij.openapi.ui.Messages;
 import com.intellij.openapi.ui.SimpleToolWindowPanel;
+import com.intellij.openapi.util.Disposer;
 
 import com.intellij.ui.JBColor;
-import com.intellij.ui.PopupHandler;
 import com.intellij.ui.ScrollPaneFactory;
 import com.intellij.ui.SimpleColoredComponent;
 import com.intellij.ui.SimpleTextAttributes;
@@ -91,6 +91,7 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import javax.swing.JPanel;
+import javax.swing.JScrollPane;
 import javax.swing.SwingUtilities;
 import javax.swing.tree.DefaultMutableTreeNode;
 import javax.swing.tree.DefaultTreeModel;
@@ -284,6 +285,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     /** Guarded by {@code this}: subscribing after dispose() must undo itself. */
     private Runnable unsubscribeShared = () -> { };
     private volatile boolean disposed;
+    final BackgroundPopupDispatcher popups;
     /** The delayed-task layer the last rebuild applied (T17a), for the fast
      * worktree-rem acknowledgement, which re-applies the displayed rows.
      * Read off-EDT too -- through the popup menu's supplier and the jump
@@ -438,7 +440,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             search.showProject(Optional.of(ref));
         });
         JPanel inboxCard = new JPanel(new BorderLayout());
-        inboxCard.add(ScrollPaneFactory.createScrollPane(inbox, true), BorderLayout.CENTER);
+        JScrollPane inboxScroll = ScrollPaneFactory.createScrollPane(inbox, true);
+        inboxCard.add(inboxScroll, BorderLayout.CENTER);
         JPanel inboxFooter = new JPanel(new BorderLayout());
         inboxFooter.add(new ActionLink("Browse projects", (ActionListener) event -> showProjects(true)),
                 BorderLayout.WEST);
@@ -452,7 +455,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         treeHeader.add(new ActionLink("← Inbox", (ActionListener) event -> showProjects(false)));
         treeHeader.add(new JBLabel("Projects").withFont(JBFont.label().asBold()));
         treeCard.add(treeHeader, BorderLayout.NORTH);
-        treeCard.add(ScrollPaneFactory.createScrollPane(tree), BorderLayout.CENTER);
+        JScrollPane treeScroll = ScrollPaneFactory.createScrollPane(tree);
+        treeCard.add(treeScroll, BorderLayout.CENTER);
         cards.add(inboxCard, "inbox");
         cards.add(treeCard, "projects");
         setContent(cards);
@@ -878,8 +882,10 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         TreeMenu treeMenu = new TreeMenu(menuActions, workspaceBoxSettings, delayedTaskActions, newDelayedTask,
                 refreshTasksAction, JiraTreeActions::jiraEnabled, () -> displayedNodes, () -> displayedTasks,
                 TaskTreePanel::watchedSnapshot);
-        PopupHandler.installPopupMenu(tree, treeMenu, "Drydock.TaskTree.Popup");
-        PopupHandler.installPopupMenu(inbox, treeMenu, "Drydock.TaskTree.Popup");
+        popups = new BackgroundPopupDispatcher(project, treeMenu, "Drydock.TaskTree.Popup");
+        Disposer.register(this, popups);
+        popups.register(tree, treeScroll.getViewport());
+        popups.register(inbox, inboxScroll.getViewport());
 
         // The tool window's own buttons: start a task, then what can be done
         // to the selected task or project. They stay in place, greyed when
@@ -887,7 +893,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         DefaultActionGroup toolbarActions = new DefaultActionGroup();
         AnAction newTaskAction = ActionManager.getInstance().getAction("Drydock.NewTask");
         if (newTaskAction != null) {
-            toolbarActions.add(newTaskAction);
+            toolbarActions.add(new NewSessionSplitAction(newTaskAction));
         }
         toolbarActions.add(switchToTask);
         toolbarActions.add(addOpenProject);

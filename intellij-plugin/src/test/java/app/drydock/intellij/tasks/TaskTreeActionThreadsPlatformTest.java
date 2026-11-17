@@ -20,12 +20,16 @@ import app.drydock.tasks.TaskNode.TasksSection;
 import app.drydock.tasks.TaskState;
 import app.drydock.tasks.TaskState.TaskView;
 
+import com.intellij.openapi.actionSystem.ActionGroup;
+import com.intellij.openapi.actionSystem.ActionManager;
 import com.intellij.openapi.actionSystem.ActionPlaces;
+import com.intellij.openapi.actionSystem.ActionToolbar;
 import com.intellij.openapi.actionSystem.ActionUiKind;
 import com.intellij.openapi.actionSystem.ActionUpdateThread;
 import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.actionSystem.CommonDataKeys;
+import com.intellij.openapi.actionSystem.DefaultActionGroup;
 import com.intellij.openapi.actionSystem.Presentation;
 import com.intellij.openapi.actionSystem.Separator;
 import com.intellij.openapi.actionSystem.impl.SimpleDataContext;
@@ -33,18 +37,27 @@ import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.project.DumbAwareAction;
 import com.intellij.openapi.util.Disposer;
 import com.intellij.testFramework.PlatformTestUtil;
+import com.intellij.ui.PopupHandler;
+import com.intellij.util.ui.UIUtil;
 import com.intellij.testFramework.fixtures.BasePlatformTestCase;
 import com.intellij.util.TimeoutUtil;
 
 import org.jetbrains.annotations.NotNull;
 
+import javax.swing.JComponent;
 import javax.swing.JTree;
+import javax.swing.JViewport;
+
+import java.awt.Component;
+import java.awt.event.MouseListener;
 
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -249,6 +262,100 @@ public class TaskTreeActionThreadsPlatformTest extends BasePlatformTestCase {
         assertEquals(List.of(), jiraQueries);
 
         assertEquals(0, menu.getChildren(null).length);
+    }
+
+    /**
+     * The panel mounts the split around the registered New Session action and
+     * owns one popup dispatcher wired to this window's project, both content
+     * components and their viewports, the TreeMenu row group and the existing
+     * place; disposing the panel removes every helper listener and still runs
+     * the panel's own cleanup.
+     */
+    public void testThePanelMountsTheSplitAndOwnsOneDispatcherItsDisposalDetaches() throws Exception {
+        IsolatedCatalog.assertSandboxed();
+        DrydockPluginService plugin = DrydockPluginService.getInstance();
+        try { plugin.initialization().get(60, TimeUnit.SECONDS); }
+        catch (Exception e) { fail("Drydock initialization did not complete within 60 s: " + e); }
+        InboxViewState.getInstance(getProject()).loadState(new InboxViewState.Stored());
+        TaskTreePanel panel = new TaskTreePanel(getProject());
+        boolean disposedHere = false;
+        try {
+            JTree tree = panel.tree();
+            InboxList inbox = panel.inbox();
+            tree.setUI(null);
+            BackgroundPopupDispatcher popups = panel.popups;
+            assertNotNull(popups);
+            assertSame("the owning window's project", getProject(), field(popups, "project"));
+            assertTrue(field(popups, "rowGroup") instanceof TaskTreePanel.TreeMenu);
+            assertEquals("Drydock.TaskTree.Popup", field(popups, "place"));
+            List<Component> surfaces = List.of(tree, inbox, viewportOf(tree), viewportOf(inbox));
+            for (Component surface : surfaces) {
+                assertEquals("one helper listener on " + surface.getClass().getSimpleName(),
+                        1, helperListeners(surface));
+                assertFalse("the unconditional PopupHandler is gone",
+                        Arrays.stream(surface.getMouseListeners()).anyMatch(l -> l instanceof PopupHandler));
+            }
+
+            AnAction registered = ActionManager.getInstance().getAction("Drydock.NewTask");
+            assertNotNull(registered);
+            ActionToolbar toolbar = UIUtil.uiTraverser(panel).filter(ActionToolbar.class).first();
+            assertNotNull("the tool window toolbar", toolbar);
+            List<AnAction> mounted = List.of(((DefaultActionGroup) toolbar.getActionGroup()).getChildActionsOrStubs());
+            AnAction first = mounted.getFirst();
+            assertTrue("the toolbar's first button is the split", first instanceof NewSessionSplitAction);
+            assertSame("the split's primary is the registered action", registered,
+                    ((NewSessionSplitAction) first).getMainAction(event(SimpleDataContext.builder()
+                            .add(CommonDataKeys.PROJECT, getProject()))));
+            assertFalse("the registered action itself is not also mounted",
+                    mounted.contains(registered));
+
+            // The panel's own row group still answers from the event alone, off the EDT.
+            ActionGroup rowGroup = (ActionGroup) field(popups, "rowGroup");
+            assertEquals(ActionUpdateThread.BGT, rowGroup.getActionUpdateThread());
+            AnActionEvent delayed = event(SimpleDataContext.builder()
+                    .add(DelayedTaskActions.SELECTED_TASK, delayedRow()));
+            AnAction[] delayedChildren = offEdt(() -> rowGroup.getChildren(delayed));
+            assertTrue(delayedChildren.length > 0);
+            AnAction[] background = popups.backgroundGroup().getChildren(null);
+            for (AnAction child : delayedChildren) {
+                assertFalse(Arrays.asList(background).contains(child));
+            }
+
+            Disposer.dispose(panel);
+            disposedHere = true;
+            for (Component surface : surfaces) {
+                assertEquals("no helper listener after disposal", 0, helperListeners(surface));
+            }
+            assertEquals(Boolean.TRUE, field(popups, "disposed"));
+            assertEquals("the panel's own cleanup still ran", Boolean.TRUE, field(panel, "disposed"));
+        } finally {
+            if (!disposedHere) { try { Disposer.dispose(panel); } catch (RuntimeException e) { } }
+        }
+    }
+
+    /** The panel's row group holds no Swing component, so building it cannot read live geometry. */
+    public void testTheRowGroupHoldsNoSwingComponent() {
+        for (Field f : TaskTreePanel.TreeMenu.class.getDeclaredFields()) {
+            assertFalse(f.getName() + " is a Swing component", Component.class.isAssignableFrom(f.getType()));
+        }
+    }
+
+    private static Object field(Object owner, String name) throws ReflectiveOperationException {
+        Field f = owner.getClass().getDeclaredField(name);
+        f.setAccessible(true);
+        return f.get(owner);
+    }
+
+    private static JViewport viewportOf(JComponent content) {
+        JViewport viewport = (JViewport) content.getParent();
+        assertSame(content, viewport.getView());
+        return viewport;
+    }
+
+    private static long helperListeners(Component surface) {
+        String prefix = BackgroundPopupDispatcher.class.getName() + "$";
+        return Arrays.stream(surface.getMouseListeners())
+                .map(MouseListener::getClass).filter(c -> c.getName().startsWith(prefix)).count();
     }
 
     /** Runs {@code body} on a pooled thread and returns its answer; the EDT stays blocked meanwhile. */
