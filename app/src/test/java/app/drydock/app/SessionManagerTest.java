@@ -582,6 +582,33 @@ class SessionManagerTest {
     }
 
     @Test
+    void updatePrStateIfPrimaryEmptyPreservesAnInterveningNumberedObservation(@TempDir Path tempDir) {
+        ManagedAgentSession session = sessionWith(tempDir, Optional.empty(), Optional.empty());
+        SessionManager manager = newManager(new InMemoryStateRepository(List.of(session)));
+
+        ManagedAgentSession staleSnapshot = currentSession(manager, session.id()).orElseThrow();
+        assertTrue(staleSnapshot.prNumber().isEmpty());
+        manager.updatePrState(session.id(), PrState.MERGED, Optional.of(129));
+
+        ManagedAgentSession updated = manager.updatePrStateIfPrimaryEmpty(session.id(), PrState.OPEN);
+
+        assertEquals(PrState.MERGED, updated.prState());
+        assertEquals(Optional.of(129), updated.prNumber());
+        assertEquals(updated, currentSession(manager, session.id()).orElseThrow());
+    }
+
+    @Test
+    void updatePrStateIfPrimaryEmptyFillsAnEmptyPrimary(@TempDir Path tempDir) {
+        ManagedAgentSession session = sessionWith(tempDir, Optional.empty(), Optional.empty());
+        SessionManager manager = newManager(new InMemoryStateRepository(List.of(session)));
+
+        ManagedAgentSession updated = manager.updatePrStateIfPrimaryEmpty(session.id(), PrState.OPEN);
+
+        assertEquals(PrState.OPEN, updated.prState());
+        assertTrue(updated.prNumber().isEmpty());
+    }
+
+    @Test
     void aSuccessorInheritsTheOutgoingSessionsIdentityAndCheckout() {
         SessionManager manager = newManager(new InMemoryStateRepository(List.of()));
         Repository repository = someRepository();

@@ -4,6 +4,8 @@ import app.drydock.agent.api.AgentKind;
 
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -40,6 +42,23 @@ import java.util.Optional;
  *   <li>{@link PrLink} -- a PR number may only exist alongside {@code OPEN} or
  *       {@code MERGED}. The paired {@code withPr} existed precisely because
  *       these changed together; now the illegal pairing cannot be built.</li>
+ *
+ *   <li>Beyond the primary {@link PrLink} a session may carry secondary PR
+ *       links ({@link #additionalPrs()}): GitHub allows several open pull
+ *       requests from one head branch (different bases), a session checked
+ *       out from one PR can open its own PR from the same worktree, and a
+ *       branch can gain PRs opened outside drydock. The <em>first</em> PR a
+ *       session learns of stays primary -- it is the one the pr-&lt;n&gt;
+ *       branch naming, review scope and finish flow keep operating on -- and
+ *       every later PR appends as a secondary link. {@link #withObservedPr}
+ *       is the single reconcile point: it updates whichever link carries the
+ *       observed number, promotes an observed PR to primary only while no
+ *       primary is known, and appends otherwise. At most
+ *       {@link #MAX_ADDITIONAL_PR_LINKS} secondary links are retained: when
+ *       full, the oldest merged secondary is evicted for a new observation,
+ *       and a full list with no merged link is left unchanged. A secondary
+ *       link always carries a number: an unnumbered PR is identifiable, an
+ *       unnumbered secondary link is not.</li>
  *   <li>{@link AgentBinding} -- which CLI runs this session and what that CLI
  *       calls it. An id from one tool's store means nothing to another.</li>
  *   <li>{@link SessionWorkspace} -- the paths, plus whether drydock created the
@@ -90,12 +109,16 @@ public record ManagedAgentSession(
         Instant lastOpenedAt,
         Optional<Integer> lastExitCode,
         PrLink pr,
+        List<PrLink> additionalPrs,
         boolean namePinned,
         Optional<ManagedSessionId> forkedFrom,
         boolean evalMode,
         Optional<WorkflowId> workflowId,
         boolean startedWithTask
 ) {
+
+    /** Maximum number of secondary pull-request links retained for one session. */
+    public static final int MAX_ADDITIONAL_PR_LINKS = 16;
 
     public ManagedAgentSession {
         Objects.requireNonNull(id, "id");
@@ -108,14 +131,48 @@ public record ManagedAgentSession(
         Objects.requireNonNull(lastOpenedAt, "lastOpenedAt");
         Objects.requireNonNull(lastExitCode, "lastExitCode");
         Objects.requireNonNull(pr, "pr");
+        Objects.requireNonNull(additionalPrs, "additionalPrs");
         Objects.requireNonNull(forkedFrom, "forkedFrom");
         Objects.requireNonNull(workflowId, "workflowId");
 
         if (displayName.isBlank()) {
             throw new IllegalArgumentException("ManagedAgentSession displayName must not be blank");
         }
-    }
 
+        // The first PR a session learns of is the primary one; a secondary
+        // link without a primary behind it would invert that ordering, and a
+        // duplicated number would make "which link does this observation
+        // belong to" ambiguous. Checked here so neither state can be built.
+        List<PrLink> links = List.copyOf(additionalPrs);
+        if (links.size() > MAX_ADDITIONAL_PR_LINKS) {
+            throw new IllegalArgumentException("ManagedAgentSession has " + links.size()
+                    + " secondary PR links; maximum is " + MAX_ADDITIONAL_PR_LINKS);
+        }
+        if (!links.isEmpty() && pr.number().isEmpty()) {
+            throw new IllegalArgumentException(
+                    "ManagedAgentSession carries " + links.size()
+                            + " secondary PR links but no primary PR");
+        }
+        for (int i = 0; i < links.size(); i++) {
+            PrLink link = links.get(i);
+            if (link.number().isEmpty()) {
+                throw new IllegalArgumentException(
+                        "Secondary PR link at index " + i + " has no number");
+            }
+            if (pr.number().equals(link.number())) {
+                throw new IllegalArgumentException(
+                        "Secondary PR link duplicates the primary PR number "
+                                + link.number().get());
+            }
+            for (int j = 0; j < i; j++) {
+                if (links.get(j).number().equals(link.number())) {
+                    throw new IllegalArgumentException(
+                            "Duplicate secondary PR link for number " + link.number().get());
+                }
+            }
+        }
+        additionalPrs = links;
+    }
     /**
      * As the canonical constructor with {@code evalMode = false} and
      * {@code workflowId = Optional.empty()}; for callers (and tests) that
@@ -126,7 +183,7 @@ public record ManagedAgentSession(
                                Instant createdAt, Instant lastOpenedAt, Optional<Integer> lastExitCode,
                                PrLink pr, boolean namePinned, Optional<ManagedSessionId> forkedFrom) {
         this(id, repositoryId, displayName, binding, workspace, status, createdAt, lastOpenedAt, lastExitCode,
-                pr, namePinned, forkedFrom, false, Optional.empty(), false);
+                pr, List.of(), namePinned, forkedFrom, false, Optional.empty(), false);
     }
 
     /**
@@ -140,7 +197,7 @@ public record ManagedAgentSession(
                                PrLink pr, boolean namePinned, Optional<ManagedSessionId> forkedFrom,
                                boolean evalMode) {
         this(id, repositoryId, displayName, binding, workspace, status, createdAt, lastOpenedAt, lastExitCode,
-                pr, namePinned, forkedFrom, evalMode, Optional.empty(), false);
+                pr, List.of(), namePinned, forkedFrom, evalMode, Optional.empty(), false);
     }
 
     // ---- leaf accessors, delegating into the groups --------------------------
@@ -175,6 +232,22 @@ public record ManagedAgentSession(
 
     public Optional<Integer> prNumber() {
         return pr.number();
+    }
+
+    /** Secondary PR links, primary first not included; see the class doc for the ordering rule. */
+    public List<PrLink> additionalPrs() {
+        return additionalPrs;
+    }
+
+    /** Every linked PR, primary first. */
+    public List<PrLink> prLinks() {
+        if (additionalPrs.isEmpty()) {
+            return pr.number().isPresent() ? List.of(pr) : List.of();
+        }
+        List<PrLink> all = new ArrayList<>(1 + additionalPrs.size());
+        all.add(pr);
+        all.addAll(additionalPrs);
+        return List.copyOf(all);
     }
 
     // ---- mutation -------------------------------------------------------------
@@ -222,6 +295,55 @@ public record ManagedAgentSession(
     /** PR state and number always change together, which {@link PrLink} now enforces. */
     public ManagedAgentSession withPr(PrState newPrState, Optional<Integer> newPrNumber) {
         return toBuilder().pr(PrLink.of(newPrState, newPrNumber)).build();
+    }
+
+    /**
+     * Folds one PR observation (a state and the number it was observed for)
+     * into the link set: updates the link that carries {@code number}, takes
+     * the primary slot only while no primary number is known, and appends a
+     * secondary link otherwise. At the {@link #MAX_ADDITIONAL_PR_LINKS} limit,
+     * a novel observation evicts the oldest {@link PrState#MERGED} secondary;
+     * if none is merged, it is not recorded. Returns {@code this} when the
+     * observation changes nothing, so callers can detect "nothing to reconcile"
+     * by identity and skip the persist/UI refresh.
+     */
+    public ManagedAgentSession withObservedPr(PrState observed, int number) {
+        Optional<Integer> target = Optional.of(number);
+        if (pr.number().equals(target)) {
+            return pr.state() == observed ? this : withPr(observed, target);
+        }
+        for (int i = 0; i < additionalPrs.size(); i++) {
+            PrLink link = additionalPrs.get(i);
+            if (!link.number().equals(target)) {
+                continue;
+            }
+            if (link.state() == observed) {
+                return this;
+            }
+            List<PrLink> updated = new ArrayList<>(additionalPrs);
+            updated.set(i, PrLink.of(observed, target));
+            return toBuilder().additionalPrs(updated).build();
+        }
+        if (pr.number().isEmpty()) {
+            // First PR this session is observed with: it becomes primary.
+            return withPr(observed, target);
+        }
+        List<PrLink> appended = new ArrayList<>(additionalPrs);
+        if (appended.size() >= MAX_ADDITIONAL_PR_LINKS) {
+            int oldestMerged = -1;
+            for (int i = 0; i < appended.size(); i++) {
+                if (appended.get(i).state() == PrState.MERGED) {
+                    oldestMerged = i;
+                    break;
+                }
+            }
+            if (oldestMerged < 0) {
+                return this;
+            }
+            appended.remove(oldestMerged);
+        }
+        appended.add(PrLink.of(observed, target));
+        return toBuilder().additionalPrs(appended).build();
     }
 
     public ManagedAgentSession withNamePinned(boolean newNamePinned) {
@@ -275,6 +397,7 @@ public record ManagedAgentSession(
         private Instant lastOpenedAt;
         private Optional<Integer> lastExitCode;
         private PrLink pr;
+        private List<PrLink> additionalPrs;
         private boolean namePinned;
         private Optional<ManagedSessionId> forkedFrom;
         private boolean evalMode;
@@ -292,6 +415,7 @@ public record ManagedAgentSession(
             this.lastOpenedAt = from.lastOpenedAt;
             this.lastExitCode = from.lastExitCode;
             this.pr = from.pr;
+            this.additionalPrs = from.additionalPrs;
             this.namePinned = from.namePinned;
             this.forkedFrom = from.forkedFrom;
             this.evalMode = from.evalMode;
@@ -317,6 +441,7 @@ public record ManagedAgentSession(
             this.lastOpenedAt = now;
             this.lastExitCode = Optional.empty();
             this.pr = PrLink.none();
+            this.additionalPrs = List.of();
             this.namePinned = false;
             this.forkedFrom = Optional.empty();
             this.evalMode = false;
@@ -374,6 +499,11 @@ public record ManagedAgentSession(
             return this;
         }
 
+        public Builder additionalPrs(List<PrLink> value) {
+            this.additionalPrs = List.copyOf(value);
+            return this;
+        }
+
         public Builder namePinned(boolean value) {
             this.namePinned = value;
             return this;
@@ -401,8 +531,8 @@ public record ManagedAgentSession(
 
         public ManagedAgentSession build() {
             return new ManagedAgentSession(id, repositoryId, displayName, binding, workspace, status,
-                    createdAt, lastOpenedAt, lastExitCode, pr, namePinned, forkedFrom, evalMode, workflowId,
-                    startedWithTask);
+                    createdAt, lastOpenedAt, lastExitCode, pr, additionalPrs, namePinned, forkedFrom,
+                    evalMode, workflowId, startedWithTask);
         }
     }
 }
