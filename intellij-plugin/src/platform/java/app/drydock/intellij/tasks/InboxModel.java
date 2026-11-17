@@ -37,9 +37,11 @@ import java.util.Set;
  * (the ALL view, no search) and the task layer's rows; no I/O, no clock.
  *
  * <p>A session goes to the first group that takes it: Needs you
- * ({@link DelayedTaskRows#needsYou}: running and waiting for the user, or an
- * assigned task waiting for the user's confirmation), Flagged, Running, else
- * Idle. A task goes by its presentation: Blocked, In review, Ready to start
+ * ({@link DelayedTaskRows#needsYou(TaskRow)}: a running session waiting
+ * for the user), Flagged, Running, else Idle. An assigned task in review
+ * does not pin its session here -- the task shows as its own row under
+ * In review, and the session's group follows its dot alone. A task goes
+ * by its presentation: Blocked, In review, Ready to start
  * (ready, and started tasks whose sessions are gone), and Done today (done,
  * with a {@code done_at} on the current day). A started task attached to a
  * session row in the inbox is represented by that row, so it is not a row of
@@ -365,7 +367,7 @@ final class InboxModel {
             List<String> titles = children.stream()
                     .filter(child -> child.presentation() == TaskState.Presentation.STARTED)
                     .map(DelayedTaskRow::title).toList();
-            placed.add(new Placed(sessionKind(at.row(), children), new SessionItem(at.row(), at.project(), titles)));
+            placed.add(new Placed(sessionKind(at.row()), new SessionItem(at.row(), at.project(), titles)));
         }
         LocalDate today = LocalDate.ofInstant(in.now(), in.zone());
         for (DelayedTaskRow row : loose) {
@@ -376,8 +378,8 @@ final class InboxModel {
         return placed;
     }
 
-    private static GroupKind sessionKind(TaskRow row, List<DelayedTaskRow> children) {
-        if (DelayedTaskRows.needsYou(row, children)) {
+    private static GroupKind sessionKind(TaskRow row) {
+        if (DelayedTaskRows.needsYou(row)) {
             return GroupKind.NEEDS_YOU;
         }
         if (row.session().flagged()) {

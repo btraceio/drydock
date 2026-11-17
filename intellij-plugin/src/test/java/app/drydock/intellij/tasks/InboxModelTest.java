@@ -147,8 +147,9 @@ class InboxModelTest {
         assertEquals("Done today", inbox.groups().getLast().label());
     }
 
+    /** A review task is its own In-review row and leaves its session's group to the dot. */
     @Test
-    void aStartedTaskRidesOnItsSessionAndAReviewTaskMakesItNeedYou() {
+    void aStartedTaskRidesOnItsSessionAndAReviewTaskDoesNotPinIt() {
         TaskRow host = running("Host", NOW);
         TaskRow reviewed = running("Reviewed", NOW);
         alphaRows.add(host);
@@ -162,10 +163,11 @@ class InboxModelTest {
 
         Inbox inbox = inbox(Query.NONE);
 
-        assertEquals(List.of("Reviewed"), titles(inbox, GroupKind.NEEDS_YOU));
+        assertTrue(inbox.groups().stream().noneMatch(group -> group.kind() == GroupKind.NEEDS_YOU),
+                "a blue-dot session is not Needs you, review child or not");
+        assertEquals(List.of("Host", "Reviewed", "Started elsewhere"), titles(inbox, GroupKind.RUNNING),
+                "the reviewed session runs on by its dot; the review task is a row of its own");
         assertEquals(List.of("Awaiting confirmation"), titles(inbox, GroupKind.IN_REVIEW));
-        assertEquals(List.of("Host", "Started elsewhere"), titles(inbox, GroupKind.RUNNING),
-                "an attached started task is no row of its own; one with no session row is");
         SessionItem hostItem = (SessionItem) inbox.groups().stream()
                 .filter(group -> group.kind() == GroupKind.RUNNING).findFirst().orElseThrow().items().get(0);
         assertEquals(List.of("Started under host"), hostItem.taskTitles());
