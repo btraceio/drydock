@@ -33,8 +33,6 @@ import javax.swing.JPanel;
 import java.awt.BorderLayout;
 import java.awt.Component;
 import java.awt.Container;
-import java.awt.Dimension;
-import java.awt.Rectangle;
 
 import java.nio.file.Path;
 
@@ -204,16 +202,25 @@ public class AgentConsoleStripPlatformTest extends BasePlatformTestCase {
                 Optional.empty(), Optional.empty(), false,
                 Optional.of(new SessionPlace("hosted-repo", Optional.of("feature/x"))),
                 false, false, running);
-        JButton ownProject = button(SessionCommands.Command.OWN_PROJECT);
-        assertNotNull(ownProject);
-        assertTrue("a tab hosting another worktree's agent offers the jump to its "
-                        + "own project window (A8)",
-                ownProject.isVisible());
+        assertEquals("a tab hosting another worktree's agent offers the jump to its "
+                        + "own project window from the overflow menu (A8)",
+                List.of(AgentStripText.OPEN_IN_PROJECT_WINDOW), strip.overflowItems());
+        assertTrue(strip.moreButton().isVisible());
 
         strip.update(session, Optional.empty(), true, false, "Pi", Duration.ZERO,
                 Optional.empty(), Optional.empty(), false, Optional.empty(), false, false, running);
         assertFalse("this window's own session has nothing to jump to (A8)",
-                ownProject.isVisible());
+                strip.overflowItems().contains(AgentStripText.OPEN_IN_PROJECT_WINDOW));
+    }
+
+    public void testTheOverflowButtonIsHiddenWhenItWouldBeEmpty() {
+        strip.update(session("Quiet", Optional.empty(), SessionStatus.INACTIVE),
+                Optional.empty(), false, false, "Pi", Duration.ZERO,
+                Optional.empty(), Optional.empty(), false, Optional.empty(), false, false,
+                commands(false, false, false));
+        assertTrue(strip.overflowItems().isEmpty());
+        assertFalse("an empty overflow menu must not leave a dead button",
+                strip.moreButton().isVisible());
     }
 
     // ---- keyboard access (AGENTS.md) ---------------------------------------
@@ -228,105 +235,29 @@ public class AgentConsoleStripPlatformTest extends BasePlatformTestCase {
                 strip.primaryButton().isFocusable());
     }
 
-    // ---- the wrapping ribbon (A4, A5) --------------------------------------
+    // ---- the one-row strip (A4, A5) -----------------------------------------
 
-    public void testANarrowStripWrapsOntoRowsAndKeepsDoneInside() {
+    public void testANarrowStripCollapsesLabelsToIconsAndKeepsDoneInside() {
         ManagedAgentSession session = session(
                 "A session whose name is long enough to need the whole first row",
                 Optional.empty(), SessionStatus.RUNNING);
         strip.update(session, Optional.empty(), true, false, "Pi agent", Duration.ZERO,
-                Optional.of(3), Optional.empty(), true,
-                Optional.of(new SessionPlace("hosted-repo", Optional.empty())),
+                Optional.of(3), Optional.empty(), true, Optional.empty(),
                 false, false, commands(true, false, false));
+        StripToolbarButton changes = (StripToolbarButton) button(SessionCommands.Command.CHANGES);
+        StripToolbarButton done = (StripToolbarButton) button(SessionCommands.Command.DONE);
+        assertNotNull(changes);
 
-        // WrapLayout reads the container's current width, so set the width
-        // before asking for the wrapped preferred size.
-        strip.setSize(200, 10);
+        strip.setSize(100_000, 40);
         strip.doLayout();
-        Dimension wrapped = strip.getPreferredSize();
-        strip.setSize(100_000, 10);
+        assertFalse("a wide strip keeps the Changes label", changes.isCompact());
+
+        strip.setSize(300, 40);
         strip.doLayout();
-        int oneRow = strip.getPreferredSize().height;
-        assertTrue("at width 200 the ribbon must prefer more than one row (A4): "
-                        + wrapped.height + " vs " + oneRow,
-                wrapped.height > oneRow);
-
-        strip.setSize(200, wrapped.height);
-        strip.doLayout();
-        JButton done = button(SessionCommands.Command.DONE);
-        assertNotNull(done);
-        assertTrue("Done must sit fully inside the wrapped strip (A5): " + done.getBounds(),
-                new Rectangle(0, 0, strip.getWidth(), strip.getHeight())
-                        .contains(done.getBounds()));
-    }
-
-    // ---- live resize through the real parent (F7) -----------------------
-
-    public void testALiveResizeThroughTheRealParentLayoutKeepsEveryButtonInsideBothWays() {
-        // The strip is painted ONCE — the way the editor paints it after a
-        // state change — and then only the parent is resized, wide to narrow
-        // to wide again, with no status tick, no timer and no further
-        // update() in between: the hypothesis under test was that WrapLayout
-        // computes its preferred height from a stale width so a narrowed
-        // parent clips the wrapped rows (Done first) until some other event
-        // repaints the world.
-        ManagedAgentSession session = session(
-                "A session whose name is long enough to need the whole first row",
-                Optional.empty(), SessionStatus.RUNNING);
-        strip.update(session, Optional.empty(), true, false, "Pi agent", Duration.ZERO,
-                Optional.of(3), Optional.empty(), true,
-                Optional.of(new SessionPlace("hosted-repo", Optional.empty())),
-                false, false, commands(true, false, false));
-
-        // The strip's real home, as AgentConsoleEditor builds it: a
-        // BorderLayout root holding it at NORTH. Only the sizes are driven by
-        // hand: a headless hierarchy has no peer, so validate() is inert, and
-        // the layoutTree call below is the validateTree recursion (each
-        // container lays out, then its children) a shown editor runs per
-        // resize — the strip itself never sets its own height.
-        JPanel root = new JPanel(new BorderLayout());
-        root.add(strip, BorderLayout.NORTH);
-        root.add(new JPanel(), BorderLayout.CENTER);
-
-        int wide = 1000;
-        // 200 is proven by testANarrowStripWrapsOntoRowsAndKeepsDoneInside
-        // to force wrapping for exactly this strip content.
-        int narrow = 200;
-
-        int wideHeight = 0;
-        int narrowHeight = 0;
-        for (int pass = 1; pass <= 3; pass++) {
-            boolean narrowPass = pass == 2;
-            root.setSize(narrowPass ? narrow : wide, 600);
-            layoutTree(root);
-            if (pass == 1) {
-                wideHeight = strip.getHeight();
-            } else if (pass == 2) {
-                narrowHeight = strip.getHeight();
-            }
-            // The wrapped units — the strip's direct children, the command
-            // buttons among them — must stay inside; the identity block is
-            // one unit by design (A5) and its own internals are its business.
-            for (int i = 0; i < strip.getComponentCount(); i++) {
-                if (!(strip.getComponent(i) instanceof JButton candidate)
-                        || !candidate.isVisible()) {
-                    continue;
-                }
-                assertTrue("every visible command button must stay fully inside the "
-                                + "strip after the resize to " + (narrowPass ? narrow : wide)
-                                + " wide (pass " + pass + "): strip " + strip.getSize()
-                                + ", button \u201c" + candidate.getText() + "\u201d "
-                                + candidate.getBounds(),
-                        new Rectangle(strip.getSize()).contains(candidate.getBounds()));
-            }
-            JButton done = button(SessionCommands.Command.DONE);
-            assertNotNull(done);
-            assertTrue("Done especially must survive the resize (A5): " + done.getBounds(),
-                    new Rectangle(strip.getSize()).contains(done.getBounds()));
-        }
-        assertTrue("the narrow pass must actually wrap — more rows than the wide "
-                        + "passes: " + wideHeight + " vs " + narrowHeight,
-                narrowHeight > wideHeight);
+        assertTrue("Changes collapses to its icon before Done is touched", changes.isCompact());
+        assertEquals("the label survives as the button's text", "Changes", changes.getText());
+        assertEquals("and as its tooltip", "Changes", changes.getToolTipText());
+        assertFalse("Done keeps its label (A5)", done.isCompact());
     }
 
     // ---- icon sameness through the real tab action (A7) -------------------

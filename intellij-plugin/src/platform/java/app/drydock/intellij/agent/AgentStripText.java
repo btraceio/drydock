@@ -23,6 +23,15 @@ public final class AgentStripText {
     private AgentStripText() {
     }
 
+    /** The accessible name and tooltip of the strip's overflow button. */
+    public static final String MORE_ACTIONS = "More actions";
+
+    /** The overflow item that opens the session in its own worktree's project window. */
+    public static final String OPEN_IN_PROJECT_WINDOW = "Open in Project Window";
+
+    /** The overflow item that moves the live session to another agent provider. */
+    public static final String TRANSFER_TO_PROVIDER = "Transfer to Another Provider…";
+
     /**
      * The status to <em>display</em> for a session, given whether this window
      * actually has a process for it.
