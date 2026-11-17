@@ -35,6 +35,8 @@ import java.util.function.Function;
 import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Platform-backed checks for values that must survive {@code DialogWrapper.init()}. */
 public class NewTaskDialogPlatformTest extends BasePlatformTestCase {
@@ -403,6 +405,79 @@ public class NewTaskDialogPlatformTest extends BasePlatformTestCase {
     // off by default; and a gate that fails clears a checked box, so the
     // value can never ride a choice the conditions no longer permit.
 
+    // Eval mode: the checkbox follows the harness's evalAvailable gate, never
+    // rides a remote launch, and a gate that fails clears a checked box.
+
+    public void testEvalModeFollowsTheHarnessGateAndNeverRidesARemoteLaunch() {
+        ApplicationManager.getApplication().invokeAndWait(() -> {
+            WorkspaceSettings.setEnabled(true);
+            NewTaskDialog dialog = new NewTaskDialog(getProject(), claudeInputsEval(), Optional.empty());
+            try {
+                dialog.diagSetInstructions("Fix the parser");
+                JCheckBox mode = control(dialog, "evalMode", JCheckBox.class);
+                JCheckBox box = control(dialog, "workspaceBox", JCheckBox.class);
+
+                // Claude's docker probe declined eval: the checkbox is hidden
+                // and the choice carries no eval.
+                assertFalse(mode.isVisible());
+                assertFalse(mode.isEnabled());
+                assertFalse(mode.isSelected());
+                assertFalse(dialog.choice().eval());
+
+                // Pi injects eval through the launch env: the offer returns, off.
+                agentButton(dialog, AgentKind.PI).doClick();
+                assertTrue(mode.isEnabled());
+                assertFalse(mode.isSelected());
+                assertFalse(dialog.choice().eval());
+
+                // A checked box rides the choice.
+                mode.setSelected(true);
+                assertTrue(dialog.choice().eval());
+
+                // The remote arm is Claude-only and never eval: selecting the
+                // workspace box clears the checked eval in the same refresh pass.
+                agentButton(dialog, AgentKind.CLAUDE).doClick();
+                box.setSelected(true);
+                assertFalse(mode.isEnabled());
+                assertFalse(mode.isSelected());
+                assertFalse(dialog.choice().eval());
+                assertTrue(dialog.choice().onWorkspaceBox());
+            } finally {
+                WorkspaceSettings.setEnabled(false);
+                Disposer.dispose(dialog.getDisposable());
+            }
+        });
+    }
+
+    public void testEvalModeIsDisabledAndClearedWhileSavingForLater() {
+        ApplicationManager.getApplication().invokeAndWait(() -> {
+            NewTaskDialog dialog = new NewTaskDialog(getProject(), claudeInputsEval(), Optional.empty());
+            try {
+                dialog.diagSetInstructions("Fix the parser");
+                JCheckBox mode = control(dialog, "evalMode", JCheckBox.class);
+                JCheckBox save = control(dialog, "saveForLater", JCheckBox.class);
+                agentButton(dialog, AgentKind.PI).doClick();
+                mode.setSelected(true);
+                assertTrue(dialog.choice().eval());
+
+                // A saved task starts as an ordinary session: saving disables
+                // the offer and clears the checked box. (doClick: the save
+                // toggle drives refresh through its action listener.)
+                save.doClick();
+                assertFalse(mode.isEnabled());
+                assertFalse(mode.isSelected());
+                assertFalse(dialog.choice().eval());
+
+                // Back to launch mode the offer returns, off — never auto-restored.
+                save.doClick();
+                assertTrue(mode.isEnabled());
+                assertFalse(mode.isSelected());
+            } finally {
+                Disposer.dispose(dialog.getDisposable());
+            }
+        });
+    }
+
     public void testWorkspaceBoxIsInvisibleAndOffWhileTheFlagIsOff() {
         AtomicReference<NewTaskPlan.Choice> choice = new AtomicReference<>();
         AtomicReference<JCheckBox> box = new AtomicReference<>();
@@ -571,6 +646,17 @@ public class NewTaskDialogPlatformTest extends BasePlatformTestCase {
     private static NewTaskPlan.Inputs claudeInputs() {
         return claudeInputs(Optional.empty(), SharedProject.local(RepositoryId.newId(), Path.of("/tmp/profiler"),
                 "profiler", Instant.EPOCH));
+    }
+
+    /** As {@link #claudeInputs()}, with eval routable by Pi only (Claude's docker probe declined). */
+    private static NewTaskPlan.Inputs claudeInputsEval() {
+        Agent claude = agentOf(AgentKind.CLAUDE);
+        Agent pi = agentOf(AgentKind.PI);
+        return new NewTaskPlan.Inputs(SharedProject.local(RepositoryId.newId(), Path.of("/tmp/profiler"),
+                "profiler", Instant.EPOCH), "profiler", Optional.empty(), List.of(claude, pi), AgentKind.CLAUDE,
+                "origin/main", List.of("origin/main"), List.of("origin"), Set.of(), Path.of("/tmp"), "", false,
+                kind -> Optional.empty(), kind -> List.of(), kind -> ModelTiers.EMPTY, kind -> true,
+                kind -> kind == AgentKind.PI);
     }
 
     private static NewTaskPlan.Inputs claudeInputs(NewTaskPlan.FixedWorktree fixed) {

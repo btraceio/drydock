@@ -174,11 +174,28 @@ public final class SessionDialogs {
             Optional<String> model, Optional<ModelTiers> tiers, boolean freshWindow,
             PreparedSessionCallback preparedSession, List<TaskLaunchBinding> bindings,
             Optional<WorkspaceBoxBinding> workspaceBox, Optional<PullRequestTarget> targetPullRequest) {
+        return launchNewSession(project, workingDirectory, repositoryRoot, kind, displayName, mode, task, model,
+                tiers, freshWindow, preparedSession, bindings, workspaceBox, targetPullRequest, false);
+    }
+
+    /**
+     * As the target-pull-request overload, with the launch's eval routing:
+     * checked, the session's row carries {@code evalMode} and its harness
+     * sends its model traffic to the eval account. The workspace-box arm
+     * never receives eval — the New task dialog's gate clears the box — so
+     * a remote launch here is always a non-eval launch.
+     */
+    public static CompletableFuture<ManagedAgentSession> launchNewSession(Project project, Path workingDirectory,
+            Path repositoryRoot, AgentKind kind, String displayName, SessionMode mode, Optional<String> task,
+            Optional<String> model, Optional<ModelTiers> tiers, boolean freshWindow,
+            PreparedSessionCallback preparedSession, List<TaskLaunchBinding> bindings,
+            Optional<WorkspaceBoxBinding> workspaceBox, Optional<PullRequestTarget> targetPullRequest,
+            boolean eval) {
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         String agentName = AgentLabels.displayName(plugin.registry(), kind);
         CompletableFuture<ManagedAgentSession> launch = launchSession(project, workingDirectory, repositoryRoot,
                 kind, displayName, mode, session -> CompletableFuture.completedFuture(task), freshWindow, model,
-                tiers, preparedSession, bindings, workspaceBox, targetPullRequest);
+                tiers, preparedSession, bindings, workspaceBox, targetPullRequest, eval);
         ProgressManager.getInstance().run(new Task.Backgroundable(project,
                 "Starting " + agentName + " session…", true) {
             @Override
@@ -394,12 +411,23 @@ public final class SessionDialogs {
             Optional<String> model, Optional<ModelTiers> tiers, PreparedSessionCallback preparedSession,
             List<TaskLaunchBinding> bindings, Optional<WorkspaceBoxBinding> workspaceBox,
             Optional<PullRequestTarget> targetPullRequest) {
+        return launchSession(project, workingDirectory, repositoryRoot, kind, displayName, mode, prompt, freshWindow,
+                model, tiers, preparedSession, bindings, workspaceBox, targetPullRequest, false);
+    }
+
+    /** As the target-pull-request overload, with the launch's eval routing (see {@link #launchNewSession}). */
+    public static CompletableFuture<ManagedAgentSession> launchSession(Project project, Path workingDirectory,
+            Path repositoryRoot, AgentKind kind, String displayName, SessionMode mode,
+            Function<ManagedAgentSession, CompletableFuture<Optional<String>>> prompt, boolean freshWindow,
+            Optional<String> model, Optional<ModelTiers> tiers, PreparedSessionCallback preparedSession,
+            List<TaskLaunchBinding> bindings, Optional<WorkspaceBoxBinding> workspaceBox,
+            Optional<PullRequestTarget> targetPullRequest, boolean eval) {
         Objects.requireNonNull(targetPullRequest, "targetPullRequest");
         Objects.requireNonNull(bindings, "bindings");
         Objects.requireNonNull(workspaceBox, "workspaceBox");
         CompletableFuture<ManagedAgentSession> chain = DrydockStartupActivity.sessions(project)
                 .prepareSession(workingDirectory, repositoryRoot, kind, displayName, mode, workspaceBox)
-                .thenApply(session -> session.toBuilder().targetPullRequest(targetPullRequest).build())
+                .thenApply(session -> session.toBuilder().targetPullRequest(targetPullRequest).evalMode(eval).build())
                 .thenApply(session -> preparedSessionNotified(preparedSession, session));
         for (TaskLaunchBinding binding : bindings) {
             chain = chain.thenCompose(session -> bindingBound(binding, session));

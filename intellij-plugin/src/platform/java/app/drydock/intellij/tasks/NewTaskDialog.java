@@ -142,6 +142,22 @@ final class NewTaskDialog extends DialogWrapper {
     private final JCheckBox workspaceBox = new JCheckBox("Run on workspace box");
 
     /**
+     * The per-launch eval offer: checked, the session's model traffic is
+     * routed to the eval account ({@code x-target-account: eval}) so
+     * plugin/extension testing is not charged to ordinary usage. Visible
+     * only while the selected harness can actually route eval traffic (the
+     * provider's {@code evalAvailable}: pi injects it through the launch
+     * env, Claude needs its docker container, Codex has no path), enabled
+     * only additionally while a launch is composed and the remote arm is
+     * not selected — a workspace box runs Claude only, and eval-on-a-box is
+     * not offered. A gate that fails clears the selection, so a checked box
+     * can never outlive the conditions that permitted it. The choice is not
+     * recorded in a saved task: a task saved for later starts as an
+     * ordinary session.
+     */
+    private final JCheckBox evalMode = new JCheckBox("Eval mode");
+
+    /**
      * The login shell that would run the launch ({@code $SHELL}), read once
      * at construction: the environment does not change mid-run.
      */
@@ -206,6 +222,9 @@ final class NewTaskDialog extends DialogWrapper {
         ownWindow.setSelected(preset.openIn() == OpenIn.OWN_WINDOW);
         thisWindow.setSelected(preset.openIn() == OpenIn.THIS_WINDOW);
         saveForLater.addActionListener(e -> refresh());
+        // Checking the box re-runs the eval gate: eval is not offered on a
+        // workspace box, and the gate clears the selection it just disabled.
+        workspaceBox.addItemListener(e -> refresh());
         init();
         setResizable(true);
         defaultWorkIn();
@@ -341,6 +360,7 @@ final class NewTaskDialog extends DialogWrapper {
                 .addLabeledComponent("Model:", modelField)
                 .addComponent(tierRows, JBUI.scale(4))
                 .addLabeledComponent("Mode:", modes)
+                .addComponent(evalMode, JBUI.scale(4))
                 .addComponent(workspaceBox, JBUI.scale(4))
                 .addComponent(saveForLater, JBUI.scale(4))
                 .addComponent(summaryRow, JBUI.scale(8))
@@ -535,6 +555,11 @@ final class NewTaskDialog extends DialogWrapper {
         }
         modelField.setEnabled(!saving);
         refreshWorkspaceBox(saving);
+        // After the box gate: if that gate just cleared the box, the eval
+        // gate must see it cleared in this same pass.
+        boolean evalWasVisible = evalMode.isVisible();
+        refreshEvalMode(saving);
+        boolean evalVisibilityChanged = evalWasVisible != evalMode.isVisible();
         boolean tiersVisible = !saving && tiersShown(selectedAgent());
         boolean tiersWere = tierRows.isVisible();
         tierRows.setVisible(tiersVisible);
@@ -547,7 +572,7 @@ final class NewTaskDialog extends DialogWrapper {
         summary.setText(saving ? ""
                 : "<html><div style=\"width:" + JBUI.scale(SUMMARY_WIDTH) + "px\">"
                         + StringUtil.escapeXmlEntities(NewTaskPlan.summary(inputs, choice)) + "</div></html>");
-        boolean resized = summary.getPreferredSize().height != before;
+        boolean resized = summary.getPreferredSize().height != before || evalVisibilityChanged;
         Optional<String> caution = NewTaskPlan.warning(inputs, choice);
         if (saving) {
             // The caution renames a warned Start; a Save Task button carries no launch warning.
@@ -563,6 +588,27 @@ final class NewTaskDialog extends DialogWrapper {
             // without a re-pack the dialog kept its height and cut off its
             // last row.
             pack();
+        }
+    }
+
+    /**
+     * The eval offer's visibility and enablement. Visible only while the
+     * selected harness can actually route eval traffic — a checkbox for a
+     * permanently dead offer (e.g. Codex) is a dead control, the same gate
+     * pattern the tier rows follow — and enabled only additionally while a
+     * launch (not a save-for-later) is being composed and the remote arm is
+     * not selected. Runs on every refresh — the agent switch and the
+     * workspace-box toggle both come through here — and a gate that fails
+     * clears the selection, so a checked box can never outlive the
+     * conditions that permitted it.
+     */
+    private void refreshEvalMode(boolean saving) {
+        boolean offered = inputs.evalAvailable().test(selectedAgent());
+        boolean evalOk = offered && !saving && !workspaceBox.isSelected();
+        evalMode.setVisible(offered);
+        evalMode.setEnabled(evalOk);
+        if (!evalOk) {
+            evalMode.setSelected(false);
         }
     }
 
@@ -636,7 +682,7 @@ final class NewTaskDialog extends DialogWrapper {
                 startPoint(), chosenFolder,
                 ownWindow.isSelected() ? OpenIn.OWN_WINDOW : OpenIn.THIS_WINDOW,
                 modelField.selected(), tiers, tiers.flatMap(this::subagentModelRule),
-                workspaceBox.isSelected(), preset.targetPullRequest());
+                workspaceBox.isSelected(), preset.targetPullRequest(), evalMode.isSelected());
     }
 
     /**

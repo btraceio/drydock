@@ -91,6 +91,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 import java.util.function.Predicate;
@@ -131,6 +132,9 @@ class DrydockSessionServiceTest {
 
         final List<CreateContext> createContexts = new CopyOnWriteArrayList<>();
         final List<ResumeContext> resumeContexts = new CopyOnWriteArrayList<>();
+        /** The session keys markEvalSession/unmarkEvalSession were called with, in order. */
+        final List<String> evalMarks = new CopyOnWriteArrayList<>();
+        final List<String> evalUnmarks = new CopyOnWriteArrayList<>();
         final List<Thread> threads = new CopyOnWriteArrayList<>();
         /** What {@link #mcpDelivery()} reports; NONE unless a test sets it. */
         volatile McpDelivery delivery = McpDelivery.NONE;
@@ -220,6 +224,8 @@ class DrydockSessionServiceTest {
             return LaunchPlan.of("fake --resume" + mcpFlag(r.mcp()), false);
         }
         @Override public SessionIdStrategy idStrategy() { return strategy; }
+        @Override public void markEvalSession(String sessionKey) { evalMarks.add(sessionKey); }
+        @Override public void unmarkEvalSession(String sessionKey) { evalUnmarks.add(sessionKey); }
         @Override public Optional<ConversationSource> conversations() { return Optional.empty(); }
         @Override public Optional<ActivityReporter> activity() { return Optional.empty(); }
         @Override public Optional<SessionIdDiscovery> idDiscovery() {
@@ -683,6 +689,238 @@ class DrydockSessionServiceTest {
 
         assertEquals(1, provider.createContexts.size());
         assertEquals(Optional.of(task), provider.createContexts.get(0).initialPrompt());
+        harness.store.flush();
+    }
+
+    @Test
+    void evalLaunchCarriesEvalModeAndMarksTheProviderByTheGeneratedId(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, true, null, harness.events);
+        DrydockSessionService service = harness.service(provider);
+
+        ManagedAgentSession prepared = service.prepareSession(base, AgentKind.CLAUDE, "Eval run")
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                .toBuilder().evalMode(true).build();
+        ManagedAgentSession running = service.launchSession(prepared).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertTrue(provider.createContexts.get(0).evalMode(), "the create context carries eval");
+        String generated = provider.createContexts.get(0).sessionId();
+        assertEquals(List.of(generated), provider.evalMarks, "marked by the generated session key");
+        assertEquals(Optional.of(generated), persisted(harness, running.id()).agentSessionId());
+        assertTrue(persisted(harness, running.id()).evalMode(), "the eval mode lands on the persisted row");
+        assertTrue(provider.evalUnmarks.isEmpty(), "a running launch is never unmarked");
+        harness.store.flush();
+    }
+
+    @Test
+    void nonEvalLaunchNeverMarksTheProvider(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, true, null, harness.events);
+        DrydockSessionService service = harness.service(provider);
+
+        ManagedAgentSession prepared = service.prepareSession(base, AgentKind.CLAUDE, "Plain run")
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        service.launchSession(prepared).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertFalse(provider.createContexts.get(0).evalMode());
+        assertTrue(provider.evalMarks.isEmpty() && provider.evalUnmarks.isEmpty());
+        harness.store.flush();
+    }
+
+    @Test
+    void failedEvalLaunchUnmarksBeforeFailing(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, true, null, harness.events);
+        DrydockSessionService service = harness.service(provider);
+        // The command builds and marks, then the console open fails
+        // asynchronously — the finalizeCreate failure path, not a synchronous
+        // throw. The launch must unmark the exact key it marked. (Hold the
+        // future in a local: startConsole consumes pendingOpen inline.)
+        CompletableFuture<Void> open = new CompletableFuture<>();
+        harness.consoles.pendingOpen = open;
+        ManagedAgentSession prepared = service.prepareSession(base, AgentKind.CLAUDE, "Doomed eval")
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                .toBuilder().evalMode(true).build();
+        CompletableFuture<ManagedAgentSession> launch = service.launchSession(prepared);
+        open.completeExceptionally(new IllegalStateException("console refused"));
+
+        assertThrows(ExecutionException.class, () -> launch.get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+
+        assertEquals(1, provider.evalMarks.size());
+        assertEquals(provider.evalMarks, provider.evalUnmarks,
+                "the failed launch unmarks the exact key it marked");
+    }
+
+    @Test
+    void failedCommandBuildNeverMarksTheProvider(@TempDir Path base) {
+        Harness harness = harness(base);
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, true, null, harness.events);
+        provider.buildError = new AssertionError("build refused");
+        DrydockSessionService service = harness.service(provider);
+
+        ManagedAgentSession prepared = service.prepareSession(base, AgentKind.CLAUDE, "Doomed eval")
+                .join()
+                .toBuilder().evalMode(true).build();
+        assertThrows(Exception.class, () -> service.launchSession(prepared).get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+
+        assertTrue(provider.evalMarks.isEmpty(),
+                "the mark rides a built plan; a launch that never built one marks nothing");
+    }
+
+    @Test
+    void evalDiscoveredLaunchDefersTheMarkToIdDiscovery(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.PI, SessionIdStrategy.DISCOVERED, null, true, false, null, harness.events);
+        DrydockSessionService service = harness.service(provider);
+
+        ManagedAgentSession prepared = service.prepareSession(base, AgentKind.PI, "Eval pi")
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                .toBuilder().evalMode(true).build();
+        service.launchSession(prepared).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertTrue(provider.createContexts.get(0).evalMode(), "the create context carries eval");
+        assertTrue(provider.evalMarks.isEmpty(),
+                "a DISCOVERED launch has no key to mark by; marking waits for discovery");
+        harness.store.flush();
+    }
+
+    @Test
+    void evalDiscoveryMarksTheResolvedId(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingDiscovery discovery = new RecordingDiscovery(harness.events);
+        discovery.candidates.add("pi-session-1");
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.PI, SessionIdStrategy.DISCOVERED, discovery, true, false, null, harness.events);
+        DrydockSessionService service = harness.service(provider);
+
+        ManagedAgentSession prepared = service.prepareSession(base, AgentKind.PI, "Eval pi")
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                .toBuilder().evalMode(true).build();
+        ManagedAgentSession running = service.launchSession(prepared).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(List.of("pi-session-1"), provider.evalMarks,
+                "the resolved id is the side channel's key for a DISCOVERED eval session");
+        assertEquals(Optional.of("pi-session-1"), persisted(harness, running.id()).agentSessionId());
+        harness.store.flush();
+    }
+
+    @Test
+    void evalDiscoverySkipsTheMarkForARowForgottenWhileItPolled(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        AtomicReference<ManagedSessionId> rowId = new AtomicReference<>();
+        SessionIdDiscovery discovery = new SessionIdDiscovery() {
+            @Override public Object snapshot(Path workingDirectory) {
+                return new Object();
+            }
+
+            @Override public Optional<String> discover(Path workingDirectory, Instant launchedAt,
+                    Object snapshot, Set<String> claimedIds) {
+                // The user forgets the session while discovery is polling.
+                harness.store.update(state -> state.withSessions(state.sessions().stream()
+                        .filter(session -> !session.id().equals(rowId.get()))
+                        .toList()));
+                return Optional.of("pi-late-1");
+            }
+        };
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.PI, SessionIdStrategy.DISCOVERED, discovery, true, false, null, harness.events);
+        DrydockSessionService service = harness.service(provider);
+
+        ManagedAgentSession prepared = service.prepareSession(base, AgentKind.PI, "Eval pi")
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                .toBuilder().evalMode(true).build();
+        rowId.set(prepared.id());
+        service.launchSession(prepared).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertTrue(provider.evalMarks.isEmpty(),
+                "a mark for a removed session's key would never be reversed");
+        harness.store.flush();
+    }
+
+    @Test
+    void anEvalRowIsRefusedOnAWorkspaceBox(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, true, null, harness.events);
+        DrydockSessionService service = harness.service(provider);
+
+        ManagedAgentSession prepared = service.prepareSession(base, base, AgentKind.CLAUDE,
+                "Eval on box", SessionMode.WRITES, Optional.of(BOX))
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                .toBuilder().evalMode(true).build();
+
+        ExecutionException failure = assertThrows(ExecutionException.class,
+                () -> service.launchSession(prepared).get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+        assertTrue(failure.getCause().getMessage().contains("eval"), failure.getCause().getMessage());
+        assertTrue(provider.evalMarks.isEmpty() && harness.consoles.opens.isEmpty(),
+                "a refused box launch marks nothing and opens no tab");
+        harness.store.flush();
+    }
+
+    @Test
+    void transferReKeysTheEvalSideChannelFromTheSourceToTheTarget(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider sourceProvider = transferSource(harness.events);
+        // The replacement is DISCOVERED: its own command carries no id at
+        // create time, so the target marks nothing and the stale source mark
+        // is simply reversed.
+        RecordingProvider targetProvider = new RecordingProvider(
+                AgentKind.CODEX, SessionIdStrategy.DISCOVERED, null, true, false, null, harness.events);
+        DrydockSessionService service = harness.service(sourceProvider, targetProvider);
+        ManagedAgentSession source = persistSession(harness, AgentKind.CLAUDE, "Eval transfer",
+                AgentBinding.unlaunched(AgentKind.CLAUDE).withSessionId(Optional.of("source-42")),
+                base, SessionStatus.INACTIVE, Instant.now())
+                .toBuilder().evalMode(true).build();
+        harness.store.update(state -> DrydockSessionService.withReplacedSession(state, source));
+
+        service.transferStoppedSession(source.id(), AgentKind.CODEX).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(List.of("source-42"), sourceProvider.evalUnmarks,
+                "the stopped source conversation's marking is reversed on the source provider");
+        assertTrue(targetProvider.evalMarks.isEmpty(),
+                "a replacement whose command carries no id marks nothing");
+        harness.store.flush();
+    }
+
+    @Test
+    void evalSessionResumesWithEvalRoutingAndMarksByThePersistedId(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.PI, SessionIdStrategy.DISCOVERED, null, true, false, null, harness.events);
+        DrydockSessionService service = harness.service(provider);
+        ManagedAgentSession stored = persistSession(harness, AgentKind.PI, "Eval pi work",
+                new AgentBinding(AgentKind.PI, Optional.of("pi-conv-42"), Optional.empty()),
+                base, SessionStatus.EXITED, Instant.parse("2026-08-12T10:00:00Z"))
+                .toBuilder().evalMode(true).build();
+        harness.store.update(state -> DrydockSessionService.withReplacedSession(state, stored));
+
+        ManagedAgentSession resumed = service.resumeSession(stored.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertTrue(provider.resumeContexts.get(0).evalMode(), "the resume context carries eval");
+        assertEquals(List.of("pi-conv-42"), provider.evalMarks, "marked by the persisted session key");
+        assertTrue(provider.evalUnmarks.isEmpty());
+        harness.store.flush();
+    }
+
+    @Test
+    void deleteOfAnEvalSessionUnmarksTheProvider(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, true, null, harness.events);
+        DrydockSessionService service = harness.service(provider);
+
+        ManagedAgentSession prepared = service.prepareSession(base, AgentKind.CLAUDE, "Eval run")
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                .toBuilder().evalMode(true).build();
+        ManagedAgentSession running = service.launchSession(prepared).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        service.deleteSession(running.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(provider.evalMarks, provider.evalUnmarks, "forget reverses the eval marking");
         harness.store.flush();
     }
 

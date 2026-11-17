@@ -188,7 +188,43 @@ final class SessionEnds implements AgentExecutionListener {
             return DrydockSessionService.withReplacedSession(state, idle);
         });
         DrydockSessionsListener.publishChanged();
+        // The agent is gone; its eval side channel (e.g. Claude's proxy
+        // marking) must not outlive it. Best-effort, off this thread — and
+        // re-checked at execution time (below), so a resume that re-marked
+        // the session in the meantime is never unmarked by a stale end.
+        unmarkEvalAsync(row, ended);
         scheduleLateBind(id);
+    }
+
+    /**
+     * Reverses an eval row's out-of-band marking on the executor; the
+     * shared implementation lives in {@link EvalMarks}. The end may race a
+     * Resume: the row can be re-claimed and re-marked between this end and
+     * the queued task's run, so the task re-reads the row and unmarks only
+     * when it still sits in the state this end settled it to — never under
+     * a live or starting session.
+     */
+    private void unmarkEvalAsync(ManagedAgentSession row, SessionStatus ended) {
+        if (row == null || !row.evalMode()) {
+            return;
+        }
+        String key = row.agentSessionId().orElse("");
+        if (key.isBlank()) {
+            return;
+        }
+        try {
+            executor.execute(() -> {
+                ManagedAgentSession current = DrydockSessionService.findIn(stateStore.get().state(), row.id());
+                if (current == null || current.status() != ended) {
+                    return;
+                }
+                EvalMarks.unmarkAsync(registry, executor, row, key);
+            });
+        } catch (RejectedExecutionException e) {
+            // Shutdown drained the executor; the proxy's mark is in-memory
+            // and dies with the proxy's own restart.
+            LOG.log(Level.DEBUG, "Skipping eval unmark for " + row.id() + " during shutdown");
+        }
     }
 
     // ---- remote settle (ssh client ended without an explicit Stop) ----------

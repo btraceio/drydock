@@ -99,7 +99,9 @@ import java.util.function.Supplier;
  * Forget ({@link #deleteSession}) are the only paths that may issue
  * {@code tmux kill-session} on it (D1) — Start, transfer and the Done flow
  * refuse a remote row, each with a named reason. Diagnostic command
- * overrides, eval marking and the handoff paths are absent by design.
+ * overrides and the handoff paths are absent by design; eval marking is
+ * present: an eval row's mode rides the launch and resume contexts and the
+ * provider's mark/unmark lifecycle, like the app's {@code SessionManager}.
  *
  * <p>Threading (AC7/AC12): every blocking step — the pre-spawn id-store
  * snapshot (disk I/O), {@code buildCreateCommand} (may probe capabilities),
@@ -500,6 +502,19 @@ public final class DrydockSessionService implements AgentExecutionListener {
             throw new IllegalStateException("The target agent is not installed");
         }
         String summary = requestTransferSummary(source, sourceProvider, sourceId);
+        // The stopped source conversation's eval marking belongs to the
+        // source provider, keyed on the id being transferred away from — the
+        // switched row's kind is already the target's, so this is the last
+        // point the source side channel can be reached. Idempotent, safe when
+        // the session was never marked.
+        if (source.evalMode()) {
+            try {
+                source.agentSessionId().filter(key -> !key.isBlank())
+                        .ifPresent(sourceProvider::unmarkEvalSession);
+            } catch (RuntimeException | Error e) {
+                LOG.log(Level.WARNING, () -> "Eval unmark for transfer of " + source.id() + " failed: " + e);
+            }
+        }
         ManagedAgentSession switched = source.toBuilder()
                 .binding(AgentBinding.unlaunched(targetKind, source.mode()))
                 .status(SessionStatus.STARTING)
@@ -527,7 +542,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
         // transfer must not drop the session's task context.
         Optional<LaunchResources> resources = launchResourcesFor(candidate.id(), access);
         CreateContext context = new CreateContext(candidate.displayName(), generatedId,
-                candidate.workingDirectory(), Optional.empty(), access, false,
+                candidate.workingDirectory(), Optional.empty(), access, candidate.evalMode(),
                 candidate.readOnly(), initialPrompt).withStdioMcpServers(stdioMcpServersFor(candidate.workingDirectory()));
         if (resources.isPresent()) {
             context = context.withLaunchResources(resources.get());
@@ -540,11 +555,33 @@ public final class DrydockSessionService implements AgentExecutionListener {
         }
         boolean sessionIdUsed = !generatedId.isEmpty() && plan.sessionIdUsed()
                 && plan.command().contains(generatedId);
+        // The transfer marks the replacement's eval side channel on the
+        // provider now launching, keyed on the id its own command carries;
+        // the source conversation's marking was already reversed in the
+        // transfer itself (the switched row's kind is the target's). Without
+        // this, the command says eval while the new side channel is never
+        // opened. Best-effort: a failed mark must not fail the transfer.
+        if (candidate.evalMode() && sessionIdUsed) {
+            try {
+                provider.markEvalSession(generatedId);
+            } catch (RuntimeException | Error e) {
+                LOG.log(Level.WARNING, () -> "Eval re-key for transfer of " + candidate.id() + " failed: " + e);
+            }
+        }
         StartedLaunch started = new StartedLaunch(candidate, discovery, snapshot, launchedAt,
                 generatedId, sessionIdUsed, Optional.empty(), Optional.empty(),
                 consoles.startConsole(candidate.id(), candidate.workingDirectory(), plan));
         return started.openFuture().handleAsync((ignored, failure) -> {
             if (failure != null) {
+                // The replacement's console failed after the transfer marked
+                // its fresh key on the launching provider; reverse it (safe
+                // when nothing was marked).
+                try {
+                    provider.unmarkEvalSession(generatedId);
+                } catch (RuntimeException | Error e) {
+                    LOG.log(Level.WARNING, () -> "Eval unmark for failed transfer of "
+                            + candidate.id() + " failed: " + e);
+                }
                 throw wrap(unwrap(failure));
             }
             ManagedAgentSession running = candidate.withStatus(SessionStatus.RUNNING)
@@ -805,24 +842,49 @@ public final class DrydockSessionService implements AgentExecutionListener {
         // cannot be resolved refuses the launch visibly here; no resources
         // resolve to empty and the launch is byte-identical to before.
         Optional<LaunchResources> resources = launchResourcesFor(prepared.id(), access);
-        CreateContext ctx = new CreateContext(prepared.displayName(), generatedId, cwd,
-                Optional.empty(), access, model, false, prepared.readOnly(), initialPrompt, List.of())
-                .withStdioMcpServers(stdioMcpServersFor(cwd));
-        if (resources.isPresent()) {
-            ctx = ctx.withLaunchResources(resources.get());
+        try {
+            CreateContext ctx = new CreateContext(prepared.displayName(), generatedId, cwd,
+                    Optional.empty(), access, model, prepared.evalMode(), prepared.readOnly(), initialPrompt,
+                    List.of())
+                    .withStdioMcpServers(stdioMcpServersFor(cwd));
+            if (resources.isPresent()) {
+                ctx = ctx.withLaunchResources(resources.get());
+            }
+            LaunchPlan plan = provider.buildCreateCommand(ctx);
+            releaseIfUnused(prepared.id(), access, plan);
+            if (!plan.supported()) {
+                // AC11: name the agent, open nothing.
+                throw new IllegalStateException(
+                        kindName(provider.kind()) + " cannot launch this session (unsupported context)");
+            }
+            boolean sessionIdUsed = !generatedId.isEmpty()
+                    && plan.sessionIdUsed() && plan.command().contains(generatedId);
+            // The eval mark rides the launch command's session key, placed
+            // after the plan is built and only when the command actually
+            // carries the generated id: a mark keyed on an id the agent never
+            // adopts would never be reversed (the end paths unmark by the
+            // row's bound id) and its routing would never apply. The mark is
+            // in place before the spawn, so the agent's first request is
+            // already routed. Best-effort — a mark that throws must not fail
+            // a launch whose command already carries the eval routing.
+            if (prepared.evalMode() && sessionIdUsed) {
+                try {
+                    provider.markEvalSession(generatedId);
+                } catch (RuntimeException | Error e) {
+                    LOG.log(Level.WARNING, () -> "Eval marking for " + prepared.id() + " failed: " + e);
+                }
+            }
+            CompletableFuture<Void> open = consoles.startConsole(prepared.id(), cwd, plan);
+            return new StartedLaunch(prepared, discovery, snapshot, launchedAt, generatedId, sessionIdUsed, model,
+                    tiers, open);
+        } catch (RuntimeException | Error failure) {
+            // The mark was keyed on the generated id the row never got to
+            // bind; reverse it here so a failed eval launch leaves no side
+            // channel behind. Unmarking a key that was never marked is safe
+            // by the SPI contract (idempotent).
+            unmarkEvalAsync(prepared, generatedId);
+            throw failure;
         }
-        LaunchPlan plan = provider.buildCreateCommand(ctx);
-        releaseIfUnused(prepared.id(), access, plan);
-        if (!plan.supported()) {
-            // AC11: name the agent, open nothing.
-            throw new IllegalStateException(
-                    kindName(provider.kind()) + " cannot launch this session (unsupported context)");
-        }
-        boolean sessionIdUsed = !generatedId.isEmpty()
-                && plan.sessionIdUsed() && plan.command().contains(generatedId);
-        CompletableFuture<Void> open = consoles.startConsole(prepared.id(), cwd, plan);
-        return new StartedLaunch(prepared, discovery, snapshot, launchedAt, generatedId, sessionIdUsed, model,
-                tiers, open);
     }
 
     /**
@@ -852,6 +914,13 @@ public final class DrydockSessionService implements AgentExecutionListener {
         if (prepared.agentKind() != AgentKind.CLAUDE) {
             throw new RemoteLaunchRefusal(kindName(prepared.agentKind())
                     + " cannot run on a workspace box; only Claude sessions can");
+        }
+        if (prepared.evalMode()) {
+            // The New task dialog clears eval for the box arm; this is the
+            // service-level enforcement of the same rule (a caller bypassing
+            // the dialog must not launch a row that claims eval onto a box
+            // that would run it unmarked).
+            throw new RemoteLaunchRefusal("eval sessions cannot run on a workspace box");
         }
         Optional<LaunchResources> resources = launchResourcesFor(prepared.id(), Optional.empty());
         if (resources.isPresent()) {
@@ -909,6 +978,10 @@ public final class DrydockSessionService implements AgentExecutionListener {
         if (failure != null) {
             Throwable cause = unwrap(failure);
             LOG.log(Level.WARNING, () -> "Failed to start session " + started.prepared().id() + ": " + cause);
+            // The console open failed after the launch had marked the eval
+            // side channel; reverse it by the generated id the row never got
+            // to bind (safe by the SPI contract even when nothing was marked).
+            unmarkEvalAsync(started.prepared(), started.generatedId());
             persistFailedBestEffort(started.prepared());
             throw wrap(cause);
         }
@@ -958,17 +1031,42 @@ public final class DrydockSessionService implements AgentExecutionListener {
                     .discover(started.prepared().workingDirectory(), started.launchedAt(),
                             started.snapshot(), ends.claimedAgentSessionIds())
                     .ifPresent(id -> {
+                        AtomicBoolean forgotten = new AtomicBoolean();
                         stateStore.get().update(state -> {
                             // The session may have been forgotten while
                             // discovery polled; a no-op beats resurrecting a
                             // removed row.
                             ManagedAgentSession existing = findIn(state, started.prepared().id());
-                            return existing == null
-                                    ? state
-                                    : withReplacedSession(state,
-                                            existing.withAgentSessionId(Optional.of(id)));
+                            if (existing == null) {
+                                forgotten.set(true);
+                                return state;
+                            }
+                            return withReplacedSession(state,
+                                    existing.withAgentSessionId(Optional.of(id)));
                         });
                         DrydockSessionsListener.publishChanged();
+                        // An eval session of a DISCOVERED provider was launched
+                        // unmarked (no key existed at launch); the resolved id is
+                        // the side channel's key, so mark now. No-op for providers
+                        // that inject eval through the command alone. Skipped when
+                        // the row was forgotten while discovery polled: a mark for
+                        // a removed session's key would never be reversed — the end
+                        // recorder never fires for a forgotten row.
+                        if (forgotten.get()) {
+                            LOG.log(Level.INFO, () -> "Skipping eval marking for " + started.prepared().id()
+                                    + ": the session was forgotten while discovery polled");
+                            return;
+                        }
+                        if (started.prepared().evalMode()) {
+                            registry.get().provider(started.prepared().agentKind()).ifPresent(provider -> {
+                                try {
+                                    provider.markEvalSession(id);
+                                } catch (RuntimeException | Error e) {
+                                    LOG.log(Level.WARNING, () -> "Eval marking for "
+                                            + started.prepared().id() + " failed: " + e);
+                                }
+                            });
+                        }
                     });
         } catch (RuntimeException e) {
             // Never fails the launch (AC14): an empty id degrades resume to
@@ -1253,16 +1351,29 @@ public final class DrydockSessionService implements AgentExecutionListener {
                         + session.agentKind().persistedName() + ") provider is registered; cannot resume session"));
         LaunchPlan plan;
         try {
-            // No remote and never eval; Drydock MCP access is minted for this
-            // launch when available. The provider's own no-id branch is what a
-            // session without an id gets (AC21).
+            // Drydock MCP access is minted for this launch when available. The
+            // provider's own no-id branch is what a session without an id gets
+            // (AC21). The row's eval mode rides the resume: an eval session
+            // resumes on the eval account, like the app's resumeSession.
             Optional<McpAccess> access = mcpAccessFor(session.id(), provider);
             // T29a: resolved before the context, on this executor stage
             // (never the EDT); a resumed task session re-receives exactly
             // what its retained receipts and the MCP surface resolve now.
             Optional<LaunchResources> resources = launchResourcesFor(session.id(), access);
+            // The eval mark rides the resumed conversation's session key, and
+            // is in place before the command is built; best-effort like the
+            // launch-side mark. A session with no bound id cannot be
+            // side-channel marked — its eval routing then rides the command
+            // alone (the provider's no-id branch, AC21).
+            if (session.evalMode() && session.agentSessionId().isPresent()) {
+                try {
+                    provider.markEvalSession(session.agentSessionId().orElseThrow());
+                } catch (RuntimeException | Error e) {
+                    LOG.log(Level.WARNING, () -> "Eval marking for " + session.id() + " failed: " + e);
+                }
+            }
             ResumeContext ctx = new ResumeContext(session.agentSessionId(), session.agentSessionName(),
-                    session.workingDirectory(), Optional.empty(), access, false, session.readOnly(),
+                    session.workingDirectory(), Optional.empty(), access, session.evalMode(), session.readOnly(),
                     List.of(),
                     session.startedWithTask() ? Optional.of(RESUME_PROMPT) : Optional.empty())
                     .withStdioMcpServers(stdioMcpServersFor(session.workingDirectory()));
@@ -1272,11 +1383,13 @@ public final class DrydockSessionService implements AgentExecutionListener {
             plan = provider.buildResumeCommand(ctx);
             releaseIfUnused(session.id(), access, plan);
         } catch (RuntimeException failure) {
+            unmarkEvalAsync(session);
             persistFailedBestEffort(session);
             throw failure;
         }
         if (!plan.supported()) {
             // AC11: name the agent, open nothing.
+            unmarkEvalAsync(session);
             persistFailedBestEffort(session);
             throw new IllegalStateException(
                     kindName(provider.kind()) + " cannot resume this session (unsupported context)");
@@ -1287,6 +1400,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
         } catch (RuntimeException failure) {
             // A synchronous throw never reaches finalizeResume; the claim's
             // end, when resumePrepared rethrows, releases the access minted above.
+            unmarkEvalAsync(session);
             persistFailedBestEffort(session);
             throw failure;
         }
@@ -1445,6 +1559,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
         if (failure != null) {
             Throwable cause = unwrap(failure);
             LOG.log(Level.WARNING, () -> "Failed to resume session " + session.id() + ": " + cause);
+            unmarkEvalAsync(session);
             persistFailedBestEffort(session);
             throw wrap(cause);
         }
@@ -1574,6 +1689,9 @@ public final class DrydockSessionService implements AgentExecutionListener {
                             return CompletableFuture.completedFuture(null);
                         }
                         consoles.forgetConsole(sessionId);
+                        // The row's eval marking dies with the session; the
+                        // mark is keyed on the agent session id the row bound.
+                        unmarkEvalAsync(session);
                         CompletableFuture<Void> forgotten = session.agentSessionId()
                                 .map(id -> watcher.get().forget(id))
                                 .orElseGet(() -> CompletableFuture.completedFuture(null));
@@ -2214,6 +2332,20 @@ public final class DrydockSessionService implements AgentExecutionListener {
             LOG.log(Level.WARNING, () -> "Could not persist FAILED status for session " + session.id()
                     + ": " + persistFailure);
         }
+    }
+
+    /**
+     * Reverses an eval session's out-of-band marking on the plugin executor;
+     * the one shared implementation lives in {@link EvalMarks}.
+     */
+    private void unmarkEvalAsync(ManagedAgentSession session) {
+        EvalMarks.unmarkAsync(registry, executor, session, session.agentSessionId().orElse(""));
+    }
+
+    /** As {@link #unmarkEvalAsync(ManagedAgentSession)}, with an explicit mark key — the launch
+      * failure path unmarks by the generated id the row never got to bind. */
+    private void unmarkEvalAsync(ManagedAgentSession session, String key) {
+        EvalMarks.unmarkAsync(registry, executor, session, key);
     }
 
     /** Pure transform: the state with {@code session}'s row replaced (no-op when its id is gone). */

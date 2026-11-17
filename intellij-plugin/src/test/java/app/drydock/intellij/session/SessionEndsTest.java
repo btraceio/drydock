@@ -5,6 +5,7 @@ import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.AgentRegistry;
 import app.drydock.agent.api.McpAccess;
 import app.drydock.agent.api.McpDelivery;
+import app.drydock.agent.api.SessionIdStrategy;
 import app.drydock.app.ApplicationStateStore;
 import app.drydock.domain.AgentBinding;
 import app.drydock.domain.ApplicationState;
@@ -305,6 +306,18 @@ class SessionEndsTest {
                 .build();
     }
 
+    /** As {@link #localRow(ManagedSessionId)}, on the eval account (the checkbox was checked at start). */
+    private static ManagedAgentSession localEvalRow(ManagedSessionId id) {
+        return new ManagedAgentSession.Builder(id, RepositoryId.newId(), "Local eval " + id,
+                new AgentBinding(AgentKind.CLAUDE, Optional.of("agent-session-of-" + id), Optional.empty()),
+                SessionWorkspace.inRepository(Path.of("/tmp/local")),
+                Instant.parse("2026-08-12T10:15:30Z"))
+                .status(SessionStatus.RUNNING)
+                .lastOpenedAt(OPENED_AT)
+                .evalMode(true)
+                .build();
+    }
+
     private static ManagedAgentSession row(Harness harness, ManagedSessionId id) {
         return harness.store.state().sessions().stream()
                 .filter(session -> session.id().equals(id))
@@ -322,6 +335,32 @@ class SessionEndsTest {
         assertEquals(expected, harness.runner.calls,
                 "the ssh client's end issues exactly the one has-session probe — "
                         + "no kill-session, no agent input, nothing else (INV-10)");
+    }
+
+    // ---- eval unmark -----------------------------------------------------------
+
+    /**
+     * A local eval row's end reverses the provider's out-of-band marking,
+     * keyed on the row's bound agent session id; a non-eval row's end
+     * unmarks nothing.
+     */
+    @Test
+    void aLocalEvalRowsEndUnmarksAndANonEvalRowsEndDoesNot() {
+        DrydockSessionServiceTest.RecordingProvider provider =
+                new DrydockSessionServiceTest.RecordingProvider(AgentKind.CLAUDE,
+                        SessionIdStrategy.PRESET, null, true, true, null, new ArrayList<>());
+        AgentRegistry registry = new AgentRegistry(List.of(provider), new AgentContext(
+                Path.of("build/unused-state"), Path.of("build/unused-activity"), new DirectExecutor()));
+        ManagedSessionId eval = ManagedSessionId.newId();
+        ManagedSessionId plain = ManagedSessionId.newId();
+        Harness harness = new Harness(() -> registry,
+                List.of(localEvalRow(eval), localRow(plain)));
+
+        harness.ends.executionTerminated(eval, false, 0);
+        harness.ends.executionTerminated(plain, false, 0);
+
+        assertEquals(List.of("agent-session-of-" + eval), provider.evalUnmarks,
+                "the eval row's end unmarks the provider by the bound agent session id");
     }
 
     // ---- AC-8 ------------------------------------------------------------------
