@@ -1,9 +1,13 @@
 package app.drydock.intellij.review;
 
-import app.drydock.intellij.review.workbench.model.SectionsModel;
+import app.drydock.git.UnifiedDiff;
+import app.drydock.intellij.review.workbench.model.FlowModel;
 import app.drydock.intellij.review.workbench.model.WorkbenchState;
+import app.drydock.review.HunkDigest;
+import app.drydock.review.HunkIds;
 import com.intellij.diff.FrameDiffTool;
 import com.intellij.diff.util.Side;
+import com.intellij.ide.util.PropertiesComponent;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.editor.Document;
 import com.intellij.openapi.fileEditor.FileDocumentManager;
@@ -22,6 +26,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 
@@ -33,7 +38,7 @@ import java.util.function.Consumer;
  * null, never a guess. The positive path (Ctrl+Click on a Java identifier
  * opens its definition) is the live IDE gate.
  *
- * <p>The viewerChanged discipline is exercised on real card viewers: the install
+ * <p>The viewerChanged discipline is exercised on the flow centre's real hunk viewer: the install
  * path runs on a live unified viewer, an immediate repeat is a no-op by the
  * installed guard, and a background-thread call hops to the EDT without
  * error. The disposal-race guard and the null-editor retry cannot be
@@ -58,8 +63,11 @@ public class ReviewSymbolNavigationPlatformTest extends BasePlatformTestCase {
         ReviewSymbolNavigation navigation = new ReviewSymbolNavigation();
         List<FrameDiffTool.DiffViewer> viewers = new ArrayList<>();
         List<String> events = new ArrayList<>();
-        ReviewWorkbenchSectionView view = new ReviewWorkbenchSectionView(getProject(),
-                new ReviewWorkbenchSectionView.Actions() {
+        ReviewWorkbenchFlow flow = new ReviewWorkbenchFlow(() -> Optional.of("scope-nav"),
+                new ReviewFlowMarks(PropertiesComponent.getInstance(getProject())), tab -> {
+                });
+        ReviewWorkbenchFlowView view = new ReviewWorkbenchFlowView(getProject(), flow,
+                new ReviewWorkbenchFlowView.Actions() {
                     @Override
                     public CompletableFuture<Optional<ReviewDiffRequests.RequestContext>> hunkContext(
                             String path, int hunkIndex, String scrollKey) {
@@ -69,21 +77,18 @@ public class ReviewSymbolNavigationPlatformTest extends BasePlatformTestCase {
                     }
 
                     @Override
-                    public CompletableFuture<Optional<String>> markReviewed(SectionsModel.Section section,
-                                                                            List<String> digests) {
+                    public CompletableFuture<Optional<String>> comment(FlowModel.Hunk hunk, String text) {
                         return CompletableFuture.completedFuture(Optional.empty());
                     }
 
                     @Override
-                    public void fullFile(String path) {
+                    public CompletableFuture<Optional<String>> submitReview() {
+                        return CompletableFuture.completedFuture(Optional.empty());
                     }
 
                     @Override
-                    public void showFinding(String findingId) {
-                    }
-
-                    @Override
-                    public void showSection(String key) {
+                    public CompletableFuture<Optional<String>> sendToSession() {
+                        return CompletableFuture.completedFuture(Optional.empty());
                     }
 
                     @Override
@@ -102,11 +107,10 @@ public class ReviewSymbolNavigationPlatformTest extends BasePlatformTestCase {
                 });
         try {
             view.setSize(800, 900);
-            view.render(state());
+            flow.render(state());
             layOut(view);
-            view.updateLiveCards();
             PlatformTestUtil.dispatchAllEventsInIdeEventQueue();
-            assertFalse("the card's real viewer reached the rewritten viewerChanged", viewers.isEmpty());
+            assertFalse("the hunk's real viewer reached the rewritten viewerChanged", viewers.isEmpty());
 
             // The thread-hop contract: a background-thread call schedules the EDT work, which
             // runs without error and keeps the install idempotent.
@@ -123,16 +127,19 @@ public class ReviewSymbolNavigationPlatformTest extends BasePlatformTestCase {
     }
 
     private static WorkbenchState state() {
-        SectionsModel.Hunk hunk = new SectionsModel.Hunk("src/A.java", 0, "src/A.java#0", "d-A", "3–4", "n3",
-                0, 2, List.of(), false, Optional.empty(), Optional.empty());
-        SectionsModel.Section section = new SectionsModel.Section("step:s2", 2, Optional.of("s2"), "Callers",
-                "Why the callers change.", List.of(), List.of(), List.of(hunk), 0, 1, 0);
-        return WorkbenchState.of("drydock", WorkbenchState.Mode.LOCAL, new ReviewTabModel.Snapshot(List.of(), 0, 0),
+        UnifiedDiff.Hunk hunk = new UnifiedDiff.Hunk("@@ -1,2 +1,2 @@", List.of(
+                new UnifiedDiff.Line(UnifiedDiff.Line.Kind.CONTEXT, OptionalInt.of(1), OptionalInt.of(1), "a"),
+                new UnifiedDiff.Line(UnifiedDiff.Line.Kind.DEL, OptionalInt.of(2), OptionalInt.empty(), "b"),
+                new UnifiedDiff.Line(UnifiedDiff.Line.Kind.ADD, OptionalInt.empty(), OptionalInt.of(2), "c")));
+        UnifiedDiff.FileDiff file = new UnifiedDiff.FileDiff("src/A.java", "modified", 0, 0, false, false,
+                List.of(hunk));
+        ReviewTabModel.FileRow row = new ReviewTabModel.FileRow("src/A.java", file,
+                new ReviewTabModel.Mark(ReviewTabModel.Mark.Kind.UNREVIEWED, 0, Optional.empty()), List.of(),
+                Optional.empty(), List.of(HunkIds.hunkId("src/A.java", 0)),
+                List.of(HunkDigest.of("src/A.java", hunk)), 0, 1);
+        return WorkbenchState.of("drydock", WorkbenchState.Mode.LOCAL, new ReviewTabModel.Snapshot(List.of(row), 1, 0),
                 WorkbenchState.Filter.ALL, Optional.empty(), WorkbenchState.View.CHANGES_ONLY, List.of(),
-                WorkbenchState.InboxChoice.DEFAULT,
-                new SectionsModel.Snapshot(SectionsModel.Source.TOUR, Optional.empty(), List.of(section)),
-                new WorkbenchState.SectionsChoice(Optional.of(WorkbenchState.Navigator.SECTIONS),
-                        Optional.of("step:s2")));
+                WorkbenchState.InboxChoice.DEFAULT);
     }
 
     private static void layOut(Container root) {

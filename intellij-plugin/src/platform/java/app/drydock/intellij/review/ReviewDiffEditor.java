@@ -15,7 +15,6 @@ import com.intellij.ide.util.PropertiesComponent;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.fileEditor.FileEditorManager;
 import com.intellij.openapi.project.Project;
-import com.intellij.openapi.util.Disposer;
 
 import java.awt.EventQueue;
 import java.util.ArrayList;
@@ -129,24 +128,6 @@ public final class ReviewDiffEditor {
                 () -> FileEditorManager.getInstance(project).openFile(ReviewWorkbenchFile.of(project), true),
                 context -> ReviewDiffRequests.toRequest(project, parent, context),
                 onViewerChanged);
-    }
-
-    /**
-     * The diff for a newly created workbench editor: a processor seeded with
-     * the current request ({@link #newProcessor}), disposed with
-     * {@code parent}. EDT.
-     */
-    ReviewWorkbenchEditor.HostedDiff host(Project project, Disposable parent) {
-        requireEdt();
-        preferUnifiedOnce(PLACE);
-        DiffRequestProcessor created = newProcessor(project);
-        Disposer.register(parent, created);
-        // A DiffVirtualFile tab's editor applies the seeded request on
-        // selection; an embedded processor has no such editor, so it applies
-        // it here, or it would show the platform's loading state until the
-        // next selection.
-        created.updateRequest();
-        return new ReviewWorkbenchEditor.HostedDiff(created.getComponent(), created::getPreferredFocusedComponent);
     }
 
     /**

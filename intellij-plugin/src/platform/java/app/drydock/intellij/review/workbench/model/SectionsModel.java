@@ -182,9 +182,12 @@ public final class SectionsModel {
                 tour.map(ReviewTour::kind));
     }
 
-    /** One hunk of the diff, before it is placed in a section. */
-    private record HunkSource(String file, int index, String hunkId, String digest, String lines, String scrollKey,
-                              int removed, int added, Set<String> rowKeys) {
+    /**
+     * One hunk of the diff, before it is placed in a section; {@code rowKeys}
+     * are the line keys of every row the hunk shows, context included.
+     */
+    record HunkSource(String file, int index, String hunkId, String digest, String lines, String scrollKey,
+                      int removed, int added, Set<String> rowKeys) {
     }
 
     /** A section before numbering and progress. */
@@ -205,6 +208,11 @@ public final class SectionsModel {
     }
 
     private static HunkSource source(String path, int index, String id, UnifiedDiff.Hunk hunk) {
+        return source(path, index, id, hunk, HunkDigest.of(path, hunk));
+    }
+
+    /** One hunk's source with its digest already known, as a {@code ReviewTabModel.FileRow} carries it. */
+    static HunkSource source(String path, int index, String id, UnifiedDiff.Hunk hunk, String digest) {
         int removed = 0;
         int added = 0;
         int firstNew = Integer.MAX_VALUE;
@@ -237,7 +245,7 @@ public final class SectionsModel {
         if (scrollKey == null) {
             scrollKey = hunk.lines().isEmpty() ? "n1" : hunk.lines().getFirst().lineKey();
         }
-        return new HunkSource(path, index, id, HunkDigest.of(path, hunk), lines, scrollKey, removed, added, rowKeys);
+        return new HunkSource(path, index, id, digest, lines, scrollKey, removed, added, rowKeys);
     }
 
     private static String span(int first, int last) {

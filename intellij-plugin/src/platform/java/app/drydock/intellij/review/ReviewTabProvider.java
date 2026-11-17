@@ -17,6 +17,7 @@ import app.drydock.intellij.DrydockSessionsListener;
 import app.drydock.intellij.agent.AgentExecutionRegistry;
 import app.drydock.intellij.agent.PromptOutcome;
 import app.drydock.intellij.agent.SessionActivityListener;
+import app.drydock.intellij.review.workbench.model.FlowModel;
 import app.drydock.intellij.review.workbench.model.InboxModel;
 import app.drydock.intellij.review.workbench.model.OutboxModel;
 import app.drydock.intellij.review.workbench.model.SectionsModel;
@@ -104,19 +105,19 @@ import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
-import java.util.stream.Stream;
 
 /**
  * The review behind the dedicated Drydock Review window and the review
  * workbench. The window's content is a launcher: the header
  * ({@code <k> / <n> reviewed}), the Open Workbench button, the batched
  * decisions bar and the status placeholder ({@link ReviewTabStatus}). The
- * review's files are listed in the workbench's navigator
- * ({@link ReviewWorkbenchNavigator}, a {@link ReviewTabBrowser}); a file
- * selection there shows the reusable diff ({@link ReviewDiffEditor}) in the
- * workbench's centre, whose active viewer the inlay layer
- * ({@link ReviewDiffInlays}) decorates with one finding card per unresolved
- * finding.
+ * workbench walks the review's hunks in its flow ({@link ReviewWorkbenchFlow},
+ * {@link #hostedFlow}): a queue of hunks and a centre that shows one hunk's
+ * diff at a time, decorated by its own inlay layer ({@link ReviewDiffInlays},
+ * {@link FlowActions#decorator}) with one finding card per unresolved
+ * finding. The reusable file diff ({@link ReviewDiffEditor}) and the
+ * selection pipeline below are still built here, but no workbench pane
+ * hosts them.
  *
  * <p><strong>Composition.</strong> The tab owns no review logic: the scope
  * comes from {@link ReviewTabScopes}; the snapshot from {@link
@@ -125,8 +126,8 @@ import java.util.stream.Stream;
  * ReviewDiffRequests} with fragments from {@link ReviewFragments}; the
  * finding cards' write side is {@link ReviewTriageActions} (T4), wired
  * through {@link TriageCards} below; the mark/unmark write side is {@link
- * ReviewVerdictCommands} — one command, two entry points (the navigator's
- * toolbar and its row context menu). The annotation store and the diff service are the backend's own
+ * ReviewVerdictCommands}, whose Mark Reviewed / Unmark actions no workbench
+ * pane shows. The annotation store and the diff service are the backend's own
  * instances (one writer, and verdict digests measured by the same diff an
  * agent sees).</p>
  *
@@ -146,11 +147,10 @@ import java.util.stream.Stream;
  *
  * <p><strong>Gutter navigation.</strong> The opener ({@link
  * ReviewTabOpener}, T8) records a finding target on the project before the
- * window's content exists; a snapshot arrival or a navigator attaching
- * consumes it ({@link ReviewTabOpener#takePendingFinding}) once a
- * workbench navigator exists, and hands it to every navigator's
- * {@link ReviewTabBrowser#selectFinding}, whose selection then drives the
- * diff open exactly as a click on the row would.</p>
+ * window's content exists; a snapshot arrival or a flow attaching consumes
+ * it ({@link ReviewTabOpener#takePendingFinding}) once a workbench flow
+ * exists, and every flow shows the hunk the finding starts on
+ * ({@link ReviewWorkbenchFlow#showLine}).</p>
  *
  * <p><strong>Threading.</strong> Everything blocking — scope resolution,
  * contents, the diff, digests, store reads, prompt submission — runs on the
@@ -197,8 +197,10 @@ final class ReviewTabProvider {
     private JBLabel statusLabel;
     /** The workbench inboxes showing this review (EDT only); the selection actions open their composer. */
     private final List<ReviewWorkbenchInbox> inboxes = new ArrayList<>();
-    /** The workbench navigators showing this review (EDT only); gutter targets land on them. */
-    private final List<ReviewWorkbenchNavigator> navigators = new ArrayList<>();
+    /** The workbench flows showing this review (EDT only); finding and file targets land on them. */
+    private final List<ReviewWorkbenchFlow> flows = new ArrayList<>();
+    /** The flows' seen and flagged marks, in this project's properties. */
+    private final ReviewFlowMarks flowMarks;
     /** The disposal parent of the reusable diff editor and its inlay layer. */
     private Disposable diffParent;
     private ReviewDiffEditor diffEditor;
@@ -324,6 +326,7 @@ final class ReviewTabProvider {
         this.project = Objects.requireNonNull(project, "project");
         this.plugin = DrydockPluginService.getInstance();
         this.promptSubmitter = Objects.requireNonNull(promptSubmitter, "promptSubmitter");
+        this.flowMarks = new ReviewFlowMarks(PropertiesComponent.getInstance(project));
     }
 
     /**
@@ -457,7 +460,7 @@ final class ReviewTabProvider {
         panel = null;
         header = null;
         statusLabel = null;
-        navigators.clear(); // each is disposed with its workbench editor
+        flows.clear(); // each ends with its workbench editor
         inboxes.clear();
         diffParent = null;
         diffEditor = null;
@@ -697,44 +700,46 @@ final class ReviewTabProvider {
 
     /**
      * The gutter-navigation half of the opener's contract (T8/T9): after a
-     * snapshot lands, or a workbench navigator attaches, the pending target
-     * the opener recorded is taken from the project and every workbench
-     * navigator selects that finding; the tree's own selection listener then
-     * drives the diff open, exactly as a click on the row would. With no
-     * navigator attached the target stays pending: the opener opens the
-     * workbench, whose navigator takes it. The take is the consumption:
-     * found or stale, the target is spent exactly once, and a stale one
-     * leaves the selection unchanged (the browser's own rule).
+     * snapshot lands, or a workbench flow attaches, the pending target the
+     * opener recorded is taken from the project and every workbench flow
+     * shows the hunk the finding starts on. With no flow attached the
+     * target stays pending: the opener opens the workbench, whose flow
+     * takes it. The take is the consumption: found or stale, the target is
+     * spent exactly once, and a stale one (a finding the snapshot no longer
+     * lists) changes nothing.
      *
      * <p>A pending file target ({@link ReviewTabOpener#openFile}, a source
      * editor's "Back to review") is taken the same way once a snapshot is
-     * here: the Files tab shows its file, scrolled to its line. A file the
-     * review no longer lists spends the target and changes nothing.</p>
+     * here: the flows show the hunk at its line, else the file's first hunk.
+     * A file the review no longer lists spends the target and changes
+     * nothing.</p>
      */
     private void consumePendingFindingTarget() {
-        if (navigators.isEmpty() || disposed.get()) {
-            return;
-        }
-        List<ReviewWorkbenchNavigator> targets = List.copyOf(navigators);
-        consumeTarget(ReviewTabOpener.takePendingFinding(project), (file, findingId) -> {
-            for (ReviewWorkbenchNavigator navigator : targets) {
-                navigator.selectFinding(file, findingId);
-            }
-        });
         ReviewTabModel.Snapshot rows = snapshot;
-        if (rows == null) {
-            return; // the file target waits for the snapshot that lists its file
+        if (flows.isEmpty() || disposed.get() || rows == null) {
+            return; // the targets wait for a flow and for the snapshot that lists their files
         }
+        List<ReviewWorkbenchFlow> targets = List.copyOf(flows);
+        consumeTarget(ReviewTabOpener.takePendingFinding(project), (file, findingId) ->
+                findingStart(rows, file, findingId).ifPresent(key -> {
+                    for (ReviewWorkbenchFlow flow : targets) {
+                        flow.showLine(file, key);
+                    }
+                }));
         ReviewTabOpener.takePendingFile(project).flatMap(target -> fileAt(rows, target)).ifPresent(at -> {
-            sectionsChoice = new WorkbenchState.SectionsChoice(Optional.of(WorkbenchState.Navigator.FILES),
-                    sectionsChoice.section());
-            // The tree's selection shows the file at its first change; the scrolled selection follows and wins.
-            for (ReviewWorkbenchNavigator navigator : targets) {
-                navigator.selectFile(at.file().path());
+            for (ReviewWorkbenchFlow flow : targets) {
+                flow.showLine(at.file().path(), at.scrollKey());
             }
-            selected(at);
-            submitWorkbenchState();
         });
+    }
+
+    /** The start key of the finding with {@code findingId} in {@code file}'s row (pure); none when not listed. */
+    static Optional<String> findingStart(ReviewTabModel.Snapshot rows, String file, String findingId) {
+        return rows.files().stream().filter(row -> row.path().equals(file))
+                .flatMap(row -> row.findings().stream())
+                .filter(finding -> finding.id().equals(findingId))
+                .map(ReviewTabModel.FindingRow::startKey)
+                .findFirst();
     }
 
     /** {@code target}'s file in {@code rows}, at its line (pure); none when the review no longer lists it. */
@@ -2264,18 +2269,6 @@ final class ReviewTabProvider {
         submitWorkbenchState();
     }
 
-    /** A section picked in the navigator (EDT): the centre shows it once the state is rebuilt. */
-    private void sectionChosen(String key) {
-        sectionsChoice = new WorkbenchState.SectionsChoice(Optional.of(WorkbenchState.Navigator.SECTIONS),
-                Optional.of(key));
-        submitWorkbenchState();
-    }
-
-    /** The workbench navigator's filter toggle (EDT): remembered, then the state is rebuilt off the EDT. */
-    private void workbenchFilterChanged(WorkbenchState.Filter filter) {
-        workbenchFilter = Objects.requireNonNull(filter, "filter");
-        submitWorkbenchState();
-    }
 
     /** What the inbox says when a finding is no longer in the store. */
     static final String FINDING_GONE = "The finding is gone: the review changed since it was shown.";
@@ -2319,12 +2312,9 @@ final class ReviewTabProvider {
     }
 
     /**
-     * Shows a finding the review lists (a take's red flag): its row goes
-     * straight to the selection pipeline, as a click on it would, and the
-     * Files tab shows, which opens the finding in its file's diff. The
-     * tree's own selection is only best effort, because the state rebuild
-     * re-renders the tree. Nothing happens for a finding the review no
-     * longer lists. EDT.
+     * Shows a finding the review lists (a take's red flag): every workbench
+     * flow moves to the hunk the finding starts on. Nothing happens for a
+     * finding the review no longer lists. EDT.
      */
     private void showFinding(String findingId) {
         ReviewTabModel.Snapshot rows = snapshot;
@@ -2334,16 +2324,17 @@ final class ReviewTabProvider {
         for (ReviewTabModel.FileRow file : rows.files()) {
             for (ReviewTabModel.FindingRow finding : file.findings()) {
                 if (finding.id().equals(findingId)) {
-                    sectionsChoice = new WorkbenchState.SectionsChoice(
-                            Optional.of(WorkbenchState.Navigator.FILES), sectionsChoice.section());
-                    selected(finding);
-                    submitWorkbenchState();
-                    for (ReviewWorkbenchNavigator navigator : List.copyOf(navigators)) {
-                        navigator.selectFinding(file.path(), findingId);
-                    }
+                    showLine(file.path(), finding.startKey());
                     return;
                 }
             }
+        }
+    }
+
+    /** Every workbench flow shows the hunk of {@code file} that holds {@code lineKey}. EDT. */
+    private void showLine(String file, String lineKey) {
+        for (ReviewWorkbenchFlow flow : List.copyOf(flows)) {
+            flow.showLine(file, lineKey);
         }
     }
 
@@ -2375,32 +2366,45 @@ final class ReviewTabProvider {
             public CompletableFuture<Optional<String>> submitReview() {
                 return provider.openSubmit();
             }
+
+            @Override
+            public void showFinding(ReviewAnnotation finding) {
+                provider.showLine(finding.file(), finding.startKey());
+            }
         });
         provider.attachWorkbenchView(outbox::render, parent);
         return Optional.of(outbox);
     }
 
     /**
-     * A section view over the live review for a new workbench editor,
-     * rendered from every {@link WorkbenchState} until {@code parent} is
-     * disposed. Empty when the project has no live Review content. EDT.
+     * The flow review over the live review for a new workbench editor: its
+     * controller, fed every {@link WorkbenchState} until {@code parent} is
+     * disposed, and its centre, disposed with {@code parent}. A pending
+     * finding or file target goes to it. Empty when the project has no live
+     * Review content. EDT.
      */
-    static Optional<JComponent> hostedSectionView(Project project, Disposable parent) {
+    static Optional<ReviewWorkbenchEditor.HostedFlow> hostedFlow(Project project, Disposable parent) {
         ReviewTabProvider provider = project.getUserData(LIVE_PROVIDER);
         if (provider == null || provider.disposed.get()) {
             return Optional.empty();
         }
-        ReviewWorkbenchSectionView view = new ReviewWorkbenchSectionView(project, provider.new SectionActions());
-        Disposer.register(parent, view);
-        provider.attachWorkbenchView(view::render, parent);
-        return Optional.of(view);
+        ReviewWorkbenchFlow flow = new ReviewWorkbenchFlow(
+                () -> Optional.ofNullable(provider.scope).map(ReviewScope::id), provider.flowMarks,
+                provider::workbenchTabChanged);
+        ReviewWorkbenchFlowView centre = new ReviewWorkbenchFlowView(project, flow, provider.new FlowActions());
+        Disposer.register(parent, centre);
+        provider.attachWorkbenchView(flow::render, parent);
+        provider.flows.add(flow);
+        Disposer.register(parent, () -> provider.flows.remove(flow));
+        provider.consumePendingFindingTarget();
+        return Optional.of(new ReviewWorkbenchEditor.HostedFlow(flow, centre));
     }
 
-    /** The section view's side of the live review. */
-    private final class SectionActions implements ReviewWorkbenchSectionView.Actions {
+    /** The flow centre's side of the live review. */
+    private final class FlowActions implements ReviewWorkbenchFlowView.Actions {
 
         /**
-         * The card's diff, built off the EDT like a file selection's: the
+         * The hunk's diff, built off the EDT like a file selection's: the
          * snapshot's row for {@code path}, both sides' texts, and the git
          * fragments, scrolled to {@code scrollKey}. Empty when the texts no
          * longer match the diff's rows (the file changed since).
@@ -2441,40 +2445,37 @@ final class ReviewTabProvider {
             }
         }
 
-        @Override
-        public CompletableFuture<Optional<String>> markReviewed(SectionsModel.Section section, List<String> digests) {
-            ReviewScope current = scope;
-            ReviewVerdictCommands verdicts = commands;
-            if (current == null || verdicts == null) {
-                return CompletableFuture.completedFuture(Optional.of(STILL_LOADING));
-            }
-            return verdicts.markHunks(current, digests, section.stepId())
-                    .thenApply(result -> result instanceof ReviewVerdictCommands.Result.Refused refused
-                            ? Optional.of(refused.reason())
-                            : Optional.<String>empty());
-        }
-
         /**
-         * The finding's row goes straight to the selection pipeline, as for
-         * {@link #fullFile}, and the Files tab shows: the finding is opened
-         * in its file's diff. Nothing happens for a finding the review no
-         * longer lists.
+         * The reviewer's comment on the hunk, stored as a human finding on
+         * its changed lines ({@link #addComment}): the added lines, or the
+         * removed ones for a hunk that only removes. Refused when the
+         * snapshot no longer lists the hunk.
          */
         @Override
-        public void showFinding(String findingId) {
-            ReviewTabProvider.this.showFinding(findingId);
+        public CompletableFuture<Optional<String>> comment(FlowModel.Hunk hunk, String text) {
+            ReviewTabModel.Snapshot rows = snapshot;
+            Optional<DiffSelection.Range> range = rows == null ? Optional.empty() : hunkRange(rows, hunk);
+            return range.isEmpty()
+                    ? CompletableFuture.completedFuture(Optional.of(FINDING_GONE_HUNK))
+                    : addComment(range.get(), text, Severity.QUESTION)
+                            .thenApply(message -> message.filter(shown -> !COMMENT_ADDED.equals(shown)));
         }
 
         @Override
-        public void showSection(String key) {
-            sectionChosen(key);
+        public CompletableFuture<Optional<String>> submitReview() {
+            return openSubmit();
+        }
+
+        @Override
+        public CompletableFuture<Optional<String>> sendToSession() {
+            return ReviewTabProvider.this.sendToSession().thenApply(
+                    message -> Optional.of(message.map(TriageCards.Surfaced::text).orElse(SEND_DELIVERED)));
         }
 
         /**
-         * A card's own decoration layer and gutter "+", as the file view's:
-         * the file's finding cards, gutter marks and ranges (its take is in
-         * the card header, not drawn again), read off the EDT now and on
-         * every store change, until {@code lifetime} ends.
+         * A hunk's own decoration layer and gutter "+", as the file view's:
+         * the file's finding cards, gutter marks and ranges, read off the EDT
+         * now and on every store change, until {@code lifetime} ends.
          */
         @Override
         public Consumer<FrameDiffTool.DiffViewer> decorator(String path, int hunkIndex, Disposable lifetime) {
@@ -2524,28 +2525,32 @@ final class ReviewTabProvider {
                 symbolNavigation.viewerChanged(viewer);
             };
         }
+    }
 
-        /**
-         * The file's row goes straight to the selection pipeline, as a click
-         * on it would: the state rebuild this triggers re-renders the Files
-         * tree, which drops a tree selection, so the tree's highlight is
-         * only best effort.
-         */
-        @Override
-        public void fullFile(String path) {
-            sectionsChoice = new WorkbenchState.SectionsChoice(Optional.of(WorkbenchState.Navigator.FILES),
-                    sectionsChoice.section());
-            ReviewTabModel.Snapshot rows = snapshot;
-            if (rows != null) {
-                rows.files().stream().filter(row -> row.path().equals(path)).findFirst()
-                        .ifPresent(ReviewTabProvider.this::selected);
-            }
-            // After the selection, so the state it rebuilds names the selected file.
-            workbenchViewChanged(WorkbenchState.View.FULL_FILE);
-            for (ReviewWorkbenchNavigator navigator : List.copyOf(navigators)) {
-                navigator.selectFile(path);
-            }
-        }
+    /** What the flow says when a hunk to comment on is no longer in the review. */
+    static final String FINDING_GONE_HUNK = "The hunk is gone: the review changed since it was shown.";
+
+    /**
+     * The changed lines of {@code hunk} in {@code rows} as one comment range
+     * (pure): the new side over its added lines, or the old side over its
+     * removed lines for a hunk that only removes. Empty when the snapshot no
+     * longer lists the hunk.
+     */
+    static Optional<DiffSelection.Range> hunkRange(ReviewTabModel.Snapshot rows, FlowModel.Hunk hunk) {
+        return rows.files().stream().filter(row -> row.path().equals(hunk.file())).findFirst()
+                .filter(row -> hunk.index() < row.diff().hunks().size()
+                        && hunk.index() < row.hunkDigests().size()
+                        && row.hunkDigests().get(hunk.index()).equals(hunk.digest()))
+                .flatMap(row -> {
+                    UnifiedDiff.Hunk lines = row.diff().hunks().get(hunk.index());
+                    boolean adds = lines.lines().stream().anyMatch(line -> line.kind() == UnifiedDiff.Line.Kind.ADD);
+                    UnifiedDiff.Line.Kind kind = adds ? UnifiedDiff.Line.Kind.ADD : UnifiedDiff.Line.Kind.DEL;
+                    int[] span = lines.lines().stream().filter(line -> line.kind() == kind)
+                            .mapToInt(line -> (adds ? line.newLine() : line.oldLine()).orElse(0))
+                            .filter(n -> n > 0).sorted().toArray();
+                    return span.length == 0 ? Optional.empty() : DiffSelection.resolve(row.diff(),
+                            adds ? DiffSelection.Side.NEW : DiffSelection.Side.OLD, span[0], span[span.length - 1]);
+                });
     }
 
     /** What the inbox says for a selection with no reviewable range. */
@@ -2693,9 +2698,7 @@ final class ReviewTabProvider {
 
         @Override
         public void showInDiff(ReviewAnnotation finding) {
-            for (ReviewWorkbenchNavigator navigator : List.copyOf(navigators)) {
-                navigator.selectFinding(finding.file(), finding.id());
-            }
+            showLine(finding.file(), finding.startKey());
         }
 
         @Override
@@ -2757,61 +2760,6 @@ final class ReviewTabProvider {
         return scope == null || snapshot == null
                 ? Optional.empty()
                 : Optional.of(new ReviewFiles(provider.rootFor(scope), snapshot));
-    }
-
-    /** The workbench's Changes only / Full file choice (EDT): the diff refolds, then the state is rebuilt. */
-    private void workbenchViewChanged(WorkbenchState.View view) {
-        workbenchView = Objects.requireNonNull(view, "view");
-        ReviewDiffEditor editor = diffEditor;
-        if (editor != null) {
-            editor.showView(view);
-        }
-        submitWorkbenchState();
-    }
-
-    /** Routes a workbench editor's view choice to the live review; nothing happens without one. EDT. */
-    static void changeView(Project project, WorkbenchState.View view) {
-        ReviewTabProvider provider = project.getUserData(LIVE_PROVIDER);
-        if (provider != null && !provider.disposed.get()) {
-            provider.workbenchViewChanged(view);
-        }
-    }
-
-    /**
-     * A Files navigator over the live review for a new workbench editor,
-     * plus {@code header} fed with every state; both detach and the
-     * navigator's tree is disposed with {@code parent}. Empty when the
-     * project has no live Review content. EDT.
-     */
-    static Optional<JComponent> hostedNavigator(Project project, Disposable parent,
-                                                Consumer<WorkbenchState> header) {
-        ReviewTabProvider provider = project.getUserData(LIVE_PROVIDER);
-        if (provider == null || provider.disposed.get()) {
-            return Optional.empty();
-        }
-        List<AnAction> rowCommands = Stream.of(provider.markReviewedAction, provider.unmarkAction,
-                provider.refreshAction).filter(Objects::nonNull).toList();
-        ReviewWorkbenchNavigator navigator = new ReviewWorkbenchNavigator(project, provider::selected,
-                provider::workbenchFilterChanged, rowCommands, provider::workbenchTabChanged,
-                provider::sectionChosen);
-        Disposer.register(parent, navigator);
-        provider.attachWorkbenchView(navigator::render, parent);
-        provider.attachWorkbenchView(header::accept, parent);
-        provider.navigators.add(navigator);
-        Disposer.register(parent, () -> provider.navigators.remove(navigator));
-        provider.consumePendingFindingTarget();
-        return Optional.of(navigator);
-    }
-
-    /**
-     * The live review's diff for a new workbench editor
-     * ({@link ReviewWorkbenchEditor.Host}): empty when the project has no
-     * live Review content, or it is disposed. EDT.
-     */
-    static Optional<ReviewWorkbenchEditor.HostedDiff> hostedDiff(Project project, Disposable parent) {
-        ReviewTabProvider provider = project.getUserData(LIVE_PROVIDER);
-        ReviewDiffEditor editor = provider == null || provider.disposed.get() ? null : provider.diffEditor;
-        return editor == null ? Optional.empty() : Optional.of(editor.host(project, parent));
     }
 
     /** Names the workbench tab after the review's subject ({@link #subjectOf}). EDT. */

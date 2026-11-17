@@ -1,7 +1,6 @@
 package app.drydock.intellij.review;
 
-import com.intellij.diff.fragments.LineFragment;
-import com.intellij.diff.requests.DiffRequest;
+import app.drydock.intellij.review.workbench.model.FlowModel;
 import app.drydock.intellij.review.workbench.model.SectionsModel;
 import app.drydock.intellij.review.workbench.model.WorkbenchState;
 import app.drydock.review.AnnotationStatus;
@@ -12,31 +11,29 @@ import app.drydock.review.Severity;
 import app.drydock.review.Triage;
 import app.drydock.review.tour.ReviewTour;
 import com.intellij.diff.DiffContentFactory;
-import com.intellij.diff.tools.util.base.TextDiffSettingsHolder;
+import com.intellij.diff.FrameDiffTool;
+import com.intellij.diff.requests.DiffRequest;
 import com.intellij.diff.requests.SimpleDiffRequest;
+import com.intellij.diff.tools.util.base.TextDiffSettingsHolder;
 import com.intellij.diff.util.Side;
+import com.intellij.diff.fragments.LineFragment;
 import com.intellij.ide.util.PropertiesComponent;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.AnActionEvent;
-import com.intellij.openapi.actionSystem.ToggleAction;
-import com.intellij.openapi.actionSystem.ex.ActionUtil;
 import com.intellij.openapi.fileEditor.FileEditorProvider;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.Disposer;
 import com.intellij.openapi.wm.impl.IdeGlassPaneImpl;
 import com.intellij.testFramework.LightVirtualFile;
-import com.intellij.testFramework.TestActionEvent;
 import com.intellij.testFramework.PlatformTestUtil;
-import com.intellij.util.ui.UIUtil;
+import com.intellij.testFramework.TestActionEvent;
 import com.intellij.testFramework.fixtures.BasePlatformTestCase;
 import com.intellij.ui.components.JBLabel;
 
 import javax.swing.JComponent;
 import javax.swing.JFrame;
-import javax.swing.JLabel;
-import javax.swing.SwingUtilities;
-import javax.swing.text.JTextComponent;
+import java.awt.BorderLayout;
 import java.awt.GraphicsEnvironment;
 import java.time.Clock;
 import java.time.Instant;
@@ -44,13 +41,15 @@ import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
+import java.util.function.Function;
 
 /**
  * The review workbench tab in a booted IDE: one reusable file per project,
- * a provider that opens only that file, and an editor whose centre hosts the
- * live review's diff processor and disposes it with the tab.
+ * a provider that opens only that file, and an editor that lays the flow's
+ * queue, centre and findings pane over the outbox dock.
  */
 public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
 
@@ -77,56 +76,30 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
         ReviewWorkbenchEditor editor = new ReviewWorkbenchEditor(getProject(), ReviewWorkbenchFile.of(getProject()),
                 NO_REVIEW);
         try {
-            // The centre's file card; there is no section card without a live review.
-            JComponent centre = editor.inboxSplitter.getFirstComponent();
-            assertEquals(1, centre.getComponentCount());
-            assertEquals(ReviewWorkbenchEditor.NO_REVIEW_TEXT, ((JBLabel) centre.getComponent(0)).getText());
+            assertEquals(ReviewWorkbenchEditor.NO_REVIEW_TEXT,
+                    ((JBLabel) editor.inboxSplitter.getFirstComponent()).getText());
+            assertFalse("nothing to finish", editor.finishReview.isEnabled());
         } finally {
             Disposer.dispose(editor);
         }
     }
 
-    public void testTheCentreHostsTheReviewDiffSeededWithTheCurrentRequestAndClosingDisposesIt() {
-        List<Integer> opens = new ArrayList<>();
-        ReviewDiffEditor diff = new ReviewDiffEditor(() -> opens.add(1),
-                context -> new SimpleDiffRequest(context.path(), DiffContentFactory.getInstance().createEmpty(),
-                        DiffContentFactory.getInstance().createEmpty(), null, null),
-                viewer -> {
-                });
-        diff.selection("row");
-        diff.requestReady("row", context("src/A.java"));
-        assertEquals("the first show opens the workbench", 1, opens.size());
-
-        ReviewWorkbenchEditor editor = new ReviewWorkbenchEditor(getProject(), ReviewWorkbenchFile.of(getProject()),
-                diffOnly(diff));
-        JComponent focus = editor.getPreferredFocusedComponent();
-        assertNotNull(focus);
-        assertTrue("the diff is inside the workbench",
-                SwingUtilities.isDescendingFrom(focus, editor.getComponent()));
-
-        Disposer.dispose(editor);
-        // The processor went with the tab: the next selection reopens the workbench.
-        diff.selection("row2");
-        diff.requestReady("row2", context("src/B.java"));
-        assertEquals(2, opens.size());
-    }
-
-    public void testTheLayoutIsNavigatorDiffInboxOverTheOutbox() {
+    public void testTheLayoutIsQueueHunkFindingsOverTheOutboxDock() {
         ReviewWorkbenchEditor editor = new ReviewWorkbenchEditor(getProject(), ReviewWorkbenchFile.of(getProject()),
                 NO_REVIEW);
         try {
-            assertTrue("the outbox sits below", editor.outboxSplitter.isVertical());
-            assertSame(editor.navSplitter, editor.outboxSplitter.getFirstComponent());
             assertFalse(editor.navSplitter.isVertical());
+            assertSame(editor.navigatorPane, editor.navSplitter.getFirstComponent());
             assertSame(editor.inboxSplitter, editor.navSplitter.getSecondComponent());
             assertFalse(editor.inboxSplitter.isVertical());
             assertEquals(ReviewWorkbenchEditor.INBOX_EMPTY_TEXT,
                     ((JBLabel) ((CollapsiblePane) editor.inboxSplitter.getSecondComponent()).content()).getText());
-            assertEquals(ReviewWorkbenchEditor.OUTBOX_EMPTY_TEXT,
-                    ((JBLabel) editor.outboxSplitter.getSecondComponent()).getText());
+            BorderLayout layout = (BorderLayout) editor.getComponent().getLayout();
+            assertSame("the dock sits under the panes, outside the splitters", editor.outbox,
+                    layout.getLayoutComponent(BorderLayout.SOUTH));
+            assertSame(editor.navSplitter, layout.getLayoutComponent(BorderLayout.CENTER));
             assertEquals(ReviewWorkbenchEditor.NAV_KEY, editor.navSplitter.getSplitterProportionKey());
             assertEquals(ReviewWorkbenchEditor.INBOX_KEY, editor.inboxSplitter.getSplitterProportionKey());
-            assertEquals(ReviewWorkbenchEditor.OUTBOX_KEY, editor.outboxSplitter.getSplitterProportionKey());
         } finally {
             Disposer.dispose(editor);
         }
@@ -154,75 +127,34 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
         }
     }
 
-    public void testTheHeaderNamesTheSubjectAndTheProgress() {
+    public void testTheHeaderNamesTheKindTheSizeAndTheProgress() {
+        FlowModel.Queue queue = new FlowModel.Queue(true, Optional.empty(), List.of(), List.of(
+                hunk("h1", "d1", 3, 1), hunk("h2", "d2", 1, 0)), 2, 3);
         WorkbenchState state = WorkbenchState.of("drydock", WorkbenchState.Mode.LOCAL,
-                new ReviewTabModel.Snapshot(List.of(), 4, 1), WorkbenchState.Filter.ALL, Optional.empty(),
-                WorkbenchState.View.CHANGES_ONLY, List.of(),
-                WorkbenchState.InboxChoice.DEFAULT);
-        assertEquals("drydock  ·  1 / 4 reviewed", ReviewWorkbenchEditor.headerText(state));
+                new ReviewTabModel.Snapshot(List.of(), 0, 0), WorkbenchState.Filter.ALL, Optional.empty(),
+                WorkbenchState.View.CHANGES_ONLY, List.of(), WorkbenchState.InboxChoice.DEFAULT,
+                new SectionsModel.Snapshot(SectionsModel.Source.TOUR, Optional.empty(), List.of(),
+                        Optional.of(ReviewTour.Kind.SECTIONS)),
+                WorkbenchState.SectionsChoice.DEFAULT);
+        assertEquals("Section review · 2 files · 3 sections · +4 −1", ReviewWorkbenchEditor.metaText(state, queue));
+        assertEquals("1 of 2 hunks seen", ReviewWorkbenchEditor.progressText(queue, Set.of("d2")));
+        assertEquals("Educational tour", ReviewWorkbenchEditor.kindLabel(ReviewTour.Kind.TOUR));
     }
 
-    public void testTheHeaderNamesTheKindOfAStoredTour() {
-        for (ReviewTour.Kind kind : ReviewTour.Kind.values()) {
-            WorkbenchState state = WorkbenchState.of("drydock", WorkbenchState.Mode.LOCAL,
-                    new ReviewTabModel.Snapshot(List.of(), 4, 1), WorkbenchState.Filter.ALL, Optional.empty(),
-                    WorkbenchState.View.CHANGES_ONLY, List.of(), WorkbenchState.InboxChoice.DEFAULT,
-                    new SectionsModel.Snapshot(SectionsModel.Source.TOUR, Optional.empty(), List.of(),
-                            Optional.of(kind)),
-                    WorkbenchState.SectionsChoice.DEFAULT);
-            assertEquals("drydock  ·  1 / 4 reviewed  ·  " + ReviewWorkbenchEditor.kindLabel(kind),
-                    ReviewWorkbenchEditor.headerText(state));
-        }
-        assertEquals("Section review", ReviewWorkbenchEditor.kindLabel(ReviewTour.Kind.SECTIONS));
-    }
-
-    public void testTheNavigatorsToggleAsksForTheOtherFilter() {
-        List<WorkbenchState.Filter> asked = new ArrayList<>();
-        ReviewWorkbenchNavigator navigator = new ReviewWorkbenchNavigator(getProject(), row -> {
-        }, asked::add, List.of(), tab -> {
-        }, key -> {
-        });
+    public void testTheHeaderFollowsTheFlowAndFinishReviewOpensTheFinishScreen() {
+        List<ReviewWorkbenchFlow> flows = new ArrayList<>();
+        ReviewWorkbenchEditor editor = new ReviewWorkbenchEditor(getProject(), ReviewWorkbenchFile.of(getProject()),
+                flowHost(flows, null));
         try {
-            AnActionEvent event = TestActionEvent.createTestEvent();
-            assertFalse(navigator.withFindingsAction().isSelected(event));
-            navigator.withFindingsAction().setSelected(event, true);
-            assertEquals(List.of(WorkbenchState.Filter.WITH_FINDINGS), asked);
-
-            navigator.render(WorkbenchState.of("drydock", WorkbenchState.Mode.LOCAL,
-                    new ReviewTabModel.Snapshot(List.of(), 0, 0), WorkbenchState.Filter.WITH_FINDINGS,
-                    Optional.empty(), WorkbenchState.View.CHANGES_ONLY, List.of(), WorkbenchState.InboxChoice.DEFAULT));
-            assertTrue("the toggle follows the rendered state", navigator.withFindingsAction().isSelected(event));
+            ReviewWorkbenchFlow flow = flows.getFirst();
+            flow.render(emptyState("PR #7"));
+            assertEquals("PR #7", editor.subject.getText());
+            assertEquals("0 of 0 hunks seen", editor.progressText.getText());
+            assertTrue(editor.finishReview.isEnabled());
+            editor.finishReview.doClick();
+            assertTrue(flow.finishing());
         } finally {
-            Disposer.dispose(navigator);
-        }
-    }
-
-    public void testTheNavigatorShowsTheStatesTabAndPassesOnTheUsersTabAndSection() {
-        List<WorkbenchState.Navigator> tabs = new ArrayList<>();
-        List<String> picked = new ArrayList<>();
-        ReviewWorkbenchNavigator navigator = new ReviewWorkbenchNavigator(getProject(), row -> {
-        }, filter -> {
-        }, List.of(), tabs::add, picked::add);
-        try {
-            SectionsModel.Snapshot sections = new SectionsModel.Snapshot(SectionsModel.Source.TOUR,
-                    Optional.of("Make widgets."), List.of(new SectionsModel.Section("step:s1", 1, Optional.of("s1"),
-                    "Widgets", "Why.", List.of(), List.of(2), List.of(), 0, 1, 0)));
-            navigator.render(WorkbenchState.of("drydock", WorkbenchState.Mode.LOCAL,
-                    new ReviewTabModel.Snapshot(List.of(), 0, 0), WorkbenchState.Filter.ALL, Optional.empty(),
-                    WorkbenchState.View.CHANGES_ONLY, List.of(), WorkbenchState.InboxChoice.DEFAULT, sections,
-                    WorkbenchState.SectionsChoice.DEFAULT));
-            assertEquals("a tour opens the Sections tab", WorkbenchState.Navigator.SECTIONS, navigator.tab());
-            assertEquals(1, navigator.sections.list.getModel().getSize());
-            assertTrue("a render selects nothing for the user", picked.isEmpty());
-
-            navigator.sections.list.setSelectedIndex(0);
-            assertEquals(List.of("step:s1"), picked);
-
-            AnActionEvent event = TestActionEvent.createTestEvent();
-            ((ToggleAction) navigator.tabActions.getChildActionsOrStubs()[1]).setSelected(event, true);
-            assertEquals(List.of(WorkbenchState.Navigator.FILES), tabs);
-        } finally {
-            Disposer.dispose(navigator);
+            Disposer.dispose(editor);
         }
     }
 
@@ -246,13 +178,10 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
         TextDiffSettingsHolder.TextDiffSettings settings =
                 TextDiffSettingsHolder.TextDiffSettings.getSettings(ReviewDiffEditor.PLACE);
         boolean saved = settings.isExpandByDefault();
-        List<String> built = new ArrayList<>();
         List<String> applied = new ArrayList<>();
-        ReviewDiffEditor diff = new ReviewDiffEditor(() -> { }, context -> {
-            built.add(context.path());
-            return new SimpleDiffRequest(context.path(), DiffContentFactory.getInstance().createEmpty(),
-                    DiffContentFactory.getInstance().createEmpty(), null, null);
-        }, viewer -> { });
+        ReviewDiffEditor diff = new ReviewDiffEditor(() -> { }, context ->
+                new SimpleDiffRequest(context.path(), DiffContentFactory.getInstance().createEmpty(),
+                        DiffContentFactory.getInstance().createEmpty(), null, null), viewer -> { });
         try {
             diff.show(context("src/A.java"));
             diff.processorReady(new ReviewDiffEditor.ProcessorHandle() {
@@ -274,133 +203,10 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
         }
     }
 
-    public void testTheHeaderTogglesAskForTheirViewOnceAStateIsShown() {
-        List<WorkbenchState.View> asked = new ArrayList<>();
-        List<Consumer<WorkbenchState>> headers = new ArrayList<>();
-        ReviewWorkbenchEditor.Host host = new ReviewWorkbenchEditor.Host() {
-            @Override
-            public Optional<ReviewWorkbenchEditor.HostedDiff> hostDiff(Project project, Disposable parent) {
-                return Optional.empty();
-            }
-
-            @Override
-            public Optional<JComponent> hostNavigator(Project project, Disposable parent,
-                                                      Consumer<WorkbenchState> header) {
-                headers.add(header);
-                return Optional.empty();
-            }
-
-            @Override
-            public void changeView(Project project, WorkbenchState.View view) {
-                asked.add(view);
-            }
-
-            @Override
-            public Optional<JComponent> hostInbox(Project project, Disposable parent) {
-                return Optional.empty();
-            }
-        };
-        ReviewWorkbenchEditor editor = new ReviewWorkbenchEditor(getProject(), ReviewWorkbenchFile.of(getProject()),
-                host);
-        try {
-            ToggleAction changesOnly = (ToggleAction) editor.viewActions.getChildActionsOrStubs()[0];
-            ToggleAction fullFile = (ToggleAction) editor.viewActions.getChildActionsOrStubs()[1];
-            assertEquals("a text-only toggle shows its text", Boolean.TRUE,
-                    changesOnly.getTemplatePresentation().getClientProperty(ActionUtil.SHOW_TEXT_IN_TOOLBAR));
-            assertEquals(Boolean.TRUE,
-                    fullFile.getTemplatePresentation().getClientProperty(ActionUtil.SHOW_TEXT_IN_TOOLBAR));
-            AnActionEvent event = TestActionEvent.createTestEvent();
-            assertFalse(changesOnly.isSelected(event));
-
-            headers.get(0).accept(WorkbenchState.of("drydock", WorkbenchState.Mode.LOCAL,
-                    new ReviewTabModel.Snapshot(List.of(), 0, 0), WorkbenchState.Filter.ALL, Optional.empty(),
-                    WorkbenchState.View.CHANGES_ONLY, List.of(), WorkbenchState.InboxChoice.DEFAULT));
-            assertTrue(changesOnly.isSelected(event));
-            assertFalse(fullFile.isSelected(event));
-
-            fullFile.setSelected(event, true);
-            assertEquals(List.of(WorkbenchState.View.FULL_FILE), asked);
-        } finally {
-            Disposer.dispose(editor);
-        }
-    }
-
-    public void testTheCentreShowsTheSelectedSectionAndTheFileDiffOtherwise() {
-        List<Consumer<WorkbenchState>> headers = new ArrayList<>();
-        ReviewWorkbenchEditor.Host host = new ReviewWorkbenchEditor.Host() {
-            @Override
-            public Optional<ReviewWorkbenchEditor.HostedDiff> hostDiff(Project project, Disposable parent) {
-                return Optional.empty();
-            }
-
-            @Override
-            public Optional<JComponent> hostNavigator(Project project, Disposable parent,
-                                                      Consumer<WorkbenchState> header) {
-                headers.add(header);
-                return Optional.empty();
-            }
-
-            @Override
-            public void changeView(Project project, WorkbenchState.View view) {
-            }
-
-            @Override
-            public Optional<JComponent> hostInbox(Project project, Disposable parent) {
-                return Optional.empty();
-            }
-
-            @Override
-            public Optional<JComponent> hostSectionView(Project project, Disposable parent) {
-                return Optional.of(new JLabel("section"));
-            }
-        };
-        ReviewWorkbenchEditor editor = new ReviewWorkbenchEditor(getProject(), ReviewWorkbenchFile.of(getProject()),
-                host);
-        try {
-            SectionsModel.Snapshot sections = new SectionsModel.Snapshot(SectionsModel.Source.TOUR, Optional.empty(),
-                    List.of(new SectionsModel.Section("step:s1", 1, Optional.of("s1"), "One", "", List.of(),
-                            List.of(), List.of(), 0, 0, 0)));
-            ReviewTabModel.Snapshot none = new ReviewTabModel.Snapshot(List.of(), 0, 0);
-            headers.get(0).accept(WorkbenchState.of("drydock", WorkbenchState.Mode.LOCAL, none,
-                    WorkbenchState.Filter.ALL, Optional.empty(), WorkbenchState.View.CHANGES_ONLY, List.of(),
-                    WorkbenchState.InboxChoice.DEFAULT, sections, new WorkbenchState.SectionsChoice(
-                            Optional.of(WorkbenchState.Navigator.SECTIONS), Optional.of("step:s1"))));
-            assertEquals(ReviewWorkbenchEditor.CENTRE_SECTION, editor.centreCard());
-
-            headers.get(0).accept(WorkbenchState.of("drydock", WorkbenchState.Mode.LOCAL, none,
-                    WorkbenchState.Filter.ALL, Optional.empty(), WorkbenchState.View.CHANGES_ONLY, List.of(),
-                    WorkbenchState.InboxChoice.DEFAULT, sections, new WorkbenchState.SectionsChoice(
-                            Optional.of(WorkbenchState.Navigator.FILES), Optional.of("step:s1"))));
-            assertEquals("the Files tab shows the file diff", ReviewWorkbenchEditor.CENTRE_FILE, editor.centreCard());
-        } finally {
-            Disposer.dispose(editor);
-        }
-    }
-
-    public void testThePrDescriptionsFirstParagraphShowsUnderTheIntent() {
-        assertEquals("Callers use the result of bar().",
-                ReviewWorkbenchSections.firstParagraph("## Summary\nCallers use\n the result of bar().\n\n## Details\nMore.", 400));
-        assertEquals("abcd…", ReviewWorkbenchSections.firstParagraph("abcdefgh", 4));
-
-        ReviewWorkbenchSections sections = new ReviewWorkbenchSections(key -> {
-        });
-        sections.render(WorkbenchState.of("PR #7", WorkbenchState.Mode.PR, new ReviewTabModel.Snapshot(List.of(), 0, 0),
-                WorkbenchState.Filter.ALL, Optional.empty(), WorkbenchState.View.CHANGES_ONLY, List.of(),
-                WorkbenchState.InboxChoice.DEFAULT).withPrDescription(Optional.of("Make widgets.\n\nMore.")));
-        List<String> shown = new ArrayList<>();
-        UIUtil.uiTraverser(sections).filter(JTextComponent.class)
-                .filter(text -> text.isVisible() && !text.getText().isEmpty()).forEach(text -> shown.add(text.getText()));
-        // The prose no longer carries the "PR description: " prefix: the eyebrow label names the block.
-        assertTrue(shown.toString(), shown.contains("Make widgets."));
-    }
-
-    public void testASectionRowsChipsAndCounts() {
-        SectionsModel.Section section = new SectionsModel.Section("step:s2", 2, Optional.of("s2"), "Two", "",
-                List.of(1), List.of(3, 4), List.of(), 1, 3, 2);
-        assertEquals("builds on §1 · needed by §3, §4", ReviewWorkbenchSections.chips(section));
-        assertEquals("1/3  ·  2 findings", ReviewWorkbenchSections.counts(section));
-        assertEquals("", ReviewWorkbenchSections.chips(new SectionsModel.Section("rest", 5, Optional.empty(),
-                "Not in the tour", "", List.of(), List.of(), List.of(), 0, 0, 0)));
+    public void testThePrDescriptionsFirstParagraphIsCutAtItsFirstBlankLine() {
+        assertEquals("Callers use the result of bar().", ReviewWorkbenchQueue.firstParagraph(
+                "## Summary\nCallers use\n the result of bar().\n\n## Details\nMore.", 400));
+        assertEquals("abcd…", ReviewWorkbenchQueue.firstParagraph("abcdefgh", 4));
     }
 
     public void testTheReviewMenuAsksForSectionsTheTourAndSphinxOnlyWhenTheHarnessHasIt() {
@@ -409,22 +215,7 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
         boolean[] sphinx = {false};
         ReviewWorkbenchEditor.Host host = new ReviewWorkbenchEditor.Host() {
             @Override
-            public Optional<ReviewWorkbenchEditor.HostedDiff> hostDiff(Project project, Disposable parent) {
-                return Optional.empty();
-            }
-
-            @Override
-            public Optional<JComponent> hostNavigator(Project project, Disposable parent,
-                                                      Consumer<WorkbenchState> header) {
-                return Optional.empty();
-            }
-
-            @Override
-            public void changeView(Project project, WorkbenchState.View view) {
-            }
-
-            @Override
-            public Optional<JComponent> hostInbox(Project project, Disposable parent) {
+            public Optional<ReviewWorkbenchEditor.HostedFlow> hostFlow(Project project, Disposable parent) {
                 return Optional.empty();
             }
 
@@ -482,82 +273,6 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
         }
     }
 
-    public void testTheModeChipShowsTheModeTheScopeIsIn() {
-        List<Consumer<WorkbenchState>> headers = new ArrayList<>();
-        ReviewWorkbenchEditor.Host host = new ReviewWorkbenchEditor.Host() {
-            @Override
-            public Optional<ReviewWorkbenchEditor.HostedDiff> hostDiff(Project project, Disposable parent) {
-                return Optional.empty();
-            }
-
-            @Override
-            public Optional<JComponent> hostNavigator(Project project, Disposable parent,
-                                                      Consumer<WorkbenchState> header) {
-                headers.add(header);
-                return Optional.empty();
-            }
-
-            @Override
-            public void changeView(Project project, WorkbenchState.View view) {
-            }
-
-            @Override
-            public Optional<JComponent> hostInbox(Project project, Disposable parent) {
-                return Optional.empty();
-            }
-        };
-        ReviewWorkbenchEditor editor = new ReviewWorkbenchEditor(getProject(), ReviewWorkbenchFile.of(getProject()),
-                host);
-        try {
-            ToggleAction local = (ToggleAction) editor.modeActions.getChildActionsOrStubs()[0];
-            ToggleAction pr = (ToggleAction) editor.modeActions.getChildActionsOrStubs()[1];
-            headers.get(0).accept(WorkbenchState.of("drydock", WorkbenchState.Mode.LOCAL,
-                    new ReviewTabModel.Snapshot(List.of(), 0, 0), WorkbenchState.Filter.ALL, Optional.empty(),
-                    WorkbenchState.View.CHANGES_ONLY, List.of(), WorkbenchState.InboxChoice.DEFAULT));
-
-            assertEquals("a text-only toggle shows its text", Boolean.TRUE,
-                    local.getTemplatePresentation().getClientProperty(ActionUtil.SHOW_TEXT_IN_TOOLBAR));
-            assertEquals(Boolean.TRUE, pr.getTemplatePresentation().getClientProperty(ActionUtil.SHOW_TEXT_IN_TOOLBAR));
-            AnActionEvent localEvent = TestActionEvent.createTestEvent(local);
-            local.update(localEvent);
-            assertTrue(local.isSelected(localEvent));
-            assertTrue(localEvent.getPresentation().isEnabled());
-
-            AnActionEvent prEvent = TestActionEvent.createTestEvent(pr);
-            pr.update(prEvent);
-            assertFalse(pr.isSelected(prEvent));
-            assertFalse("the mode follows the checkout", prEvent.getPresentation().isEnabled());
-            assertEquals(ReviewWorkbenchEditor.MODE_FOLLOWS_CHECKOUT, prEvent.getPresentation().getDescription());
-
-            headers.get(0).accept(WorkbenchState.of("PR #12", WorkbenchState.Mode.PR,
-                    new ReviewTabModel.Snapshot(List.of(), 0, 0), WorkbenchState.Filter.ALL, Optional.empty(),
-                    WorkbenchState.View.CHANGES_ONLY, List.of(), WorkbenchState.InboxChoice.DEFAULT));
-            pr.update(prEvent);
-            local.update(localEvent);
-            assertTrue("a PR checkout is the PR mode", pr.isSelected(prEvent));
-            assertTrue(prEvent.getPresentation().isEnabled());
-            assertFalse(localEvent.getPresentation().isEnabled());
-        } finally {
-            Disposer.dispose(editor);
-        }
-    }
-
-    public void testAWorkbenchOpenedBeforeAnySelectionShowsTheSeededMessageNotTheLoadingState() {
-        ReviewDiffEditor diff = new ReviewDiffEditor(() -> { }, context -> {
-            throw new AssertionError("nothing is selected: no request is built");
-        }, viewer -> { });
-        ReviewWorkbenchEditor editor = new ReviewWorkbenchEditor(getProject(), ReviewWorkbenchFile.of(getProject()),
-                diffOnly(diff));
-        try {
-            PlatformTestUtil.dispatchAllEventsInIdeEventQueue();
-            List<String> texts = UIUtil.uiTraverser(editor.getComponent()).filter(JLabel.class).toList().stream()
-                    .map(JLabel::getText).filter(text -> text != null).toList();
-            assertTrue(texts.toString(), texts.stream().anyMatch(text -> text.contains(ReviewDiffEditor.NO_FILE_TEXT)));
-        } finally {
-            Disposer.dispose(editor);
-        }
-    }
-
     public void testInboxShownFollowsWhatThereIsToReach() {
         SectionsModel.Snapshot tour = tour();
         ReviewTabModel.Snapshot none = new ReviewTabModel.Snapshot(List.of(), 0, 0);
@@ -580,51 +295,25 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
     }
 
     public void testTheInboxPaneYieldsItsSpaceWhileThereIsNothingToReach() {
-        List<Consumer<WorkbenchState>> headers = new ArrayList<>();
-        List<Disposable> parents = new ArrayList<>();
-        ReviewWorkbenchEditor.Host host = new ReviewWorkbenchEditor.Host() {
-            @Override
-            public Optional<ReviewWorkbenchEditor.HostedDiff> hostDiff(Project project, Disposable parent) {
-                return Optional.empty();
-            }
-
-            @Override
-            public Optional<JComponent> hostNavigator(Project project, Disposable parent,
-                                                      Consumer<WorkbenchState> header) {
-                headers.add(header);
-                return Optional.empty();
-            }
-
-            @Override
-            public void changeView(Project project, WorkbenchState.View view) {
-            }
-
-            @Override
-            public Optional<JComponent> hostInbox(Project project, Disposable parent) {
-                ReviewWorkbenchInbox inbox = new ReviewWorkbenchInbox(inboxActions(),
-                        Clock.fixed(Instant.EPOCH, ZoneOffset.UTC));
-                Disposer.register(parent, inbox);
-                parents.add(parent);
-                return Optional.of(inbox);
-            }
-        };
+        List<ReviewWorkbenchFlow> flows = new ArrayList<>();
         ReviewWorkbenchEditor editor = new ReviewWorkbenchEditor(getProject(), ReviewWorkbenchFile.of(getProject()),
-                host);
+                flowHost(flows, this::inbox));
         try {
+            ReviewWorkbenchFlow flow = flows.getFirst();
             ReviewWorkbenchInbox inbox = (ReviewWorkbenchInbox) editor.inboxPane.content();
             assertTrue("expanded to begin with", !editor.inboxPane.isCollapsed());
             assertTrue(inbox.isVisible());
 
-            headers.get(0).accept(noFindingsTourState());
+            flow.render(noFindingsTourState());
             assertTrue("no findings anywhere: the pane yields its space (collapsed to its strip)",
                     editor.inboxPane.isCollapsed());
             assertFalse(inbox.isVisible());
 
-            headers.get(0).accept(oneFindingTourState());
+            flow.render(oneFindingTourState());
             assertTrue("a finding brings the pane back", !editor.inboxPane.isCollapsed());
             assertTrue(inbox.isVisible());
 
-            headers.get(0).accept(noFindingsTourState());
+            flow.render(noFindingsTourState());
             assertTrue(editor.inboxPane.isCollapsed());
 
             // A comment can start with no findings at all: the composer keeps the pane.
@@ -642,34 +331,9 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
         if (GraphicsEnvironment.isHeadless()) {
             return; // the relayout is only observable in a peer-created (packable) hierarchy
         }
-        List<Consumer<WorkbenchState>> headers = new ArrayList<>();
-        ReviewWorkbenchEditor.Host host = new ReviewWorkbenchEditor.Host() {
-            @Override
-            public Optional<ReviewWorkbenchEditor.HostedDiff> hostDiff(Project project, Disposable parent) {
-                return Optional.empty();
-            }
-
-            @Override
-            public Optional<JComponent> hostNavigator(Project project, Disposable parent,
-                                                      Consumer<WorkbenchState> header) {
-                headers.add(header);
-                return Optional.empty();
-            }
-
-            @Override
-            public void changeView(Project project, WorkbenchState.View view) {
-            }
-
-            @Override
-            public Optional<JComponent> hostInbox(Project project, Disposable parent) {
-                ReviewWorkbenchInbox inbox = new ReviewWorkbenchInbox(inboxActions(),
-                        Clock.fixed(Instant.EPOCH, ZoneOffset.UTC));
-                Disposer.register(parent, inbox);
-                return Optional.of(inbox);
-            }
-        };
+        List<ReviewWorkbenchFlow> flows = new ArrayList<>();
         ReviewWorkbenchEditor editor = new ReviewWorkbenchEditor(getProject(), ReviewWorkbenchFile.of(getProject()),
-                host);
+                flowHost(flows, this::inbox));
         JFrame frame = new JFrame();
         // The splitter's one-pixel divider asks IdeGlassPaneUtil.find for the root pane's glass
         // pane on addNotify: a bare JFrame's JPanel glass pane is not an IdeGlassPane, so install
@@ -681,13 +345,10 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
             JComponent centre = editor.inboxSplitter.getFirstComponent();
             JComponent inbox = (JComponent) editor.inboxPane.content();
             assertTrue(inbox.isVisible());
-            // The inbox sits beside the centre in a horizontal splitter: the share it yields is
-            // width. (The frame's height can also re-balance here, because Splitter's minimum
-            // sizes skip hidden components in the outer vertical splitter — not what's under test.)
             int withInbox = centre.getWidth();
             assertTrue("precondition: the packed frame laid the splitters out", withInbox > 0);
 
-            headers.get(0).accept(noFindingsTourState());
+            flows.getFirst().render(noFindingsTourState());
             PlatformTestUtil.dispatchAllEventsInIdeEventQueue();
             assertTrue("no findings anywhere: the pane yields its space (collapsed to its strip)",
                     editor.inboxPane.isCollapsed());
@@ -698,6 +359,77 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
             frame.dispose();
             Disposer.dispose(editor);
         }
+    }
+
+    private Optional<JComponent> inbox(Disposable parent) {
+        ReviewWorkbenchInbox inbox = new ReviewWorkbenchInbox(inboxActions(), Clock.fixed(Instant.EPOCH, ZoneOffset.UTC));
+        Disposer.register(parent, inbox);
+        return Optional.of(inbox);
+    }
+
+    /**
+     * A host whose flow is a real one over the scope "s1", recorded in
+     * {@code flows}; {@code inbox} builds the findings pane, null for none.
+     */
+    private static ReviewWorkbenchEditor.Host flowHost(List<ReviewWorkbenchFlow> flows,
+                                                       Function<Disposable, Optional<JComponent>> inbox) {
+        return new ReviewWorkbenchEditor.Host() {
+            @Override
+            public Optional<ReviewWorkbenchEditor.HostedFlow> hostFlow(Project project, Disposable parent) {
+                ReviewWorkbenchFlow flow = new ReviewWorkbenchFlow(() -> Optional.of("s1"),
+                        new ReviewFlowMarks(PropertiesComponent.getInstance(project)), tab -> {
+                        });
+                ReviewWorkbenchFlowView centre = new ReviewWorkbenchFlowView(project, flow, NO_ACTIONS);
+                Disposer.register(parent, centre);
+                flows.add(flow);
+                return Optional.of(new ReviewWorkbenchEditor.HostedFlow(flow, centre));
+            }
+
+            @Override
+            public Optional<JComponent> hostInbox(Project project, Disposable parent) {
+                return inbox == null ? Optional.empty() : inbox.apply(parent);
+            }
+        };
+    }
+
+    /** Flow centre actions that load and store nothing. */
+    static final ReviewWorkbenchFlowView.Actions NO_ACTIONS = new ReviewWorkbenchFlowView.Actions() {
+        @Override
+        public CompletableFuture<Optional<ReviewDiffRequests.RequestContext>> hunkContext(String path, int hunkIndex,
+                                                                                        String scrollKey) {
+            return CompletableFuture.completedFuture(Optional.empty());
+        }
+
+        @Override
+        public Consumer<FrameDiffTool.DiffViewer> decorator(String path, int hunkIndex, Disposable lifetime) {
+            return viewer -> {
+            };
+        }
+
+        @Override
+        public CompletableFuture<Optional<String>> comment(FlowModel.Hunk hunk, String text) {
+            return CompletableFuture.completedFuture(Optional.empty());
+        }
+
+        @Override
+        public CompletableFuture<Optional<String>> submitReview() {
+            return CompletableFuture.completedFuture(Optional.empty());
+        }
+
+        @Override
+        public CompletableFuture<Optional<String>> sendToSession() {
+            return CompletableFuture.completedFuture(Optional.empty());
+        }
+    };
+
+    private static FlowModel.Hunk hunk(String key, String digest, int added, int removed) {
+        return new FlowModel.Hunk(key, "src/A.java", 0, digest, "1", "n1", removed, added, Set.of("n1"), 0, false);
+    }
+
+    private static WorkbenchState emptyState(String subject) {
+        return WorkbenchState.of(subject, WorkbenchState.Mode.PR, new ReviewTabModel.Snapshot(List.of(), 0, 0),
+                WorkbenchState.Filter.ALL, Optional.empty(), WorkbenchState.View.CHANGES_ONLY, List.of(),
+                WorkbenchState.InboxChoice.DEFAULT);
     }
 
     private static WorkbenchState noFindingsTourState() {
@@ -766,51 +498,7 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
         };
     }
 
-    private static final ReviewWorkbenchEditor.Host NO_REVIEW = new ReviewWorkbenchEditor.Host() {
-        @Override
-        public Optional<ReviewWorkbenchEditor.HostedDiff> hostDiff(Project project, Disposable parent) {
-            return Optional.empty();
-        }
-
-        @Override
-        public Optional<JComponent> hostNavigator(Project project, Disposable parent,
-                                                  Consumer<WorkbenchState> header) {
-            return Optional.empty();
-        }
-
-        @Override
-        public void changeView(Project project, WorkbenchState.View view) {
-        }
-
-        @Override
-        public Optional<JComponent> hostInbox(Project project, Disposable parent) {
-            return Optional.empty();
-        }
-    };
-
-    private static ReviewWorkbenchEditor.Host diffOnly(ReviewDiffEditor diff) {
-        return new ReviewWorkbenchEditor.Host() {
-            @Override
-            public Optional<ReviewWorkbenchEditor.HostedDiff> hostDiff(Project project, Disposable parent) {
-                return Optional.of(diff.host(project, parent));
-            }
-
-            @Override
-            public Optional<JComponent> hostNavigator(Project project, Disposable parent,
-                                                      Consumer<WorkbenchState> header) {
-                return Optional.empty();
-            }
-
-            @Override
-            public void changeView(Project project, WorkbenchState.View view) {
-            }
-
-            @Override
-            public Optional<JComponent> hostInbox(Project project, Disposable parent) {
-                return Optional.empty();
-            }
-        };
-    }
+    private static final ReviewWorkbenchEditor.Host NO_REVIEW = (project, parent) -> Optional.empty();
 
     private static ReviewDiffRequests.RequestContext context(String path) {
         return new ReviewDiffRequests.RequestContext(path,
