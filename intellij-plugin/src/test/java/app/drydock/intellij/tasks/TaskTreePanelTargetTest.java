@@ -146,6 +146,14 @@ class TaskTreePanelTargetTest {
     }
 
     @Test
+    void noRowHasNoRowTargetSoBlankSpaceAndTheToolbarKeepTheirOwnRoutes() {
+        assertEquals(Optional.empty(), TaskTreePanel.newTaskTarget(null, REGISTERED_ROOT));
+        assertEquals(Optional.empty(), TaskTreePanel.newTaskTarget(sessionRow("Session"), null));
+        assertEquals(Optional.of(new TaskTreePanel.NewTaskTarget(REGISTERED_ROOT, Optional.empty())),
+                TaskTreePanel.newTaskTarget(sessionRow("Session"), REGISTERED_ROOT));
+    }
+
+    @Test
     void issueRowDoesNotOfferTheGenericNewTaskAction() {
         IssueRow row = new IssueRow(REGISTERED_ROOT, new OpenIssue(42, "Fix allocation profile",
                 Optional.of("https://github.com/DataDog/profiling-backend/issues/42"), List.of(), List.of(),

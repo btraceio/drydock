@@ -10,6 +10,7 @@ import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.delayedtasks.TaskStoreWatcher;
 import app.drydock.git.GhCliService.BranchPullRequest;
+import app.drydock.git.GhCliService.CiFailure;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.GhCliService.OpenPullRequest;
 import app.drydock.git.GhCliService.PrInfo;
@@ -35,8 +36,10 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -422,6 +425,115 @@ class TaskLinksTest {
         // picked by the displayed session rows' order, whatever the layer
         // map iterates first.
         assertEquals(Optional.of(attachedUnderTwo), TaskLinks.taskOfSession(sessionTwo, nodes, tasks));
+    }
+
+    // Carried PR health (conflict, CI failure) rides the PR row's own
+    // record onto an already-linked delayed task row. The association is
+    // the unchanged same-project stacked-branch-first / shown-session
+    // fallback: health never links a row, and no row is linked by number.
+
+    private static PullRequestRow failingPullRequest(Path root, String head, int number) {
+        return new PullRequestRow(root, new OpenPullRequest(number, "Speed up the flaky suite", head, "main",
+                false, Optional.of("reviewer"), Optional.of("https://github.com/x/y/pull/" + number),
+                true, Set.of(CiFailure.FAILURE, CiFailure.ERROR)));
+    }
+
+    private static TaskDocument document(TaskId id, RepositoryId repository, List<String> sessions) {
+        return new TaskDocument(id, repository, "Fix allocation profile", TaskStatus.OPEN,
+                app.drydock.tasks.DoneBy.AGENT, Optional.of(NOW), List.of(), sessions, "", "body");
+    }
+
+    private static TaskStoreWatcher.WatchedSnapshot watchedIn(RepositoryId repository, TaskDocument... documents) {
+        Map<TaskId, TaskDocument> byId = new java.util.LinkedHashMap<>();
+        for (TaskDocument document : documents) {
+            byId.put(document.id(), document);
+        }
+        return new TaskStoreWatcher.WatchedSnapshot(new TaskSnapshot(List.of(documents),
+                List.of(repository), byId, Map.of(), List.of(), List.of()), List.of(), null);
+    }
+
+    /** The panel's own carriage: every task row through TaskTreePanel.linkedTaskRows, by id. */
+    private static Map<TaskId, DelayedTaskRow> carried(List<TaskNode> nodes, TaskStoreWatcher.WatchedSnapshot tasks) {
+        Map<TaskId, DelayedTaskRow> byId = new java.util.LinkedHashMap<>();
+        TaskTreePanel.linkedTaskRows(nodes, tasks, Set.of(), Map.of(), NOW)
+                .forEach(row -> byId.put(row.id(), row));
+        return byId;
+    }
+
+    @Test
+    void aStackedBranchLinkedTaskCarriesItsPullRequestsHealthVerbatim() {
+        TaskId stackedId = TaskId.of("stacked-row-k5d5");
+        PullRequestRow stacked = failingPullRequest(ROOT_A, StackBranches.name(stackedId), 40);
+        List<TaskNode> nodes = List.of(project(REPO_A, ROOT_A, pullRequests(stacked)));
+
+        DelayedTaskRow row = carried(nodes, watchedIn(REPO_A, document(stackedId, REPO_A, List.of())))
+                .get(stackedId);
+
+        assertSame(stacked.pullRequest(), row.pullRequest().orElseThrow(),
+                "the PR row's own record is carried, never rebuilt");
+        assertTrue(row.pullRequest().get().conflicting());
+        assertEquals(Set.of(CiFailure.FAILURE, CiFailure.ERROR), row.pullRequest().get().ciFailures());
+    }
+
+    @Test
+    void aShownSessionLinkedTaskCarriesTheSessionBranchsPullRequestHealth() {
+        TaskRow working = session("feature/fix");
+        TaskId viaSession = TaskId.of("session-row-k6e6");
+        PullRequestRow onSession = failingPullRequest(ROOT_A, "feature/fix", 41);
+        List<TaskNode> nodes = List.of(project(REPO_A, ROOT_A, pullRequests(onSession), working));
+
+        DelayedTaskRow row = carried(nodes, watchedIn(REPO_A,
+                document(viaSession, REPO_A, List.of(working.session().id().toString())))).get(viaSession);
+
+        assertSame(onSession.pullRequest(), row.pullRequest().orElseThrow());
+    }
+
+    @Test
+    void theStackedBranchStillWinsWhenTheSessionBranchsPullRequestIsTheFailingOne() {
+        TaskRow working = session("feature/fix");
+        TaskId id = TaskId.of("stacked-wins-k7f7");
+        PullRequestRow healthyStacked = pullRequest(ROOT_A, StackBranches.name(id), 40);
+        PullRequestRow failingOnSession = failingPullRequest(ROOT_A, "feature/fix", 41);
+        List<TaskNode> nodes = List.of(project(REPO_A, ROOT_A,
+                pullRequests(failingOnSession, healthyStacked), working));
+
+        DelayedTaskRow row = carried(nodes, watchedIn(REPO_A,
+                document(id, REPO_A, List.of(working.session().id().toString())))).get(id);
+
+        assertSame(healthyStacked.pullRequest(), row.pullRequest().orElseThrow(),
+                "health never reorders the stacked-branch-first rule");
+        assertEquals(Set.of(), row.pullRequest().get().ciFailures());
+    }
+
+    @Test
+    void intentionallyUnlinkedTasksCarryNoPullRequestEvenBesideFailingOnes() {
+        TaskRow shownInA = session("feature/fix");
+        TaskId otherProject = TaskId.of("other-project-k8g8");
+        TaskId hiddenSession = TaskId.of("hidden-session-k9h9");
+        TaskId otherBranch = TaskId.of("other-branch-k1j1");
+        TaskId notListed = TaskId.of("not-listed-k2m2");
+        // A failing PR on the other project's stacked branch and number; a
+        // failing PR whose number a task's session could alias; the shown
+        // session in A sits on a branch no PR has.
+        List<TaskNode> nodes = List.of(
+                project(REPO_A, ROOT_A, pullRequests(failingPullRequest(ROOT_A, "pr-7", 7)), shownInA),
+                project(REPO_B, ROOT_B, pullRequests(
+                        failingPullRequest(ROOT_B, StackBranches.name(otherProject), 12))));
+
+        Map<TaskId, DelayedTaskRow> rows = carried(nodes, watchedIn(REPO_A,
+                // Its stacked-branch PR lives in another project only.
+                document(otherProject, REPO_A, List.of()),
+                // Its stored session is not shown.
+                document(hiddenSession, REPO_A, List.of("gone-session")),
+                // Its shown session's branch has no PR (pr-7's head is "pr-7").
+                document(otherBranch, REPO_A, List.of(shownInA.session().id().toString())),
+                // Its repository is not a shown project at all.
+                document(notListed, RepositoryId.newId(), List.of())));
+
+        assertEquals(4, rows.size(), "carriage never drops or adds a task row");
+        for (DelayedTaskRow row : rows.values()) {
+            assertEquals(Optional.empty(), row.pullRequest(), row.id() + " must stay unlinked");
+        }
     }
 
     @Test

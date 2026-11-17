@@ -12,6 +12,7 @@ import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.git.GhCliService;
 import app.drydock.git.GhCliService.BranchPullRequest;
+import app.drydock.git.GhCliService.CiFailure;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.GhCliService.PrInfo.PrLifecycle;
 import app.drydock.git.JiraIssue;
@@ -30,22 +31,33 @@ import app.drydock.intellij.tasks.TaskNode.Section;
 import app.drydock.intellij.tasks.TaskNode.SectionKind;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
 
+import com.intellij.icons.AllIcons;
+import com.intellij.ui.SimpleColoredComponent;
+import com.intellij.ui.icons.RowIcon;
 import org.junit.jupiter.api.Test;
 
 import javax.swing.Icon;
 import javax.swing.JTree;
 import javax.swing.tree.DefaultMutableTreeNode;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.awt.GraphicsEnvironment;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -339,5 +351,135 @@ class TaskTreeRendererTest {
     void aDelayedTasksPullRequestTooltipNamesNumberBranchAndTitle() {
         assertEquals("Pull request #40 from pr-40: Speed up the flaky suite",
                 TaskTreeRenderer.pullRequestLinkTooltip(openPr(40, "Speed up the flaky suite", "pr-40")));
+    }
+
+    private static GhCliService.OpenPullRequest healthPr(boolean conflicting, Set<CiFailure> ci) {
+        return new GhCliService.OpenPullRequest(7, "Fix it", "feature/x", "main", false,
+                Optional.of("someone"), Optional.empty(), conflicting, ci);
+    }
+
+    private static TaskTreeRenderer painted(TaskTreeRenderer renderer, GhCliService.OpenPullRequest pr,
+                                            Optional<TaskDocument> linked) {
+        renderer.clear();
+        renderer.paintPullRequest(pr, linked);
+        return renderer;
+    }
+
+    private static List<Object> tags(TaskTreeRenderer renderer) {
+        List<Object> tags = new ArrayList<>();
+        SimpleColoredComponent.ColoredIterator it = renderer.iterator();
+        while (it.hasNext()) {
+            it.next();
+            tags.add(it.getTag());
+        }
+        return tags;
+    }
+
+    @Test
+    void aPullRequestRowsIconComposesConflictThenCiAndOnlyForPositiveSignals() {
+        Icon github = AllIcons.Vcs.Vendors.Github;
+        assertSame(github, TaskTreeRenderer.pullRequestRowIcon(false, Set.of()), "no status: the bare mark");
+        Icon conflict = TaskTreeRenderer.pullRequestRowIcon(true, Set.of());
+        assertEquals(List.of(github, TaskTreeRenderer.PR_CONFLICT_ICON), ((RowIcon) conflict).getAllIcons());
+        Icon ci = TaskTreeRenderer.pullRequestRowIcon(false, Set.of(CiFailure.FAILURE));
+        assertEquals(List.of(github, TaskTreeRenderer.PR_CI_FAILURE_ICON), ((RowIcon) ci).getAllIcons());
+        Icon both = TaskTreeRenderer.pullRequestRowIcon(true, Set.of(CiFailure.ERROR));
+        assertEquals(List.of(conflict, TaskTreeRenderer.PR_CI_FAILURE_ICON), ((RowIcon) both).getAllIcons(),
+                "the conflict composite, then the CI glyph: both visible at once");
+        assertNotSame(conflict, both);
+        assertNotSame(ci, both);
+    }
+
+    @Test
+    void theLegacyIconMethodKeepsItsMeaningAndRepaintsReuseTheCachedComposites() {
+        assertSame(AllIcons.Vcs.Vendors.Github, TaskTreeRenderer.pullRequestRowIcon(false));
+        assertSame(TaskTreeRenderer.pullRequestRowIcon(true, Set.of()), TaskTreeRenderer.pullRequestRowIcon(true));
+        assertSame(TaskTreeRenderer.pullRequestRowIcon(true, Set.of(CiFailure.FAILURE)),
+                TaskTreeRenderer.pullRequestRowIcon(true, Set.of(CiFailure.ERROR, CiFailure.FAILURE)));
+        Icon base = TaskTreeRenderer.JIRA_ICON;
+        assertSame(TaskTreeRenderer.healthIcon(base, true, true), TaskTreeRenderer.healthIcon(base, true, true),
+                "a shared base gets the same composite on every paint");
+        assertSame(base, TaskTreeRenderer.healthIcon(base, false, false));
+    }
+
+    @Test
+    void theHealthTooltipNamesOnlyPositiveSignals() {
+        assertEquals(Optional.empty(), TaskTreeRenderer.healthTooltip(7, Optional.of("main"), false, Set.of()));
+        assertEquals(Optional.of("#7 cannot merge into main: it has conflicts"),
+                TaskTreeRenderer.healthTooltip(7, Optional.of("main"), true, Set.of()));
+        assertEquals(Optional.of("#7 has failing CI checks"),
+                TaskTreeRenderer.healthTooltip(7, Optional.of("main"), false, Set.of(CiFailure.FAILURE)));
+        assertEquals(Optional.of("#7 has merge conflicts · #7 has failing CI checks (errored)"),
+                TaskTreeRenderer.healthTooltip(7, Optional.empty(), true, Set.of(CiFailure.ERROR)));
+        assertEquals(Optional.of("#12 has merge conflicts"), TaskTreeRenderer.healthTooltip(new BranchPullRequest(
+                12, PrLifecycle.OPEN, false, "feature/x", "Fix it", Optional.empty(), true, Set.of())));
+        assertEquals(Optional.empty(), TaskTreeRenderer.healthTooltip(branchPr(PrLifecycle.OPEN, false)));
+    }
+
+    @Test
+    void resolveConflictsIsOfferedExactlyWhenThePullRequestConflicts() {
+        TaskTreeRenderer renderer = new TaskTreeRenderer();
+        assertTrue(tags(painted(renderer, healthPr(true, Set.of()), Optional.empty()))
+                .contains(TaskTreeRenderer.RESOLVE_CONFLICTS_LINK));
+        assertTrue(tags(painted(renderer, healthPr(true, Set.of(CiFailure.FAILURE)), Optional.empty()))
+                .contains(TaskTreeRenderer.RESOLVE_CONFLICTS_LINK));
+        assertFalse(tags(painted(renderer, healthPr(false, Set.of(CiFailure.FAILURE)), Optional.empty()))
+                .contains(TaskTreeRenderer.RESOLVE_CONFLICTS_LINK), "failing CI is not a conflict");
+        assertFalse(tags(painted(renderer, healthPr(false, Set.of()), Optional.empty()))
+                .contains(TaskTreeRenderer.RESOLVE_CONFLICTS_LINK));
+        assertTrue(tags(renderer).contains(TaskTreeRenderer.LINK), "Review stays offered");
+    }
+
+    @Test
+    void aPullRequestRowsTooltipComposesHealthWithTheLinkedTask() {
+        TaskTreeRenderer renderer = new TaskTreeRenderer();
+        TaskDocument task = document(TaskId.of("fix-alloc-k3f9"));
+        String linked = TaskTreeRenderer.linkedTaskTooltip(task);
+        assertEquals("#7 cannot merge into main: it has conflicts · #7 has failing CI checks · " + linked,
+                painted(renderer, healthPr(true, Set.of(CiFailure.FAILURE)), Optional.of(task)).getToolTipText());
+        assertEquals(linked, painted(renderer, healthPr(false, Set.of()), Optional.of(task)).getToolTipText());
+        assertTrue(renderer.getCharSequence(false).toString().contains(TaskTreeRenderer.mirroredTaskBadge(task.title())));
+    }
+
+    @Test
+    void aReusedRendererKeepsNoHealthOfThePreviousPullRequest() {
+        TaskTreeRenderer renderer = new TaskTreeRenderer();
+        painted(renderer, healthPr(true, Set.of(CiFailure.FAILURE)), Optional.empty());
+        assertSame(TaskTreeRenderer.pullRequestRowIcon(true, Set.of(CiFailure.FAILURE)), renderer.getIcon());
+
+        painted(renderer, healthPr(false, Set.of()), Optional.empty());
+        assertSame(AllIcons.Vcs.Vendors.Github, renderer.getIcon(), "a healthy PR gets the bare mark");
+        assertNull(renderer.getToolTipText(), "no conflict or CI text leaks onto a healthy PR");
+
+        painted(renderer, healthPr(false, Set.of(CiFailure.ERROR)), Optional.empty());
+        renderer.customizeCellRenderer(new JTree(), new DefaultMutableTreeNode(
+                githubNode(new Placeholder(TaskTreeModel.NOT_LOADED))), false, false, false, 0, false);
+        assertSame(AllIcons.Vcs.Vendors.Github, renderer.getIcon());
+        assertNull(renderer.getToolTipText(), "an unrelated row inherits no status");
+    }
+
+    @Test
+    void theCiFailureGlyphShipsLightAndDarkSixteenPixelVariants() throws IOException {
+        String light = resource("/icons/prCiFailure.svg");
+        String dark = resource("/icons/prCiFailure_dark.svg");
+        for (String svg : List.of(light, dark)) {
+            assertTrue(svg.contains("width=\"16\"") && svg.contains("height=\"16\""), svg);
+        }
+        assertNotEquals(light, dark, "the dark theme gets its own colour");
+        assertNotEquals(resource("/icons/prConflict.svg").replaceAll("#\\w+", ""), light.replaceAll("#\\w+", ""),
+                "conflict and CI glyphs differ in shape, not just colour");
+        // IconLoader's SVG rasterization has no headless path — it hands back
+        // its 1x1 placeholder — so the rendered-size assertions hold only headful.
+        if (!GraphicsEnvironment.isHeadless()) {
+            assertEquals(16, TaskTreeRenderer.PR_CI_FAILURE_ICON.getIconWidth());
+            assertEquals(16, TaskTreeRenderer.PR_CI_FAILURE_ICON.getIconHeight());
+        }
+    }
+
+    private static String resource(String path) throws IOException {
+        try (InputStream in = TaskTreeRenderer.class.getResourceAsStream(path)) {
+            assertNotNull(in, path);
+            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        }
     }
 }

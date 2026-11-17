@@ -8,6 +8,7 @@ import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.git.GhCliService.BranchPullRequest;
+import app.drydock.git.GhCliService.CiFailure;
 import app.drydock.git.GhCliService.PrInfo.PrLifecycle;
 import app.drydock.git.JiraIssueListing;
 import app.drydock.git.WorktreeService.Worktree;
@@ -18,6 +19,10 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -31,11 +36,13 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -593,5 +600,270 @@ class TaskTreeInputsTest {
 
         assertEquals(Map.of(), matched, "a detached worktree has no branch, so no badge");
         assertEquals(0, prs.get());
+    }
+
+    // --- Carried PR health through the existing root+repository join and cache ---
+
+    private static BranchPullRequest pr(int number, String head, boolean conflicting, Set<CiFailure> failures) {
+        return new BranchPullRequest(number, PrLifecycle.OPEN, false, head, "PR " + number, Optional.empty(),
+                conflicting, failures);
+    }
+
+    private static final Set<CiFailure> FAILING = Set.of(CiFailure.FAILURE);
+
+    @Test
+    void healthNeverReordersHeadPrecedenceOrTheNumberAliases() {
+        BranchPullRequest onBranch = pr(12, "feature/x", false, Set.of());
+        BranchPullRequest numbered = pr(77, "alice/fix", true, Set.of(CiFailure.ERROR));
+        Map<String, BranchPullRequest> byHead = Map.of("feature/x", onBranch, "alice/fix", numbered);
+
+        assertSame(onBranch, TaskTreeInputs.sessionPullRequest(byHead, "feature/x", Optional.of(77)).orElseThrow(),
+                "the head-branch PR wins over a failing stored-number PR");
+        assertSame(numbered, TaskTreeInputs.sessionPullRequest(byHead, "pr-77", Optional.empty()).orElseThrow(),
+                "the pr-<n> alias carries its PR's own health");
+        assertSame(numbered,
+                TaskTreeInputs.sessionPullRequest(byHead, "review/local", Optional.of(77)).orElseThrow(),
+                "the stored number carries its PR's own health");
+    }
+
+    @Test
+    void twoRootsWithTheSameBranchAndNumberJoinOnlyTheirOwnAnswer() throws IOException {
+        Path rootA = Files.createDirectories(tempDir.resolve("a"));
+        Path rootB = Files.createDirectories(tempDir.resolve("b"));
+        Path wtA = Files.createDirectories(tempDir.resolve("a/.wt/shared"));
+        Path wtB = Files.createDirectories(tempDir.resolve("b/.wt/shared"));
+        ManagedAgentSession inA = session(wtA);
+        ManagedAgentSession inB = session(wtB);
+        // Same repository setting, same branch, same number: only the root differs.
+        Map<Path, TaskTreeInputs.BadgeSource> sources = Map.of(
+                rootA, new TaskTreeInputs.BadgeSource(rootA, Optional.of("o/r")),
+                rootB, new TaskTreeInputs.BadgeSource(rootB, Optional.of("o/r")));
+        Map<Path, List<Worktree>> listings = Map.of(
+                wtA, List.of(mainCheckout(rootA, "main"), linkedCheckout(wtA, "feature/shared")),
+                wtB, List.of(mainCheckout(rootB, "main"), linkedCheckout(wtB, "feature/shared")));
+        BranchPullRequest failingInA = pr(12, "feature/shared", true, FAILING);
+        BranchPullRequest healthyInB = pr(12, "feature/shared", false, Set.of());
+        AtomicInteger lookups = new AtomicInteger();
+
+        Map<ManagedSessionId, BranchPullRequest> matched = TaskTreeInputs.sessionPullRequests(
+                List.of(inA, inB), sources, listings::get, source -> {
+                    lookups.incrementAndGet();
+                    return Map.of("feature/shared", source.root().equals(rootA) ? failingInA : healthyInB);
+                });
+
+        assertEquals(Map.of(inA.id(), failingInA, inB.id(), healthyInB), matched);
+        assertEquals(2, lookups.get(), "one lookup per root, never shared across roots");
+    }
+
+    @Test
+    void aSessionInASubdirectoryJoinsItsOwnMainCheckoutAndDeepestBranch() throws IOException {
+        // A hosted session's join reads only its own working directory's
+        // listing: the main checkout names the source, the deepest entry
+        // names the branch; no window root takes part.
+        Path main = Files.createDirectories(tempDir.resolve("repo"));
+        Path wt = Files.createDirectories(tempDir.resolve("repo/.wt/fix"));
+        Path nested = Files.createDirectories(wt.resolve("module/src"));
+        ManagedAgentSession hosted = session(nested);
+        List<Worktree> listing = List.of(mainCheckout(main, "main"), linkedCheckout(wt, "fix/branch"));
+        BranchPullRequest onMain = pr(1, "main", true, FAILING);
+        BranchPullRequest onFix = pr(2, "fix/branch", false, Set.of(CiFailure.ERROR));
+        AtomicReference<Path> listed = new AtomicReference<>();
+
+        Map<ManagedSessionId, BranchPullRequest> matched = TaskTreeInputs.sessionPullRequests(List.of(hosted),
+                Map.of(main, new TaskTreeInputs.BadgeSource(main, Optional.of("o/r"))),
+                dir -> {
+                    listed.set(dir);
+                    return listing;
+                },
+                source -> Map.of("main", onMain, "fix/branch", onFix));
+
+        assertEquals(nested, listed.get(), "listed from the session's own working directory");
+        assertEquals(Map.of(hosted.id(), onFix), matched, "the main checkout's branch never shadows the worktree's");
+    }
+
+    // The instance cache and the join's publication gate, driven through
+    // their private production paths with every entry pre-seeded unexpired,
+    // so no git or gh process is spawned: the futures are completed here.
+
+    private static Object field(Object target, String name) throws ReflectiveOperationException {
+        Field field = TaskTreeInputs.class.getDeclaredField(name);
+        field.setAccessible(true);
+        return field.get(target);
+    }
+
+    private static Object record(String simpleName, Object... components) throws ReflectiveOperationException {
+        for (Class<?> nested : TaskTreeInputs.class.getDeclaredClasses()) {
+            if (nested.getSimpleName().equals(simpleName)) {
+                Constructor<?> constructor = nested.getDeclaredConstructors()[0];
+                constructor.setAccessible(true);
+                return constructor.newInstance(components);
+            }
+        }
+        throw new AssertionError("no record " + simpleName);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void seedBranchPullRequests(TaskTreeInputs inputs, Path root, Optional<String> repository,
+                                               CompletableFuture<Map<String, BranchPullRequest>> lookup,
+                                               Map<String, BranchPullRequest> previous)
+            throws ReflectiveOperationException {
+        Map<Object, Object> cache = (Map<Object, Object>) field(inputs, "branchPullRequestCache");
+        cache.put(record("PullRequestKey", root, repository),
+                record("CachedBranchPullRequests", System.nanoTime() + TimeUnit.MINUTES.toNanos(5), lookup,
+                        previous));
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void seedWorktrees(TaskTreeInputs inputs, Path directory, List<Worktree> listed)
+            throws ReflectiveOperationException {
+        ((Map<Path, TaskTreeInputs.CachedWorktrees>) field(inputs, "worktreeCache")).put(directory,
+                new TaskTreeInputs.CachedWorktrees(System.nanoTime() + TimeUnit.MINUTES.toNanos(5), listed));
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, BranchPullRequest> branchPullRequestsNow(TaskTreeInputs inputs, Path root,
+                                                                        Optional<String> repository)
+            throws ReflectiveOperationException {
+        Method method = TaskTreeInputs.class.getDeclaredMethod("branchPullRequestsNow", Path.class, Optional.class);
+        method.setAccessible(true);
+        return (Map<String, BranchPullRequest>) method.invoke(inputs, root, repository);
+    }
+
+    /** Runs one badge join through the production scheduler and waits for its completion. */
+    private static void join(TaskTreeInputs inputs, List<ManagedAgentSession> sessions,
+                             Map<Path, TaskTreeInputs.BadgeSource> sources) throws Exception {
+        Method method = TaskTreeInputs.class.getDeclaredMethod("scheduleSessionPullRequestJoin", List.class,
+                Map.class);
+        method.setAccessible(true);
+        AtomicBoolean inFlight = (AtomicBoolean) field(inputs, "badgeJoinInFlight");
+        try {
+            method.invoke(inputs, sessions, sources);
+        } catch (InvocationTargetException e) {
+            throw new AssertionError(e.getCause());
+        }
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (inFlight.get()) {
+            assertTrue(System.nanoTime() < deadline, "the join did not complete");
+            Thread.sleep(5);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<ManagedSessionId, BranchPullRequest> published(TaskTreeInputs inputs)
+            throws ReflectiveOperationException {
+        return (Map<ManagedSessionId, BranchPullRequest>) field(inputs, "publishedSessionPullRequests");
+    }
+
+    private static TaskTreeInputs inputs() {
+        return new TaskTreeInputs(onChange -> () -> { });
+    }
+
+    @Test
+    void aPendingRefreshServesThePreviousAnswerUntilItsStatusOnlyCompletion() throws Exception {
+        try (TaskTreeInputs inputs = inputs()) {
+            BranchPullRequest healthy = pr(12, "feature/x", false, Set.of());
+            BranchPullRequest failing = pr(12, "feature/x", true, FAILING);
+            CompletableFuture<Map<String, BranchPullRequest>> lookup = new CompletableFuture<>();
+            seedBranchPullRequests(inputs, ROOT, Optional.of("o/r"), lookup, Map.of("feature/x", healthy));
+
+            assertEquals(Map.of("feature/x", healthy), branchPullRequestsNow(inputs, ROOT, Optional.of("o/r")),
+                    "while the lookup runs, the previous answer is served (no blink-off)");
+
+            lookup.complete(Map.of("feature/x", failing));
+
+            assertEquals(Map.of("feature/x", failing), branchPullRequestsNow(inputs, ROOT, Optional.of("o/r")),
+                    "same PR identity, only health changed: the completed answer replaces the previous one");
+        }
+    }
+
+    @Test
+    void aFailedRefreshKeepsServingThePreviousAnswer() throws Exception {
+        try (TaskTreeInputs inputs = inputs()) {
+            BranchPullRequest failing = pr(12, "feature/x", true, FAILING);
+            seedBranchPullRequests(inputs, ROOT, Optional.of("o/r"),
+                    CompletableFuture.failedFuture(new IllegalStateException("gh")), Map.of("feature/x", failing));
+
+            assertEquals(Map.of("feature/x", failing), branchPullRequestsNow(inputs, ROOT, Optional.of("o/r")),
+                    "an unavailable answer never clears or invents health");
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void theBranchCacheIsKeyedByRootAndRepositoryAndInvalidatedPerRoot() throws Exception {
+        try (TaskTreeInputs inputs = inputs()) {
+            BranchPullRequest failingHere = pr(12, "feature/shared", true, FAILING);
+            BranchPullRequest healthyThere = pr(12, "feature/shared", false, Set.of());
+            BranchPullRequest otherRepository = pr(12, "feature/shared", false, Set.of(CiFailure.ERROR));
+            seedBranchPullRequests(inputs, ROOT, Optional.of("o/r"),
+                    CompletableFuture.completedFuture(Map.of("feature/shared", failingHere)), Map.of());
+            seedBranchPullRequests(inputs, OTHER, Optional.of("o/r"),
+                    CompletableFuture.completedFuture(Map.of("feature/shared", healthyThere)), Map.of());
+            seedBranchPullRequests(inputs, ROOT, Optional.of("fork/r"),
+                    CompletableFuture.completedFuture(Map.of("feature/shared", otherRepository)), Map.of());
+
+            assertEquals(Map.of("feature/shared", failingHere),
+                    branchPullRequestsNow(inputs, ROOT, Optional.of("o/r")));
+            assertEquals(Map.of("feature/shared", healthyThere),
+                    branchPullRequestsNow(inputs, OTHER, Optional.of("o/r")),
+                    "the same repository, branch and number under another root keeps its own answer");
+            assertEquals(Map.of("feature/shared", otherRepository),
+                    branchPullRequestsNow(inputs, ROOT, Optional.of("fork/r")));
+
+            Map<Object, Object> cache = (Map<Object, Object>) field(inputs, "branchPullRequestCache");
+            inputs.invalidatePullRequests(ROOT);
+            assertEquals(1, cache.size(), "explicit refresh of one root drops only that root's entries");
+            assertEquals(Map.of("feature/shared", healthyThere),
+                    branchPullRequestsNow(inputs, OTHER, Optional.of("o/r")));
+
+            inputs.invalidateGitHub();
+            assertTrue(cache.isEmpty(), "the GitHub refresh drops every root's entry");
+        }
+    }
+
+    @Test
+    void theJoinPublishesAStatusOnlyChangeAndNeverLoopsOnAnUnchangedAnswer() throws Exception {
+        Path main = Files.createDirectories(tempDir.resolve("repo"));
+        Path wt = Files.createDirectories(tempDir.resolve("repo/.wt/fix"));
+        ManagedAgentSession session = session(wt);
+        Map<Path, TaskTreeInputs.BadgeSource> sources =
+                Map.of(main, new TaskTreeInputs.BadgeSource(main, Optional.of("o/r")));
+        BranchPullRequest healthy = pr(12, "fix/branch", false, Set.of());
+        BranchPullRequest failing = pr(12, "fix/branch", true, FAILING);
+        try (TaskTreeInputs inputs = inputs()) {
+            AtomicInteger rebuilds = new AtomicInteger();
+            inputs.onLateData(rebuilds::incrementAndGet);
+            seedWorktrees(inputs, wt, List.of(mainCheckout(main, "main"), linkedCheckout(wt, "fix/branch")));
+            seedBranchPullRequests(inputs, main, Optional.of("o/r"),
+                    CompletableFuture.completedFuture(Map.of("fix/branch", healthy)), Map.of());
+
+            join(inputs, List.of(session), sources);
+            assertEquals(Map.of(session.id(), healthy), published(inputs));
+            assertEquals(1, rebuilds.get(), "a changed answer requests one rebuild");
+
+            join(inputs, List.of(session), sources);
+            join(inputs, List.of(session), sources);
+            assertEquals(1, rebuilds.get(), "an unchanged completion requests no rebuild: no self-sustaining loop");
+
+            seedBranchPullRequests(inputs, main, Optional.of("o/r"),
+                    CompletableFuture.completedFuture(Map.of("fix/branch", failing)), Map.of());
+            join(inputs, List.of(session), sources);
+            assertNotEquals(healthy, failing, "the same PR identity with different health");
+            assertEquals(Map.of(session.id(), failing), published(inputs),
+                    "a status-only change is a changed answer and is published");
+            assertEquals(2, rebuilds.get());
+
+            join(inputs, List.of(session), sources);
+            assertEquals(2, rebuilds.get());
+
+            // Explicit worktree refresh forgets the published map, so the same
+            // answer is published once more -- and only once.
+            inputs.invalidateWorktrees();
+            seedWorktrees(inputs, wt, List.of(mainCheckout(main, "main"), linkedCheckout(wt, "fix/branch")));
+            join(inputs, List.of(session), sources);
+            join(inputs, List.of(session), sources);
+            assertEquals(Map.of(session.id(), failing), published(inputs));
+            assertEquals(3, rebuilds.get());
+        }
     }
 }
