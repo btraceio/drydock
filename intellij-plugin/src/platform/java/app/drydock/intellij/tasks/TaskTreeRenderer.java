@@ -6,6 +6,7 @@ import app.drydock.delayedtasks.TaskStoreWatcher;
 import app.drydock.domain.SessionStatus;
 import app.drydock.git.GhCliService;
 import app.drydock.git.GhCliService.BranchPullRequest;
+import app.drydock.git.GhCliService.CiFailure;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.JiraIssue;
 import app.drydock.git.PrCheckoutService;
@@ -58,6 +59,7 @@ import java.util.function.Function;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -220,23 +222,8 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
                 setToolTipText("Jira issue " + jira.issue().key());
                 paintMirroredTask(jira.issue().url());
             }
-            case PullRequestRow pullRequest -> {
-                setIcon(pullRequestRowIcon(pullRequest.pullRequest().conflicting()));
-                append("#" + pullRequest.pullRequest().number() + " " + pullRequest.pullRequest().title());
-                pullRequest.pullRequest().author().ifPresent(author ->
-                        append("  @" + author, SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES));
-                if (pullRequest.pullRequest().conflicting()) {
-                    setToolTipText("#" + pullRequest.pullRequest().number()
-                            + " cannot merge into " + pullRequest.pullRequest().baseRefName() + ": it has conflicts");
-                }
-                paintLinkedTask(pullRequest.pullRequest().headRefName());
-                append(" · ", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
-                append("Review ▸", SimpleTextAttributes.LINK_ATTRIBUTES, LINK);
-                if (pullRequest.pullRequest().conflicting()) {
-                    append(" · ", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
-                    append(RESOLVE_CONFLICTS_LINK_TEXT, SimpleTextAttributes.LINK_ATTRIBUTES, RESOLVE_CONFLICTS_LINK);
-                }
-            }
+            case PullRequestRow pullRequest -> paintPullRequest(pullRequest.pullRequest(),
+                    linkedTaskOf(pullRequest.pullRequest().headRefName()));
             default -> append(String.valueOf(node.getUserObject()));
         }
     }
@@ -440,18 +427,43 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
     }
 
     /**
-     * The badge of a PR row whose head branch is a task's stacked branch,
-     * looked up in the task service's cached snapshot (memory only, like
-     * the mirror badge): the link mark and the task's title, the twin of
-     * the task row's pull-request badge.
+     * The task whose stacked branch is a PR's head branch, looked up in the
+     * task service's cached snapshot (memory only, like the mirror badge).
      */
-    private void paintLinkedTask(String headRefName) {
+    private static Optional<TaskDocument> linkedTaskOf(String headRefName) {
         TaskStoreWatcher.WatchedSnapshot watched = DrydockPluginService.getInstance().taskService().watchedSnapshot();
-        TaskLinks.taskOfBranch(headRefName, watched).ifPresent(document -> {
+        return TaskLinks.taskOfBranch(headRefName, watched);
+    }
+
+    /**
+     * Paints a PR row from carried data only: the GitHub mark composed with
+     * the conflict and then the CI-failure icon, number, title and author,
+     * the linked task's badge (the twin of the task row's pull-request
+     * badge), and the links. Icon and tooltip are set outright, so a reused
+     * renderer keeps nothing of the previous row.
+     */
+    void paintPullRequest(GhCliService.OpenPullRequest pullRequest, Optional<TaskDocument> linkedTask) {
+        setIcon(pullRequestRowIcon(pullRequest.conflicting(), pullRequest.ciFailures()));
+        setToolTipText(healthTooltip(pullRequest.number(), Optional.of(pullRequest.baseRefName()),
+                pullRequest.conflicting(), pullRequest.ciFailures()).orElse(null));
+        append("#" + pullRequest.number() + " " + pullRequest.title());
+        pullRequest.author().ifPresent(author ->
+                append("  @" + author, SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES));
+        linkedTask.ifPresent(document -> {
             append("  " + mirroredTaskBadge(document.title()), MIRROR_ATTRIBUTES);
-            setToolTipText((getToolTipText() == null ? "" : getToolTipText() + " · ")
-                    + linkedTaskTooltip(document));
+            setToolTipText(joinTooltip(getToolTipText(), linkedTaskTooltip(document)));
         });
+        append(" · ", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
+        append("Review ▸", SimpleTextAttributes.LINK_ATTRIBUTES, LINK);
+        if (pullRequest.conflicting()) {
+            append(" · ", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
+            append(RESOLVE_CONFLICTS_LINK_TEXT, SimpleTextAttributes.LINK_ATTRIBUTES, RESOLVE_CONFLICTS_LINK);
+        }
+    }
+
+    /** Pure. A tooltip with {@code detail} added after any existing text. */
+    static String joinTooltip(String existing, String detail) {
+        return existing == null || existing.isEmpty() ? detail : existing + " · " + detail;
     }
 
     /** Pure. A task row's pull-request badge tooltip: the PR, its branch and its title. */
@@ -482,11 +494,53 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
 
     /** A pull request row's leading icon: GitHub's mark, followed by the conflict icon while it conflicts. */
     static Icon pullRequestRowIcon(boolean conflicting) {
-        if (!conflicting) {
-            return AllIcons.Vcs.Vendors.Github;
-        }
-        return ROW_ICONS.computeIfAbsent(new IconPair(AllIcons.Vcs.Vendors.Github, PR_CONFLICT_ICON),
+        return pullRequestRowIcon(conflicting, Set.of());
+    }
+
+    /** A pull request row's leading icon: GitHub's mark, then the conflict icon, then the CI-failure icon. */
+    static Icon pullRequestRowIcon(boolean conflicting, Set<CiFailure> ciFailures) {
+        return healthIcon(AllIcons.Vcs.Vendors.Github, conflicting, !ciFailures.isEmpty());
+    }
+
+    /**
+     * Pure over the static glyphs. {@code base} followed by the conflict
+     * icon while the PR conflicts, then the CI-failure icon while its CI
+     * positively fails; {@code base} itself when neither. Each pairwise
+     * composite is cached, so repaints of unchanged state get the same icon.
+     */
+    static Icon healthIcon(Icon base, boolean conflicting, boolean ciFailing) {
+        Icon icon = conflicting ? rowIcon(base, PR_CONFLICT_ICON) : base;
+        return ciFailing ? rowIcon(icon, PR_CI_FAILURE_ICON) : icon;
+    }
+
+    private static Icon rowIcon(Icon first, Icon second) {
+        return ROW_ICONS.computeIfAbsent(new IconPair(first, second),
                 pair -> IconManager.getInstance().createRowIcon(pair.first(), pair.second()));
+    }
+
+    /**
+     * Pure. The PR-specific hover details: its conflict (naming the base
+     * branch when known) and its failing CI. Empty when neither is
+     * positively known -- unknown data says nothing.
+     */
+    static Optional<String> healthTooltip(int number, Optional<String> baseRefName, boolean conflicting,
+                                          Set<CiFailure> ciFailures) {
+        String conflict = conflicting ? baseRefName
+                .map(base -> "#" + number + " cannot merge into " + base + ": it has conflicts")
+                .orElse("#" + number + " has merge conflicts") : null;
+        String ci = ciFailures.isEmpty() ? null : "#" + number + " has failing CI checks"
+                + (ciFailures.contains(CiFailure.ERROR) && !ciFailures.contains(CiFailure.FAILURE)
+                        ? " (errored)" : "");
+        if (conflict == null) {
+            return Optional.ofNullable(ci);
+        }
+        return Optional.of(ci == null ? conflict : joinTooltip(conflict, ci));
+    }
+
+    /** Pure. {@link #healthTooltip} for a session's branch pull request, whose base is not carried. */
+    static Optional<String> healthTooltip(BranchPullRequest pullRequest) {
+        return healthTooltip(pullRequest.number(), Optional.empty(), pullRequest.conflicting(),
+                pullRequest.ciFailures());
     }
 
     private record IconPair(Icon first, Icon second) { }
@@ -494,6 +548,9 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
     private static final Map<IconPair, Icon> ROW_ICONS = new ConcurrentHashMap<>();
 
     static final Icon PR_CONFLICT_ICON = IconLoader.getIcon("/icons/prConflict.svg", TaskTreeRenderer.class);
+
+    /** Failing CI: a crossed-out circle in the error colour. Dark variant: {@code prCiFailure_dark.svg}. */
+    static final Icon PR_CI_FAILURE_ICON = IconLoader.getIcon("/icons/prCiFailure.svg", TaskTreeRenderer.class);
 
     /** Marks either end of a task mirror: the task's row and the mirrored issue's row. */
     static final String MIRROR_MARK = "\u21c4";

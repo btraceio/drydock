@@ -10,9 +10,12 @@ import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.domain.SshRemote;
+import app.drydock.git.GhCliService.BranchPullRequest;
+import app.drydock.git.GhCliService.CiFailure;
 import app.drydock.git.GhCliService.IssueListing;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.GhCliService.OpenPullRequest;
+import app.drydock.git.GhCliService.PrInfo.PrLifecycle;
 import app.drydock.git.GhCliService.PullRequestListing;
 import app.drydock.git.JiraIssue;
 import app.drydock.git.JiraIssueListing;
@@ -89,6 +92,7 @@ class TaskTreeModelTest {
         final Map<Path, PullRequestListing> pullRequests = new HashMap<>();
         final Map<Path, List<Worktree>> pullRequestDedupWorktrees = new HashMap<>();
         Map<ManagedSessionId, Boolean> resumable = Map.of();
+        final Map<ManagedSessionId, BranchPullRequest> pullRequestsBySession = new HashMap<>();
         Optional<String> problem = Optional.empty();
         String filter = "";
 
@@ -142,7 +146,7 @@ class TaskTreeModelTest {
                     pullRequestContainers, githubIssueRoots, githubGhostRoots, jiraRoots, jiraGhostRoots,
                     openFolders, lastActivity, T,
                     issues, jiraGroups, pullRequests, pullRequestDedupWorktrees, problem, filter,
-                    resumable);
+                    resumable, pullRequestsBySession);
         }
     }
 
@@ -1019,5 +1023,114 @@ class TaskTreeModelTest {
 
         assertTrue(section(projectRow(TaskTreeModel.build(in.build()), DRYDOCK),
                 SectionKind.PULL_REQUESTS).isEmpty());
+    }
+
+    // --- Carried PR health: rows carry what the inputs hold, root-scoped ---
+
+    private static OpenPullRequest failingPullRequest(int number, String headBranch, boolean draft) {
+        return new OpenPullRequest(number, "Failing " + number, headBranch, "main", draft, Optional.empty(),
+                Optional.empty(), true, Set.of(CiFailure.FAILURE));
+    }
+
+    private static BranchPullRequest branchPullRequest(int number, String head, boolean conflicting,
+                                                       Set<CiFailure> failures) {
+        return new BranchPullRequest(number, PrLifecycle.OPEN, false, head, "PR " + number, Optional.empty(),
+                conflicting, failures);
+    }
+
+    private static TaskRow sessionRow(List<TaskNode> nodes, Path root, ManagedSessionId id) {
+        return sessionNodes(projectRow(nodes, root)).stream().map(TaskRow.class::cast)
+                .filter(row -> row.session().id().equals(id)).findFirst().orElseThrow();
+    }
+
+    @Test
+    void twoRootsListingTheSameNumberOnTheSameBranchKeepTheirOwnHealth() {
+        OpenPullRequest failingInBtrace = failingPullRequest(12, "feature/shared", false);
+        OpenPullRequest healthyInAlpha = pullRequest(12, "Healthy 12", "feature/shared", false);
+        In in = new In().project(BTRACE).project(ALPHA);
+        in.pullRequestContainers.addAll(List.of(BTRACE, ALPHA));
+        in.pullRequests.put(BTRACE, new PullRequestListing.Listed(List.of(failingInBtrace)));
+        in.pullRequests.put(ALPHA, new PullRequestListing.Listed(List.of(healthyInAlpha)));
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build());
+
+        PullRequestRow btrace = (PullRequestRow) pullRequestNodes(projectRow(nodes, BTRACE)).get(0);
+        PullRequestRow alpha = (PullRequestRow) pullRequestNodes(projectRow(nodes, ALPHA)).get(0);
+        assertEquals(new PullRequestRow(BTRACE, failingInBtrace), btrace, "the listing's record, verbatim");
+        assertEquals(new PullRequestRow(ALPHA, healthyInAlpha), alpha);
+        assertFalse(alpha.pullRequest().conflicting());
+        assertEquals(Set.of(), alpha.pullRequest().ciFailures(), "no health leaks across roots");
+    }
+
+    @Test
+    void healthNeverChangesPullRequestRowMembershipOrSearch() {
+        // A failing draft and a failing checked-out PR stay excluded; a
+        // failing open PR is kept, and the search narrows on the same text.
+        In in = new In().project(DRYDOCK);
+        in.pullRequestContainers.add(DRYDOCK);
+        in.pullRequests.put(DRYDOCK, new PullRequestListing.Listed(List.of(
+                failingPullRequest(40, "feature/open", false),
+                failingPullRequest(41, "feature/draft", true),
+                failingPullRequest(42, "feature/taken", false),
+                pullRequest(43, "Healthy", "feature/healthy", false))));
+        in.pullRequestDedupWorktrees.put(DRYDOCK, List.of(linked(Path.of("/wt/drydock-taken"), "feature/taken")));
+
+        List<TaskNode> rows = pullRequestNodes(projectRow(TaskTreeModel.build(in.build()), DRYDOCK));
+        assertEquals(List.of(43, 40), rows.stream().map(PullRequestRow.class::cast)
+                .map(row -> row.pullRequest().number()).toList());
+
+        in.filter = "feature/open";
+        List<TaskNode> searched = pullRequestNodes(projectRow(TaskTreeModel.build(in.build()), DRYDOCK));
+        assertEquals(List.of(new PullRequestRow(DRYDOCK, failingPullRequest(40, "feature/open", false))), searched,
+                "the searched row still carries its health");
+    }
+
+    @Test
+    void sessionRowsCarryTheirOwnJoinedPullRequestHealthPerRoot() {
+        Path btraceWt = Path.of("/wt/btrace-shared");
+        Path alphaWt = Path.of("/wt/alpha-shared");
+        In in = new In().project(BTRACE).project(ALPHA)
+                .worktree(BTRACE, btraceWt, "feature/shared").worktree(ALPHA, alphaWt, "feature/shared");
+        ManagedAgentSession inBtrace = session("Btrace work", btraceWt);
+        ManagedAgentSession inAlpha = session("Alpha work", alphaWt);
+        ManagedAgentSession unjoined = session("No PR", BTRACE);
+        in.sessions.addAll(List.of(inBtrace, inAlpha, unjoined));
+        BranchPullRequest failing = branchPullRequest(12, "feature/shared", true, Set.of(CiFailure.ERROR));
+        BranchPullRequest healthy = branchPullRequest(12, "feature/shared", false, Set.of());
+        in.pullRequestsBySession.put(inBtrace.id(), failing);
+        in.pullRequestsBySession.put(inAlpha.id(), healthy);
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build());
+
+        assertEquals(Optional.of(failing), sessionRow(nodes, BTRACE, inBtrace.id()).branchPullRequest());
+        assertEquals(Optional.of(healthy), sessionRow(nodes, ALPHA, inAlpha.id()).branchPullRequest(),
+                "same branch and number in another root: its own answer, no contamination");
+        assertEquals(Optional.empty(), sessionRow(nodes, BTRACE, unjoined.id()).branchPullRequest(),
+                "a session the join did not match carries nothing");
+    }
+
+    @Test
+    void aHostedSessionKeepsItsOwnRootBranchAndPullRequestNotTheHostWindows() {
+        // Running in another window whose base is ALPHA: the row still sits
+        // under its own main checkout with its worktree's branch and the
+        // join's answer for that session id.
+        Path feature = Path.of("/wt/btrace-feature");
+        In in = new In().project(BTRACE).project(ALPHA).worktree(BTRACE, feature, "feature/hosted")
+                .current(ALPHA, ALPHA);
+        ManagedAgentSession hosted = session("Hosted elsewhere", feature.resolve("sub/dir"));
+        // A subdirectory git does not list: placed by its recorded main checkout.
+        in.recordedRoots.put(hosted.repositoryId(), BTRACE);
+        in.sessions.add(hosted);
+        in.running.add(hosted.id());
+        in.hosts.put(hosted.id(), new TaskTreeModel.Host(Path.of("/wt/other-window"), "alpha"));
+        BranchPullRequest failing = branchPullRequest(7, "feature/hosted", false, Set.of(CiFailure.FAILURE));
+        in.pullRequestsBySession.put(hosted.id(), failing);
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build());
+
+        TaskRow row = sessionRow(nodes, BTRACE, hosted.id());
+        assertEquals(Optional.of("feature/hosted"), row.branch(), "the deepest listed worktree's branch");
+        assertEquals(Optional.of(failing), row.branchPullRequest());
+        assertTrue(projectRow(nodes, ALPHA).children().isEmpty(), "never placed under the window's root");
     }
 }

@@ -364,8 +364,10 @@ final class InboxList extends JBList<InboxList.Entry> {
                 if (task.folderMissing()) {
                     text.append(" · folder missing");
                 }
-                task.branchPullRequest().ifPresent(pr -> text.append(" · ")
-                        .append(TaskTreeRenderer.pullRequestTooltip(pr)));
+                task.branchPullRequest().ifPresent(pr -> {
+                    text.append(" · ").append(TaskTreeRenderer.pullRequestTooltip(pr));
+                    TaskTreeRenderer.healthTooltip(pr).ifPresent(health -> text.append(" · ").append(health));
+                });
                 List<String> mirrors = TaskMirroring.mirrorsOfSession(task.session().id().toString());
                 if (!mirrors.isEmpty()) {
                     text.append(" · mirrored to ").append(String.join(", ",
@@ -382,8 +384,11 @@ final class InboxList extends JBList<InboxList.Entry> {
                     text.append(" · mirrored to ").append(String.join(", ",
                             row.mirrors().stream().map(TaskMirror::label).toList()));
                 }
-                row.pullRequest().ifPresent(pr -> text.append(" · ")
-                        .append(TaskTreeRenderer.pullRequestLinkTooltip(pr)));
+                row.pullRequest().ifPresent(pr -> {
+                    text.append(" · ").append(TaskTreeRenderer.pullRequestLinkTooltip(pr));
+                    TaskTreeRenderer.healthTooltip(pr.number(), Optional.of(pr.baseRefName()), pr.conflicting(),
+                            pr.ciFailures()).ifPresent(health -> text.append(" · ").append(health));
+                });
             }
         }
         return text.toString();
@@ -438,21 +443,39 @@ final class InboxList extends JBList<InboxList.Entry> {
         };
     }
 
-    /** The row's status icon: a session's dot, or the task state's icon. */
+    /**
+     * The row's status icon: a session's dot, or the task state's icon,
+     * followed by the carried PR's conflict and then CI-failure icons when
+     * those are positively known (the session's branch PR, the task's
+     * already-linked PR). No PR, or nothing known, leaves the base alone.
+     */
     static Icon icon(Item item) {
         return switch (item) {
             case SessionItem session -> {
                 TaskRow task = session.row();
                 SessionStatus status = task.running() ? SessionStatus.RUNNING : task.session().status();
-                yield SessionDots.dotIcon(status, task.activity());
+                Icon base = SessionDots.dotIcon(status, task.activity());
+                yield task.branchPullRequest()
+                        .map(pr -> TaskTreeRenderer.healthIcon(base, pr.conflicting(), !pr.ciFailures().isEmpty()))
+                        .orElse(base);
             }
-            case TaskItem task -> switch (task.row().presentation()) {
-                case READY, INTERRUPTED -> AllIcons.Actions.Execute;
-                case BLOCKED -> AllIcons.General.Error;
-                case REVIEW -> AllIcons.Vcs.History;
-                case STARTED -> AllIcons.Actions.Forward;
-                case TERMINAL -> AllIcons.Actions.Checked;
-            };
+            case TaskItem task -> {
+                Icon base = stateIcon(task.row());
+                yield task.row().pullRequest()
+                        .map(pr -> TaskTreeRenderer.healthIcon(base, pr.conflicting(), !pr.ciFailures().isEmpty()))
+                        .orElse(base);
+            }
+        };
+    }
+
+    /** A delayed task state's icon. */
+    private static Icon stateIcon(DelayedTaskRow row) {
+        return switch (row.presentation()) {
+            case READY, INTERRUPTED -> AllIcons.Actions.Execute;
+            case BLOCKED -> AllIcons.General.Error;
+            case REVIEW -> AllIcons.Vcs.History;
+            case STARTED -> AllIcons.Actions.Forward;
+            case TERMINAL -> AllIcons.Actions.Checked;
         };
     }
 

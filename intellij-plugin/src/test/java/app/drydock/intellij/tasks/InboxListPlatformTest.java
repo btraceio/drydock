@@ -9,8 +9,11 @@ import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionActivity;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
+import app.drydock.git.GhCliService.BranchPullRequest;
+import app.drydock.git.GhCliService.CiFailure;
 import app.drydock.git.GhCliService.OpenPullRequest;
 import app.drydock.intellij.DrydockPluginService;
+import app.drydock.git.GhCliService.PrInfo.PrLifecycle;
 import app.drydock.intellij.IsolatedCatalog;
 import app.drydock.intellij.tasks.InboxList.Entry;
 import app.drydock.intellij.tasks.InboxList.Header;
@@ -23,9 +26,11 @@ import app.drydock.intellij.tasks.InboxModel.Inbox;
 import app.drydock.intellij.tasks.InboxModel.Item;
 import app.drydock.intellij.tasks.InboxModel.ProjectRef;
 import app.drydock.intellij.tasks.InboxModel.Query;
+import app.drydock.intellij.tasks.InboxModel.SessionItem;
 import app.drydock.intellij.tasks.InboxModel.TaskItem;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
+import app.drydock.intellij.ui.SessionDots;
 import app.drydock.projects.SharedProject;
 import app.drydock.tasks.DoneBy;
 import app.drydock.tasks.TaskDocument;
@@ -34,13 +39,19 @@ import app.drydock.tasks.TaskNode.DelayedTaskRow;
 import app.drydock.tasks.TaskState.Presentation;
 import app.drydock.tasks.TaskState.TaskView;
 import app.drydock.tasks.TaskStatus;
+import com.intellij.icons.AllIcons;
 import com.intellij.testFramework.fixtures.BasePlatformTestCase;
+import com.intellij.ui.components.JBLabel;
+import com.intellij.ui.icons.RowIcon;
 
 import javax.swing.JLabel;
+import javax.swing.Icon;
 import java.awt.Component;
 import java.awt.Container;
 import java.awt.Point;
 import java.awt.Rectangle;
+import java.awt.event.InputEvent;
+import java.awt.event.MouseEvent;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -118,10 +129,15 @@ public class InboxListPlatformTest extends BasePlatformTestCase {
 
     /** Six running sessions, one ready task with a linked PR, one task done today. */
     private Inbox inbox(Query query) {
+        return inbox(query, false, Set.of());
+    }
+
+    /** {@link #inbox(Query)}, the ready task's linked PR carrying {@code conflicting} and {@code ciFailures}. */
+    private Inbox inbox(Query query, boolean conflicting, Set<CiFailure> ciFailures) {
         TaskId readyId = TaskId.of("ready-one");
         TaskId doneId = TaskId.of("done-one");
         OpenPullRequest pr = new OpenPullRequest(943, "PR", "dd/ready-one", "main", false, Optional.empty(),
-                Optional.of("https://github.com/o/r/pull/943"), false);
+                Optional.of("https://github.com/o/r/pull/943"), conflicting, ciFailures);
         DelayedTaskRow ready = new DelayedTaskRow(new TaskView(readyId, Presentation.READY, List.of(), List.of()),
                 "Ready one", TASKS, Optional.empty(), false, List.of(), List.of(), "alpha", Optional.empty())
                 .withPullRequest(pr);
@@ -327,5 +343,132 @@ public class InboxListPlatformTest extends BasePlatformTestCase {
         list.show(inbox(new Query(Optional.of(ALPHA), "")), true);
         assertEquals("a project filter hides the tag", List.of(Hit.ELSEWHERE, Hit.PULL_REQUEST, Hit.ELSEWHERE),
                 hitsAcross(indexOf("Ready one")));
+    }
+
+    /** {@code row} with its branch's pull request #{@code number} carrying the given health. */
+    private static TaskRow withPullRequest(TaskRow row, int number, boolean conflicting, Set<CiFailure> ci) {
+        BranchPullRequest pr = new BranchPullRequest(number, PrLifecycle.OPEN, false, "dd/branch-" + number,
+                "Session PR", Optional.of("https://github.com/o/r/pull/" + number), conflicting, ci);
+        return new TaskRow(row.session(), row.activity(), row.running(), row.branch(), row.placement(),
+                row.readOnly(), row.folderMissing(), row.resumable(), Optional.of(pr));
+    }
+
+    private Item itemOf(String title) {
+        return ((Row) list.entries().get(indexOf(title))).item();
+    }
+
+    /** The icon the renderer paints on the row at {@code index}, rendered now (the renderer is reused). */
+    private Icon renderedIcon(int index, String title) {
+        Component cell = list.getCellRenderer().getListCellRendererComponent(list, list.entries().get(index),
+                index, false, false);
+        JBLabel label = findLabel(cell, title);
+        assertNotNull("no title label " + title, label);
+        return label.getIcon();
+    }
+
+    private static JBLabel findLabel(Component component, String text) {
+        if (component instanceof JBLabel label && text.equals(label.getText())) {
+            return label;
+        }
+        if (component instanceof Container container) {
+            for (Component child : container.getComponents()) {
+                JBLabel found = findLabel(child, text);
+                if (found != null) {
+                    return found;
+                }
+            }
+        }
+        return null;
+    }
+
+    /** The expected composite: {@code base}, then the conflict icon, then the CI-failure icon. */
+    private static void assertHealthIcon(Icon base, boolean conflicting, boolean ci, Icon actual) {
+        if (!conflicting && !ci) {
+            assertSame("no known health: the base icon itself", base, actual);
+            return;
+        }
+        List<Icon> parts = ((RowIcon) actual).getAllIcons();
+        assertSame("CI comes last", ci ? TaskTreeRenderer.PR_CI_FAILURE_ICON : TaskTreeRenderer.PR_CONFLICT_ICON,
+                parts.getLast());
+        Icon head = parts.getFirst();
+        if (conflicting && ci) {
+            assertEquals(List.of(base, TaskTreeRenderer.PR_CONFLICT_ICON), ((RowIcon) head).getAllIcons());
+        } else {
+            assertSame("the base status icon comes first", base, head);
+        }
+    }
+
+    private void click(int index, Hit target, int clicks) {
+        Rectangle cell = list.getCellBounds(index, index);
+        int y = cell.y + cell.height / 2;
+        for (int x = cell.x; x < cell.x + cell.width; x++) {
+            if (list.hit(index, new Point(x, y)) == target) {
+                list.dispatchEvent(new MouseEvent(list, MouseEvent.MOUSE_CLICKED, 0, InputEvent.BUTTON1_DOWN_MASK,
+                        x, y, clicks, false, MouseEvent.BUTTON1));
+                return;
+            }
+        }
+        throw new AssertionError("no " + target + " on row " + index);
+    }
+
+    public void testSessionAndLinkedTaskRowsComposeCarriedPrHealth() {
+        Icon sessionBase = SessionDots.dotIcon(SessionStatus.RUNNING, Optional.of(SessionActivity.BUSY));
+        TaskRow plain = (TaskRow) sessions.get(5);
+        for (boolean conflicting : List.of(false, true)) {
+            for (boolean failing : List.of(false, true)) {
+                Set<CiFailure> ci = failing ? Set.of(CiFailure.FAILURE) : Set.of();
+                String combo = "conflicting=" + conflicting + " ci=" + failing;
+                sessions.set(5, withPullRequest(plain, 77, conflicting, ci));
+                activated.clear();
+                pullRequests.clear();
+                picked.clear();
+                list.show(inbox(Query.NONE, conflicting, ci), false);
+
+                for (String title : List.of("Run 5", "Ready one")) {
+                    Item item = itemOf(title);
+                    Icon base = item instanceof SessionItem ? sessionBase : AllIcons.Actions.Execute;
+                    assertHealthIcon(base, conflicting, failing, InboxList.icon(item));
+                    assertSame(combo + " " + title, InboxList.icon(item), renderedIcon(indexOf(title), title));
+                    assertSame("the next healthy row keeps its bare dot", sessionBase,
+                            renderedIcon(indexOf("Run 4"), "Run 4"));
+
+                    String tooltip = InboxList.tooltip(item, NOW);
+                    int number = item instanceof SessionItem ? 77 : 943;
+                    assertTrue(combo + ": " + tooltip, tooltip.contains("Pull request #" + number));
+                    String conflictText = item instanceof SessionItem ? "#77 has merge conflicts"
+                            : "#943 cannot merge into main: it has conflicts";
+                    assertEquals(combo + ": " + tooltip, conflicting, tooltip.contains(conflictText));
+                    assertEquals(combo + ": " + tooltip, failing,
+                            tooltip.contains("#" + number + " has failing CI checks"));
+                    String baseDetail = item instanceof SessionItem
+                            ? InboxList.tooltip(new SessionItem(plain, Optional.empty(), List.of()), NOW)
+                            : "Task ready-one (ready)";
+                    assertTrue(combo + " keeps the base details: " + tooltip, tooltip.startsWith(baseDetail));
+
+                    int index = indexOf(title);
+                    assertEquals(combo + " " + title, List.of(Hit.ELSEWHERE, Hit.PULL_REQUEST, Hit.ELSEWHERE,
+                            Hit.TAG, Hit.ELSEWHERE), hitsAcross(index));
+                    click(index, Hit.PULL_REQUEST, 1);
+                    click(index, Hit.TAG, 1);
+                    click(index, Hit.ELSEWHERE, 2);
+                }
+                assertEquals(List.of(itemOf("Run 5"), itemOf("Ready one")), pullRequests);
+                assertEquals(List.of(itemOf("Run 5"), itemOf("Ready one")), activated);
+                assertEquals(2, picked.size());
+                assertFalse("a healthy session says nothing of PR health",
+                        InboxList.tooltip(itemOf("Run 4"), NOW).contains("CI"));
+            }
+        }
+    }
+
+    public void testUnknownOrAbsentPrHealthAddsNoBadge() {
+        list.show(inbox(Query.NONE), false);
+        TaskItem ready = (TaskItem) itemOf("Ready one");
+        assertSame(AllIcons.Actions.Execute, InboxList.icon(ready));
+        SessionItem bare = (SessionItem) itemOf("Run 5");
+        assertSame(SessionDots.dotIcon(SessionStatus.RUNNING, Optional.of(SessionActivity.BUSY)),
+                InboxList.icon(bare));
+        String tooltip = InboxList.tooltip(ready, NOW);
+        assertFalse(tooltip, tooltip.contains("conflicts") || tooltip.contains("failing CI"));
     }
 }
