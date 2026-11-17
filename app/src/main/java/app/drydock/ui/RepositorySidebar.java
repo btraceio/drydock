@@ -3087,6 +3087,15 @@ public final class RepositorySidebar extends VBox {
                 Label attention = new Label("waiting");
                 attention.getStyleClass().add("attention-badge");
                 row.getChildren().add(attention);
+            } else if (activity == SessionActivity.WAITING_BACKGROUND) {
+                // Informational, unlike the attention badge above: the run is
+                // parked on async work and resumes on its own, so this is a
+                // ghost chip, not a call to action.
+                Label bg = new Label("bg");
+                bg.getStyleClass().add("bg-badge");
+                Tooltip.install(bg, new Tooltip("Waiting on background work\n"
+                        + "The agent is blocked in a background-wait tool and resumes on its own."));
+                row.getChildren().add(bg);
             }
             if (session.evalMode()) {
                 Label evalChip = new Label("eval");
@@ -3152,6 +3161,7 @@ public final class RepositorySidebar extends VBox {
         private String activityLabel(SessionActivity activity) {
             return switch (activity) {
                 case BUSY -> "working";
+                case WAITING_BACKGROUND -> "waiting on background work";
                 case IDLE -> "at the prompt";
                 case NEEDS_ATTENTION -> "waiting for you";
                 case UNKNOWN -> "unknown";

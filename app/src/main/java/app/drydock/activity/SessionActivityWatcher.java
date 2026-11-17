@@ -38,7 +38,7 @@ public final class SessionActivityWatcher implements AutoCloseable {
 
     private static final Logger LOG = System.getLogger(SessionActivityWatcher.class.getName());
 
-    /** A state word is one of "busy"/"idle"/"attention"; anything longer is not ours. */
+    /** A state word is one of "busy"/"bg"/"idle"/"attention"; anything longer is not ours. */
     private static final long MAX_STATE_FILE_BYTES = 64;
 
     private final Path activityDirectory;

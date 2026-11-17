@@ -1962,6 +1962,17 @@
     -fx-font-weight: bold;
     -fx-padding: 1 8 1 8;
 }
+/* Session parked in a background-wait tool (bg_wait / TaskOutput). Ghost
+   treatment, deliberately unlike the attention badge above: the run resumes
+   on its own, so this is a hint, not a call to action. */
+.bg-badge {
+    -fx-background-color: -drydock-hover;
+    -fx-background-radius: 100px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 10px;
+    -fx-font-weight: bold;
+    -fx-padding: 1 7 1 7;
+}
 .eval-badge {
     -fx-background-color: -drydock-merged-soft;
     -fx-background-radius: 100px;

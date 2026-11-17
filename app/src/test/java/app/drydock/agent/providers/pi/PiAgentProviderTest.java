@@ -641,8 +641,17 @@ class PiAgentProviderTest {
         assertTrue(source.contains("pi.on(\"input\""), source);
         assertTrue(source.contains("pi.on(\"ui_prompt_start\""), source);
         assertTrue(source.contains("pi.on(\"ui_prompt_end\""), source);
+        assertTrue(source.contains("pi.on(\"tool_execution_start\""), source);
+        assertTrue(source.contains("pi.on(\"tool_execution_end\""), source);
+        assertTrue(source.contains("\"bg_wait\""), source);
+        assertTrue(source.contains("\"bg\""), source);
         assertTrue(source.contains("pi.on(\"agent_settled\""), source);
         assertTrue(source.contains("pi.on(\"session_shutdown\""), source);
+        String shutdownHandler = source.substring(source.indexOf("pi.on(\"session_shutdown\""));
+        int clearWaits = shutdownHandler.indexOf("bgWaits.clear();");
+        int cancelIdle = shutdownHandler.indexOf("cancelIdle();");
+        int clearState = shutdownHandler.indexOf("clear(ctx);");
+        assertTrue(clearWaits >= 0 && clearWaits < cancelIdle && cancelIdle < clearState, source);
         assertTrue(source.contains("Write-then-rename"), source);
     }
 

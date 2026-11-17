@@ -49,7 +49,7 @@ public final class ClaudeHookInstaller {
      * #install()} rewrites both files unconditionally on every startup, so
      * nothing compares this value.
      */
-    private static final String INSTALL_VERSION = "1";
+    private static final String INSTALL_VERSION = "2";
 
     /**
      * POSIX sh, because it runs on every hook invocation and must add no
@@ -64,7 +64,7 @@ public final class ClaudeHookInstaller {
     private static final String HOOK_SCRIPT = """
             #!/bin/sh
             # Managed by Drydock -- regenerated on launch; do not edit.
-            # usage: drydock-activity.sh <busy|idle|notify|end>
+            # usage: drydock-activity.sh <busy|bg|idle|notify|end>
             set -u
             dir="$(dirname "$0")/../activity"
             payload=$(cat 2>/dev/null || true)
@@ -85,7 +85,7 @@ public final class ClaudeHookInstaller {
                       | sed -n 's/.*"notification_type"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')
               case "$ntype" in
                 permission_prompt|idle_prompt|agent_needs_input) state=attention ;;
-                *) state=busy ;;
+                *) exit 0 ;;
               esac
             fi
 
@@ -176,9 +176,13 @@ public final class ClaudeHookInstaller {
     }
 
     /**
-     * Hook registrations covering the full busy/waiting/idle cycle. No {@code
-     * matcher} field: that filters by tool name and applies only to tool
-     * events, none of which are used here.
+     * Hook registrations covering the full busy/waiting/idle cycle, plus the
+     * background-wait pair: while Claude is blocked inside {@code TaskOutput}
+     * or {@code BashOutput} the run is alive but parked on async work, which
+     * the "bg" word reports (informational, unlike a permission prompt).
+     * The tool events need a {@code matcher} so Pre/PostToolUse only report
+     * background-wait tools. This narrows when those hooks write but does not
+     * serialize them against concurrent Notification hooks.
      */
     private String settingsJson() {
         String script = jsonQuote(scriptFile().toString());
@@ -188,11 +192,13 @@ public final class ClaudeHookInstaller {
                   "hooks": {
                     "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "sh %s busy" }] }],
                     "Notification":     [{ "hooks": [{ "type": "command", "command": "sh %s notify" }] }],
+                    "PreToolUse":       [{ "matcher": "TaskOutput|BashOutput", "hooks": [{ "type": "command", "command": "sh %s bg" }] }],
+                    "PostToolUse":      [{ "matcher": "TaskOutput|BashOutput", "hooks": [{ "type": "command", "command": "sh %s busy" }] }],
                     "Stop":             [{ "hooks": [{ "type": "command", "command": "sh %s idle" }] }],
                     "SessionEnd":       [{ "hooks": [{ "type": "command", "command": "sh %s end" }] }]
                   }
                 }
-                """.formatted(INSTALL_VERSION, script, script, script, script);
+                """.formatted(INSTALL_VERSION, script, script, script, script, script, script, script);
     }
 
     /**
