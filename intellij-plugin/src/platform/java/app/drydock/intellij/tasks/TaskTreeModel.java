@@ -77,6 +77,9 @@ public final class TaskTreeModel {
     /** The muted child of a configured listing node the user has not opened yet. */
     static final String NOT_LOADED = "Not loaded";
 
+    /** The child of an opened listing node whose first answer is still running. */
+    static final String LOADING_ISSUES = "Loading issues…";
+
     /** The one child of a listing that answered with nothing: the renderer's "answered" discriminator. */
     static final String NO_ISSUES = "No issues";
 
@@ -120,7 +123,9 @@ public final class TaskTreeModel {
                          Map<ManagedSessionId, Boolean> resumable,
                          Map<ManagedSessionId, BranchPullRequest> pullRequestsBySession,
                          Map<ManagedSessionId, SearchRefs.ItemRefs> sessionRefs,
-                         Map<Path, List<SearchRefs.LooseTaskRefs>> looseTaskRefsByMainRoot) {
+                         Map<Path, List<SearchRefs.LooseTaskRefs>> looseTaskRefsByMainRoot,
+                         Set<Path> pendingIssueRoots,
+                         Set<ListingExpansionTracker.GroupKey> pendingJiraGroups) {
         public Inputs {
             projects = List.copyOf(projects);
             sessions = List.copyOf(sessions);
@@ -158,6 +163,8 @@ public final class TaskTreeModel {
             Map<Path, List<SearchRefs.LooseTaskRefs>> copiedLooseRefs = new LinkedHashMap<>();
             looseTaskRefsByMainRoot.forEach((root, refs) -> copiedLooseRefs.put(root, List.copyOf(refs)));
             looseTaskRefsByMainRoot = Map.copyOf(copiedLooseRefs);
+            pendingIssueRoots = Set.copyOf(pendingIssueRoots);
+            pendingJiraGroups = Set.copyOf(pendingJiraGroups);
         }
 
         /** Compatibility with the previous full constructor, before item search references were carried. */
@@ -183,7 +190,7 @@ public final class TaskTreeModel {
                     pullRequestContainers, githubIssueRoots, githubGhostRoots, jiraRoots, jiraGhostRoots,
                     openFolders, lastActivity, now, issuesByMainRoot, jiraGroupsByMainRoot,
                     pullRequestsByMainRoot, pullRequestDedupWorktrees, listProblem, filter, prTerms, issueTerms,
-                    focusRoot, resumable, pullRequestsBySession, Map.of(), Map.of());
+                    focusRoot, resumable, pullRequestsBySession, Map.of(), Map.of(), Set.of(), Set.of());
         }
 
         /** These inputs with the Projects tree's scope: the plain search text, the {@code pr:}/{@code issue:}
@@ -195,7 +202,8 @@ public final class TaskTreeModel {
                     pullRequestContainers, githubIssueRoots, githubGhostRoots, jiraRoots, jiraGhostRoots, openFolders,
                     lastActivity, now, issuesByMainRoot, jiraGroupsByMainRoot, pullRequestsByMainRoot,
                     pullRequestDedupWorktrees, listProblem, filter, prTerms, issueTerms, focusRoot,
-                    resumable, pullRequestsBySession, sessionRefs, looseTaskRefsByMainRoot);
+                    resumable, pullRequestsBySession, sessionRefs, looseTaskRefsByMainRoot,
+                    pendingIssueRoots, pendingJiraGroups);
         }
 
         /** These inputs with item references available to the scoped search matcher. Pure. */
@@ -206,10 +214,11 @@ public final class TaskTreeModel {
                     pullRequestContainers, githubIssueRoots, githubGhostRoots, jiraRoots, jiraGhostRoots, openFolders,
                     lastActivity, now, issuesByMainRoot, jiraGroupsByMainRoot, pullRequestsByMainRoot,
                     pullRequestDedupWorktrees, listProblem, filter, prTerms, issueTerms, focusRoot,
-                    resumable, pullRequestsBySession, sessions, looseTasks);
+                    resumable, pullRequestsBySession, sessions, looseTasks,
+                    pendingIssueRoots, pendingJiraGroups);
         }
 
-        /** The shape before sessions carried their branch's pull request: none known. */
+        /** The shape before sessions carried their branch's pull request: none known, no listing pending. */
         public Inputs(List<SharedProject> projects, List<ManagedAgentSession> sessions,
                       Map<Path, List<Worktree>> worktreesByMainRoot, Map<Path, Path> mainRootOf,
                       Optional<Path> currentMainRoot, Optional<Path> currentWorkingRoot,
@@ -233,7 +242,7 @@ public final class TaskTreeModel {
                     openFolders, lastActivity, now, issuesByMainRoot, jiraGroupsByMainRoot,
                     pullRequestsByMainRoot, pullRequestDedupWorktrees, listProblem, filter,
                     List.of(), List.of(), Optional.empty(),
-                    resumable, pullRequestsBySession, Map.of(), Map.of());
+                    resumable, pullRequestsBySession, Map.of(), Map.of(), Set.of(), Set.of());
         }
     }
 
@@ -619,7 +628,8 @@ public final class TaskTreeModel {
         boolean nodeMatches = itemFilter.isEmpty() || contains("GitHub", itemFilter);
         List<TaskNode> children = new ArrayList<>();
         switch (in.issuesByMainRoot().get(main)) {
-            case null -> children.add(new TaskNode.Placeholder(NOT_LOADED));
+            case null -> children.add(in.pendingIssueRoots().contains(main)
+                    ? new TaskNode.Deferred(LOADING_ISSUES) : new TaskNode.Placeholder(NOT_LOADED));
             case IssueListing.Listed listed -> listed.issues().stream()
                     .filter(issue -> (nodeMatches || matches(itemFilter, issue))
                             && SearchTerms.matchAllIssues(in.issueTerms(),
@@ -686,7 +696,9 @@ public final class TaskTreeModel {
         boolean groupMatches = itemFilter.isEmpty() || contains(listing.group().name(), itemFilter);
         List<TaskNode> children = new ArrayList<>();
         switch (listing.listing().orElse(null)) {
-            case null -> children.add(new TaskNode.Placeholder(NOT_LOADED));
+            case null -> children.add(
+                    in.pendingJiraGroups().contains(new ListingExpansionTracker.GroupKey(main, listing.group().id()))
+                            ? new TaskNode.Deferred(LOADING_ISSUES) : new TaskNode.Placeholder(NOT_LOADED));
             case JiraIssueListing.Failed failed ->
                     children.add(new TaskNode.ListProblem(
                             "Jira group \"" + listing.group().name() + "\": " + failed.message()));

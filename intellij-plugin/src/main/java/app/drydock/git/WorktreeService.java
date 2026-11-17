@@ -390,6 +390,57 @@ public final class WorktreeService implements AutoCloseable {
         return CompletableFuture.supplyAsync(() -> lastActivityBlocking(worktree), executor);
     }
 
+    /**
+     * Where a directory sits in git: the main checkout of its repository and
+     * the branch checked out in its worktree, empty when HEAD is detached.
+     */
+    public record Checkout(Path mainCheckout, Optional<String> branch) {
+        public Checkout {
+            Objects.requireNonNull(mainCheckout, "mainCheckout");
+            Objects.requireNonNull(branch, "branch");
+        }
+    }
+
+    /**
+     * {@code directory}'s main checkout and branch from one bounded
+     * {@code git rev-parse}, on this service's executor. It works for a
+     * linked worktree and for any directory inside one. A repository whose
+     * common git directory is not named {@code .git} (bare, or a separate
+     * git dir) has no main checkout to name, and fails the future.
+     */
+    public CompletableFuture<Checkout> checkoutOf(Path directory) {
+        return CompletableFuture.supplyAsync(() -> checkoutOfBlocking(directory), executor);
+    }
+
+    /** Synchronous form of {@link #checkoutOf}, package-private for tests. */
+    Checkout checkoutOfBlocking(Path directory) {
+        Path git = locator.locate()
+                .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
+        List<String> command = List.of(
+                git.toString(), "-C", directory.toAbsolutePath().normalize().toString(),
+                "rev-parse", "--path-format=absolute", "--git-common-dir", "--abbrev-ref", "HEAD");
+        ProcessResult result = run(command);
+        if (result.exitCode() != 0) {
+            throw new GitCommandFailedException(command, result.exitCode(), ProcessRunner.excerpt(result.stderr()));
+        }
+        return parseCheckout(command, result.stdout());
+    }
+
+    /** Pure: rev-parse prints the common git directory, then the branch or {@code HEAD} when detached. */
+    static Checkout parseCheckout(List<String> command, String stdout) {
+        String[] lines = stdout.strip().split("\\R");
+        if (lines.length != 2) {
+            throw new GitCommandFailedException(command, 0, "unexpected rev-parse output");
+        }
+        Path common = Path.of(lines[0].strip());
+        Path main = common.getParent();
+        if (main == null || !".git".equals(String.valueOf(common.getFileName()))) {
+            throw new GitCommandFailedException(command, 0, "no main checkout for git directory " + common);
+        }
+        String head = lines[1].strip();
+        return new Checkout(main, head.equals("HEAD") ? Optional.empty() : Optional.of(head));
+    }
+
     /** Synchronous form of {@link #lastActivity}, package-private for tests. */
     Instant lastActivityBlocking(Path worktree) {
         Path git = locator.locate()

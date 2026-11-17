@@ -163,9 +163,10 @@ record JiraGroups(List<JiraGroup> groups) {
 
     /**
      * One group and what its query answered, as the tree model reads it.
-     * An empty {@code listing} means the query has not run for this tree
-     * state yet (the section was never opened and the view does not ask
-     * for listings) — the node shows a loading child, not an empty one.
+     * An empty {@code listing} means there is no answer for this tree state
+     * yet: the group was never opened (the node shows "Not loaded") or its
+     * first query is still running (it shows a loading child), never an
+     * empty node.
      */
     record Listing(JiraGroup group, Optional<JiraIssueListing> listing) {
         public Listing {
