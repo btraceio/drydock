@@ -152,6 +152,30 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
         }
     }
 
+    public void testTheHeadersRefreshAsksTheHostToRerunTheDiff() {
+        List<Project> refreshed = new ArrayList<>();
+        ReviewWorkbenchEditor.Host host = new ReviewWorkbenchEditor.Host() {
+            @Override
+            public Optional<ReviewWorkbenchEditor.HostedFlow> hostFlow(Project project, Disposable parent) {
+                return Optional.empty();
+            }
+
+            @Override
+            public void refresh(Project project) {
+                refreshed.add(project);
+            }
+        };
+        ReviewWorkbenchEditor editor = new ReviewWorkbenchEditor(getProject(), ReviewWorkbenchFile.of(getProject()),
+                host);
+        try {
+            assertEquals(ReviewWorkbenchEditor.REFRESH, editor.refreshAction.getTemplatePresentation().getText());
+            editor.refreshAction.actionPerformed(TestActionEvent.createTestEvent(editor.refreshAction));
+            assertEquals(List.of(getProject()), refreshed);
+        } finally {
+            Disposer.dispose(editor);
+        }
+    }
+
     public void testThePrDescriptionsFirstParagraphIsCutAtItsFirstBlankLine() {
         assertEquals("Callers use the result of bar().", ReviewWorkbenchQueue.firstParagraph(
                 "## Summary\nCallers use\n the result of bar().\n\n## Details\nMore.", 400));

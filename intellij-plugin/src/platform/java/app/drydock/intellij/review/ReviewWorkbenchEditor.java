@@ -5,6 +5,7 @@ import app.drydock.intellij.review.workbench.model.InboxModel;
 import app.drydock.intellij.review.workbench.model.WorkbenchState;
 import app.drydock.intellij.tasks.WorktreeReview;
 import app.drydock.review.tour.ReviewTour;
+import com.intellij.icons.AllIcons;
 import com.intellij.ide.ui.laf.darcula.ui.DarculaButtonUI;
 import com.intellij.ide.util.PropertiesComponent;
 import com.intellij.openapi.Disposable;
@@ -48,7 +49,7 @@ import java.util.function.Supplier;
  * The review workbench (design A, "Flow"): a file editor tab with a header
  * over the queue | one hunk | findings panes, and the outbox dock under
  * them. The header names the review, its size and how many hunks are seen,
- * and offers the agent reviews and Finish Review. The queue and the
+ * and offers Refresh, the agent reviews and Finish Review. The queue and the
  * findings pane collapse to strips; the two splitters keep their
  * proportions per user under {@link #NAV_KEY} and {@link #INBOX_KEY} (the
  * platform splitter stores a moved divider at once and loads the stored
@@ -65,6 +66,8 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
     static final String INBOX_EMPTY_TEXT = "Findings to triage will appear here.";
     static final String QUEUE_EMPTY_TEXT = "No hunks to review.";
     static final String FINISH_REVIEW = "Finish Review";
+    static final String REFRESH = "Refresh";
+    static final String REFRESH_DESCRIPTION = "Save open documents and re-run the review diff";
     static final String REVIEW_MENU = "Agent Review";
     static final String SECTION_REVIEW = "Section Review…";
     static final String EDUCATIONAL_TOUR = "Educational Tour…";
@@ -122,6 +125,10 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
         /** Asks an agent to review the workbench's checkout: sections, the educational tour, or sphinx's. EDT. */
         default void startReview(Project project, ReviewTabOpener.ReviewStart start) {
         }
+
+        /** Saves the open documents and re-runs the review's diff. EDT. */
+        default void refresh(Project project) {
+        }
     }
 
     private final ReviewWorkbenchFile file;
@@ -135,6 +142,8 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
     final JButton finishReview = new JButton(FINISH_REVIEW);
     /** The header's Review ▾: the agent reviews that can be asked for. */
     final DefaultActionGroup reviewActions;
+    /** The header's Refresh: saves the open documents and re-runs the review's diff. */
+    final AnAction refreshAction;
     /** The findings pane, hidden while the review has no findings to reach and no composer is open. */
     private final JComponent inboxComponent;
     /** Whether the pane is collapsed by this view's empty-yield (not the user): only our own yield re-expands. */
@@ -185,8 +194,10 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
         reviewActions.add(new StartReview(project, host, ReviewTabOpener.ReviewStart.TOUR));
         reviewActions.add(new StartReview(project, host, ReviewTabOpener.ReviewStart.SPHINX));
         showTextInToolbar(reviewActions);
+        refreshAction = DumbAwareAction.create(REFRESH, AllIcons.Actions.Refresh, e -> host.refresh(project));
+        refreshAction.getTemplatePresentation().setDescription(REFRESH_DESCRIPTION);
         ActionToolbar reviews = ActionManager.getInstance().createActionToolbar(TOOLBAR_PLACE,
-                new DefaultActionGroup(reviewActions), true);
+                new DefaultActionGroup(refreshAction, reviewActions), true);
         JPanel west = new JPanel(new HorizontalLayout(JBUI.scale(16)));
         west.setOpaque(false);
         west.add(subject);
@@ -395,6 +406,11 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
                 String base = project.getBasePath();
                 ReviewTabProvider.liveScope(project).filter(scope -> base != null).ifPresent(scope ->
                         ReviewTabOpener.startReview(project, Path.of(base), scope, start));
+            }
+
+            @Override
+            public void refresh(Project project) {
+                ReviewTabProvider.refresh(project);
             }
 
             @Override

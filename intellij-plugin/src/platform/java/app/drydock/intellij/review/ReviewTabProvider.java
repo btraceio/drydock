@@ -2233,7 +2233,28 @@ final class ReviewTabProvider {
         provider.userReload();
     }
 
-    /** A user-triggered re-run (Refresh action, Changes link): save first (Q9, EDT), then reload. */
+    /**
+     * The workbench's Refresh (EDT): a user-triggered load, so open documents
+     * are saved first (Q9). Before a scope is resolved (still loading, or
+     * the first load never completed) the whole load path re-runs, showing
+     * its own placeholder and terminal state; nothing happens without a live
+     * Review content.
+     */
+    static void refresh(Project project) {
+        ReviewTabProvider provider = project.getUserData(LIVE_PROVIDER);
+        if (provider == null || provider.disposed.get()) {
+            return;
+        }
+        if (provider.scope == null || provider.refresher == null) {
+            ReviewDocumentSaves.saveOpenDocuments();
+            provider.renderStatus(ReviewTabStatus.LOADING, ReviewTabStatus.LOADING.message());
+            provider.submitLoad();
+            return;
+        }
+        provider.userReload();
+    }
+
+    /** A user-triggered re-run (workbench Refresh, Changes link): save first (Q9, EDT), then reload. */
     private void userReload() {
         if (disposed.get()) {
             return;
