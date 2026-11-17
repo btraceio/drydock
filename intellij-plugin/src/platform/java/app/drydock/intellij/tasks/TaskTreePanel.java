@@ -43,6 +43,7 @@ import app.drydock.intellij.workspace.WorkspaceSettings;
 import app.drydock.tasks.DelayedTaskRows;
 import app.drydock.tasks.TaskNode.DelayedTaskRow;
 import app.drydock.tasks.TaskNode.TasksSection;
+import app.drydock.tasks.TaskState;
 import app.drydock.tasks.TaskSnapshot;
 
 import com.intellij.icons.AllIcons;
@@ -262,7 +263,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
     {
         search.setToolTipText("Search titles; is:needs, is:running, is:idle, is:done and the other group "
-                + "words keep only those groups; project:<name> shows one project.");
+                + "words keep only those groups; project:<name> shows one project; pr:<number|text> and "
+                + "issue:<number|key|text> keep rows whose pull request or issue matches (quote terms "
+                + "with spaces: pr:\"dark mode\").");
     }
     private final TaskTreeInputs inputs = new TaskTreeInputs();
     private final TaskTreeRefreshRequests refreshRequests = new TaskTreeRefreshRequests();
@@ -795,7 +798,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         AnAction refresh = refreshAction(refreshTarget);
         // Filters the inbox to the selected row's project (the project:
         // chip), or shows every project again: with a filter on, the same
-        // button drops it, whatever is selected.
+        // menu entry drops it, whatever is selected. The toolbar's own
+        // button (below) targets this window's project instead — the
+        // selection must not decide what a fixed toolbar button does.
         AnAction focusProject = new DumbAwareAction("Focus on Project",
                 "Show only the selected row's project in the inbox", AllIcons.General.Locate) {
             @Override
@@ -903,7 +908,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         // button (TaskActions.toolbarActions).
         toolbarActions.addAll(TaskActions.toolbarActions(taskActions));
         toolbarActions.addSeparator();
-        toolbarActions.add(focusProject);
+        toolbarActions.add(windowFocusAction());
         toolbarActions.add(refresh);
         ActionToolbar toolbar = ActionManager.getInstance().createActionToolbar("Drydock.TaskTree", toolbarActions, true);
         toolbar.setTargetComponent(this);
@@ -1865,9 +1870,11 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 inputs.invalidateWorktrees();
             }
             repositoryIdsByRoot = repositoryIdsByRoot(plugin);
+            SearchTerms<InboxModel.GroupKind> terms = SearchTerms.parse(requestedFilter, InboxModel::kindOf);
             // One gather, two builds: the inbox, menus and jumps read every
-            // row; the Projects tree reads them narrowed by the search text
-            // (its is:<group> words are the inbox's alone).
+            // row; the Projects tree reads them narrowed by the scope — the
+            // plain search text (its is:<group> words are the inbox's
+            // alone), the pr:/issue: terms, and the project: chip.
             TaskTreeModel.Inputs gathered = inputs.gather(project, "",
                     Set.copyOf(expansions.requested(SectionKind.WORKTREES)),
                     Set.copyOf(expansions.requestedGitHubIssues()),
@@ -1878,25 +1885,53 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             // remembered as open. A failed gather never gets here and forgets nothing.
             expansions.retainDefinedJiraGroups(gathered.jiraGroupsByMainRoot());
             List<TaskNode> nodes = TaskTreeModel.build(gathered);
-            String treeText = InboxModel.titleText(requestedFilter);
-            List<TaskNode> treeNodes = treeText.isEmpty() ? nodes
-                    : TaskTreeModel.build(gathered.withFilter(treeText));
-            // T17a: the task layer rides this same background pass -- the
-            // cached snapshot the gather read, the T15a row derivation, and
-            // the in-memory catalog for slugs; never a fresh scan, never
-            // the EDT.
+            // T17a: derive linked task rows once from this unscoped base model;
+            // the inbox and item-search references must see the same snapshot and PR index.
             Instant now = Instant.now();
             Optional<WatchedSnapshot> watched = inputs.watchedTasks();
             Set<String> liveSessionIds = plugin.taskService().liveSessionIds();
             Map<RepositoryId, String> displayNames = displayNamesByRepository(plugin);
-            TaskLayer tasks = taskLayer(nodes, watched, liveSessionIds, displayNames, now);
+            List<DelayedTaskRow> linkedRows = watched
+                    .map(snapshot -> linkedTaskRows(nodes, snapshot, liveSessionIds, displayNames, now))
+                    .orElse(List.of());
+            TaskLayer tasks = taskLayer(nodes, watched, liveSessionIds, displayNames, now, linkedRows);
             Map<RepositoryId, Path> roots = repositoryRoots(plugin);
-            InboxModel.Inbox builtInbox = InboxModel.build(new InboxModel.Inputs(nodes, gathered.projects(),
-                    watched.map(snapshot -> linkedTaskRows(nodes, snapshot, liveSessionIds, displayNames, now))
-                            .orElse(List.of()),
+            Map<RepositoryId, Path> taskRoots = taskProjectRoots(roots, gathered.mainRootOf());
+            InboxModel.Inputs inboxInputs = new InboxModel.Inputs(nodes, gathered.projects(), linkedRows,
                     watched.map(snapshot -> snapshot.snapshot().byId()).orElse(Map.of()),
-                    taskProjectRoots(roots, gathered.mainRootOf()), now, ZoneId.systemDefault()),
+                    taskRoots, now, ZoneId.systemDefault());
+            InboxModel.Inbox builtInbox = InboxModel.build(inboxInputs,
                     new InboxModel.Query(Optional.ofNullable(requestedFocus).map(Focus::root), requestedFilter));
+
+            Map<ManagedSessionId, SearchRefs.ItemRefs> sessionRefs = new LinkedHashMap<>();
+            Map<Path, List<SearchRefs.LooseTaskRefs>> looseRefsByRoot = new LinkedHashMap<>();
+            if (!terms.pullRequests().isEmpty() || !terms.issues().isEmpty()) {
+                Map<String, TaskRow> sessionsByTextId = sessionRowsOf(nodes);
+                Map<String, List<DelayedTaskRow>> attachedBySession = new LinkedHashMap<>();
+                for (DelayedTaskRow linked : linkedRows) {
+                    Optional<String> attachedSession = DelayedTaskRows.attachedSession(linked,
+                            sessionsByTextId.keySet());
+                    attachedSession.ifPresent(id ->
+                            attachedBySession.computeIfAbsent(id, ignored -> new ArrayList<>()).add(linked));
+                    if ((attachedSession.isEmpty()
+                            || linked.presentation() != TaskState.Presentation.STARTED)
+                            && InboxModel.searchableTask(inboxInputs, linked,
+                                    terms.groupKinds().contains(InboxModel.GroupKind.DONE), now,
+                                    ZoneId.systemDefault())) {
+                        InboxModel.registeredTaskRoot(taskRoots, gathered.projects(), linked).ifPresent(root ->
+                                looseRefsByRoot.computeIfAbsent(root, ignored -> new ArrayList<>())
+                                        .add(new SearchRefs.LooseTaskRefs(linked.title(),
+                                                SearchRefs.looseTaskRefs(linked))));
+                    }
+                }
+                sessionsByTextId.forEach((id, row) -> sessionRefs.put(row.session().id(),
+                        SearchRefs.sessionRefs(row, attachedBySession.getOrDefault(id, List.of()))));
+            }
+            TaskTreeModel.Inputs scoped = gathered.withScope(terms.plainText(), terms.pullRequests(), terms.issues(),
+                    Optional.ofNullable(requestedFocus).map(Focus::root))
+                    .withMatchRefs(sessionRefs, looseRefsByRoot);
+            List<TaskNode> treeNodes = terms.isEmpty() && requestedFocus == null ? nodes
+                    : TaskTreeModel.build(scoped);
             // A session whose pull request merged or closed is offered its
             // Done flow once, by whichever window's pass sees it first.
             List<PullRequestDoneOffers.Offer> doneOffers =
@@ -2196,13 +2231,21 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
      */
     static TaskLayer taskLayer(List<TaskNode> nodes, Optional<WatchedSnapshot> tasks, Set<String> liveSessionIds,
                                Map<RepositoryId, String> displayNames, Instant now) {
+        return taskLayer(nodes, tasks, liveSessionIds, displayNames, now,
+                tasks.map(snapshot -> linkedTaskRows(nodes, snapshot, liveSessionIds, displayNames, now))
+                        .orElse(List.of()));
+    }
+
+    static TaskLayer taskLayer(List<TaskNode> nodes, Optional<WatchedSnapshot> tasks, Set<String> liveSessionIds,
+                               Map<RepositoryId, String> displayNames, Instant now,
+                               List<DelayedTaskRow> linkedRows) {
         if (tasks.isEmpty()) {
             return TaskLayer.EMPTY;
         }
         Set<String> shown = sessionRowsOf(nodes).keySet();
         Map<String, List<DelayedTaskRow>> attached = new LinkedHashMap<>();
         List<DelayedTaskRow> unattached = new ArrayList<>();
-        for (DelayedTaskRow linked : linkedTaskRows(nodes, tasks.get(), liveSessionIds, displayNames, now)) {
+        for (DelayedTaskRow linked : linkedRows) {
             DelayedTaskRows.attachedSession(linked, shown).ifPresentOrElse(
                     session -> attached.computeIfAbsent(session, any -> new ArrayList<>()).add(linked),
                     () -> unattached.add(linked));
@@ -2516,6 +2559,75 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         };
     }
 
+    /** EDT: whether the scope gesture can run: an active focus to drop, a registered window project,
+     *  or an unregistered one to register first. The keymap action's update reads it. */
+    boolean canFocusThisWindow() {
+        return focus != null || thisWindowFocus().isPresent() || unregistered().isPresent();
+    }
+
+    /** EDT: the project open in this IDE window, when a registered project row shows it. */
+    private Optional<Focus> thisWindowFocus() {
+        return displayedNodes.stream()
+                .filter(ProjectRow.class::isInstance)
+                .map(ProjectRow.class::cast)
+                .filter(ProjectRow::isThisWindow)
+                .findFirst()
+                .map(row -> new Focus(row.project().root(), row.project().displayName()));
+    }
+
+    /**
+     * The toolbar's scope button: one click scopes the tool window — the
+     * inbox and the projects tree alike — to the project open in this IDE
+     * window, without first selecting one of its rows. An unregistered
+     * project is registered first (the banner's shared registration), then
+     * focused. With any focus on, the same button drops it. The keymap's
+     * {@code Drydock.FocusProject} action runs this through the panel
+     * lookup in {@link FocusProjectAction}.
+     */
+    private AnAction windowFocusAction() {
+        return new DumbAwareAction("Focus on This Project",
+                "Show only this window's project in the tool window", AllIcons.General.Locate) {
+            @Override
+            public void update(@NotNull AnActionEvent e) {
+                boolean focused = focus != null;
+                boolean registered = thisWindowFocus().isPresent();
+                boolean unregistered = unregistered().isPresent();
+                e.getPresentation().setText(focused ? "Show All Projects" : "Focus on This Project");
+                e.getPresentation().setDescription(focused ? "Show every project in the tool window again"
+                        : registered ? "Show only this window's project in the tool window"
+                        : "Register this window's project with Drydock, then show only it");
+                e.getPresentation().setEnabled(focused || registered || unregistered);
+            }
+
+            @Override
+            public @NotNull ActionUpdateThread getActionUpdateThread() {
+                return ActionUpdateThread.BGT;
+            }
+
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                focusThisWindow();
+            }
+        };
+    }
+
+    /** EDT: scopes to this window's project, registering it first when needed; an active focus drops. */
+    void focusThisWindow() {
+        if (focus != null) {
+            setFocus(null);
+            return;
+        }
+        Optional<Focus> registered = thisWindowFocus();
+        if (registered.isPresent()) {
+            setFocus(registered.get());
+            return;
+        }
+        unregistered().ifPresent(add -> register(add, shared ->
+                ApplicationManager.getApplication().invokeLater(() ->
+                        setFocus(new Focus(add.mainRoot(), add.repoName())),
+                        ModalityState.nonModal(), project.getDisposed())));
+    }
+
     /** The inbox's project filter: a project's main root and the name its chip shows. */
     private record Focus(Path root, String name) {
     }
@@ -2562,6 +2674,16 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     }
 
     private void register(AddCurrentProject add) {
+        register(add, null);
+    }
+
+    /**
+     * Registers this window's project, then runs {@code then} on the EDT
+     * with the registered project (null: the banner's own confirmation is
+     * the whole outcome). The registration is the shared one — the
+     * listings stay strictly lazy until the user opens them.
+     */
+    private void register(AddCurrentProject add, Consumer<SharedProject> then) {
         DrydockPluginService.getInstance().sharedProjects().register(add.mainRoot(), add.repoName())
                 .whenComplete((registered, failure) -> {
                     if (failure == null) {
@@ -2571,6 +2693,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                             // a Jira group or a section fetches them.
                             justAdded = Optional.of(new AddProjectBanner.Added(add.mainRoot(), add.repoName()));
                             updateBanner();
+                            if (then != null) {
+                                then.accept(registered);
+                            }
                         }, ModalityState.nonModal(), project.getDisposed());
                     } else {
                         ApplicationManager.getApplication().invokeLater(() -> Messages.showErrorDialog(project,

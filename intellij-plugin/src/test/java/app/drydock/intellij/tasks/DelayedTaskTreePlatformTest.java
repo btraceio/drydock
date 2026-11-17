@@ -69,6 +69,8 @@ public class DelayedTaskTreePlatformTest extends BasePlatformTestCase {
     private Path root;
     private Path repoRoot;
     private SharedProject registered;
+    private SharedProject secondRegistered;
+    private Path secondRepoRoot;
     private ManagedSessionId sessionId;
     private TaskTreePanel panel;
     private JTree tree;
@@ -117,8 +119,13 @@ public class DelayedTaskTreePlatformTest extends BasePlatformTestCase {
     protected void tearDown() throws Exception {
         if (panel != null) { try { Disposer.dispose(panel); } catch (RuntimeException e) { } }
         if (sessionId != null) { try { IsolatedCatalog.remove(sessionId); } catch (RuntimeException e) { } }
+        if (secondRegistered != null) {
+            try { plugin.sharedProjects().remove(secondRegistered.id()).get(30, TimeUnit.SECONDS); }
+            catch (Exception e) { }
+        }
         try { plugin.sharedProjects().remove(registered.id()).get(30, TimeUnit.SECONDS); } catch (Exception e) { }
         for (Path fixture : fixtures) { delete(fixture.getParent()); } // the unique repository dir
+        if (secondRepoRoot != null) { delete(secondRepoRoot); }
         delete(repoRoot);
         super.tearDown();
     }
@@ -256,6 +263,48 @@ public class DelayedTaskTreePlatformTest extends BasePlatformTestCase {
         awaitTree(() -> applies > before, "the pass the search asks for");
         assertNotNull("is:<group> words are the inbox's alone", find(projectRow));
         assertEquals("No project matches the search.", TaskTreePanel.emptyText("x"));
+    }
+
+    public void testFocusScopesTheProjectsTreeWhenEffectiveSearchTextIsEmpty() throws Exception {
+        secondRepoRoot = Files.createTempDirectory("drydock-tree-second");
+        secondRegistered = plugin.sharedProjects().register(secondRepoRoot, "tree-second-" + System.nanoTime())
+                .get(30, TimeUnit.SECONDS);
+        panel.showProjects(true);
+        awaitTree(() -> projectRow(registered.id()) && projectRow(secondRegistered.id()),
+                "both registered projects in the unfiltered tree");
+
+        int before = applies;
+        panel.search().setText("project:" + registered.displayName());
+        press(panel.search(), KeyEvent.VK_ENTER);
+        assertEquals(Optional.of(registered.displayName()),
+                panel.search().project().map(InboxModel.ProjectRef::name));
+        assertEquals("the project chip leaves no effective text", "",
+                InboxSearchField.effectiveText(panel.search().getText()));
+        awaitTree(() -> applies > before && projectRow(registered.id()) && !projectRow(secondRegistered.id()),
+                "the focused rebuild to show only its project row");
+
+        List<TaskNode> base = panelNodes("displayedNodes");
+        List<TaskNode> scoped = panelNodes("displayedTreeNodes");
+        assertTrue("the unscoped base remains available to inbox and metadata", hasProject(base, secondRegistered.id()));
+        assertTrue("the focused project remains in both models", hasProject(base, registered.id())
+                && hasProject(scoped, registered.id()));
+        assertFalse("the other project is absent from the Projects tree", hasProject(scoped, secondRegistered.id()));
+    }
+
+    private boolean projectRow(Object id) {
+        return find(value -> value instanceof TaskNode.ProjectRow row && row.project().id().equals(id)) != null;
+    }
+
+    private static boolean hasProject(List<TaskNode> nodes, Object id) {
+        return nodes.stream().anyMatch(node -> node instanceof TaskNode.ProjectRow row
+                && row.project().id().equals(id));
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<TaskNode> panelNodes(String name) throws Exception {
+        var field = TaskTreePanel.class.getDeclaredField(name);
+        field.setAccessible(true);
+        return (List<TaskNode>) field.get(panel);
     }
 
     public void testTheProjectsViewHasNoSessionsAndKeepsItsProjectRow() {

@@ -214,7 +214,7 @@ final class InboxSearchField extends ExtendableTextField {
             extensions.add(clear);
         }
         setExtensions(extensions);
-        getEmptyText().setText(project.isPresent() ? "Search in project" : "Search, or type project:");
+        getEmptyText().setText(project.isPresent() ? "Search in project" : "Search, or type project:, pr:, issue:");
         revalidate();
         repaint();
     }

@@ -1133,4 +1133,173 @@ class TaskTreeModelTest {
         assertEquals(Optional.of(failing), row.branchPullRequest());
         assertTrue(projectRow(nodes, ALPHA).children().isEmpty(), "never placed under the window's root");
     }
+
+    // -- the tree's scope: the project: chip, pr: and issue: terms ---------
+
+    @Test
+    void aFocusedProjectHidesEveryOtherProjectRow() {
+        In in = new In().project(DRYDOCK).project(BTRACE);
+        in.sessions.add(session("A task", DRYDOCK));
+        in.sessions.add(session("Another task", BTRACE));
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build().withScope("", List.of(), List.of(),
+                Optional.of(DRYDOCK)));
+
+        assertEquals(List.of(DRYDOCK), projectRoots(nodes));
+    }
+
+    @Test
+    void aFocusOnAnUnregisteredRootShowsNothingNotEvenTheAddRow() {
+        In in = new In().project(BTRACE).current(ALPHA, ALPHA);
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build().withScope("", List.of(), List.of(),
+                Optional.of(ALPHA)));
+
+        assertTrue(nodes.isEmpty(), "the panel clears such a focus on the next apply; the tree shows nothing");
+    }
+
+    @Test
+    void aPrTermFiltersPullRequestRowsAndHidesProjectsWithoutHits() {
+        In in = new In().project(DRYDOCK).project(BTRACE);
+        in.pullRequestContainers.add(DRYDOCK);
+        in.pullRequestContainers.add(BTRACE);
+        in.pullRequests.put(DRYDOCK, new PullRequestListing.Listed(List.of(
+                pullRequest(12, "The one", "feature/one", false))));
+        in.pullRequests.put(BTRACE, new PullRequestListing.Listed(List.of(
+                pullRequest(40, "Another", "feature/another", false))));
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build().withScope("", List.of("12"), List.of(),
+                Optional.empty()));
+
+        assertEquals(List.of(DRYDOCK), projectRoots(nodes));
+        assertEquals(List.of(12), pullRequestNodes(projectRow(nodes, DRYDOCK)).stream()
+                .map(PullRequestRow.class::cast).map(row -> row.pullRequest().number()).toList());
+    }
+
+    @Test
+    void anIssueTermFiltersGithubAndJiraRows() {
+        In in = new In().project(BTRACE).githubIssues(BTRACE).jira(BTRACE);
+        in.issues.put(BTRACE, new IssueListing.Listed(List.of(
+                new OpenIssue(4, "Allocation regression", Optional.empty(), List.of(), List.of(), Optional.of(T)))));
+        in.jiraGroups.put(BTRACE, List.of(listedGroup("Sprint", List.of(
+                jiraIssue("PROJ-1", "Jira first", List.of(), Optional.of(T)),
+                jiraIssue("PROJ-2", "Jira second", List.of(), Optional.of(T))))));
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build().withScope("", List.of(), List.of("2"),
+                Optional.empty()));
+
+        // Only PROJ-2's group row survives; the GitHub node, whose issue
+        // matches no term, is omitted rather than saying "No issues".
+        ProjectRow row = projectRow(nodes, BTRACE);
+        assertEquals(List.of("PROJ-2"), jiraRowIds(row, "Sprint"));
+        List<TaskNode> issueChildren = issueNodes(row);
+        assertTrue(issueChildren.stream().noneMatch(GitHubNode.class::isInstance),
+                "a term-filtered GitHub node with nothing left is hidden");
+    }
+
+    @Test
+    void prAndIssueTermsConstrainTheirRowsEvenUnderANameMatch() {
+        In in = new In().project(DRYDOCK);
+        in.pullRequestContainers.add(DRYDOCK);
+        in.pullRequests.put(DRYDOCK, new PullRequestListing.Listed(List.of(
+                pullRequest(9, "Number-only row", "feature/number-only", false))));
+
+        // The project's name matches the plain text, which keeps the whole
+        // project — but the pr: term still narrows its pull requests.
+        List<TaskNode> nodes = TaskTreeModel.build(in.build().withScope("drydock", List.of("40"), List.of(),
+                Optional.empty()));
+
+        assertEquals(List.of(DRYDOCK), projectRoots(nodes));
+        assertTrue(section(projectRow(nodes, DRYDOCK), SectionKind.PULL_REQUESTS).isEmpty(),
+                "no pull request matches the term, so the section is absent");
+    }
+
+    private static SearchRefs.ItemRefs refs(boolean pr, boolean issue) {
+        return new SearchRefs.ItemRefs(pr ? List.of(SearchTerms.PrRef.of(12, "Fix", "feature/fix")) : List.of(),
+                issue ? List.of(new SearchTerms.IssueRef("PROJ-5", Optional.empty())) : List.of());
+    }
+
+    @Test
+    void combinedTermsMustBeSatisfiedByTheSameVisibleSession() {
+        In in = new In().project(DRYDOCK);
+        ManagedAgentSession prOnly = session("PR only", DRYDOCK);
+        ManagedAgentSession issueOnly = session("Issue only", DRYDOCK);
+        in.sessions.add(prOnly);
+        in.sessions.add(issueOnly);
+        Map<ManagedSessionId, SearchRefs.ItemRefs> split = Map.of(
+                prOnly.id(), refs(true, false), issueOnly.id(), refs(false, true));
+
+        List<TaskNode> splitNodes = TaskTreeModel.build(in.build()
+                .withScope("", List.of("12"), List.of("5"), Optional.empty())
+                .withMatchRefs(split, Map.of()));
+        List<TaskNode> sameItemNodes = TaskTreeModel.build(in.build()
+                .withScope("", List.of("12"), List.of("5"), Optional.empty())
+                .withMatchRefs(Map.of(prOnly.id(), refs(true, true)), Map.of()));
+
+        assertTrue(splitNodes.stream().noneMatch(ProjectRow.class::isInstance),
+                "separate sessions cannot satisfy the two reference categories together");
+        assertEquals(List.of(DRYDOCK), projectRoots(sameItemNodes));
+    }
+
+    @Test
+    void aMatchingLooseTaskCanKeepAnOtherwiseEmptyProjectVisible() {
+        In in = new In().project(DRYDOCK).project(BTRACE);
+        Map<Path, List<SearchRefs.LooseTaskRefs>> looseRefs = Map.of(DRYDOCK,
+                List.of(new SearchRefs.LooseTaskRefs("Standalone task", refs(true, false))));
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build()
+                .withScope("", List.of("12"), List.of(), Optional.empty())
+                .withMatchRefs(Map.of(), looseRefs));
+
+        assertEquals(List.of(DRYDOCK), projectRoots(nodes));
+        assertTrue(projectRow(nodes, DRYDOCK).children().isEmpty(),
+                "a loose task match need not fabricate a visible tree child");
+    }
+
+    @Test
+    void sessionAndLooseTaskReferencesMustPassThePlainTextItemFilter() {
+        In in = new In().project(DRYDOCK);
+        ManagedAgentSession session = session("PR session", DRYDOCK);
+        in.sessions.add(session);
+
+        List<TaskNode> hiddenSession = TaskTreeModel.build(in.build()
+                .withScope("no such title", List.of("12"), List.of(), Optional.empty())
+                .withMatchRefs(Map.of(session.id(), refs(true, false)), Map.of()));
+        List<TaskNode> hiddenLooseTask = TaskTreeModel.build(new In().project(DRYDOCK).build()
+                .withScope("no such title", List.of("12"), List.of(), Optional.empty())
+                .withMatchRefs(Map.of(), Map.of(DRYDOCK,
+                        List.of(new SearchRefs.LooseTaskRefs("other title", refs(true, false))))));
+
+        assertTrue(hiddenSession.isEmpty());
+        assertTrue(hiddenLooseTask.isEmpty());
+    }
+
+    @Test
+    void listingAndSessionReferencesDoNotCombineAcrossItems() {
+        In in = new In().project(DRYDOCK);
+        in.pullRequestContainers.add(DRYDOCK);
+        in.pullRequests.put(DRYDOCK, new PullRequestListing.Listed(List.of(
+                pullRequest(12, "PR listing", "feature/one", false))));
+        ManagedAgentSession session = session("Issue only", DRYDOCK);
+        in.sessions.add(session);
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build()
+                .withScope("", List.of("12"), List.of("5"), Optional.empty())
+                .withMatchRefs(Map.of(session.id(), refs(false, true)), Map.of()));
+
+        assertTrue(nodes.isEmpty(), "a PR listing hit cannot combine with an issue on a different item");
+    }
+
+    @Test
+    void scopePreservesReferenceMaps() {
+        ManagedAgentSession session = session("A", DRYDOCK);
+        Map<ManagedSessionId, SearchRefs.ItemRefs> sessions = Map.of(session.id(), refs(true, false));
+        Map<Path, List<SearchRefs.LooseTaskRefs>> loose = Map.of(DRYDOCK,
+                List.of(new SearchRefs.LooseTaskRefs("task", refs(false, true))));
+        TaskTreeModel.Inputs scoped = new In().project(DRYDOCK).build()
+                .withMatchRefs(sessions, loose).withScope("title", List.of("12"), List.of(), Optional.empty());
+
+        assertEquals(sessions, scoped.sessionRefs());
+        assertEquals(loose, scoped.looseTaskRefsByMainRoot());
+    }
 }

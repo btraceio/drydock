@@ -9,6 +9,7 @@ import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionActivity;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
+import app.drydock.git.GhCliService;
 import app.drydock.intellij.tasks.InboxModel.GroupKind;
 import app.drydock.intellij.tasks.InboxModel.Inbox;
 import app.drydock.intellij.tasks.InboxModel.Inputs;
@@ -259,6 +260,7 @@ class InboxModelTest {
     @Test
     void titleTextDropsOnlyTheGroupWords() {
         assertEquals("parser fix", InboxModel.titleText("  is:idle parser IS:Done fix "));
+        assertEquals("dark mode fix", InboxModel.titleText("\"dark mode\" fix"));
         assertEquals("is:nonsense", InboxModel.titleText("is:nonsense"), "an unknown group word is text");
         assertEquals("", InboxModel.titleText(null));
     }
@@ -269,5 +271,90 @@ class InboxModelTest {
         assertEquals(Optional.of(""), InboxModel.projectPrefix("  Project:"));
         assertEquals(Optional.empty(), InboxModel.projectPrefix("proj"));
         assertEquals(Optional.empty(), InboxModel.projectPrefix(null));
+    }
+
+    // -- the pr: and issue: terms -----------------------------------------
+
+    /** The session's row rebuilt with a branch pull request attached. */
+    private static TaskRow withBranchPr(TaskRow row, GhCliService.BranchPullRequest pr) {
+        return new TaskRow(row.session(), row.activity(), row.running(), row.branch(), row.placement(),
+                row.readOnly(), row.folderMissing(), row.resumable(), Optional.of(pr));
+    }
+
+    /** The task row rebuilt with a mirror list attached. */
+    private static DelayedTaskRow withMirrors(DelayedTaskRow row, List<String> mirrors) {
+        return new DelayedTaskRow(row.view(), row.title(), row.repository(), Optional.empty(), false,
+                row.storedSessions(), mirrors);
+    }
+
+    @Test
+    void aPrTermKeepsOnlyItemsWhosePullRequestMatches() {
+        TaskRow prNine = withBranchPr(running("Working", NOW),
+                new GhCliService.BranchPullRequest(9, GhCliService.PrInfo.PrLifecycle.OPEN, false, "feature/x",
+                        "Fix the parser", Optional.empty()));
+        alphaRows.add(prNine);
+        alphaRows.add(running("No pull request", NOW));
+        task("Task on pr", Presentation.READY);
+        tasks.set(tasks.size() - 1, tasks.getLast().withPullRequest(
+                new GhCliService.OpenPullRequest(9, "Fix the parser", "feature/x", "main", false,
+                        Optional.empty(), Optional.empty())));
+
+        assertEquals(List.of("Working"), titles(inbox(new Query(Optional.empty(), "pr:9")), GroupKind.RUNNING));
+        assertEquals(List.of("Task on pr"), titles(inbox(new Query(Optional.empty(), "pr:9")), GroupKind.READY));
+        assertEquals(List.of("Working"), titles(inbox(new Query(Optional.empty(), "pr:parser")), GroupKind.RUNNING),
+                "free text matches the pull request's title");
+        // Two terms AND: the session's pull request matches both, a miss keeps nothing.
+        assertEquals(List.of("Working"), titles(inbox(new Query(Optional.empty(), "pr:9 pr:parser")),
+                GroupKind.RUNNING));
+        assertTrue(inbox(new Query(Optional.empty(), "pr:9 pr:40")).isEmpty());
+        assertTrue(inbox(new Query(Optional.empty(), "pr:40")).isEmpty(),
+                "no item's pull request is 40");
+    }
+
+    @Test
+    void combinedTermsMustMatchTheSameSessionItem() {
+        TaskRow pullRequestSession = withBranchPr(running("PR only", NOW),
+                new GhCliService.BranchPullRequest(12, GhCliService.PrInfo.PrLifecycle.OPEN, false,
+                        "feature/one", "First", Optional.empty()));
+        TaskRow issueSession = running("Issue only", NOW.minusSeconds(10));
+        alphaRows.add(pullRequestSession);
+        alphaRows.add(issueSession);
+        task("Issue mirror", Presentation.STARTED, TaskStatus.STARTED, Optional.empty(),
+                List.of(issueSession.session().id().toString()));
+        tasks.set(tasks.size() - 1, withMirrors(tasks.getLast(),
+                List.of("https://acme.atlassian.net/browse/PROJ-5")));
+
+        assertTrue(inbox(new Query(Optional.empty(), "pr:12 issue:5")).isEmpty(),
+                "the PR on one session cannot combine with the issue on another");
+    }
+
+    @Test
+    void oneSessionItemCanMatchPrAndIssueTermsTogether() {
+        TaskRow host = withBranchPr(running("Both references", NOW),
+                new GhCliService.BranchPullRequest(12, GhCliService.PrInfo.PrLifecycle.OPEN, false,
+                        "feature/one", "First", Optional.empty()));
+        alphaRows.add(host);
+        task("Issue mirror", Presentation.STARTED, TaskStatus.STARTED, Optional.empty(),
+                List.of(host.session().id().toString()));
+        tasks.set(tasks.size() - 1, withMirrors(tasks.getLast(),
+                List.of("https://acme.atlassian.net/browse/PROJ-5")));
+
+        assertEquals(List.of("Both references"),
+                titles(inbox(new Query(Optional.empty(), "pr:12 issue:5")), GroupKind.RUNNING));
+    }
+
+    @Test
+    void anIssueTermKeepsOnlyItemsWhoseMirroredIssueMatches() {
+        TaskRow host = running("Host", NOW);
+        alphaRows.add(host);
+        task("Mirrors jira", Presentation.STARTED, TaskStatus.STARTED, Optional.empty(),
+                List.of(host.session().id().toString()));
+        tasks.set(tasks.size() - 1, withMirrors(tasks.getLast(),
+                List.of("https://acme.atlassian.net/browse/PROJ-7")));
+
+        Inbox hit = inbox(new Query(Optional.empty(), "issue:PROJ-7"));
+        assertEquals(List.of("Host"), titles(hit, GroupKind.RUNNING),
+                "the started task rides its session, and the session matches by the mirror");
+        assertTrue(inbox(new Query(Optional.empty(), "issue:PROJ-8")).isEmpty());
     }
 }

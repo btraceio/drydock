@@ -479,7 +479,7 @@ final class TaskTreeInputs implements AutoCloseable {
                 pullRequestContainers, githubIssueRoots, githubGhostRoots, jiraRoots, jiraGhostRoots,
                 openFolders, freshActivity(), Instant.now(),
                 issues, jiraGroupListings, pullRequests, pullRequestDedupWorktrees, plugin.sharedProjects().problem(),
-                filter, resumable, sessionPullRequests);
+                filter, List.of(), List.of(), Optional.empty(), resumable, sessionPullRequests);
     }
 
     /** Where a project's pull-request badges come from: its main checkout and its configured repository. */

@@ -15,6 +15,7 @@ import app.drydock.git.JiraIssueListing;
 import app.drydock.git.WorktreeService.Worktree;
 import app.drydock.intellij.agent.SessionCommands;
 import app.drydock.intellij.tasks.TaskNode.AddCurrentProject;
+import app.drydock.intellij.tasks.TaskNode.Deferred;
 import app.drydock.intellij.tasks.TaskNode.Ghost;
 import app.drydock.intellij.tasks.TaskNode.GhostSource;
 import app.drydock.intellij.tasks.TaskNode.GitHubNode;
@@ -23,6 +24,8 @@ import app.drydock.intellij.tasks.TaskNode.IssueRow;
 import app.drydock.intellij.tasks.TaskNode.JiraGroupRow;
 import app.drydock.intellij.tasks.TaskNode.JiraIssueRow;
 import app.drydock.intellij.tasks.TaskNode.JiraNode;
+import app.drydock.intellij.tasks.TaskNode.ListProblem;
+import app.drydock.intellij.tasks.TaskNode.Placeholder;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.review.RepositoryPullRequests;
 import app.drydock.intellij.tasks.TaskNode.PullRequestRow;
@@ -45,6 +48,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Predicate;
 
 /**
  * The shape of the Drydock tool window's tree, decided in one pure place:
@@ -112,8 +116,11 @@ public final class TaskTreeModel {
                          Map<Path, PullRequestListing> pullRequestsByMainRoot,
                          Map<Path, List<Worktree>> pullRequestDedupWorktrees,
                          Optional<String> listProblem, String filter,
+                         List<String> prTerms, List<String> issueTerms, Optional<Path> focusRoot,
                          Map<ManagedSessionId, Boolean> resumable,
-                         Map<ManagedSessionId, BranchPullRequest> pullRequestsBySession) {
+                         Map<ManagedSessionId, BranchPullRequest> pullRequestsBySession,
+                         Map<ManagedSessionId, SearchRefs.ItemRefs> sessionRefs,
+                         Map<Path, List<SearchRefs.LooseTaskRefs>> looseTaskRefsByMainRoot) {
         public Inputs {
             projects = List.copyOf(projects);
             sessions = List.copyOf(sessions);
@@ -142,17 +149,64 @@ public final class TaskTreeModel {
             pullRequestDedupWorktrees = Map.copyOf(pullRequestDedupWorktrees);
             Objects.requireNonNull(listProblem, "listProblem");
             filter = filter == null ? "" : filter.strip();
+            prTerms = List.copyOf(prTerms);
+            issueTerms = List.copyOf(issueTerms);
+            Objects.requireNonNull(focusRoot, "focusRoot");
             resumable = Map.copyOf(resumable);
             pullRequestsBySession = Map.copyOf(pullRequestsBySession);
+            sessionRefs = Map.copyOf(sessionRefs);
+            Map<Path, List<SearchRefs.LooseTaskRefs>> copiedLooseRefs = new LinkedHashMap<>();
+            looseTaskRefsByMainRoot.forEach((root, refs) -> copiedLooseRefs.put(root, List.copyOf(refs)));
+            looseTaskRefsByMainRoot = Map.copyOf(copiedLooseRefs);
         }
 
-        /** These inputs with {@code text} as the search filter; everything else unchanged. Pure. */
-        public Inputs withFilter(String text) {
+        /** Compatibility with the previous full constructor, before item search references were carried. */
+        public Inputs(List<SharedProject> projects, List<ManagedAgentSession> sessions,
+                      Map<Path, List<Worktree>> worktreesByMainRoot, Map<Path, Path> mainRootOf,
+                      Optional<Path> currentMainRoot, Optional<Path> currentWorkingRoot,
+                      Map<ManagedSessionId, Optional<SessionActivity>> activity, Set<ManagedSessionId> running,
+                      Map<ManagedSessionId, Host> hosts, Set<Path> missingFolders,
+                      Map<RepositoryId, Path> recordedRoots,
+                      Set<Path> worktreeContainers, Set<Path> pullRequestContainers,
+                      Set<Path> githubIssueRoots, Set<Path> githubGhostRoots,
+                      Set<Path> jiraRoots, Set<Path> jiraGhostRoots,
+                      Set<Path> openFolders, Map<Path, Instant> lastActivity, Instant now,
+                      Map<Path, IssueListing> issuesByMainRoot,
+                      Map<Path, List<JiraGroups.Listing>> jiraGroupsByMainRoot,
+                      Map<Path, PullRequestListing> pullRequestsByMainRoot,
+                      Map<Path, List<Worktree>> pullRequestDedupWorktrees,
+                      Optional<String> listProblem, String filter, List<String> prTerms, List<String> issueTerms,
+                      Optional<Path> focusRoot, Map<ManagedSessionId, Boolean> resumable,
+                      Map<ManagedSessionId, BranchPullRequest> pullRequestsBySession) {
+            this(projects, sessions, worktreesByMainRoot, mainRootOf, currentMainRoot, currentWorkingRoot,
+                    activity, running, hosts, missingFolders, recordedRoots, worktreeContainers,
+                    pullRequestContainers, githubIssueRoots, githubGhostRoots, jiraRoots, jiraGhostRoots,
+                    openFolders, lastActivity, now, issuesByMainRoot, jiraGroupsByMainRoot,
+                    pullRequestsByMainRoot, pullRequestDedupWorktrees, listProblem, filter, prTerms, issueTerms,
+                    focusRoot, resumable, pullRequestsBySession, Map.of(), Map.of());
+        }
+
+        /** These inputs with the Projects tree's scope: the plain search text, the {@code pr:}/{@code issue:}
+         *  terms, and the focused project ({@code project:} chip). Everything else unchanged. Pure. */
+        public Inputs withScope(String filter, List<String> prTerms, List<String> issueTerms,
+                                Optional<Path> focusRoot) {
             return new Inputs(projects, sessions, worktreesByMainRoot, mainRootOf, currentMainRoot,
                     currentWorkingRoot, activity, running, hosts, missingFolders, recordedRoots, worktreeContainers,
                     pullRequestContainers, githubIssueRoots, githubGhostRoots, jiraRoots, jiraGhostRoots, openFolders,
                     lastActivity, now, issuesByMainRoot, jiraGroupsByMainRoot, pullRequestsByMainRoot,
-                    pullRequestDedupWorktrees, listProblem, text, resumable, pullRequestsBySession);
+                    pullRequestDedupWorktrees, listProblem, filter, prTerms, issueTerms, focusRoot,
+                    resumable, pullRequestsBySession, sessionRefs, looseTaskRefsByMainRoot);
+        }
+
+        /** These inputs with item references available to the scoped search matcher. Pure. */
+        public Inputs withMatchRefs(Map<ManagedSessionId, SearchRefs.ItemRefs> sessions,
+                                    Map<Path, List<SearchRefs.LooseTaskRefs>> looseTasks) {
+            return new Inputs(projects, this.sessions, worktreesByMainRoot, mainRootOf, currentMainRoot,
+                    currentWorkingRoot, activity, running, hosts, missingFolders, recordedRoots, worktreeContainers,
+                    pullRequestContainers, githubIssueRoots, githubGhostRoots, jiraRoots, jiraGhostRoots, openFolders,
+                    lastActivity, now, issuesByMainRoot, jiraGroupsByMainRoot, pullRequestsByMainRoot,
+                    pullRequestDedupWorktrees, listProblem, filter, prTerms, issueTerms, focusRoot,
+                    resumable, pullRequestsBySession, sessions, looseTasks);
         }
 
         /** The shape before sessions carried their branch's pull request: none known. */
@@ -171,18 +225,29 @@ public final class TaskTreeModel {
                       Map<Path, PullRequestListing> pullRequestsByMainRoot,
                       Map<Path, List<Worktree>> pullRequestDedupWorktrees,
                       Optional<String> listProblem, String filter,
-                      Map<ManagedSessionId, Boolean> resumable) {
+                      Map<ManagedSessionId, Boolean> resumable,
+                      Map<ManagedSessionId, BranchPullRequest> pullRequestsBySession) {
             this(projects, sessions, worktreesByMainRoot, mainRootOf, currentMainRoot, currentWorkingRoot,
                     activity, running, hosts, missingFolders, recordedRoots, worktreeContainers,
                     pullRequestContainers, githubIssueRoots, githubGhostRoots, jiraRoots, jiraGhostRoots,
                     openFolders, lastActivity, now, issuesByMainRoot, jiraGroupsByMainRoot,
                     pullRequestsByMainRoot, pullRequestDedupWorktrees, listProblem, filter,
-                    resumable, Map.of());
+                    List.of(), List.of(), Optional.empty(),
+                    resumable, pullRequestsBySession, Map.of(), Map.of());
         }
     }
 
     public static List<TaskNode> build(Inputs in) {
         List<SharedProject> local = in.projects().stream().filter(project -> !project.isRemote()).toList();
+        // The project: chip scopes the tree to the focused project: every
+        // other registered project row (and the unregistered add row) is
+        // hidden, mirroring the inbox. A focus whose project is no longer
+        // registered shows nothing; the panel clears the saved filter on the
+        // next apply.
+        if (in.focusRoot().isPresent()) {
+            Path focused = in.focusRoot().get();
+            local = local.stream().filter(project -> project.root().equals(focused)).toList();
+        }
         Map<Path, List<TaskRow>> tasksByMain = new LinkedHashMap<>();
         for (ManagedAgentSession session : in.sessions()) {
             if (session.agentKind() == AgentKind.TERMINAL) {
@@ -195,7 +260,8 @@ public final class TaskTreeModel {
         List<TaskNode> nodes = new ArrayList<>();
         in.listProblem().ifPresent(message -> nodes.add(new TaskNode.ListProblem(message)));
         Optional<Path> current = in.currentMainRoot();
-        if (current.isPresent() && local.stream().noneMatch(project -> project.root().equals(current.get()))) {
+        boolean scoped = in.focusRoot().isPresent();
+        if (!scoped && current.isPresent() && local.stream().noneMatch(project -> project.root().equals(current.get()))) {
             Path root = current.get();
             String name = String.valueOf(root.getFileName());
             // The current project keeps showing, with the filter applied to its tasks.
@@ -209,13 +275,22 @@ public final class TaskTreeModel {
         List<SharedProject> ordered = new ArrayList<>(local);
         ordered.sort(Comparator.comparing((SharedProject project) -> !project.root().equals(current.orElse(null)))
                 .thenComparing(project -> project.displayName().toLowerCase(Locale.ROOT)));
+        // A pr:/issue: term narrows listing rows and can also retain a
+        // project through one visible inbox item whose references satisfy
+        // all terms together; the item matcher below keeps those semantics aligned.
+        boolean termsConstrain = !in.prTerms().isEmpty() || !in.issueTerms().isEmpty();
         for (SharedProject project : ordered) {
             boolean thisWindow = project.root().equals(current.orElse(null));
             boolean nameMatch = nameMatch(in.filter(), project.displayName());
             String itemFilter = itemFilter(in.filter(), nameMatch);
             Children classified = children(in, project.root(),
                     tasksByMain.getOrDefault(project.root(), List.of()), itemFilter);
-            if (classified.visible().isEmpty() && !in.filter().isEmpty() && !thisWindow && !nameMatch) {
+            if (termsConstrain && !classified.termsMatched() && !nameMatch) {
+                continue;
+            }
+            boolean constrained = !in.filter().isEmpty() || termsConstrain;
+            if (classified.visible().isEmpty() && constrained && !thisWindow && !nameMatch
+                    && !(termsConstrain && classified.termsMatched())) {
                 continue;
             }
             int running = (int) tasksByMain.getOrDefault(project.root(), List.of()).stream()
@@ -347,7 +422,7 @@ public final class TaskTreeModel {
                 Optional.ofNullable(in.pullRequestsBySession().get(session.id())));
     }
 
-    private record Children(List<TaskNode> visible, List<IdleWorktree> inactive) {
+    private record Children(List<TaskNode> visible, List<IdleWorktree> inactive, boolean termsMatched) {
     }
 
     private static Children children(Inputs in, Path main, List<TaskRow> tasks, String itemFilter) {
@@ -403,7 +478,8 @@ public final class TaskTreeModel {
         }
         // The Issues and Pull Requests sections render with only the search
         // text narrowing the rows inside (a project whose name matches keeps
-        // all of them, as with its tasks). Only a section with nothing
+        // all of them, as with its tasks), plus the pr:/issue: terms, which
+        // always constrain their own rows. Only a section with nothing
         // configured to show is absent.
         issueChildren(in, main, itemFilter).ifPresent(issueChildren ->
                 children.add(new Section(SectionKind.ISSUES, issueChildren)));
@@ -414,7 +490,56 @@ public final class TaskTreeModel {
             pullRequestChildren(in, main, itemFilter).ifPresent(pullRequestChildren ->
                     children.add(new Section(SectionKind.PULL_REQUESTS, pullRequestChildren)));
         }
-        return new Children(List.copyOf(children), List.copyOf(inactive));
+        // A listing hit or a single eligible inbox item matching all reference
+        // terms keeps the project row; the section builders already filter listing rows.
+        boolean hasReferenceTerms = !in.prTerms().isEmpty() || !in.issueTerms().isEmpty();
+        boolean listingMatched = (in.prTerms().isEmpty() || containsRow(children, PullRequestRow.class::isInstance))
+                && (in.issueTerms().isEmpty() || containsRow(children,
+                        row -> row instanceof IssueRow || row instanceof JiraIssueRow));
+        boolean itemMatched = hasReferenceTerms && (visibleTasks.stream().anyMatch(task -> {
+            SearchRefs.ItemRefs refs = in.sessionRefs().get(task.session().id());
+            return refs != null && matchesSearchTerms(in, refs);
+        }) || in.looseTaskRefsByMainRoot().getOrDefault(main, List.of()).stream()
+                .filter(task -> itemFilter.isEmpty() || contains(task.title(), itemFilter))
+                .anyMatch(task -> matchesSearchTerms(in, task.refs())));
+        return new Children(List.copyOf(children), List.copyOf(inactive), listingMatched || itemMatched);
+    }
+
+    private static boolean matchesSearchTerms(Inputs in, SearchRefs.ItemRefs refs) {
+        return SearchTerms.matchAllPullRequests(in.prTerms(), refs.pullRequests())
+                && SearchTerms.matchAllIssues(in.issueTerms(), refs.issues());
+    }
+
+    /** Whether any node at any depth of the built children satisfies {@code of}. Pure. */
+    private static boolean containsRow(List<? extends TaskNode> nodes, Predicate<TaskNode> of) {
+        for (TaskNode node : nodes) {
+            if (of.test(node)) {
+                return true;
+            }
+            List<? extends TaskNode> nested = switch (node) {
+                case Section section -> section.children();
+                case ProjectRow row -> row.children();
+                case GitHubNode github -> github.children();
+                case JiraNode jira -> jira.children();
+                case JiraGroupRow group -> group.children();
+                case WorktreeGroup group -> group.tasks();
+                case StaleWorktrees stale -> stale.worktrees();
+                case ListProblem ignored -> List.of();
+                case AddCurrentProject ignored -> List.of();
+                case Deferred ignored -> List.of();
+                case Placeholder ignored -> List.of();
+                case Ghost ignored -> List.of();
+                case TaskRow ignored -> List.of();
+                case IdleWorktree ignored -> List.of();
+                case IssueRow ignored -> List.of();
+                case JiraIssueRow ignored -> List.of();
+                case PullRequestRow ignored -> List.of();
+            };
+            if (containsRow(nested, of)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -429,7 +554,9 @@ public final class TaskTreeModel {
                 List<TaskNode> rows = RepositoryPullRequests.selectable(
                                 listed.pullRequests(), in.pullRequestDedupWorktrees().getOrDefault(main, List.of()))
                         .stream()
-                        .filter(pullRequest -> matches(itemFilter, pullRequest))
+                        .filter(pullRequest -> matches(itemFilter, pullRequest)
+                                && SearchTerms.matchAllPullRequests(in.prTerms(),
+                                        List.of(refOf(pullRequest))))
                         .sorted(Comparator.comparingInt(OpenPullRequest::number).reversed())
                         .map(pullRequest -> (TaskNode) new PullRequestRow(main, pullRequest))
                         .toList();
@@ -440,6 +567,12 @@ public final class TaskTreeModel {
             case PullRequestListing.Unsupported ignored -> Optional.empty();
             case null -> Optional.empty();
         };
+    }
+
+    /** The PR's reference for the {@code pr:} terms. Pure. */
+    private static SearchTerms.PrRef refOf(OpenPullRequest pullRequest) {
+        return new SearchTerms.PrRef(pullRequest.number(), pullRequest.title(), pullRequest.headRefName(),
+                pullRequest.author());
     }
 
     /**
@@ -488,7 +621,10 @@ public final class TaskTreeModel {
         switch (in.issuesByMainRoot().get(main)) {
             case null -> children.add(new TaskNode.Placeholder(NOT_LOADED));
             case IssueListing.Listed listed -> listed.issues().stream()
-                    .filter(issue -> nodeMatches || matches(itemFilter, issue))
+                    .filter(issue -> (nodeMatches || matches(itemFilter, issue))
+                            && SearchTerms.matchAllIssues(in.issueTerms(),
+                                    List.of(new SearchTerms.IssueRef("#" + issue.number(),
+                                            Optional.of(issue.title())))))
                     .forEach(issue -> children.add(new IssueRow(main, issue)));
             case IssueListing.Failed failed ->
                     children.add(new TaskNode.ListProblem("GitHub issues: " + failed.message()));
@@ -496,7 +632,9 @@ public final class TaskTreeModel {
                     children.add(new TaskNode.Placeholder("Issues are disabled for this repository"));
         }
         if (children.isEmpty() && in.issuesByMainRoot().get(main) instanceof IssueListing.Listed) {
-            if (!nodeMatches) {
+            // Terms that match nothing hide the node: "No issues" would lie
+            // about a listing that has issues the terms filtered away.
+            if (!in.issueTerms().isEmpty() || !nodeMatches) {
                 return Optional.empty();
             }
             children.add(new TaskNode.Placeholder(NO_ISSUES));
@@ -527,7 +665,7 @@ public final class TaskTreeModel {
                 .flatMap(Optional::stream)
                 .toList();
         if (children.isEmpty()) {
-            if (!nodeMatches) {
+            if (!in.issueTerms().isEmpty() || !nodeMatches) {
                 return Optional.empty();
             }
             return Optional.of(List.of(new TaskNode.Placeholder("No Jira groups")));
@@ -554,11 +692,16 @@ public final class TaskTreeModel {
                             "Jira group \"" + listing.group().name() + "\": " + failed.message()));
             case JiraIssueListing.Unsupported ignored -> { }
             case JiraIssueListing.Listed listed -> listed.issues().stream()
-                    .filter(issue -> groupMatches || matches(itemFilter, issue))
+                    .filter(issue -> (groupMatches || matches(itemFilter, issue))
+                            && SearchTerms.matchAllIssues(in.issueTerms(),
+                                    List.of(new SearchTerms.IssueRef(issue.key(),
+                                            Optional.of(issue.summary())))))
                     .forEach(issue -> children.add(new JiraIssueRow(main, issue)));
         }
         if (children.isEmpty() && listing.listing().orElse(null) instanceof JiraIssueListing.Listed) {
-            if (!groupMatches) {
+            // Terms that match nothing hide the group: "No issues" would
+            // lie about a listing that has tickets the terms filtered away.
+            if (!in.issueTerms().isEmpty() || !groupMatches) {
                 return Optional.empty();
             }
             children.add(new TaskNode.Placeholder(NO_ISSUES));
